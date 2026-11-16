@@ -4751,6 +4751,14 @@ def main():
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+    # DM_SPLIT_SKIP: a file of source paths, one a line as the map's source column names them (/Shader/…), left out of the split: base files an update tree keeps though the update drops them,
+    # which the NSP script finds when a split's tables differ from the profile's (unregistered_files); they are not read, so none of their shaders is built
+    if skip := os.environ.get('DM_SPLIT_SKIP'):
+        import builtins
+        with builtins.open(skip, encoding='utf-8') as f: drop = {ln.rstrip('\n') for ln in f if ln.strip()}
+        kept = [(p, r) for p, r in files if '/' + r not in drop]
+        print(f'left out: {len(files) - len(kept)} file(s) listed in DM_SPLIT_SKIP', flush=True)
+        files = kept
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))

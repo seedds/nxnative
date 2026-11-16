@@ -2343,6 +2343,29 @@ def table_difference(name, profile, split):
     return '\n'.join(out)
 
 
+def unregistered_files(g, tables, romfs):
+    """The RomFS files a split read shaders from that hold no shader source the profile registers, as source paths (/Shader/…): files an update tree keeps from its base though
+    the update drops them. A NUP or NX packed by laying an update over its base keeps them (Donkey Kong Bananza v458752's 42 Product.100 files, which its Product.200 ones replace,
+    5,440 more shaders), and the game does not read them. A file is listed only when no registered source is that file or lies inside it, so a file with a registered shader is
+    always read; shaders it shares with a listed file keep their registered source. DLC sources and later versions' prefixed sources are never listed. The split without them must
+    still give the profile's tables row for row."""
+    def sources(path):
+        out = set()
+        for line in path.read_text(errors='replace').splitlines():
+            c = line.split('\t')
+            if len(c) == 5 and c[0].endswith('.bin') and c[4].startswith('/') and not c[4].startswith('/aoc/'): out.add(c[4].split('#', 1)[0])
+        return out
+    try: have, split = sources(g.table('shader_map.tsv')), sources(tables / 'shader_map.tsv')
+    except OSError: return []
+    inside = {'/'.join(s.split('/')[:i]) for s in have for i in range(2, s.count('/') + 2)}   # every registered source and each folder or archive it lies in
+    out = set()
+    for s in split - have:
+        parts = s.lstrip('/').split('/')
+        f = next(('/' + '/'.join(parts[:i]) for i in range(len(parts), 0, -1) if (romfs / '/'.join(parts[:i])).is_file()), None)   # the RomFS file holding the source (an archive's member: the archive)
+        if f and f not in inside: out.add(f)
+    return sorted(out)
+
+
 GLSLC_PLAY_SOURCE = '/glslc_play/'
 
 
@@ -2487,41 +2510,50 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     have_pairs = g.table('pso_pairs.tsv').is_file() or pkg.with_name('pso_pairs.tsv').is_file()
     if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None and reused(outputkf, split_output_key(pkg, g)) is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return package_key(pkg)
-    PROG.set(step='splitting')
-    tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
-    extra = [','.join(map(str, dlc_roms))] if dlc_roms or play_files else []
-    if play_files:
-        manifest = tmp / 'glslc_play.json'
-        manifest.write_text(json.dumps([str(p) for p in play_files]))
-        extra.append(str(manifest))
-    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + extra,
-        logs / 'shader_split.log', env=dict(env, DM_SPLIT_REGISTERED_MAP=registered_map), on_line=counted)
-    text = (logs / 'shader_split.log').read_text(errors='replace')
-    m = re.search(r'shaders: (\d+) \(', text)
-    bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
-    if bad and not provisional:   # the profile's tables were split from every file: one that does not read now is a reader change
-        raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
-    if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
-    if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
-        raise BuildError('the shader split found no shaders in main or the RomFS: the game keeps them in a form shader_split.py does not read; locate them (docs/agents) and add a reader')
-    # pso_pairs.tsv (supplemental BAHS variations and legacy Unity pass-input covers): checked like the others where the profile has one; else kept beside the
-    # package, where dmsh_build.py reads it too, so padding and the pipeline prebuild use the same pairs
-    if not provisional and derive_dlc and optional_shader_change(g, tmp / 'tables'):
-        promote(derive_dlc, 'dlc')
-    if not provisional and derive_compute and compute_reader_additions(g, tmp / 'tables', text):
-        promote(derive_compute, 'compute')
-    if provisional or g.table('pso_pairs.tsv').is_file(): names += ('pso_pairs.tsv',)
-    else: shutil.copyfile(tmp / 'tables' / 'pso_pairs.tsv', pkg.with_name('pso_pairs.tsv'))
-    if provisional:   # a provisional profile takes the tables as they come
-        for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
-    else:
+    registered, skipf = g, pkg.with_name(pkg.name + '.skip')
+    tmp = pkg.with_name(pkg.name + '.partial')
+    split_names = names
+    for attempt in (0, 1):   # a second split only without the RomFS files that hold no registered shader source (unregistered_files), checked as strictly as the first
+        PROG.set(step='splitting' if not attempt else 'splitting again without the unregistered files')
+        rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
+        extra = [','.join(map(str, dlc_roms))] if dlc_roms or play_files else []
+        if play_files:
+            manifest = tmp / 'glslc_play.json'
+            manifest.write_text(json.dumps([str(p) for p in play_files]))
+            extra.append(str(manifest))
+        split_env = dict(env, DM_SPLIT_REGISTERED_MAP=registered_map, DM_SPLIT_SKIP=str(skipf) if attempt else '')
+        run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in split_names + ('pso_pairs.tsv',)] + extra,
+            logs / 'shader_split.log', env=split_env, on_line=counted)
+        text = (logs / 'shader_split.log').read_text(errors='replace')
+        m = re.search(r'shaders: (\d+) \(', text)
+        bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
+        if bad and not provisional:   # the profile's tables were split from every file: one that does not read now is a reader change
+            raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
+        if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
+        if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
+            raise BuildError('the shader split found no shaders in main or the RomFS: the game keeps them in a form shader_split.py does not read; locate them (docs/agents) and add a reader')
+        # pso_pairs.tsv (supplemental BAHS variations and legacy Unity pass-input covers): checked like the others where the profile has one; else kept beside the
+        # package, where dmsh_build.py reads it too, so padding and the pipeline prebuild use the same pairs
+        if not provisional and derive_dlc and optional_shader_change(g, tmp / 'tables'):
+            promote(derive_dlc, 'dlc')
+        if not provisional and derive_compute and compute_reader_additions(g, tmp / 'tables', text):
+            promote(derive_compute, 'compute')
+        names = split_names + (('pso_pairs.tsv',) if provisional or g.table('pso_pairs.tsv').is_file() else ())
+        if provisional: break
         # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
         diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
-        if diff:
-            rows = '\n'.join(table_difference(n, g.table(n).read_bytes(), (tmp / 'tables' / n).read_bytes()) for n in diff)
-            raise BuildError(f'the split shader tables differ from game profile {g.id}\'s:\n{rows}\nEither these game files are not the versions the profile registers, or shader_split.py now reads them differently and the profile\'s tables were not split again (the split\'s tables: {tmp / "tables"})')
+        if not diff: break
+        if not attempt and (skip := unregistered_files(registered, tmp / 'tables', roms[0])):
+            skipf.write_text(''.join(s + '\n' for s in skip))
+            say(f'the split read {len(skip)} RomFS file(s) whose shaders the profile does not register (e.g. {skip[0]}): splitting again without them, so none of their shaders is built (list: {skipf})')
+            continue
+        rows = '\n'.join(table_difference(n, g.table(n).read_bytes(), (tmp / 'tables' / n).read_bytes()) for n in diff)
+        raise BuildError(f'the split shader tables differ from game profile {g.id}\'s:\n{rows}\nEither these game files are not the versions the profile registers, or shader_split.py now reads them differently and the profile\'s tables were not split again (the split\'s tables: {tmp / "tables"})')
+    if 'pso_pairs.tsv' not in names: shutil.copyfile(tmp / 'tables' / 'pso_pairs.tsv', pkg.with_name('pso_pairs.tsv'))
+    if provisional:   # a provisional profile takes the tables as they come
+        for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
     rmtree(kf); rmtree(outputkf); swap_in(tmp / 'pkg', pkg); rmtree(tmp)
     note = (f'{int(m.group(1)):,} shaders' if m else '') + (f', {bad.group(1)} file(s) unreadable' if bad else '')
     if key:   # an own profile's tables are outputs too; the next split checks the profile after they were written

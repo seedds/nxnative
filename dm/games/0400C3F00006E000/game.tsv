@@ -38,6 +38,11 @@ sys_resource	0x4000000
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
 shader_note	Mario Kart World shaders
 
+# ---- GPU order ----
+# About 94 of the race's 120 dispatches a frame have an image or handle binding (no memory range): ordered by the game's barriers instead of each after the one before it (nvn_mtl.m
+# dbar_unknown_game; DM_NVN_DISPATCH_RANGELESS=0 brings the full order back): compute / copy time a race frame docked 1.3-1.5 → 0.87-0.99 ms (M3 Max, in-run A/B)
+dispatch_rangeless	game
+
 # ---- Frame rate ----
 # The framework picks each frame's interval (1 or 2 vsyncs, which the game steps by) from the frame's CPU time alone, so frames that wait on the GPU kept interval 1 and played in
 # slow motion. The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it), at most 2; the game's own

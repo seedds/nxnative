@@ -15795,13 +15795,30 @@ static geo_access cs_access_of(NvShader *sh, uint64_t ind) {   // the guest memo
     }
     return a;
 }
-static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free;
+// A dispatch with no range, by the profile key dispatch_rangeless game (DM_NVN_DISPATCH_RANGELESS=1 / 0 overrides it; ab alternates with the DM_AB phases): it is ordered against the
+// copies as a whole, a barrier before it when a copy, update or fill ran since the last barrier (it may read what one wrote, or write what one reads), and it counts as having read and
+// written everything for the copies after it (g_dw / g_dr), so each of them waits for it. Against other dispatches it follows the game's barriers, as a dispatch with ranges does.
+// Without the key, the full order on both sides (dispatch_enc). Mario Kart World makes about 120 dispatches a frame, many of one workgroup: about 94 have an image or a handle
+// binding, and each waited for the one before it to finish (compute / copy time a race frame docked, M3 Max: 1.3-1.5 → 0.87-0.99 ms)
+static int dbar_unknown_game(void) { static int v = -1; if (v < 0) { v = sw_mode("DM_NVN_DISPATCH_RANGELESS", DM_GAME_DISPATCH_RANGELESS_GAME);
+        if (v == 1) MLOG("compute dispatches with an image or handle binding are ordered by the game's barriers, and against copies as a whole (dispatch_rangeless game; DM_NVN_DISPATCH_RANGELESS)"); } return sw_on(v); }
+static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free, g_dbar_ufree;
 void mtl_dispatch_barrier_stats(uint64_t *game, uint64_t *copy, uint64_t *unknown, uint64_t *none) {   // the periodic [nvn] line (hle_nvn.c)
-    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *none = g_dbar_free; }
+    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *none = g_dbar_free + g_dbar_ufree; }
 static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind) {
     if (!dbar_game()) { g_dsp_game_bar = 0; return dispatch_enc(); }
     geo_access a = cs_access_of(cs, ind);
-    if (a.unknown) { g_dbar_unknown++; g_dsp_game_bar = 0; return dispatch_enc(); }
+    if (a.unknown && !dbar_unknown_game()) { g_dbar_unknown++; g_dsp_game_bar = 0; return dispatch_enc(); }
+    if (a.unknown) {
+        id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
+        if (g_blit_ops && (g_dsp_game_bar || g_bw_n || g_br_n)) { g_dbar_unknown++; blit_barrier(); } else g_dbar_ufree++;   // after the game's barrier or a copy: as before
+        g_dsp_game_bar = 0;
+        g_dw_lo[0] = 0; g_dw_hi[0] = ~0ull; g_dw_n = 1; g_dr_lo[0] = 0; g_dr_hi[0] = ~0ull; g_dr_n = 1;   // read and written everything, for the copies after it (blit_buf, blit)
+        g_blit_ops++;
+        if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
+        args_dirty_all();
+        return e;
+    }
     id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
     int copy = g_dr_n + a.n > DW_MAX || g_dw_n + a.n > DW_MAX;
     for (int i = 0; i < a.n && !copy; i++) copy = bw_hit(a.r[i].lo, a.r[i].hi) || (a.r[i].write && br_hit(a.r[i].lo, a.r[i].hi));

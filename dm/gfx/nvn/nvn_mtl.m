@@ -8263,7 +8263,8 @@ static uint64_t vk_get(const vk_key *k, uint64_t src, uint64_t es) {
     e->lo = src; e->n = sn; e->plo = plo; e->pn = pn; e->span = span;
     e->stamp = e->seen = nvn_dirty_now(); if (pn) nvn_dirty_protect((const void *)(uintptr_t)plo, (size_t)pn);   // take the stamp, protect, then read (as ix_range)
     uint64_t head = pn ? plo - src : sn, tail = pn ? src + sn - phi : 0;
-    e->edge = malloc((size_t)(head + tail) + 1); memcpy(e->edge, (const void *)(uintptr_t)src, (size_t)head); memcpy(e->edge + head, (const void *)(uintptr_t)(src + sn - tail), (size_t)tail);
+    if (!(e->edge = malloc((size_t)(head + tail) + 1))) { e->retry = g_sub_serial + 1; return 0; }   // not kept; the protected pages fault once and are let go (nvn_dirty)
+    memcpy(e->edge, (const void *)(uintptr_t)src, (size_t)head); memcpy(e->edge + head, (const void *)(uintptr_t)(src + sn - tail), (size_t)tail);
     float *d = (float *)b.contents;
     vconv_fill((int)k->fmt, src, k->stride, k->nv, d);
     if (k->nt > k->nv) { static const uint8_t zeros[16]; vconv_fill((int)k->fmt, (uint64_t)(uintptr_t)zeros, 0, k->nt - k->nv, d + 4 * k->nv); }

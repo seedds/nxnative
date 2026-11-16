@@ -2696,6 +2696,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (v131072, with a provisional profile before this repository had one), chain `ae59da13e481`, M5 Pro, macOS 27.0, on a fork with other host changes. Also [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game): without the bundle, the first start wrote 88 compute pipelines into the device's archive and the second took 88 from it.
 - **Check:** `t_pso_archive` (`compute_pipelines`): a compute pipeline is built, compiled into the flush period in the background, written to a plain file, taken from it again without a build, captured again during a compaction, and a function without a descriptor is built through the `MTLDevice`, never looked up and not captured; `t_pso_bundle`: a shader outside the map is captured, one with function constants is not.
 
+### A learned mesh pipeline is built again after prewarm
+
+- **Symptom:** a manifest contains native mesh rows, but the game still logs `task / mesh pipeline: … required at frame` for the same pipelines after preparation.
+- **Cause:** a shader row could carry NVN2's task/mesh stage numbers (6/7), while the host uses slots 3/4. The prewarm workers cache a shader by name, so the first worker could publish the raw stage even for a later request from a valid mesh row. A draw using that shader could write stage 7 into its own mesh row; the next launch then rejected that row.
+- **Fix:** load standalone shader rows using the stage in the current game's shader map, as the live loader does. Read a stored stage 7 as 4 only in a mesh row; the map, task, fragment and render-state checks still apply. Prepare one library per shader name and one pipeline per normalized mesh state and task shader. The render test exercises raw and host stage numbers together and checks both the first demand and its rendered pixels.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#found-on-this-game).
+
 ### Native mesh pipelines compiled at their first draw
 
 - **Symptom:** the first sight of a scene drawn with task and mesh shaders freezes for seconds on a cold Metal cache, on every start once the system's shader cache has dropped the pipelines, although the prewarm finished: `task / mesh pipeline: task … mesh … fragment …, N ms required at frame F`. Before ea0c98df the draw was left out instead, and the foliage stayed missing or white until the pipeline was ready.

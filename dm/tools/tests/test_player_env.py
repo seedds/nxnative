@@ -15,7 +15,7 @@ int main(void) {
  const char *drop[]={"DM_NVN_CPUPROF","DM_NVN_TSV","DM_NVN_PASSDUMP_ALL",
    "DM_NVN_GEOMETRY_PACK","DM_NVN_SHMAP","DM_NVN_ZBLOCK","DM_NVN_ENC_THREAD_PROBE","DM_CTL",
    "DM_TEST_UP_LOST","MTL_DEBUG_LAYER","MTL_SHADER_VALIDATION","DM_MSL_DIR"};
- const char *keep[]={"DM_SHOW_FPS","DM_METAL_HUD","MTL_HUD_ENABLED",
+ const char *keep[]={"DM_SHOW_FPS","DM_SHOW_HEAT_BATTERY","DM_METAL_HUD","MTL_HUD_ENABLED",
    "DM_FPS_TARGET","DM_DYNAMIC_RESOLUTION","DM_OPMODE","DM_RENDER_SCALE","DM_LANG","DM_RT",
    "DM_TOUCH_HAPTICS","DM_RUMBLE","DM_SAVE","DM_ROMFS","DM_NVN_ENC_THREAD"};
  for(unsigned i=0;i<sizeof drop/sizeof *drop;i++)assert(dm_player_diagnostic_key(drop[i]));

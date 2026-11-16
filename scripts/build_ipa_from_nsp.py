@@ -1470,7 +1470,11 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
     app + N, whose DLC are the application's). The host reports these indices as owned and mounts them (DM_AOC_DIR).
     Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract are as at the last extraction (extraction_key) (Monster Hunter Rise: 250 DLC, 30 s),
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
-    if not fam['dlc']: return None
+    if not fam['dlc']:
+        if fam.get('nup'):   # a NUP that lists no DLC (Pokemon Pokopia's) keeps the images the player put in aoc/ by hand: the ones the packer made have an .inputs.json beside them
+            mine = sorted(p for p in (work / 'aoc').glob('*.img') if p.is_file() and not p.with_name(p.name + '.inputs.json').exists()) if (work / 'aoc').is_dir() else []
+            if mine: say(f'DLC from aoc/ placed by hand: {", ".join(p.name for p in mine)}'); return work / 'aoc'
+        return None
     if fam.get('nup'):
         PROG.stage('unpack DLC', step='unpacking')
         try: pack_nup.pack_dlc(fam['nup'], app, {tid: k for tid, _, k in fam['dlc']}, work / 'aoc', say=lambda s: None)

@@ -518,6 +518,16 @@ class Pack(Base):
         self.assertEqual(sorted(p.name for p in aoc.iterdir()), ['1.img', '1.img.inputs.json'])
         self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
 
+    def test_hand_placed_aoc_kept_when_nup_lists_no_dlc(self):   # Pokemon Pokopia's NUP has no DLC; its DLC NSP is a marker the player extracts into aoc/<index>.img
+        work = self.out(); aoc = work / 'aoc'; aoc.mkdir(parents=True)
+        fam = {'dlc': [], 'nup': object()}
+        self.assertIsNone(nsp.extract_aoc('nx', 'keys', REPO, work, TID, fam, work / 'logs'))   # nothing there: no DLC
+        (aoc / '1.img').write_bytes(b'by hand')
+        self.assertEqual(nsp.extract_aoc('nx', 'keys', REPO, work, TID, fam, work / 'logs'), aoc)
+        (aoc / '1.img.inputs.json').write_text('{}')   # the packer's own image is stale once the container lists no DLC
+        self.assertIsNone(nsp.extract_aoc('nx', 'keys', REPO, work, TID, fam, work / 'logs'))
+        self.assertIsNone(nsp.extract_aoc('nx', 'keys', REPO, work, TID, {'dlc': []}, work / 'logs'))   # not a NUP: unchanged
+
     def test_nsp_dlc_not_reused_after_nup(self):   # the NUP packs into the aoc/ the NSP extraction keyed: the same NSPs again extract again
         n = self.open(); app, _, _, dlc = pack_nup.scan(n)
         work, logs, p = self.out(), self.out() / 'logs', self.dir / 'dlc.nsp'

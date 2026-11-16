@@ -26,6 +26,9 @@ const char *front_ios_device_check(void);   // main.m: why this device cannot ru
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
+// Cached from the screen hosting the game view; the NVN present thread reads it.
+static int g_screen_max_fps;
+int front_screen_max_fps(void) { return __atomic_load_n(&g_screen_max_fps, __ATOMIC_RELAXED); }
 static void front_ios_notify_setup(void);
 static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
@@ -54,6 +57,7 @@ static UILabel *front_ios_fps_label(void);
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     UIScreen *screen = self.window.windowScene.screen;
+    __atomic_store_n(&g_screen_max_fps, screen ? (int)screen.maximumFramesPerSecond : 0, __ATOMIC_RELAXED);
     CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;

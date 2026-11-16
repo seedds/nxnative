@@ -147,7 +147,7 @@ static void launcher_done(void) { [g_root startGame]; }
     [self.view setNeedsLayout];
 }
 #endif
-// The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
+// The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD). Host loading normally began at app launch (main.m); Resident Evil defers it until its signed FPS variant is chosen.
 - (void)startGame {
     if (self.game) return;
     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)

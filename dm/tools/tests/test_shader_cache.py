@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import concurrent.futures as cf, hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -134,6 +134,28 @@ class Entries(Base):
         self.store.put_file('f', src)
         self.assertTrue(self.store.to_file('f', dst)); self.assertEqual(dst.read_bytes(), b'data')
         self.assertFalse(self.store.to_file('absent', self.root / 'none')); self.assertFalse((self.root / 'none').exists())
+
+    def test_other_threads_read_on_connections_of_their_own(self):
+        # one connection gives an entry's bytes at 190 MB/s; the library image is written from 300,000 entries (shader_lib.py write), read by a few threads at once
+        for i in range(50): self.store.put(f's/{i}', bytes([i]) * 40000)
+        self.assertEqual(self.store.get('s/7'), bytes([7]) * 40000); self.assertEqual(self.store.readers, {})   # the thread that opened it: the one connection, as before
+        with cf.ThreadPoolExecutor(4) as pool: got = list(pool.map(lambda i: self.store.get(f's/{i}'), range(50)))
+        self.assertEqual(got, [bytes([i]) * 40000 for i in range(50)])
+        self.assertTrue(0 < len(self.store.readers) <= 4)
+        self.store.put('s/new', b'written since'); self.store.delete_prefix('s/1')   # what was written since is read, what was removed is gone
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(lambda: [self.store.get(n) for n in ('s/new', 's/1', 's/2', 'absent')]).result(), [b'written since', None, bytes([2]) * 40000, None])
+        self.store.close()
+        self.assertEqual(os.listdir(self.root), ['cas.db']); self.assertEqual(self.store.readers, {})   # their connections closed with it: one file is left
+
+    def test_a_read_in_another_thread_waits_for_a_batch_and_a_batch_reads_what_it_wrote(self):
+        started, read = threading.Event(), []
+        def reader(): started.wait(20); t = time.time(); read.append((self.store.get('in/batch'), time.time() - t))
+        def writer():
+            with self.store.batch():
+                self.store.put('in/batch', b'whole'); self.assertEqual(self.store.get('in/batch'), b'whole')   # its own write, on the one connection
+                started.set(); time.sleep(0.3)
+        with cf.ThreadPoolExecutor(2) as pool: a, b = pool.submit(reader), pool.submit(writer); b.result(); a.result()
+        self.assertEqual(read[0][0], b'whole'); self.assertGreater(read[0][1], 0.2)   # not "absent": the read came after the batch, as on one connection
 
     def test_one_file_is_left(self):
         self.store.put('x', b'1'); self.store.close()

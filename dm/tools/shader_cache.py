@@ -103,6 +103,7 @@ class Store(_Files):
         older: the files of earlier generations of this one (for_chain), whose Metal compiles are copied into this file when they are read"""
         self.path, self.say = os.fspath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
+        self.readers, self.wal, self.opener = {}, False, threading.get_ident()   # each other thread's own connection for get, read-only (_reader), where the file's log lets a reader stand beside the writer
         self.full = False   # set by the first write that fails (a full drive): no later write is tried, and the batch it was part of is rolled back
         self.outer = False   # inside the outermost batch: SQLite may end the transaction itself on a failed write, so its own flag cannot tell
         source = readonly if readonly is not None else READ_ONLY
@@ -140,13 +141,14 @@ class Store(_Files):
     def _prepare(self):   # the file's settings and tables; each step does nothing to a file that has them, so a reopened file takes it again
         self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
         # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
-        if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
-        else: self.db.execute('PRAGMA synchronous=OFF')
+        self.wal = self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        self.db.execute('PRAGMA synchronous=NORMAL' if self.wal else 'PRAGMA synchronous=OFF')
         for s in SCHEMA: self.db.execute(s)
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False
         self.say(f'[RED] the shader compile cache {self.path} is damaged, and is made anew: {e}')
+        self._close_readers()
         with contextlib.suppress(sqlite3.Error): self.db.close()
         for suffix in ('', '-wal', '-shm', '-journal'):
             with contextlib.suppress(FileNotFoundError): os.unlink(self.path + suffix)
@@ -163,9 +165,29 @@ class Store(_Files):
     def has(self, name):
         return bool(self._run('SELECT 1 FROM entry WHERE name=?', name)) or any(r is not None and r.has(name) for r in (self.older, self.readonly))
 
+    def _reader(self):
+        """This thread's own read-only connection, or None when the read belongs on the one connection: in the thread that opened the store (a store used by one thread opens no
+        other connection), inside a batch (the lock is then this thread's, and its writes are not yet the file's), or on a file without the write-ahead log. The lock is taken to
+        ask, so a batch under way in another thread is over first, as the read waited for it before: what the connection then reads is everything written up to here. Entries read
+        one after the other on the one connection come out at 190 MB/s (a library's bytes lie on a chain of pages, read one by one), eight threads with a connection each read
+        780 MB/s: the library image's write (shader_lib.py write) reads its 300,000 files so"""
+        me = threading.get_ident()
+        if me == self.opener: return None
+        with self.lock:
+            if not self.wal or self.outer or self.db.in_transaction: return None
+        if me not in self.readers:
+            try: db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+            except sqlite3.Error: return None
+            with self.lock: self.readers[me] = db
+        return self.readers[me]
+
     def get(self, name):
         """An entry's bytes, None when there is none. One an older generation holds is copied into this file first, so that it stays when that generation goes"""
-        rows = self._run('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', name)
+        sql, rows, db = 'SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', None, self._reader()
+        if db is not None:
+            try: rows = db.execute(sql, (name,)).fetchall()
+            except sqlite3.Error: rows = None   # asked again below, on the one connection, which also finds a damaged file
+        if rows is None: rows = self._run(sql, name)
         if rows: return bytes(rows[0][0])
         if self.older and (data := self.older.get(name)) is not None:
             self.put(name, data); return data
@@ -221,15 +243,20 @@ class Store(_Files):
     def prune_shaders(self, keep, since):
         """Remove the shader/<64 hex digits>/ entries not in keep and all written before since, and the bytes nothing names any more, giving their pages back. Other names stay.
         Returns (shaders removed, bytes of their sources and reflection: their libraries are shared with metallib/)"""
-        rows = self._run("SELECT e.name, e.mtime, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>='shader/' AND e.name<'shader0'")
-        newest, size, names = {}, {}, {}
-        for name, mtime, n in rows:
+        # The names and times first, from the entry table alone: reading each entry's size with them walked the blob table too, 13 s of every build of Ocarina of Time (an 11.5 GB
+        # file, 128,544 such entries) that had nothing to remove, the builds that reuse every shader included. The sizes are read for what goes
+        rows = self._run("SELECT name, mtime FROM entry WHERE name>='shader/' AND name<'shader0'")
+        newest, names = {}, {}
+        for name, mtime in rows:
             m = SHADER_ENTRY.match(name)
             if not m: continue
             d = m.group(1); newest[d] = max(newest.get(d, 0), mtime); names.setdefault(d, []).append(name)
-            if not name.endswith('.metallib'): size[d] = size.get(d, 0) + n
         gone = [d for d in newest if d not in keep and newest[d] < since]
         if not gone: return 0, 0
+        size = {}
+        for d in gone:
+            size[d] = sum(n for name, n in self._run('SELECT e.name, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>=? AND e.name<?', f'shader/{d}/', f'shader/{d}0')
+                          if not name.endswith('.metallib'))
         with self.lock, self.batch():
             self.db.executemany('DELETE FROM entry WHERE name=?', ((n,) for d in gone for n in names[d]))
             self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
@@ -262,7 +289,17 @@ class Store(_Files):
             finally: self.db.execute('DETACH DATABASE old')
         return 0 if self.full else n
 
+    def _close_readers(self, thread=None):   # every thread's connection, or one thread's
+        with self.lock:
+            readers = [self.readers.pop(thread)] if thread in self.readers else [] if thread is not None else list(self.readers.values())
+            if thread is None: self.readers = {}
+        for db in readers:
+            with contextlib.suppress(sqlite3.Error): db.close()
+
+    def forget(self): self._close_readers(threading.get_ident())   # a thread that reads no more (Served's, when its worker is gone)
+
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
+        self._close_readers()   # first: the last connection to close is the one that folds the log
         with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
         for r in (self.readonly, self.older):
             if r: r.close()
@@ -359,7 +396,9 @@ class Served:
         return Remote(self.pipes[i][1])
 
     def _serve(self, conn):
-        with contextlib.suppress(_Gone, EOFError, OSError): self._calls(conn, False)
+        try:
+            with contextlib.suppress(_Gone, EOFError, OSError): self._calls(conn, False)
+        finally: self.store.forget()
 
     def _calls(self, conn, inside):   # answers a worker's calls: until its end closes, or inside its batch until the batch ends
         s = self.store

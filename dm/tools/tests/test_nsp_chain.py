@@ -180,6 +180,24 @@ class TableTools(unittest.TestCase):
         self.assertEqual(self.table(lib, 'c1_guard', memo), ['00112233aabbccdd'])
         self.assertEqual(len(path.read_text().splitlines()), 3)   # only this run's answers are kept
 
+    def test_memo_holds_across_a_chain_change(self):
+        # a reflection names its chain version, which neither tool reads: after a chain change the shaders whose MSL and reflection are otherwise the same keep their answers
+        # (Ocarina of Time: both analyses ran whole, 86 s, after every chain change)
+        lib = self.memo_lib(); memo = lib.parent / 'memo'
+        for f in lib.glob('*_b.json'): f.write_text(json.dumps(dict(json.loads(f.read_text()), chain='0123456789ab'), indent=1))
+        plain = {tool: self.table(lib, tool, memo) for tool in ('c1_guard', 'cb_extent')}
+        new = lib.parent / 'b-ba9876543210'; shutil.copytree(lib, new)
+        for f in new.glob('*_b.json'): f.write_text(f.read_text().replace('"chain": "0123456789ab"', '"chain": "ba9876543210"'))
+        for tool in ('c1_guard', 'cb_extent'):
+            with self.subTest(tool=tool):
+                path = memo / f'{tool}.memo'; before = path.read_text()
+                self.assertEqual(self.table(new, tool, memo), plain[tool]); self.assertEqual(path.read_text(), before)   # the same digests
+        path = memo / 'c1_guard.memo'; head, *rows = path.read_text().splitlines()
+        path.write_text(head + '\n' + ''.join(r.split('\t')[0] + '\tu\n' for r in rows))   # every shader answered "not proven"
+        self.assertEqual(self.table(new, 'c1_guard', memo), ['00112233aabbccdd', '44556677eeff0011'])   # taken from the memo
+        f = new / '44556677eeff0011_b.json'; f.write_text(json.dumps(dict(json.loads(f.read_text()), c1='00' * 32), indent=1))   # anything else in the reflection: analysed again
+        self.assertEqual(self.table(new, 'c1_guard', memo), ['00112233aabbccdd'])
+
     def test_memo_of_other_tools_is_not_taken(self):   # another version of the tools (its first line) starts the memo empty
         lib = self.memo_lib(); memo = lib.parent / 'memo'
         self.table(lib, 'c1_guard', memo)

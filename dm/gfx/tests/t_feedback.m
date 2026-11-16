@@ -686,7 +686,7 @@ static void cut_boundary_case(void) {
 // version continued the next submission in the held command buffer, and an upload recorded inside it went to the GPU after the draws recorded before it. The encode thread is held
 // by a queue block until the submissions are recorded, and "an earlier command buffer runs" is the counter raised by hand
 static void merge_case(void) {
-    if (!rec_on()) return;
+    if (!rec_on() || !rx_merge_on()) return;   // held submissions: iOS's default, DM_NVN_SUB_MERGE=1 on the Mac (check_t_feedback)
     tex_t colour; target(&colour, 99820);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);

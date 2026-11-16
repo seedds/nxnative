@@ -157,10 +157,13 @@ static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_busy_hold;   // main co
 static id<MTLSharedEvent> g_rx_ev; static uint64_t g_rx_seq;   // signalled with ++g_rx_seq after every commit of the encode thread (rx_mark)
 static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions held and committed with a later one; commit calls of main command buffers; command buffers in the last one
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
+// On by default on iOS only, where it was made for the GPU clock the iPhone lowers ([A frame's submissions queued behind its first one while the iPhone's GPU clock is low]). On the
+// Mac a held submission waits for the GPU to run out before it is committed, so each batch began behind a GPU gone idle: Mario Kart World uncapped on an M3 Max, DM_NVN_SUB_MERGE=ab
+// in phases of 300 frames, frame p50 0.65 ms shorter docked and 0.60 ms handheld with it off (handheld 8.1-8.35 ms against 8.8-9.6), the GPU busier, and no frame over 20 ms either way
 static int rx_merge_on(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_NVN_SUB_MERGE"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_SUB_MERGE", 0) : !(e && !strcmp(e, "0"));
-        if (!v) MLOG("DM_NVN_SUB_MERGE=0: every submission is committed on its own"); }
+    if (v < 0) { const char *e = getenv("DM_NVN_SUB_MERGE"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_SUB_MERGE", 0) : e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE;
+        if (!v) MLOG("held submissions off: every submission is committed on its own (%s)", e ? "DM_NVN_SUB_MERGE=0" : "the Mac's default; DM_NVN_SUB_MERGE=1 holds them"); }
     return sw_on(v);
 }
 static void rx_mark(void) { if (!g_rx_ev) g_rx_ev = [g_dev newSharedEvent]; [g_q4 signalEvent:g_rx_ev value:++g_rx_seq]; }   // after a commit, under g_res_commit_mu

@@ -17,7 +17,7 @@ int main(void) {
    "DM_TEST_UP_LOST","MTL_DEBUG_LAYER","MTL_SHADER_VALIDATION","DM_MSL_DIR"};
  const char *keep[]={"DM_SHOW_FPS","DM_METAL_HUD","MTL_HUD_ENABLED",
    "DM_FPS_TARGET","DM_DYNAMIC_RESOLUTION","DM_OPMODE","DM_RENDER_SCALE","DM_LANG","DM_RT",
-   "DM_TOUCH_HAPTICS","DM_RUMBLE","DM_SAVE","DM_ROMFS","DM_NVN_ENC_THREAD"};
+   "DM_TOUCH_HAPTICS","DM_RUMBLE","DM_SAVE","DM_ROMFS","DM_NVN_ENC_THREAD","DM_DEPTH_BOUNDS"};
  for(unsigned i=0;i<sizeof drop/sizeof *drop;i++)assert(dm_player_diagnostic_key(drop[i]));
  for(unsigned i=0;i<sizeof keep/sizeof *keep;i++)assert(!dm_player_diagnostic_key(keep[i]));
 }

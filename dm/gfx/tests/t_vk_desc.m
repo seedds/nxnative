@@ -1,6 +1,6 @@
 // Vulkan descriptors outlive the objects written into them (GitHub issue 68): a set names an image view, a sampler and a uniform buffer in element 1 of an 8-texture
 // array and a buffer binding, as Super Mario Galaxy 2's shaders take them; the objects are destroyed and their host structs freed and overwritten, and the set bound
-// for a draw still binds the texture, sampler state and buffer it was written with. Resetting the pool releases them
+// for a draw still binds the texture, sampler state and buffer it was written with. Resetting the pool releases them. Then a pipeline's depth bounds test, static and dynamic
 #include "../vk/hle_vk.m"
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -180,6 +180,32 @@ int main(void) {
         h_vkDestroyRenderPass(dev, rp, NULL);
     }
     CHECK(!wdss, "a destroyed pipeline releases its dynamic depth-stencil state");
+    // A pipeline's depth bounds test (pipe_make, nvn_dbnd.h): static bounds are resolved with the pipeline; with VK_DYNAMIC_STATE_DEPTH_BOUNDS Vulkan ignores the static ones
+    // (here 0, 0, which would pass only a stored 0) and vkCmdSetDepthBounds is not among the imports, so the test is off, as before it was applied
+    @autoreleasepool {
+        NSError *error = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { return float4(float(i & 1), float(i >> 1), 0.5, 1); }\n" options:nil error:&error];
+        CHECK(lib != nil, "test vertex shader compiles");
+        shinfo vsi = {.key = "t_vk_dbnd"}; struct VkShaderModule_T vm = {.si = &vsi, .fn = [lib newFunctionWithName:@"v"]}; strcpy(vm.key, "t_vk_dbnd");
+        VkAttachmentDescription att = {.format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkAttachmentReference dref = {0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription sp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .pDepthStencilAttachment = &dref};
+        VkRenderPassCreateInfo rci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &att, .subpassCount = 1, .pSubpasses = &sp};
+        VkRenderPass rp; CHECK(h_vkCreateRenderPass(dev, &rci, NULL, &rp) == VK_SUCCESS, "depth-only render pass created");
+        VkPipelineShaderStageCreateInfo st = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = &vm, .pName = "main"};
+        VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_DEPTH_BOUNDS, VK_DYNAMIC_STATE_SCISSOR};
+        for (int dynamic = 0; dynamic < 2; dynamic++) {
+            VkPipelineDepthStencilStateCreateInfo dsi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = 1, .depthWriteEnable = 1,
+                                                         .depthCompareOp = VK_COMPARE_OP_LESS, .depthBoundsTestEnable = 1, .minDepthBounds = dynamic ? 0 : .25f, .maxDepthBounds = dynamic ? 0 : .75f};
+            VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = dynamic ? 3 : 1, .pDynamicStates = dyn};
+            VkGraphicsPipelineCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 1, .pStages = &st, .pDepthStencilState = &dsi,
+                                                .pDynamicState = &dy, .renderPass = rp};
+            VkPipeline p = pipe_make(&pci);
+            CHECK(p->pso != nil, "depth-only pipeline built");
+            if (!dynamic) CHECK(p->dbk == DBND_TEST && p->db[0] == .25f && p->db[1] == .75f, "static depth bounds: the pipeline tests them");
+            else CHECK(p->dbk == DBND_OFF && p->db[0] == 0 && p->db[1] == 1, "dynamic depth bounds: the static (0, 0) ignored, the test off");
+        }
+    }
     printf("Vulkan descriptors: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -129,6 +129,7 @@ int main(void) {
     const char *lay = cap_layout();
     const char *legacy = "format 1\nops 54\n";
     CHECK(!cap_layout_matches(legacy, strlen(legacy)), "old absolute descriptor handles require a new capture");
+    uint8_t bounds[16] = {0}; CHECK(cap_rec_fields(OP_DEPTH_BOUNDS, bounds, 8 + sizeof(p_depth_bounds), &enc, NULL), "a depth bounds record has no pointer to walk");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};

@@ -39,6 +39,7 @@ Two conventions that run through the whole table:
 | BindUniformBuffer(s) / BindStorageBuffer(s) / BindSeparateTextures / BindSeparateSamplers / BindImages | Fills the argument buffer according to the shader's reflection json | For how slot numbers correspond to the constant sections in the shader see "Shader translation chain" in the README |
 | BindVertexBuffers | Vertex buffer = (`MTLBuffer`, offset) | — |
 | SetViewports / SetScissor / SetDepthRange / Stencil* / SetBlendColor / SetPolygonOffsetClamp | The corresponding setting on the encoder | — |
+| SetDepthBounds | The encoder's depth bounds test (`setDepthTestMinBound:maxBound:`) | Apple10 GPUs and later; ignored with a red line elsewhere, every draw drawn as before. Bounds clamped to [0, 1]; bounds no stored depth meets skip the draw where the GPU has the test; not applied in a pass without depth ([rendering](../../docs/reference/rendering.md#depth-bounds)) |
 | DrawArrays / DrawElementsInstanced | Draw / indexed draw | Metal has no quad or triangle-fan primitive: non-indexed quads and fans are drawn as triangles through shared index buffers (0,1,2,0,2,3 per quad; 0,i,i+1 per fan triangle) with first as the base vertex; indexed quads / fans and 8-bit indices are expanded on the CPU into a 32-bit (16-bit for 8-bit lists) index list in the frame arena |
 | DrawArraysIndirect / DrawElementsIndirect | Indirect draw / indexed indirect draw | NVN's records have the layouts of `MTLDrawPrimitivesIndirectArguments` / `MTLDrawIndexedPrimitivesIndirectArguments` and are read by the GPU from the pool. Quads, fans and 8-bit indices: a compute pass before the render pass (`ixc_run`) converts the GPU-written record into indexed indirect arguments (and, for indexed draws, a 32-bit index list of at most 49,152 indices) |
 | DrawTexture | A textured rectangle drawn by a built-in pipeline | Its own render pass per bound colour target, with the scissor and channel mask; no blending (`draw_tex`, [rendering](../../docs/reference/rendering.md#nvncommandbufferdrawtexture)) |
@@ -51,7 +52,7 @@ Two conventions that run through the whole table:
 
 The following are empty implementations (`g_nops` in `hle_nvn.c`); calling them neither reports red nor has any effect:
 
-`SetPatchSize`, `MultiDrawArraysIndirectCount`, `MultiDrawElementsIndirectCount`, `SetDepthBounds`, `DownsampleTextureView`, `WaitSync`, `SetShaderScratchMemory`, `PushDebugGroupDynamic`, `PopDebugGroup`, `InsertDebugMarkerDynamic`, `WaitEvent`, and `nvnWindowFinalize`.
+`SetPatchSize`, `MultiDrawArraysIndirectCount`, `MultiDrawElementsIndirectCount`, `DownsampleTextureView`, `WaitSync`, `SetShaderScratchMemory`, `PushDebugGroupDynamic`, `PopDebugGroup`, `InsertDebugMarkerDynamic`, `WaitEvent`, and `nvnWindowFinalize`.
 
 ## 3. Shader bindings
 

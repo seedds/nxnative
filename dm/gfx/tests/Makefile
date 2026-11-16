@@ -682,6 +682,14 @@ check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 
+# Depth bounds (t_depth_bounds.m): the replay's state and encoder calls with the Metal encoder call taken by the test (a Mac GPU below Apple10 has no depth bounds test), on and off the encode thread
+t_depth_bounds: t_depth_bounds.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_depth_bounds.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_depth_bounds
+check_t_depth_bounds: t_depth_bounds
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_render_enable_queue

@@ -16,6 +16,7 @@
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/nvn_dbnd.h"
 #import "../nvn/host_msl.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
@@ -234,6 +235,7 @@ struct VkPipeline_T {
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int fan, restart;   // a triangle fan, drawn as a list (fan_arrays, fan_indexed), and its primitive restart
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
+    int dbk; float db[2];   // the depth bounds test as nvn_dbnd.h resolves the pipeline's (DBND_*, the bounds for the encoder)
     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
     // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
     // pipeline keeps its depth-stencil description and builds the state for the masks set (one cached)
@@ -1061,7 +1063,9 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             if (fmt_has_depth(df) && ds->depthTestEnable) { dd.depthCompareFunction = (MTLCompareFunction)ds->depthCompareOp; dd.depthWriteEnabled = ds->depthWriteEnable != 0; }
             if (fmt_has_stencil(df) && ds->stencilTestEnable) { dd.frontFaceStencil = stencil_d(&ds->front); dd.backFaceStencil = stencil_d(&ds->back); p->sref_f = ds->front.reference; p->sref_b = ds->back.reference;
                                                                 p->stencil = 1; p->sf = ds->front; p->sb = ds->back; p->dcmp = dd.depthCompareFunction; p->dwrite = dd.depthWriteEnabled; }
-            if (ds->depthBoundsTestEnable) RED1("depth bounds test not implemented");
+            // The depth bounds test is static pipeline state here (vkCmdSetDepthBounds is not among the imports): resolved once as NVN's (nvn_dbnd.h) and set with the pipeline (pre_draw).
+            // Without a depth format, or with rasterization off, it has nothing to test
+            if (ds->depthBoundsTestEnable && fmt_has_depth(df) && !(rs && rs->rasterizerDiscardEnable)) p->dbk = dbnd_resolve(1, ds->minDepthBounds, ds->maxDepthBounds, p->db);
             p->dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         } else p->dss = g_dss_off;
         const VkPipelineDynamicStateCreateInfo *dy = ci->pDynamicState;
@@ -1071,6 +1075,8 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
             else if (s == VK_DYNAMIC_STATE_LINE_WIDTH) continue;   // Metal draws lines one pixel wide whatever the width (Super Mario 64 sets 1)
             else if (s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK || s == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK) p->dyn_smask |= s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK ? 1 : 2;
+            else if (s == VK_DYNAMIC_STATE_DEPTH_BOUNDS) {   // Vulkan ignores the static bounds then (often left at 0, 0, which would pass almost nothing): no test, as before
+                p->dbk = DBND_OFF; p->db[0] = 0; p->db[1] = 1; RED1("dynamic state %d not implemented (the imports have no matching set function)", s); }
             else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
@@ -1234,6 +1240,7 @@ typedef struct {
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
     // for a copy in the middle of the pass and is resumed (loading the attachments) at the next draw
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
+    int db_live;   // the encoder has depth bounds from a pipeline (a new encoder starts with the test off)
     VkQueryPool aq; uint32_t aq_first;   // the occlusion query running (occ_start)
     uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
 } rs_t;
@@ -1273,7 +1280,7 @@ static void resume_rp(rs_t *s) {
     if (d.stencilAttachment.texture) d.stencilAttachment.loadAction = MTLLoadActionLoad;
     fan_prepare(s, s->cmd);
     s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->cut = 0; g_n_resume++;
-    s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
+    s->applied = NULL; s->vp_dirty = s->sc_dirty = 1; s->db_live = 0;
     occ_start(s);
 }
 // An attachment opened with LOAD_OP_DONT_CARE is loaded, colour, depth and stencil alike: Vulkan leaves its contents undefined, the Switch's driver does no colour discard
@@ -1314,7 +1321,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
     fan_prepare(s, (const chdr *)((const uint8_t *)s->cmd + s->cmd->size));
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d];
-    s->applied = NULL; s->rt_w = w; s->rt_h = h;
+    s->applied = NULL; s->rt_w = w; s->rt_h = h; s->db_live = 0;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
     // Resetting them at every pass drew Super Mario Galaxy's handheld UI 1.5x too big: it sets a 1280x720 viewport once and then draws through several passes into its 1920x1080 swapchain
     if (!s->have_vp) s->vp = (VkViewport){0, 0, (float)w, (float)h, 0, 1};
@@ -1377,6 +1384,7 @@ static int pre_draw(rs_t *s) {
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
     if (!re) { RED1("draw outside a render pass"); return 0; }
     if (!p || !p->pso) return 0;
+    if (p->dbk == DBND_EMPTY && mtl_depth_bounds_hw()) return 0;   // bounds no stored depth meets: nothing passes, and Metal refuses them (nvn_dbnd.h); drawn where the GPU has no test, as before
     if (p->logic) { static uint64_t n; if (!n++) LOG("[vk] [RED] logic op %d not implemented: the pipeline draws with its shader's colour", p->logic); if (!(n % 1000)) LOG("[vk] logic op draws so far: %llu", (unsigned long long)n); }
     if (s->applied != p) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
@@ -1384,6 +1392,8 @@ static int pre_draw(rs_t *s) {
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
         [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
         [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
+        if (p->dbk == DBND_TEST && mtl_depth_bounds_hw()) { [re setDepthTestMinBound:p->db[0] maxBound:p->db[1]]; s->db_live = 1; }   // only on a GPU that has the test (Apple10 and later)
+        else if (s->db_live) { [re setDepthTestMinBound:0 maxBound:1]; s->db_live = 0; }
         s->s_dirty = 1;
         if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
         if (p->has_sc) s->sc_dirty = 1;

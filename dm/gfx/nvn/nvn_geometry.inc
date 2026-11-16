@@ -546,7 +546,8 @@ static int geo_mesh_keeps(uint32_t op) {
 }
 // Whether the draw's result is the same in any order among the draws of a run (see above); the first refusal of each kind is logged
 static int geo_mesh_run_fits(NvProg *pr) {
-    static const char *const why[] = {"its fragment shader writes memory", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest"};
+    static const char *const why[] = {"its fragment shader writes memory", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest",
+                                      "it writes depth with a depth bounds test, which reads the depth the run's other draws write"};
     static uint8_t logged;
     NvShader *fs = pr->sh[1]; int r = -1;
     uint32_t attached = 0; for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) attached |= 1u << i;
@@ -555,6 +556,8 @@ static int geo_mesh_run_fits(NvProg *pr) {
     else if (draw_color_writes(pr) & attached) r = 1;
     else if (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])) r = 2;
     else if (g_pass.hd && S.ds.dw && !(S.ds.dt && (S.ds.df == 1 || S.ds.df == 2 || S.ds.df == 4 || S.ds.df == 5 || S.ds.df == 7))) r = 3;   // NVN NEVER, LESS, LEQUAL, GREATER, GEQUAL
+    else if (g_pass.hd && S.ds.dw && S.dbnd.on) { float b_[2]; if (dbnd_resolve(1, S.dbnd.lo, S.dbnd.hi, b_) == DBND_TEST && dbnd_on() && dbnd_hw()) r = 4; }   // the test reads
+    // the depth stored when the fragment runs, which depends on the order the run's draws rasterize in (bounds (0.5, 1) over a cleared 1: a draw at 0.2 passes before one at 0.3, fails after)
     if (r < 0) return 1;
     if (!(logged >> r & 1)) { logged |= 1 << r; MLOG("geometry mesh run: a draw of vertex %s draws alone: %s", pr->sh[0] ? pr->sh[0]->key : "-", why[r]); }
     return 0;

@@ -7683,14 +7683,14 @@ static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
     enc_r_vbuf(en, 30, zero_gpu);
     return bad;
 }
-// The per-draw layout block of a pulling pipeline (dm/gfx/tools/dmsh_pull.metal dm_vlayout, at buffer 16): per stream the base address, stride and divisor, per NVN attribute its
-// state word. A base address is kept 4-byte aligned, its low bits moved into its attributes' offsets (dm_fetch reads whole words where the element is aligned); elements keep their
+// The per-draw layout block of a pulling pipeline (dm/gfx/tools/dmsh_pull.metal dm_vlayout, at buffer 16): per stream the base address, stride and divisor, per NVN attribute (all 32)
+// its state word. A base address is kept 4-byte aligned, its low bits moved into its attributes' offsets (dm_fetch reads whole words where the element is aligned); elements keep their
 // components' alignment as for Metal's own fetch (16-bit components at even addresses, packed 32-bit words at multiples of 4). An attribute whose stream has no buffer reads zeros,
 // as through the zero buffer (t_pull.m)
 enum { PULL_SLOT = 16 };   // = dmsh_pull.py SLOT
 typedef struct { uint64_t base; uint32_t stride, divisor; } pull_stream;
-typedef struct { pull_stream s[16]; uint32_t attr[16]; } pull_layout;
-_Static_assert(sizeof(pull_layout) == 320, "dmsh_pull.metal dm_vlayout");
+typedef struct { pull_stream s[16]; uint32_t attr[32]; } pull_layout;
+_Static_assert(sizeof(pull_layout) == 384, "dmsh_pull.metal dm_vlayout");
 static void pull_layout_fill(pull_layout *Lp) {
     pull_layout L; memset(&L, 0, sizeof L); uint32_t lo[16] = {0};
     for (int st = 0; st < 16; st++) {
@@ -7700,7 +7700,7 @@ static void pull_layout_fill(pull_layout *Lp) {
             if (!mtl_gpu_addr(addr, S.vbuf[st].size ? S.vbuf[st].size : 1, &mb, &mo, &gpu)) continue;
         L.s[st].base = gpu & ~3ull; lo[st] = (uint32_t)(gpu & 3); L.s[st].stride = S.stream[st].stride; L.s[st].divisor = S.stream[st].divisor;
     }
-    for (int a = 0; a < 16 && a < S.nattr; a++) {
+    for (int a = 0; a < 32 && a < S.nattr; a++) {
         va_st v = S.attr[a];
         if (!v.fmt || v.stream >= 16) continue;
         if (!L.s[v.stream].base) {   // the attribute reads zeros

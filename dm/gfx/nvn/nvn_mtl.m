@@ -12105,7 +12105,7 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
         uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
         else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
         else RED_ONCE(92, "a uniform update deferred inside the pass covers only part of the binding (stage %d cb%d): the content before the update is read", nvn_stage, reg); }
-    if (g_fg_mode && nvn_stage == 0 && reg == 0 && u->size == 13568) fg_cam_note((const float *)u->addr);   // scratch (DM_FRAMEGEN): Ocarina of Time's camera block
+    if (g_fg_mode) fg_cam_bind(nvn_stage, reg, u->addr, u->size);   // scratch (DM_FRAMEGEN): the scene camera's block, on a build whose layout is known
     return gpu;
 }
 // The uniform slots' bound sizes (DMSH_CBSIZE_BANK), which the translator's reads at computed offsets compare with: one past its slot's size, rounded up to 256 bytes (ub_bound), gives 0, as on Maxwell. 0 for an unbound slot,

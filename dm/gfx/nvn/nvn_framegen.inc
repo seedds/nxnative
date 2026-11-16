@@ -18,7 +18,7 @@
 // DM_FRAMEGEN_SHOT=<dir>:<a>-<b> saves the generated and the real picture of frames a..b (slow: it waits for the GPU).
 #if FG_PART == 0
 static int g_fg_mode = -1;   // -1 unread, 0 off, 1 on
-static int fg_on(void); static void fg_cam_note(const float *c); static void fg_depth_note(MTL4RenderPassDescriptor *pd);
+static int fg_on(void); static void fg_cam_bind(int stage, int reg, uint64_t addr, uint64_t size); static void fg_depth_note(MTL4RenderPassDescriptor *pd);
 static void fg_shown(int gen, double tt, double tin);
 static __thread double g_fg_pres_adj;   // present thread: seconds added to the presented time recorded for the real frame being presented (negative: it was held behind its generated frame)
 static double g_fg_tin[64];   // by ticket: when the game queued the present (present_main), for the enqueue-to-screen time of real frames
@@ -66,6 +66,14 @@ static int g_fg_gate_mode, g_fg_need = FG_NEED; static _Atomic int g_fg_closed; 
 double nvn_last_gpu_ms(void);   // hle_nvn.c
 static int g_fg_overlap, g_fg_real_on_q;   // g_fg_real_on_q: the present thread, around the real frame's present behind a generated one
 static const char *g_fg_shot_dir; static long g_fg_shot_a = -1, g_fg_shot_b = -1;
+// The scene camera's uniform block, by the main's build ID: which binding it is (stage, slot, bound size) and the float that tells the scene camera's binding from the others
+// (its far plane). The offsets fg_frame reads (the view's rows at floats 0-11, the view-projection at 12-27, the projection at 28-43, near 56, far 57, aspect 62, the
+// vertical angle 70) are that build's too, read in play. A build with no row gets no frame generation: nothing reads a block whose layout was not verified.
+typedef struct { const char *build; int stage, reg; uint32_t size; int far_i; float far_min; } fg_cam_abi;
+static const fg_cam_abi k_fg_cam[] = {
+    { "e0f3ccfaf50065ae4ea01eb5aeb13b1a", 0, 0, 13568, 57, 20000.0f },   // Ocarina of Time v131072: vertex cb0; the scene camera's far plane is 25000, the environment probe's 10000
+};
+static const fg_cam_abi *g_fg_abi;
 static int fg_on(void) {
     if (g_fg_mode >= 0) return g_fg_mode;
     const char *e = getenv("DM_FRAMEGEN"), *x; int v = e && atoi(e) > 0; g_fg_seen = e != NULL;
@@ -81,6 +89,9 @@ static int fg_on(void) {
     if ((x = getenv("DM_FRAMEGEN_SHOT"))) { const char *c = strrchr(x, ':'); if (c && sscanf(c + 1, "%ld-%ld", &g_fg_shot_a, &g_fg_shot_b) == 2) g_fg_shot_dir = strndup(x, (size_t)(c - x)); }
     FG.last_frame = -2; FG.cam_frame = -1; FG.pvp_frame = -2;
     if (v && !(g_q4 && [MTLFXFrameInterpolatorDescriptor supportsMetal4FX:g_dev])) { MLOG("[RED] frame generation (DM_FRAMEGEN): this GPU has no Metal 4 MetalFX frame interpolator; frames are shown as the game draws them"); v = 0; }
+    if (v) { const char *b = dm_main_build();
+        for (unsigned i = 0; i < sizeof k_fg_cam / sizeof *k_fg_cam; i++) if (!strcmp(k_fg_cam[i].build, b)) g_fg_abi = &k_fg_cam[i];
+        if (!g_fg_abi) { MLOG("[RED] frame generation (DM_FRAMEGEN): no camera block layout is verified for this build (main %s); frames are shown as the game draws them", *b ? b : "unknown"); v = 0; } }
     if (v && rec_on()) { MLOG("[RED] frame generation (scratch build): not with DM_NVN_ENC_THREAD=1; frames are shown as the game draws them"); v = 0; }
     if (v) MLOG("frame generation (DM_FRAMEGEN=1, scratch build): the scene before the HUD is interpolated from depth and the camera, upscaled a second time, and the HUD is kept from the real frame; "
                 "pause while late %d, view %d, flip %d, stages up to %d, generator %s", g_fg_pause, g_fg_view, g_fg_flip, g_fg_upto,
@@ -93,7 +104,15 @@ static int fg_on(void) {
     return g_fg_mode = v;
 }
 // The camera block as the game binds it (encode_args_): the scene camera's binding has far plane 25000; the environment probe's (far 10000, one cube face a frame) is not taken
-static void fg_cam_note(const float *c) { if (!fg_on() || !(c[57] > 20000.0f)) return; memcpy(FG.cam, c, sizeof FG.cam); FG.cam_frame = (long)atomic_load(&g_cur_frame); }
+static void fg_cam_note(const float *c) { if (!(c[g_fg_abi->far_i] > g_fg_abi->far_min)) return; memcpy(FG.cam, c, sizeof FG.cam); FG.cam_frame = (long)atomic_load(&g_cur_frame); }
+// A uniform binding of a draw (cbuf_slot). The block is read as the draw's shader will see it: with inline updates still deferred in the pass or queued in the submission
+// over it, guest memory holds the content before them, so the read goes through ubo_read (the deferred updates' ring copies, the shadow of queued ones); with none, memory is it
+static void fg_cam_bind(int stage, int reg, uint64_t addr, uint64_t size) {
+    if (!fg_on()) return;
+    const fg_cam_abi *a = g_fg_abi; if (stage != a->stage || reg != a->reg || size != a->size || !addr) return;
+    if (!(g_nubd && ubd_hits(addr, addr + sizeof FG.cam)) && !pend_hits(addr, sizeof FG.cam)) { fg_cam_note((const float *)(uintptr_t)addr); return; }
+    float c[96]; ubo_read(stage, reg, 0, sizeof c, c); fg_cam_note(c);
+}
 // Each render pass (td_note): the last few D32F depth attachments, newest first. The scene depth is the newest of them that holds the scene being upscaled
 // (fg_frame); with dynamic resolution the scene is narrower than a shadow map, so "the last large one" is not it
 static void fg_depth_note(MTL4RenderPassDescriptor *pd) {
@@ -162,6 +181,20 @@ static id<MTLTexture> fg_tex(MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTe
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:h mipmapped:NO]; td.storageMode = MTLStorageModePrivate; td.usage = u;
     id<MTLTexture> t = [g_dev newTextureWithDescriptor:td]; if (t) { t.label = label; res_add(t); } return t;
 }
+// A MetalFX object of the old size (the interpolator, the generator queue's scaler) is released after the GPU work that uses it: behind the frame queue's next fence, as a
+// spatial scaler is (dlss_scaler_drop), and, while jobs on the generator's own queue are still running (fg_setup's wait gave up), not before the last of them reports back
+static NSMutableArray *g_fg_old; static pthread_mutex_t g_fg_old_mu = PTHREAD_MUTEX_INITIALIZER;   // [job number, object] pairs waiting for the generator queue
+static void fg_fx_retire(id obj) {
+    if (!obj) return;
+    uint64_t n = FG.job_n;
+    if (!(g_fg_overlap && FG.q) || atomic_load(&FG.job_done) >= n) { defer_obj_release(obj); return; }
+    pthread_mutex_lock(&g_fg_old_mu); if (!g_fg_old) g_fg_old = [NSMutableArray array]; [g_fg_old addObject:@[@(n), obj]]; pthread_mutex_unlock(&g_fg_old_mu);
+}
+static void fg_fx_drain(uint64_t done) {   // the generator queue's feedback: job `done` has left the GPU
+    pthread_mutex_lock(&g_fg_old_mu);
+    for (NSUInteger i = g_fg_old.count; i-- > 0;) if ([g_fg_old[i][0] unsignedLongLongValue] <= done) [g_fg_old removeObjectAtIndex:i];
+    pthread_mutex_unlock(&g_fg_old_mu);
+}
 // The interpolator and its textures for a scene of iw x ih upscaled to ow x oh (made again when a size changes: dynamic resolution)
 static int fg_setup(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, MTLPixelFormat cvf, id<MTL4FXSpatialScaler> sc) {
     if (FG.iw == iw && FG.ih == ih && FG.ow == ow && FG.oh == oh && FG.cvf == cvf) return !FG.bad;
@@ -169,6 +202,7 @@ static int fg_setup(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, 
     id<MTLTexture> old[] = {FG.c[0], FG.c[1], FG.c[2], FG.d[0], FG.d[1], FG.d[2], FG.mv, FG.gen, FG.gen_up, FG.cv0[0], FG.cv0[1], FG.cv0[2], FG.cv1[0], FG.cv1[1], FG.cv1[2]};
     for (unsigned i = 0; i < sizeof old / sizeof *old; i++) if (old[i]) { res_remove(old[i]); defer_obj_release(old[i]); }
     for (int i = 0; i < 3; i++) FG.c[i] = FG.d[i] = FG.cv0[i] = FG.cv1[i] = nil;
+    fg_fx_retire(FG.fi); fg_fx_retire(FG.sc2);   // not dropped here: command buffers already committed may still use them
     FG.mv = FG.gen = FG.gen_up = nil; FG.fi = nil; FG.sc2 = nil; FG.p_ok = 0;
     FG.iw = iw; FG.ih = ih; FG.ow = ow; FG.oh = oh; FG.cvf = cvf; FG.bad = 1; FG.warm = 0; FG.prev_ok = 0; FG.gen_ready = 0; FG.last_frame = -2;
     NSError *err = nil; uint64_t t0 = now_ns();
@@ -448,6 +482,7 @@ static uint64_t fg_job(const tex_t *t, const int crop[4], int *slot) {
         static double sum; static int cnt; sum += (fb.GPUEndTime - fb.GPUStartTime) * 1e3;   // the feedback queue is serial
         if (++cnt == 300) { MLOG("frame generation: generator jobs on their own queue, GPU start to end mean %.2f ms over 300", sum / cnt); sum = 0; cnt = 0; }
         uint64_t d = atomic_load(&FG.job_done); while (d < n && !atomic_compare_exchange_weak(&FG.job_done, &d, n)) { }
+        fg_fx_drain(n);
     }];
     pthread_mutex_lock(&g_res_mu);
     if (qc) [g_q4 commit:&qc count:1];
@@ -621,8 +656,12 @@ static int present_gen(const tex_t *t, double hold, const int crop[4]) {
     [pq commit:&cb count:1 options:o];
     [pq signalDrawable:dr];
     g_fg_pfence[i] = seq;
+#if TARGET_OS_SIMULATOR   // the iOS simulator SDK has no presentation-time callback and no minimum display duration (as present_now): the picture is presented, its shown time is not counted
+    (void)hold; [dr present];
+#else
     [dr addPresentedHandler:^(id<MTLDrawable> d) { fg_shown(1, d.presentedTime, 0); }];
     if (hold > 0) [dr presentAfterMinimumDuration:hold]; else [dr present];
+#endif
     return 1;
 }
 // DM_FRAMEGEN_SHOT: the generated and the real picture of a frame as PNGs (waits for the GPU: a diagnostic)

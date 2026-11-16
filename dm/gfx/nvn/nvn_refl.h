@@ -70,7 +70,7 @@ typedef struct {
     // For the fully-covering-first-draw proof (dmsh_reflect.py raster_facts; missing field = not provable): vertex - position xyz taken as-is from attribute pos_attr (-1 = no), w is the constant 1 (pos_w1) or taken from the same attribute's .w;
     // fragment - may discard, writes sample_mask, bitmap of the color numbers written
     int8_t pos_attr; uint8_t pos_w1, may_discard, writes_smask, color_mask, color_known;   // color_known: the color list was recorded at packaging (color_mask can be trusted)
-    uint8_t fcols, fcols_known;   // fragment: bitmap of the colour outputs main0 declares float (dmsh_reflect.py raster_facts float_colors); one meeting an integer attachment with no integer entry point fitting is a red line (nvn_mtl.m pso_desc)
+    uint8_t fcols, ucols, scols, fcols_known;   // fragment: bitmaps of the colour outputs main0 declares float, unsigned and signed (dmsh_reflect.py raster_facts float_colors, uint_colors, sint_colors); a target of another class takes the typed-output entry point (nvn_mtl.m pso_cls)
     uint8_t reads_prim_id;   // fragment: reads the primitive ID, so its pipelines are built whole (nvn_mtl.m pso_build_ex)
     uint8_t pos_far;         // vertex: gl_Position z = w (dmsh_reflect.py far_plane): drawn with a depth bias past the far value and depth clamping (nvn_mtl.m draw)
     // fragment: the SPH's output map (word 18, dmsh_build.py ps_omap): 4 bits per colour output, R G B A from the low bit; the GPU writes only these components of the target.

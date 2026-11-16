@@ -53,6 +53,7 @@ int main(void) { @autoreleasepool {
         mtl_sub_commit(); mtl_drain();
         CHECK(!mtl_last_commit_error(), "replay completes without GPU error");
         size_t bpp = 4; id<MTLBuffer> out = [g_dev newBufferWithLength:64 * bpp options:MTLResourceStorageModeShared];
+        CHECK(out != nil, "readback buffer allocates"); if (!out) { mtl_tex_release(&t); continue; }
         cb = [queue commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:base sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 8, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:8 * bpp destinationBytesPerImage:64 * bpp];
         [b endEncoding]; [cb commit]; [cb waitUntilCompleted];

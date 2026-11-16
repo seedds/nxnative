@@ -269,6 +269,7 @@ void own_tex_live_put_locked(const tex_t *t) {
     if (!t->pool) return;
     uintptr_t pk = (uintptr_t)t->pool; CFMutableSetRef set = nvn_hm_get(&g_pool_tex, &pk);
     if (!set) { set = CFSetCreateMutable(NULL, 0, NULL); if (!set) ODIE("the pool's texture index"); nvn_hm_put(&g_pool_tex, &pk, (void *)set); }
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): g_pool_tex owns set until pool_tex_del or own_pool_finalize_locked releases it.
     CFSetAddValue(set, (const void *)(uintptr_t)t->serial); nvn_hm_put(&g_tex_pool, &t->serial, (void *)t->pool);
 }
 int own_tex_live_locked(uint64_t serial) { return nvn_hm_get(&g_tex_live, &serial) != NULL; }

@@ -65,8 +65,9 @@ def raster_facts(stage, src):
         mem = out.group(1) if out else ''
         return {'discard': int('discard_fragment' in src), 'sample_mask': int('sample_mask' in mem), 'primitive_id': int('[[primitive_id]]' in src),
                 'colors': sorted({int(x) for x in re.findall(r'\[\[color\((\d+)\)\]\]', mem)}),
-                # the colour outputs main0 declares float (bitmap): the host's red line when one meets an integer attachment with no integer entry point fitting (nvn_mtl.m pso_desc)
-                'float_colors': sum(1 << int(c) for ty, c in re.findall(r'^\s*(\w+)\s+\w+\s*\[\[color\((\d+)\)[^\]]*\]\];', mem, re.M) if ty.startswith(('float', 'half')))}
+                # the colour outputs main0 declares float, unsigned and signed (bitmaps): a pipeline whose target takes another class takes the typed-output entry point (nvn_mtl.m pso_desc)
+                **{k: sum(1 << int(c) for ty, c in re.findall(r'^\s*(\w+)\s+\w+\s*\[\[color\((\d+)\)[^\]]*\]\];', mem, re.M) if ty.startswith(p))
+                   for k, p in (('float_colors', ('float', 'half')), ('uint_colors', ('uint',)), ('sint_colors', ('int',)))}}
     if stage != 'vs': return {}
     scr: dict[str, object] = {'screen': dmsh_fetch.screen_varyings(src)}   # clip → screen varyings (dmsh_fetch.py): the vertex side of a projective sample's tile read
     body = re.search(r'\bvertex\s+\w+\s+\w+\s*\(.*?\)\s*\{(.*)\}\s*$', src, re.S)   # the main function is the last function in the file

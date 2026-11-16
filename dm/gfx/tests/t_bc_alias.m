@@ -175,6 +175,43 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(2, &apart, NULL);
     { tex_t pair; CHECK(!bcp_find(&bc, &pair), "a registration that changes texture leaves the pair"); }
 
+    // A second alias over the same storage, made after the compressed texture was written, takes its blocks at once (bcp_up_fill, in the upload batch): a shader may read the
+    // alias before writing it, and a texture binding resolved inside a render pass cannot copy in the replay's order
+    tex_t alias2 = tex2d(NVN_FORMAT_RGBA32UI, BLOCKS, storage); mtl_tex_init(&alias2); mtl_reg_tex(3, &alias2, NULL);
+    id<MTLBuffer> bc_now = blocks_of(mbc);
+    mtl_sub_begin(); id<MTLTexture> ma2 = tex_mtl(&alias2);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the second alias's submission completes");
+    CHECK(ma2 && !memcmp(texels_of(ma2).contents, bc_now.contents, bc_now.length), "an alias made after the compressed texture's write holds its blocks");
+
+    // The CPU's bytes uploaded into the compressed texture (a packaged texture taken from its storage) reach the alias too (bcp_up_follow)
+    id<MTLBuffer> p4 = pattern(17);
+    run(^(id<MTLBlitCommandEncoder> b) { [b copyFromBuffer:p4 sourceOffset:0 sourceBytesPerRow:BLOCKS * BLOCK sourceBytesPerImage:BLOCKS * BLOCKS * BLOCK
+                                               sourceSize:MTLSizeMake(W, W, 1) toTexture:mbc destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; });
+    mtl_sub_begin(); bcp_up_follow(&bc, mbc);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the upload's submission completes");
+    CHECK(!memcmp(texels_of(ma2).contents, p4.contents, p4.length), "an upload into the compressed texture reaches the alias");
+
+    // A texture clear of the alias (clear_tex, unsigned 9, 10, 11, 12 over blocks 2-5 x 1-3) goes into the compressed texture's blocks there, and only there
+    p_clear_tex ct = {.tex = &alias2, .is_uint = 1, .r = {2, 1, 0, 4, 3, 1}, .mask = 0xf, .c.u = {9, 10, 11, 12}};
+    mtl_sub_begin(); clear_tex(&ct);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the texture clear's submission completes");
+    id<MTLBuffer> b5 = blocks_of(mbc); int in = 1, out = 1;
+    for (int y = 0; y < BLOCKS; y++) for (int x = 0; x < BLOCKS; x++) { const uint32_t *v = (const uint32_t *)((const uint8_t *)b5.contents + (y * BLOCKS + x) * BLOCK);
+        if (x >= 2 && x < 6 && y >= 1 && y < 4) in &= v[0] == 9 && v[1] == 10 && v[2] == 11 && v[3] == 12;
+        else out &= !memcmp(v, (const uint8_t *)p4.contents + (y * BLOCKS + x) * BLOCK, BLOCK); }
+    CHECK(in, "the cleared texels are the compressed texture's blocks");
+    CHECK(out, "and the blocks outside the clear stay");
+
+    // A scissored zero clear of the alias as a render target (clear_rect_zero: blocks 0-2 x 5-7) goes into the compressed texture too
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &alias2; R.has_sc = 1; R.sc = (p_scissor){0, 5, 3, 3};
+    mtl_sub_begin(); CHECK(clear_rect_zero(0), "the scissored clear is taken");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the scissored clear's submission completes");
+    id<MTLBuffer> b6 = blocks_of(mbc); int zero = 1;
+    for (int y = 5; y < 8; y++) for (int i = 0; i < 3 * BLOCK; i++) zero &= ((const uint8_t *)b6.contents)[(y * BLOCKS) * BLOCK + i] == 0;
+    CHECK(zero, "the scissored zero clear reaches the compressed texture's blocks");
+    CHECK(blocks_eq(b6, b5, 3, 5, BLOCKS, BLOCKS) && blocks_eq(b6, b5, 0, 0, BLOCKS, 5), "and the rest stays");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.has_sc = 0;
+
     printf("t_bc_alias: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

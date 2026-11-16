@@ -21,10 +21,14 @@ static tex_t target(pool_t *pool, uint64_t serial, uint64_t off, unsigned w, uns
 // queue alone holds
 static char g_census_formats[256];   // the last census's formats line
 static int census_run(const char *why, unsigned long long *named, unsigned long long *queued) {
-    fflush(stderr); int saved = dup(2); FILE *tmp = tmpfile(); if (saved < 0 || !tmp) return -1;
-    dup2(fileno(tmp), 2); mem_census(why); fflush(stderr); dup2(saved, 2); close(saved);
-    char line[8192], tag[128]; snprintf(tag, sizeof tag, "] %s census: ", why); int n = 0; *named = *queued = ~0ull;
-    rewind(tmp);
+    *named = *queued = ~0ull; g_census_formats[0] = 0;
+    if (fflush(stderr)) return -1;
+    int saved = dup(2); if (saved < 0) return -1;
+    FILE *tmp = tmpfile(); if (!tmp) { close(saved); return -1; }
+    if (dup2(fileno(tmp), 2) < 0) { fclose(tmp); close(saved); return -1; }
+    mem_census(why); int flushed = fflush(stderr), restored = dup2(saved, 2); close(saved);
+    if (flushed || restored < 0 || fseek(tmp, 0, SEEK_SET)) { fclose(tmp); return -1; }
+    char line[8192], tag[128]; snprintf(tag, sizeof tag, "] %s census: ", why); int n = 0;
     while (fgets(line, sizeof line, tmp)) {
         const char *at = strstr(line, tag); if (!at) continue; n++;
         const char *v = strstr(at, "live descriptors' views "), *q = strstr(at, "only in the deferred-release queue ");
@@ -32,7 +36,9 @@ static int census_run(const char *why, unsigned long long *named, unsigned long 
         if (q) *queued = strtoull(q + strlen("only in the deferred-release queue "), NULL, 10);
         const char *fm = strstr(at, "by Metal format: "); if (fm) snprintf(g_census_formats, sizeof g_census_formats, "%s", fm + strlen("by Metal format: "));
     }
-    fclose(tmp); return n;
+    if (ferror(tmp)) n = -1;
+    if (fclose(tmp)) n = -1;
+    return n;
 }
 static int is_ghost(uint64_t k) { __block int r = 0; pthread_mutex_lock(&g_smu); own_each_locked(^(uint64_t s, id o, int g) { (void)o; if (s == k && g) r = 1; }); pthread_mutex_unlock(&g_smu); return r; }
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }

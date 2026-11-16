@@ -671,6 +671,11 @@ t_rop_round: t_rop_round.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rop_round.m $(MTL_T_SRC) $(FW)
 check_t_rop_round: t_rop_round
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture-rop "$$work"; MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_ROUND=0 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"
+# Typed outputs through the pipeline path (t_typed_outputs.m), with its libraries from test_dmsh_typed.py, on the Metal 4 path and the MTLDevice's
+t_typed_outputs: t_typed_outputs.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_typed_outputs.m $(MTL_T_SRC) $(FW)
+check_t_typed_outputs: t_typed_outputs
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_typed.py --fixture "$$work"; for m in 1 0; do DM_PSO_MTL4=$$m MTL_DEBUG_LAYER=1 ./t_typed_outputs "$$work"; done
 # Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
 t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)

@@ -160,6 +160,9 @@ t_large_mdi: t_large_mdi.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_large_mdi.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_mdx_prescan: t_mdx_prescan.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mdx_prescan.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+t_draw_clamp: t_draw_clamp.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_draw_clamp.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_draw_clamp: RUN_ENV = MTL_DEBUG_LAYER=1
 t_capture_live: t_capture_live.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_capture_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_capture_live

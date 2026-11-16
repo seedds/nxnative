@@ -10262,14 +10262,14 @@ static int pso_pend_slot(const pso_key *k, int spec, uint32_t *gen) {
 }
 static void pso_pend_start(int slot, uint32_t gen, MTLRenderPipelineDescriptor *d, int off, dispatch_queue_t q) {
     pthread_mutex_lock(&g_pp_mu); if (g_pp[slot].gen == gen) g_pp[slot].d = d; pthread_mutex_unlock(&g_pp_mu);   // only the submit thread takes a queued build, so none has yet
-    dispatch_async(q, ^{
+    dispatch_async(q, ^{ @autoreleasepool {   // a serial queue drains no pool per block: a burst's descriptors and errors would wait for the thread to idle
         pthread_mutex_lock(&g_pp_mu);
         int go = g_pp[slot].used && g_pp[slot].gen == gen && !g_pp[slot].run; if (go) { g_pp[slot].run = 1; g_pp[slot].d = nil; }
         pthread_mutex_unlock(&g_pp_mu);
         if (!go) return;   // the draw made it itself
         NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         pthread_mutex_lock(&g_pp_mu); if (g_pp[slot].gen == gen) { g_pp[slot].ps = ps; g_pp[slot].done = 1; } pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu); g_pp_done_n++;
-    });
+    } });
 }
 static int pso_pend_kick_(const pso_key *k, NvShader *vs, NvShader *fs, int spec) {
     if (hm_get_id(&g_pso, k)) return 0;
@@ -10348,7 +10348,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
         pbase_key bk; pbase_key_of(d, off, &bk); NSData *kd = [NSData dataWithBytes:&bk length:sizeof bk];
         os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
         int fresh = ![g_hy_kick_set containsObject:kd]; if (fresh) [g_hy_kick_set addObject:kd]; os_unfair_lock_unlock(&g_hy_lock);
-        if (fresh) { g_hy_kicked++; dispatch_async(pp_bg_queue(), ^{ NSError *be = nil; (void)pso_build(d, off, &be); }); }
+        if (fresh) { g_hy_kicked++; dispatch_async(pp_bg_queue(), ^{ @autoreleasepool { NSError *be = nil; (void)pso_build(d, off, &be); } }); }
         g_hy_none++; return nil;
     }
     g_hy_made++; hm_put_id(&g_pso_hy, k, ps);
@@ -10714,9 +10714,9 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
     if (g_sm_amp_n >= SM_AMP_MAX) { os_unfair_lock_unlock(&g_sm_amp_lock); return nil; }
     g_sm_amp[i].k = *k; g_sm_amp[i].ps = nil; g_sm_amp[i].done = 0; g_sm_amp_n++; os_unfair_lock_unlock(&g_sm_amp_lock);
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = !k->border;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         if (!ps) MLOG("[RED] slice-merged pass: no amplified pipeline for vertex %s fragment %s: %s (those passes stay apart)", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String);
-        os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); });
+        os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); } });
     return nil;
 }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
@@ -13629,9 +13629,9 @@ static int fb_tile_ready(NvShader *vs, NvShader *fs, id<MTLFunction> fn, const u
     if (g_fb_tp_n >= FB_TP_MAX) { os_unfair_lock_unlock(&g_fb_tp_lock); static int once; if (!once++) MLOG("same-pass feedback sampling: %d tile-reading pipelines built; later ones keep the snapshot", FB_TP_MAX); return 0; }
     g_fb_tp[i].k = k; g_fb_tp[i].ps = nil; g_fb_tp[i].done = 0; g_fb_tp_n++; os_unfair_lock_unlock(&g_fb_tp_lock);
     MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, fn, 1); int off = !k.border;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         if (!ps) MLOG("[RED] same-pass feedback sampling: no tile-reading pipeline for vertex %s fragment %s: %s (its draws keep the snapshot)", vs->key, fs->key, e.localizedDescription.UTF8String);
-        os_unfair_lock_lock(&g_fb_tp_lock); g_fb_tp[i].ps = ps; g_fb_tp[i].done = 1; os_unfair_lock_unlock(&g_fb_tp_lock); });
+        os_unfair_lock_lock(&g_fb_tp_lock); g_fb_tp[i].ps = ps; g_fb_tp[i].done = 1; os_unfair_lock_unlock(&g_fb_tp_lock); } });
     return 0;
 }
 // The texture slots (bit per slot 0-255) whose attachment this draw reads from the tile; 0 = none (then g_fb_tfn and the rest are not this draw's)

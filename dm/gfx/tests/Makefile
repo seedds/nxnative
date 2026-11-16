@@ -114,9 +114,11 @@ t_thermal_tsan: t_thermal.c $(MTL_T_DEP)
 check_t_thermal: t_thermal
 	./t_thermal
 	DM_THERMAL_CAP=0 ./t_thermal
+	DM_LOW_POWER_CAP=0 ./t_thermal
 thermal-tsan: t_thermal_tsan
 	./t_thermal_tsan
 	DM_THERMAL_CAP=0 ./t_thermal_tsan
+	DM_LOW_POWER_CAP=0 ./t_thermal_tsan
 t_perf_order: t_perf_order.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_perf_order.m $(MTL_T_SRC) $(FW)
 t_perf_order_tsan: t_perf_order.m $(MTL_T_DEP)

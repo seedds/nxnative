@@ -2320,28 +2320,41 @@ __attribute__((weak)) int dm_movie_hz(void) { return 0; }   // hle_movie.c: the 
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
 // then took 17-26 ms a frame and dropped a frame in most windows; a steady 30 instead also lets the device cool. DM_THERMAL_CAP=0 turns it off; the Mac reports no thermal state
+// Low Power Mode (iOS, NSProcessInfo lowPowerModeEnabled) is a second cause of the same cap: the player asked for battery over speed, Apple's energy guide asks apps to lower their frame
+// rate in it, and it already lowers the CPU and GPU clocks, so a scene that still held 60 now does half the frames (GPU, game and host work) with the game's speed unchanged (the
+// frame-step stubs and the 120 fps limiter keep game time equal to real time at 30, as for heat and movies). Same scope as heat, nothing else: the frame-step games and the 120 → 60
+// step of a host-written engine limiter; a game the host does not pace (Persona 5 Royal's present interval) never asks. Same 1 s sample and THERMAL_CALM_NS calm after it is
+// turned off. DM_LOW_POWER_CAP=0 keeps 60 in Low Power Mode only; DM_THERMAL_CAP=0 turns off both causes. The Mac front end reports none (the weak dm_low_power_now above returns 0)
 #define THERMAL_CALM_NS 30000000000ull
+enum { CAP_HEAT = 1, CAP_LOW_POWER = 2 };   // thermal_capped's causes
 static int thermal_capped(void) {
     // Acquire, present and the display-link configuration can ask on different
     // threads. Serialize the sample and its recovery timer as one transition;
     // take the clock inside the lock so samples cannot arrive out of order.
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    static int on = -1, capped; static uint64_t last, calm_since;
+    static int on = -1, lp_on, capped; static uint64_t last, calm_since;
     pthread_mutex_lock(&mu);
-    if (on < 0) { const char *e = getenv("DM_THERMAL_CAP"); on = !(e && !strcmp(e, "0")); }
+    if (on < 0) { const char *e = getenv("DM_THERMAL_CAP"); on = !(e && !strcmp(e, "0")); e = getenv("DM_LOW_POWER_CAP"); lp_on = on && !(e && !strcmp(e, "0")); }
     if (on) {
         uint64_t now = now_ns();
-        if (now - last >= 1000000000ull) {   // the thermal state is read once a second
+        if (now - last >= 1000000000ull) {   // the thermal state and Low Power Mode are read once a second
             last = now;
-            int th = dm_thermal_now();
-            if (th >= 2) { calm_since = 0; if (!capped) { capped = 1; LOG("[nvn] thermal state %d: the frame step holds 30 fps until the device is fair again for %llu s (DM_THERMAL_CAP=0 turns this off)", th, THERMAL_CALM_NS / 1000000000ull); } }
-            else if (capped) { if (!calm_since) calm_since = now; else if (now - calm_since >= THERMAL_CALM_NS) { capped = 0; LOG("[nvn] thermal state %d for %llu s: back to the frame rate cap", th, THERMAL_CALM_NS / 1000000000ull); } }
+            int th = dm_thermal_now(), lp = lp_on && dm_low_power_now(), why = (th >= 2 ? CAP_HEAT : 0) | (lp ? CAP_LOW_POWER : 0);
+            if (why) { calm_since = 0;
+                if (!capped) { if (why & CAP_HEAT) LOG("[nvn] thermal state %d: the frame step holds 30 fps until the device is fair again for %llu s (DM_THERMAL_CAP=0 turns this off)", th, THERMAL_CALM_NS / 1000000000ull);
+                    else LOG("[nvn] Low Power Mode: the frame step holds 30 fps until it has been off for %llu s (DM_LOW_POWER_CAP=0 keeps the frame rate cap in it, DM_THERMAL_CAP=0 turns off both)", THERMAL_CALM_NS / 1000000000ull); }
+                capped = why; }
+            else if (capped) { if (!calm_since) calm_since = now; else if (now - calm_since >= THERMAL_CALM_NS) {
+                if (capped & CAP_HEAT) LOG("[nvn] thermal state %d for %llu s: back to the frame rate cap", th, THERMAL_CALM_NS / 1000000000ull);
+                else LOG("[nvn] Low Power Mode off for %llu s: back to the frame rate cap", THERMAL_CALM_NS / 1000000000ull);
+                capped = 0; } }
         }
     }
     int result = capped;
     pthread_mutex_unlock(&mu);
-    return result;
+    return result;   // 0, or the causes (CAP_HEAT, CAP_LOW_POWER) of the last sample that had one
 }
+static const char *thermal_why(int c) { return c & CAP_HEAT ? "thermal state serious" : "Low Power Mode"; }   // a nonzero thermal_capped(), for the cap-change lines
 // 120 fps (profile fps_max 120, DM_FPS_TARGET=120): an engine limiter the host writes (hle_fpslock.c) follows the frame step, counted here in ticks of 1/120 s: hold 1 is 120 fps, hold 2 is 60.
 // A game may step by its target whatever the frames really take (Fire Emblem Fortune's Weave: 60.0 / target a frame), so a target of 120 at 70 frames a second is a game at 58% speed, and
 // on a 60 Hz screen at half speed: late frames step the hold up (nvn_fstep.h), the target follows the hold, and the game's step stays what the screen shows. The cap is 60 on a screen
@@ -2364,8 +2377,9 @@ static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the f
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), cap = ok && !movie && !thermal_capped() ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : "thermal state serious"); was = cap; }
+    // The movie state is read once, so the cap and the reason it logs agree (a movie that ends between two reads gave 120 with the heat or Low Power Mode cause unread)
+    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), th = ok && !movie ? thermal_capped() : 0, cap = ok && !movie && !th ? 120 : 60;
+    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : thermal_why(th)); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -2610,7 +2624,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     int movie = dm_movie_hz();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)(movie != 0), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
-    if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
+    if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60) { int th = thermal_capped(); if (th) snprintf(why, sizeof why, " (%s)", thermal_why(th)); }
         LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, why); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided

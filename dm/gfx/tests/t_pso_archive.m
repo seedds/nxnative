@@ -503,6 +503,17 @@ static void crashed_period(void) {
     EXPECT("crashed: the next period captures", 1, pso_build(c, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
     arch_flush_wait();
     EXPECT("crashed: the next period written", 1, (int)archive_files(@(cdir)).count);
+    // the compiler service dying under a compile that is not a capture (a plain or MTLDevice pipeline): the current period is not written either
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); d.vertexDescriptor.layouts[16].stride = 2048;
+    EXPECT("died elsewhere: a capture before", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep2 = g_ep;
+    arch_died([NSError errorWithDomain:@"AGXMetalG14G" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED."}]);
+    arch_died([NSError errorWithDomain:@"test" code:1 userInfo:nil]);   // any other error: nothing
+    EXPECT("died elsewhere: the period marked", 1, ep2->crashed);
+    EXPECT("died elsewhere: handed over", 1, g_ep != ep2);
+    arch_flush_wait();
+    EXPECT("died elsewhere: the period not written", 1, (int)archive_files(@(cdir)).count);
+    EXPECT("died elsewhere: nothing left counted as unwritten", 0, atomic_load(&g_arch_new));
     nvn_hm_clear(&g_pbase, hm_rel);
     [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
 }

@@ -9,7 +9,9 @@ from test_dmsh_alpha import compile_lib   # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / 'ios/tools'))
 import ios_metal   # noqa: E402
 
-# Each colour written from bits that are a normal float, so a float target keeps them too (no NaN to canonicalize, no denormal to flush): 0.25, -0.5, 1.0, 3.0 and -3.0
+# Colours 0 to 2 written from bits that are a normal float, so a float target keeps them too (no NaN to canonicalize, no denormal to flush): 0.25, -0.5, 1.0, 3.0 and -3.0. Colour 3 holds
+# bits no float target would keep, as the BC block encoders write (agl's BC4 encoder in Breath of the Wild and Tears of the Kingdom): a NaN with a payload, all ones, the smallest denormal
+# and a negative denormal, which an integer target takes through main0's float output as they are
 MAIN = '''#include <metal_stdlib>
 using namespace metal;
 
@@ -18,6 +20,7 @@ struct main0_out
     float4 m_0 [[color(0)]];
     float4 m_1 [[color(1)]];
     float m_2 [[color(2)]];
+    float4 m_3 [[color(3)]];
 };
 
 fragment main0_out main0(float4 gl_FragCoord [[position]])
@@ -26,6 +29,7 @@ fragment main0_out main0(float4 gl_FragCoord [[position]])
     out.m_0 = float4(0.25, -0.5, 1.0, 0.25);
     out.m_1 = as_type<float4>(uint4(0x3e800000u, 0xbf000000u, 0x3f800000u, 0x40400000u));
     out.m_2 = as_type<float>(int(-1069547520));
+    out.m_3 = as_type<float4>(uint4(0x7fc00001u, 0xffffffffu, 0x00000001u, 0x807fffffu));
     return out;
 }
 '''
@@ -52,7 +56,7 @@ class Typed(unittest.TestCase):
 
     def test_reflection_classes(self):   # what main0 declares, which the host compares with the pipeline's targets (pso_cls)
         r = dmsh_reflect.raster_facts('ps', MAIN.replace('float4 m_1', 'uint4 m_1').replace('float m_2', 'int m_2'))
-        self.assertEqual((r['float_colors'], r['uint_colors'], r['sint_colors']), (1, 2, 4))
+        self.assertEqual((r['float_colors'], r['uint_colors'], r['sint_colors']), (9, 2, 4))
 
     @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
     def test_base_keeps_main0_alone_on_both_platforms(self):   # the base every shader loads, and the pipeline archive compiles, has no function constant (pso_offline.py)

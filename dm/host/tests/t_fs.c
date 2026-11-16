@@ -19,7 +19,7 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 static int fake_clonefile(const char *src, const char *dst, uint32_t flags);
 #define pwrite fake_pwrite
 #define clonefile fake_clonefile
-static char t_moddir[1100]; const char *dm_module_dir(void) { return t_moddir; }   // the folder romfs_patch.tsv is read from
+extern char t_moddir[1100];   // the folder romfs_patch.tsv is read from (dm_module_dir is t_fs_stub.c's)
 #include "../hle_fs.c"
 #undef pwrite
 #undef clonefile

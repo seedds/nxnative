@@ -1117,7 +1117,9 @@ static void rpatch_load(void) {
             int64_t k = img_find(m, c[1]); if (k < 0 || !m->e[k].type) continue;
             uint8_t *have = malloc(n);
             if ((uint64_t)off + n <= m->e[k].b && pread(m->fd, have, n, (int64_t)m->e[k].a + off) == (ssize_t)n && !memcmp(have, o, n)) {
-                g_rp = realloc(g_rp, (g_nrp + 1) * sizeof *g_rp); g_rp[g_nrp++] = (rpatch){ m, k, off, n, o, w, 0 }; ok = 1; used++; }
+                rpatch *grown = realloc(g_rp, (g_nrp + 1) * sizeof *g_rp);
+                if (!grown) { LOG("[RED] fs RomFS patch %s %s +%s: out of memory growing the patch table; the row is dropped", var, c[1], c[2]); free(have); free(o); free(w); ok = 1; break; }   // ok: the row is done here, its buffers are freed here (the !ok path below would free them again)
+                g_rp = grown; g_rp[g_nrp++] = (rpatch){ m, k, off, n, o, w, 0 }; ok = 1; used++; }
             free(have);
         }
         if (!ok) { LOG("[RED] fs RomFS patch %s %s +%lld (%zu bytes): the file has other bytes there (another build of it?); left as it is", var, c[1], (long long)off, n); free(o); free(w); }

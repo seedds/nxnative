@@ -6,6 +6,8 @@ void front_save_failed(int err) { g_nfail++; g_lasterr = err; }
 #include "../dm.h"
 module_t *g_mod;
 int g_nmod;
+// the loader's module folder (loader.c dm_module_dir): the unit tests have no modules, so the rewriter's tables (romfs_patch.tsv) are read from a folder each test sets in t_moddir
+char t_moddir[1100]; const char *dm_module_dir(void) { return t_moddir; }
 // the loader's symbol lookup (loader.c): no modules, so no SDK, unless a test sets its own lookup
 void *(*t_guest_sym)(const char *);
 void *guest_sym(const char *name) { return t_guest_sym ? t_guest_sym(name) : NULL; }

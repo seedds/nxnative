@@ -11,6 +11,7 @@ static int fake_setxattr(const char *p, const char *name, const void *v, size_t 
     return setxattr(p, name, v, n, pos, opt);
 }
 #define setxattr fake_setxattr
+const char *dm_module_dir(void) { return ""; }   // no module folder here (loader.c); this test links no t_fs_stub.c
 #include HLE_FS_SOURCE
 #undef setxattr
 struct dm_flags g_flag; uint64_t g_t0_ns;

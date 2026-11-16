@@ -702,6 +702,13 @@ check_t_render_enable_queue: t_render_enable_queue
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 
+t_vis_need: t_vis_need.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vis_need.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_vis_need
+check_t_vis_need: t_vis_need
+	MTL_DEBUG_LAYER=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_VIS_NEED=0 ./$<
+
 t_render_counter_overlap: t_render_counter_overlap.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_counter_overlap.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_render_counter_overlap

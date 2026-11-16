@@ -287,6 +287,24 @@ class UniformBounds(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'not written as a select'):
             dmsh_fetch.select_guards(src.replace('[_100 ? _96 : 0] : 0u);', '[_96] : 0u);', 1))   # an index without its choice would read outside the binding
 
+    def test_row_bounds(self):   # shader_row_bounds 1: the word comparison by row when the column is a value & 3 (the size table's sizes are multiples of 16 bytes)
+        size = '(*spvDescriptorSet0.fp_c%d)._m0[2].w' % dmsh_abi.CBSIZE_BANK
+        for col in ('int _4 = int(_2) & 3;\n', 'int _4 = _2 & 3;\n'):
+            with self.subTest(col=col):
+                got = dmsh_fetch.select_guards(col + COMPUTED, rows=True)
+                self.assertIn('bool _5 = uint(_3) < (%s >> 4u);' % size, got)
+                self.assertIn('select(0.0, (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4], _5)', got, 'the read and its row-0 choice as before')
+                self.assertEqual(dmsh_fetch.select_guards(got, rows=True), got, 'a second pass changes nothing')
+                self.assertEqual(dmsh_fetch.select_guards(col + COMPUTED), dmsh_fetch.select_guards(col + COMPUTED, rows=False), 'off by default')
+                self.assertNotIn('>> 4u', dmsh_fetch.select_guards(col + COMPUTED))
+        for why, col in (('no assignment', ''), ('another column', 'int _4 = _2 & 7;\n'), ('assigned twice', 'int _4 = _2 & 3;\n_4 = _9;\n')):
+            with self.subTest(why=why):
+                self.assertNotIn('>> 4u', dmsh_fetch.select_guards(col + COMPUTED, rows=True), 'a column not proved below 4 keeps the word comparison')
+        for i in range(4):   # the two comparisons agree for every row, column and size the table can hold
+            for s in (0, 256, 512, 4096, 65536):
+                for r in range(0, s // 16 + 3):
+                    self.assertEqual(((r << 2) | i) < (s >> 2), r < (s >> 4), (r, i, s))
+
 class ScreenVaryings(unittest.TestCase):
     def test_both_spellings_after_a_branch(self):
         self.assertEqual(dmsh_fetch.screen_varyings(VS), [4, 5])

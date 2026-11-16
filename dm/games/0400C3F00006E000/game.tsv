@@ -37,6 +37,7 @@ sys_resource	0x4000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
 shader_note	Mario Kart World shaders
+shader_row_bounds	1
 
 # ---- GPU order ----
 # About 94 of the race's 120 dispatches a frame have an image or handle binding (no memory range): ordered by the game's barriers instead of each after the one before it (nvn_mtl.m

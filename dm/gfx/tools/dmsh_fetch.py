@@ -71,8 +71,26 @@ _GLEFT = re.compile(r'%s\) \?' % _GSIZE)
 _STABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
 _SBOOL = re.compile(r'\bbool (_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
 _SROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_s\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\]')
+# A bounded uniform read's size comparison by row (rows=True, the profile key shader_row_bounds 1): the translator compares the word index, ((uint(row) << 2u) | uint(column)) < size >> 2u,
+# with the column some value & 3. The size table holds 0, 65536 or a size rounded up to 256 bytes (nvn_mtl.m cbsize_table, ub_bound), a multiple of 16 bytes, so with a column of 0 to 3
+# the comparison is row < size >> 4u: the same choice for every row whose word index does not wrap (row < 2^30), and false where it wraps (where the word comparison read past the binding).
+# One compare in place of a shift, an or and a compare on every read: on an M3 Max, Mario Kart World's material pixel shader 31b1e17f0c848ab3 (a light loop of 12 bounded reads a light)
+# took 7 % less at 2 lights, 12 % less at 8 (full screen, 2560x1440). Only when every assignment of the column is a value & 3; the others keep the word comparison
+_GROWB = re.compile(r'\bbool (_\d+) = \(\(uint\((_\d+)\) << 2u\) \| uint\((_\d+)\)\) < \((\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw]) >> 2u\);' % abi.CBSIZE_BANK)
+_GASSIGN = re.compile(r'(?<![\w.])(_\d+) = ([^;\n]*);')
+_GCOL = re.compile(r'(?:int\()?_\d+\)? & 3')
 
-def select_guards(msl):
+def row_bounds(msl):
+    if not _GROWB.search(msl): return msl
+    cols = collections.defaultdict(list)
+    for m in _GASSIGN.finditer(msl): cols[m.group(1)].append(m.group(2))
+    def row(m):
+        c = cols.get(m.group(3))
+        if not c or not all(_GCOL.fullmatch(x) for x in c): return m.group(0)
+        return 'bool %s = uint(%s) < (%s >> 4u);' % (m.group(1), m.group(2), m.group(4))
+    return _GROWB.sub(row, msl)
+
+def select_guards(msl, rows=False):
     if 'spvDescriptorSet0' not in msl: return msl
     bools, sbools = set(_GBOOL.findall(msl)), set(_SBOOL.findall(msl))
     def select(m, conds):
@@ -83,7 +101,7 @@ def select_guards(msl):
     if sbools: msl = _SROW.sub(lambda m: select(m, sbools), msl)
     left = _GLEFT.search(msl) or next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in bools | sbools), None)
     if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
-    return msl
+    return row_bounds(msl) if rows else msl
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)
 
 def _frag_pos(msl, var, comp):

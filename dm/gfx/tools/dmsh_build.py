@@ -22,6 +22,7 @@ _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables come from here
+ROW_BOUNDS = GAME.get('shader_row_bounds', '0') == '1'   # bounded uniform reads compared by row (dmsh_fetch.row_bounds); a shader_* key, so in every shader's cache key (profile_rows)
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current translation chain version {CHAIN}: run dmsh_chain.py --header first and commit it (otherwise the host cannot find these libraries)')
 INPUTS = dmsh_chain.inputs(GAME)   # the digest of the profile's inputs, which a full build stamps on its libraries (b-<V>/inputs.tsv)
 XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))
@@ -695,7 +696,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *XC, spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))   # precise, a tested bit 0's mask (bit0_mask), bounded uniform reads as selects (dmsh_fetch.select_guards), tested words as volatile loads (uniform_tests), as finish makes them
+        try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout))), ROW_BOUNDS))   # precise, a tested bit 0's mask (bit0_mask), bounded uniform reads as selects (dmsh_fetch.select_guards), tested words as volatile loads (uniform_tests), as finish makes them
         except ValueError as e: return 'geometry MSL failed', str(e)[:160], None
         plain = dmsh_geometry.topology_pointer(dmsh_reflect.pool_arrays(selected))
         src = dmsh_geometry.capture_input(plain)
@@ -727,7 +728,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *XC, spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))
+            try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout))), ROW_BOUNDS))
             except ValueError as e: return 'geometry reader failed', str(e)[:160], None
             reader = dmsh_entry.vs_layer(dmsh_entry.vs_init(dmsh_geometry.reader(dmsh_reflect.pool_arrays(selected))))
             analysis, full = dmsh_entry.vs_depth(reader)
@@ -775,7 +776,7 @@ def finish(key, w, j, c1):
         except ValueError as e: return 'per-vertex input rewrite failed', str(e)[:160], None
     src = dmsh_rewrite.precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     src = dmsh_rewrite.bit0_mask(src)   # a tested bit 0's 0 / -1 mask without the compare, which Apple's GPU compiler can fail to encode a jump on (see bit0_mask)
-    try: src = dmsh_fetch.select_guards(src)   # bounded uniform reads as a load and a select, as the translator means them, not a branch for each (see dmsh_fetch.select_guards)
+    try: src = dmsh_fetch.select_guards(src, ROW_BOUNDS)   # bounded uniform reads as a load and a select, as the translator means them, not a branch for each (see dmsh_fetch.select_guards)
     except ValueError as e: return 'uniform bounds rewrite failed', str(e)[:160], None
     src = dmsh_rewrite.mul_extended(src)   # scalar extended products without the optnone wrapper (see mul_extended)
     src = dmsh_rewrite.float_add_msl(src)   # a float add's compare-and-swap loop as one native atomic add (see float_add_msl)

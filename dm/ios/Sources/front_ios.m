@@ -291,6 +291,8 @@ bool dm_setting_live(const char *env, const char *value) {
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
+    // Frame rate: at once in a game the host steps through its state page (loader.c dm_fps_target_live); others take it at the next start, from the settings screen
+    if (!strcmp(env, "DM_FPS_TARGET")) { if (!dm_fps_target_live()) return false; if (value && dm_fps_target_set(atoi(value))) LOG("front end: frame rate %s fps (in-game menu)", value); return true; }
     return false;
 }
 @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>

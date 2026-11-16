@@ -53,11 +53,12 @@ int main(void) { @autoreleasepool {
         CHECK("a buffer puts the pool in the table", in_table((uint64_t)(uintptr_t)m + 4096) && pool_resident((uint64_t)(uintptr_t)m));
         h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     }
-    {   // the virtual pool's own address asked before its first mapping: the mapping must keep it reachable
+    {   // the virtual pool's own address asked before its first mapping: the mapping must keep it reachable. Main makes such a pool sparse (MapVirtual, vmode 2): the physical
+        // pages are remapped into the range the address came from, so that range, not the physical pool's, is what the raw pool table names
         uint8_t *m = pages(); pool_t phys, virt; pool_init(&phys, m, PHYS); pool_init(&virt, NULL, VIRT_GPU);
-        h_nvnMemoryPoolGetBufferAddress((const NVNmemoryPool *)&virt);
+        uint64_t va = h_nvnMemoryPoolGetBufferAddress((const NVNmemoryPool *)&virt);
         map_whole(&virt, &phys);
-        CHECK("an address given out before the mapping puts the physical pool in", in_table((uint64_t)(uintptr_t)m + 4096));
+        CHECK("an address given out before the mapping stays in the raw pool table", va && in_table(va + 4096));
         h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     }
     {   // plain pools

@@ -33,6 +33,8 @@ typedef struct {
 
 DuoHarnessInput duo_harness_input(void);
 int duo_harness_rumble(void);   // the in-game menu's rumble switch (dm_haptics_set_enabled)
+void duo_harness_fps_page(int target);   // the synthetic frame step state page: 0 = none, else its target (30 / 60)
+int duo_harness_fps_target(void);   // its target now (dm_fps_target_set)
 void dm_set_opmode(int mode);
 int dm_opmode(void);
 DuoHarnessState duo_harness_state(void);

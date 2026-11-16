@@ -253,3 +253,26 @@ static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, const nvn_fstep 
     }
     return nvn_fgpu_slow(g);
 }
+
+// The frame step state page's target (patch_nso.py FRAME_STEP: +0 float fps, 0 = every stub runs the game's own instructions). The loader writes it at start (loader.c
+// dm_fps_state_apply) and when the player changes the frame rate while the game runs (dm_fps_target_set: the in-game menus); the graphics layer reads it at every present
+// (hle_nvn.c fps_step_cap), so a change takes effect at the next frame there, and the stubs read it when they run
+static inline float nvn_fstep_target(const uint8_t *page) { uint32_t b = __atomic_load_n((const uint32_t *)page, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t); return t; }
+static inline void nvn_fstep_target_put(uint8_t *page, float t) { uint32_t b; memcpy(&b, &t, sizeof b); __atomic_store_n((uint32_t *)page, b, __ATOMIC_RELAXED); }
+// The cap the frame step holds for a target: 0 (off) for a target of 0. A movie (movie_hz: the picture rate of the movie playing, hle_movie.c dm_movie_hz, 0 when none): its
+// player takes a picture per game frame, so the step follows its pictures whatever the target, 60 for a movie of 50 or more pictures a second, else 30, the thermal cap aside.
+// Without a movie: 30 for a target of 30 or under the thermal cap, else 60
+static inline int nvn_fstep_cap(float target, int movie_hz, int thermal) {
+    if (target <= 0) return 0;
+    if (movie_hz) return movie_hz >= 50 && !thermal ? 60 : 30;
+    return target <= 30 || thermal ? 30 : 60;
+}
+// A target change while the game runs: 30 or 60, and only while the host steps the game (target above 0). A target of 0 hands the stubs' paths back to the game's own interval
+// logic, which is not switched in or out mid-run. Returns the previous target (30 or 60), or 0 when refused and the page is left as it was
+static inline int nvn_fstep_target_change(uint8_t *page, int fps) {
+    if (!page || (fps != 30 && fps != 60)) return 0;
+    float was = nvn_fstep_target(page);
+    if (!(was > 0)) return 0;
+    nvn_fstep_target_put(page, (float)fps);
+    return was <= 30 ? 30 : 60;
+}

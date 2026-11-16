@@ -22,6 +22,7 @@ static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, c
 #include "../hle.c"
 #include "../loader.c"
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
+int dm_fps_lock_engine(void) { return 0; }   // loader.c dm_fps_target_live: no engine frame limit here
 #undef getsectiondata
 
 struct dm_flags g_flag;

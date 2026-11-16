@@ -1,7 +1,8 @@
 // Recycled texture memory (nvn_mtl.m rh_texture, rh_place, GitHub issues #1831, #1823): a shared texture in a GPU-only pool is made in a placement heap of its own, an eighth larger
 // than the texture; once its texture is freed the heap stays resident, and the smallest waiting heap that fits, up to half as large again, takes the next texture, cleared as a new
 // allocation is: one a step of Metal's sizes larger included, COMPRESSIBLE or not. Same-pass feedback snapshots draw from the same heaps. Heaps that wait too long leave the
-// residency set when a submission begins. CPU-visible pools, block-compressed textures and DM_NVN_RT_RECYCLE=0 keep allocations of their own.
+// residency set when a submission begins. CPU-visible pools, block-compressed textures and DM_NVN_RT_RECYCLE=0 keep allocations of their own. A pool finalized before its texture
+// object takes the texture and its memory with it.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -104,6 +105,20 @@ int main(void) { @autoreleasepool {
         if (e) { defer_obj_release(e->snap); e->snap = nil; e->ser = 0; }
         settle();
         CHECK(waiting() == 1, "its heap waits once the snapshot is freed");
+    }
+    {   // a pool finalized before its texture object (Ocarina of Time's shadow target: the pool at the load into the field, the object only after the target is made again at the
+        // load back): the texture leaves with the pool, as its memory does on NVN, and its heap waits for the next target; the object's own finalize later finds nothing to free
+        unsigned w0 = waiting(); __weak id<MTLTexture> wt; __weak id<MTLHeap> wh;
+        tex_t s = target(&pool, 95010, 0, 2048, 2048); mtl_tex_init(&s);
+        @autoreleasepool { id<MTLTexture> ts = tex_mtl(&s); wt = ts; wh = ts.heap; CHECK(ts && ts.heap, "the target is placed in a heap of its own"); }
+        mtl_alias_drop_pool(&pool); pool.magic = 0;   // nvnMemoryPoolFinalize: the replay forgets the pool, then its magic goes
+        settle();
+        CHECK(!wt, "the texture of a finalized pool is freed while the game's texture object is still live");
+        CHECK(wh && waiting() == w0 + 1, "its heap waits in the recycled list once the submission in flight has completed");
+        @autoreleasepool { CHECK(tex_mtl(&s) == nil, "a look at the texture after its pool is gone makes nothing"); }
+        pool.magic = MAGIC('P','O','O','L');
+        mtl_tex_release(&s); settle();
+        CHECK(waiting() == w0 + 1, "the object's later finalize frees nothing more");
     }
     mtl_sub_commit(); mtl_drain(); free(mem);
     printf("t_rt_recycle: %d checks, %d failed\n", checks, failed); return failed != 0;

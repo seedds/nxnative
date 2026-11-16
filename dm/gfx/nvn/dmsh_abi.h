@@ -177,6 +177,9 @@
 // The integer-output entry point's function constants (dm/gfx/tools/dmsh_entry.py fs_uint): bool, colour output n goes to an unsigned integer target, at this index + n: main0_u returns that
 // output as the unsigned integer vector of its bits and the others as floats (nvn_mtl.m uint_fn specializes it per pipeline's integer targets)
 #define DMSH_UINT_FC 208
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py, profile shader_metalwa): bool, KosmicKrisp's KK_WORKAROUND_3 ballot rewrite is used; default true. The host sets it false on
+// macOS 27 and later, whose GPU compiler is fixed (nvn_mtl.m mwa_on, DM_NVN_METALWA), in every set of values it specializes a game's shader with (fc_values)
+#define DMSH_MWA_FC 220
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_rewrite.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30

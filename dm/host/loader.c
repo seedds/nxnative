@@ -811,6 +811,40 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
+// Resident Evil HD Remaster 1.0.0: select the timing instructions before the
+// guest text is sealed RX. The launcher already supplies DM_FPS_TARGET.
+// CUTS in patches.py build the known-good 120 profile; this switches those
+// exact instructions back to native 30 or to the derived 60 profile.
+static void resident_evil_timing_profile(module_t *m) {
+    if (strcmp(DM_GAME_ID, "010050F00BC1A000") || strcmp(m->name, "main") ||
+        strcmp(m->build_id, "6bec9b23b09df46c315aa6f4bfacf91c")) return;
+
+    const char *e = getenv("DM_FPS_TARGET");
+    int fps = e ? atoi(e) : DM_GAME_FPS_TARGET;
+    if (fps == 0) fps = 30;  // 0 means the game's own limiter: keep its native timing
+    if (fps != 30 && fps != 60 && fps != 120)
+        die("Resident Evil: DM_FPS_TARGET=%s must be 0, 30, 60 or 120", e ? e : "(unset)");
+
+    static const struct {
+        uint32_t off;
+        uint8_t patched[4], native[4], sixty[4];
+    } sites[] = {
+        { 0x799900, {0x0e,0x00,0x00,0x14}, {0xc5,0x01,0x00,0x54}, {0x0e,0x00,0x00,0x14} },
+        { 0x775ac4, {0x2f,0x00,0x00,0x14}, {0xe8,0x05,0x00,0x34}, {0x2f,0x00,0x00,0x14} },
+        { 0x0ce5dc, {0x08,0x5e,0xa8,0xd2}, {0x08,0x3e,0xa8,0xd2}, {0x08,0x4e,0xa8,0xd2} },
+        { 0x0ce5e8, {0x08,0x5e,0xe8,0xf2}, {0x08,0x3e,0xe8,0xf2}, {0x08,0x4e,0xe8,0xf2} },
+    };
+    for (size_t i = 0; i < sizeof sites / sizeof *sites; i++) {
+        const uint8_t *want = fps == 30 ? sites[i].native : fps == 60 ? sites[i].sixty : sites[i].patched;
+        uint8_t *p = m->base + sites[i].off;
+        if ((uint64_t)sites[i].off + 4 > m->size) die("Resident Evil: timing patch %#x is outside main", sites[i].off);
+        if (memcmp(p, sites[i].patched, 4)) die("Resident Evil: unexpected instruction at main+%#x (build/patch mismatch)", sites[i].off);
+        memcpy(p, want, 4);
+    }
+    __builtin___clear_cache((char *)m->base + 0x775ac4, (char *)m->base + 0x799904);
+    LOG("main: Resident Evil timing profile %d fps (%s)", fps, fps == 30 ? "native instructions" : fps == 60 ? "60 fps timing" : "tested 120 fps timing");
+}
+
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
@@ -828,7 +862,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m);
+        free(raw); resident_evil_timing_profile(m); install_key_page(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
@@ -840,7 +874,7 @@ static void map_image(module_t *m, const char *dir) {
     uint8_t *slot = jit_slot(m, m->size, 0);
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    memcpy(m->base, raw, sz); free(raw); resident_evil_timing_profile(m); install_key_page(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

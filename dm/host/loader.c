@@ -774,7 +774,23 @@ static void map_image(module_t *m, const char *dir) {
     unsigned long z0 = 0, zw = 0, z1 = 0;
     const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
     if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
-    else { x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0); w = getsectiondata(IMAGE_MH, dm, "__img", &zw); x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1); }
+    else {
+        x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0);
+        // Resident Evil's code pages are signed __TEXT. Select a prebuilt, signed text variant instead of writing into the mapped code.
+        if (!strcmp(DM_GAME_ID, "010050F00BC1A000") && !strcmp(m->name, "main") &&
+            !strcmp(m->build_id, "6bec9b23b09df46c315aa6f4bfacf91c")) {
+            const char *e = getenv("DM_FPS_TARGET"); int fps = e ? atoi(e) : DM_GAME_FPS_TARGET;
+            if (fps == 0) fps = 30;
+            if (fps != 30 && fps != 60 && fps != 120)
+                die("Resident Evil: DM_FPS_TARGET=%s must be 0, 30, 60 or 120", e ? e : "(unset)");
+            if (fps != 120) {
+                snprintf(sx0, sizeof sx0, "__dm%s%s%dx0", g, m->name, fps);
+                x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0);
+                if (!x0) die("Resident Evil: embedded %d fps text section %s is missing", fps, sx0);
+            }
+        }
+        w = getsectiondata(IMAGE_MH, dm, "__img", &zw); x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1);
+    }
     if (!x0 || !w || !x1) die("embedded sections %s / %s / %s missing", sx0, dm, sx1);
     // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
     unsigned long z2 = 0; const uint8_t *x2 = NULL;

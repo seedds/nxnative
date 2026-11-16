@@ -108,11 +108,13 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (th
   F=; : > Gen/embed.S
   while IFS= read -r row; do prog_set "$row"
     J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")   # the nn::jit image (dm/tools/jit_capture.py), beside the RomFS
-    F="$F $(python3 tools/gen_embed.py --tag "p$PN" ${J[@]+"${J[@]}"} "$PATCHED" "Gen/embed_p$PN.S" $MODS)" || die "gen_embed (program $PN)"
+    E=(); [ "$GAME" != "010050F00BC1A000" ] || E=(--re-fps)   # signed iOS text needs prebuilt 30/60 variants for Resident Evil
+    F="$F $(python3 tools/gen_embed.py --tag "p$PN" ${E[@]+"${E[@]}"} ${J[@]+"${J[@]}"} "$PATCHED" "Gen/embed_p$PN.S" $MODS)" || die "gen_embed (program $PN)"
     cat "Gen/embed_p$PN.S" >> Gen/embed.S && rm "Gen/embed_p$PN.S"
   done < <(prog_rows); prog_back
 else J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")
-  F=$(python3 tools/gen_embed.py ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
+  E=(); [ "$GAME" != "010050F00BC1A000" ] || E=(--re-fps)
+  F=$(python3 tools/gen_embed.py ${E[@]+"${E[@]}"} ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
 echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
 # One program's tables into TD: the rewriter's, the shader tables and the launcher's settings
 program_tables() {

@@ -56,6 +56,23 @@ class Fixups(unittest.TestCase):
         self.assertEqual(gl_shaders.function_semicolons(g), g)
 
 
+# GLSL ES 1.00 as Fate/hollow ataraxia REMASTERED's built shaders write it: a sampler named `texture` (a built-in function from ES 3.00 on) and, as GameMaker's, a variable `sample`
+ES100_FRAG = (b'precision mediump float;\nvarying vec2 v_uv;\nuniform sampler2D texture;\nuniform float sample;\n'
+              b'void main() { gl_FragColor = texture2D(texture, v_uv) * sample; }\n')
+
+
+class GameNames(unittest.TestCase):
+    def test_es100_renames_texture_names_not_calls(self):
+        t = gl_shaders.es100(ES100_FRAG.decode(), 'frag')
+        self.assertIn('uniform sampler2D dm_texture;', t); self.assertIn('texture2D(dm_texture, v_uv)', t)
+        self.assertIn('vec4 c = texture (s, v);', gl_shaders.es100('vec4 c = texture (s, v);', 'frag'))   # a call (NVIDIA takes one in ES 1.00 too) stays
+
+    def test_table_rows_give_the_names_back(self):
+        rows = ['t:dm_texture=0:sampler2D', 'u:L.gm_sample=16:float:0:0', 'a:dm_sampler=1:vec4', 'b:0:32', 'o:gm_FragColor=0', 'u:dm_texture_scale=0:float:0:0']
+        self.assertEqual(gl_shaders.game_names(rows), ['t:texture=0:sampler2D', 'u:L.sample=16:float:0:0', 'a:sampler=1:vec4', 'b:0:32', 'o:gm_FragColor=0',
+                                                       'u:dm_texture_scale=0:float:0:0'])
+
+
 class Sources(unittest.TestCase):
     def test_glsl_files_are_read_with_no_stage(self):   # Mega Man Legacy Collection: shaders/nx/*.glsl, whose names say nothing of the stage
         with tempfile.TemporaryDirectory() as d:
@@ -87,6 +104,14 @@ class Translate(unittest.TestCase):
             r = gl_shaders.translate(src, 'frag', 'a' * 16, tmp)
             self.assertIsInstance(r, tuple, r)
             self.assertEqual([x for x in r[1] if x.startswith('t:')], ['t:T0=0:sampler2D'])
+
+
+    def test_es100_sampler_named_texture(self):   # Fate/hollow ataraxia REMASTERED: 16 of its 78 fragment shaders failed with `'texture' : redefinition`
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(ES100_FRAG, 'frag', 'e' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:texture=0:sampler2D', r[1])
+            self.assertTrue(any(x.startswith('u:sample=') for x in r[1]), r[1])
 
 
 class MainStrings(unittest.TestCase):

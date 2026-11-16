@@ -2149,6 +2149,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - GLSL 1.50 as DOOM 3's renderer writes it: built-ins redeclared as plain varyings (`out vec4 gl_Position;`, `in vec4 gl_FragCoord;`, `out float gl_FragDepth;`) lose the declaration and keep the built-in; `out vec4 gl_FragColor;` becomes a plain output of the shader's own, `dm_FragColor` (Vulkan GLSL has no `gl_FragColor`); the compatibility colour declared as a varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader, which NVIDIA links as GL's fixed pipeline does, becomes one varying, `dm_Color`, matched by name; `sampler` as a name (its helpers take `sampler2D sampler`), a reserved word in Vulkan GLSL, becomes `dm_sampler`. A compatibility built-in the shader does not declare is left alone.
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): all 62 shaders of its title and first level (`test_gl_shaders.py` has a pair written in their form).
 
+### A GLSL ES 1.00 name that later GLSL takes
+
+- **Symptom:** `gl_shaders.py` reports `does not translate: frag: glslang: ERROR: …: 'texture' : redefinition`, and the scenes those shaders draw are black.
+- **Cause:** GLSL ES 1.00 shaders go through glslang as ES 3.10, where `texture` is a built-in function and `sample` a reserved word; ES 1.00 leaves both free as names (`uniform sampler2D texture;`).
+- **Fix:** `es100()` renames them (`dm_texture`, `gm_sample`; a `texture(` call stays, since NVIDIA's compiler takes one in ES 1.00 too), and the table rows give every name the rewrite renamed (`dm_texture`, `gm_sample`, `dm_sampler`) back as the game wrote it: the host finds attributes, uniforms and samplers by the game's names, and the shader's key is the hash of the game's own source.
+- **Check:** `test_gl_shaders.py`.
+- **Found on:** Fate/hollow ataraxia REMASTERED, [issue #2818](https://github.com/seedds/nxnative/issues/2818): 16 of its 78 captured fragment shaders; 13 of them translate now (62 shaders → 75), and the other 3 need a sampler slot above 15, which the table cannot name. The tables of Well Dweller (93 shaders) and Balatro (35) are the same row for row.
+
 ### GL shaders put together at run time and captured
 
 - **Symptom:** in a capture run every program links with no uniforms; the game's first `Shader:send` raises a Lua error and, on the Switch, its error handler quits ([Any Lua error quits a LÖVE game](game-state.md#any-lua-error-quits-a-löve-game)).

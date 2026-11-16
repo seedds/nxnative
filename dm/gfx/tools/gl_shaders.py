@@ -175,7 +175,20 @@ def es100(t, stage):
     if stage == 'frag' and 'gl_FragColor' in t:
         t = 'out vec4 gm_FragColor;\n' + t.replace('gl_FragColor', 'gm_FragColor')
     t = re.sub(r'\bsample\b', 'gm_sample', t)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
+    # `texture` became a built-in function after ES 1.00, and a name declared `texture` redefines it (Fate/hollow ataraxia REMASTERED: `uniform sampler2D texture;`); a call stays
+    t = re.sub(r'\btexture\b(?!\s*\()', 'dm_texture', t)
     return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
+
+# The game's names that the rewrite renames (es100, fixups): the table rows give them back as the game wrote them, since the host finds attributes, uniforms and samplers by the
+# game's name (glGetAttribLocation, glGetUniformLocation); the key is the hash of the game's own source
+RENAMED = {'gm_sample': 'sample', 'dm_texture': 'texture', 'dm_sampler': 'sampler'}
+
+def game_names(f):
+    """table fields with the renamed names in their name part (a:, o:, u:, t:, n: up to the '=') given back"""
+    def back(x):
+        k, sep, rest = x.partition('=')
+        return re.sub(r'\b(' + '|'.join(RENAMED) + r')\b', lambda m: RENAMED[m.group(1)], k) + sep + rest
+    return [back(x) for x in f]
 
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
@@ -225,7 +238,7 @@ def translate(src, stage, key, tmp):
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
     if any(int(x) > 15 for x in re.findall(r'\[\[(?:sampler|buffer)\((\d+)\)\]\]', m)): return 'a buffer or sampler slot above 15'
-    return msl, f
+    return msl, game_names(f)
 
 def one(item, tmp):
     """[(key, stage, fields, msl, where)], or [(key, None, errors, None, where)] when no stage translates"""

@@ -41,7 +41,7 @@
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze, Metroid Prime Remastered): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
-#   · bnd2 (Criterion's Bundle 2, Need for Speed: Hot Pursuit Remastered): whole GLSLC outputs in the zlib resources of SHADERS.BNDL, see bnd2_resources and bnd2_shaders
+#   · bnd2 (Criterion's Bundle 2: Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): whole GLSLC outputs in its zlib resources, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
@@ -3370,23 +3370,26 @@ def separable_pairs(keys):
 
 SMASH_ARC = struct.pack('<Q', 0xABCDEF9876543210)   # smash_arc.MAGIC (scan_file reads only the first bytes, without importing the reader)
 BND2 = b'bnd2'
+BND2_LAYOUTS = {2: (3, 0x40), 3: (4, 0x50)}   # version → (blocks per resource, entry size): 2 in Burnout Paradise Remastered, 3 in Need for Speed: Hot Pursuit Remastered
 
 def bnd2_resources(d, label):
-    """The resources of a Criterion Bundle 2 ('bnd2', Burnout Paradise's format; version 3 in Need for Speed: Hot Pursuit Remastered): → [(resource ID, type, block, data)].
-    Header: +0x04 version, +0x08 platform, +0x10 entry count, +0x14 entry table offset, +0x18 four block data offsets (u32), +0x28 flags (bit 0: resources zlib-compressed).
-    An entry is 0x50 bytes: +0x00 resource ID u64, +0x08 import hash u64, +0x10 four uncompressed sizes, +0x20 four sizes on disk (each with the alignment in the top
-    nibble), +0x30 four offsets (from that block's data offset), +0x40 import offset, +0x44 type ID, +0x48 import count u16, flags u8, stream index u8.
-    A resource has up to four blocks (0: main memory, 1: graphics memory). Hot Pursuit Remastered's SHADERS.BNDL keeps one whole GLSLC output in block 1 of each type 0x8 resource (2,112)"""
-    ver, _, _, cnt, eoff, *datoff, flags = field(d, '<10I', 4, f'{label}: bnd2 header')
-    table_end = eoff + cnt * 0x50
-    if ver not in (2, 3) or eoff < 0x30 or table_end > len(d): red(f'{label}: bnd2 version {ver} with {cnt} entries at {eoff:#x} is not a layout this reader knows')
+    """The resources of a Criterion Bundle 2 ('bnd2'; version 2 in Burnout Paradise Remastered, 3 in Need for Speed: Hot Pursuit Remastered): → [(resource ID, type, block, data)].
+    The version sets the number of blocks a resource has, B (BND2_LAYOUTS: 3 or 4), and every offset after the first array follows from it.
+    Header: +0x04 version, +0x08 platform, +0x10 entry count, +0x14 entry table offset, +0x18 B block data offsets (u32), then the flags (bit 0: resources zlib-compressed).
+    An entry (0x40 bytes in v2, 0x50 in v3): +0x00 resource ID u64, +0x08 import hash u64, +0x10 B uncompressed sizes, then B sizes on disk (each with the alignment in the top
+    nibble), then B offsets (from that block's data offset), then import offset, type ID, import count u16, flags u8, stream index u8.
+    Block 0 is main memory, block 1 graphics memory. Hot Pursuit Remastered's SHADERS.BNDL keeps one whole GLSLC output in block 1 of each type 0x8 resource (2,112)"""
+    ver, _, _, cnt, eoff = field(d, '<5I', 4, f'{label}: bnd2 header')
+    blocks, entry = BND2_LAYOUTS.get(ver, (0, 0))
+    table_end = eoff + cnt * entry
+    if not blocks or eoff < 0x30 or table_end > len(d): red(f'{label}: bnd2 version {ver} with {cnt} entries at {eoff:#x} is not a layout this reader knows')
+    *datoff, flags = field(d, f'<{blocks + 1}I', 0x18, f'{label}: bnd2 header')
     out = []
     for i in range(cnt):
-        e = eoff + i * 0x50
-        rid, = struct.unpack_from('<Q', d, e); typ, = struct.unpack_from('<I', d, e + 0x44)
-        unpacked = struct.unpack_from('<4I', d, e + 0x10)
-        sizes = struct.unpack_from('<4I', d, e + 0x20); offs = struct.unpack_from('<4I', d, e + 0x30)
-        for k in range(4):
+        e = eoff + i * entry
+        rid, = struct.unpack_from('<Q', d, e); typ, = struct.unpack_from('<I', d, e + 0x14 + 12 * blocks)
+        unpacked, sizes, offs = (struct.unpack_from(f'<{blocks}I', d, e + 0x10 + 4 * blocks * a) for a in range(3))
+        for k in range(blocks):
             n = sizes[k] & 0x0FFFFFFF; expected = unpacked[k] & 0x0FFFFFFF
             where = f'{label}: bnd2 resource {rid:016x} block {k}'
             if not n:
@@ -3583,7 +3586,7 @@ def scan_file_in(args):
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
+    if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:3] == b'PAK':   # a Heaps PAK archive (Dead Cells): only its shader cache is read, not its 2 GB of other files (heaps_pak_files, heaps_shaders)

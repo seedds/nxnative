@@ -300,10 +300,11 @@ void dm_fps_lock_tick(void) {
     if (uq.base) unity_vsync_tick(target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
-        // Resident Evil's +0x48 value also governs its per-frame simulation
-        // step. Keep that engine clock at 120; the requested 30/60 cap is
-        // applied independently by NVN presentation pacing.
-        int row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && target < 120 ? 120 : target;
+        // Resident Evil uses the two constructor timing values selected by
+        // resident_evil_timing_profile() in loader.c. For 30/60, keep the
+        // engine clock at the selected rate; for the 120 profile, keep its
+        // simulation clock at 120 even while NVN temporarily holds presents.
+        int row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && high ? 120 : target;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {

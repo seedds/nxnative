@@ -23,6 +23,7 @@ static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
 // The host schedules no alarms, so zeroed output is its answer: no alarms listed, a registration that never fires (ID 0), a parameter of 0 bytes
 static const struct { const char *name; sf_answer answer; } sf_served[] = {
     {"olsc:u", NULL}, {"caps:su", NULL}, {"caps:u", NULL}, {"caps:a", NULL}, {"caps:c", NULL}, {"caps:sc", NULL}, {"caps:ss", NULL}, {"notif:a", NULL},
+    {"friend:u", NULL}, {"friend:v", NULL}, {"friend:m", NULL},
 };
 // The services other files serve (SF_SERVICE, hle.h): audren:u (hle_audren_sv.c)
 static const sf_service_ent *sf_registered(unsigned long *n) {

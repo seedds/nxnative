@@ -65,6 +65,7 @@ DM_GL_DRAWLOG	diagnostic	`=<n>[:<seconds>]` logs the first `<n>` GL draws after 
 DM_GL_FBLOG	diagnostic	`=1` logs every framebuffer bind with its size and the draws so far
 DM_GL_LOG	diagnostic	`=1` makes the GL layer log object creation
 DM_GL_MISSES	diagnostic	`=1` reports each `eglGetProcAddress` name the layer lacks when the game first asks for it
+DM_GL_RENDERPROGS	path	`=<job file>`: id Tech 4 render program capture job file for DOOM 3 (`idtech4_programs.py`)
 DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that reports its first call and returns 0, instead of a null pointer (bring-up)
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)

@@ -516,8 +516,20 @@ static uint32_t g_tu_now = 1, g_tu_pass_no;   // deciseconds since the first sub
 static int g_pool_walk;   // a pool walk is resolving its IDs (pool_gpu, under g_rmu): not uses
 static nvn_hmap g_tu_gone = {.klen = 8};   // serials whose texture a pass released, until it is made again (the count of those made again) or the set is full. Under g_tu_lk
 static uint64_t g_tu_remade;
+// Whether o is a Metal texture. conformsToProtocol: walks the class's protocol list on every call, and respondsToSelector: asks the method cache: in a Mario Kart World race the replay
+// thread spent about 3 % of its busy time in them (tex_mtl_ on every lookup, tu_find on every use stamp). The answer is kept per class, for the first few classes seen (textures,
+// views, NvPkg, buffers); a class past those is asked each time
+static int is_mtl_tex(id o) {
+    if (!o) return 0;
+    enum { N = 16 }; static _Atomic uintptr_t seen[N]; static _Atomic int nseen;
+    uintptr_t c = (uintptr_t)object_getClass(o); int k = atomic_load_explicit(&nseen, memory_order_acquire); if (k > N) k = N;
+    for (int i = 0; i < k; i++) { uintptr_t e = atomic_load_explicit(&seen[i], memory_order_acquire); if (e && (e & ~(uintptr_t)1) == c) return (int)(e & 1); }   // a class pointer's low bit is free
+    int y = [o conformsToProtocol:@protocol(MTLTexture)];
+    int i = atomic_fetch_add_explicit(&nseen, 1, memory_order_acq_rel); if (i < N) atomic_store_explicit(&seen[i], c | (uintptr_t)y, memory_order_release);   // a slot read before it is written holds 0: no match
+    return y;
+}
 static tu_rec *tu_find(id o) {   // o's record, or its parent's for a view. Caller holds g_tu_lk
-    for (id x = o; x; x = [x respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)x).parentTexture : nil) {
+    for (id x = o; x; x = is_mtl_tex(x) ? ((id<MTLTexture>)x).parentTexture : nil) {
         uintptr_t k = (uintptr_t)(__bridge void *)x; tu_rec *r = nvn_hm_get(&g_tu, &k); if (r) return r; }
     return NULL;
 }
@@ -3279,7 +3291,7 @@ static inline void tex_lsize(const tex_t *t, unsigned l, uint32_t *w, uint32_t *
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     id holder = tex_get(t->serial);
     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
-    id<MTLTexture> view = ![holder isKindOfClass:[NvPkg class]] && [holder conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)holder).parentTexture
+    id<MTLTexture> view = is_mtl_tex(holder) && ((id<MTLTexture>)holder).parentTexture
         && (holder == asked || ((id<MTLTexture>)holder).parentTexture == asked) ? holder : nil;
     id<MTLTexture> base = view ? view.parentTexture : asked;
     if (base.isSparse) { RED_ONCE(149, "a placement sparse texture needs usage %#lx it was not made with (ser=%llu format %#x): kept as it is, not remade whole", (unsigned long)add, (unsigned long long)t->serial, t->d.format); return base; }
@@ -4680,7 +4692,7 @@ static void gws_drop_pool(const pool_t *p) {   // the pool goes: its spans with 
 // The GPU owns the texture's content: its host texture was made to be rendered into or written by shaders (nvn_ft_poll in hle_nvn.c never re-uploads such a texture from guest memory)
 int mtl_tex_gpu_owned(uint64_t serial) {
     __unsafe_unretained id o = tex_get(serial);
-    if (!o || ![o conformsToProtocol:@protocol(MTLTexture)]) return 0;
+    if (!is_mtl_tex(o)) return 0;
     return (((id<MTLTexture>)o).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) != 0;
 }
 void mtl_tex_cpu_written(const tex_t *t) {
@@ -5232,7 +5244,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
     // An sRGB / linear view whose parent left the sharing table (upgraded, or evicted with its pool; a takeover leaves a held view's parent) no longer shares the storage's bytes: dropped,
     // live or finalized (its ghost entry), and made again below on what holds them now. serial_del took only a live entry, so a finalized serial kept resolving to the stale view
     // whenever making the new texture failed, and to any thread in between
-    if (have && [have conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)have).parentTexture && own_view_drop_stale(t->serial, have)) {
+    if (is_mtl_tex(have) && ((id<MTLTexture>)have).parentTexture && own_view_drop_stale(t->serial, have)) {
         static int nstale; if (nstale++ < 4) MLOG("stale sRGB / linear view dropped ser=%llu format %lu (%d so far)", (unsigned long long)t->serial, (unsigned long)((id<MTLTexture>)have).pixelFormat, nstale);
         have = nil;
     }

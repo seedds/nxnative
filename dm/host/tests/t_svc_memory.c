@@ -20,15 +20,25 @@ static int memory_getpagesize(void) {
     return getpagesize();
 #endif
 }
+static void *memory_calloc(size_t n, size_t size);
 #define getpagesize memory_getpagesize
 #define mprotect memory_mprotect
 #define mmap memory_mmap
 #define abort memory_abort
+#define calloc memory_calloc
 #include "../hle_svc.c"
+#undef calloc
 #undef abort
 #undef mprotect
 #undef mmap
 #undef getpagesize
+// A sweep (guest_file_thread's, started by guest_file_init before the bitmaps exist and not ordered after mem_init's pthread_once) at each allocation of mem_init_once,
+// one of them between the alias region's release bitmap and its aged one: it must find the guest memory not ready yet and return, not read the aged bitmap through NULL
+static atomic_int sweep_in_init;
+static void *memory_calloc(size_t n, size_t size) {
+    if (atomic_load(&sweep_in_init)) guest_file_sweep();
+    return calloc(n, size);
+}
 
 static module_t test_modules[2];
 module_t *g_mod = test_modules;
@@ -603,8 +613,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     pthread_t threads[8]; uint64_t addresses[8];
+    atomic_store(&sweep_in_init, 1);
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
+    atomic_store(&sweep_in_init, 0);
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
 #if !TARGET_OS_IPHONE
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's

@@ -43,6 +43,7 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
 int mavc_queued(const mavc *a) { return a->nq; }
 void mavc_set_rgba(mavc *a) { a->rgba = 1; }
 void mavc_drop(mavc *a) { a->nq = 0; }
+int mavc_constant(const mavc *a) { (void)a; return 1; }   // every picture is opaque black (RGBA) or video-range black (NV12): hle_movie.c md_out_tex writes a texture once
 #else
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
@@ -180,4 +181,5 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     CVPixelBufferRelease(pb);
     return 1;
 }
+int mavc_constant(const mavc *a) { (void)a; return 0; }   // VideoToolbox's pictures are the movie's
 #endif

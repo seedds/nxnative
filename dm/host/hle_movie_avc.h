@@ -15,3 +15,4 @@ int mavc_take(mavc *a, int flush, uint8_t *nv12, int w, int h, int64_t *pts_us);
 int mavc_queued(const mavc *a);
 void mavc_set_rgba(mavc *a);   // pictures come out as 4-byte RGBA (stride w * 4) instead of NV12: the native texture mode
 void mavc_drop(mavc *a);   // a flush / seek: queued pictures are discarded
+int mavc_constant(const mavc *a);   // 1: every picture it hands out is the same (the port's stopgap, opaque black), so a texture that holds one needs no rewrite; 0 on Apple

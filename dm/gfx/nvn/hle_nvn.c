@@ -75,6 +75,7 @@
 #define APPLE_ONLY_NOTE(...) do { static _Atomic int note_; if (!atomic_exchange(&note_, 1)) LOG("note: Apple only: " __VA_ARGS__); } while (0)
 // A declared null form whose absence can change what the game sees (the GPU's view of memory): a [RED] line, said once per call site
 #define PORT_RED_ONCE(...) do { static _Atomic int red_; if (!atomic_exchange(&red_, 1)) LOG("[RED] " __VA_ARGS__); } while (0)
+static _Atomic uint64_t g_wt_calls, g_wt_bytes, g_wt_whole;   // CPU texel writes (write_texels): calls, bytes of their regions, calls by the whole-level path
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
@@ -1530,7 +1531,7 @@ static void power_line(uint64_t frame) {
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
         LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
             (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
-        char rs[400]; be_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; be_barrier_stats(&bs, &bf);
+        char rs[768]; be_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; be_barrier_stats(&bs, &bf);
         static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = be_cut_count(), ccut = be_copy_cut_count(), bsp = be_blit_splits(), ud, uc; be_ubd_stats(&ud, &uc);
         static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; be_ubp_stats(&pm, &pr, &pf_);
         static uint64_t plt, pll; uint64_t lt, ll; be_lc_stats(&lt, &ll);
@@ -1545,7 +1546,7 @@ static void power_line(uint64_t frame) {
             (ld - pld) / 1048576.0 / nf, (st - pst) / 1048576.0 / nf, (fu - pfu) / nf, (udc - pudc) / 1048576.0 / nf); pbs = bs; pbf = bf; pcut = cut; pccut = ccut; pbsp = bsp; pud = ud; puc = uc; ppm = pm; ppr = pr; ppf = pf_; memcpy(pw5, w5, sizeof pw5); plt = lt; pll = ll; psmp = smp; psmc = smc; psmw = smw; pchm = chm; pchd = chd; memcpy(pchs, chs, sizeof pchs);
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
-    else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); be_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
+    else { char yt[192], rs[768], tc[400]; dm_yield_top(yt, sizeof yt); be_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; be_bw(&pld, &pst, &pfu); pudc = be_udc_saved_bytes();
 #endif
 }
@@ -1596,7 +1597,8 @@ static void tsummary(uint64_t frame) {
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = be_pkg_edge_skips(), fa, pr; be_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr);
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu; missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, be_pkg_miss(), be_cpu_tex_count());
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu; missed %llu (cumulative); CPU-written textures alive %u; WriteTexels %llu calls, %.1f MB, %llu by the whole level (cumulative)", up, re, es, fa, pr, be_pkg_miss(), be_cpu_tex_count(),
+        (unsigned long long)atomic_load(&g_wt_calls), (double)atomic_load(&g_wt_bytes) / 1048576.0, (unsigned long long)atomic_load(&g_wt_whole));
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),
@@ -2596,6 +2598,9 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
+    atomic_fetch_add_explicit(&g_wt_calls, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_wt_bytes, (uint64_t)((r->width + bw - 1) / bw) * (uint64_t)bpb * (uint64_t)((r->height + bh - 1) / bh) * (uint64_t)(r->depth ? r->depth : 1),
+                              memory_order_relaxed);
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
     if (!is3d) {
@@ -2605,6 +2610,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         for (int z = 0; z < nz && ok; z++) ok = !write_region_bl(t, level, layer0 + (unsigned)(r->zoffset + z), r, src + (size_t)z * img0, row0, bw, bh, bpb);
         if (ok) { be_tex_cpu_written(t); return; }
     }
+    atomic_fetch_add_explicit(&g_wt_whole, 1, memory_order_relaxed);
     uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
@@ -2677,6 +2683,13 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
     if (th) *th = (int)t->d.height;
     if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0); }
     return (int)t->d.format;
+}
+// A texture object's Initialize serial, 0 when the object is not a texture (the movie decoder's native-texture output, hle_movie.c md_out_tex)
+uint64_t nvn_host_texture_serial(const void *nvntex) {
+    const tex_t *t = nvntex;
+    uint32_t mg = 0; size_t got = 0;
+    if (!t || (uintptr_t)t & 7 || plat_mem_read((uint64_t)(uintptr_t)t, &mg, 4, &got) || got != 4 || t->magic != MAGIC('T', 'E', 'X', 0)) return 0;
+    return t->serial;
 }
 // work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)
 int nvn_host_signal_sync(void *nvnsync) {

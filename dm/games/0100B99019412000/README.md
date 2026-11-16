@@ -114,6 +114,30 @@ The first game packed for Linux and started on the x86-64 engine (`scripts/build
   - not changed: lavapipe's descriptor sets. The backend allocates each frame's sets from pools it resets per submission slot (`vk_pipeline.c` `set_alloc`, `hvk_pipeline_slot_reset`); lavapipe makes each set a buffer of its own, so the level's `PresentationThread` spends 7.9 ms a frame there, 5.8 of them in `mmap` and `munmap` as glibc gives that thread's arena back every frame. A hardware driver's sets are pieces of their pool.
   - not changed: the sampler's own cost while it records a profile, which the launcher does on every Play unless told not to: each JIT fallback run reads the thread's CPU clock twice (`dm_aot_profile_cpu_ns`, a system call), 1.8 ms a frame on the three physics workers at the title (2 % of a core), and each dispatcher miss takes the target table's lock (6 ms per level frame on `Thread_0`, 0.3 % of a core).
   - the guest's synchronisation: the host's wake-ups (`hle_thread.c` `wake`, a `pthread_cond_signal` and its futex call) and timed waits, 3.5 ms a frame at the title (4.4 % of a core), the rumble thread's 200 waits a second among them.
+- **Current: the CPU's bound with the rasteriser taken out** (2026-11-16; the packs of the `13a0a5c1` bundle with this round's host, console mode, 6 CPUs; `DM_VK_RASTER_SHRINK=64`, which renders every pass into the top-left 1/64 of its targets with the game's commands unchanged ([env_switches.tsv](../../../docs/env_switches.tsv)); natively the profile marks with `DM_AOT_PROFILE_HOST`, under Wine the threads' CPU from `/proc` only (Wine has no sampler); scenes checked by a full-resolution shot after each window; other agents' jobs ran on the machine's other cores). The factor: in level 1-1 a frame took 380 ms at 4, 190 at 16 and 98 at 64, where the rasteriser's threads are down to 39 % of the 6 cores and lavapipe's own front end (its queue thread, which takes the name of the guest main thread that made the device) is the bound. Frame times after the round's fixes (ms: p50 / p99 / max, frames), and the present interval the game asked for:
+
+  | scene | Linux, `run.sh` | Wine 11, `run.cmd` | interval |
+  |---|---|---|---|
+  | the title | 16.6 / 26.0 / 48.8 (1,278) | 37.3 / 96.8 / 101.5 (612) | Linux 1 (60 fps, reached), Wine 2 |
+  | the level select | 33.2 / 50.3 / 69.4 (645) | 36.9 / 80.8 / 134.3 (658) | 2 (30 fps) |
+  | level 1-1 in play | 85.1 / 109.5 / 138.3 (770) | 95.6 / 128.7 / 155.6 (652) | 2 (30 fps, not reached) |
+
+  The game picks its present interval itself (1, 60 fps, when its frames fit, else 2; the timestamps it reads are lavapipe's), and waits for it at the acquire (`@wait_ms` 15 ms at the title, 28.5 ms at the level select). Natively, per frame in ms of CPU (and % of one core):
+
+  | | title | level select | level 1-1 |
+  |---|---|---|---|
+  | lavapipe's queue thread | 3.1 (19 %) | 10.8 (33 %) | 48.2 (56 %) |
+  | lavapipe's rasteriser threads | 2.1 (13 %) | 11.8 (36 %) | 33.5 (39 %) |
+  | the game's threads, sampled | 10.3 (62 %) | 12.8 (39 %) | 33.9 (39 %) |
+  | of which compiled guest code / JIT fallback | 2.7 / 1.2 | 3.8 / 1.1 | 12.7 / 1.8 |
+  | host calls and SVCs / elsewhere in the host | 3.8 / 2.6 | 4.7 / 3.2 | 9.3 / 10.2 |
+  | the main thread / `PresentationThread` (the NVN replay into Vulkan) | 1.2 / 0.4 | 1.6 / 1.4 | 4.1 / 3.1 |
+  | the sampler's own recording (`dm_aot_profile_cpu_ns`, `dm_aot_target_note`) | 1.6 | 1.6 | 4.3 |
+  | the floating-point helpers (`aot_fp.c`) | 0.3 | 0.5 | 2.0 |
+  | the guests' synchronisation in the C library (`hle_thread.c` `wake`, the waits) | 2.7 | 2.4 | 3.9 |
+
+  The CPU's bound: no per-frame thread of the game or ours takes more than 4.1 ms a frame (the level's main thread), so with a GPU that keeps up all three scenes have room for 60 fps; the title reaches it here. Level 1-1 stays at 85 ms because of lavapipe's front end, 48 ms a frame on one thread for 283 draws in 43 passes (vertex work and state), which a GPU does in hardware. Under Wine the same work plus `wineserver`: 21.6, 16.6 and 28.8 ms of its CPU a frame (50, 42 and 30 % of a core), the guests' waits and wake-ups, each a server round trip without `ntsync` (the game's threads switch 1,500 to 3,800 times a second under Wine against 150 to 450 natively).
+  What was ours and fixed, measured in the same mode: the descriptor sets the present thread made and freed every frame, 12.8 to 3.2 ms a level frame ([Descriptor sets kept across frames](../../../docs/reference/rendering.md#descriptor-sets-kept-across-frames)); the H.264 stopgap's black pictures written into the two 960x1080 movie textures every frame, 7.9 MB a frame, 1.7 ms a frame at the title and their re-uploads, now written once ([H.264 movies without a decoder](../../../docs/reference/movies.md#h264-movies-without-a-decoder)). Not changed: the sampler's recording (for the recompiler), the floating-point helpers (for the recompiler), lavapipe's front end. Our own threads' wake-ups natively: the Vulkan backend's completion thread, the present thread and the vsync source about 60 a second each; the SDL front end's loop 750 a second, SDL's dummy video driver (the headless runs') polling every millisecond.
 - **Current: the route to level 1-1 with this round's host, natively and under Wine 11** (2026-11-16, the same packs and save; native: the pack's `run.sh` in the player's container; Wine: the Windows pack's `run.cmd` in `nx-wine-11` with the host cross-built from the same tree, `DM_SHARED_FONT` Wine's Tahoma). Both reach level 1-1 in play (shots `ssplit_s2_*` and `wlevel_w1_*` in the work folder's `gfx/shots`: the opening movie black, then the title, the file select, the level select with its previews, the level's opening wipe and the level with Mario, the HUD and "HERE WE GO!"); no wrong picture seen. Frame times per scene:
 
   | scene | Linux, `run.sh` | Wine 11, `run.cmd` |
@@ -141,6 +165,9 @@ General host changes first needed here; each applies to every game:
 - **A system font as the standard shared font on Linux and Windows, and a stop with status 10 when none stands in** (`hle_sdk16.c` `font_system`, `no_font`): [Shared fonts on Linux and Windows](../../../docs/reference/services.md#shared-fonts-on-linux-and-windows).
 - **No Vulkan device for a game a player starts: a stop with status 9 and what to install** (`main_x86.c`, `vk_backend.c` `hvk_require_device`, the launcher's Problem column; found on the bundle in a plain Ubuntu): [No Vulkan device for a game](../../../docs/reference/rendering.md#no-vulkan-device-for-a-game-it-stops-with-what-to-install).
 - **`WriteTexels` regions addressed row by row** (`nvn_deswizzle.c` `nvn_bl_row_of`, `nvn_bl_row_at`; found in the title's glyph writes): [`WriteTexels` regions addressed row by row](../../../docs/reference/nvn-objects.md#writetexels-regions-addressed-row-by-row).
+- **The rasteriser's work taken out for measurement** (`DM_VK_RASTER_SHRINK`, `vk_commands.c`): [env_switches.tsv](../../../docs/env_switches.tsv).
+- **Descriptor sets kept across frames** (`vk_pipeline.c` `set_take`): [Descriptor sets kept across frames](../../../docs/reference/rendering.md#descriptor-sets-kept-across-frames).
+- **The H.264 stopgap's pictures written once** (`hle_movie.c` `md_out_tex`, `mavc_constant`): [H.264 movies without a decoder](../../../docs/reference/movies.md#h264-movies-without-a-decoder).
 - **The sampler's host samples by pc and its marks** (`DM_AOT_PROFILE_HOST`, `DM_CTL` `profmark`; `dm/host/aot_profile.c`): [env_switches.tsv](../../../docs/env_switches.tsv) `DM_AOT_PROFILE_HOST`.
 - **The session's files written before the graceful exit's bound** (`hle_lifecycle.c`; found as `sdk.bind.tsv.tmp` after `nxlauncher --play` under `timeout`): [A session ended by SIGTERM left `sdk.bind.tsv.tmp`](../../../docs/reference/packing.md#a-session-ended-by-sigterm-left-sdkbindtsvtmp).
 - **Black pictures from the port's H.264 stopgap** (`hle_movie_avc.c`): [H.264 movies without a decoder](../../../docs/reference/movies.md#h264-movies-without-a-decoder).

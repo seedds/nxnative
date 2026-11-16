@@ -578,6 +578,12 @@ void be_res_stats(char *out, size_t n) {
                      (unsigned long long)atomic_load(&hvk.st_xfb_draws), (unsigned long long)atomic_load(&hvk.st_copy_draws), (double)atomic_load(&hvk.st_tex_bytes) / mib, (double)atomic_load(&hvk.st_astc_native_bytes) / mib,
                      (double)atomic_load(&hvk.st_astc_decoded_bytes) / mib, (double)atomic_load(&hvk.st_astc_block_bytes) / mib, (unsigned long long)atomic_load(&hvk.st_up_gpu),
                      (unsigned long long)atomic_load(&hvk.st_up_cpu), (unsigned long long)atomic_load(&hvk.st_reupload_same), (unsigned long long)atomic_load(&hvk.st_astc_decodes));
+    if (k > 0 && (size_t)k < n) {   // the descriptor sets: written, allocated from a pool, taken again from a free list (vk_pipeline.c set_take)
+        uint64_t dh = 0, dm = 0, dw = 0, made = 0, again = 0; hvk_desc_stats(&dh, &dm, &dw); hvk_desc_set_stats(&made, &again);
+        int k2 = snprintf(out + k, n - (size_t)k, "; descriptor sets written %llu (%llu found written in the submission), allocated %llu, taken again %llu",
+                          (unsigned long long)dm, (unsigned long long)dh, (unsigned long long)made, (unsigned long long)again);
+        if (k2 > 0) k += k2;
+    }
     if (k > 0 && (size_t)k < n) {
         if (mem_budget(&bud, &use)) snprintf(out + k, n - (size_t)k, "; device-local %.0f of %.0f MiB", use, bud);
         else snprintf(out + k, n - (size_t)k, "; no memory budget");

@@ -208,16 +208,41 @@ static int static_buffers(void) {
 }
 
 // ---------- Descriptor sets ----------
-typedef struct { VkDescriptorPool *pools; int n, cap, cur; nvn_hmap cache; } slot_sets;
+// A submission slot's sets: taken from its pools, or from its free lists (below), deduplicated within the slot's submission by content (the cache), and given back when the
+// slot is reset, which hvk_sub_begin does once the slot's previous submission completed. They go back to the slot's free list of their layout, not to the pools: a set lives
+// across frames and is rewritten (vkUpdateDescriptorSets, every binding the draw's shaders have) each time it is taken again, so a frame allocates and frees no set once the
+// slot has as many of each layout as its busiest submission used. vkResetDescriptorPool and vkAllocateDescriptorSets are a pool's bookkeeping on a hardware driver, but
+// lavapipe makes each set a buffer of its own and gives it back at the reset, which cost Mario vs. Donkey Kong's present thread 7.9 ms of CPU a level frame, 5.8 of them in
+// mmap and munmap as glibc trimmed that thread's arena every frame (docs/reference/rendering.md, "Descriptor sets kept across frames"). A set taken again is never in use by the
+// GPU: its slot's submission completed before the reset, as with the pool reset before
+typedef struct { VkDescriptorSet *v; int n, cap; } set_list;   // a layout's sets free in a slot
+typedef struct {
+    VkDescriptorPool *pools; int n, cap, cur;
+    nvn_hmap cache;                                              // set_key -> the set (the handle itself as the value) written in this submission
+    nvn_hmap free;                                               // layout -> its set_list (boxed; kept)
+    struct { VkDescriptorSetLayout l; VkDescriptorSet set; } *taken; int ntaken, ctaken;   // the sets this submission took, with their layouts
+} slot_sets;
 static slot_sets g_slots[16];
 typedef struct { VkDescriptorSetLayout l; uint64_t h1, h2; } set_key;
-static uint64_t g_hits, g_misses, g_writes;
+static uint64_t g_hits, g_misses, g_writes, g_made, g_reused;
 void hvk_desc_stats(uint64_t *hits, uint64_t *misses, uint64_t *writes) { *hits = g_hits; *misses = g_misses; *writes = g_writes; }
+void hvk_desc_set_stats(uint64_t *made, uint64_t *reused) { *made = g_made; *reused = g_reused; }   // sets allocated from a pool / taken from a free list, so far
+static set_list *free_list(slot_sets *s, VkDescriptorSetLayout l, int make) {
+    if (!s->free.klen) nvn_hm_init(&s->free, sizeof l);
+    set_list *f = nvn_hm_get(&s->free, &l);
+    if (!f && make && (f = calloc(1, sizeof *f))) nvn_hm_put(&s->free, &l, f);
+    return f;
+}
 void hvk_pipeline_slot_reset(int slot) {
     slot_sets *s = &g_slots[slot & 15];
-    for (int i = 0; i < s->n; i++) vkResetDescriptorPool(hvk.d, s->pools[i], 0);
-    s->cur = 0;
-    if (s->cache.klen) nvn_hm_clear(&s->cache, free); else nvn_hm_init(&s->cache, sizeof(set_key));
+    for (int i = 0; i < s->ntaken; i++) {   // every set the slot's last submission took goes back to its layout's free list
+        set_list *f = free_list(s, s->taken[i].l, 1);
+        if (!f) continue;   // no memory for the list: the set stays allocated in its pool, unused
+        if (f->n == f->cap) { int c = f->cap ? 2 * f->cap : 16; VkDescriptorSet *v = realloc(f->v, (size_t)c * sizeof *v); if (!v) continue; f->v = v; f->cap = c; }
+        f->v[f->n++] = s->taken[i].set;
+    }
+    s->ntaken = 0;
+    if (s->cache.klen) nvn_hm_clear(&s->cache, NULL); else nvn_hm_init(&s->cache, sizeof(set_key));
 }
 static VkDescriptorPool pool_new(void) {
     VkDescriptorPoolSize ps[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16384}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192},
@@ -228,20 +253,31 @@ static VkDescriptorPool pool_new(void) {
     if (vkCreateDescriptorPool(hvk.d, &ci, NULL, &p)) return VK_NULL_HANDLE;
     return p;
 }
-static VkDescriptorSet set_alloc(slot_sets *s, VkDescriptorSetLayout l) {
-    for (int tries = 0; tries < 2; tries++) {
+static VkDescriptorSet set_take(slot_sets *s, VkDescriptorSetLayout l) {   // a free set of the layout, else a new one from the pools; recorded as taken by this submission
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    set_list *f = free_list(s, l, 0);
+    if (f && f->n) { set = f->v[--f->n]; g_reused++; }
+    for (int tries = 0; !set && tries < 2; tries++) {
         if (s->cur == s->n) {
-            if (s->n == s->cap) { s->cap = s->cap ? 2 * s->cap : 4; s->pools = realloc(s->pools, (size_t)s->cap * sizeof *s->pools); if (!s->pools) return VK_NULL_HANDLE; }
+            if (s->n == s->cap) { int c = s->cap ? 2 * s->cap : 4; VkDescriptorPool *v = realloc(s->pools, (size_t)c * sizeof *v); if (!v) return VK_NULL_HANDLE; s->pools = v; s->cap = c; }
             if (!(s->pools[s->n] = pool_new())) return VK_NULL_HANDLE;
             s->n++;
         }
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, s->pools[s->cur], 1, &l};
-        VkDescriptorSet set; VkResult r = vkAllocateDescriptorSets(hvk.d, &ai, &set);
-        if (r == VK_SUCCESS) return set;
+        VkResult r = vkAllocateDescriptorSets(hvk.d, &ai, &set);
+        if (r == VK_SUCCESS) { g_made++; break; }
+        set = VK_NULL_HANDLE;
         if (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL) return VK_NULL_HANDLE;
-        s->cur++;   // this pool is full: the next one
+        s->cur++;   // this pool is full: the next one (the pools are never reset: their sets live in the free lists)
     }
-    return VK_NULL_HANDLE;
+    if (!set) return VK_NULL_HANDLE;
+    if (s->ntaken == s->ctaken) {
+        int c = s->ctaken ? 2 * s->ctaken : 256; __typeof__(s->taken) v = realloc(s->taken, (size_t)c * sizeof *v);
+        if (!v) return set;   // not recorded: it is not taken again, and stays allocated in its pool
+        s->taken = v; s->ctaken = c;
+    }
+    s->taken[s->ntaken].l = l; s->taken[s->ntaken++].set = set;
+    return set;
 }
 // One set's content as it is resolved: the writes and the bytes that identify it
 enum { MAXW = 256, MAXINFO = 512 };
@@ -498,14 +534,14 @@ int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6
         if (k == 0) for (int i = 0; i < l->ndyn; i++) if (!w_buffer(&b, l->dyn_binding[i], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, dbuf[i], 0, DRV_SIZE)) return 0;
         if (!build_set(&b, l, k, sh, base_instance, dispatch, ubo_max)) return 0;
         set_key key = {l->set[k], b.h1, b.h2};
-        VkDescriptorSet *have = nvn_hm_get(&ss->cache, &key);
-        if (have) { sets[k] = *have; g_hits++; continue; }
-        VkDescriptorSet set = set_alloc(ss, l->set[k]);
+        VkDescriptorSet have = (VkDescriptorSet)nvn_hm_get(&ss->cache, &key);   // the handle itself is the value (a pointer on 64-bit hosts, never NULL)
+        if (have) { sets[k] = have; g_hits++; continue; }
+        VkDescriptorSet set = set_take(ss, l->set[k]);
         if (!set) { HVK_RED_ONCE("descriptor set allocation failed: the draw is skipped"); return 0; }
         for (int i = 0; i < b.nw; i++) b.w[i].dstSet = set;
         if (b.nw) vkUpdateDescriptorSets(hvk.d, (uint32_t)b.nw, b.w, 0, NULL);
         g_misses++; g_writes += (uint64_t)b.nw;
-        VkDescriptorSet *box = malloc(sizeof *box); if (box) { *box = set; nvn_hm_put(&ss->cache, &key, box); }
+        nvn_hm_put(&ss->cache, &key, (void *)set);
         sets[k] = set;
     }
     for (int i = 0; i < l->ndyn; i++) dyn[ndyn++] = (uint32_t)doff[i];
@@ -708,7 +744,7 @@ int hvk_copy_draw(VkCommandBuffer cb, const hvk_view *sv, const hvk_view *dv, co
     VkPipeline p = copy_pipeline(&k);
     if (!p) return 0;
     slot_sets *ss = &g_slots[hvk_slot_index() & 15];
-    VkDescriptorSet set = set_alloc(ss, g_copy_dsl);
+    VkDescriptorSet set = set_take(ss, g_copy_dsl);
     if (!set) return 0;
     VkDescriptorImageInfo ii[2] = {{g_copy_samp[linear && !depth], sv->view, VK_IMAGE_LAYOUT_GENERAL}, {g_copy_samp[0], stencil ? ssv.view : sv->view, VK_IMAGE_LAYOUT_GENERAL}};
     VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[0], NULL, NULL},
@@ -765,9 +801,15 @@ void hvk_pipeline_shutdown(void) {
     memset(g_kernel, 0, sizeof g_kernel);
     if (g_kpl) vkDestroyPipelineLayout(hvk.d, g_kpl, NULL);
     g_kpl = VK_NULL_HANDLE;
-    for (int s = 0; s < 16; s++) { for (int i = 0; i < g_slots[s].n; i++) vkDestroyDescriptorPool(hvk.d, g_slots[s].pools[i], NULL); free(g_slots[s].pools);
-        if (g_slots[s].cache.klen) nvn_hm_clear(&g_slots[s].cache, free);
-        memset(&g_slots[s], 0, sizeof g_slots[s]); }
+    for (int s = 0; s < 16; s++) {   // the pools with every set in them (the free lists' too); the cache holds handles, the free map boxed lists
+        slot_sets *ss = &g_slots[s];
+        for (int i = 0; i < ss->n; i++) vkDestroyDescriptorPool(hvk.d, ss->pools[i], NULL);
+        free(ss->pools);
+        free(ss->cache.keys); free(ss->cache.vals);
+        for (uint32_t i = 0; i < ss->free.cap; i++) if (ss->free.vals && ss->free.vals[i]) { set_list *f = ss->free.vals[i]; free(f->v); free(f); }
+        free(ss->free.keys); free(ss->free.vals); free(ss->taken);
+        memset(ss, 0, sizeof *ss);
+    }
     for (uint32_t i = 0; i < g_layouts.cap; i++) if (g_layouts.vals && g_layouts.vals[i]) { hvk_layout *l = g_layouts.vals[i]; vkDestroyPipelineLayout(hvk.d, l->pl, NULL); for (int k = 0; k < 4; k++) free(l->sd[k]); free(l); }
     nvn_hm_clear(&g_layouts, NULL); memset(g_univ, 0, sizeof g_univ);
     for (uint32_t i = 0; i < g_dsl.cap; i++) if (g_dsl.vals && g_dsl.vals[i]) { vkDestroyDescriptorSetLayout(hvk.d, *(VkDescriptorSetLayout *)g_dsl.vals[i], NULL); free(g_dsl.vals[i]); }

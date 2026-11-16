@@ -108,6 +108,7 @@ typedef struct {
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain;                    // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet came with pictures still queued, they leave one per free slot
+    uint64_t held[8]; int nheld;                 // native-texture mode with a decoder whose pictures are all the same (mavc_constant): the serials of the textures that hold one
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
@@ -604,7 +605,7 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configur
         if (GUEST_FIND_BUF(md, "avcc", &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_avcc(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b));
     }
     int w = 0, h = 0; if (md) { GUEST_FIND_I32(md, "width", &w); GUEST_FIND_I32(md, "height", &h); }
-    dm_host_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
+    dm_host_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; d->nheld = 0; } pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 0, "Configure: MediaData width %d height %d", w, h);
     return 0;
 }
@@ -781,6 +782,7 @@ HLE_FORCE("_ZN5movie7Decoder19GetOutputBufferSizeEPiS1_", "movie decoder: output
 // In the SDK, NnCodecConsumer draws the decoded frame into that texture on the GPU and signals the sync when done; the host writes the texture storage on the CPU (as WriteTexels; the replay layer re-uploads dirty pages), and the sync counts as done once written
 int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, size_t row, int *tw, int *th);
 int nvn_host_signal_sync(void *nvnsync);
+uint64_t nvn_host_texture_serial(const void *nvntex);   // hle_nvn.c: its Initialize serial (a texture made again at the same address has a new one)
 static int md_out_tex(mdec_t *d, int i, void *buf) {
     // SDK 4's Buffer has no sync object (Dark Souls Remastered's subsdk0 exports no GetNvnSync): the game reads the texture once GetOutputBuffer returns, which the CPU write already satisfies
     static int sync_looked; if (!sync_looked) { G.nvn_sync = guest_sym("_ZNK5movie6Buffer10GetNvnSyncEv"); sync_looked = 1; }
@@ -792,7 +794,17 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     int w = d->w < tw ? d->w : tw, h = d->h < th ? d->h : th;
     // No picture (an end-of-stream output): nothing is drawn and the texture keeps the last frame, as the SDK's consumer has no frame to draw. A black frame here flashed at the
     // end of every loop of Big Brain Academy: Brain vs. Brain's activity previews, which read the end-of-stream output's buffer
-    if (d->out[i].pic && d->out[i].frm) nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL);
+    // A decoder whose pictures are all the same (the port's H.264 stopgap: black, mavc_constant) writes each texture once: writing it again every frame changed nothing and
+    // cost Mario vs. Donkey Kong's title 1.7 ms of CPU a frame (two 960 x 1080 RGBA textures, 7.9 MB a frame) and their re-upload (docs/reference/movies.md, "H.264 movies
+    // without a decoder"). Keyed by the texture's Initialize serial, so a texture made again at the same address is written; a size change (Configure) clears the list
+    if (d->out[i].pic && d->out[i].frm) {
+        const uint64_t ser = d->avc && mavc_constant(d->avc) ? nvn_host_texture_serial(tex) : 0;
+        int held = 0; for (int k = 0; ser && k < d->nheld; k++) held |= d->held[k] == ser;
+        if (!held) {
+            nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL);
+            if (ser) { if (d->nheld == 8) { memmove(d->held, d->held + 1, 7 * sizeof *d->held); d->nheld = 7; } d->held[d->nheld++] = ser; }
+        }
+    }
     void *sy = G.nvn_sync ? GUEST_CALL(G.nvn_sync, buf) : NULL; if (sy && nvn_host_signal_sync(sy) && !d->red_dec++) LOG("[RED] movie: the buffer's sync object %p is not an NVNsync", sy);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → texture %p (%d×%d format %#x)%s", i, tex, tw, th, f, d->out[i].pic ? "" : " (no picture: the texture keeps its last frame)");
     return 0;

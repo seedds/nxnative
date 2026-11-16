@@ -243,9 +243,38 @@ struct pass_t {
     int noting;         // hvk_bind_resources is building a draw's descriptors: its views are checked against the attachments
     int d24sub;   // the depth attachment is NVN depth 24 held in a 32-bit float format: the constant depth bias goes in 24-bit units (decision D10)
     int no; uint32_t ndraws;   // the pass's number in its frame and its draws (the dumps, vk_dump.c)
+    uint32_t shrink;   // DM_VK_RASTER_SHRINK's factor for this pass (1: off), taken at its begin (shrink_now)
 };
 static pass_t P;
 static int pass_active(void) { return P.active; }
+// ---------- DM_VK_RASTER_SHRINK: the rasteriser's work taken out, for measurement ----------
+// DM_VK_RASTER_SHRINK=<k> (2 to 64; docs/env_switches.tsv, a measurement switch): every pass renders into the top-left 1/k of its attachments in each direction: its render area,
+// the viewport, the scissor and the clears inside it are scaled by 1/k, so a software rasteriser (lavapipe) shades and stores about 1/k^2 of the fragments while the game's
+// command stream stays the same: the same passes, draws, pipelines, uploads, copies, queries and readbacks, on images of their own sizes. What it changes: the picture (the
+// rest of each target keeps what was there, so a pass that samples a target over its whole size reads that), the occlusion counts (about 1/k^2 of the samples pass, so a
+// small object's count can drop to 0, and a render condition on it with it), and what a readback of a target reads outside the corner. Copies, blits, resolves, ClearTexture
+// and dispatches keep their sizes. Not for players: for the CPU's bound on the frame rate on a machine without a GPU (the game note of Mario vs. Donkey Kong).
+// Read at each pass's begin, so DM_CTL's `env DM_VK_RASTER_SHRINK=1` turns it off for a screenshot that shows the scene, and `env DM_VK_RASTER_SHRINK=<k>` on again
+static uint32_t shrink_now(void) {
+    static long said = 1;
+    const char *e = getenv("DM_VK_RASTER_SHRINK");
+    long v = e && *e ? strtol(e, NULL, 10) : 1;
+    const uint32_t k = v >= 2 && v <= 64 ? (uint32_t)v : 1;
+    if (v != said) {   // said once per change of the value
+        said = v;
+        if (k > 1) hostvk_log("[hostvk] DM_VK_RASTER_SHRINK=%u: every pass renders into the top-left 1/%u of its targets (a measurement: the picture is not the game's)", k, k);
+        else if (v != 1 && e && *e) hostvk_log("[RED] [hostvk] DM_VK_RASTER_SHRINK=%s is not 2 to 64: not applied", e);
+        else hostvk_log("[hostvk] DM_VK_RASTER_SHRINK off: passes render into their whole targets");
+    }
+    return k;
+}
+static VkRect2D shrink_rect(VkRect2D r) {   // a rect of the open pass (offset >= 0) scaled by 1/k: its first pixel's and its end's, rounded out
+    const uint32_t k = P.shrink ? P.shrink : 1;
+    if (k == 1 || !r.extent.width || !r.extent.height) return r;
+    const uint32_t x0 = (uint32_t)r.offset.x / k, y0 = (uint32_t)r.offset.y / k;
+    const uint32_t x1 = ((uint32_t)r.offset.x + r.extent.width + k - 1) / k, y1 = ((uint32_t)r.offset.y + r.extent.height + k - 1) / k;
+    return (VkRect2D){{(int32_t)x0, (int32_t)y0}, {x1 - x0, y1 - y0}};
+}
 // A pass segment of the counters (4.6): inside a pass, one query of each kind that is counted, ended at the pass end or at a report or reset of a counter
 static void seg_open(VkCommandBuffer cb) {
     if (P.seg_open || g_cur < 0) return;
@@ -372,13 +401,15 @@ static int pass_begin(VkCommandBuffer cb) {
         w = R.has_sc && R.sc.x + R.sc.w > 0 ? (uint32_t)(R.sc.x + R.sc.w) : 1; h = R.has_sc && R.sc.y + R.sc.h > 0 ? (uint32_t)(R.sc.y + R.sc.h) : 1; layers = 1; samples = VK_SAMPLE_COUNT_1_BIT;
     }
     P.extent = (VkExtent2D){w, h}; P.layers = layers ? layers : 1; P.samples = samples ? samples : VK_SAMPLE_COUNT_1_BIT;
+    P.shrink = shrink_now();
     if (g_store_none_next) {   // a feedback pass: what it only reads is not stored (no write after the draws' reads of it; core in Vulkan 1.3)
         for (int i = 0; i < P.nc; i++) if (g_store_none_next >> i & 1) P.ca[i].storeOp = VK_ATTACHMENT_STORE_OP_NONE;
         if (g_store_none_next >> 8 & 1) P.da.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
         if (g_store_none_next >> 9 & 1) P.sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
         P.store_none = g_store_none_next; g_store_none_next = 0;
     }
-    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, P.extent}, P.layers, 0, (uint32_t)P.nc, P.ca, P.has_d ? &P.da : NULL, P.has_s ? &P.sa : NULL};
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, shrink_rect((VkRect2D){{0, 0}, P.extent}), P.layers, 0, (uint32_t)P.nc, P.ca, P.has_d ? &P.da : NULL,
+                          P.has_s ? &P.sa : NULL};   // DM_VK_RASTER_SHRINK: the top-left 1/k (shrink_rect)
     vkCmdBeginRendering(cb, &ri);
     P.active = 1; g_bound.valid = 0; g_dyn.valid = 0;
     atomic_fetch_add(&hvk.st_passes, 1);
@@ -396,7 +427,7 @@ static int pass_begin(VkCommandBuffer cb) {
             if (P.has_s && R.clear_s) { d.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT; d.clearValue.depthStencil.stencil = R.cs & 0xff; }
             ca[n++] = d; R.clear_d = R.clear_s = 0; P.written |= 3u << 8;
         }
-        if (n) { VkClearRect rr = {{{0, 0}, P.extent}, 0, P.layers}; vkCmdClearAttachments(cb, n, ca, 1, &rr); }
+        if (n) { VkClearRect rr = {shrink_rect((VkRect2D){{0, 0}, P.extent}), 0, P.layers}; vkCmdClearAttachments(cb, n, ca, 1, &rr); }
     }
     return 1;
 }
@@ -941,6 +972,11 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int restart,
         if (y1 > (long)th) y1 = (long)th;
         sc = x1 > x0 && y1 > y0 ? (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}} : (VkRect2D){{0, 0}, {0, 0}};
     }
+    if (P.shrink > 1) {   // DM_VK_RASTER_SHRINK: the viewport and the scissor in the pass's top-left 1/k
+        const float k = (float)P.shrink;
+        vp.x /= k; vp.y /= k; vp.width /= k; vp.height /= k;
+        sc = shrink_rect(sc);
+    }
     n.vp = vp; n.sc = sc;
     n.cull = S.poly.cull == NVN_FACE_FRONT ? VK_CULL_MODE_FRONT_BIT : S.poly.cull == NVN_FACE_BACK ? VK_CULL_MODE_BACK_BIT : S.poly.cull == NVN_FACE_FRONT_AND_BACK ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_NONE;
     // NVN's raster flip is captured when the queue is initialized (rendering.md, "Queue initialization captures the raster origin"): the winding follows the queue's origin
@@ -1295,6 +1331,7 @@ static VkRect2D clear_rect(void) {
     if (x1 <= x0 || y1 <= y0) return (VkRect2D){{0, 0}, {0, 0}};
     return (VkRect2D){{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
 }
+static VkRect2D clear_rect_shrunk(void) { return shrink_rect(clear_rect()); }   // inside the render area under DM_VK_RASTER_SHRINK
 static uint8_t kind_of_cls(uint8_t cls) { return cls == NVN_VK_UINT ? 1 : cls == NVN_VK_SINT ? 2 : 0; }
 static void value_of(uint8_t cls, const float rgba[4], uint32_t v[4]) {
     for (int i = 0; i < 4; i++) { float f = rgba[i]; int32_t si;
@@ -1321,7 +1358,7 @@ void hvk_clear_color(const p_clear_color *c) {
     if (P.active && (P.store_none >> c->index & 1)) pass_end_only();   // a feedback pass does not store it (see hvk_draw)
     if (!pass_begin(cb)) return;
     if (!P.ca[c->index].imageView) { HVK_RED_ONCE("colour clear of slot %d, which the pass does not attach", c->index); return; }
-    VkRect2D rr = clear_rect(); if (!rr.extent.width || !rr.extent.height) return;
+    VkRect2D rr = clear_rect_shrunk(); if (!rr.extent.width || !rr.extent.height) return;
     if (full_mask) {
         nvn_clear_color cc = {c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]};
         VkClearAttachment a = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)c->index, clear_value_of(P.ccls[c->index], &cc)};
@@ -1354,7 +1391,7 @@ void hvk_clear_ds(const p_clear_ds *c) {
     VkCommandBuffer cb = hvk_main();
     if (P.active && (P.store_none & 3u << 8)) pass_end_only();   // a feedback pass does not store its depth / stencil (see hvk_draw)
     if (!pass_begin(cb)) return;
-    VkRect2D rr = clear_rect(); if (!rr.extent.width || !rr.extent.height) return;
+    VkRect2D rr = clear_rect_shrunk(); if (!rr.extent.width || !rr.extent.height) return;
     float z = c->depth > 0 ? (c->depth < 1 ? c->depth : 1) : 0;
     if (partial_s) {   // the stencil bits of the mask only: the clear triangle (depth written with it when asked)
         static const uint32_t zv[4];

@@ -212,6 +212,7 @@ int hvk_clear_tri(VkCommandBuffer cb, const VkFormat color[8], int ncolor, VkFor
                   uint32_t mask, const uint32_t value[4], float z, int write_depth, uint32_t stencil_mask, uint32_t stencil_ref, VkRect2D rect, VkExtent2D extent);
 // Descriptor microbenchmark access (dm/gfx/hostvk/tests/t_vk_descbench.c): counters of the set cache
 void hvk_desc_stats(uint64_t *hits, uint64_t *misses, uint64_t *writes);
+void hvk_desc_set_stats(uint64_t *made, uint64_t *reused);   // descriptor sets allocated from a pool / taken again from a slot's free list (vk_pipeline.c)
 // A draw's descriptors read view v of a texture (sampled or storage): vk_commands.c notes whether it is attached to the open pass (a feedback draw, design 5.5; step P8)
 void hvk_feedback_note(const hvk_view *v);
 // Draw-based copies (design 2.7; step P8): src's view sv region sr into dst's view dv region dr, converting the format and scaling or mirroring, one pass per layer, outside any

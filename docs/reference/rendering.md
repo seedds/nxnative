@@ -629,6 +629,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Uniforms, copies and ordering
 
+### Descriptor sets kept across frames
+
+- **Symptom:** on lavapipe the thread that replays the game's command buffers into Vulkan (the game's `PresentationThread`) spent 7 to 13 ms of CPU a frame making and freeing descriptor sets, about half of it in `mmap` and `munmap`; the munmaps also interrupt the rasteriser's threads (a TLB shootdown each).
+- **Cause:** the backend reset each submission slot's descriptor pools when it reused the slot and allocated the slot's sets anew every frame (`vk_pipeline.c`). On a hardware driver that is a pool's bookkeeping, but lavapipe makes each set a buffer of its own and frees it at the pool's reset, so every frame allocated and freed hundreds of buffers, and glibc gave the thread's arena back to the system each time (its trim) and took it again the next frame.
+- **Fix:** a slot's sets go back to free lists per layout when the slot is reset (its submission completed) and are rewritten when taken again; the pools are never reset (`set_take`, `hvk_pipeline_slot_reset`). A frame allocates no set once each slot holds as many of each layout as its busiest submission used. A set is rewritten with every binding its draw's shaders have before it is bound, so nothing of its earlier content is read. What a hardware driver gains is the allocation and the reset, which are small there; the per-submission cache by content (consecutive draws with the same bindings) is unchanged. Measured on Mario vs. Donkey Kong's route with `DM_VK_RASTER_SHRINK=64` (the profile marks): the present thread's CPU a frame 12.8 to 3.2 ms in level 1-1, 6.8 to 1.6 at the level select, 1.5 to 0.7 at the title, its mmap and munmap gone; the level's frame (lavapipe's geometry still its bound) 128 to 93 ms.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) on Linux, lavapipe, with `DM_VK_RASTER_SHRINK` (the profile marks' host samples by pc).
+- **Check:** `t_vk_desc_reuse` (three textures fetched in turn over 24 submissions, three times round the 8 slots: each reads its own texels, sets are taken again and no set is allocated after the first round), and every `t_vk_*` test under validation.
+
+
 ### Inline uniform updates as ordered GPU copies
 
 - **Cause:** reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.

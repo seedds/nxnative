@@ -74,6 +74,7 @@ int main(void) {
         for (int i = 0; i < 3; i++) mavc_decode(a, au, sizeof au, i * 33333);
         mavc_drop(a);
         CHECK(mavc_queued(a) == 0 && !mavc_take(a, 1, rgba, W, H, &t), "a flush drops the queued pictures");
+        CHECK(mavc_constant(a) == 1, "its pictures are all the same (mavc_constant): the native-texture output writes each texture once (hle_movie.c md_out_tex)");
         mavc_free(a);
     }
     printf("t_movie_avc: %d checks, %d failed\n", checks, fails);

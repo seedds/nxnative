@@ -173,7 +173,14 @@ HLE_FORCE("_ZN2nn3err50ShowUnacceptableAddOnContentForUpgradeVersionErrorEv", "u
 }
 HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "game version mismatch error applet; the host only logs it", void, h_err_AppVer, void) { DM_APPLET("error"); LOG("game asks to show an error: game version mismatch"); }
 // Pokémon Legends: Z-A (SDK 19): the application's own error screen (an error code number and two messages in the argument) goes through the error applet as well
-HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) { DM_APPLET("error"); (void)arg; LOG("game asks to show an application error (ApplicationErrorArg)"); }
+// ApplicationErrorArg (libnx ErrorApplicationArg, packed): an 8-byte header, the error number at +0x8, the language code at +0xc, the dialog message at +0x14 (0x800 bytes, UTF-8),
+// the full-screen one after it. The log names the number and the message, which say why the game gave up (nobody sees the applet here)
+HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) { DM_APPLET("error");
+    const uint8_t *a = arg; char msg[161] = "";
+    if (a) { int k = 0; for (; k < 160 && a[0x14 + k] && (a[0x14 + k] >= 0x20 || a[0x14 + k] == '\n'); k++) msg[k] = a[0x14 + k] == '\n' ? ' ' : (char)a[0x14 + k]; msg[k] = 0; }
+    uint32_t num = 0; if (a) memcpy(&num, a + 8, 4);
+    LOG("game asks to show an application error (ApplicationErrorArg): number %u, message \"%s\"", num, msg);
+}
 // Pokémon Sword (SDK 7.3.2): the error applet's network service form, after a failed online call
 HLE_FORCE("_ZN2nn3err23ShowNetworkServiceErrorENS0_9ErrorCodeE", "network service error applet; the host only logs it", void, h_err_ShowNet, uint64_t code) { DM_APPLET("error"); LOG("game asks to show a network service error: %04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
 

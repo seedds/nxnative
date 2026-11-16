@@ -895,11 +895,12 @@ HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE",
 static void save_sync_or_stop(const char *dd) {
     if (save_sync_mount(dd, DM_GAME_ID)) die("this game's save %s is not whole after a pull of the cloud's save that could not be undone: not mounted (the [save-sync] lines above say where this device's save is kept; the next start tries again)", dd);
 }
-static Result mount_own_save_ro(const char *name) {
+static void user_save_dir(char *dd, size_t n, int user);
+static Result mount_own_save_ro(const char *name, int user) {
     const char *d = getenv("DM_SAVE");
     if (!d || !*d) { LOG("[RED] fs read-only mount of this game's save data %s: DM_SAVE is not set, answered as no save data", name); return 0x7d402u; }   // fs ResultTargetNotFound
     char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
-    save_sync_or_stop(dd);   // the cloud's save comes in before anything reads the committed one (the first mount does it, as for MountSaveData)
+    if (user > 0) user_save_dir(dd, sizeof dd, user); else save_sync_or_stop(dd);   // the cloud's save comes in before anything reads the committed one (the first mount does it, as for MountSaveData)
     // A first launch has no committed save yet: an empty one, as the console's new save data. The folder is checked here, since mount_ex would stop on a missing one as on missing game files
     struct stat st;
     if (mkdir(dd, 0755) && errno != EEXIST) { LOG("[RED] fs read-only mount of this game's save data %s: cannot create the save folder %s (errno=%d), answered as no save data", name, dd, errno); return 0x7d402u; }
@@ -907,17 +908,20 @@ static Result mount_own_save_ro(const char *name) {
     return mount_ex(name, dd, 1, 0);
 }
 HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; this game's own save data read-only (the committed save); another program's: none", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) { dm_thread_service_request();
-    (void)uid;
-    if (app == DM_GAME_PROGRAM_ID) return mount_own_save_ro(name);
+    if (app == DM_GAME_PROGRAM_ID) return mount_own_save_ro(name, dm_uid_user(uid));
     LOG("[RED] fs read-only mount of another program's save data %s: program %016llx, the host has none", name, (unsigned long long)app); return 0x7d402u;   // fs ResultTargetNotFound
 }
 const char *dm_save_title(void) { return DM_GAME_ID; }   // save_sync.h: the iPhone launcher names the cloud file with it before the game runs
-HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv; save data → host directory (single user)", Result, h_fs_MountSave, const char *name, const void *uid) { dm_thread_service_request();
-    (void)uid;
+// The save of a user past the first (a second local player's, made by the user selector: hle_account.c, dm_uid_user): <DM_SAVE>_user<n>, a transaction of its own, so that
+// player's save never lands in player 1's. Only player 1's save goes through the save sync
+static void user_save_dir(char *dd, size_t n, int user) { if (user > 0) { char suf[16]; snprintf(suf, sizeof suf, "_user%d", user + 1); strlcat(dd, suf, n); } }
+HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv; save data → host directory (player 1's; another local user's beside it)", Result, h_fs_MountSave, const char *name, const void *uid) { dm_thread_service_request();
     // No default directory: silently landing on a directory with no characters distorts the "character select" measurement (this once caused a misjudgment). Runs always use a fresh copy of save_ref
     const char *d = getenv("DM_SAVE");
     if (!d) die("DM_SAVE is not set: point it at a writable copy of a save directory");
     char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;   // strip trailing slashes (.work / .new are appended at the same level)
+    int user = dm_uid_user(uid);
+    if (user > 0) { user_save_dir(dd, sizeof dd, user); LOG("fs save data %s is local user %d's", name, user + 1); return mount_ex(name, dd, 0, 1); }
     save_sync_or_stop(dd);   // DM_SAVE_SYNC: the cloud's save comes in before the work directory is cloned from the committed one (save_sync.h)
     return mount_ex(name, dd, 0, 1);
 }

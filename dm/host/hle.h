@@ -128,3 +128,15 @@ void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnit
 typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf;   // next, data, buffer_size, data_size, data_offset
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
+
+// Local users (hle_account.c): user 1 is the host's fixed Uid, users 2..DM_USERS share its second word and count up in its first, made one at a time when the user selector
+// is shown with every existing user left out (a second local player, Minecraft Dungeons II). dm_uid_user gives a Uid's user index (0 for user 1), -1 for a Uid that is none of them;
+// hle_fs.c gives each user past the first a save folder of its own
+#define DM_USERS 8
+#define DM_UID0 0x78626c0000000001ull
+#define DM_UID1 0x53574e4154495645ull
+static inline int dm_uid_user(const void *uid) {
+    if (!uid) return 0;
+    const uint64_t *v = (const uint64_t *)uid;
+    return v[1] == DM_UID1 && v[0] >= DM_UID0 && v[0] < DM_UID0 + DM_USERS ? (int)(v[0] - DM_UID0) : -1;
+}

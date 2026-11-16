@@ -247,6 +247,9 @@ static void md_defer_body(void *arg) {
         else { uint64_t w = next - now; struct timespec ts = { (time_t)(w / 1000000000u), (long)(w % 1000000000u) }; pthread_cond_timedwait_relative_np(&g_dfcv, &g_dfmu, &ts); }
     }
 }
+// A VideoToolbox session iOS invalidated while the app was in the background (kVTInvalidSessionErr, -12903) is dropped and a fresh one starts at the stream's next key frame
+// (hle_movie_av1.c, hle_movie_avc.c): the profile's movie_restart, DM_MOVIE_RESTART (1 on, 0 off) overriding it. Read only when that error comes, so not cached
+int movie_vt_restart(void) { const char *e = getenv("DM_MOVIE_RESTART"); return e && *e ? *e != '0' : DM_GAME_MOVIE_RESTART; }
 // log the first 12 calls one by one, then every 2^k-th (DM_MOVIE_TRACE=1: every call, with the calling thread and the decoder: Unity drives a movie's audio and video decoders from one thread)
 static int md_trace_all(void) { static int on = -1; if (on < 0) on = getenv("DM_MOVIE_TRACE") != NULL; return on; }
 #define MD_TRACE(d, slot, fmt, ...) do { unsigned long n_ = ++(d)->ncall[slot]; if (md_trace_all()) LOG("[movie] [%p] [%p] " fmt, (void *)pthread_self(), (void *)(d), ##__VA_ARGS__); \

@@ -41,6 +41,12 @@ shader_note	Ocarina of Time shaders
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
 
+# ---- Movies ----
+# The movies are AV1 decoded by VideoToolbox. On an iPhone iOS ended the hardware decoder while the notification panel was down during the opening movie: every later
+# temporal unit failed with -12903 (kVTInvalidSessionErr) and the movie ran through its file in about 2 s, 365 of 9,254 pictures shown. With the key the dead session is dropped and
+# a new one starts at the next key frame, the last picture shown again until then (hle_movie.c movie_vt_restart; DM_MOVIE_RESTART=0 in env.txt turns it off)
+movie_restart	on
+
 # ---- Graphics ----
 draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials

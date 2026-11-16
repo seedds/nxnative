@@ -121,3 +121,30 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class MovieRestart(unittest.TestCase):   # a VideoToolbox movie session iOS invalidated in the background restarted at the next key frame (hle_movie.c movie_vt_restart; DM_MOVIE_RESTART overrides)
+    def macro(self, rows, gid=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d, 'game.h')
+            if gid is None:
+                Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                env = {**os.environ, 'DM_GAMES_DIR': d}
+            else: env = {k: v for k, v in os.environ.items() if k != 'DM_GAMES_DIR'}   # a profile of the repository
+            subprocess.run([sys.executable, str(GAME), 'header', gid or ID, str(out)], env=env, check=True, capture_output=True)
+            return [l for l in out.read_text().splitlines() if 'MOVIE_RESTART' in l]
+
+    def test_values_and_the_default(self):
+        self.assertEqual(self.macro(''), ['#define DM_GAME_MOVIE_RESTART 0'])   # without the key: off, every other game as before
+        self.assertEqual(self.macro('movie_restart\ton\n'), ['#define DM_GAME_MOVIE_RESTART 1'])
+        self.assertEqual(self.macro('movie_restart\toff\n'), ['#define DM_GAME_MOVIE_RESTART 0'])
+        for v in ('1', 'yes', 'On', ''):
+            rc, out = header(f'movie_restart\t{v}\n')
+            self.assertNotEqual(rc, 0, v); self.assertIn('movie_restart must be on or off', out, v)
+
+    def test_profiles_that_set_it(self):   # Ocarina of Time, and any game that sets it names it in its note
+        on = [tsv.parent for tsv in sorted((REPO / 'dm/games').glob('*/game.tsv'))
+              if any(l.split('\t')[:2] == ['movie_restart', 'on'] for l in tsv.read_text(encoding='utf-8').splitlines())]
+        self.assertIn('0400486024DEC000', [d.name for d in on])
+        self.assertEqual(self.macro('', '0400486024DEC000'), ['#define DM_GAME_MOVIE_RESTART 1'])
+        for d in on: self.assertIn('movie_restart', (d / 'README.md').read_text(encoding='utf-8') if (d / 'README.md').is_file() else '', d.name)

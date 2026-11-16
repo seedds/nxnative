@@ -16,3 +16,4 @@ int mavc_queued(const mavc *a);
 int mavc_bt709(const mavc *a, int h);   // the stream's colour matrix is BT.709: as its SPS declares; undeclared (or no SPS yet), from 720 lines up
 void mavc_set_rgba(mavc *a);   // pictures come out as 4-byte RGBA (stride w * 4) instead of NV12: the native texture mode
 void mavc_drop(mavc *a);   // a flush / seek: queued pictures are discarded
+int movie_vt_restart(void);   // hle_movie.c: restart a session iOS invalidated in the background at the next key frame (profile movie_restart, DM_MOVIE_RESTART)

@@ -68,7 +68,7 @@ ends exactly where `g_pass` begins in this build. Its tenth, 56-byte stencil
 record overlaps the pass cache: write flags at offsets 34/35 change depth
 `0x00000104` to `0x01010104`. The general correction is
 [ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil).
-Disabling only the unwritten-store tracking (`g_udc_ab=0`, TBDR still off) in
+Disabling only the unwritten-store tracking (`g_udc=0`, TBDR still off) in
 the running app clears Rex at the same camera angle; this is a diagnostic
 control, not the shipped fix. AddressSanitizer reproduces the old overflow
 without game files. The corrected ledger and lookahead arrays pass the GPU

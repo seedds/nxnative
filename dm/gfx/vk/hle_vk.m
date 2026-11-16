@@ -16,6 +16,7 @@
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#import "../nvn/host_msl.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
@@ -130,6 +131,8 @@ static _Atomic uint64_t g_done;                 // highest value whose command b
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER, g_done_mu = PTHREAD_MUTEX_INITIALIZER, g_mem_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem_bytes;
+static _Atomic uint64_t g_n_resume;   // render encoders that resumed a split pass (t_vk_fan)
+static _Atomic uint32_t g_fan_pipes;   // triangle-fan pipelines created: until there is one, no command buffer is scanned for fans (fan_prepare)
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -149,7 +152,7 @@ static void sh_load(void) {
         if (line[0] == '#' || line[0] == '\n') continue;
         char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");   // strsep keeps the empty resource field of a shader without resources
         if (!key || !stage || strlen(key) != 16) continue;
-        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; g_sh = realloc(g_sh, cap * sizeof *g_sh); }
+        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; shinfo *q = realloc(g_sh, cap * sizeof *g_sh); if (!q) die("[vk] out of memory for the shader table"); g_sh = q; }
         shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
         memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag");
         for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
@@ -208,7 +211,8 @@ struct VkFence_T { _Atomic uint64_t val; };   // 0 = signalled; FENCE_NONE = uns
 
 #define MAXB 64
 typedef struct { uint32_t binding, count, base; VkDescriptorType type; int dyn, imm; } lbind;   // base: first element in a set's array; dyn: first dynamic offset in the set (-1 if not dynamic)
-struct VkDescriptorSetLayout_T { uint32_t n, total, ndyn; lbind b[MAXB]; int8_t idx[128]; VkSampler *imm; };
+// refs: the handle and each set allocated from it (dsl_put frees on the last): Vulkan lets sets, and pipelines made with it, outlive vkDestroyDescriptorSetLayout
+struct VkDescriptorSetLayout_T { _Atomic int refs; uint32_t n, total, ndyn; lbind b[MAXB]; int8_t idx[128]; VkSampler *imm; };
 // A descriptor holds the Metal objects it was written with (retained), as a hardware descriptor holds a copy of the object's handle: a set may still name a view, sampler
 // or buffer the game has destroyed (the hardware reads it only when a draw samples it), and the replay binds every element of an array the shader takes. Descriptors
 // used to point at this layer's view / sampler / buffer structs, and Super Mario Galaxy 2 crashed reading a freed view's texture from element 1 of its 8-texture array
@@ -218,15 +222,17 @@ typedef struct { __strong id<MTLBuffer> buf; VkDeviceSize off; __strong id<MTLTe
 struct VkDescriptorPool_T { struct VkDescriptorSet_T *sets; };
 struct VkDescriptorSet_T { VkDescriptorSetLayout L; VkDescriptorPool pool; struct VkDescriptorSet_T *prev, *next; desc_t *d; };   // d: L->total descriptors (ARC objects: no flexible array)
 struct VkDescriptorUpdateTemplate_T { uint32_t n; VkDescriptorUpdateTemplateEntry e[]; };
-struct VkPipelineLayout_T { uint32_t nset, pc_size; VkDescriptorSetLayout set[8]; };   // pc_size: end of the highest push-constant range
+struct VkPipelineLayout_T { uint32_t nset, pc_size; VkDescriptorSetLayout set[8]; };   // pc_size: end of the highest push-constant range; pipelines copy what they use (pipe_make)
 
 typedef struct { VkFormat fmt; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; } ratt;
 struct VkRenderPass_T { uint32_t natt, ncol; ratt att[16]; int col[8], res[8], depth; };
 struct VkFramebuffer_T { uint32_t n, w, h, layers; VkImageView v[16]; };
 struct VkPipeline_T {
     __strong id<MTLRenderPipelineState> pso; __strong id<MTLDepthStencilState> dss;
-    const shinfo *vs, *fs; uint32_t vb_mask; VkPipelineLayout layout;
+    const shinfo *vs, *fs; uint32_t vb_mask;
+    uint32_t pc_size, nset; VkDescriptorSetLayout set[8];   // from its pipeline layout, which may be destroyed first: the push-constant size, and the set layouts (held) for a missing binding's report
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
+    int fan, restart;   // a triangle fan, drawn as a list (fan_arrays, fan_indexed), and its primitive restart
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
     // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
@@ -718,7 +724,7 @@ static int is_dyn(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_B
 VK(vkCreateDescriptorSetLayout, VkResult, VkDevice d, const VkDescriptorSetLayoutCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorSetLayout *out) {
     (void)d; (void)a;
     if (ci->bindingCount > MAXB) { LOG("[vk] [RED] descriptor set layout with %u bindings, over %d", ci->bindingCount, MAXB); return VK_ERROR_OUT_OF_HOST_MEMORY; }
-    VkDescriptorSetLayout L = zalloc(sizeof *L); memset(L->idx, -1, sizeof L->idx);
+    VkDescriptorSetLayout L = zalloc(sizeof *L); memset(L->idx, -1, sizeof L->idx); L->refs = 1;
     const VkDescriptorSetLayoutBinding *src[MAXB];
     for (uint32_t i = 0; i < ci->bindingCount; i++) {   // sorted by binding number: the order dynamic offsets are consumed in
         uint32_t j = i; src[i] = &ci->pBindings[i];
@@ -745,7 +751,8 @@ VK(vkCreateDescriptorSetLayout, VkResult, VkDevice d, const VkDescriptorSetLayou
     if (L->ndyn > 16) LOG("[vk] [RED] %u dynamic offsets in one set, over 16", L->ndyn);
     *out = L; return VK_SUCCESS;
 }
-VK(vkDestroyDescriptorSetLayout, void, VkDevice d, VkDescriptorSetLayout L, const VkAllocationCallbacks *a) { (void)d; (void)L; (void)a; }   // kept: sets allocated from it still read it
+static void dsl_put(VkDescriptorSetLayout L) { if (L && atomic_fetch_sub(&L->refs, 1) == 1) { free(L->imm); free(L); } }
+VK(vkDestroyDescriptorSetLayout, void, VkDevice d, VkDescriptorSetLayout L, const VkAllocationCallbacks *a) { (void)d; (void)a; dsl_put(L); }   // sets allocated from it keep it (refs)
 VK(vkCreateDescriptorPool, VkResult, VkDevice d, const VkDescriptorPoolCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorPool *out) {
     (void)d; (void)ci; (void)a; *out = zalloc(sizeof **out); return VK_SUCCESS;
 }
@@ -764,7 +771,7 @@ static void set_free(VkDescriptorSet s) {
     if (s->prev) s->prev->next = s->next; else p->sets = s->next;
     if (s->next) s->next->prev = s->prev;
     for (uint32_t k = 0; k < s->L->total; k++) s->d[k] = (desc_t){0};   // releases what the descriptors hold
-    free(s->d); free(s);
+    dsl_put(s->L); free(s->d); free(s);
 }
 VK(vkResetDescriptorPool, VkResult, VkDevice d, VkDescriptorPool p, VkDescriptorPoolResetFlags f) { (void)d; (void)f; while (p->sets) set_free(p->sets); return VK_SUCCESS; }
 VK(vkDestroyDescriptorPool, void, VkDevice d, VkDescriptorPool p, const VkAllocationCallbacks *a) { (void)a; if (p) { h_vkResetDescriptorPool(d, p, 0); free(p); } }
@@ -773,7 +780,7 @@ VK(vkAllocateDescriptorSets, VkResult, VkDevice d, const VkDescriptorSetAllocate
     for (uint32_t i = 0; i < ai->descriptorSetCount; i++) {
         VkDescriptorSetLayout L = ai->pSetLayouts[i];
         VkDescriptorSet s = zalloc(sizeof *s); s->d = zalloc(umax(1, L->total) * sizeof(desc_t));
-        s->L = L; s->pool = ai->descriptorPool; s->next = s->pool->sets; if (s->next) s->next->prev = s; s->pool->sets = s; set_live(s, 1);
+        atomic_fetch_add(&L->refs, 1); s->L = L; s->pool = ai->descriptorPool; s->next = s->pool->sets; if (s->next) s->next->prev = s; s->pool->sets = s; set_live(s, 1);
         if (L->imm) for (uint32_t k = 0; k < L->total; k++) s->d[k].smp = L->imm[k] ? L->imm[k]->s : nil;
         out[i] = s;
     }
@@ -850,7 +857,7 @@ VK(vkCreatePipelineLayout, VkResult, VkDevice d, const VkPipelineLayoutCreateInf
     if (l->pc_size > 256) { LOG("[vk] [RED] push constant range %u bytes, over 256", l->pc_size); l->pc_size = 256; }
     *out = l; return VK_SUCCESS;
 }
-VK(vkDestroyPipelineLayout, void, VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d; (void)l; (void)a; }   // kept: pipelines point at it
+VK(vkDestroyPipelineLayout, void, VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d; (void)a; free(l); }   // pipelines copied what they use; commands ignore the layout
 
 // ---------- Render passes, framebuffers ----------
 VK(vkCreateRenderPass, VkResult, VkDevice d, const VkRenderPassCreateInfo *ci, const VkAllocationCallbacks *a, VkRenderPass *out) {
@@ -872,7 +879,8 @@ VK(vkCreateRenderPass, VkResult, VkDevice d, const VkRenderPassCreateInfo *ci, c
     if (sp->inputAttachmentCount) RED1("input attachments not implemented");
     *out = rp; return VK_SUCCESS;
 }
-VK(vkDestroyRenderPass, void, VkDevice d, VkRenderPass rp, const VkAllocationCallbacks *a) { (void)d; (void)rp; (void)a; }   // kept: recorded commands may still name it
+// Commands are replayed at vkQueueSubmit and pipelines copy the formats, so nothing reads a render pass after its destroy: a command buffer that recorded it may not be submitted again (Vulkan), as for framebuffers
+VK(vkDestroyRenderPass, void, VkDevice d, VkRenderPass rp, const VkAllocationCallbacks *a) { (void)d; (void)a; free(rp); }
 VK(vkCreateFramebuffer, VkResult, VkDevice d, const VkFramebufferCreateInfo *ci, const VkAllocationCallbacks *a, VkFramebuffer *out) {
     (void)d; (void)a;
     if (ci->attachmentCount > 16) { LOG("[vk] [RED] framebuffer with %u attachments", ci->attachmentCount); return VK_ERROR_OUT_OF_HOST_MEMORY; }
@@ -964,7 +972,11 @@ static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, co
     return f;
 }
 static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
-    VkPipeline p = zalloc(sizeof *p); p->layout = ci->layout;
+    VkPipeline p = zalloc(sizeof *p);
+    if (ci->layout) {
+        p->pc_size = ci->layout->pc_size; p->nset = ci->layout->nset;
+        for (uint32_t i = 0; i < p->nset; i++) if ((p->set[i] = ci->layout->set[i])) atomic_fetch_add(&p->set[i]->refs, 1);
+    }
     @autoreleasepool {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         char keys[64] = ""; int dual = dual_source(ci->pColorBlendState);
@@ -1008,6 +1020,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: p->prim = MTLPrimitiveTypeLineStrip; pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine; break;
             case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: p->prim = MTLPrimitiveTypeTriangleStrip; break;
             case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: p->prim = MTLPrimitiveTypeTriangle; break;
+            case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: p->prim = MTLPrimitiveTypeTriangle; p->fan = 1; p->restart = ci->pInputAssemblyState->primitiveRestartEnable; g_fan_pipes++; break;
             default: RED1("primitive topology %d not implemented", ci->pInputAssemblyState->topology); p->prim = MTLPrimitiveTypeTriangle; break;
         }
         const VkPipelineRasterizationStateCreateInfo *rs = ci->pRasterizationState;
@@ -1075,7 +1088,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
     for (uint32_t i = 0; i < n; i++) out[i] = pipe_make(&ci[i]);   // a pipeline Metal refuses is still handed out: its draws are skipped
     return VK_SUCCESS;
 }
-VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
+VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; p->dss_dyn = nil; for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]); free(p); } }   // ARC does not release a malloc'd struct's strong fields
 
 // ---------- Command buffers: recording ----------
 enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL };
@@ -1101,7 +1114,7 @@ static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
     if (cb->n + need > cb->cap) {
         size_t c = cb->cap ? cb->cap * 2 : 4096; while (c < cb->n + need) c *= 2;
-        cb->buf = realloc(cb->buf, c); if (!cb->buf) die("[vk] out of command buffer memory %zu", c); cb->cap = c;
+        uint8_t *q = realloc(cb->buf, c); if (!q) die("[vk] out of command buffer memory %zu", c); cb->buf = q; cb->cap = c;
     }
     chdr *h = (chdr *)(cb->buf + cb->n); h->op = op; h->size = (uint32_t)need; cb->n += need;
     return h + 1;
@@ -1205,8 +1218,12 @@ VK(vkCmdPipelineBarrier, void, VkCommandBuffer cb, VkPipelineStageFlags s, VkPip
 // of the submit counts into (one 8-byte slot per BeginQuery), copied to the pools when the submit completes
 typedef struct { VkQueryPool q; uint32_t idx, slot; } occ_t;
 typedef struct { uint64_t v; id<MTLBuffer> vis; uint32_t nvis, cap; occ_t *occ; } subq_t;
+typedef struct { uint64_t offset; uint32_t count, isz, restart, inst; int32_t base; uint32_t first_inst; } fan_p;   // vk_fan.metal's Fan
+typedef struct { const void *cmd; uint64_t at; VkBuffer ib; fan_p p; } fan_job;   // an indexed fan converted ahead (fan_prepare): its arguments at s->fan_out + at, its indices 32 bytes on
 typedef struct {
     id<MTLCommandBuffer> cb; id<MTLRenderCommandEncoder> re; id<MTLBlitCommandEncoder> be;
+    const chdr *cmd; const uint8_t *cmd_end;   // the command being replayed and the end of its command buffer (fan_prepare scans ahead)
+    id<MTLBuffer> fan_out; fan_job *fj; uint32_t nfj, fjcap, fji; const void *fan_from, *fan_to;   // the indexed fans of the current stretch of the pass, and the commands its scan covered
     VkPipeline pipe, applied; uint32_t rt_w, rt_h;
     struct { VkDescriptorSet s; uint32_t dyn[16]; } set[8];
     VkBuffer vb[14]; VkDeviceSize vbo[14];
@@ -1223,6 +1240,7 @@ typedef struct {
 #define DONE_RING 1024
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
 static void end_blit(rs_t *s) { if (s->be) { [s->be endEncoding]; s->be = nil; } }
+static void fan_prepare(rs_t *s, const chdr *h);
 static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
 static void end_rp(rs_t *s, int final) {   // final: the pass's own store actions; otherwise everything is stored, to be loaded again when the pass resumes
     if (!s->re) return;
@@ -1253,7 +1271,8 @@ static void resume_rp(rs_t *s) {
     for (int i = 0; i < 8; i++) if (d.colorAttachments[i].texture) d.colorAttachments[i].loadAction = MTLLoadActionLoad;
     if (d.depthAttachment.texture) d.depthAttachment.loadAction = MTLLoadActionLoad;
     if (d.stencilAttachment.texture) d.stencilAttachment.loadAction = MTLLoadActionLoad;
-    s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->cut = 0;
+    fan_prepare(s, s->cmd);
+    s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->cut = 0; g_n_resume++;
     s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
     occ_start(s);
 }
@@ -1293,6 +1312,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
     if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
+    fan_prepare(s, (const chdr *)((const uint8_t *)s->cmd + s->cmd->size));
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d];
     s->applied = NULL; s->rt_w = w; s->rt_h = h;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
@@ -1315,7 +1335,7 @@ static void bind_res(rs_t *s, const shinfo *si, int frag) {
         if (bi < 0 || !L->b[bi].count) {
             char have[256] = ""; size_t o = 0;
             for (uint32_t k = 0; k < L->n && o + 8 < sizeof have; k++) o += snprintf(have + o, sizeof have - o, " %u", L->b[k].binding);
-            const VkPipelineLayout pl = s->pipe->layout; const VkDescriptorSetLayout PL = pl && r->set < pl->nset ? pl->set[r->set] : NULL;
+            const VkDescriptorSetLayout PL = r->set < s->pipe->nset ? s->pipe->set[r->set] : NULL;
             RED1("shader %s: %u.%u is not in the bound set's layout %p (it has:%s); the pipeline layout's set %u is %p%s", si->key, r->set, r->binding, (void *)L, have, r->set, (void *)PL,
                  PL && r->binding < 128 && PL->idx[r->binding] >= 0 ? ", which has this binding: the set was not rebound with the pipeline" : "");
             continue;
@@ -1348,7 +1368,7 @@ static void bind_push(rs_t *s, const shinfo *si, int frag) {   // the push-const
     if (!si) return;
     for (int i = 0; i < si->nres; i++) {
         if (si->res[i].kind != 'p') continue;
-        const VkPipelineLayout l = s->pipe->layout; uint32_t n = (umax(l ? l->pc_size : 0, 16) + 15) & ~15u;
+        uint32_t n = (umax(s->pipe->pc_size, 16) + 15) & ~15u;
         if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
     }
 }
@@ -1407,9 +1427,101 @@ static int pre_draw(rs_t *s) {
         }
     return 1;
 }
+// ---------- Triangle fans ----------
+// Metal has no fan topology: a fan draws as a triangle list whose triangle i is (i+1, i+2, 0), Vulkan's order, so the first (provoking) vertex is the rim's; putting the anchor
+// first changes flat-shaded attributes. A draw without indices indexes one shared list, its first vertex the base vertex, which keeps VertexIndex and BaseVertex.
+// Indexed fans are converted on the GPU (dm/gfx/msl/vk_fan.metal), since copies earlier in the submission may write their indices. All of them up to the next command that may
+// split the render encoder are converted in one compute pass before the encoder starts (fan_prepare): Vulkan copies nothing inside a render pass, and the copies this layer
+// runs there anyway split the pass (blit), so the indices a stretch of the pass reads are final when it begins. Converting at each draw would split the encoder there, storing
+// and loading every attachment once per draw. A restart index ends a fan (compared before vertexOffset is added); the conversion then compacts the runs into one list and
+// writes its length into the draw's indirect arguments. docs/reference/rendering.md, "Vulkan triangle fans"; t_vk_fan
+static id<MTLBuffer> g_fan_ib; static uint64_t g_fan_tris;   // the shared list (replay holds g_qmu); one it replaced stays alive in the command buffers that use it
+static id<MTLBuffer> fan_shared(uint32_t tris) {
+    if (tris > g_fan_tris) {
+        uint64_t n = g_fan_tris ? g_fan_tris : 4096; while (n < tris) n *= 2;
+        if (n * 12 > g_dev.maxBufferLength) n = tris;
+        id<MTLBuffer> b = n * 12 <= g_dev.maxBufferLength ? [g_dev newBufferWithLength:n * 12 options:MTLResourceStorageModeShared] : nil;
+        if (!b) { RED1("cannot allocate triangle fan indices (%u triangles)", tris); return nil; }
+        uint32_t *ix = b.contents;
+        for (uint64_t i = 0; i < n; i++) { ix[3 * i] = (uint32_t)i + 1; ix[3 * i + 1] = (uint32_t)i + 2; ix[3 * i + 2] = 0; }
+        g_fan_ib = b; g_fan_tris = n;
+    }
+    return g_fan_ib;
+}
+static void fan_arrays(rs_t *s, const c_draw *x) {
+    if (x->count < 3) return;
+    id<MTLBuffer> b = fan_shared(x->count - 2); if (!b) return;
+    [s->re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)(x->count - 2) * 3 indexType:MTLIndexTypeUInt32 indexBuffer:b
+              indexBufferOffset:0 instanceCount:x->inst baseVertex:x->first baseInstance:x->first_inst];
+}
+static int fan_scan_passes(uint32_t op) {   // commands that never end a render encoder; any other ends the scan
+    switch (op) {
+        case C_PIPE: case C_SETS: case C_VB: case C_IB: case C_VP: case C_SC: case C_DRAWI: case C_DRAW: case C_PUSH:
+        case C_QRESET: case C_QTS: case C_QBEGIN: case C_QEND: case C_STENCIL: return 1;
+    }
+    return 0;
+}
+// Converts the indexed fans from command h up to the end of the stretch of the pass the encoder about to start covers, into one buffer, in one compute pass
+static void fan_prepare(rs_t *s, const chdr *h) {
+    s->nfj = s->fji = 0; s->fan_out = nil; s->fan_from = s->fan_to = h;
+    if (!g_fan_pipes) return;
+    VkPipeline pipe = s->pipe; VkBuffer ib = s->ib; VkDeviceSize ibo = s->ibo; uint32_t isz = s->isz; uint64_t size = 0;
+    for (; (const uint8_t *)h < s->cmd_end && fan_scan_passes(h->op); h = (const chdr *)((const uint8_t *)h + h->size)) {
+        const void *c = h + 1;
+        if (h->op == C_PIPE) pipe = ((const c_pipe *)c)->p;
+        else if (h->op == C_IB) { const c_ib *x = c; ib = x->b; ibo = x->o; isz = x->t == VK_INDEX_TYPE_UINT32 ? 4 : 2; }
+        else if (h->op == C_DRAWI) {
+            const c_drawi *x = c;
+            if (!pipe || !pipe->fan || x->count < 3 || !x->inst || !ib || !ib->mem) continue;
+            if (s->nfj == s->fjcap) { s->fjcap = s->fjcap ? 2 * s->fjcap : 16; fan_job *q = realloc(s->fj, s->fjcap * sizeof *s->fj); if (!q) die("[vk] out of memory"); s->fj = q; }
+            s->fj[s->nfj++] = (fan_job){c, size, ib, {ib->off + ibo + (VkDeviceSize)x->first * isz, x->count, isz, (uint32_t)pipe->restart, x->inst, x->voff, x->first_inst}};
+            size += (32 + (uint64_t)(x->count - 2) * 12 + 31) & ~31ull;   // arguments, then indices
+        }
+    }
+    s->fan_to = h;
+    if (!s->nfj) return;
+    static id<MTLComputePipelineState> ps; static int failed;
+    if (!ps && !failed) {   // the host shader library is compiled at build time, like the NVN layer's own kernels
+        NSError *e = nil; id<MTLLibrary> lib = host_msl_lib(g_dev, nil, "vk_fan", &e);
+        id<MTLFunction> fn = [lib newFunctionWithName:@"vk_fan"];
+        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        if (!ps) { failed = 1; LOG("[vk] [RED] cannot build the triangle fan conversion (indexed fans are not drawn): %s", e.localizedDescription.UTF8String); }
+    }
+    id<MTLBuffer> out = ps && size <= g_dev.maxBufferLength ? [g_dev newBufferWithLength:size options:MTLResourceStorageModeShared] : nil;
+    if (!out) { if (ps) RED1("cannot allocate triangle fan indices (%llu bytes)", (unsigned long long)size); s->nfj = 0; return; }
+    id<MTLComputeCommandEncoder> ce = [s->cb computeCommandEncoder];
+    [ce setComputePipelineState:ps];
+    for (uint32_t i = 0; i < s->nfj; i++) {
+        const fan_job *j = &s->fj[i];
+        [ce setBuffer:mem_buf(j->ib->mem) offset:0 atIndex:0]; [ce setBuffer:out offset:j->at + 32 atIndex:1]; [ce setBuffer:out offset:j->at atIndex:2];
+        [ce setBytes:&j->p length:sizeof j->p atIndex:3];
+        NSUInteger threads = j->p.restart ? 1 : j->p.count - 2;   // with restart one linear scan compacts the runs without crossing a marker; otherwise each triangle is independent
+        [ce dispatchThreads:MTLSizeMake(threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(MIN(threads, ps.threadExecutionWidth), 1, 1)];
+    }
+    [ce endEncoding];
+    s->fan_out = out;
+}
+static const fan_job *fan_job_of(rs_t *s, const void *cmd) {   // draws replay in the order they were scanned
+    while (s->fji < s->nfj && (const uint8_t *)s->fj[s->fji].cmd < (const uint8_t *)cmd) s->fji++;
+    return s->fji < s->nfj && s->fj[s->fji].cmd == cmd ? &s->fj[s->fji] : NULL;
+}
+static void fan_indexed(rs_t *s, const c_drawi *x) {
+    if (x->count < 3) return;
+    const fan_job *j = fan_job_of(s, x);
+    if (!j && ((const uint8_t *)x < (const uint8_t *)s->fan_from || (const uint8_t *)x >= (const uint8_t *)s->fan_to)) {
+        // Past the scan, which a command stopped that did not end the encoder after all: split it here, converting from this draw on
+        end_rp(s, 0); s->cut = 1;
+        if (!pre_draw(s)) return;
+        j = fan_job_of(s, x);
+    }
+    if (!j) return;   // not converted: reported by fan_prepare
+    [s->re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt32 indexBuffer:s->fan_out indexBufferOffset:j->at + 32
+                   indirectBuffer:s->fan_out indirectBufferOffset:j->at];
+}
 static void replay(rs_t *s, VkCommandBuffer cb) {
+    s->cmd_end = cb->buf + cb->n;
     for (size_t o = 0; o < cb->n;) {
-        const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
+        const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size; s->cmd = h;
         switch (h->op) {
             case C_BRP: begin_rp(s, c); break;
             case C_ERP: end_rp(s, 1); s->cut = 0; s->rpd = nil; break;
@@ -1430,6 +1542,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 const c_drawi *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
                 if (!s->ib || !s->ib->mem) { RED1("index buffer not bound"); break; }
+                if (s->pipe->fan) { fan_indexed(s, x); g_n_draw++; break; }
                 [s->re drawIndexedPrimitives:s->pipe->prim indexCount:x->count indexType:s->it indexBuffer:mem_buf(s->ib->mem)
                            indexBufferOffset:s->ib->off + s->ibo + (VkDeviceSize)x->first * s->isz instanceCount:x->inst baseVertex:x->voff baseInstance:x->first_inst];
                 g_n_draw++;
@@ -1465,6 +1578,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             case C_DRAW: {
                 const c_draw *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
+                if (s->pipe->fan) { fan_arrays(s, x); g_n_draw++; break; }
                 [s->re drawPrimitives:s->pipe->prim vertexStart:x->first vertexCount:x->count instanceCount:x->inst baseInstance:x->first_inst];
                 g_n_draw++;
                 break;
@@ -1563,6 +1677,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
     }
     if (s->re || s->cut) { RED1("render pass not ended when the command buffer ended"); end_rp(s, 1); s->cut = 0; }
     end_blit(s);
+    free(s->fj); s->fj = NULL; s->nfj = s->fjcap = 0; s->fan_out = nil;
 }
 
 // ---------- Queue, fences, semaphores ----------
@@ -1703,7 +1818,9 @@ VKB(vkCreateSwapchainKHR, VkResult, VkDevice d, const VkSwapchainCreateInfoKHR *
 }
 VKB(vkDestroySwapchainKHR, void, VkDevice d, VkSwapchainKHR sc, const VkAllocationCallbacks *a) {
     (void)d; (void)a; if (!sc) return;
-    for (uint32_t i = 0; i < sc->n; i++) { if (sc->ticket[i]) mtl_present_wait(sc->ticket[i]); sc->img[i]->tex = nil; free(sc->img[i]); }   // the present path keeps its own reference to each texture
+    for (uint32_t i = 0; i < sc->n; i++) { if (sc->ticket[i]) mtl_present_wait(sc->ticket[i]); }
+    // The present path keeps each texture until its presents have completed on the GPU, then lets it go (mtl_ext_tex_release); kept for good before, at every recreation
+    for (uint32_t i = 0; i < sc->n; i++) { mtl_ext_tex_release(sc->img[i]->serial); sc->img[i]->tex = nil; free(sc->img[i]); }
     free(sc);
 }
 VK(vkGetSwapchainImagesKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint32_t *n, VkImage *out) {

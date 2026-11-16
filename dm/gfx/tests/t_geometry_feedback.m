@@ -32,7 +32,7 @@ static void feedback_replay(int discard) {
     state.what=3;EMIT(OP_TF_STATE,state);d.first=2;d.count=2;EMIT(OP_DRAW,d);
     state.what=1;state.ctl=(uint64_t)(cmd+8256);EMIT(OP_TF_STATE,state);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
-    state_reset();memset(&R,0,sizeof R);mtl_sub_begin();uint64_t h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
+    state_reset();memset(&R,0,sizeof R);mtl_sub_begin();mtl_exec(cmd);
     id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
     uint32_t *pause=(uint32_t*)(cmd+8192),*done=(uint32_t*)(cmd+8256);

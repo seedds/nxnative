@@ -19,6 +19,7 @@ from test_dmsh_ampere_alu import STORE, waiting, s2r_tid   # noqa: E402
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
+from dmsh_rewrite import raw_noinline   # noqa: E402
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
 HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+)\)\n\{\n')
@@ -80,7 +81,9 @@ class RawLast(Translated):
         calls = re.findall(name + r'\([^;]*, (_\d+)\);', main)
         self.assertEqual(calls, [word.group(1)] * 2)
         helper = msl[m.end():msl.index('\n}\n', m.end())]
-        self.assertLess(helper.index(last), helper.index('>> uint(21)'))   # the last entry first, then the 2 MiB chunk's hint
+        self.assertLess(helper.index(last), helper.index('dmsh_raw_find('))   # the last entry first, then the search, one function for every access
+        find = msl[msl.index('dmsh_raw_find('):msl.index(name + '(')]
+        self.assertIn('>> uint(21)', find)   # which tries the 2 MiB chunk's hint first
         self.assertRegex(helper, re.escape(last) + r' = uint\(_\d+\);')   # a hint or search records its choice
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
@@ -91,16 +94,19 @@ class RawLast(Translated):
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
                   '{\n    uint last = 0u;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
                   f'        out[id * 16 + s] = {m.group(1)}(lo, hi, map, last);\n    }}\n}}\n')
-        with tempfile.TemporaryDirectory() as w:
-            w = Path(w)
-            (w / 'k.metal').write_text(kernel)
-            r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr[-3000:])
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
-            (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
-            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
-            self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+        noinline = raw_noinline(kernel)
+        self.assertIn('static __attribute__((noinline))\nint dmsh_raw_find(', noinline)
+        for form, kernel in (('inline', kernel), ('noinline', noinline)):   # as spirv-cross writes it, and with the search built once (dmsh_rewrite.raw_noinline)
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(kernel)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(RUNNER)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+                self.assertIn('bad 0 of 1024', out.stdout, form + ': ' + out.stdout + out.stderr)
 
 
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
@@ -163,16 +169,19 @@ class RawVector(Translated):
                   '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
                   f'        vec[0] = vec[1] = vec[2] = 0xdeadu; int w = {m.group(1)}(lo, hi, map, last, vec);\n'   # a miss must not leave them as they were
                   '        out[id * 16 + s] = (w == 0 && vec[0] == 0u && vec[1] == 0u && vec[2] == 0u) || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
-        with tempfile.TemporaryDirectory() as w:
-            w = Path(w)
-            (w / 'k.metal').write_text(kernel)
-            r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr[-3000:])
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
-            (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
-            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
-            self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+        noinline = raw_noinline(kernel)
+        self.assertIn('static __attribute__((noinline))\nint dmsh_raw_find(', noinline)
+        for form, kernel in (('inline', kernel), ('noinline', noinline)):   # as spirv-cross writes it, and with the search built once (dmsh_rewrite.raw_noinline)
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(kernel)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(RUNNER)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+                self.assertIn('bad 0 of 1024', out.stdout, form + ': ' + out.stdout + out.stderr)
 
 
 

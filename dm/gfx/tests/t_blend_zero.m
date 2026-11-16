@@ -64,7 +64,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     op_hdr end = {OP_END, 8}; memcpy(commands + used, &end, 8);
     #undef EMIT
     state_reset();
-    memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
+    memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(commands);
     id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 * NROWS options:MTLResourceStorageModeShared];
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, NROWS, 1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256 * NROWS];
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());

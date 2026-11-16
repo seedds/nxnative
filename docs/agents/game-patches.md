@@ -80,9 +80,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 3 | 0 | `game` ×5 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 1 | 1 | 0 | `game` ×2 |
 
 ## Games
 
@@ -284,7 +285,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
 - **1.8d.310c `main`** `a48c0de3…`
-  - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: FIFA frame regulator
+  - host [hle_fpslock.c:54](../../dm/host/hle_fpslock.c#L54): engine frame limit set to fps_target: FIFA frame regulator
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
@@ -341,7 +342,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:38](../../dm/host/hle_fpslock.c#L38): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:39](../../dm/host/hle_fpslock.c#L39): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope
 
@@ -368,7 +369,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one RE Engine game here, judgement: RE Engine's frame limit at a fixed pointer. Engine code other RE Engine games ship
 
 - **16.0.2 `main`** `c9a3dd77…`
-  - host [hle_fpslock.c:34](../../dm/host/hle_fpslock.c#L34): engine frame limit set to fps_target: RE Engine frame limit
+  - host [hle_fpslock.c:35](../../dm/host/hle_fpslock.c#L35): engine frame limit set to fps_target: RE Engine frame limit
 
 ### Need For Speed™ Hot Pursuit Remastered
 
@@ -379,11 +380,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.0.3 `main`** `799d1061…` ([patches.py:7](../../dm/games/010029B0118E8000/patches.py#L7))
   - cut `+0x4835a4`: frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)
-  - host [hle_fpslock.c:43](../../dm/host/hle_fpslock.c#L43): engine frame limit set to fps_target: Criterion 60 fps mode
-  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion frame ticks
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion frame ticks / 10
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion 2D game step
-  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion 3D game step
+  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion 60 fps mode
+  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion frame ticks
+  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion frame ticks / 10
+  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion 2D game step
+  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Criterion 3D game step
 
 ### NieR:Automata The End of YoRHa Edition (010056B015FE8000)
 
@@ -402,7 +403,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:69](../../dm/host/hle_fpslock.c#L69): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -421,7 +422,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:70](../../dm/host/hle_fpslock.c#L70): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
 
 ### Ori and the Will of the Wisps
 
@@ -578,9 +579,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
 
+- **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the constructor, its one caller, the update and the advance read by disassembly; the limit and the count read in play with DM_PROBE, the opening movie timed at a 30 fps frame step without and with the cut (2026-11-12): movie pictures a frame: up to 2. The game's own movie player constructor, found by its function's fingerprint on any build that keeps the function; no other game has it: the fingerprint matches no function in the mains of Donkey Kong Bananza, Splatoon Raiders, Pokopia, Mario Tennis Fever, Switch Sports, Yoshi and the Mysterious Book, Mario Golf, Xenoblade Chronicles 2 or Super Mario 3D All-Stars, and Breath of the Wild's and Tears of the Kingdom's movies go through subsdk0's movie::Decoder, not a player in main
+- **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the cap's only read of the limit, the pool and input slots the limit sizes and the advance read by disassembly; the opening with frames forced to three vsyncs at cap 2, limit 3 with pool 4 (decode error) and cap 3 (2026-11-16): movie update cap: 3 pictures a frame. The game's own movie player update, found by its function's fingerprint on any build that keeps the function; it goes with the player's two-picture cut and has no wider binding
+- **`game`**, frame rate, at goal, checked: v131072 main: one function with each fingerprint, each with one caller, the event update that reads the frame (vtable +0x78), the timeline and sound syncs and the player's +0xc read by disassembly; the opening timed with frames forced to two vsyncs (2026-11-16): movie frame: the pictures the player has taken. The game's own movie draw functions, found by their functions' fingerprints on any build that keeps them; it is the counter the same game's player keeps, so it goes with the player's two-picture cut and has no wider binding
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
 - **`game`**, rendering, at goal, checked: v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09): dynamic resolution: full size, or a climb on the load measured at each level. The game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)
 
+- **function-matched** (`main` of builds without CUTS): movie pictures a frame: up to 2, the constructor's value for an argument of 2 or more, whatever its caller passes (1): 1 function, 1 cut
+- **function-matched** (`main` of builds without CUTS): movie update cap: 3 pictures a frame, the frame step's largest hold, in place of the limit (2), which also sizes the decoder pipeline: 1 function, 1 cut
+- **function-matched** (`main` of builds without CUTS): movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn: 2 functions, 2 cuts
 - **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; launcher capabilities: DYNAMIC_RESOLUTION
 
 ### The Legend of Zelda: Tears of the Kingdom
@@ -604,6 +611,23 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x12418d8`: first arena subtraction, sign extension
   - cut `+0x12418dc`: first arena subtraction: -(512 MB + 128 KB)
   - cut `+0x12418e8`: first arena stored capacity: 512 MB + 128 KB
+
+### Xenoblade Chronicles X: Definitive Edition
+
+[Xenoblade Chronicles X: Definitive Edition](../../dm/games/0100453019AA8000/README.md), `0100453019AA8000`, [patches.py](../../dm/games/0100453019AA8000/patches.py).
+
+- **`game`**, address space, at goal, checked: both complete functions and their callees in base 1.0.0 and update 1.0.1; forged-build rewrite byte-identical; 1.0.1 opening-field gameplay with the iPhone alias size, first arena 95 MB committed: malloc region 60 GB → 4 GB and its first arena. Monolith's allocator calls nn::os directly; its sizes span two functions matched atomically. The 512 MB first arena is sized for this game; an engine rule needs shared-layout proof and dynamic sizing
+- **`game`**, frame rate, at goal, checked: complete orbit bodies, scratch-register liveness, unique interval setter, elapsed getter and clamped task-step functions in base 1.0.0 and update 1.0.1: camera angular integration uses elapsed time. The game's orbit camera integrates configured angular speed once per update; multiply the loaded gain by its own 30 Hz elapsed-time ratio. Engine input is amplitude state and must not be scaled
+
+- **1.0.1 `main`** `3f242586…` ([patches.py:15](../../dm/games/0100453019AA8000/patches.py#L15))
+  - cut `+0x13f3cf0`: malloc address region: 60 GB to 4 GB
+  - cut `+0xbabe70`: first arena bump size, low part: mov x9,#0xffff
+  - cut `+0xbabe80`: first arena bump size: 512 MB + 128 KB + 64 KB - 1
+  - cut `+0xbabf04`: first arena subtraction, sign extension
+  - cut `+0xbabf0c`: first arena subtraction: -(512 MB + 128 KB)
+  - cut `+0xbabf1c`: first arena stored capacity: 512 MB + 128 KB
+- **function-matched** (`main` of builds without CUTS): Monolith malloc region and first arena: 2 functions, 6 cuts
+- **function-matched stub** (`main` of builds without STUBS): camera angular integration uses elapsed time: a function of 0xadc bytes, `+0x1ec` in it; native frame targets require the complete correction
 
 ## SDK cuts
 
@@ -629,6 +653,7 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 - node area 1 GB → 62 MB: SDK 22.2.0 (EA SPORTS FC 27, Well Dweller): the SDK 19 / 20 constructor, instruction for instruction up to its cold path, which gives each failing result its own abort (32 bytes more)
 - node area 1 GB → 62 MB: SDK 22.2.0 built for the Switch 2 (Fire Emblem Fortune's Weave): the constructor at sdk+0x16ba30 with return address signing and its own frame. The host's StandardAllocator cap counts on the 62 MB (alias_room): with 1 GB the capped region did not fit the alias region
 - node area 1 GB → 62 MB: SDK 19.3.3 (Mario Kart World), 20.5.15 (Yoshi and the Mysterious Book, Hyrule Warriors: Age of Imprisonment), 20.5.19 (Donkey Kong Bananza) built for the Switch 2: the constructor at sdk+0x14df00 on 20.5.15, with return address signing. Unreal's engine region takes what the alias region has room for, counting on the 62 MB (alias_room): with 1 GB nninitStartup's AllocateAddressRegion fails and it exits
+- node area 1 GB → 62 MB: SDK 21.4.1 (Sonic Frontiers Definitive Edition), 21.4.2 (Orbitals), 21.4.3 (Resident Evil 4), 21.4.4 (Splatoon Raiders) built for the Switch 2: the constructor at sdk+0x16db70 in all four, with return address signing: the 20.5 build's instructions in another order, with 32 more bytes on its cold path (an abort code per failing result). Unreal's engine region counts on the 62 MB (alias_room), as Yoshi and the Mysterious Book's. Region placement aligns to 64 KB or 2 MB only (sdk+0x16dd14), as SDK 20
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 7.3.2 (DRAGON QUEST XI S), 8.2.1 (Super Smash Bros. Ultimate), 8.3.1 (Paper Mario: The Origami King), 10.4.1 (Advance Wars 1+2), 10.4.8 (Pikmin 4)
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 11.4.0 (Pokémon Legends: Arceus, Kirby and the Forgotten Land): the next rule's size classes with 8 more bytes of body; the 4 GB StandardAllocator region of Arceus's nninitStartup (the host's cap) fits after the 62 MB node area only with it
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 12.3.2 (OCTOPATH TRAVELER II), 12.3.9 (Xenoblade Chronicles 3), 13.3.5 (Mario + Rabbids Sparks of Hope), 14.3.0 (Batman: Arkham Knight), 15.3.2 (Paper Mario: The Thousand-Year Door)

@@ -25,7 +25,7 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 ## Rendering
 
 - Deferred. The G-buffer is RGBA16F (normals), RGBA8 sRGB (albedo), RGBA8Uint (material bits) and RG11B10F; the lighting pass reads the material bits to choose how a pixel is lit.
-- **Resolved: grass, ground and trees dark, and most of the World of Peace map black.** The integer target stayed zero for 687 of the G-buffer's pixel shaders ([Integer outputs told from float bits](../../../docs/reference/shaders.md#integer-outputs-told-from-float-bits)).
+- **Resolved: grass, ground and trees dark, and most of the World of Peace map black.** The integer target stayed zero for 687 of the G-buffer's pixel shaders ([Integer outputs told by the pipeline's targets](../../../docs/reference/shaders.md#integer-outputs-told-by-the-pipelines-targets)).
 - **Current, harmless:** `[RED] stage 0 cb1 has no uniform buffer bound`, once per run, first seen as the movie after the first file start begins ([An unbound uniform slot reads the zero bank](../../../docs/reference/rendering.md#an-unbound-uniform-slot-reads-the-zero-bank)). Which shader it is was not looked at; nothing visibly wrong goes with it.
 
 ## Movies
@@ -62,5 +62,5 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 - [`nv12-colorspace` picks the game's YUV matrix](../../../docs/reference/movies.md#nv12-colorspace-picks-the-games-yuv-matrix).
 - [H.264 packets are Annex B, not NAL lengths](../../../docs/reference/movies.md#h264-packets-are-annex-b-not-nal-lengths): its `ImageMovie.mp4` has 167 samples whose first NAL length begins `00 00 01`, and plays in full, so its packets come as Annex B.
-- [Integer outputs told from float bits](../../../docs/reference/shaders.md#integer-outputs-told-from-float-bits).
+- [Integer outputs told by the pipeline's targets](../../../docs/reference/shaders.md#integer-outputs-told-by-the-pipelines-targets).
 - [A pipeline archive on an external drive is read into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory).

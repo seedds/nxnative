@@ -2,6 +2,7 @@
 build folder is <title ID>_build in the NSP folder and the IPA is in the NSP folder. The provisional profile goes in <build folder>/profile (copied once from the
 default place when --work-dir is new). The run stops at the prerequisite check; no game files, keys or Xcode needed."""
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -84,6 +85,20 @@ class WorkDir(unittest.TestCase):
             # the setting does the same as the option
             with mock.patch.object(nsp, 'WORK_DIR', str(work)):
                 self.assertEqual(nsp.profile_folder(args(), self.nsps, TID), work / 'profile')
+
+    def test_the_builds_own_profile_is_not_taken_as_registered(self):
+        # a provisional or derived profile in the folder this script writes them to, reached through DM_GAMES_DIR (the bring-up recipe the script prints; DM_GAMES_FIRST as a
+        # derived build sets it): main took it for a registered one, and derived it onto itself (Chained Echoes)
+        own, ipa = self.nsps / f'{TID:016X}_build' / 'profile', profile_ipa(); (own / f'{TID:016X}').mkdir(parents=True)
+        mine = game.by_title(TID); assert mine, 'no profile for the test game'
+        text = (mine.dir / 'game.tsv').read_text(encoding='utf-8')
+        (own / f'{TID:016X}' / 'game.tsv').write_text(text.replace(f'ipa\t{ipa}\n', 'ipa\tOwnCopy.ipa\n'), encoding='utf-8')
+        with mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(own), 'DM_GAMES_FIRST': '1'}), mock.patch.object(nsp, 'PROFILE_OUT', ''):
+            found = game.by_title(TID); assert found
+            self.assertEqual(found.get('ipa'), 'OwnCopy.ipa')   # what the lookup finds without the rule
+            self.assertIn(own, nsp.own_profile_folders(nsp.parse_args([str(self.nsps)]), self.nsps, TID))
+            self.assertIn(own, nsp.own_profile_folders(nsp.parse_args([str(self.nsps), '--work-dir', str(self.tmp / 'w')]), self.nsps, TID))   # a profile from before --work-dir too
+            self.assertEqual(self.plan()[1], self.nsps / ipa)   # dm/games' profile, not the own copy
 
     def test_profile_migrates_once_and_keeps_the_original(self):
         old = self.nsps / f'{TID:016X}_build' / 'profile' / f'{TID:016X}'; old.mkdir(parents=True)

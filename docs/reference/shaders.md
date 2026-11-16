@@ -431,6 +431,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** LUNAR Remastered Collection (0100DCD01E9EE000, a launcher and two game programs): `data.cpk` (ContentOffset 0x16000, TocOffset 0x42b06800) was read 0x15800 bytes too far in and `movie.cpk` 0x1000; with the fix program 1's split takes 18 shaders and program 2's 20, from the `.bnsh` files under `sysbin/nx/shader/`.
 - **Check:** `dm/tools/tests/test_cpk_offsets.py`: a synthetic CPK with its TOC after the header and one with its TOC at the end give each file its own bytes.
 
+### UnityFS bundles in CRI CPK archives
+
+- **Symptom:** a Unity game whose `StreamingAssets` hold `.cpk` files splits only the shaders of the player's own serialized files (`data.unity3d`, `sharedassets*.assets`, `Resources/unity default resources`) and `main`, a few hundred to a few thousand; the run prints `[RED] shader … is not in the shader map` for programs the title screen draws and `[RED] program has no vertex shader (or it is not mapped)`.
+- **Cause:** the game packs its Addressables bundles into CRI CPK archives, each entry a stored UnityFS bundle named by its hash. `cpk_shaders` scanned every CPK entry as a blob (`scan_blob`), which looks for the containers PlatinumGames and others keep in CPKs and does not read Unity's serialized files; only a loose file was given to the Unity reader.
+- **Fix:** `cpk_shaders` gives an entry that is a UnityFS bundle or a Unity serialized file to `unity_shaders`, as `scan_file_in` does for a loose one, and returns its legacy pass pairs. A range of entries that needs a type tree no bundle of its own has is deferred as that range: the second pass of the split scans the deferred jobs themselves again with the borrowed trees (it used to look each one up as a loose file by its path).
+- **Found on:** [Ace Angler: Fishing Spirits](../../dm/games/01007C50132C8000/README.md) 1.0.0: 22 CPKs under `Data/StreamingAssets/aa/Cpk/` with 21,205 bundles; 1,458 shaders before, 31,364 after, and the boot to the title and into play without a missing shader.
+- **Check:** `dm/tools/tests/test_split_cpk_unity.py`: the bundles of a synthetic CPK go to the Unity reader entry by entry with their pairs, another entry is still scanned as a blob, and a range without a type tree is deferred.
+
 ### Monolith ARH1, XBC1 and HCPS/SLCT shader containers
 
 - **Symptom:** archive or loose asset shaders are absent from the map; only boot shaders in `main` are found, sometimes reported as raw controls with no identified code area. Mixed-architecture assets report `HCPS: truncated control` and leave out their Maxwell shaders too.

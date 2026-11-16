@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (0400486024DEC000): the rewriter's patches of this game's own code. dm/tools/patch_nso.py loads every profile's patches.py;
 # MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
-from nso_asm import ADRP, B
+from nso_asm import ADRP, B, BL
 
 # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
 # [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
@@ -186,20 +186,44 @@ def screen_shape(ctx):
         fs_put(dev_site, [B(dev_site, start)], 'Device projection aspect and Vert+ fovyTan scaled by (16/9) / aspect when screen aspect is active')
 
 
-    # Layout2 pane matrix (main+0x14e9980): for fullscreen PicturePanes (width >= 1000, height >= 700, ~16:9), scales Y matrix row by state +0x5c (k = (16/9) / aspect) so full-screen faders cover the expanded canvas without letterboxing.
+    # Layout2 pane matrix (main+0x14e9980): duo_calc(pane, state + 0x80, x21) runs right after global matrix row 2 is stored (+0x1a0).
+    # - Fullscreen backgrounds/faders/scrims (w >= 1000, h >= 650 at x21+0x58, w > h*1.4, |Ty| < 40) scale row 1 by k = (16/9) / aspect;
+    # - Top/bottom HUD & menu bars (|Ty| >= 320 in 1080 canvas) shift out by ±d (st[0] * 1.5);
+    # - Centered dialogs, reticles, and central menu panels remain unshifted.
+    _duo_anchor = (
+        'bd4000211e20202854000041d65f03c0bd409000b40003a22d4b104352866668'
+        '72a7f6681e2701021e2208851e20c00252a88f481e2701061e26206052900008'
+        '72a884481e2701061e26a4881e25a46452a844081e2701031e23c44054000185'
+        'bd400421fc4840020f819042fc084002bd408c021e220822bd008c021e210800'
+        'bd009000d65f03c01e20c00252a882c81e2701031e23204054fffba41e211002'
+        '1e2208211e2140221e2020081e22cc211e212800bd009000d65f03c0'
+    )
     calc_fn = ctx.others.get('layout calc matrix')
     if calc_fn is not None:
-        calc_site = calc_fn + 0x19c
-        fs_site(calc_site, '6042883c')   # stur q0, [x19, #0x84]
+        duo_code = here()
+        for i in range(0, len(_duo_anchor), 8):
+            emit(int(_duo_anchor[i:i + 8], 16))
+        calc_site = calc_fn + 0x1a0
+        fs_site(calc_site, '6142893c')   # stur q1, [x19, #0x94]
         start = here()
+        emit(0x3c894261)                 # stur q1, [x19, #0x94]
         emit(ADRP(16, here(), FS_STATE_OFF))
-        for w in (0xb9404a11, 0x34000351, 0xb940aab1, 0x53166631, 0x7100063f, 0x540002c1, 0x2d4b0ea2,
-                  0x52a88f51, 0x1e270224, 0x1e242040, 0x54000224, 0x52a885f1, 0x1e270224, 0x1e242060,
-                  0x540001a4, 0x1e245004, 0x1e261005, 0x1e240844, 0x1e250865, 0x1e253884, 0x1e20c084,
-                  0x52a86911, 0x1e270225, 0x1e252080, 0x5400006a, 0xbd405e02, 0x4f829000, 0x3c884260):
+        for w in (0xb9404a11,   # ldr w17, [x16, #0x48]  (oh; 0 = 16:9)
+                  0x34000171,   # cbz w17, +11 (back)
+                  0x91020201,   # add x1, x16, #0x80     (anc[7])
+                  0xaa1303e0,   # mov x0, x19            (pane)
+                  0xaa1503e2,   # mov x2, x21            (p21 with size at +0x58)
+                  0xa9bb7be8,   # stp x8, x30, [sp, #-0x50]!
+                  0xad009be5,   # stp q5, q6, [sp, #0x10]
+                  0xad01c3e7):  # stp q7, q16, [sp, #0x30]
+            emit(w)
+        emit(BL(here(), duo_code))
+        for w in (0xad41c3e7,   # ldp q7, q16, [sp, #0x30]
+                  0xad409be5,   # ldp q5, q6, [sp, #0x10]
+                  0xa8c57be8):  # ldp x8, x30, [sp], #0x50
             emit(w)
         emit(B(here(), calc_site + 4))
-        fs_put(calc_site, [B(calc_site, start)], 'Layout2 fullscreen picture panes scaled by (16/9) / aspect when screen aspect is active')
+        fs_put(calc_site, [B(calc_site, start)], 'Layout2 edge-anchored HUD/menu panes and stretched fullscreen backgrounds when screen aspect is active')
 
 def dynamic_resolution(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state

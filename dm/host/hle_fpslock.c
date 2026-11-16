@@ -304,7 +304,8 @@ void dm_fps_lock_tick(void) {
         // resident_evil_timing_profile() in loader.c. For 30/60, keep the
         // engine clock at the selected rate; for the 120 profile, keep its
         // simulation clock at 120 even while NVN temporarily holds presents.
-        int row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && high ? 120 : target;
+        int re_movie_clock = !strcmp(DM_GAME_ID, "010050F00BC1A000") && target == 60 && !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
+        int row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && (high || re_movie_clock) ? nvn_fps_high_now() : target;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {

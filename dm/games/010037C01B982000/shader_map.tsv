@@ -1,0 +1,5 @@
+# kind: evidence  Xuan Yuan Sword: Mists Beyond the Mountains shaders (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_other.bin	0	pixel	8ee2d23081fb9530	/glslc_capture/2b5e7fb3ca9de30e.glslc#GLSLC@0x0
+vs_other.bin	0	vertex	d3ff93e32f2f20dc	/glslc_capture/5dedcf511b5e4b27.glslc#GLSLC@0x0

@@ -87,8 +87,11 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
     fi
 else sync_romfs "$DM_RESOURCE_ROMFS" "$APP"; fi
 sync_libraries "$DM_RESOURCE_SHADERS" "$APP/msl" "$DM_RESOURCE_MSLDIR"
+# A game that draws through the GL layer beside NVN (profile_guess.py gl_too): its GL libraries beside the NVN ones in msl, where hle_gl.m reads them (DM_MSL_DIR/gl)
+DM_RESOURCE_GL=${DM_RESOURCE_GL:-}
+if [ -n "$DM_RESOURCE_GL" ] && [ -d "$DM_RESOURCE_GL" ]; then sync_dir "$DM_RESOURCE_GL" "$APP/msl/gl"; else rm -rf "$APP/msl/gl"; fi
 for old in "$APP/msl/"*; do
-    case "$old" in "$APP/msl/$DM_RESOURCE_MSLDIR"|"$APP/msl/$DM_RESOURCE_MSLDIR.img") ;; *) rm -rf "$old";; esac
+    case "$old" in "$APP/msl/$DM_RESOURCE_MSLDIR"|"$APP/msl/$DM_RESOURCE_MSLDIR.img"|"$APP/msl/gl") ;; *) rm -rf "$old";; esac
 done
 beside_romfs "$DM_RESOURCE_ROMFS" "$APP"
 for old in "$APP"/p[0-9]*; do [ -d "$old" ] && rm -rf "$old"; done   # the programs of a project prepared for several

@@ -340,6 +340,7 @@ DM_RENDER_SCALE	player	`0.5` to `1.0`: fixes the game's 3D views at that fractio
 DM_RESOURCE_AOC	path	The add-on content folder the iOS build copies into the app's `aoc/` (empty for none); written by `gen_resources.py`, read by `stage_resources.sh`
 DM_RESOURCE_BUILD	switch	Package version (for example `v327680`), written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `build=` field of the app's `romfs.id`
 DM_RESOURCE_CHAIN_H	path	Path of `dm/gfx/nvn/dmsh_chain.h`, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) stops when the prepared shaders are not of its chain version
+DM_RESOURCE_GL	path	Folder of an iOS game's GL shader libraries (`sh/ios/gl`), written to `Gen/resources.env` by `build_ipa.sh` for a game that draws through the GL layer beside NVN (`profile_guess.py` `gl_too`); the Xcode copy phase copies it to `<App>/msl/gl`, where `hle_gl.m` reads it
 DM_RESOURCE_MARKER	path	A file under the RomFS, written to `Gen/resources.env` by `build_ipa.sh`, that the Xcode copy phase (`stage_resources.sh`) checks for before copying the game files
 DM_RESOURCE_MSLDIR	path	Name of the shader library folder (`b-<chain>`), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies the shaders to `msl/<name>` in the app, or `msl/<name>.img` for an NVN game's one file
 DM_RESOURCE_PROGRAMS	path	The table of a game's programs' files for the Xcode build phase (`stage_resources.sh`; `build_ipa.sh` writes it)

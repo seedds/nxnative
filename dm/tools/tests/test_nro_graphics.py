@@ -35,6 +35,15 @@ class NroGraphics(unittest.TestCase):
         self.assertTrue(s['glslc_capture'][0])
         self.assertFalse(s['gl_capture'][0])
 
+    def test_own_glslc_with_egl_builds_the_gl_libraries_too(self):   # Xuan Yuan Sword: Mists Beyond the Mountains draws with SDL's GLES2 renderer beside NVN; the GL libraries go beside the NVN ones
+        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader', 'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        self.assertTrue(s['gl_too'][0])
+        self.assertFalse(s['gl_capture'][0])   # graphics stays nvn: the NVN chain, not the GL layer, is the game's main path
+
+    def test_own_glslc_without_egl_names_needs_no_gl_libraries(self):   # a game of Rayman's class that names no GL function
+        s = pg.shader_sources({'nvnBootstrapLoader', 'glslcCompile', 'eglGetProcAddress'}, 4, ['subsdk2'], 0, 0, gl_names=0)
+        self.assertFalse(s['gl_too'][0])
+
     def test_glslc_without_nvn_stays_gl(self):   # no nvnBootstrapLoader in main: GLSLC alone does not make it an NVN game
         s = pg.shader_sources(SDL_MAIN | {'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
         self.assertEqual(s['graphics'][0], 'gl')

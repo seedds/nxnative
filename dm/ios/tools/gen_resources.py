@@ -37,6 +37,7 @@ def main():
         'DM_RESOURCE_AOC': str(Path(aoc).resolve()) if aoc and Path(aoc).is_dir() else '',
         'DM_RESOURCE_CHAIN_H': str(Path(chain_h).resolve()),   # dm/gfx/nvn/dmsh_chain.h, which the host is compiled with (one chain version for every game)
         'DM_RESOURCE_PSO': str(Path(pso).resolve()) if pso and Path(pso).is_dir() else '',   # → <App>/pso, which the app hands the host as DM_PSO_BUNDLE
+        'DM_RESOURCE_GL': os.environ.get('DM_RESOURCE_GL', ''),   # a game that draws through the GL layer beside NVN (profile_guess.py gl_too): its GL libraries → <App>/msl/gl (stage_resources.sh)
         # what the identity line of a RomFS image names (stage_resources.sh with DM_COPY_ROMFS=NO writes <App>/romfs.id): title ID, display version, package version
         'DM_RESOURCE_TITLE': os.environ.get('GAME', ''),
         'DM_RESOURCE_VERSION': os.environ.get('DM_APP_VERSION', ''),

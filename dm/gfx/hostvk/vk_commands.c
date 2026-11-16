@@ -504,6 +504,8 @@ int hvk_commands_init(void) {
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, s->pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 2};
         if (vkAllocateCommandBuffers(hvk.d, &ai, cbs)) return 0;
         s->pre = cbs[0]; s->main = cbs[1];
+        hostvk_name(&hvk.dev, VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)(uintptr_t)s->pre, "slot %d prologue (uploads, zero-fills)", i);
+        hostvk_name(&hvk.dev, VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)(uintptr_t)s->main, "slot %d main", i);
         VkQueryPoolCreateInfo qi[QK_N] = {{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_OCCLUSION, NSEG, 0},
             {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_PIPELINE_STATISTICS, NSEG, K_STAT_BITS},
             {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT, NSEG, 0},
@@ -1258,6 +1260,10 @@ void hvk_dispatch(const p_dispatch *dp) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe); g_bound.valid = 0;
     if (!hvk_bind_resources(cb, l, sh, VK_PIPELINE_BIND_POINT_COMPUTE, 0, dim)) { CQ("descriptors"); return; }
     atomic_fetch_add(&hvk.st_dispatches, 1);
+    if (!pr->sh[5]->dispatched) {   // which compute passes a game runs, and where: each shader's first dispatch
+        pr->sh[5]->dispatched = 1;
+        hostvk_log("[hostvk] compute shader %s: first dispatch in frame %llu (%d x %d x %d groups%s)", pr->sh[5]->key, (unsigned long long)hvk.frame, dp->x, dp->y, dp->z, dp->ind ? ", indirect" : "");
+    }
     if (dp->ind) {
         VkBuffer ab; VkDeviceSize ao;
         if (!hvk_buf(dp->ind, 12, &ab, &ao, NULL) || (ao & 3)) { HVK_RED_ONCE("indirect dispatch arguments in no memory pool: skipped"); return; }

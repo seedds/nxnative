@@ -141,6 +141,7 @@ typedef struct hvk_shader {
     // Step P8: from the module itself (vk_shader.c module_scan)
     uint16_t xfb_stride[4];    // the XfbStride of each transform feedback buffer its outputs are captured into (0: none): DrawTransformFeedback's vertex size (vk_commands.c)
     uint8_t tcs_vertices;      // a tessellation control shader's OutputVertices: the patch size a draw is made with (nvnCommandBufferSetPatchSize is not recorded)
+    uint8_t dispatched;        // a compute shader that has been dispatched (vk_commands.c: its first dispatch is logged; submit thread)
 } hvk_shader;
 typedef struct hvk_prog { hvk_shader *sh[6]; uint64_t serial; } hvk_prog;
 // The program's shaders, per NVN stage: loaded on first use from the shader map and the library (hvk_shader_dir), NULL with a red line for one that is missing. Submit thread
@@ -271,6 +272,7 @@ typedef struct {
     // texture memory (step P7): every image's allocation, and of those the ASTC images held compressed and the RGBA8 decodes with the bytes their blocks take (decision D1)
     _Atomic int64_t st_tex_bytes, st_astc_native_bytes, st_astc_decoded_bytes, st_astc_block_bytes;
     _Atomic uint64_t st_up_gpu, st_up_cpu, st_astc_decodes;   // subresources uploaded through the GPU kernels and through the CPU, ASTC subresources decoded
+    _Atomic uint64_t st_reupload_same;   // uploads of a texture already uploaded in the same submission's prologue (ordered after the earlier one by a barrier)
 } hvk_t;
 extern hvk_t hvk;
 int hvk_up(void);                     // the device is up, initializing it on the first call (pthread_once): 0 = the null forms

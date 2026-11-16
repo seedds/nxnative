@@ -151,16 +151,23 @@ static hvk_shader *task_shader(const char *key) {
     return s;
 }
 static void finished(void);
+// A row that could not be built, said for the first 8 (the "failed" of the done line)
+static void fail_note(const char *what, const char *a, const char *b) {
+    static _Atomic int n;
+    if (atomic_fetch_add(&n, 1) < 8) hostvk_log("[hostvk] pipeline prewarm: %s not built (%s%s%s)", what, a, b && b[0] ? ", " : "", b ? b : "");
+}
 static void task_run(task *t) {
     if (t->kind == T_SHADER) {
         hvk_shader *s = task_shader(t->vs);
-        if (s) { if (!hvk_pso_gpl() || hvk_pso_build_shader(s)) atomic_fetch_add(&s_built, 1); else atomic_fetch_add(&s_failed, 1); }
+        // an S row of a compute shader (the Metal backend's lists have them, beside its C row, which builds its pipeline): no pipeline library holds one, skipped
+        if (s && s->stage != 0 && s->stage != 1) atomic_fetch_add(&s_skipped, 1);
+        else if (s) { if (!hvk_pso_gpl() || hvk_pso_build_shader(s)) atomic_fetch_add(&s_built, 1); else { atomic_fetch_add(&s_failed, 1); fail_note("a shader row's library", s->key, NULL); } }
     } else if (t->kind == T_COMPUTE) {
         hvk_shader *s = task_shader(t->vs);
         if (s && s->stage == 5) {
             hvk_shader *sh[6] = {0}; sh[5] = s;
             hvk_layout *l = hvk_layout_for(sh);
-            if (l && hvk_cs_pipeline(s, l)) atomic_fetch_add(&s_built, 1); else atomic_fetch_add(&s_failed, 1);
+            if (l && hvk_cs_pipeline(s, l)) atomic_fetch_add(&s_built, 1); else { atomic_fetch_add(&s_failed, 1); fail_note("a compute row's pipeline", s->key, l ? NULL : "no layout"); }
         } else if (s) atomic_fetch_add(&s_skipped, 1);
     } else {
         hvk_shader *vs = task_shader(t->vs), *fs = t->fs[0] ? task_shader(t->fs) : NULL;
@@ -169,8 +176,8 @@ static void task_run(task *t) {
         hvk_layout *l = hvk_layout_for(sh);
         for (int i = 0; i < t->nd; i++) {
             hvk_vin v; hvk_gfx_key k;
-            if (!l || !row_key(&t->d[i], sh, &v, &k)) { atomic_fetch_add(&s_failed, 1); continue; }
-            if (hvk_pso_build(sh, l, &k, t->row[i])) atomic_fetch_add(&s_built, 1); else atomic_fetch_add(&s_failed, 1);
+            if (!l || !row_key(&t->d[i], sh, &v, &k)) { atomic_fetch_add(&s_failed, 1); fail_note("a render pipeline row", vs->key, l ? "its key" : "no layout"); continue; }
+            if (hvk_pso_build(sh, l, &k, t->row[i])) atomic_fetch_add(&s_built, 1); else { atomic_fetch_add(&s_failed, 1); fail_note("a render pipeline row", vs->key, fs ? fs->key : "no fragment shader"); }
         }
     }
 }

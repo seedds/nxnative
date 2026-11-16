@@ -189,3 +189,6 @@ void hostvk_set_log(void (*fn)(const char *line));
 // Tests (t_vk_provoking): VK_EXT_provoking_vertex taken as absent by the next hostvk_init (on: 1), so the device is made without it and the red line is said
 void hvk_test_no_provoking_vertex(int on);
 void hostvk_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+// A debug name for a Vulkan object (VK_EXT_debug_utils, only with the validation layer's messenger on): the layer's messages then name it (a texture's serial, a command
+// buffer's role). Nothing is done without the messenger
+void hostvk_name(const hostvk_dev *d, VkObjectType type, uint64_t handle, const char *fmt, ...) __attribute__((format(printf, 4, 5)));

@@ -47,6 +47,7 @@ struct hvk_tex {
     int cpu_content, gpu_written, uploaded, expand3, convert, astc_dec, astc_srgb, d24sub;
     int64_t mem_bytes, astc_block_bytes;   // the image's allocation; for a decoded ASTC texture what its blocks take (the memory line, decision D1)
     uint64_t stamp, seen; const void *span;
+    uint64_t up_fence;         // the submission whose prologue holds its last upload (upload: a second upload in the same prologue is ordered after the first)
     struct { view_key k; VkImageView v; } views[NVIEW]; int nviews;
     VkBufferView bview[2]; uint8_t bcls;   // a buffer texture's texel buffer views (sampled, storage)
     uint64_t bview_imp[2];     // the import each was made over (hvk_buf_import): a pool's import can change (vk_memory.c), and its view with it
@@ -99,6 +100,10 @@ void hvk_test_band_bytes(uint32_t n);
 void hvk_test_band_bytes(uint32_t n) { g_band = n ? n : HVK_SCRATCH_MAX; }
 // For tests: the depth bias of NVN depth 24 held in a float format as on a device without VK_EXT_depth_bias_control's float representation (vk_commands.c asks hvk_tex_dbc_float)
 static int g_no_dbc;
+// Tests: every use of a texture the CPU fills uploads it again, as when the CPU wrote it between two draws of one submission (t_vk_reupload)
+static int g_test_reupload;
+void hvk_test_reupload(int on);
+void hvk_test_reupload(int on) { g_test_reupload = on != 0; }
 void hvk_test_no_depth_bias_control(int on);
 void hvk_test_no_depth_bias_control(int on) { g_no_dbc = on; }
 int hvk_tex_dbc_float(void) { return hvk.dev.x.dbc_float && !g_no_dbc; }
@@ -335,7 +340,13 @@ static int tex_make(hvk_tex *x) {
     if ((ff & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT) && type != VK_IMAGE_TYPE_1D) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (ff & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if ((ff & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT) && ((d->flags & NVN_TEXTURE_FLAGS_IMAGE) || x->wants_storage) && samples == VK_SAMPLE_COUNT_1_BIT) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-    if ((d->flags & NVN_TEXTURE_FLAGS_IMAGE) && !(usage & VK_IMAGE_USAGE_STORAGE_BIT))
+    // The IMAGE flag on a block-compressed format: no shader writes block-compressed texels (Maxwell's surface stores have no compressed formats either), so only an uncompressed
+    // view of the blocks could be an image, and nothing is lost until the game registers one as an image (hvk_reg_tex says that with a red line). Mario vs. Donkey Kong's
+    // resource textures carry the flag (130 of its 184 textures in level 1-1, nearly all BC) and none is registered as an image: said once, not red
+    if ((d->flags & NVN_TEXTURE_FLAGS_IMAGE) && !(usage & VK_IMAGE_USAGE_STORAGE_BIT) && (x->f.flags & NVN_VK_BLOCK))
+        HVK_NOTE_ONCE("textures with the IMAGE flag in a block-compressed format (first case ser=%llu, NVN %s): made without storage use, as no shader writes block-compressed texels; "
+                      "a RegisterImage of one would need an uncompressed view of its blocks and is said with a red line", (unsigned long long)x->serial, nvn_fmt_name(d->format));
+    else if ((d->flags & NVN_TEXTURE_FLAGS_IMAGE) && !(usage & VK_IMAGE_USAGE_STORAGE_BIT))
         HVK_RED_ONCE("texture with the IMAGE flag in VkFormat %u, which this device cannot use as a storage image (first case ser=%llu): its image binds read the dummy", (unsigned)f, (unsigned long long)x->serial);
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, flags, type, f, {w, h, dz}, levels, layers, samples, VK_IMAGE_TILING_OPTIMAL, usage,
                             VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
@@ -353,6 +364,8 @@ static int tex_make(hvk_tex *x) {
         }
     }
     if (vkCreateImage(hvk.d, &ci, NULL, &x->img)) { hostvk_log("[RED] [hostvk] vkCreateImage failed for texture ser=%llu", (unsigned long long)x->serial); x->img = VK_NULL_HANDLE; x->failed = 1; return 0; }
+    hostvk_name(&hvk.dev, VK_OBJECT_TYPE_IMAGE, (uint64_t)(uintptr_t)x->img, "texture ser=%llu NVN %s %ux%ux%u levels %u layers %u%s", (unsigned long long)x->serial,
+                nvn_fmt_name(d->format), w, h, dz, levels, layers, t->has_layout ? " (a packaged layout)" : "");
     VkResult mr = hvk_mem_image(x->img, 0, 0, &x->mem);
     if (mr) {
         VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, x->img, &req);
@@ -642,6 +655,12 @@ static void upload(hvk_tex *x, VkCommandBuffer cb) {
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
     if (!bpb) return;
     uint64_t stamp = nvn_dirty_now(), t0 = plat_now_ns();   // the content's stamp, taken before it is read (nvn_dirty.h)
+    // A texture the CPU wrote again between two draws of one submission is uploaded again into the same prologue, where every upload runs before the submission's draws: the
+    // later copy must land after the earlier one, or the image may keep the older content or a mix of both (two transfer writes with no barrier between them are unordered:
+    // SYNC-HAZARD-WRITE-AFTER-WRITE, the game's glyph texture in Mario vs. Donkey Kong). A barrier orders them; a first upload needs none (the prologue begins with one)
+    uint64_t fence = hvk_open_fence();
+    if (x->uploaded && fence && x->up_fence == fence) { hvk_full_barrier(cb); atomic_fetch_add(&hvk.st_reupload_same, 1); }
+    x->up_fence = fence;
     int64_t bytes;
     if (x->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) bytes = (int64_t)upload_ds(x, cb);
     else if ((bytes = upload_gpu(x, cb)) < 0) bytes = (int64_t)upload_cpu(x, cb);
@@ -663,7 +682,7 @@ hvk_tex *hvk_tex_get(const tex_t *t) {
     }
     if (x && x->made && x->cpu_content && !x->gpu_written) {
         uint64_t now = nvn_dirty_now();
-        if (!x->uploaded || (x->seen != now && (!x->span || nvn_dirty_since_span(x->span, x->t.mem, x->t.L.size, x->stamp)))) upload(x, hvk_pre());
+        if (!x->uploaded || g_test_reupload || (x->seen != now && (!x->span || nvn_dirty_since_span(x->span, x->t.mem, x->t.L.size, x->stamp)))) upload(x, hvk_pre());
         else x->seen = now;
     }
     pthread_mutex_unlock(&hvk.tex_mu);
@@ -855,6 +874,14 @@ void hvk_reg_tex(int tid, const tex_t *t, const view_t *v, int image) {
         if (!t) memset(r, 0, sizeof *r);
         else {
             r->t = *t; r->ok = 1; r->has_v = v != NULL; r->image = (uint8_t)image; if (v) r->v = *v; else memset(&r->v, 0, sizeof r->v);
+            int bw = 1, bh = 1; nvn_fmt_bpb(t->d.format, &bw, &bh);
+            if (image && (bw > 1 || bh > 1)) {   // a block-compressed texture as an image (tex_make's IMAGE flag note): said for the first 16, with the view's format
+                static _Atomic int n_bc_img;
+                if (atomic_fetch_add(&n_bc_img, 1) < 16)
+                    hostvk_log("[RED] [hostvk] texture ser=%llu in NVN %s (block-compressed) registered as an image at texture ID %d%s%s: its image binds read the dummy (an image "
+                               "of a block-compressed texture's blocks through an uncompressed view, VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT, is not made)", (unsigned long long)t->serial,
+                               nvn_fmt_name(t->d.format), tid, v && v->set_format ? ", view format NVN " : "", v && v->set_format ? nvn_fmt_name(v->format) : "");
+            }
             if (image) { hvk_tex *x = tex_entry(t); if (x) { x->wants_storage = 1;
                 if (x->made && !(x->usage & VK_IMAGE_USAGE_STORAGE_BIT) && (fmt_features(x->fmt, 1) & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT))
                     HVK_RED_ONCE("texture ser=%llu registered as an image after it was made without storage use (first case): its image binds read the dummy (remaking it with its content is later)", (unsigned long long)t->serial); } }

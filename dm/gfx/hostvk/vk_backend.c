@@ -563,13 +563,13 @@ void be_res_stats(char *out, size_t n) {
     if (!n) return;
     double mib = 1048576.0, bud, use;
     int k = snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu index conversions GPU %llu CPU %llu indirect %llu fb splits %llu xfb draws %llu copy draws %llu; "
-                     "textures %.1f MiB (ASTC %.1f native, %.1f decoded from %.1f of blocks), uploads GPU %llu CPU %llu, ASTC decodes %llu",
+                     "textures %.1f MiB (ASTC %.1f native, %.1f decoded from %.1f of blocks), uploads GPU %llu CPU %llu (%llu again in one prologue), ASTC decodes %llu",
                      (unsigned long long)hvk.st_passes, (unsigned long long)hvk.st_draws, (unsigned long long)hvk.st_dispatches, (unsigned long long)hvk.st_pipelines,
                      (unsigned long long)hvk.st_shaders, (unsigned long long)hvk.st_barriers, (unsigned long long)hvk.st_pass_splits, (unsigned long long)hvk.st_vcopies_gpu,
                      (unsigned long long)hvk.st_index_gpu, (unsigned long long)atomic_load(&hvk.st_index_cpu), (unsigned long long)atomic_load(&hvk.st_index_ind), (unsigned long long)atomic_load(&hvk.st_feedback_splits),
                      (unsigned long long)atomic_load(&hvk.st_xfb_draws), (unsigned long long)atomic_load(&hvk.st_copy_draws), (double)atomic_load(&hvk.st_tex_bytes) / mib, (double)atomic_load(&hvk.st_astc_native_bytes) / mib,
                      (double)atomic_load(&hvk.st_astc_decoded_bytes) / mib, (double)atomic_load(&hvk.st_astc_block_bytes) / mib, (unsigned long long)atomic_load(&hvk.st_up_gpu),
-                     (unsigned long long)atomic_load(&hvk.st_up_cpu), (unsigned long long)atomic_load(&hvk.st_astc_decodes));
+                     (unsigned long long)atomic_load(&hvk.st_up_cpu), (unsigned long long)atomic_load(&hvk.st_reupload_same), (unsigned long long)atomic_load(&hvk.st_astc_decodes));
     if (k > 0 && (size_t)k < n) {
         if (mem_budget(&bud, &use)) snprintf(out + k, n - (size_t)k, "; device-local %.0f of %.0f MiB", use, bud);
         else snprintf(out + k, n - (size_t)k, "; no memory budget");

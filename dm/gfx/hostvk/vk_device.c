@@ -362,6 +362,12 @@ static void driver_version(const hostvk_dev *d, char *out, size_t n) {
 }
 
 // ---------- Validation messages ----------
+void hostvk_name(const hostvk_dev *d, VkObjectType type, uint64_t handle, const char *fmt, ...) {
+    if (!d || !d->messenger || !d->device || !handle || !vkSetDebugUtilsObjectNameEXT) return;
+    char b[160]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    VkDebugUtilsObjectNameInfoEXT ni = {VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT, NULL, type, handle, b};
+    vkSetDebugUtilsObjectNameEXT(d->device, &ni);
+}
 static VKAPI_ATTR VkBool32 VKAPI_CALL on_message(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                  const VkDebugUtilsMessengerCallbackDataEXT *m, void *user) {
     hostvk_dev *d = user;

@@ -124,6 +124,10 @@ t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
 	clang -O1 -Wall -o $@ t_thread_rt.c
 t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h
 	clang -O1 -Wall -o $@ t_link_drain.c
+t_link_latch_cb: t_link_latch_cb.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_link_latch_cb.m $(MTL_T_SRC) $(FW)
+t_link_latch: t_link_latch.c ../nvn/nvn_link_latch.h
+	clang -O1 -Wall -o $@ t_link_latch.c
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)

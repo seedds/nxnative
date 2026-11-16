@@ -35,7 +35,9 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
                             failed ? ": " : "", failed ? (failed.localizedDescription.UTF8String ?: "no reason given") : "");
                     return -1;
                 }
-                usleep(150 * 1000);
+                // Every 150 ms for the first 10 s, then every 500 ms: the mount stops waiting at 10 s (save_sync.c FETCH_MS) and leaves this thread polling on while the game
+                // starts; only the launcher's report waits longer (MATERIALIZE_S), and it sees the file at most 0.35 s later
+                usleep([start timeIntervalSinceNow] > -10 ? 150 * 1000 : 500 * 1000);
             }
             if (asked) fprintf(stderr, "[dm] save sync: the cloud's save downloaded in %.1f s\n", -[start timeIntervalSinceNow]);
         }

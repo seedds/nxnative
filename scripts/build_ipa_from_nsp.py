@@ -86,7 +86,8 @@ MOTION = True                           # True passes a gyro controller's motion
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <build folder>/profile, i.e. <NSP folder>/<title ID>_build/profile unless WORK_DIR is set; the profile is <this>/<title ID>/)
 PROGRAM_INDEX = 0                       # a multi-program application (Super Mario 3D All-Stars: a launcher and one program per game): which program to pack, 0 = the application's own; its title ID is the application's + the index.
-                                        #   A game of several programs (its profile's key programs) is packed as one from program 0: this setting packs one of them alone, for bring-up
+                                        #   A game of several programs (its profile's key programs) is packed as one from program 0: this setting packs one of them alone, for bring-up.
+                                        #   A NUP holding several programs (a Switch 2 Edition of a Switch 1 game) packs its highest program unless this or --program names another; the other programs' RomFS go beside it
 ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes), stop the build; True writes those files as read and goes on
 ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
                                         #   True packs the app without them
@@ -812,21 +813,23 @@ def survey_dump(src, out):
 
 def survey_nup(n, k, base, out):
     """A NUP package's files as nx_extract --manifest leaves an NSP's for the survey, without writing the RomFS: out/ExeFS, out/romfs_manifest.tsv (path, size and first 32 bytes of every
-    RomFS file), out/romfs_nro (the NRO modules, whole: their imports decide the graphics API and the modules) and the package's control data, else its base game's. Returns the files listed"""
+    RomFS file, then the other programs' files it lacks), out/romfs_nro (the NRO modules, whole: their imports decide the graphics API and the modules) and the package's control data, else its
+    base game's. Returns the files listed"""
     out.mkdir(parents=True)
     try: pack_nup.exefs(n, k, out / 'ExeFS')
     except pack_nup.Error as e: raise BuildError(str(e)) from e
-    rows = []
+    rows, seen = [], set()
     def walk(d, pre):
         for name, isdir, i in n.children(d):
             p = pre + '/' + os.fsdecode(name)
             if isdir: walk(i, p); continue
-            rows.append(f'{p}\t{n.files[i][1]}\t{n.head(i).hex()}\n')
+            if p in seen: continue   # a path the program's own RomFS has
+            seen.add(p); rows.append(f'{p}\t{n.files[i][1]}\t{n.head(i).hex()}\n')
             if p.lower().endswith('.nro'):
                 o = out / 'romfs_nro' / p.lstrip('/'); o.parent.mkdir(parents=True, exist_ok=True)
                 with open(o, 'wb') as f: n.copy(i, f)
     try:
-        walk(pack_nup.romfs_of(k, base), '')
+        for d in [pack_nup.romfs_of(k, base), *pack_nup.sibling_romfs(n, k).values()]: walk(d, '')   # then the other programs' RomFS, which this one mounts by program index (a Switch 2 Edition's game data is its Switch 1 program's)
         pack_nup.control(k, out, pack_nup.app_package(n) if base is None else base)   # what an update lacks, from its base game (or the metadata record, as pack_version takes it)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
@@ -1371,12 +1374,14 @@ def nup_file(path):   # the NUP to pack: path when it is a .nup file, else the o
     return nups[0] if nups else None
 
 
-def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, with its packages for the NSPs: (title ID, {'base', 'updates', 'dlc', 'nup': the open container})
+def scan_nup(path, want=None, program=None):
+    """A NUP as scan_nsps gives a folder of NSPs, with its packages for the NSPs: (title ID, {'base', 'updates', 'dlc', 'nup': the open container}). program: of an application of several
+    programs, the index of the one to pack (default: the highest); the title ID is its program ID. want: --title-id, that program's ID or the application's"""
     try:
         n = pack_nup.Nup(path)
-        app, base, vers, dlc = pack_nup.scan(n)
+        app, base, vers, dlc = pack_nup.scan(n, program)
     except (pack_nup.Error, OSError) as e: raise BuildError(str(e)) from e
-    if want is not None and want != app: raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {path}, which holds {app:016X}')
+    if want is not None and want not in (app, n.application): raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {path}, which holds {app:016X}')
     return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nup': n}
 
 
@@ -1386,7 +1391,7 @@ def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its bas
         try: return {'done': part.stat().st_size}
         except OSError: return None
     try:
-        PROG.stage(f'unpack {name}', poll=poll, unit='B', total=n.tree_bytes(pack_nup.romfs_of(k, base)), est=True)
+        PROG.stage(f'unpack {name}', poll=poll, unit='B', total=pack_nup.romfs_bytes(n, k, base), est=True)
         how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
@@ -1399,8 +1404,9 @@ def check_formats(dirs):
     textures beginning with 12,288 zero bytes; the game asked for one again on every pass of its background loader (412% CPU on the Mac; PR #1530). The result is kept beside
     the image (RomFS.img.formats) with its size and time, so an unchanged image is not read again (Ocarina of Time: 102,185 .zs files, 16 s from a USB SSD)"""
     import romfs_image
-    for ver, d in dirs.items():
-        img = d / 'RomFS.img'; stamp = d / 'RomFS.img.formats'
+    for ver, img in ((ver, img) for ver, d in dirs.items() for img in [d / 'RomFS.img', *sorted((d / pack_nup.PROGRAMS).glob('*.img'))]):   # the other programs' RomFS too
+        stamp = img.with_name(img.name + '.formats')
+        if img.parent.name == pack_nup.PROGRAMS: ver = f'{ver} program {img.stem}'
         st = img.stat(); ident = f'{st.st_size} {st.st_mtime_ns}'
         try: lines = stamp.read_text().splitlines()
         except OSError: lines = []
@@ -3111,7 +3117,7 @@ def parse_args(argv):
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
-    ap.add_argument('--program', type=int, default=None, help='a multi-program application (Super Mario 3D All-Stars): pack program N of the NSPs as a game of its own, title ID = the application\'s + N (default: the PROGRAM_INDEX setting, 0; a game whose profile lists programs packs them all as one from program 0: this is for bring-up)')
+    ap.add_argument('--program', type=int, default=None, help='a multi-program application (Super Mario 3D All-Stars): pack program N of the NSPs as a game of its own, title ID = the application\'s + N (default: the PROGRAM_INDEX setting, 0; a game whose profile lists programs packs them all as one from program 0: this is for bring-up). A NUP of several programs (a Switch 2 Edition of a Switch 1 game): program N, title ID = its program ID (default: the highest), with the other programs\' RomFS beside its own')
     ap.add_argument('--allow-damaged', action='store_true', help='a damaged NSP (files failing the NCA hash check), or files whose bytes do not start as their names promise (a .zs file that is no zstd stream): write them as read and go on instead of stopping')
     ap.add_argument('--allow-shader-regressions', action='store_true', help='shaders that translated in the game\'s previous build and fail with the current translation chain: '
                     'pack the app without them instead of stopping')
@@ -3267,11 +3273,13 @@ def main(args=None):
     py = sys.executable
     want = args.title_id or TITLE_ID
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
-    if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
-                                                     + ('a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
+    if PROGRAM_INDEX and dump == 'folder': raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs or NUP; a dump folder is read as one program\'s files')
     if nup:
-        app, fam = scan_nup(nup, int(want, 16) if want else None)
+        app, fam = scan_nup(nup, int(want, 16) if want else None, PROGRAM_INDEX if args.program is not None or PROGRAM_INDEX else None)
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
+        if fam['nup'].siblings:
+            say(f'program {app & 0xFFF} of application {fam["nup"].application:016X}; the RomFS of its program(s) '
+                + ', '.join(f'{i} ({pid:016X})' for i, (pid, _, _) in sorted(fam['nup'].siblings.items())) + f' go beside its own ({pack_nup.PROGRAMS}/), --program picks another')
         if fam['base'] is None: say(pack_nup.NO_BASE)
     elif dump:
         app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
@@ -3352,7 +3360,7 @@ def main(args=None):
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = (sum(fam['nup'].tree_bytes(pack_nup.romfs_of(u or b, b)) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = (sum(pack_nup.romfs_bytes(fam['nup'], u or b, b) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)

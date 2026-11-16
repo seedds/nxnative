@@ -166,6 +166,11 @@ HLE_FORCE("_ZN2nn3ngc46MaskProfanityWordsInTextForPlatformRegionChinaEPc", "Chin
 HLE_FORCE("_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", "error display applet; the host only logs it", void, h_err_ShowCode, uint64_t code) { DM_APPLET("error"); LOG("game asks to show an error: %04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
 HLE_FORCE("_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE", "error display applet; the host only logs it", void, h_err_ShowVar, const void *v) { DM_APPLET("error"); (void)v; LOG("game asks to show an error (ErrorResultVariant)"); }
 HLE_FORCE("_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", "add-on content version mismatch error applet; the host only logs it", void, h_err_AocVer, void) { DM_APPLET("error"); LOG("game asks to show an error: add-on content version mismatch"); }
+// A Switch 2 Edition's program asks it when its upgrade add-on is older than it needs: Super Mario Bros. Wonder's Switch 2 program 1.2.1 reads aocup:/System/AocUpgradeVersion.txt and stops
+// below 3 (main+0x132b9b4); the console then asks the player to update the add-on. Unhooked, the SDK's applet call crashed on a null handle (sdk StartLibraryAppletImmediately)
+HLE_FORCE("_ZN2nn3err50ShowUnacceptableAddOnContentForUpgradeVersionErrorEv", "upgrade add-on too old error applet; the host only logs it", void, h_err_AocUpgVer, void) {
+    DM_APPLET("error"); LOG("[RED] game asks to show an error: its upgrade add-on content is older than this program needs (pack the add-on of the same version as the game)");
+}
 HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "game version mismatch error applet; the host only logs it", void, h_err_AppVer, void) { DM_APPLET("error"); LOG("game asks to show an error: game version mismatch"); }
 // Pokémon Legends: Z-A (SDK 19): the application's own error screen (an error code number and two messages in the argument) goes through the error applet as well
 HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) { DM_APPLET("error"); (void)arg; LOG("game asks to show an application error (ApplicationErrorArg)"); }

@@ -175,6 +175,9 @@ def sign(app, identity, codesign, nested=()):   # the new data bundles and the i
 DATA_FORMAT = 'nxnative data bundle 1'
 
 
+PROGRAM_ROMFS = 'romfs_programs'   # beside the RomFS: <index>.img of each other program of the application (pack_nup.PROGRAMS)
+
+
 def data_bundle(contents, name): return contents / 'PlugIns' / f'{name}.bundle'
 
 
@@ -331,7 +334,7 @@ def pack(a):
         sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
         large = {*msls, *pso, *(p for x in programs for p in x[5])}   # the shader libraries and pipeline archives (13.5 GB for Ocarina of Time): by stat, as the RomFS trees below
         inputs = {'options': vars(a), 'files': [file_row(p, p in large) for p in files + sources],
-                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, str(Path(a.romfs).parent / PROGRAM_ROMFS), *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
                             str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
@@ -349,7 +352,8 @@ def pack(a):
     for d in (mac, dm / 'font'): d.mkdir(parents=True)
     romfs, msl, aoc = Path(a.romfs), Path(a.msl), Path(a.aoc) if a.aoc else None
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
-    trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
+    sib = romfs.parent / PROGRAM_ROMFS   # the RomFS of the application's other programs, beside this one's where the host mounts them by program index (hle_fs.c; scripts/pack_nup.py)
+    trees, lists = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
     if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
@@ -389,6 +393,7 @@ def pack(a):
     rtop = 'romfs.img' if romfs.is_file() else 'romfs'
     place('GameData', rtop, 'game files', inventory(romfs), lambda d: copy([romfs], d, clone['romfs']))
     if a.html and Path(a.html).is_dir(): copy([Path(a.html)], res / 'html', False)   # the offline pages, beside the RomFS where the host looks for them (hle_web.c)
+    if trees['programs']: place('GameDataPrograms', PROGRAM_ROMFS, 'other programs\' game files', inventory(sib), lambda d: copy([sib], d, clone['programs']))
     # The other programs: p<N>/ (RomFS in the data bundle GameData<N>, offline pages), msl/p<N>/<library> (in ShaderLibraries), dm/p<N>/ (modules, tables), and the table of them all, which the
     # launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
     if programs:

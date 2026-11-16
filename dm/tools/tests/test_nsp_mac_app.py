@@ -380,6 +380,20 @@ class PackReuse(unittest.TestCase):
         (t / 'p1/msl/k.metallib').write_bytes(b'lib2')
         self.assertIn('step: shader libraries\n', self.pack())
 
+    def test_other_programs_romfs_beside_the_romfs(self):   # a NUP of several programs (scripts/pack_nup.py): romfs_programs/ beside the RomFS, in a data bundle of its own, where the host looks
+        t = self.tmp; (t / 'romfs_programs').mkdir(); (t / 'romfs_programs/0.img').write_bytes(b'switch 1 data')
+        self.pack()
+        res, plugins = Path(self.args.out) / 'Contents/Resources', Path(self.args.out) / 'Contents/PlugIns'
+        self.assertTrue((res / 'romfs_programs').is_symlink())
+        self.assertEqual((res / 'romfs_programs').resolve(), (plugins / 'GameDataPrograms.bundle/Contents/Resources/romfs_programs').resolve())
+        self.assertEqual((res / 'romfs_programs/0.img').read_bytes(), b'switch 1 data')
+        self.assert_reused()
+        (t / 'romfs_programs/0.img').write_bytes(b'switch 1 data, updated')
+        self.assertIn("step: other programs' game files\n", self.pack())
+        self.assertEqual((res / 'romfs_programs/0.img').read_bytes(), b'switch 1 data, updated')
+        shutil.rmtree(t / 'romfs_programs'); self.pack()
+        self.assertFalse((res / 'romfs_programs').exists() or (plugins / 'GameDataPrograms.bundle').exists())
+
     def test_unpacked_files_and_unselected_split_pairs_do_not_invalidate(self):
         self.pack()
         for name in ('msl/k.metal', 'msl/_b_build.json', 'msl/analysis/report.txt', 'patched/main.sites.tsv', 'profile/game.tsv',

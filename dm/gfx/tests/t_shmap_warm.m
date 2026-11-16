@@ -1,6 +1,6 @@
 // Reading the shader map is one thing and starting the prewarm another. The map is read once from any thread (shmap_read_once: the prefetch at nvnProgramSetShaders, the submit thread), inside a
 // dispatch_once; the prewarm and its prepare step run on the submit path, at the first submission, and reach shmap_load again (pso_prebuild). With the prewarm inside the once, that second call on
-// the same thread trapped in _dispatch_once_wait: every game with a window and a prebuild, at its first program.
+// the same thread trapped in _dispatch_once_wait: every game with a window and a prebuild, at its first program. hle_glslc.c's lookup (mtl_shmap_has) reads the map the same way.
 #include "../nvn/nvn_mtl.m"
 #include <stdlib.h>
 #include <unistd.h>
@@ -26,13 +26,21 @@ int main(void) { @autoreleasepool {
     char tmpl[] = "/tmp/t_shmap_warm.XXXXXX";
     if (!mkdtemp(tmpl)) { perror("mkdtemp"); return 2; }
     NSString *dir = @(tmpl);
-    put(dir, @"shader_map.tsv", @"# no shaders\n");
+    put(dir, @"shader_map.tsv", @"# one shader\nvs_other.bin\t0\tvertex\t0123456789abcdef\t/glslc_play/fedcba9876543210.glslc#GLSLC@0x0\n");
     put(dir, @"pso_manifest.tsv", @"# an empty seed list: the prepare step goes on to the prebuild\n");
     setenv("DM_NVN_SHMAP", [dir stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
     setenv("DM_MSL_DIR", tmpl, 1);
     setenv("DM_PSO_PREPARE", "1", 1);   // as with a window (front_metal_layer here has none)
     unsetenv("DM_PSO_MANIFEST"); unsetenv("DM_SAVE"); unsetenv("DM_PSO_PREBUILD"); unsetenv("DM_PSO_HYBRID");
     mtl_init();
+
+    // hle_glslc.c asks for keys before the game's first program: no map file yet gives -1 and reads nothing; then the map is read once, without the prewarm
+    setenv("DM_NVN_SHMAP", [dir stringByAppendingPathComponent:@"absent.tsv"].UTF8String, 1);
+    EXPECT_EQ("no map: the lookup says so", -1, mtl_shmap_has("0123456789abcdef"));
+    EXPECT_EQ("no map: nothing was read", 1, g_shmap == nil);
+    setenv("DM_NVN_SHMAP", [dir stringByAppendingPathComponent:@"shader_map.tsv"].UTF8String, 1);
+    EXPECT_EQ("a key the map lists", 1, mtl_shmap_has("0123456789abcdef"));
+    EXPECT_EQ("a key it does not", 0, mtl_shmap_has("fedcba9876543210"));
 
     shmap_read_once();   // what the prefetch does at the game's first program
     EXPECT_EQ("the map is read without starting the prewarm", 0, g_warm_started);

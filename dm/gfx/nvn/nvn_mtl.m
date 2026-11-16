@@ -6045,10 +6045,21 @@ static void shmap_read_once(void) { static dispatch_once_t once; dispatch_once(&
 // That, then the prewarm (warm_start) once: the submit thread and the tools only. The flag is set before warm_start runs, so a call from inside it (pso_prebuild) returns at
 // once; inside the dispatch_once that call re-entered it and libdispatch aborted (Tears of the Kingdom and Pokémon Scarlet at boot, chain d0e99bd4b2fe)
 static void shmap_load(void) { shmap_read_once(); static int warmed; if (!warmed) { warmed = 1; warm_start(); } }
+static NSString *shmap_path(void) {   // DM_NVN_SHMAP, by default the current game profile folder's (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+    const char *e = getenv("DM_NVN_SHMAP");
+    return e ? @(e) : exe_rel([NSString stringWithFormat:@"../games/%s/shader_map.tsv", DM_GAME_ID].UTF8String);
+}
+// Whether the shader map holds a key (16 lowercase hex digits, as nvn_shkey.h computes and column 4 lists): 1 yes, 0 no, -1 there is no map to read. hle_glslc.c asks it for the stages of an
+// output the game compiled with its own GLSLC (a game may do that before its first program, so the map is read here if need be; without a map the first program stops the run anyway)
+// A pool of its own: the game's compile threads have none, so the strings made here, and the whole map's parse when this call reads it, would stay until the thread ends
+int mtl_shmap_has(const char *key) { @autoreleasepool {
+    if (!g_shmap && access(shmap_path().fileSystemRepresentation, R_OK)) return -1;
+    shmap_read_once();
+    return g_shmap[@(key)] != nil;
+} }
 static void shmap_read(void) {
     if (g_shmap) return;
-    const char *e = getenv("DM_NVN_SHMAP");
-    NSString *path = e ? @(e) : exe_rel([NSString stringWithFormat:@"../games/%s/shader_map.tsv", DM_GAME_ID].UTF8String);   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+    NSString *path = shmap_path();
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
     g_shmap = [NSMutableDictionary dictionary];

@@ -60,6 +60,7 @@ DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
 DM_GFX_SCALE	diagnostic	The graphics scale tier `oe::GetCurrentGraphicsScale` answers: `0` (default, both modes), or `1` or `2`, the reduced tiers at which a Switch 2 game renders smaller
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every GLSLC output the game compiles at run time; `shader_split.py` reads it (default `<version dir>/glslc_capture`)
+DM_GLSLC_PLAY	path	Where the host saves a GLSLC output the game compiles while it is played with a stage whose shader key the shader map lacks (default `glslc_play/` in the parent of `DM_SAVE`: the app's `Documents/glslc_play`; `off` saves none); the NSP script takes the folder into the next build (`gather_glslc_play`). For `shader_split.py`, the folder of those outputs (default `<version dir>/glslc_play`)
 DM_GL_CAPTURE	path	`=<dir>`: the GL layer writes every shader source the game compiles (`<key>.vert` / `<key>.frag`) for `gl_shaders.py`; the NSP script uses it to capture run-time shaders
 DM_GL_DRAWLOG	diagnostic	`=<n>[:<seconds>]` logs the first `<n>` GL draws after `<seconds>`, each with its framebuffer, viewport, scissor box, program, uniforms, samplers and its vertex attributes' first vertices; `=1` or more also names samplers that have no texture
 DM_GL_FBLOG	diagnostic	`=1` logs every framebuffer bind with its size and the draws so far

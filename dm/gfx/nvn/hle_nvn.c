@@ -20,6 +20,7 @@
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#include "nvn_shkey.h"
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -774,38 +775,16 @@ static prog_keys_t *pk_get(uint64_t serial) {
     pthread_mutex_unlock(&g_pk_mu);
     return k;
 }
-// mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
-// The control section's bytes in the key and the code area's length. NVN: +0x704 is the code area's length; +0x20 holds the section's own length: sections of at least
-// 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own
-// length is used (shader_split.py ctl_len). NVN2 (Switch 2, version 0xc9 at +4): the code area's length at +0x44; the key takes the first 0x48 bytes (through the shader's
-// own hash at +0x20 and the code lengths), +0x30 hashed as zero: Donkey Kong Bananza's BNSH files hold the section's length there (0xd8, 0xd0 in effects), agl's BAHS 0, also in memory
-#define NVN2_KEY_CTL 0x48
-static int nvn2_ctl(const uint8_t *c) { uint32_t magic, ver; memcpy(&magic, c, 4); memcpy(&ver, c + 4, 4); return magic == 0x98761234u && ver == 0xc9; }
-void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
-    const uint8_t *c = control; uint32_t own;
-    if (nvn2_ctl(c)) { memcpy(ncode, c + 0x44, 4); *nctl = NVN2_KEY_CTL; return; }
-    memcpy(ncode, c + 0x704, 4);
-    memcpy(&own, c + 0x20, 4);
-    *nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
-}
+// mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw).
+// The key itself, the bytes it takes and the profile's shader_key_skip: nvn_shkey.h, which hle_glslc.c keys a run-time GLSLC output's stages with
+void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) { nvn_shkey_lens(control, nctl, ncode); }
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0, nctl;
     if (!sd->control) return 0;
-    nvn_ctl_lens(sd->control, &nctl, &ncode);
+    nvn_shkey_lens(sd->control, &nctl, &ncode);
     int code = sd->data && ncode && ncode < (1u << 24);
     if (mapped && !(code && mtl_addr_known(sd->data, ncode))) return 0;   // its code in a memory pool; the pool is not made resident for that (the GPU runs the translated shader)
-    uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
-    // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
-    // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
-    if (nvn2_ctl(sd->control)) {
-        uint8_t ctl[NVN2_KEY_CTL]; memcpy(ctl, sd->control, NVN2_KEY_CTL); memset(ctl + 0x30, 0, 4);
-        CC_SHA256_Update(&hc, ctl, NVN2_KEY_CTL);
-    } else if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
-        uint8_t ctl[0x880]; memcpy(ctl, sd->control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
-        CC_SHA256_Update(&hc, ctl, nctl);
-    } else CC_SHA256_Update(&hc, sd->control, nctl);
-    if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
-    CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
+    nvn_shkey(sd->control, nctl, code ? (const void *)(uintptr_t)sd->data : NULL, ncode, out);
     return 1;
 }
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {

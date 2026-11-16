@@ -971,7 +971,7 @@ static id<MTLBuffer> blk_buffer(const pblk_t *b, size_t *mo) {
     size_t off = (size_t)S.ubo[b->binding].off, len = 0;
     if (x && x->mb && off < x->size) len = S.ubo[b->binding].size ? ((size_t)S.ubo[b->binding].size < x->size - off ? (size_t)S.ubo[b->binding].size : x->size - off) : x->size - off;
     if (x) x->use = g_serial;
-    if (len >= b->size) { *mo = off; return x->mb; }
+    if (x && x->mb && len >= b->size) { *mo = off; return x->mb; }
     if (!x || !x->mb) RED1("uniform block %s: no buffer at binding point %u (zeros)", b->name, b->binding);
     id<MTLBuffer> mb = arena_alloc(b->size, mo); memset((uint8_t *)mb.contents + *mo, 0, b->size);
     if (len) memcpy((uint8_t *)mb.contents + *mo, (const uint8_t *)x->mb.contents + off, len);

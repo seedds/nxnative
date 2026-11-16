@@ -149,6 +149,7 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 
 ## Found on this game
 
+- [Waiting clears of consecutive array layers landed in a pass each](../../../docs/reference/rendering.md#waiting-clears-of-consecutive-array-layers-landed-in-a-pass-each): the five layers of a 128x128 array cleared one by one every frame; one layered pass instead of five, GPU time at the 60 fps cap -0.42 to -0.44 ms a frame
 - [A pool's set of live textures slowed as its textures came and went](../../../docs/reference/frame-rate.md#a-pools-set-of-live-textures-slowed-as-its-textures-came-and-went): about 1,150 memory pools, the largest with 37,000 live textures; adding or removing a texture in it took about 2.5 µs midway through a race, about 17 ms a second of the guest threads
 - [A pool's Finalize walked every registered texture ID](../../../docs/reference/nvn-objects.md#a-pools-finalize-walked-every-registered-texture-id): about 130,000 registered IDs; each pool Finalize walked them all holding the registry lock, about 6 ms a second of the guest threads
 - [Waiters found by walking every waiting thread](../../../docs/reference/threads.md#waiters-found-by-walking-every-waiting-thread): about 87 threads waiting; process CPU at the 60 fps cap -1.9 ms a frame, CPU energy -0.18 to -0.23 W

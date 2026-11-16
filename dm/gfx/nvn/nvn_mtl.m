@@ -2725,6 +2725,7 @@ static cbs_list *cbs_take(void);
 static void cbs_feedback(cbs_list *l, NSError *err, const char *where);
 static void cbs_fly_report(uint64_t fence); static void cbs_fly_put(uint64_t fence, const cbs_list *l); static void ind_fly_put(const char *key, uint64_t ind, uint64_t off, void *buf);
 static void lc_land(void); static void lc_take_rt(void); static int g_nlc;   // lazy clears (lc_push): land / take the waiting ones, and how many wait
+static int g_lc_layers;   // the clear-only pass rp_begin_ex is about to open clears this many layers of its one colour attachment (lc_land, lc_layer_run); 0 or 1: one
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
 typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready, frame; } post_rec;   // frame: the game's frame it was replayed in (ts_stretch); t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
@@ -6429,6 +6430,15 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         if (nl != NSUIntegerMax && nl > 1) { pd.renderTargetArrayLength = nl; PD("L %llu layered pass: %lu layers", g_stat_pass + 1, (unsigned long)nl); }
     }
     if (g_nrtm) rt_mirror_layers(pd);
+    if (clear_only == 1 && g_lc_layers > 1) {   // waiting clears of consecutive layers landing together (lc_layer_run): one layered pass
+        int k = -1, nc = 0; for (int i = 0; i < 8; i++) if (pd.colorAttachments[i].texture) { k = i; nc++; }
+        id<MTLTexture> t = k >= 0 ? pd.colorAttachments[k].texture : nil;
+        if (nc == 1 && !pd.depthAttachment.texture && !pd.stencilAttachment.texture && t.textureType == MTLTextureType2DArray && pd.colorAttachments[k].slice + (NSUInteger)g_lc_layers <= t.arrayLength) {
+            pd.renderTargetArrayLength = (NSUInteger)g_lc_layers;
+            if (g_nrtm) rt_mirror_layers(pd);
+            PD("L %llu layered clear: layers %lu-%lu", g_stat_pass + 1, (unsigned long)pd.colorAttachments[k].slice, (unsigned long)(pd.colorAttachments[k].slice + (NSUInteger)g_lc_layers - 1));
+        } else g_lc_layers = 1;   // not attached as lc_layer_run expected: this pass clears its first layer, and lc_land lands the others one by one
+    }
     pg_render(pd, (NSUInteger)R.rt.n);
     { void td_note(id pd, NSUInteger nc); td_note(pd, (NSUInteger)R.rt.n);
       void ts_note(id pd, NSUInteger nc); ts_note(pd, (NSUInteger)R.rt.n);
@@ -15222,6 +15232,36 @@ enum { LC_MAX = 8 };
 static lc_group g_lc[LC_MAX];   // g_nlc of them wait
 static uint64_t g_lc_taken, g_lc_landed;   // clears a later pass took as its load action / clear-only passes still opened for them (the residency set line)
 void mtl_lc_stats(uint64_t *taken, uint64_t *landed) { *taken = g_lc_taken; *landed = g_lc_landed; }
+// Clears of consecutive layers that land together become one layered pass (DM_NVN_LC_LAYERS, 1 by default, 0 off, ab alternates under DM_AB). Mario Kart World clears the five
+// layers of a 128x128 2D array one at a time every frame, nothing drawn in between, and they landed in five clear-only passes of its nine. A pass costs about 14 µs of CPU in Metal's
+// driver and kernel on an M3 Max whatever it holds (dev/tools/passcpu.m: 64 empty clears in one command buffer against none), besides the GPU's fixed cost of a pass. A run is
+// groups that each clear only one colour attachment, the same slot, through views that differ only in their first layer, one layer each, consecutive, of one level of the
+// same 2D array texture, with the same colour; landing the run in order changes nothing else, as no other clear lands between its groups
+static uint64_t g_lc_merged;   // layers cleared in another layer's pass
+static int lc_layers_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_LC_LAYERS", 1); return m; }
+static int lc_one_color(const lc_group *g) {   // the slot of the group's only clear, when that is one colour attachment; else -1
+    if (g->clear_d || g->clear_s) return -1;
+    int k = -1; for (int i = 0; i < 8; i++) if (g->clear_c[i]) { if (k >= 0) return -1; k = i; }
+    return k;
+}
+// How many groups from gi on (of the n landing) clear consecutive layers in one layered pass: 1 when the group starts no run
+static int lc_layer_run(int gi, int n) {
+    if (gi + 1 >= n || !sw_on(lc_layers_mode())) return 1;
+    const lc_group *g = &g_lc[gi]; int k = lc_one_color(g); if (k < 0) return 1;
+    const tex_t *t = g->rt.color[k]; const view_t *v = &g->rt.cview[k];
+    if (!t || !t->serial || t->d.target != NVN_TEXTURE_TARGET_2D_ARRAY || nvn_fmt_bc(t->d.format) || rt_dup_slot(&g->rt, k) || !g->rt.has_cview[k] || !v->set_layers || v->nlayers != 1) return 1;
+    id<MTLTexture> mt = tex_mtl(t);   // attach's texture: a 2D array of one sample whose layers hold the run (a shadow for compressed or depth formats is not)
+    if (!mt || mt.textureType != MTLTextureType2DArray || mt.sampleCount != 1 || mtl_fmt_block(mt.pixelFormat) || mtl_fmt_depth(mt.pixelFormat)) return 1;
+    int run = 1;
+    for (int j = gi + 1; j < n && v->min_layer + run < (int)mt.arrayLength; j++, run++) {
+        const lc_group *h = &g_lc[j]; if (lc_one_color(h) != k || !h->rt.color[k] || h->rt.color[k]->serial != t->serial || !h->rt.has_cview[k] || h->cc[k].red != g->cc[k].red || h->cc[k].green != g->cc[k].green || h->cc[k].blue != g->cc[k].blue || h->cc[k].alpha != g->cc[k].alpha) break;
+        view_t w = h->rt.cview[k]; if (w.min_layer != v->min_layer + run) break;
+        w.min_layer = v->min_layer; if (memcmp(&w, v, sizeof w)) break;
+    }
+    if (run > 1) { static int once; if (!once++) MLOG("layered clear: waiting clears of layers %d-%d of one texture level land in one pass (first case pass %llu; DM_NVN_LC_LAYERS)", v->min_layer, v->min_layer + run - 1, g_stat_pass + 1); }
+    return run;
+}
+uint64_t mtl_lc_merged(void) { return g_lc_merged; }
 static int lc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_LAZY_CLEAR"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_LAZY_CLEAR=0: clears with no draw open a pass of their own as before"); } return v; }
 static int lc_same(const p_set_rt *a, int ka, const p_set_rt *b, int kb) {   // the same subresource through the same view (k = 8: depth / stencil)
     uint64_t s1, s2; int l1, l2, x1, x2; rt_sub(a, ka, &s1, &l1, &x1); rt_sub(b, kb, &s2, &l2, &x2);
@@ -15237,9 +15277,11 @@ static void lc_land(void) {
     typeof(R) save = R;
     for (int gi = 0; gi < n; gi++) { const lc_group *g = &g_lc[gi]; int any = g->clear_d || g->clear_s; for (int i = 0; i < 8; i++) any |= g->clear_c[i];
         if (!any || !g_cb) continue;
+        int nl = lc_layer_run(gi, n);
         R.rt = g->rt; R.has_rt = 1; memcpy(R.clear_c, g->clear_c, sizeof R.clear_c); memcpy(R.cc, g->cc, sizeof R.cc);
         R.clear_d = g->clear_d; R.clear_s = g->clear_s; R.cd = g->cd; R.cs = g->cs;
-        rp_begin_ex(1); rp_end(); g_lc_landed++; }
+        g_lc_layers = nl; id e = rp_begin_ex(1); nl = e && g_lc_layers > 1 ? g_lc_layers : 1; g_lc_layers = 0; rp_end(); g_lc_landed++;
+        if (nl > 1) { g_lc_merged += (uint64_t)(nl - 1); gi += nl - 1; } }
     R = save;
 }
 // SetRenderTargets with clears pending and no draw since: the clears wait instead of opening a pass

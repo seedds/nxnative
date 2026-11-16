@@ -152,6 +152,20 @@ void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unkno
     }
     if (s->nwin == MD_RATE_PICS && abs(s->hz - s->logged_hz) > 1) { LOG("[movie] %s decoder %p: %d pictures a second", lib, dec, s->hz); s->logged_hz = s->hz; }
     s->ts = ts_ns; s->ns = now; s->n++;
+    // Resident Evil clock investigation: record actual decoded-picture timestamps
+    // at their source, rather than inferring movie activity from the frame loop.
+    if (!strcmp(DM_GAME_ID, "010050F00BC1A000")) {
+        static unsigned re_picture_probe_count;
+        if (re_picture_probe_count < 32) {
+            FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
+            if (pf) {
+                fprintf(pf, "[RE decoded picture] decoder=%p lib=%s pts_ns=%lld dt_ns=%lld hz=%d unknown_hz=%d count=%u\\n",
+                    dec, lib ? lib : "(null)", (long long)ts_ns, (long long)dt, s->hz, unknown_hz, s->n);
+                fclose(pf);
+                re_picture_probe_count++;
+            }
+        }
+    }
     pthread_mutex_unlock(&g_md_slots_mu);
 }
 void dm_movie_stopped(const void *dec) {

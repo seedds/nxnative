@@ -113,6 +113,7 @@ static void test_vertex_binding(void) {
     attr_ptr(16, 2, GL_FLOAT, 0, 0, NULL); assert(geterr() == GL_INVALID_VALUE);
     attr_div(16, 1); vb_div(16, 1); assert(geterr() == GL_INVALID_VALUE); assert(geterr() == GL_NO_ERROR);
     GLint lim = 0; h_glGetIntegerv(0x82da, &lim); assert(lim == 16); h_glGetIntegerv(0x82d9, &lim); assert(lim == 2047);   // MAX_VERTEX_ATTRIB_BINDINGS, _RELATIVE_OFFSET
+    h_glGetIntegerv(0x8c2b, &lim); assert(lim == 65536);   // MAX_TEXTURE_BUFFER_SIZE
     del_buf(1, &b[0]); FETCH(8, 0, 0, 16, 0); FETCH(2, b[1], 0, 16, 255);
     bind_vao(0); del_buf(1, &b[1]);
 }

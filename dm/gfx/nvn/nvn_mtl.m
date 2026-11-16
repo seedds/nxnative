@@ -1637,6 +1637,17 @@ static void *g_sub_pool;
 static void treg_finish_submission(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
+// DM_NVN_SUBTL=<f>[-<f2>] (diagnostic): the submission timeline of those frames, on the clock of the GPU times Metal reports (CACurrentMediaTime, in ms): the game's submits and
+// SyncWaits (nvn_queue.inc), the replay's start of each submission, each segment's commit or skipped cut, and the GPU start and end of each committed command buffer
+static long g_stl_a = -2, g_stl_b;
+int mtl_subtl_on(void) {
+    if (g_stl_a == -2) { const char *e = getenv("DM_NVN_SUBTL"); g_stl_b = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : e ? atol(e) : -1; g_stl_a = e ? atol(e) : -1; }
+    long f = (long)atomic_load(&g_cur_frame); return g_stl_a >= 0 && f >= g_stl_a && f <= g_stl_b;
+}
+void mtl_subtl(const char *fmt, ...) {
+    char b[200]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
+    MLOG("[subtl] %.3f F%llu %s", CACurrentMediaTime() * 1e3, (unsigned long long)atomic_load(&g_cur_frame), b);
+}
 static int g_pkg_kept;   // a texture written during this submission kept its texture (tex_mtl_): the next submission starts a write generation, as a write would
 // The first submission: the prepare step (warm_start), before anything of it is encoded. No GPU work: the submit entry (hle_nvn.c) calls it outside the graphics gate
 void mtl_prepare(void) {
@@ -1651,6 +1662,7 @@ static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: sp
 static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
+    if (mtl_subtl_on()) mtl_subtl("replay begins submission %llu", (unsigned long long)g_sub_serial);
     treg_sparse_notes();   // the mappings made before this submission
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
@@ -2800,6 +2812,8 @@ uint64_t mtl_sub_commit(void) {
     void arena_commit(uint64_t fence); arena_commit(fence);
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+    if (mtl_subtl_on()) { unsigned long long sn = g_sub_serial; mtl_subtl("commit last command buffer of submission %llu (fence %llu, draw %llu)", sn, (unsigned long long)fence, (unsigned long long)g_stat_draw);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { MLOG("[subtl] gpu submission %llu last ran %.3f-%.3f", sn, f.GPUStartTime * 1e3, f.GPUEndTime * 1e3); }]; }
     cb_commit(o, 1);   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
     // With the encode thread the records go to it and the replay goes on with the next submission: what comes after it on the queue is a record too (the next submission's commits,
@@ -6924,6 +6938,15 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     return o;
 }
 // A submitted descriptor and a queue binding pin the program by its serial (own_prog_pin; mtl_prog_release and mtl_prog_unpin are nvn_owner.m's)
+// A streamed submission's copy (nvn_queue.inc nvn_queue_submit): the game's thread holds no submission lock, so it does not resolve the program (prog_get is the replay's);
+// the replay finds or builds it from the copy's serial and shader keys, which SetShaders stored. The pin keeps the serial's program while the copy is queued
+void mtl_prog_snapshot_pin(prog_t *copy,const prog_t *source) {
+    *copy=*source;
+    if(!source->serial) MDIE("cannot retain a program without an initialization serial");
+    own_prog_pin(source->serial);
+}
+// DM_NVN_SUB_STREAM (nvn_queue.inc nvn_queue_submit): on by default, 0 off, ab alternates it with the DM_AB phases; off while a frame is captured (DM_NVN_CAPTURE)
+int mtl_sub_stream_on(void) { static int m=-1; if(m<0) m=getenv("DM_NVN_CAPTURE") ? 0 : sw_mode("DM_NVN_SUB_STREAM",1); return sw_on(m); }
 void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
     prog_get(source); *copy=*source;
     if(!source->serial) MDIE("cannot retain a program without an initialization serial");
@@ -16758,6 +16781,7 @@ static void sub_cut(void) {
     // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
     static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
     if (busy && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
+        if (mtl_subtl_on()) mtl_subtl("cut skipped: a segment is still on the GPU (draw %llu)", (unsigned long long)g_stat_draw);
         if (ts_on()) { ts_boundary(); g_seg++; }
         g_cut_draw0 = g_stat_draw; return; }
     if (g_tf_enc) tf_pass_end();
@@ -16779,6 +16803,8 @@ static void sub_cut(void) {
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
         gpu_lost_check(cb.error, "segment");
     }];
+    if (mtl_subtl_on()) { unsigned long long sn = g_sub_serial; mtl_subtl("commit segment %u of submission %llu (draw %llu)", k, sn, (unsigned long long)g_stat_draw);
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) { MLOG("[subtl] gpu submission %llu segment %u ran %.3f-%.3f", sn, k, cb.GPUStartTime * 1e3, cb.GPUEndTime * 1e3); }]; }
     cb_commit(o, 0);
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     g_cb = rec_cb_new();

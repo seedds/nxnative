@@ -206,6 +206,7 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
     pthread_mutex_lock(&g_res_commit_mu);
     [g_q4 commit:buffers count:(NSUInteger)nb options:o]; rx_mark();
     pthread_mutex_unlock(&g_res_commit_mu);
+    { int mtl_subtl_on(void); void mtl_subtl(const char *fmt, ...); if (mtl_subtl_on()) mtl_subtl("encode thread commits %d command buffers", nb); }   // DM_NVN_SUBTL: how far behind the replay's commit
     if (cur) g_rx_cb = nil;
     g_rx_cbs++; g_rx_merged += (uint64_t)n; g_rx_last_nb = nb;
     for (int i = 0; i < g_rx_npost; i++) {   // what followed the held commits

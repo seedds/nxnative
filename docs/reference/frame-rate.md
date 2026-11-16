@@ -772,6 +772,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), Mac.
 - **Open:** `rp_begin_ex`, `img_binding` and `tex_fit` still return objects; the encode records retain each pipeline and texture they carry to the encode thread (`rec_obj`), which releases it there (the largest site left, `-[DmRecEnc setRenderPipelineState:]`, 11 of the replay thread's 2,742 samples).
 
+### Sparse pool ranges looked up under the mapping lock at every draw
+
+- **Symptom:** in a Time Profiler trace of the submit (replay) thread, `nvn_sparse_alias` (under `tex_storage_overlap` ← `draw_samples_rt`, and `cs_access_of`) takes a percent or two, partly waiting for `g_vp_mu`.
+- **Cause:** whether a guest range may alias another pool through a sparse virtual pool's own range was answered under `g_vp_mu`, which the game's threads take to map and unmap pages, by walking every such pool. The replay asks it for each texture a draw samples against each attachment and for every compute access. The pools' ranges are host `mmap` reservations on both sides of the guest's address space (Mario Kart World: from about 0x12a000000 to 0x8e9e000000 around a guest space at 0x7ca0000000), so a lowest-highest bound left the guest's own addresses inside it.
+- **Fix:** in `hle_nvn.c`, for every game. The ranges are kept sorted in a fixed table (`g_vpr`, up to 1,024) rewritten under `g_vp_mu` whenever a pool reserves or drops its range, behind a sequence count (a seqlock: odd while written). `nvn_sparse_alias` and `nvn_host_readable` search it without the lock (the ranges never overlap, each being its own reservation, so the first range that ends past the query decides) and take the lock as before only when the table is being written, holds more than 1,024 ranges, or the address is in a range (`nvn_host_readable` then looks at the mapped runs).
+- **Check:** the graphics tests of sparse and virtual pools (`t_copy_alias`, `t_vpool_first_map`, `t_sparse_tiles`, `t_sparse_copy`, `t_sparse_pool_cache`, `t_pool_standin_sparse`, `t_large_mdi`, `t_nvn` and others) pass. Time Profiler at the 60 fps cap, handheld, 10 s each (M3 Max): `nvn_sparse_alias` went from 47 to 6 of the replay thread's samples (2,742 and 2,659 in all) and `tex_storage_overlap` from 28 to 5, about 0.06 ms of a frame.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), Mac, a few dozen such pools in a race.
+
 ### Main guest thread keeps inherited default QoS
 
 - **Symptom:** gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`).

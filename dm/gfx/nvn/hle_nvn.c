@@ -2937,6 +2937,27 @@ enum { VLOG_N = 4096 };
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_gen;   // bumped per mapping request
+// The pools' own ranges, sorted, for readers that take no lock: nvn_sparse_alias and nvn_host_readable search them (they never overlap: each is its own mmap). The replay asks
+// nvn_sparse_alias for every texture a draw samples against each attachment and for every compute access: it took g_vp_mu, which the game's mapping threads take too, and walked
+// every pool, about 1.7 % of the replay thread at Mario Kart World's 60 fps cap. Rewritten under g_vp_mu between two steps of g_vpr_seq (odd while it is written), as a seqlock:
+// a reader that sees the count move or an odd count asks again, and past VPR_MAX ranges (g_vpr_n -1) or after a few tries takes the lock as before
+enum { VPR_MAX = 1024 };
+static struct { _Atomic uint64_t lo, hi; } g_vpr[VPR_MAX];
+static _Atomic uint32_t g_vpr_seq; static _Atomic int g_vpr_n;
+static int vpr_cmp(const void *a, const void *b) { uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0]; return (x > y) - (x < y); }
+static void vpr_rebuild(void);   // after g_vp changes, under g_vp_mu
+// 1 = [lo, hi) meets a pool's own range, 0 = it meets none, -1 = not known without the lock
+static int vpr_meets(uint64_t lo, uint64_t hi) {
+    for (int tries = 0; tries < 4; tries++) {
+        uint32_t s = atomic_load_explicit(&g_vpr_seq, memory_order_acquire); if (s & 1) continue;
+        int n = atomic_load_explicit(&g_vpr_n, memory_order_relaxed); if (n < 0) return -1;
+        int a = 0, b = n; while (a < b) { int m = (a + b) / 2; if (atomic_load_explicit(&g_vpr[m].hi, memory_order_relaxed) <= lo) a = m + 1; else b = m; }   // the first range that ends past lo
+        int r = a < n && atomic_load_explicit(&g_vpr[a].lo, memory_order_relaxed) < hi;
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&g_vpr_seq, memory_order_relaxed) == s) return r;
+    }
+    return -1;
+}
 // Every mapping request's host range [lo, hi), by its generation: the replay turns the requests since its last look into notes for the textures they overlap (nvn_sparse_notes)
 enum { VNOTE_N = 8192 };
 static struct { uint64_t gen, lo, hi; } g_vnote[VNOTE_N];   // under g_vp_mu
@@ -2962,7 +2983,7 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     v->pool = o; v->base = a; v->len = len; v->size = o->size;
     pthread_mutex_lock(&g_vp_mu);
     if (g_nvp == g_cvp && !(g_vp = realloc(g_vp, (g_cvp = g_cvp ? 2 * g_cvp : 64) * sizeof *g_vp))) die("sparse pool table allocation failed");
-    g_vp[g_nvp++] = v; o->vp = v;
+    g_vp[g_nvp++] = v; o->vp = v; vpr_rebuild();
     o->vmode = o->size > DM_GAME_APP_POOL ? 2 : 0;
     pthread_mutex_unlock(&g_vp_mu);
     if (o->vmode == 2) LOG("[nvn] virtual pool %p (%#llx bytes, flags %#x): sparse, own address range %p+%#llx, physical pages are remapped into it", (const void *)o, (unsigned long long)o->size, o->flags, a, (unsigned long long)len);
@@ -2974,6 +2995,7 @@ static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
+    vpr_rebuild();
     free(v->pt); free(v->log); free(v->run); free(v); o->vp = NULL;
 }
 static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
@@ -3646,6 +3668,7 @@ NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVN
 }
 // Whether the host can read n bytes at a guest address: outside a sparse virtual pool always; inside one only where pages are mapped (nvn_mtl.m reads multi-draw counts there)
 int nvn_host_readable(uint64_t a, uint64_t n) {
+    if (!vpr_meets(a, a + 1)) return 1;   // in no pool's own range
     int ok = 1; pthread_mutex_lock(&g_vp_mu);
     for (int k = 0; k < g_nvp; k++) { struct vpool *v = g_vp[k]; if (a < (uint64_t)(uintptr_t)v->base || a >= (uint64_t)(uintptr_t)v->base + v->len) continue;
         uint64_t o = a - (uint64_t)(uintptr_t)v->base; ok = 0;
@@ -3657,13 +3680,27 @@ int nvn_host_readable(uint64_t a, uint64_t n) {
 // prove copy independence.
 int nvn_sparse_alias(uint64_t lo, uint64_t hi) {
     if (hi <= lo) return 0;
+    int known = vpr_meets(lo, hi); if (known >= 0) return known;
     int r = 0; pthread_mutex_lock(&g_vp_mu);
     for (int k = 0; k < g_nvp && !r; k++) { const struct vpool *v = g_vp[k];
         uint64_t base = (uint64_t)(uintptr_t)v->base;
         r = lo < base + v->len && base < hi;
     }
     pthread_mutex_unlock(&g_vp_mu); return r;
+}static void vpr_rebuild(void) {   // under g_vp_mu
+    atomic_fetch_add_explicit(&g_vpr_seq, 1, memory_order_relaxed); atomic_thread_fence(memory_order_release);   // odd: being written
+    int n = g_nvp <= VPR_MAX ? g_nvp : -1;
+    if (n > 0) {
+        uint64_t (*r)[2] = malloc((size_t)n * sizeof *r); if (!r) die("sparse pool ranges");
+        for (int i = 0; i < n; i++) { r[i][0] = (uint64_t)(uintptr_t)g_vp[i]->base; r[i][1] = r[i][0] + g_vp[i]->len; }
+        qsort(r, (size_t)n, sizeof *r, vpr_cmp);
+        for (int i = 0; i < n; i++) { atomic_store_explicit(&g_vpr[i].lo, r[i][0], memory_order_relaxed); atomic_store_explicit(&g_vpr[i].hi, r[i][1], memory_order_relaxed); }
+        free(r);
+    }
+    atomic_store_explicit(&g_vpr_n, n, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_vpr_seq, 1, memory_order_release);   // even again
 }
+
 // Textures of a sparse pool, read through its page table (see the sparse pools above): whether a pool is one, a copy of a texture's bytes (unmapped pages read as 0; → bytes not mapped),
 // whether its content may have changed since an upload (a mapping in its range newer than gen, or a physical page behind it written after the dirty-page stamp), and the write
 // protection of the physical pages behind it (taken before an upload, as for any packaged texture)

@@ -218,7 +218,7 @@ static void rec_exec(const rec_t *r) {
     switch (r->op) {
     case RO_CB_NEW: g_rx_cb = [g_dev newCommandBuffer]; break;
     case RO_CB_BEGIN: [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:rec_id(a[0])]; break;
-    case RO_CB_END: [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
+    case RO_CB_END: cb_end(g_rx_cb, nil); break;   // names the residency sets (nvn_mtl.m res_name)
     case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
     case RO_COMMIT: {   // a main command buffer (ended): a[0] its feedback, a[2] its uniform shadows, a[5] the submission ends with it
         DmCommitFB *fb = rec_id(a[0]);

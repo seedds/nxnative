@@ -90,6 +90,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 Ampere = ampere;
             }
 
+            // nxnative: the function that finds a raw access's pool table entry past the last one it chose (GetRawFindFunction), -1 before the first
+            public int RawFindFunction = -1;
+
+            public int AddRawFindFunction(Function function) => _hfm.AddFunction(function);
+
             // nxnative: the raw vector load helpers by word count (TryGenerateRawStorageOp), kept apart from _entries, where a scalar load would find them
             public readonly Dictionary<int, int> RawVectorFunctions = [];
 
@@ -1044,7 +1049,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             Operand selected = Local();
-            Operand lblFound = Label();
             Operand lblChosen = Label();
 
             // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
@@ -1057,29 +1061,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             context.Copy(selected, last);
             context.BranchIfTrue(lblChosen, lastHolds);
 
-            // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
-            Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
-            Operand indexMask = Const((1 << GmemMapLog2) - 1);
-            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
-            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
-            Operand hintFits = context.BitwiseAnd(
-                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
-                context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
-            context.Copy(selected, hintIndex);
-            context.BranchIfTrue(lblFound, hintFits);
-
-            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
-            Operand index = Const(0);
-
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
-            {
-                Operand candidate = context.IAdd(index, Const(step));
-                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
-                index = context.ConditionalSelect(AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)), candidate, index);
-            }
-
-            context.Copy(selected, index);
-            context.MarkLabel(lblFound);
+            // Else the hint of the address's chunk or a search finds it: one function for every call (RawFindFunction)
+            context.Copy(selected, context.Call(GetRawFindFunction(gtsContext, mapBinding), true, addrLow, addrHigh));
             context.Store(StorageKind.LocalMemory, lastBinding, selected);
             Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
             Operand lblSkip = Label();
@@ -1206,6 +1189,62 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 : gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
 
             return true;
+        }
+
+        // nxnative: the entry of the memory pool table that may hold an address (TryGenerateRawStorageOp's lookup past the last entry it chose): int dmsh_raw_find(address low, address high).
+        // One function for a shader's every raw access, by name (SpirvGenerator keeps dmsh_ names): spirv-cross writes every function always_inline (it ignores SPIR-V's DontInline), and
+        // the shader build writes this one noinline (dmsh_rewrite.py raw_noinline), so Metal's compiler builds the search once rather than at each access. Ocarina of Time's foliage mesh
+        // shader 3439aaa071d868ae makes 141 raw accesses. Only the last entry's check, the entry's end and the access stay at each call: building the whole lookup once also put
+        // the last entry and the vector words behind the call, and cost 2.5 ms of a 15 ms frame on an M4 Pro (docs/reference/shaders.md, Raw global lookups built once for every call)
+        private static int GetRawFindFunction(GtsContext gtsContext, int mapBinding)
+        {
+            if (gtsContext.RawFindFunction >= 0)
+            {
+                return gtsContext.RawFindFunction;
+            }
+
+            EmitterContext context = new();
+
+            Operand addrLow = Argument(0);
+            Operand addrHigh = Argument(1);
+
+            Operand MapWord(Operand entry, int word)
+            {
+                return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
+            }
+
+            // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
+            Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
+            Operand indexMask = Const((1 << GmemMapLog2) - 1);
+            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
+            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
+            Operand hintFits = context.BitwiseAnd(
+                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
+                context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+            Operand lblSearch = Label();
+            context.BranchIfFalse(lblSearch, hintFits);
+            context.Return(hintIndex);
+            context.MarkLabel(lblSearch);
+
+            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
+            Operand index = Const(0);
+
+            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
+            {
+                Operand candidate = context.IAdd(index, Const(step));
+                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
+                Operand startHigh = MapWord(entry, 1);
+                Operand atOrAbove = context.BitwiseOr(
+                    context.ICompareLessUnsigned(startHigh, addrHigh),
+                    context.BitwiseAnd(context.ICompareEqual(startHigh, addrHigh), context.ICompareLessOrEqualUnsigned(MapWord(entry, 0), addrLow)));
+                index = context.ConditionalSelect(atOrAbove, candidate, index);
+            }
+
+            context.Return(index);
+
+            Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_raw_find", true, 2, 0);
+
+            return gtsContext.RawFindFunction = gtsContext.AddRawFindFunction(function);
         }
 
         // nxnative: the last entry of a multi-target helper's buffers whose misses go through the memory pool table (TryGenerateMultiTargetStorageOp); no constant buffer has slot 0xffff

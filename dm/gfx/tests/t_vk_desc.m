@@ -147,7 +147,7 @@ int main(void) {
     }
     // Layouts destroyed while what was made from them lives on (Vulkan allows it): a set and a pipeline keep reading the set layout, the pipeline its push-constant size;
     // the last of them frees the set layout. A destroyed pipeline releases its dynamic depth-stencil state; a destroyed render pass and pipeline layout are freed (ASan build)
-    __weak id<MTLDepthStencilState> wdss;
+    __weak id wdss;
     @autoreleasepool {
         VkDescriptorSetLayoutBinding b = {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
         VkDescriptorSetLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
@@ -166,8 +166,9 @@ int main(void) {
         CHECK(L3->refs == 2, "destroying the layouts drops only the handle's hold");
         CHECK(p->pc_size == 96 && p->nset == 1 && p->set[0] == L3, "the pipeline keeps its push-constant size and set layout");
         CHECK(s3->L == L3 && L3->idx[3] >= 0 && L3->total == 1, "the set still reads its layout");
-        MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionLess;
-        p->dss_dyn = [g_dev newDepthStencilStateWithDescriptor:dd]; wdss = p->dss_dyn;
+        // A plain object as the pipeline's dynamic state, held by nothing else: Metal keeps a real depth-stencil state alive in its device's cache after the last release
+        // (macOS 27.2, M4 Pro), so a weak reference to one never goes nil whatever the pipeline does. Destroying the pipeline only drops its reference (vkDestroyPipeline)
+        p->dss_dyn = (id<MTLDepthStencilState>)[NSObject new]; wdss = p->dss_dyn;
         h_vkFreeDescriptorSets(dev, lp, 1, &s3);
         CHECK(L3->refs == 1, "freeing the set drops its hold");
         h_vkDestroyPipeline(dev, p, NULL);   // the last hold: the set layout is freed

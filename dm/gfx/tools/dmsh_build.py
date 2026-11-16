@@ -784,6 +784,7 @@ def finish(key, w, j, c1):
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
     src = dmsh_rewrite.tg_fence(src)   # warp-synchronous shared memory: the translator's dmsh_tg_fence() as a simdgroup-scope fence (see tg_fence)
     src = dmsh_rewrite.border_emu(src)   # border colours Metal lacks (see border_emu)
+    if j['stage'] == 'ps': src = dmsh_rewrite.tap_grid(src)   # 49 taps written out, which Apple's GPU compiler cannot fit, as a loop (see tap_grid)
     if j['stage'] == 'ps': src = dmsh_rewrite.frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
     try: src = dmsh_rewrite.uniform_tests(src)   # a uniform word tested against constants read by a volatile load per test, so the front end folds no switch (see uniform_tests)
     except ValueError as e: return 'uniform tests rewrite failed', str(e)[:160], None

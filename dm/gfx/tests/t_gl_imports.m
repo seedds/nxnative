@@ -149,7 +149,7 @@ static void test_literal_stride_fetch(void) {
         pkey_t k; memset(&k, 0, sizeof k);
         vkey_set(&k, 0, attr(0), vb_of(cur_vao(), 0));
         assert(k.stride[0] == cases[c].stride && k.div[0] == (cases[c].stride ? cases[c].div : 0));   // a constant fetch has no divisor, so one pipeline serves both
-        k.cpf = MTLPixelFormatRGBA8Unorm; k.mask = 15;
+        k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.mask = 15;
         id<MTLRenderPipelineState> pso = pso_get(&p, &k);
         assert(pso);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:1 mipmapped:NO];
@@ -336,8 +336,8 @@ static void test_doom3(void) {
     pr = h_glCreateProgram(); vs = h_glCreateShader(GL_VERTEX_SHADER); shader_of(vs)->si = &vonly; shader_of(vs)->fn = [lib newFunctionWithName:@"vmain"];
     h_glAttachShader(pr, vs); h_glLinkProgram(pr); p = prog_of(pr);
     assert(p->linked && p->fn[0] && !p->fn[1] && p->si[1]->frag && !p->si[1]->nu && !p->si[1]->nt && !p->si[1]->nb && p->si[1]->ub_slot < 0);
-    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask = 15;
-    k.cpf = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
+    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.mask = 15;
+    k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
     assert(pso_get(p, &k));
     h_glDeleteProgram(pr); h_glDeleteShader(vs);
 

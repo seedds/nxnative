@@ -1,7 +1,7 @@
 // NVIDIA's "zero times anything is zero" float blending through the replay: a pixel shader that writes NaN, +Inf, -Inf and 2 at alpha 0 and at alpha 1 (dmsh_rewrite.py blend_zero's
 // guard in it, from test_dmsh_blend_zero.py --fixture), drawn into an RGBA16F target under blend states with and without a zero source weight, and the target read back. Where the
 // weight is zero by the alpha the target keeps its colour; everywhere else the non-finite colour is stored, as NVIDIA stores it. With DM_NVN_BLEND_ZERO=0 the same draws show Apple's blender as
-// it is: the NaN is stored under the zero weight too (what the guard is for). bz_word's cases are checked on the state alone.
+// it is: the NaN is stored under the zero weight too (what the guard is for). bz_word's cases are checked on the state alone, and through draw_map_take with a merged pass's mapping.
 // make GAME=<id> check_t_blend_zero (./t_blend_zero <dir>)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -80,7 +80,15 @@ int main(int argc, char **argv) { @autoreleasepool {
         CHECK(bz_word() == (on ? rows[r].word : 0));
         g_pso_lmap = NULL; S.color.blend_en = rows[r].on ? 2 : 0; S.blend[1] = state(r); memset(&S.blend[0], 0, sizeof S.blend[0]);
         CHECK(bz_word() == (on ? rows[r].word << DMSH_BLEND_ZERO_BITS : 0));   // output 1's bits
+        // through draw_, which resets g_pso_lmap before it binds the draw's arguments: the word bz_bind sends is taken by the mapping first. A readable-tile merge's second phase,
+        // output 0 at physical 1 (RGBA16F) while physical 0 is the first phase's normalized target: by physical index the guard would be off
+        memset(&S.color, 0, sizeof S.color); S.color.blend_en = (uint32_t)rows[r].on; S.blend[0] = state(r); memset(&S.blend[1], 0, sizeof S.blend[1]); S.chmask.mask = 0xf;
+        g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; g_pass.cfmt[1] = MTLPixelFormatRGBA16Float; g_pso_lmap = lmap; g_draw_bz[0] = 0xdead;
+        uint32_t written = draw_map_take(pr);
+        CHECK(g_draw_bz[0] == (on ? rows[r].word : 0)); CHECK(written == 2); CHECK(!g_pso_lmap);
+        ps->has_bz = 0; g_pso_lmap = lmap; draw_map_take(pr); CHECK(g_draw_bz[0] == 0 && g_draw_bz[1] == 0); ps->has_bz = 1;   // a shader that does not read the words
     }
+    g_pso_lmap = NULL;
     const uint16_t *px = pixels.contents;
     if (getenv("DM_T_DUMP")) for (int r = 0; r < NROWS; r++) { printf("row %d:", r); for (int x = 0; x < 8; x++) printf(" %g", half(px[r * 128 + x * 4])); printf("\n"); }   // the red channel as stored
     for (int r = 0; r < NROWS; r++) for (int x = 0; x < 8 && rows[r].a0; x++) {

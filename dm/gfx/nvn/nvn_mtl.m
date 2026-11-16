@@ -8579,10 +8579,13 @@ static uint32_t rop_word(void) {
     }
     return w;
 }
-// The two words at fragment buffer DMSH_BLEND_BUFFER (zero, round), for every draw of a shader that reads them: a copy in the frame arena per value and pass, as at_bind
+// The two words at fragment buffer DMSH_BLEND_BUFFER (zero, round), for every draw of a shader that reads them: a copy in the frame arena per value and pass, as at_bind. The values
+// are g_draw_bz, which draw_map_take works out by the draw's own physical -> logical mapping before draw_ resets g_pso_lmap (a readable-tile merge's second phase writes its outputs
+// to other attachments)
+static uint32_t g_draw_bz[2];
 static void bz_bind(id<MTLCommandEncoder> en) {
     static uint64_t gpu, pass; static uint32_t last[2];
-    uint32_t v[2] = {bz_word(), rop_word()};
+    uint32_t v[2] = {g_draw_bz[0], g_draw_bz[1]};
     if (!gpu || pass != g_pass.serial || memcmp(v, last, sizeof v)) {
         __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, v, sizeof v);
         gpu = b.gpuAddress + off; pass = g_pass.serial; memcpy(last, v, sizeof v);
@@ -14047,6 +14050,18 @@ static uint32_t draw_color_writes(NvProg *pr) {
     }
     return mask;
 }
+// What the draw's encoding needs of a merged pass's mapping, taken before it ends: the physical attachments the pipeline writes (returned) and bz_bind's words (g_draw_bz: bits by
+// logical output, formats by the physical attachment each output goes to). Then g_pso_lmap is reset, and the next draw fetches its pipeline again according to its own situation
+static uint32_t draw_map_take(NvProg *pr) {
+    uint32_t raster_mask = draw_color_writes(pr);
+    if (pr && pr->sh[1] && pr->sh[1]->has_bz && !S.rast_discard) { g_draw_bz[0] = bz_word(); g_draw_bz[1] = rop_word(); } else g_draw_bz[0] = g_draw_bz[1] = 0;
+    if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }
+    return raster_mask;
+}
+// A draw that is encoded again after draw_map_take (draw_ below: binding its arguments ended the pass, or an rt_range pass split) begins its new pass on the same targets, R.rt,
+// which for a deferred-merge replay are the merged pass Q's: it takes back the mapping this draw's pipeline was fetched by, which no branch of draw_ sets again while replaying.
+// Without it the pipeline came with no mapping, and output i went to Q's attachment i instead of the one the mapping names
+static void draw_map_put(const uint8_t *lmap, id<MTLFunction> fsfn, const pso_fz_desc *fz) { if (lmap) { g_pso_lmap = lmap; g_pso_fsfn = fsfn; g_pso_fz = *fz; g_pso_dirty = 1; } }
 // Large calls take one record regardless of the declared maximum. The fast path feeds mdx_run in bounded batches,
 // with a fresh mask table for this range. Coincident records (stride zero) need a different predicate at each index,
 // and the conversion paths need a resolved count. Beyond the mask table's capacity read the count once, so even
@@ -14205,8 +14220,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
         rp_end(); en = rp_begin_ex(0); if (!en) return;
         cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
-    uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
-    if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
+    const uint8_t *lmap0 = g_pso_lmap; id<MTLFunction> fsfn0 = g_pso_fsfn; pso_fz_desc fz0 = g_pso_fz;   // for an encode again below (draw_map_put)
+    uint32_t raster_mask = draw_map_take(pr);   // the physical mapping's uses below are taken before the merged pipeline state is reset
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
     if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
@@ -14278,7 +14293,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc != en) {
         static int again; if (again) { RED_ONCE(130, "binding a draw's arguments ended its render pass twice; draw skipped"); return; }
         PD("M %llu binding the draw's arguments ended the render pass (texture upgrade); encoded again", g_stat_pass);
-        again = 1; draw(dw, di); again = 0; return;
+        again = 1; draw_map_put(lmap0, fsfn0, &fz0); draw(dw, di); again = 0; return;
     }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;

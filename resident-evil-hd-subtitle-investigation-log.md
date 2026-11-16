@@ -177,3 +177,62 @@ L'utente non ha ancora inviato il risultato di questo comando.
 - Non fare modifiche o commit senza autorizzazione esplicita.
 - Distinguere chiaramente fatti verificati, ipotesi e test falliti.
 - Non dichiarare risolto il problema finché l'utente non lo verifica nel gioco.
+
+## Aggiornamento indagine — 16 novembre 2026
+
+### Correzione: riferimenti a 0x12370
+
+La ricerca di chiamate dirette a 0x12370 non ha prodotto risultati.
+L'analisi del codice a 0x1900 ha chiarito che i riferimenti osservati
+sono tabelle, non chiamate a una funzione:
+
+- 0x192c–0x193c: costruisce l'indirizzo 0x1237b58, legge un offset
+  relativo e salta alla destinazione con `br x9`.
+- 0x198c–0x1998: accede a una seconda tabella a 0x1237d00.
+
+La precedente ipotesi che 0x12370 fosse un inizializzatore rilevante
+per il clock non è dimostrata e non va usata come base per una patch.
+
+### Nuovo blocco di codice esaminato
+
+Nel codice intorno a 0x1a30–0x1a88 vengono confrontati valori
+caricati da una tabella con il valore in w20. In caso di
+corrispondenza il flusso raggiunge 0x1a8c.
+
+Nel blocco successivo sono state osservate chiamate a:
+- 0xb2f268
+- 0xb2f278
+
+Il loro ruolo non è ancora identificato. Le istruzioni disponibili
+non dimostrano che aggiornino il timer del filmato.
+
+### Valutazione tecnica e proposta
+
+Le modifiche al limite FPS e alla presentazione NVN già testate
+non hanno corretto la velocità dei sottotitoli. Non ripetere
+questi tentativi come se fossero una soluzione.
+
+La pista prioritaria resta il valore globale a offset +0x58418,
+letto da cMovie::execNormal() e sommato al timer del movie object
+a offset +0x3c.
+
+Prima di modificare il binario occorre:
+1. Disassemblare e identificare le funzioni 0xb2f268 e 0xb2f278.
+2. Ricostruire il blocco completo 0x1a8c–0x1ae8 e i registri base.
+3. Risalire alla provenienza dei campi global_object +0x48 e +0x78.
+4. Verificare se il delta temporale cambia durante la riproduzione
+   del filmato rispetto al gameplay.
+
+Patch proposta, non ancora implementata:
+correggere soltanto il delta temporale usato dal timer dei filmati,
+mantenendo separato il limite di presentazione grafica. La modifica
+dovrà essere specifica per Resident Evil, reversibile e verificata
+prima di essere mantenuta.
+
+Nessuna patch al binario è stata applicata in questo aggiornamento.
+Il problema dei sottotitoli resta aperto.
+
+### Prossimo passo
+
+Analizzare le due funzioni a 0xb2f268 e 0xb2f278 e completare
+il tracciamento dei dati prima di formulare una patch eseguibile.

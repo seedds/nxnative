@@ -12,6 +12,8 @@ int svc_thread(int num, uint64_t *regs);
 uint32_t svc_thread_main_init(void);
 void (*dm_test_cv_after_release)(void);
 
+// Supply a full register frame even for SVCs with few arguments: svc_thread records x30 (LR).
+
 static _Atomic uint32_t g_mutex, g_key;            // mutex word, condition key (corresponding to one word of the SDK's InternalCriticalSection / InternalConditionVariable)
 static uint32_t g_wtag, g_rtag = 0x2002;
 static _Atomic int g_rstate;                       // 0 not started 1 lock acquired 2 about to send 0x1D 3 done
@@ -28,9 +30,9 @@ static void *reader(void *a) {
     uint32_t z = 0; while (!atomic_compare_exchange_strong(&g_mutex, &z, g_rtag)) { z = 0; sched_yield(); }   // grab the lock in user mode
     state_set(1);
     // (here R changes the condition: for example decrementing the reader count to 0)
-    if (atomic_load(&g_key)) { state_set(2); uint64_t r[8] = {(uint64_t)&g_key, 1}; svc_thread(0x1D, r); }   // Signal fast path: key 0 sends no svc
+    if (atomic_load(&g_key)) { state_set(2); uint64_t r[32] = {(uint64_t)&g_key, 1}; svc_thread(0x1D, r); }   // Signal fast path: key 0 sends no svc
     uint32_t v = g_rtag;
-    if (!atomic_compare_exchange_strong(&g_mutex, &v, 0)) { uint64_t r[8] = {(uint64_t)&g_mutex}; svc_thread(0x1B, r); }      // waiter bit set => ArbitrateUnlock
+    if (!atomic_compare_exchange_strong(&g_mutex, &v, 0)) { uint64_t r[32] = {(uint64_t)&g_mutex}; svc_thread(0x1B, r); }      // waiter bit set => ArbitrateUnlock
     state_set(3);
     return NULL;
 }
@@ -44,7 +46,7 @@ static void *waiter(void *a) {
     g_wtag = svc_thread_main_init();
     uint32_t z = 0; atomic_compare_exchange_strong(&g_mutex, &z, g_wtag);                 // W holds the lock
     dm_test_cv_after_release = hook;
-    uint64_t r[8] = {(uint64_t)&g_mutex, (uint64_t)&g_key, g_wtag, (uint64_t)-1};
+    uint64_t r[32] = {(uint64_t)&g_mutex, (uint64_t)&g_key, g_wtag, (uint64_t)-1};
     svc_thread(0x1C, r);
     pthread_mutex_lock(&g_m); g_wret = (int64_t)r[0]; g_wlock_after = atomic_load(&g_mutex); g_wdone = 1; pthread_cond_broadcast(&g_c); pthread_mutex_unlock(&g_m);
     return NULL;

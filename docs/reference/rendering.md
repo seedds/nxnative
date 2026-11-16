@@ -2042,7 +2042,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 ### Smaller GL calls of an id Tech 4 renderer
 
-- `glIsSync` (a sync the layer made and has not deleted), `glShadeModel` (`GL_SMOOTH`; GLSL programs interpolate by their own qualifiers, `GL_FLAT` is a red line), `glClientActiveTexture` (unit 0; no fixed-pipeline arrays), `glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)` (Metal's triangle fill mode, with `GL_POLYGON_OFFSET_LINE` as its offset enable; a masked clear always fills), `GL_MAX_TEXTURE_COORDS` (8), `GL_MAX_UNIFORM_BLOCK_SIZE` (65,536). `GL_TEXTURE_LOD_BIAS` stays a red line: a Metal sampler has no bias.
+- `glIsSync` (a sync the layer made and has not deleted), `glShadeModel` (`GL_SMOOTH`; GLSL programs interpolate by their own qualifiers, `GL_FLAT` is a red line), `glClientActiveTexture` (unit 0; no fixed-pipeline arrays), `glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)` (Metal's triangle fill mode, with `GL_POLYGON_OFFSET_LINE` as its offset enable; a masked clear always fills), `GL_MAX_TEXTURE_COORDS` (8), `GL_MAX_UNIFORM_BLOCK_SIZE` (65,536). `GL_TEXTURE_LOD_BIAS` is the texture's sampler's `lodBias` (Metal 4, macOS and iOS 26, the host's minimum), clamped to ±15 as `GL_MAX_TEXTURE_LOD_BIAS` says: the layer used to drop it with a red line, from before Metal had it; `t_gl_imports` draws a two-level texture 1:1 and reads level 1 with a bias of 1.
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): it asks for these while it puts its GL state in order and sets a level's sync objects.
 
 ### GLSL prefixes in main are no shaders

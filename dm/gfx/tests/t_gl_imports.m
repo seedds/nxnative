@@ -391,6 +391,34 @@ static void test_doom3(void) {
     assert(d[0] == 255 && d[1] == 0 && d[2] == 0 && d[3] == 255 && d[4] == 0 && d[5] == 255 && d[6] == 0 && d[7] == 255);
     h_glDeleteTextures(1, &a);
 
+    // GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green)
+    static const char *bsrc = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
+        "vertex V bv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
+        "fragment float4 bf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
+    id<MTLLibrary> blib = [g_dev newLibraryWithSource:@(bsrc) options:nil error:&err]; assert(blib);
+    MTLRenderPipelineDescriptor *bpd = [MTLRenderPipelineDescriptor new];
+    bpd.vertexFunction = [blib newFunctionWithName:@"bv"]; bpd.fragmentFunction = [blib newFunctionWithName:@"bf"]; bpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> bpso = [g_dev newRenderPipelineStateWithDescriptor:bpd error:&err]; assert(bpso);
+    uint32_t red[16], green[4]; for (int i = 0; i < 16; i++) red[i] = 0xff0000ffu; for (int i = 0; i < 4; i++) green[i] = 0xff00ff00u;
+    h_glGenTextures(1, &a); h_glBindTexture(GL_TEXTURE_2D, a);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    ta = tex_of(a); assert(tex_make(ta, 0) && ta->levels == 2);
+    for (int bias = 0; bias <= 1; bias++) {
+        h_glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (float)bias);
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        [e setRenderPipelineState:bpso]; [e setFragmentTexture:ta->tex atIndex:0]; [e setFragmentSamplerState:tex_sampler(ta) atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+        assert(px[5] == (bias ? green[0] : red[0]));
+    }
+    h_glDeleteTextures(1, &a);
+
     // Sync queries, wireframe and its polygon offset enable
     void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
     h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
@@ -521,6 +549,6 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     return 0;
 }

@@ -302,7 +302,7 @@ typedef struct {
     GLenum target; int made, fmt, levels, slevels; uint32_t w, h, d; uint64_t use, gen;
     level_t pend[6][MAXLV]; int defined;   // defined: bit per level whose face(s) were given
     __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp;
-    GLint minf, magf, ws, wt, wr, maxlv, cmp, swz[4]; float aniso, border[4]; int smp_dirty;
+    GLint minf, magf, ws, wt, wr, maxlv, cmp, swz[4]; float aniso, lodbias, border[4]; int smp_dirty;   // lodbias: GL_TEXTURE_LOD_BIAS
 } tex_t;
 NAMES(tex_t, g_texs, g_ntexs, g_captexs)
 static tex_t *tex_of(GLuint n) { return n && n < g_ntexs ? g_texs[n] : NULL; }
@@ -592,11 +592,11 @@ static MTLTextureSwizzleChannels tex_swz(const tex_t *t) {
 static id<MTLSamplerState> tex_sampler(tex_t *t) {
     if (!t->smp_dirty && t->smp) return t->smp;
     // sampler states are shared: one per distinct parameter set
-    typedef struct { GLint minf, magf, ws, wt, wr, lv, cmp; float aniso, b; } skey;
+    typedef struct { GLint minf, magf, ws, wt, wr, lv, cmp; float aniso, b, bias; } skey;
     static struct { skey k; __strong id<MTLSamplerState> s; } cache[256]; static int n;
     int mips = t->levels > 1;
     skey k = {t->minf, t->magf, t->ws, t->wt, t->target == GL_TEXTURE_CUBE_MAP ? GL_CLAMP_TO_EDGE : t->wr, mips ? (GLint)umin((uint32_t)t->maxlv, (uint32_t)t->levels - 1) : 0, t->cmp, t->aniso,
-             t->border[3] > 0.5f ? (t->border[0] > 0.5f ? 2.f : 1.f) : 0.f};
+             t->border[3] > 0.5f ? (t->border[0] > 0.5f ? 2.f : 1.f) : 0.f, fmaxf(-15, fminf(15, t->lodbias))};   // GL clamps the bias to GL_MAX_TEXTURE_LOD_BIAS
     for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.magFilter = k.magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
@@ -608,6 +608,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
     d.sAddressMode = wrap_of(k.ws); d.tAddressMode = wrap_of(k.wt); d.rAddressMode = wrap_of(k.wr);
     d.borderColor = k.b == 2.f ? MTLSamplerBorderColorOpaqueWhite : k.b == 1.f ? MTLSamplerBorderColorOpaqueBlack : MTLSamplerBorderColorTransparentBlack;
     d.maxAnisotropy = (NSUInteger)fmaxf(1, fminf(16, k.aniso));
+    d.lodBias = k.bias;   // added to the level of detail a sample computes, as GL adds the texture's (Metal 4: macOS and iOS 26, the host's minimum)
     if (k.cmp) d.compareFunction = (MTLCompareFunction)(k.cmp - GL_NEVER);
     id<MTLSamplerState> s = [g_dev newSamplerStateWithDescriptor:d];
     if (n < 256) { cache[n].k = k; cache[n].s = s; n++; } else RED1("more than 256 distinct sampler parameter sets");
@@ -1585,7 +1586,7 @@ static void tex_param(GLenum target, GLenum p, float f, GLint i) {
         case GL_TEXTURE_MAX_LEVEL: t->maxlv = i; break; case GL_TEXTURE_MAX_ANISOTROPY: t->aniso = f; break;
         case GL_TEXTURE_COMPARE_MODE: t->cmp = i ? (t->cmp ? t->cmp : 0x203) : 0; break;   // COMPARE_REF_TO_TEXTURE, the function defaults to LEQUAL
         case GL_TEXTURE_COMPARE_FUNC: if (t->cmp) t->cmp = i; break;
-        case GL_TEXTURE_LOD_BIAS: if (f != 0) RED1("GL_TEXTURE_LOD_BIAS %g: Metal samplers have no bias (the shaders pass theirs)", f); break;   // LÖVE sets −(mipmap sharpness), 0 by default
+        case GL_TEXTURE_LOD_BIAS: t->lodbias = f; break;   // LÖVE sets −(mipmap sharpness), 0 by default; DOOM 3 0.5 on some images
         case 0x813a: case 0x813b: case 0x813c: break;   // MIN_LOD / MAX_LOD / BASE_LEVEL
         case GL_TEXTURE_SWIZZLE_R: case GL_TEXTURE_SWIZZLE_R + 1: case GL_TEXTURE_SWIZZLE_R + 2: case GL_TEXTURE_SWIZZLE_A:   // fixed once the texture is made (tex_make)
             if (t->made && t->swz[p - GL_TEXTURE_SWIZZLE_R] != i) RED1("texture swizzle changed after the texture was made: ignored");

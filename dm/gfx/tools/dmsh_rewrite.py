@@ -702,8 +702,11 @@ def tap_grid(msl):
     if body is None: return msl
     calls = list(TAP49.finditer(body))
     if len(calls) != 49 or len({(m.group(1), m.group(2)) for m in calls}) != 1: return msl
-    ops = [call_args(body, m.start() + len('dm_bs'))[0] for m in calls]   # each call's own arguments: one tex, sampler and shape, 49 coordinates
-    if any(o is None or len(o) != 6 for o in ops): return msl
+    ops = []   # each call's own arguments: one tex, sampler and shape, 49 coordinates
+    for m in calls:
+        o = call_args(body, m.start() + len('dm_bs'))[0]
+        if o is None or len(o) != 6: return msl
+        ops.append(o)
     tex, samp = calls[0].group(1), calls[0].group(2)
     rest = [(o[1].strip(), o[2].strip(), o[3].strip(), o[4].strip()) for o in ops]
     if len(set(rest)) != 1: return msl

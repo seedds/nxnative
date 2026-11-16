@@ -7127,7 +7127,9 @@ static void treg_finish_submission(void) {
 // have nothing to let it go), and goes at the first commit after the owner lets the texture go (vc_commit: the owner runs under g_smu, which cannot take g_rmu, so it lists them,
 // own_gone_take_locked), when its pool is finalized (treg_drop_pool_views), and with all the others past VC_MAX textures. Under g_rmu
 typedef struct { uint32_t pf, l0, nl, s0, ns; uint8_t tt, sw[4], pad[3]; } vc_key;
-enum { VC_WAYS = 4, VC_MAX = 16384 };
+// Ways per texture: Mario Kart World samples its two reflection cubes (one 128x128 array of 12 layers) through 28 views, 7 levels x 2 cubes x 2 swizzles; with 4 ways they pushed
+// each other out and about 57 views a frame were made again, 4.5 % of the replay thread in a race (M3 Max); with 32, about 2 a frame. A set is 1 KB, for the ~150 textures holding views
+enum { VC_WAYS = 32, VC_MAX = 16384 };
 typedef struct { const void *pool; unsigned next; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained
                  void *rows; uint64_t rows_rid, rows_n; } vc_set;   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_n: its element count
 static nvn_hmap g_vc = {.klen = 8};   // the Metal texture's address → vc_set
@@ -14419,6 +14421,18 @@ static void fb_depth_rule(NvShader *fs, int dsw) {
     if (other) g_fb_dread = 1;
 }
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
+// A view for same-pass feedback sampling (fb_prepare), from the view cache when it holds one (vc_get, keyed by the texture viewed). A mip chain drawn in passes that sample the level
+// above (Mario Kart World's bloom and reflection chains) asked for the same views every frame, and each was made again: about 1.4 % of the replay thread in a race (M3 Max)
+static id<MTLTexture> fb_view(id<MTLTexture> base, const void *pool, MTLPixelFormat pf, MTLTextureType tt, NSRange lv, NSRange sl, MTLTextureSwizzleChannels sw) {
+    vc_key k; memset(&k, 0, sizeof k); k.pf = (uint32_t)pf; k.tt = (uint8_t)tt; k.l0 = (uint32_t)lv.location; k.nl = (uint32_t)lv.length; k.s0 = (uint32_t)sl.location; k.ns = (uint32_t)sl.length;
+    k.sw[0] = (uint8_t)sw.red; k.sw[1] = (uint8_t)sw.green; k.sw[2] = (uint8_t)sw.blue; k.sw[3] = (uint8_t)sw.alpha;
+    os_unfair_lock_lock(&g_rmu); id<MTLTexture> v = vc_get(base, &k); os_unfair_lock_unlock(&g_rmu);
+    if (v) return v;
+    v = [base newTextureViewWithPixelFormat:pf textureType:tt levels:lv slices:sl swizzle:sw];
+    if (v) { os_unfair_lock_lock(&g_rmu); vc_put(base, pool, &k, v); os_unfair_lock_unlock(&g_rmu); }
+    return v;
+}
+
 // Whether a texture or image slot of this fragment shader names an attachment of the pass: the depth rule, the tile plan and the snapshot loop below each walk the bindings for
 // that, and in a race nearly no draw has one (Mario Kart World: about 2 % of the replay thread's time in those walks). A shader whose reads go through handles in uniform
 // buffers, pool tables or dynamic tables answers yes, and takes the whole path as before
@@ -14502,7 +14516,7 @@ static void fb_prepare(NvProg *pr) {
             int known = !image && !texu && fb_reach(fs, b->reg, (int)(handle >> 20), n, &lo, &hs, &hi);
             if (g_fb_mode == 1 && !((wm | g_fb_wmask) >> k & 1)) { g_fb_rmask |= 1u << k; continue; }   // nothing in this pass has written it so far: read directly
             if (n != 1 && known && lo == hs && lo != a) {
-                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl + (NSUInteger)lo, 1) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
+                id<MTLTexture> use = fb_view(base, R.rt.color[k]->pool, t.pixelFormat, t.textureType, NSMakeRange(tl + (NSUInteger)lo, 1), NSMakeRange(ts, tn), t.swizzle);
                 if (!use) { RED_ONCE(143, "same-pass feedback sampling: cannot make the view of level %lu that the sampler pins (format %lu); left as is", (unsigned long)(tl + (NSUInteger)lo), (unsigned long)t.pixelFormat); continue; }
                 if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
                 g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
@@ -14511,7 +14525,7 @@ static void fb_prepare(NvProg *pr) {
             }
             if (known && lo > a) continue;   // a range of levels above the attachment's: the view as it is
             if (a > 0 && (!known || lo < a)) {
-                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl, (NSUInteger)a) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
+                id<MTLTexture> use = fb_view(base, R.rt.color[k]->pool, t.pixelFormat, t.textureType, NSMakeRange(tl, (NSUInteger)a), NSMakeRange(ts, tn), t.swizzle);
                 if (!use) { RED_ONCE(82, "same-pass feedback sampling: cannot make the view of levels %lu+%d below the attachment (format %lu); left as is", (unsigned long)tl, a, (unsigned long)t.pixelFormat); continue; }
                 if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
                 g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;

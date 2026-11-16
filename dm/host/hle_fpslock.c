@@ -309,6 +309,20 @@ void dm_fps_lock_tick(void) {
                        !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && movie_hz != 0;
         int re_row = !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
         int row_target = re_row && high && !re_movie ? nvn_fps_high_now() : re_movie ? 60 : target;
+        // The macOS launcher may detach dmhost from the launching terminal, so stderr is
+        // not a reliable way to retrieve this one-off investigation. Keep a small,
+        // explicit diagnostic file in /tmp, independent of the app's working directory.
+        if (re_row) {
+            static int probe_file_started;
+            if (!probe_file_started) {
+                FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "w");
+                if (pf) {
+                    fprintf(pf, "[RE movie clock probe] FPS-lock tick reached; target=%d, movie_hz=%d\\n", target, movie_hz);
+                    fclose(pf);
+                    probe_file_started = 1;
+                }
+            }
+        }
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         // Resident Evil: observe the actual movie-clock delta consumed by cMovie::execNormal,
@@ -323,6 +337,12 @@ void dm_fps_lock_tick(void) {
                 memcpy(&dt, &v[2], 4); memcpy(&dt1, &v[3], 4); memcpy(&dt2, &v[4], 4);
                 LOG("[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g",
                     movie_hz, cap0, cap1, dt, dt1, dt2);
+                FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
+                if (pf) {
+                    fprintf(pf, "[RE movie clock probe] picture=%d Hz; MT limits=%g/%g; cMovie delta=%g, +5841c=%g, +58420=%g\\n",
+                        movie_hz, cap0, cap1, dt, dt1, dt2);
+                    fclose(pf);
+                }
                 memcpy(last, v, sizeof v); nprobe++;
             }
         }

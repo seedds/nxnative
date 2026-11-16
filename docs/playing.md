@@ -8,7 +8,7 @@ How to build and install a game: [README](../README.md#how-to-play).
 
 ## Touch controls
 
-The launcher’s **Controls** section offers optional **Swipe camera**, **Swipe sensitivity**, **Camera touch area**, and **Left-stick dead zone** settings. Swipe camera is off by default. See [Touch settings](settings.md#swipe-camera). Physical controllers are unaffected.
+The launcher’s **Controls** section offers optional **Swipe camera**, **Swipe sensitivity**, **Camera touch area**, **Left-stick dead zone** and **Floating left stick** settings. Swipe camera and the floating left stick are off by default. See [Touch settings](settings.md#swipe-camera). Physical controllers are unaffected.
 
 The gear at the top centre opens the in-game menu: **Controller layout** switches between **2D** and **3D** (and **Tap**, every touch to the game, in handheld mode), and the settings that take effect at once are there too, such as **Picture**, **Console mode** and **Game rumble** ([In-game menu](settings.md#in-game-menu)). The app remembers your choices. Wonder, Engage, Dread, 13 Sentinels, Link's Awakening, Ace Attorney Investigations Collection, Unicorn Overlord, Rhythm Heaven Groove, Octopath Traveler 0, Pokémon Legends: Z-A, Cuphead, Absolum, Blasphemous 2, Brain Memory Training Academy, The Great Ace Attorney Chronicles, STEINS;GATE RE:BOOT, Big Brain Academy: Brain vs. Brain, Patrick's Parabox, Celeste, Raging Loop and Mario vs. Donkey Kong start in 2D, the other games in 3D (STEINS;GATE RE:BOOT's quick save is R3, in the 3D layout).
 

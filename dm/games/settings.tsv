@@ -28,6 +28,7 @@ DM_TOUCH_SWIPE	toggle	-	0	platform:ios	Controls	Swipe camera	Move your finger to
 DM_TOUCH_SWIPE_GAIN	range	0.25:4:0.05	1.0	platform:ios	Controls	Swipe sensitivity	Only used with Swipe camera.
 DM_TOUCH_RIGHT_AREA	choice	third=Right third,half=Right half	third	platform:ios	Controls	Camera touch area	Used by both camera modes; buttons keep priority.
 DM_TOUCH_LEFT_DEADZONE	range	0:0.4:0.01	0.10	platform:ios	Controls	Left-stick dead zone	Ignore small movements near the centre.
+DM_TOUCH_LEFT_FLOAT	toggle	-	0	platform:ios	Controls	Floating left stick	The stick centres where your thumb lands and follows it past the edge.
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1

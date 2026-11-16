@@ -52,6 +52,8 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((area['kind'], area['default']), ('choice', 'third'))
                 self.assertEqual(area['options'], [['third', 'Right third'], ['half', 'Right half']])
                 self.assertTrue(all(r['section'] == 'Controls' for r in (mode, gain, dead, area)))
+                floating = rows['DM_TOUCH_LEFT_FLOAT']
+                self.assertEqual((floating['kind'], floating['default'], floating['section']), ('toggle', '0', 'Controls'))
 
     def test_upscaling_is_opt_in_for_every_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
@@ -89,7 +91,7 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_TOUCH_SWIPE', 'DM_TOUCH_SWIPE_GAIN', 'DM_TOUCH_RIGHT_AREA', 'DM_TOUCH_LEFT_DEADZONE'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_TOUCH_SWIPE', 'DM_TOUCH_SWIPE_GAIN', 'DM_TOUCH_RIGHT_AREA', 'DM_TOUCH_LEFT_DEADZONE', 'DM_TOUCH_LEFT_FLOAT'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
         s = mac['DM_FULLSCREEN']

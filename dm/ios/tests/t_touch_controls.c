@@ -31,18 +31,18 @@ int main(void) {
     for (int t=30;t<=120;t*=2) for (int d=30;d<=120;d*=2) {
         sampling(t,d,0); sampling(t,d,0.3); sampling(t,d,0.7);
     }
-    DmTouchControls defaults = dm_touch_controls(NULL,NULL,NULL,NULL);
-    assert(!defaults.swipe && defaults.swipe_gain==1 && defaults.left_deadzone==0.1 && defaults.right_fraction==1.0/3);
-    DmTouchControls chosen=dm_touch_controls("1","2.5","0.25","half");
+    DmTouchControls defaults = dm_touch_controls(NULL,NULL,NULL,NULL,NULL);
+    assert(!defaults.swipe && !defaults.left_float && defaults.swipe_gain==1 && defaults.left_deadzone==0.1 && defaults.right_fraction==1.0/3);
+    DmTouchControls chosen=dm_touch_controls("1","2.5","0.25","half",NULL);
     assert(chosen.swipe && chosen.swipe_gain==2.5 && chosen.left_deadzone==0.25 && chosen.right_fraction==0.5);
     const char *invalid[]={"", "nan", "inf", "1.0junk", "--1", "1e999"};
     for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i) {
-        DmTouchControls bad=dm_touch_controls(invalid[i],invalid[i],invalid[i],invalid[i]);
+        DmTouchControls bad=dm_touch_controls(invalid[i],invalid[i],invalid[i],invalid[i],NULL);
         assert(!bad.swipe && bad.swipe_gain==1 && bad.left_deadzone==0.1 && bad.right_fraction==1.0/3);
     }
-    DmTouchControls bounds=dm_touch_controls("0","100","-1","third");
+    DmTouchControls bounds=dm_touch_controls("0","100","-1","third",NULL);
     assert(!bounds.swipe && bounds.swipe_gain==4 && bounds.left_deadzone==0);
-    bounds=dm_touch_controls(NULL,"-1","100",NULL);
+    bounds=dm_touch_controls(NULL,"-1","100",NULL,NULL);
     assert(bounds.swipe_gain==0.25 && bounds.left_deadzone==0.4);
     // Higher sensitivity increases tilt for the same physical finger speed.
     dm_swipe_begin(&s,0,0,4); dm_swipe_move(&s,1,0,4+1.0/60);
@@ -60,8 +60,8 @@ int main(void) {
     assert(x>0 && y<0 && hypot(x,y)<=8193); // low-gain diagonal is also capped
     // Camera start boundary is independent of swipe mode; UI buttons still claim first.
     for (int mode=0;mode<2;++mode) {
-        DmTouchControls third=dm_touch_controls(mode ? "1":"0",NULL,NULL,"third");
-        DmTouchControls half=dm_touch_controls(mode ? "1":"0",NULL,NULL,"half");
+        DmTouchControls third=dm_touch_controls(mode ? "1":"0",NULL,NULL,"third",NULL);
+        DmTouchControls half=dm_touch_controls(mode ? "1":"0",NULL,NULL,"half",NULL);
         assert(!dm_touch_right_area(&third,639,960) && dm_touch_right_area(&third,640,960));
         assert(!dm_touch_right_area(&half,479,960) && dm_touch_right_area(&half,480,960));
         assert(dm_touch_right_area(&third,959,960) && dm_touch_right_area(&half,959,960));
@@ -79,5 +79,16 @@ int main(void) {
     dm_touch_axes(-60,0,77,0.25,&x,&y); assert(x<0 && y==0);
     dm_touch_axes(0,0,77,0,&x,&y); assert(x==0 && y==0);
     dm_touch_axes(60,-60,77,0.4,&x,&y); assert(x>0 && y>0 && hypot(x,y)<=32768);
-    puts("touch controls: PASS (defaults, parsing, limits, sensitivity, expiry, mixed sample rates and unchanged legacy response)");
+    // Floating left stick: opt-in, exactly "1"; the centre follows only past the radius, onto the rim.
+    assert(dm_touch_controls(NULL,NULL,NULL,NULL,"1").left_float);
+    assert(!dm_touch_controls(NULL,NULL,NULL,NULL,"0").left_float && !dm_touch_controls(NULL,NULL,NULL,NULL,"yes").left_float);
+    double cx=100, cy=100;
+    dm_touch_follow(&cx,&cy,150,100,77); assert(cx==100 && cy==100);           // inside: centre stays
+    dm_touch_follow(&cx,&cy,277,100,77); assert(cx==200 && cy==100);           // past the rim: dragged to keep the finger on it
+    dm_touch_axes(277-cx,100-cy,77,0.1,&x,&y); assert(x==32767 && y==0);       // still full tilt the same way
+    dm_touch_follow(&cx,&cy,190,100,77); assert(cx==200);                      // reversing: centre stays, so the axis turns at once
+    dm_touch_axes(190-cx,100-cy,77,0.1,&x,&y); assert(x<0 && y==0);
+    cx=0; cy=0; dm_touch_follow(&cx,&cy,300,400,100); assert(fabs(cx-240)<1e-9 && fabs(cy-320)<1e-9 && fabs(hypot(300-cx,400-cy)-100)<1e-9);
+    dm_touch_follow(&cx,&cy,cx,cy,0); assert(fabs(cx-240)<1e-9);               // no radius: unchanged
+    puts("touch controls: PASS (defaults, parsing, limits, sensitivity, expiry, mixed sample rates, unchanged legacy response and floating centre)");
 }

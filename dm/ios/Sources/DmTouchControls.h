@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { int swipe; double swipe_gain, left_deadzone, right_fraction; } DmTouchControls;
+typedef struct { int swipe, left_float; double swipe_gain, left_deadzone, right_fraction; } DmTouchControls;
+// Floating left stick: a touch-down this many ring radii from the stick's home grabs it (fixed stick: 1.4).
+#define DM_TOUCH_FLOAT_GRAB 1.65
 static inline double dm_touch_number(const char *text, double fallback, double lo, double hi) {
     if (!text || !*text) return fallback;
     char *end; double n = strtod(text, &end);
@@ -15,8 +17,9 @@ static inline double dm_touch_number(const char *text, double fallback, double l
     if (*end) return fallback;
     return fmin(fmax(n, lo), hi);
 }
-static inline DmTouchControls dm_touch_controls(const char *swipe, const char *gain, const char *deadzone, const char *area) {
-    return (DmTouchControls){swipe && !strcmp(swipe, "1"),
+static inline DmTouchControls dm_touch_controls(const char *swipe, const char *gain, const char *deadzone, const char *area,
+                                                const char *left_float) {
+    return (DmTouchControls){swipe && !strcmp(swipe, "1"), left_float && !strcmp(left_float, "1"),
         dm_touch_number(gain, 1, 0.25, 4), dm_touch_number(deadzone, 0.10, 0, 0.40),
         area && !strcmp(area, "half") ? 0.5 : 1.0 / 3};
 }
@@ -30,4 +33,11 @@ static inline void dm_touch_axes(double dx, double dy, double radius, double dea
     if (!(radius > 0 && d > radius * deadzone)) return;
     double m = fmin((d - radius * deadzone) / (radius * 0.8 - radius * deadzone), 1) / d;
     *x = (int32_t)lrint(dx * m * 32767); *y = (int32_t)lrint(-dy * m * 32767);
+}
+// A floating stick's centre follows a finger past its radius just far enough to keep the finger on the
+// rim, so reversing direction responds at once. Inside the radius the centre stays where it is.
+static inline void dm_touch_follow(double *cx, double *cy, double px, double py, double radius) {
+    double dx = px - *cx, dy = py - *cy, d = hypot(dx, dy);
+    if (!(radius > 0 && d > radius)) return;
+    *cx = px - dx * radius / d; *cy = py - dy * radius / d;
 }

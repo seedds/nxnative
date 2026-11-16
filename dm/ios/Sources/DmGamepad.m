@@ -7,7 +7,8 @@
 //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
 //     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
 //     Optional Swipe camera uses relative finger velocity instead; holding still clears it within 40 ms.
-//     The launcher also offers swipe sensitivity and the left-stick dead zone. Physical controllers are unchanged.
+//     The launcher also offers swipe sensitivity, the left-stick dead zone and an optional floating left stick (off by default: a touch-down within
+//     DM_TOUCH_FLOAT_GRAB ring radii of its home grabs it and becomes its centre, which follows the thumb past the ring as the right stick's does). Physical controllers are unchanged.
 //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
 //   Touch-down ownership: the menu button where it is nearer than a locked key (a view of its own, DmMenuButton), locked keys next (shoulders, − / +, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then in 3D the right-side camera area (right third by default, optionally the right half).
@@ -157,6 +158,7 @@ static void pads_start(void);   // Physical controllers, below
     CADisplayLink *_lookLink;
     int32_t _lookX, _lookY;
     CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
+    CGPoint _lCentre;                              // the floating left stick's centre while held (DM_TOUCH_LEFT_FLOAT), as _rCentre
     uint64_t _faceBits, _dpadBits, _btnBits;
     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
@@ -192,8 +194,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         [self registerForTraitChanges:@[UITraitDisplayScale.class] withHandler:^(id<UITraitEnvironment> environment, UITraitCollection *previous) {
             [(UIView *)environment setNeedsLayout];
         }];
-        _touchSettings = dm_touch_controls(getenv("DM_TOUCH_SWIPE"), getenv("DM_TOUCH_SWIPE_GAIN"), getenv("DM_TOUCH_LEFT_DEADZONE"), getenv("DM_TOUCH_RIGHT_AREA"));
-        LOG("touch controls: swipe %d, sensitivity %.0f%%, left dead zone %.0f%%, camera area %s", _touchSettings.swipe, _touchSettings.swipe_gain * 100, _touchSettings.left_deadzone * 100, _touchSettings.right_fraction == 0.5 ? "right half" : "right third");
+        _touchSettings = dm_touch_controls(getenv("DM_TOUCH_SWIPE"), getenv("DM_TOUCH_SWIPE_GAIN"), getenv("DM_TOUCH_LEFT_DEADZONE"), getenv("DM_TOUCH_RIGHT_AREA"), getenv("DM_TOUCH_LEFT_FLOAT"));
+        LOG("touch controls: swipe %d, sensitivity %.0f%%, left dead zone %.0f%%, camera area %s, floating left stick %d", _touchSettings.swipe, _touchSettings.swipe_gain * 100, _touchSettings.left_deadzone * 100, _touchSettings.right_fraction == 0.5 ? "right half" : "right third", _touchSettings.left_float);
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
@@ -298,7 +300,8 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
     CGRect s = self.corner;
     return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u);
 }
-- (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
+- (CGPoint)stickCentre:(int)i { return i ? _rCentre : _touchSettings.left_float && _stick[0] ? _lCentre : self.stickHome; }
+- (CGFloat)stickGrabR { return MAX([self stickR:0] * (_touchSettings.left_float ? DM_TOUCH_FLOAT_GRAB : K_STICK_GRAB), _layout.separated ? 22 : 0); }   // touch-down grab radius around the left stick's home
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return dm_touch_right_area(&_touchSettings, p.x - CGRectGetMinX(b), b.size.width); }
 - (CGPoint)dpadCenter {
@@ -449,7 +452,7 @@ int front_web_touch(void);
     if ([self btnAt:p] >= 0) return YES;
     if (dist(p, self.faceCenter) / (self.faceGap + MAX(self.faceR * 1.6, self.faceHitR)) <= 1) return YES;
     if (_full && dist(p, self.dpadCenter) / MAX(self.dpadR * K_DPAD_GRAB, _layout.separated ? 22 : 0) < 1) return YES;
-    if (!_stick[0] && dist(p, self.stickHome) / MAX([self stickR:0] * K_STICK_GRAB, _layout.separated ? 22 : 0) < 1) return YES;
+    if (!_stick[0] && dist(p, self.stickHome) / self.stickGrabR < 1) return YES;
     return _full && !_stick[1] && [self inRightArea:p];
 }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
@@ -469,11 +472,11 @@ int front_web_touch(void);
         CGFloat best = 1; int kind = C_NONE, idx = 0;
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + MAX(self.faceR * 1.6, self.faceHitR)); if (f <= best) { best = f; kind = C_FACE; }
         if (_full) { CGFloat d = dist(p, self.dpadCenter) / MAX(self.dpadR * K_DPAD_GRAB, _layout.separated ? 22 : 0); if (d < best) { best = d; kind = C_DPAD; } }
-        if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / MAX([self stickR:0] * K_STICK_GRAB, _layout.separated ? 22 : 0); if (s < best) { best = s; kind = C_STICK; } }
+        if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / self.stickGrabR; if (s < best) { best = s; kind = C_STICK; } }
         if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
-        else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
+        else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; if (!idx) _lCentre = p; }   // a floating left stick centres where the touch lands
         else game |= [self gameBegin:t];
     }
     if (game) [self pushGame];
@@ -485,11 +488,11 @@ int front_web_touch(void);
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff); CGPoint p = [t locationInView:self];
         if (c == C_FACE) [_faceOf setObject:@([self faceAt:p]) forKey:t];
         else if (c == C_STICK) { _stickNow[v >> 8] = p;
-            if ((v >> 8) == 1) {
+            if ((v >> 8) == 1) {   // the camera stick's centre follows a finger past its radius, so turning back responds at once
                 if (_touchSettings.swipe) dm_swipe_move(&_look, p.x, p.y, t.timestamp);
-                else { CGFloat d = dist(p, _rCentre), R = [self stickR:1];
-                    if (d > R) _rCentre = CGPointMake(p.x - (p.x - _rCentre.x) * R / d, p.y - (p.y - _rCentre.y) * R / d); }
-            } }
+                else { double x = _rCentre.x, y = _rCentre.y; dm_touch_follow(&x, &y, p.x, p.y, [self stickR:1]); _rCentre = CGPointMake(x, y); }
+            } else if (_touchSettings.left_float) { double x = _lCentre.x, y = _lCentre.y; dm_touch_follow(&x, &y, p.x, p.y, [self stickR:0]); _lCentre = CGPointMake(x, y); }
+        }
         else if (c == C_GAME) game = YES;
     }
     if (game) [self pushGame];
@@ -582,7 +585,8 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
         _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
-    CGPoint h = self.stickHome, o = [self knobOffset:0];
+    CGPoint home = self.stickHome, h = [self stickCentre:0], o = [self knobOffset:0];
+    _ring.affineTransform = CGAffineTransformMakeTranslation(h.x - home.x, h.y - home.y);   // a floating left stick's ring goes with its centre; home otherwise
     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
     [CATransaction commit];
 }

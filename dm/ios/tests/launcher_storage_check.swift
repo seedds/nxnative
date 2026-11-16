@@ -14,7 +14,7 @@ import Foundation
         d.set("0", forKey: "launcher.DM_PSO_MTL4")       // a changed performance setting
         d.set("1", forKey: "launcher.DM_FPS_HOLD")       // a value the toggle does not take (on / off): the default
         setenv("DM_ENV_FILE_KEYS", "DM_METAL_HUD", 1); setenv("DM_METAL_HUD", "1", 1)   // set by Documents/env.txt
-        let touchValues = [("DM_TOUCH_SWIPE", "1"), ("DM_TOUCH_SWIPE_GAIN", "2.50"), ("DM_TOUCH_LEFT_DEADZONE", "0.25"), ("DM_TOUCH_RIGHT_AREA", "half")]
+        let touchValues = [("DM_TOUCH_SWIPE", "1"), ("DM_TOUCH_SWIPE_GAIN", "2.50"), ("DM_TOUCH_LEFT_DEADZONE", "0.25"), ("DM_TOUCH_RIGHT_AREA", "half"), ("DM_TOUCH_LEFT_FLOAT", "1")]
         for (key, value) in touchValues { d.set(value, forKey: "launcher." + key) }
         let m = LauncherModel(file.settings, defaults: d)
         let scale = file.settings.first { $0.env == "DM_RENDER_SCALE" }!
@@ -22,7 +22,7 @@ import Foundation
         d.set("nan", forKey: "launcher.DM_RENDER_SCALE")
         expect(LauncherModel(file.settings, defaults: d).values["DM_RENDER_SCALE"] == scale.def, "an invalid saved range loads the default")
         expect(m.values["DM_FPS_TARGET"] == "30" && m.values["DM_PSO_MTL4"] == "0" && m.values["DM_FPS_HOLD"] == "on" && m.values["DM_METAL_HUD"] == "1", "stored choices and the env file are read")
-        expect(touchValues.allSatisfy { m.values[$0.0] == $0.1 }, "all four touch choices load from storage")
+        expect(touchValues.allSatisfy { m.values[$0.0] == $0.1 }, "all touch choices load from storage")
         expect(m.changed, "Reset is offered with changed settings")
         m.values["DM_RENDER_SCALE"] = "1.00"   // the slider's format of the default
         m.apply()

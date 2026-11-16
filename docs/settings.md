@@ -127,7 +127,18 @@ on until released.
 0 to 40 % of the on-screen stick's radius, default 10 % (the existing behaviour).
 Increase it if small accidental movements turn the character; decrease it for
 finer response near the centre. It changes only the touch movement stick, not
-physical controllers or the camera stick. The stick's centre stays fixed.
+physical controllers or the camera stick. It applies with or without
+**Floating left stick**.
+
+### Floating left stick
+
+Off by default: the movement stick stays where it is drawn. Turn this on to
+centre the stick where your thumb lands: a touch near the stick (within 1.65
+times its ring, rather than 1.4) grabs it, and the ring moves there. If your
+thumb travels past the ring, the ring follows just far enough to keep it on the
+edge, so reversing direction responds at once, as the camera stick does. The
+ring returns home on release. Buttons and the D-pad keep their priority where
+hit areas overlap. Physical controllers are unaffected.
 
 ### Touch feedback
 
@@ -312,6 +323,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Swipe sensitivity | `DM_TOUCH_SWIPE_GAIN` | `0.25` to `4`, default `1` |
 | Camera touch area | `DM_TOUCH_RIGHT_AREA` | `third` (default), `half` |
 | Left-stick dead zone | `DM_TOUCH_LEFT_DEADZONE` | `0` to `0.4`, default `0.1` |
+| Floating left stick | `DM_TOUCH_LEFT_FLOAT` | `1` on, `0` off (default) |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |

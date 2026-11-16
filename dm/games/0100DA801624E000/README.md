@@ -59,4 +59,4 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 
 ## Found on this game
 
-Nothing new: the general mechanisms it uses are listed above.
+- [The callback took the frame queued after the previous tick](../../../docs/reference/frame-rate.md#the-callback-took-the-frame-queued-after-the-previous-tick): the queue wait fixed by the late latch, the backoff of its drain found here (PR [#2757](https://github.com/seedds/nxnative/pull/2757)). On the beach at 60 fps in a window on an M6 with a 120 Hz screen, present to screen p50 40.6 → 24.0 ms with no more frames shown 33 ms; with four 19 ms frames every 5 s (a test switch), the latch without the backoff cost one frame shown 33 ms more per hitch and kept none of the gain, which the backoff ended (8-9 frames against 12 without the latch). At a 30 fps cap: unchanged.

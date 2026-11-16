@@ -843,30 +843,44 @@ static void depth_snap_case(NvProg *pr) {
 }
 // A draw that samples the depth attachment after an earlier draw of its pass wrote depth, and writes none itself, ends the pass first (Red Dead Redemption's cloud fog); one that samples
 // it first in its pass leaves the pass open, and a later draw that writes depth then ends it (g_fb_dread)
-static void depth_after_write_case(NvProg *pr) {
+static void depth_rebind(NvProg *pr) {
+    uint8_t ops[1024]={0}; size_t off=0; p_set_rt targets[2]={{0},R.rt};
+    for (int i=0;i<2;i++) { op_hdr h={OP_SET_RT,8+sizeof(p_set_rt)}; memcpy(ops+off,&h,8); memcpy(ops+off+8,&targets[i],sizeof(p_set_rt)); off+=h.size; }
+    op_hdr end={OP_END,8}; memcpy(ops+off,&end,8); mtl_exec(ops);
+    CHECK(g_enc && g_rt_merged,"empty unbind/rebind preserves the open depth-feedback pass");
+    g_samples_fb_left=1; CHECK(!draw_samples_rt(pr),"continued-pass guard hands exact depth reads to the depth feedback rule"); g_samples_fb_left=0;
+}
+static void depth_binding(int texu, int tid) { if (texu) g_ubo_words[0]=(uint32_t)tid; else S.tex[1][0]=(uint64_t)tid; }
+static void depth_after_write_case(NvProg *pr, int texu) {
     int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
     tex_t output, depth; target(&output, 99940); target(&depth, 99941); mtl_reg_tex(654, &depth, NULL);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &output; S.chmask.mask = 0xffffffffu;
     clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
     uint64_t splits = g_fb_dsplit;
-    S.ds.dt = S.ds.dw = 1; S.tex[1][0] = 0;
+    fs->rf.bindless=texu; fs->rf.b[0].kind=texu ? NVN_RB_TEXU : NVN_RB_TEX;
+    if (texu) { fs->rf.b[0].reg=2; S.ubo[1][2]=(p_bind_buf){.addr=(uint64_t)(uintptr_t)g_ubo_words,.size=16}; }
+    S.ds.dt = S.ds.dw = 1; depth_binding(texu,0);
     fb_prepare(pr);
     CHECK(g_enc && g_fb_dwrote && !g_fb_dread, "a draw that writes depth and samples nothing leaves the pass open");
-    S.ds.dw = 0; S.tex[1][0] = 654;
+    S.ds.dw = 0; depth_binding(texu,654); depth_rebind(pr);
     fb_prepare(pr);
     CHECK(!g_enc && g_fb_n == 0 && g_fb_dsplit == splits + 1, "a draw that samples the depth an earlier draw of its pass wrote ends the pass first");
     R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;   // the pass that draw opens
     fb_prepare(pr);
     CHECK(g_enc && g_fb_dread && g_fb_dsplit == splits + 1, "one that samples it first in its pass reads it there");
-    S.ds.dw = 1; S.tex[1][0] = 0;
+    S.ds.dw = 1; depth_binding(texu,0); depth_rebind(pr);
     fb_prepare(pr);
     CHECK(!g_enc, "and a later draw that writes depth ends that pass");
-    R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; g_fb_depth_m = 0;
-    fb_prepare(pr); S.ds.dw = 0; S.tex[1][0] = 654;
+    g_fb_pass=UINT64_MAX; R.rt.depth=NULL; clear(MTLClearColorMake(0,0,0,1)); R.rt.depth=&depth; S.ds.dw=0; depth_binding(texu,654); fb_prepare(pr);
+    S.ds.st=1; S.ds.zpass_f=NVN_STENCIL_OP_REPLACE; S.st_wmask[0]=255; depth_binding(texu,0); depth_rebind(pr); fb_prepare(pr);
+    CHECK(!g_enc,"a stencil writer after a depth read still ends the continued pass"); S.ds.st=0;
+    g_fb_pass=UINT64_MAX; R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; g_fb_depth_m = 0;
+    fb_prepare(pr); S.ds.dw = 0; depth_binding(texu,654);
     fb_prepare(pr);
     CHECK(g_enc && g_fb_dsplit == splits + 1, "with DM_NVN_FB_DEPTH=0 it reads it in the pass, as before");
-    g_fb_depth_m = 1; R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; S.tex[1][0] = 0; rp_end();
+    g_fb_depth_m = 1; R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; depth_binding(texu,0); rp_end();
+    fs->rf.bindless=0; fs->rf.b[0].kind=NVN_RB_TEX; fs->rf.b[0].reg=0;
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "that submission completed without error");
     mtl_tex_release(&output); mtl_tex_release(&depth);
     printf("depth after a write: %s\n", before == failed ? "PASS" : "FAIL");
@@ -897,6 +911,7 @@ static void real_depth_snap_case(NvProg *pr, int colour_pass, int stencil, int p
     if (pending) CHECK(!g_enc, "no pass is open: the clear waits for the draw's pass");
     else if (colour_pass) clear(MTLClearColorMake(0, 0, 0, 1)); else CHECK(rp_begin() != nil, "production depth-only render pass opens");
     uint64_t copies = g_fb_dsnaps;
+    if (colour_pass && !pending) depth_rebind(pr);
     fb_prepare(pr);
     id<MTLTexture> snap = g_fb_n == 1 ? g_fb_use[0] : nil;
     CHECK(!g_enc && snap && snap != dt && snap.pixelFormat == dt.pixelFormat && g_fb_dsnaps == copies + 1,
@@ -964,11 +979,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
     CHECK(pipeline != nil, "synthetic render pipeline compiles");
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
+    if (posix_memalign((void **)&g_ubo_words, getpagesize(), getpagesize())) abort(); memset(g_ubo_words, 0, getpagesize()); mtl_pool_add(g_ubo_words, getpagesize());
     const int slots[] = {0, 128, 255};
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
     depth_snap_case(pr);
-    depth_after_write_case(pr);
+    depth_after_write_case(pr,0); depth_after_write_case(pr,1);
     for (int pending = 0; pending < 2; pending++) for (int stencil = 0; stencil < 2; stencil++) { real_depth_snap_case(pr, 1, stencil, pending); real_depth_snap_case(pr, 0, stencil, pending); }
     pending_clear_case(pr);
     shape_case();
@@ -977,7 +993,6 @@ int main(int argc, char **argv) { @autoreleasepool {
     mip_pixels_case(lib);
     base_level_case(lib, 0, 1, 0, 0); base_level_case(lib, 1, 2, 1, 0); base_level_case(lib, 0, 2, 2, 1); base_level_case(lib, 0, 2, 3, 2);
     // A texture named by one handle in a uniform buffer (FINAL FANTASY XII THE ZODIAC AGE's limit-break echo): before fb_prepare took TEXU bindings, the draw read the attachment itself
-    if (posix_memalign((void **)&g_ubo_words, getpagesize(), getpagesize())) abort(); memset(g_ubo_words, 0, getpagesize()); mtl_pool_add(g_ubo_words, getpagesize());
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEXU, .aid=0, .dtt=MTLTextureType2D}; slot_case(pr, pipeline, 2, 4);
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
     fs->fn = [lib newFunctionWithName:@"mask"];

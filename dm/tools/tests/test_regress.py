@@ -50,6 +50,43 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 
 
 class Regress(unittest.TestCase):
+    def test_gl_chain_key_tracks_the_glsl_compiler(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); compiler = root / 'glslangValidator'; compiler.write_bytes(b'compiler version one')
+            tree = NS(path=root)
+            g = NS(kind='gl', ver='v0', shader_roots=list)
+            gl = NS(sources=lambda roots: [(b'void main() {}', 'frag', 'synthetic')])
+            with patch.dict(os.environ, {}, clear=True), patch.object(regress, 'load_module', return_value=gl), \
+                 patch.object(regress.shutil, 'which', return_value=str(compiler)):
+                before = regress.chain_key(tree, g, 'other tools')
+                self.assertEqual(before, regress.chain_key(tree, g, 'other tools'))
+                compiler.write_bytes(b'compiler version two')
+                self.assertNotEqual(before, regress.chain_key(tree, g, 'other tools'))
+
+    def test_gl_manifest_preserves_translation_failures(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'translations.json'
+            p.write_text(json.dumps({'a_frag': {'st': 'ok', 'msl': 'abc', 'refl': 'def'}, 'b_frag': {'st': 'translation failed', 'err': 'sampler limit'}}))
+            built = regress.gl_manifest(p, True, Path(d) / 'log')
+            self.assertEqual((built['a_frag']['st'], built['b_frag']['st']), ('ok', 'translation failed'))
+            failed = regress.gl_manifest(p, False, Path(d) / 'log')
+            self.assertEqual((failed['a_frag']['st'], failed['b_frag']['st']), ('library failed', 'translation failed'))
+            p.write_text('{}')
+            with self.assertRaises(regress.HarnessError): regress.gl_manifest(p, True, Path(d) / 'log')
+
+    def test_gl_game_capture_roots_and_provisional_route(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); build = root / '0100000000000000_build'
+            (build / 'patched_v0').mkdir(parents=True); (build / 'shader/gl').mkdir(parents=True)
+            capture = build / 'extract/v0/gl_capture'; capture.mkdir(parents=True)
+            profile = build / 'profile/0100000000000000'; profile.mkdir(parents=True)
+            (profile / 'game.tsv').write_text('name\tSynthetic GL game\n')
+            (profile / 'smoke.tsv').write_text('secs\t120\nsave\tnew\n')
+            g = regress.Game(root, build)
+            self.assertEqual(g.kind, 'gl'); self.assertEqual(g.route()['secs'], 120)
+            with patch.object(regress.Game, 'romfs', return_value=root / 'romfs'):
+                self.assertEqual(g.shader_roots(), [root / 'romfs', capture, build / 'extract/v0/ExeFS/main'])
+
     def test_run_env_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync a route's scratch save with the player's cloud save (docs/reference/services.md)
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -160,6 +197,26 @@ class Regress(unittest.TestCase):
             self.assertEqual((cwd / 'ctl').read_text(), 'shot x.png\ndump\n')
             with patch.object(regress.time, 'sleep'), patch.object(regress.subprocess, 'run', side_effect=OSError):
                 self.assertIsNone(regress.hang_evidence(NS(pid=4242), cwd))
+
+    def test_gl_frames_progress_while_display_link_messages_stop(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            now = [0.0]; log = Path(td) / 'log.txt'
+            child = NS(pid=4242, returncode=0, poll=lambda: 0 if now[0] >= 1.5 else None, send_signal=lambda _: None, wait=lambda _: None)
+            cafe = NS(poll=lambda: 0)
+            def popen(cmd, **kw):
+                if cmd[0] == 'caffeinate': return cafe
+                kw['stdout'].write('[dm] [nvn-mtl] presents 1\n'); kw['stdout'].flush(); return child
+            def sleep(secs):
+                now[0] += secs
+                with log.open('a') as f: f.write(f'[dm] [gl] frame {int(now[0] * 1200)}: draws 10\n')
+            for name, value in (('check_disk', None), ('wait_idle', True), ('take_lock', None), ('footprint', None), ('hang_evidence', None)):
+                stack.enter_context(patch.object(regress, name, return_value=value))
+            stack.enter_context(patch.object(regress.subprocess, 'Popen', side_effect=popen))
+            stack.enter_context(patch.object(regress.time, 'monotonic', side_effect=lambda: now[0]))
+            stack.enter_context(patch.object(regress.time, 'sleep', side_effect=sleep))
+            r = regress.run_watched(['host'], {}, Path(td), log, NS(min_free_gb=0, wait_idle=0, lock=None), limit=2, hang=0.5, kind='gl', what='synthetic')
+            self.assertIsNone(r['hang_at_s'])
+            self.assertGreaterEqual(r['max_frame'], 1200)
 
     def test_routes(self):   # every profile's smoke.tsv reads
         for f in (REPO / 'dm/games').glob('*/smoke.tsv'):

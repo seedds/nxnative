@@ -3,11 +3,12 @@
 // such parameters are always declared as int/unsigned and truncated by ourselves. Variadic arguments go on the stack on Apple and in registers on Switch ⇒ variadic functions cannot use C's "..." directly.
 #pragma once
 #include "dm.h"
+#include "registration.h"
 #include <stddef.h>
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+    DM_REGISTER("swhle", hle_ent, hle_ent_##cname, {mangled, (void *)cname}); \
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
@@ -56,14 +57,14 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
             "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n"              \
             ".if " HLE_STR(HLE_NARG(__VA_ARGS__)) " > 8\n    mov x17, #(((" HLE_STR(HLE_NARG(__VA_ARGS__)) " - 8) * 8 + 15) & ~15)\n" \
             "    b _dm_bigstack_enter_n\n.else\n    b _dm_bigstack_enter\n.endif\n");           \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)(uintptr_t)cname##_bs, why}); \
     static ret cname(__VA_ARGS__)
 // Same as above, but the implementation runs on the caller's stack. Only for a take-over that runs the game's own code (an NRO's init and fini, a JIT plugin): that code's stack
 // use is the game's, sized for the thread's own stack (which can be larger than the 512 KB host stack), and it may switch stacks itself (a coroutine), which would reuse the
 // host stack the take-over is on. A short call into the SDK (fs::IsMounted, the audio renderer's command generation) is no reason. Say why beside it
 #define HLE_FORCE_DIRECT(mangled, why, ret, cname, ...)                                            \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)cname, why}); \
     static ret cname(__VA_ARGS__)
 // A guest alias: every reference to mangled binds to the loaded modules' own definition of target instead, as if the module had imported target. No host code runs and no
 // signature is restated, so the alias holds for every SDK that defines both. For a hardware class whose constructor the host takes over to build the SDK's software class in the
@@ -72,7 +73,7 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
 #define HLE_FORCE_ALIAS(mangled, target, why) HLE_FORCE_ALIAS_(mangled, target, why, __COUNTER__)
 #define HLE_FORCE_ALIAS_(mangled, target, why, n) HLE_FORCE_ALIAS__(mangled, target, why, n)
 #define HLE_FORCE_ALIAS__(mangled, target, why, n) \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_alias_##n = {mangled, NULL, why, target}
+    DM_REGISTER("swforce", hle_force_ent, hle_force_alias_##n, {mangled, NULL, why, target})
 // Programs that do not link hle_bigstack.c (unit tests, whose stacks are host stacks) get this pass-through: the implementation runs on the caller's stack, as dm.h's weak dm_log
 // writes there. The host's entry (hle_bigstack.c) replaces it at link time
 __attribute__((weak, naked, visibility("hidden"))) void dm_bigstack_enter(void) { __asm__ volatile("br x16"); }
@@ -98,7 +99,7 @@ typedef Result (*sf_answer)(sf_req *r);
 uint32_t sf_session(const char *name, sf_answer answer, void *ctx, void (*close)(void *ctx));   // a new host session (its handle), for a service to move to its client
 // A service the host serves in its own file: SF_SERVICE("name", answer) registers it (the __DATA,swsf section), and connecting to that name gives a session answered by it
 typedef struct { const char *name; sf_answer answer; } sf_service_ent;
-#define SF_SERVICE(svc, fn) __attribute__((used, section("__DATA,swsf"))) static const sf_service_ent sf_service_##fn = {svc, fn}
+#define SF_SERVICE(svc, fn) DM_REGISTER("swsf", sf_service_ent, sf_service_##fn, {svc, fn})
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
 int dm_opmode(void);
 void dm_set_opmode(int m);          // On change, push notification 30 / 31 according to the switches the game has turned on

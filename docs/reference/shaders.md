@@ -1418,6 +1418,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** each half of such a binding carries the other word (`soff`, `sreg`), and the host ORs the two as the GPU does (`ubo_bind_handle`). A shader whose order was as assumed gets the same handle.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): its lighting, with this as the last step from a black scene to a lit one.
 
+### Compute texture handles loaded through uniform addresses
+
+- **Symptom:** `Failed to find handle source for bindless access of type "textureBuffer".` in compute shaders; the build reports deleted reads whose results become zero.
+- **Cause:** compute code can load its handle words through the uniform addresses in the canonical c0 table (`DMSH_C0_CS_UBO`), instead of direct constant-buffer instructions. `GlobalToStorage` lowers these loads to storage-buffer operations before `BindlessElimination`, which recognized only direct constant-buffer handle words. A two-word handle then lost its known uniform origin and its buffer fetch was deleted.
+- **Fix:** `ResourceManager.TryGetComputeUniformSlot` recovers the uniform slot from the storage binding's descriptor origin. `BindlessElimination.UniformHandleWord` resolves a fixed word in a representable game-uniform slot to the existing constant-buffer binding metadata, retaining both words of an ORed handle. It changes no ordinary load. Other stages, unrelated storage descriptors, reserved slots and dynamic word offsets keep their existing paths. This is bound to the NVN compute driver layout, with no game/build gate or pool-array workaround.
+- **Found on:** [Sid Meier's Civilization VI](../../dm/games/010044500C182000/README.md#rendering-and-shaders): all 382 deleted accesses in four compute shaders restored. Their later gameplay use has not been exercised.
+- **Check:** `DMSH_TEST_XLATE=<translator> DMSH_TEST_GPU=1 python3 dm/gfx/tests/test_dmsh_compute_uniform_handles.py`; synthetic Maxwell checks both handle orders and descriptor/offset boundaries, and executes a translated fetch on Metal. `t_tbuf_handle` checks production binding of both uniform words.
+
 ### A store only a dispatch's first invocation makes
 
 - **Symptom:** objects from a compute-built list flicker: each is in one of two states, on and off irregularly and independently of the others, while the draws are the same frame to frame and the camera is still. Whole groups may vanish or appear in one frame and stay that way until the list's next rebuild. Shots of consecutive frames show the change per frame jumping between two levels.

@@ -140,6 +140,7 @@ class Host(unittest.TestCase):
         src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
         got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
         self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK,
+                               'NxComputeUniformBase': abi.C0_CS_UBO, 'NxComputeUniformStride': abi.C0_ROW, 'NxComputeUniformSlots': abi.C0_CS_UBO_SLOTS,
                                'NxBufferImageBiasBank': abi.TBIAS_BANK, 'NxBufferImageBiases': abi.TBIAS_SLOTS,
                                'NxStorageLengthsBank': abi.SBLEN_BANK, 'NxStorageLengthSlots': abi.SBLEN_SLOTS})
         self.assertIn('TranslationFlags.MetalStorageBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())

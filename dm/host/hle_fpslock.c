@@ -303,7 +303,7 @@ void dm_fps_lock_tick(void) {
         // Resident Evil's +0x48 value also governs its per-frame simulation
         // step. Keep that engine clock at 120; the requested 30/60 cap is
         // applied independently by NVN presentation pacing.
-        int row_row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && row_target < 120 ? 120 : row_target;
+        int row_target = !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && target < 120 ? 120 : target;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {
@@ -313,7 +313,7 @@ void dm_fps_lock_tick(void) {
                 if (cur == want || !(cur >= 10 && cur <= 120)) continue;   // already set, or not set yet
                 double *p = (double *)(uintptr_t)a;
                 dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint64_t *)p, *(uint64_t *)&want, __ATOMIC_RELAXED);
-                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (row_target)") : "", cur, row_target, src); }
+                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, row_target, src); }
             }
             continue;
         }

@@ -1,3 +1,33 @@
+# nxnative Resident Evil HD Remake
+
+Resident Evil HD Remaster – Optimized nxnative Version
+
+I've been working on improving Resident Evil HD Remaster support in nxnative, with optimizations specifically tailored to this game.
+
+This version includes:
+
+Support for the game's ARC v9 archives and SPK shader packages.
+Processing of over 19,000 unique shaders.
+Selectable 30, 60 and 120 FPS modes.
+Improved game timing to keep gameplay and animations running at the correct speed.
+Fixed cutscene playback speed and subtitle synchronization.
+Improved iOS display refresh-rate compatibility.
+I've successfully built and tested the Mac and iOS versions, including gameplay on an iPad Pro M5.
+
+This is a game-specific optimized version for Resident Evil HD Remaster, not a general-purpose build for every game.
+
+You can find the source code here:
+
+https://github.com/H3li03/nxnative
+
+Feel free to try it out and share your feedback, especially if you test different FPS modes or devices!
+
+Note: You must own a legally obtained copy of the game and provide your own game files and keys. No copyrighted game files or assets are included.
+
+P.s.
+
+All this was possible with the free version of chatgpt and around 3 days of vibe coding, the game is awesome at 120fps!
+
 # nxnative
 
 Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.

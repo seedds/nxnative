@@ -1,0 +1,49 @@
+# Game profile of LEGO® Harry Potter™ Collection (010052A00B5D2000), update 1.0.2 (v131072), SDK 5.4.0.
+# Format: see dm/games/README.md
+# TT Games' own renderer: the Windows D3D11 DLLs ported to nn::ro modules. main is 750 instructions that mount the
+# RomFS; libHarryLauncher.nro (nro2) starts and loads libharry1.nro (nro1, Years 1-4) or libharry2.nro (nro0,
+# Years 5-7) as a module — lhp_switch_dll_launcher.nrr registers all three. Modules main, sdk and those three NROs
+# are rewritten, and the host maps the NROs at start (loader.c, "NRO modules").
+# Years 5-7's frame is built by three routines this build does not order as the console does, and that is the crash
+# this profile's one cut fixes: the recorder stores a pass's record in the live table at singleton+0x9d0
+# (nro0+0xd2ff0), the begin-frame routine copies the 24 entries into the published table at singleton+0xa90 a frame
+# phase later (nro0+0x15f420), and the replay reads the published table in the same frame (nro0+0xd39c0 and eleven
+# other sites) — different threads, two locks that do not order them. patches.py publishes the record at the store
+# (nro0+0xd3138); dm/host/hle_nullpass.c reads a load that still faults in the null page as zero for the sites a
+# frame reaches before it fills them (the emulator's recovery, natively).
+# What this profile does NOT hold: the shader tables. They are the build's own output (the derived profile), and 493
+# of the map's rows come from a run-time dump no split reproduces (docs/reference/shaders.md, "Shaders whose bytes
+# exist only in a run-time dump"). The note says where they are and what each count is.
+
+# ---- Identity ----
+title_id	010052A00B5D2000
+program_id	010052A00B5D2000
+
+# ---- App ----
+name	LEGO® Harry Potter™ Collection
+ipa	LegoHarryPotterCollection.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=01c46c3e39c5370f76f985004a872366	sdk=26ffb122262ca25e4c016c0af2f92a29
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	harry2_dll/HARRY2B.DATNX
+zip_store	.datnx:.nro:.pkdswitch:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/.nro/=nro /harry1_dll/=harry1dll /harry2_dll/=harry2dll /launcher_dll/=launcherdll /.nrr/=nrr
+shader_note	LEGO® Harry Potter™ Collection shaders (the split reads 372 keys from the three NROs; the rest of the 1,397-key map is the dump's)

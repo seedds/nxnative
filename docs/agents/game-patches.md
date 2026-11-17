@@ -19,6 +19,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | yes |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 12 | 0 | 0 | 0 | 0 | yes |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 3 | 0 | 0 | yes |
+| [LEGO® Harry Potter™ Collection](#lego-harry-potter-collection) | 1 | 0 | 0 | 0 | 1 |  |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 |  |
 | [Mario + Rabbids Kingdom Battle](#mario--rabbids-kingdom-battle) | 6 | 0 | 0 | 0 | 0 | yes |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 7 | 0 | 0 | 0 | 0 | yes |
@@ -312,6 +313,14 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - frame step `+0x8d94b0`: KTGL device config present interval: 1 above a 30 fps cap, else the game's 2 (state page target fps)
   - frame step `+0x166dab4`: KIDS frame task: fps and the frame-rate block = the cap, vsyncs per update marked; device frame rate 59.94 / vsyncs (state page target fps; 0 = the game's 30)
   - frame step `+0x166dc60`: KIDS frame task: the frame-rate object's steps × its fps × vsyncs per update / 60 (state page target fps; 0 = as the game sets them)
+
+### LEGO® Harry Potter™ Collection
+
+[LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md), `010052A00B5D2000`, [patches.py](../../dm/games/010052A00B5D2000/patches.py).
+
+- **build** `7e19fa84…` (in this profile's patches.py, not a `build` row) ([patches.py:37](../../dm/games/010052A00B5D2000/patches.py#L37))
+  - stub `+0xd3138`: pass-state recorder: publish live[slot] into published[slot] at record time, before the slot count is incremented (the replay reads the record in the same frame, and the records die with the frame; without it the published table is only filled by 0x15f420, which the worker's pass loop can outrun)
+  - host [hle_nullpass.c:41](../../dm/host/hle_nullpass.c#L41): build check
 
 ### Luigi's Mansion 3
 
@@ -726,6 +735,7 @@ Applied to the `sdk` of any build without CUTS whose profile was not brought up 
 Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
 
 - `992787e2…`: [hle_fpslock.c:218](../../dm/host/hle_fpslock.c#L218): build check (a build no profile registers)
+- `7e19fa84…`: [hle_nullpass.c:41](../../dm/host/hle_nullpass.c#L41): build check
 
 ## Translator rules keyed by a shader's code
 

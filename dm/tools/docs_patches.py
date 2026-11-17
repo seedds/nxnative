@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Writes docs/agents/game-patches.md, the index of game-specific code: per game, the rewriter's patches of its builds (CUTS, OBS, FRAME_STEP sites, MATCH_CUTS and CAPABILITIES of its
+# Writes docs/agents/game-patches.md, the index of game-specific code: per game, the rewriter's patches of its builds (CUTS, OBS, FRAME_STEP sites, STUBS sites, MATCH_CUTS and CAPABILITIES of its
 # dm/games/<id>/patches.py, with each patch's reason), the host's rows keyed by its build IDs (32-hex string literals in dm/host and dm/gfx), and the GENERALIZE note of its patches.py (whether
 # the patch could become a general rule, and how); then the SDK cuts of dm/tools/sdk_patches.py by sdk build and the games that ship it, the SDK-wide function-matched rules, translator rules
 # keyed by a shader's code hash, and the profile keys that switch host behaviour away from their default, with the games that set them. Frame-step sites are found by running each
-# FRAME_STEP function against a recording context (no game files). Run it after changing a patch file, a build-keyed host table or a profile key; --check only reports whether the page is
+# FRAME_STEP function against a recording context (no game files), and so are stub sites (no game files either). Run it after changing a patch file, a build-keyed host table or a profile key; --check only reports whether the page is
 # current (dm/tools/tests/test_docs.py runs it).
 # Usage: docs_patches.py [--check]
 import importlib.util, re, subprocess, sys, pathlib, types
@@ -56,7 +56,15 @@ def frame_step_sites(fn):   # (offset, reason) of each site a FRAME_STEP functio
     return sorted(puts), ctx.render_scale
 
 
-def host_rows(builds):   # {build ID: [(file, line, what)]}: rows and checks of the host keyed by a main build ID
+def stub_sites(fn):   # (offset, reason) of each site a STUBS function writes (a stub's site is a cut: patch_nso.py puts a B there and lists it in <module>.cuts.tsv)
+    pos, puts = [0x8000000], []
+    def emit(w): pos[0] += 4
+    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, word=lambda off: 0, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)))
+    fn(ctx)
+    return sorted(puts)
+
+
+def host_rows(builds, registered=None):   # {build ID: [(file, line, what)]}: rows and checks of the host keyed by a main build ID
     out = {}
     tracked = subprocess.run(['git', 'ls-files', *HOST], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\n')
     for p in sorted(REPO / f for f in set(tracked) if f):   # a set: ls-files lists a file in a merge conflict once per stage
@@ -70,7 +78,7 @@ def host_rows(builds):   # {build ID: [(file, line, what)]}: rows and checks of 
                 strings = re.findall(r'"([^"]*)"', line)
                 what = TABLES.get(table, table) if table else 'build check'
                 if table == 'k_locks' and len(strings) > 1: what = f'{what}: {strings[1]}'
-                out.setdefault(m.group(1), []).append((p, n, what if m.group(1) in builds else f'{what} (a build no profile registers)'))
+                out.setdefault(m.group(1), []).append((p, n, what if m.group(1) in (registered or builds) else f'{what} (a build no profile registers)'))
     return out
 
 
@@ -116,9 +124,11 @@ def version(builds, bid, owner=None):   # "1.4.3 main" from the build rows (of t
 
 def page():
     gs = games(); names = [g.get('name', g.id) for g in gs]; DUP.update(g.id for g in gs if names.count(g.get('name', g.id)) > 1)
-    gs.sort(key=lambda g: name(g).casefold()); builds = build_rows(gs); host = host_rows(builds)
+    gs.sort(key=lambda g: name(g).casefold()); builds = build_rows(gs)
     files = {p.parent.name: p for p in sorted((REPO / 'dm/games').glob('*/patches.py'))}
     mods = {gid: load(p, n) for n, (gid, p) in enumerate(files.items())}
+    registered = set(builds) | {bid for m in mods.values() for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES') for bid in getattr(m, k, {})}
+    host = host_rows(builds, registered)
     sdk = load(SDK, 'sdk'); sdk_text = SDK.read_text()
     host_games = {}
     for bid, rows in host.items():
@@ -129,14 +139,16 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, mc, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'CAPABILITIES'))
-        bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *sorted(host_games.get(g.id, ()))]))
+        cuts, obs, fs, mc, caps, subs = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'CAPABILITIES', 'STUBS'))
+        bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *subs, *sorted(host_games.get(g.id, ()))]))
         n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         general = getattr(m, 'GENERALIZE', '') if m else ''
         if general: lines += [f'**Generalize?** {general}', '']
         for bid in bids:
-            lines.append(f'- **{version(builds, bid, g)}** {short(bid)}' + (f' ({link(files[g.id], lineno(text, repr(bid)))})' if bid in text else ''))
+            head = f'- **{version(builds, bid, g)}** {short(bid)}' if bid in builds else f'- **build** {short(bid)} (in this profile\'s patches.py, not a `build` row)'
+            lines.append(head + (f' ({link(files[g.id], lineno(text, repr(bid)))})' if bid in text else ''))
             for off, ob, nb, why in cuts.get(bid, []): lines.append(f'  - cut `+{off:#x}`: {why}')
+            for off, why in stub_sites(subs[bid]) if bid in subs else []: lines.append(f'  - stub `+{off:#x}`: {why}')
             for off, gate, word, why in obs.get(bid, []): lines.append(f'  - gate {gate} at `+{off:#x}`: {why}')
             if bid in fs:
                 sites, scale = frame_step_sites(fs[bid]); n_fs += len(sites)
@@ -153,7 +165,8 @@ def page():
                 lines.append(f'- **function-matched** (`{module}` of builds without CUTS): {r["name"]}: {len(fns)} function{"s" * (len(fns) > 1)}, {ncut} cut{"s" * (ncut > 1)}')
         sections += lines + ['']
         n_host = sum(len(host.get(b, [])) for b in bids)
-        summary.append(f'| [{name(g)}](#{slug(name(g))}) | {sum(map(len, cuts.values()))} | {sum(map(len, obs.values()))} | {n_fs} | '
+        n_stub = sum(len(stub_sites(subs[b])) for b in subs)
+        summary.append(f'| [{name(g)}](#{slug(name(g))}) | {sum(map(len, cuts.values())) + n_stub} | {sum(map(len, obs.values()))} | {n_fs} | '
                        f'{sum(len(v) for v in mc.values())} | {n_host} | {"yes" if general else ""} |')
 
     orphans = [f'- {short(bid)}: {link(p, n)}: {what}' for bid, rows in host.items() if bid not in builds for p, n, what in rows]

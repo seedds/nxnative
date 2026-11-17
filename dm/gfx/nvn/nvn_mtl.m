@@ -15128,7 +15128,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         NvShader *fs = pr->sh[1];
         if (fs->has_alpha && atest_on()) at_bind(en);
         if (fs->has_bz) bz_bind(en, draw_lmap);
-        if (fs->has_logic && lop_on()) lo_bind(en);
+        if ((fs->has_logic || fs->u_logic) && lop_on()) lo_bind(en);
     }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;

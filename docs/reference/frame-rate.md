@@ -734,6 +734,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** synthetic tests of the acquire path while looking at [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) ([GitHub issue #1985](https://github.com/seedds/nxnative/issues/1985)). No game is known to acquire in several calls a frame or from several threads; whether this played a part in that issue's Castle Town slowdown is open.
 - **Check:** `dm/gfx/tests/t_rt_comp` (runs its auto, fixed and off modes): 6 ms of CPU a frame in two acquires declares 7.5 ms, not 3.75; a second acquire thread learns 1.25 ms from 1 ms frames on itself; the first goes back to the standard policy 120 frames after it stopped; an ended thread is retired with no call on its port.
 
+### A storage takeover looked at a spared entry once per 64 KB cell
+
+- **Symptom:** a `sample` of the queue replay thread shows `own_alias_publish` → `alias_take_over` → `nvn_hm_get` and `memcmp` under the passes' first draws (`draw_` → `rt_dims` → `tex_mtl_at`): 3% of the thread's samples, 6% of its busy time, in a scene where the game makes its render targets again as new texture objects.
+- **Cause:** a new shared texture takes over the storage of the entries it overlaps under another description (`alias_take_over` in `nvn_owner.m`). It finds them through the index of 64 KB cells, in which each entry is listed in every cell its storage reaches, and it looked at each entry in each cell of the overlap. An entry it spares (looked up in the last 16 submissions, or held by a live object) cost a key compare and two hash lookups per cell: a 16 MB render target over storage that others share, about 256 cells, repeated that hundreds of times per new texture.
+- **Fix:** general, in the host (`nvn_owner.m`): an entry is looked at only in the first cell of its overlap with the new texture. The result is the same; `own_alias_stats` counts the entries takeovers looked at (`looks`).
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), Mac, the owner's save in the Temple of Time (batch OoT-30, item C-1).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_alias_takeover`: a spared entry that lies in every cell of the new texture is looked at once (fails before the fix).
+
 ### A shader that writes a whole frame through raw global memory
 
 - **Symptom:** a movie or full-screen compute pass far slower than the same work should be, nearly all of it GPU time: `GPU p50` near the frame time with `submit+present` under 1 ms. `[RED] raw global memory: a write log ran out of slots` on older chains. With `DM_NVN_GPUPROF` a relaxed timestamp can put the time before the compute encoder's reported start, so the encoder itself looks short and the gap before it is what is long.

@@ -40,7 +40,26 @@ case ${1:-module} in
       echo "  the rewriter, the patch files or the NRO are not the ones this module was built from" >&2
       exit 1
     fi ;;
+  tables)
+    romfs=${ROMFS:-$WORK/extract/v131072/RomFS.img}
+    exemain=${MAIN:-$(dirname "$romfs")/ExeFS/main}
+    out=${OUT:-$WORK/tables}
+    [ -f "$romfs" ] || { echo "no $romfs: set ROMFS= to the game's RomFS image" >&2; exit 2; }
+    rm -rf "$out"; mkdir -p "$out/pkg"
+    env DM_GAME=$ID "$PY" "$here/dm/gfx/tools/shader_split.py" "$romfs" "$exemain" "$out/pkg" \
+      "$out/shader_map.tsv" "$out/shader_facts.tsv" "$out/shader_pairs.tsv" "$out/pso_pairs.tsv"
+    env DM_GAME=$ID "$PY" "$here/dm/gfx/tools/dmsh_shdump.py" "$here/dm/games/$ID/shdump" "$out/pkg" "$out/shader_map.tsv"
+    rc=0; keys=0
+    for t in shader_map.tsv shader_facts.tsv shader_pairs.tsv pso_pairs.tsv; do
+      if ! diff -q <(grep -v '^#' "$out/$t") <(grep -v '^#' "$here/dm/games/$ID/$t") >/dev/null; then
+        echo "$t differs from the profile's: diff $out/$t $here/dm/games/$ID/$t" >&2; rc=1; continue
+      fi
+      [ "$t" = shader_map.tsv ] && keys=$(grep -v '^#' "$here/dm/games/$ID/$t" | tail -n +2 | wc -l | tr -d ' ')
+      echo "$t reproduces"
+    done
+    [ "$rc" = 0 ] && echo "the profile's tables are what the split and its dump produce ($keys keys)"
+    exit $rc ;;  # $out/pkg holds the same records: keep it beside the tables for dmsh_build.py
   survey)
     exec "$PY" "$here/scripts/build_ipa_from_nsp.py" "$NSP" --survey-only ;;
-  *) echo "usage: $0 [module|survey]" >&2; exit 2 ;;
+  *) echo "usage: $0 [module|tables|survey]" >&2; exit 2 ;;
 esac

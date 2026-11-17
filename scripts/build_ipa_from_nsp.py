@@ -1652,6 +1652,15 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
     if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
         raise BuildError('the shader split found no shaders in main or the RomFS: the game keeps them in a form shader_split.py does not read; locate them (docs/agents) and add a reader')
+    # A profile that carries a run-time dump (dm/games/<id>/shdump/: the pairs DM_NVN_SHDUMP wrote) has shaders no scan of the files can find. dm/gfx/tools/dmsh_shdump.py
+    # recomputes each pair's key, rejects one that is not the key it was written under, and appends the row and the package record the profile's map holds — here, before the
+    # tables are compared, so the map a registered profile commits is what the split plus its own dump reproduces (docs/reference/shaders.md, "Shaders whose bytes exist only
+    # in a run-time dump")
+    dump = g.dir / 'shdump'
+    if dump.is_dir():
+        run([py, repo / 'dm/gfx/tools/dmsh_shdump.py', dump, tmp / 'pkg', tmp / 'tables' / 'shader_map.tsv'], logs / 'dmsh_shdump.log', env=env)
+        dm = re.search(r'shdump: (\d+) pair\(s\), (\d+) rejected, (\d+) row\(s\) added', (logs / 'dmsh_shdump.log').read_text(errors='replace'))
+        if dm: say(f'{int(dm.group(1)):,} dumped pair(s), {dm.group(3)} row(s), {dm.group(2)} rejected')
     # pso_pairs.tsv (supplemental BAHS variations and legacy Unity pass-input covers): checked like the others where the profile has one; else kept beside the
     # package, where dmsh_build.py reads it too, so padding and the pipeline prebuild use the same pairs
     if not provisional and derive_dlc and dlc_only_shader_change(g, tmp / 'tables'):

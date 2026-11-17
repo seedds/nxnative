@@ -66,6 +66,7 @@ static int frame1(int delay_us) { frame_start(1, delay_us); int w = waiting(0); 
 int main(void) { @autoreleasepool {
     alarm(120); setbuf(stdout, NULL);
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LATCH", "1", 1); setenv("DM_PRESENT_DRAIN", "1", 1); setenv("DM_RT", "0", 1);
+    setenv("DM_PRESENT_SNAP", "0", 1);   // a profile with present_snap on (Breath of the Wild) turns the latch off through mtl_snap_on()
     mtl_init();
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     mtl_present_layer(8, 8);
@@ -142,5 +143,14 @@ int main(void) { @autoreleasepool {
     }
     snprintf(name, sizeof name, "a 2-tick acquire probes within %d woken callbacks (took %d), no waits in between (%d)", LINK_LATCH_PROBE, n, waited_early);
     CHECK(name, g_link_latched == latched0 + 1 && n <= LINK_LATCH_PROBE && waited_early == 0 && g_link_latch_misses == 0 && g_link_dropped == 0);
+
+    // 6. The 120 Hz link (a variable-refresh screen): a 60 fps acquire waits two ticks, the tick between finds nothing new, and the woken tick latches its present with no drain
+    g_link_mode = 2; g_gap = 1. / 120; g_link_latch_misses = 0; latched0 = g_link_latched; ok = 1;
+    for (int i = 0; i < 6; i++) { NO_DRAIN(); frame_start(2, 1000); ok &= waiting(0); while (!next_wakes()) tick(); tick(); ok &= frame_done() && queued() == 0; }
+    snprintf(name, sizeof name, "120 Hz link: %llu of 6 woken presents latched on their own tick, none dropped", (unsigned long long)(g_link_latched - latched0));
+    CHECK(name, ok && g_link_latched == latched0 + 6 && g_link_dropped == 0);
+    // A present past the wait (an eighth of a period before the next tick) times out and goes up on the next tick, as without the latch
+    out0 = g_link_latch_out; NO_DRAIN(); frame_start(2, 9000); waiting(0); while (!next_wakes()) tick(); tick();
+    CHECK("120 Hz link: a present 9 ms after its wake times out, stands, and the next tick shows it", g_link_latch_out == out0 + 1 && frame_done() && queued() == 1 && (tick(), queued() == 0) && g_link_dropped == 0);
     printf("t_link_latch_cb: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

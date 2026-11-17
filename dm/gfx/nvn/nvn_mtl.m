@@ -17619,9 +17619,11 @@ static struct timespec link_deadline(uint64_t ns);
     // finds the queue full waits for this callback, and the wait is bounded). Not with present snapshots, which run the game a frame ahead of the screen on purpose.
     // Only into an empty queue: a frame that stands (one that missed the previous tick) goes out first, in order as without the latch, until a drain (link_drain_note) lets
     // the queue run empty again. Taking the latched present over it dropped that frame: about 3 a second on a built-in ProMotion screen, where presents came late more often
-    // Only on the 60 Hz link, where it was measured. Not on the 120 Hz link: there a 60 fps acquire waits two ticks with no hold between them (the drain does not run there
-    // either). Not on the 30 Hz power-saving link (a 30 fps target in variable-refresh fullscreen), which has not been measured with it
-    const int latch = link_latch_on() && mtl_link_rate() == 60 && !mtl_snap_on();
+    // On the 60 and 120 Hz links. On the 120 Hz link a 60 fps acquire waits two ticks and the tick between takes the frame, so the woken tick finds the queue empty with no
+    // drain (the drain does not run there): the latch takes the present on its own tick instead of the next one, 8.3 ms sooner, and a present that misses the wait goes up
+    // on the next tick as without it. Not for a 120 fps game on that link, nor on the 30 Hz power-saving link (a 30 fps target in variable-refresh fullscreen): neither
+    // has been measured with it
+    const int rate = mtl_link_rate(), latch = link_latch_on() && (rate == 60 || (rate == 120 && mtl_fps_target() == 60)) && !mtl_snap_on();
     const double room = latch ? update.targetTimestamp - cb : 0;   // read only with the latch: the update's targetTimestamp is all it needs it for
     static uint64_t woken_n; if (woke) woken_n++;   // woken callbacks: the probe counts these, whatever ticks the acquire waits
     if (latch) {   // the room the latch has: the time from the callback to its targetTimestamp, logged every 300 ticks
@@ -17724,9 +17726,11 @@ static int link_30hz(void) { return front_fullscreen() ? front_screen_variable_r
 // target time (@pres_at_ms − @link_target_ms = 8.33 ms) and the link then skipped every other tick (@link_gap_ms 16.7, 33.3, 16.7, …): 40 callbacks a second, so a game
 // paced by the link ran at 40 fps with its GPU at 10 ms of the 16.7 (Ocarina of Time on an M5 Pro, macOS 27.2; at latency 1 the frame step went to 4 vsyncs, 15 fps).
 // The Mac front end first switches such a screen to a fixed-rate mode (front_screen_match: 60 Hz, 60.0 fps at latency 1 there), so this is the fallback for a screen with
-// no such mode or with DM_SCREEN_MATCH=0: the 120 Hz link held 59.2 fps, about 2% of frames up 25 ms. A window keeps the 60 Hz link, where every present lands on its
-// target (docs/reference/frame-rate.md)
-static int link_vrr_120(void) { int hz = front_screen_max_fps(); return !g_present_link_env && front_fullscreen() && front_screen_variable_refresh() && hz >= 120 && hz % 120 == 0; }
+// no such mode or with DM_SCREEN_MATCH=0: the 120 Hz link held 59.2 fps, about 2% of frames up 25 ms (docs/reference/frame-rate.md).
+// A window on such a screen takes it too: the screen is not switched there (the switch would change it for every app), and in a window the 60 Hz link showed 4% of its
+// presents a 120 Hz refresh after their target in gameplay (112 frames on screen 8 or 25 ms in 25 s; the 120 Hz link none) and called back 49.9 ms ahead (41.6 on the
+// 120 Hz link). Ocarina of Time on an M4 Pro MacBook Pro's ProMotion screen (issue #2648)
+static int link_vrr_120(void) { int hz = front_screen_max_fps(); return !g_present_link_env && front_screen_variable_refresh() && hz >= 120 && hz % 120 == 0; }
 static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
 static void *link_main(void *arg) {   // Display link thread: started when switching to display-link mode, exits when switching back to 0
     (void)arg;
@@ -17758,8 +17762,8 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
     if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one
-    static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
-    if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
+    static int vrr_was; int vrr = want == 1 && link_vrr_120();   // a variable-refresh screen (a window, or fullscreen that kept its mode): the 120 Hz link paces the 60 (link_vrr_120)
+    if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
     if (vrr) want = 2;
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
     // while its thread starts (after link_main read the rate) is not lost

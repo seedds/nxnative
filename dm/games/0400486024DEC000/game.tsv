@@ -43,6 +43,9 @@ fps_target	60
 
 # ---- Graphics ----
 draw_barriers	game
+# Its dynamic-resolution targets are a resolution family (one storage, several sizes): uncompressed they cost the M1 about 0.85 ms of GPU time a frame at Kokiri Forest;
+# mid-game switches between 1440x810, 1366x768 and 1280x720 with compression showed no garbage (forced with DM_FPS_TARGET=60)
+family_compress	on
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on

@@ -991,39 +991,232 @@ def d11_pack_shaders(path, label, out):
         if not found: found = glslc_shaders(m, lb, need=False)
         out.extend(found)
 
+def ipk_v5_entries(t, n, label):
+    """Read version 5 UbiArt IPK entries."""
+    p = 0
+
+    for i in range(n):
+        try:
+            noff, size, csize, timestamp = struct.unpack_from(
+                '>IIIQ', t, p
+            )
+            p += 20
+
+            # Version 5 stores one 64-bit offset.
+            if noff != 1:
+                red(f'{label}: v5 entry {i}: '
+                    f'unsupported offset count {noff}')
+
+            off, = struct.unpack_from('>Q', t, p)
+            p += 8
+
+            nl, = struct.unpack_from('>I', t, p)
+            p += 4
+            if p + nl > len(t):
+                red(f'{label}: v5 entry {i}: '
+                    'filename runs past the IPK table')
+
+            name = t[p:p + nl].decode('latin1')
+            p += nl
+
+            pl, = struct.unpack_from('>I', t, p)
+            p += 4
+            if p + pl > len(t):
+                red(f'{label}: v5 entry {i}: '
+                    'directory runs past the IPK table')
+
+            directory = t[p:p + pl].decode('latin1')
+            p += pl
+
+            # CRC32 and flags
+            struct.unpack_from('>II', t, p)
+            p += 8
+
+        except struct.error:
+            red(f'{label}: entry {i} runs past the '
+                'IPK v5 table')
+
+        yield directory + name, off, size, csize
+
 UBIART_IPK = bytes.fromhex('50ec12ba')
 def ipk_shaders(path, rel, out):
+    """Read UbiArt IPK v5 and v7 archives and extract GLSLC shaders from their .fxb effect files."""
     """A UbiArt IPK archive (Rayman Legends: Definitive Edition, bundle_nn.ipk, version 7, 26,878 files). Big-endian: magic 0x50EC12BA, version, platform, +0xc base offset (the data start),
     +0x10 file count; entries from +0x38: u32 offset count, u32 size, u32 compressed size (0: stored), u64 time, u64 offset × count (from the base), u32 + directory, u32 + name, u32 CRC, u32 0.
     Compressed entries are zlib. The shaders are whole GLSLC outputs in the engine's .fxb effect files (enginedata/shaders/compiled/nx: renderpct, afterfx, font, movie; 5,893 programs);
     shaders_dev/ holds a development build of the same effects with other keys, which the game does not ask for. Only the .fxb entries are read: the 2.6 GB of .ckd cooked assets hold none"""
+
+    import lzma
+    
     label = f'/{rel}'
     with open(path, 'rb') as f:
-        h = f.read(0x38)
-        if len(h) < 0x38: red(f'{label}: {len(h)} bytes, shorter than a UbiArt IPK header (0x38)')
-        ver, _plat, base, n = struct.unpack_from('>IIII', h, 4)
-        if ver != 7: red(f'{label}: UbiArt IPK version {ver} (only version 7 is read)')
-        t = f.read(max(base - 0x38, 0))
-        if base < 0x38 or len(t) != base - 0x38: red(f'{label}: the IPK header puts its data at {base:#x}, outside the file')
+        # --------------------------------------------------
+        # 1. Header
+        # --------------------------------------------------
+
+        h = f.read(0x14)
+
+        if len(h) < 0x14:
+            red(f'{label}: short IPK header')
+
+        if h[:4] != UBIART_IPK:
+            red(f'{label}: invalid IPK magic {h[:4].hex()}')
+
+        ver, platform, base, n = struct.unpack_from(
+            '>IIII', h, 4
+        )
+
+        if ver == 5:
+            header_size = 0x30
+        elif ver == 7:
+            header_size = 0x38
+        else:
+            red(f'{label}: unsupported IPK version {ver}')
+
+        if base < header_size:
+            red(f'{label}: invalid base offset {base:#x}')
+
+        # --------------------------------------------------
+        # 2. Entry table
+        # --------------------------------------------------
+
+        f.seek(header_size)
+        t = f.read(base - header_size)
+
+        if len(t) != base - header_size:
+            red(f'{label}: incomplete IPK table')
+
+        # --------------------------------------------------
+        # 3. Parse entries
+        # --------------------------------------------------
+        
         p = 0
+
+        def read_string():
+            nonlocal p
+
+            length, = struct.unpack_from('>I', t, p)
+            p += 4
+
+            if length > len(t) - p:
+                raise struct.error('string exceeds table')
+
+            value = t[p:p + length].decode('latin1')
+            p += length
+
+            return value
+                    
         for i in range(n):
             try:
-                noff, size, csize = struct.unpack_from('>III', t, p); p += 20
-                off = struct.unpack_from('>Q', t, p)[0] if noff else 0; p += 8 * noff
-                pl = struct.unpack_from('>I', t, p)[0]; d = t[p + 4:p + 4 + pl].decode('latin1'); p += 4 + pl
-                nl = struct.unpack_from('>I', t, p)[0]; name = d + t[p + 4:p + 4 + nl].decode('latin1'); p += 4 + nl + 8
-            except struct.error: red(f'{label}: entry {i} of {n} runs past the IPK table ({len(t) + 0x38:#x} bytes): not the layout of a version 7 archive')
-            if not name.endswith('.fxb') or '/shaders_dev/' in '/' + name: continue
-            f.seek(base + off); b = f.read(csize or size)
-            if len(b) != (csize or size): red(f'{label}/{name}: the entry at {base + off:#x} runs past the end of the archive')
-            if csize:
-                try: b = zlib.decompress(b)
-                except zlib.error as e: red(f'{label}/{name}: invalid zlib stream ({e})')
-            if len(b) != size: red(f'{label}/{name}: {len(b)} bytes decoded, the entry says {size}')
+                noff, size, csize = struct.unpack_from(
+                    '>III', t, p
+                )
+                p += 20  # Three u32 + timestamp u64
+
+                if noff:
+                    off, = struct.unpack_from('>Q', t, p)
+                else:
+                    off = 0
+
+                p += 8 * noff
+
+                # V5: filename then directory
+                # V7: directory then filename
+
+                if ver == 5:
+                    filename = read_string()
+                    directory = read_string()
+                else:
+                    directory = read_string()
+                    filename = read_string()
+
+                name = directory + filename
+
+                # CRC32 + flags
+                if p + 8 > len(t):
+                    raise struct.error('missing CRC/flags')
+
+                p += 8
+
+            except (struct.error, UnicodeDecodeError) as e:
+                red(
+                    f'{label}: entry {i}/{n} cannot be read: {e}'
+                )
+
+            # --------------------------------------------------
+            # 4. Filter FXB files
+            # --------------------------------------------------
+
+            normalized_name = name.replace('\\', '/')
+            lower_name = normalized_name.lower()
+
+            if not lower_name.endswith('.fxb'):
+                continue
+
+            if '/shaders_dev/' in '/' + lower_name:
+                continue
+
+            stored_size = csize or size
+            absolute_offset = base + off
+
+            # --------------------------------------------------
+            # 5. Extract
+            # --------------------------------------------------
+
+            f.seek(absolute_offset)
+            packed = f.read(stored_size)
+
+            if len(packed) != stored_size:
+                red(
+                    f'{label}/{name}: incomplete read '
+                    f'at {absolute_offset:#x}'
+                )
+
+            # --------------------------------------------------
+            # 6. Decompress
+            # --------------------------------------------------
+
+            if not csize:
+                b = packed
+                codec = 'stored'
+
+            else:
+                try:
+                    b = zlib.decompress(packed)
+                    codec = 'zlib'
+
+                except zlib.error as ze:
+                    try:
+                        b = lzma.decompress(packed)
+                        codec = 'lzma'
+
+                    except (lzma.LZMAError, EOFError, ValueError) as le:
+                        red(
+                            f'{label}/{name}: '
+                            f'zlib failed ({ze}); '
+                            f'lzma failed ({le})'
+                        )
+
+            if len(b) != size:
+                red(
+                    f'{label}/{name}: decoded size '
+                    f'{len(b)}, expected {size}'
+                )
+
+            # --------------------------------------------------
+            # 7. Shader recognition
+            # --------------------------------------------------
+                
             found = []
             scan_blob(b, f'{label}/{name}', found)
-            if not found: found = glslc_shaders(b, f'{label}/{name}', need=False)
-            out += found
+            if not found:
+                found = glslc_shaders(
+                    b,
+                    f'{label}/{name}',
+                    need=False
+                )
+
+            out.extend(found)
 
 CPK = b'CPK '
 def cpk_jobs(files, parts=64):

@@ -125,7 +125,7 @@ struct dm_jit final : A64::UserCallbacks {
         conf.tpidrro_el0 = &tpidrro_el0;
         conf.wall_clock_cntpct = true;
         conf.enable_cycle_counting = one_block;  // off (section 11), except in the measurement mode of one block per Run()
-        conf.define_unpredictable_behaviour = false;
+        conf.define_unpredictable_behaviour = true;  // a store-exclusive with Rs == Rt is the store (README.md, "Store-exclusives whose status register is a data register"); the same in every user of the frontend
         conf.code_cache_size = CodeCacheSize();
         // Without A64GetSetElimination, as the reference runs (README.md, "Known issues", 1: it reads msr nzcv back wrong)
         conf.optimizations = all_safe_optimizations & ~OptimizationFlag::GetSetElimination;

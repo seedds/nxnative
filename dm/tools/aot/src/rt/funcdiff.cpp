@@ -140,7 +140,7 @@ struct Ref final : A64::UserCallbacks {
         conf.tpidrro_el0 = &tpidrro;
         conf.wall_clock_cntpct = true;
         conf.enable_cycle_counting = true;
-        conf.define_unpredictable_behaviour = false;
+        conf.define_unpredictable_behaviour = true;  // a store-exclusive with Rs == Rt is the store (README.md, "Store-exclusives whose status register is a data register"); the same in every user of the frontend
         conf.code_cache_size = 64 * 1024 * 1024;
         conf.optimizations = all_safe_optimizations & ~OptimizationFlag::GetSetElimination;  // as nxaot_vec's reference (README, Known issues 1)
         jit = std::make_unique<A64::Jit>(conf);

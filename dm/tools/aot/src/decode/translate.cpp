@@ -13,7 +13,10 @@ namespace {
 
 A64::TranslationOptions Options() {
     A64::TranslationOptions options;
-    options.define_unpredictable_behaviour = false;  // as dynarmic's JIT translates (a64_interface.cpp), so the vector harness compares like with like
+    // Set: its one effect in the A64 frontend is that a store-exclusive whose status register is a data register (stlxr wzr, xzr, [x8], which
+    // compilers emit) is translated as the store instead of an UnpredictableInstruction trap (README.md, "Store-exclusives whose status register is
+    // a data register"). The JIT fallback, the vector harness's reference, nxaot_run and funcdiff set the same, so every engine translates alike
+    options.define_unpredictable_behaviour = true;
     options.wall_clock_cntpct = true;
     options.hook_hint_instructions = true;
     return options;

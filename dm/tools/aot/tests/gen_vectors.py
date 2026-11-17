@@ -823,6 +823,66 @@ def gen_exclusive(out, r):
         ea = data_address(r, nbytes, align=nbytes)
         out.add(r, 'excl_single', f'LDXR{sname} x{rt}, [x{rn}] alone', [enc_excl(size, 0, 1, 0, 31, r.below(2), 31, rn, rt)], {f'x{rn}': ea})
 
+    # A store-exclusive whose status register is also a data register (Rs == Rt, or Rs == Rt2 of a pair): CONSTRAINED UNPREDICTABLE in the Arm
+    # ARM, translated as dynarmic defines it (define_unpredictable_behaviour: src/decode/translate.cpp): the store of the register's value, then
+    # the status written to it. Compilers emit the form with the zero register as both for a compare-and-swap to zero whose result nothing reads
+    # (stlxr wzr, xzr, [x8]: README.md, "Store-exclusives whose status register is a data register")
+    for i in range(240):
+        size, sname, nbytes = r.choice(sizes)
+        acq, rel = r.below(2), r.below(2)
+        rn = r.below(31)
+        rt = r.choice([x for x in range(31) if x != rn])
+        both = 31 if r.below(2) else r.choice([x for x in range(31) if x not in (rn, rt)])
+        ea = data_address(r, nbytes, align=nbytes)
+        regs = {f'x{rn}': ea}
+        if both != 31:
+            regs[f'x{both}'] = value(r)
+        ldxr = enc_excl(size, 0, 1, 0, 31, acq, 31, rn, rt)
+        stxr = enc_excl(size, 0, 0, 0, both, rel, 31, rn, both)
+        name = f'ST{"L" if rel else ""}XR{sname} {rname(both, 0)}, {rname(both, 1)}, [x{rn}]'
+        if r.below(4):
+            out.add(r, 'excl_same', f'LD{"A" if acq else ""}XR{sname} x{rt}, [x{rn}]; {name}', [ldxr, stxr], regs)
+        else:
+            out.add(r, 'excl_same', f'{name} with no exclusive load: fails', [stxr], regs)
+    for i in range(120):
+        sz = r.below(2)
+        nbytes = 8 << sz
+        rn = r.below(31)
+        rt, rt2 = [x for x in r_sample(r, 31, 2, avoid=(rn,))]
+        rv, rv2 = [x for x in r_sample(r, 32, 2, avoid=(rn,))]   # 31: the zero register
+        rs = rv if r.below(2) else rv2
+        ea = data_address(r, nbytes, align=nbytes)
+        regs = {f'x{rn}': ea}
+        for v in (rv, rv2):
+            if v != 31:
+                regs[f'x{v}'] = value(r)
+        ldxp = enc_excl(2 | sz, 0, 1, 1, 31, r.below(2), rt2, rn, rt)
+        rel = r.below(2)
+        stxp = enc_excl(2 | sz, 0, 0, 1, rs, rel, rv2, rn, rv)
+        name = f'ST{"L" if rel else ""}XP {rname(rs, 0)}, {rname(rv, sz)}, {rname(rv2, sz)}, [x{rn}]'
+        if r.below(4):
+            out.add(r, 'excl_same', f'LDXP {"X" if sz else "W"} x{rt}, x{rt2}, [x{rn}]; {name}', [ldxp, stxp], regs)
+        else:
+            out.add(r, 'excl_same', f'{name} with no exclusive load: fails', [stxp], regs)
+    # The compare-and-swap to zero as compilers write it when nothing reads its result: ldaxr x9, [x8]; cmp x9, x19; b.ne out; stlxr wzr, xzr, [x8]
+    # (Mario vs. Donkey Kong 1.0.0, main+0x6a0f88), with the expected value the cell's own (the first load) or another
+    for i in range(40):
+        rn, rt, rx = r_sample(r, 31, 3)
+        ea = data_address(r, 8, align=8)
+        words = [enc_excl(3, 0, 1, 0, 31, 1, 31, rn, rt),       # ldaxr xt, [xn]
+                 enc_addsub_sh(1, 1, 1, 0, rx, 0, rt, 31),      # cmp xt, xx
+                 enc_bcond(2, 1),                               # b.ne +8
+                 enc_excl(3, 0, 0, 0, 31, 1, 31, rn, 31),       # stlxr wzr, xzr, [xn]
+                 NOP]                                           # out
+        regs = {f'x{rn}': ea}
+        equal = r.below(3) != 0
+        if equal:
+            words.insert(0, enc_ldst_uimm(3, 1, 0, rn, rx))     # ldr xx, [xn]
+        else:
+            regs[f'x{rx}'] = value(r)
+        out.add(r, 'excl_same', f'{"ldr x%d, [x%d]; " % (rx, rn) if equal else ""}ldaxr x{rt}, [x{rn}]; cmp x{rt}, x{rx}; b.ne +8; stlxr wzr, xzr, [x{rn}]; nop',
+                words, regs)
+
 
 def r_sample(r, n, k, avoid=()):
     pool = [x for x in range(n) if x not in avoid]

@@ -26,7 +26,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Run-time helpers | [src/lift/runtime.cpp](src/lift/runtime.cpp) | the operations whose exact Arm semantics are no x86 sequence (the estimates' lanes the inline tables do not take, half-precision arithmetic, FZ fused multiply-add fix-ups, some conversions, software AES): wrappers of dynarmic's own `common/fp` and `common/crypto`, which its backend calls for the same cases |
 | ORC JIT | [src/lift/jit.cpp](src/lift/jit.cpp) | LLVM 18 ORC LLJIT, the default O2 pipeline, the host's CPU (`getHostCPUName` and its features) or a named level (`--cpu x86-64-v3`); the helpers as absolute symbols; the x86 assembly of a module (nxaot_bench) |
 | Vector harness | [src/vec/](src/vec/) (`nxaot_vec`) | every vector on dynarmic's own A64 JIT (the reference) and as lifted code, from one initial state; compares x0..x30, SP, NZCV, FPCR, FPSR (QC and the cumulative flags), TPIDR_EL0, v0..v31, the exit (pc, reason, svc number) and the 64 KiB memory image byte for byte. It runs lifted code as a host gate would: MXCSR from FPCR before, its flags into FPSR after, and a continuation lifted for the new pc and FPCR after a normal exit inside the code (`msr fpcr`) |
-| Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) and [tests/gen_fp_simd.py](tests/gen_fp_simd.py) | 179,296 vectors: 24,400 integer ones as `.tsv` (encodings written by hand from the Arm ARM), 154,896 floating-point and SIMD ones as `.tsv.gz` (every form of dynarmic's decoder table, fields swept, lanes of special values, 13 FPCR values: the variants of design section 12 and mixes) |
+| Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) and [tests/gen_fp_simd.py](tests/gen_fp_simd.py) | 183,452 vectors: 24,800 integer ones as `.tsv` (encodings written by hand from the Arm ARM), 158,652 floating-point and SIMD ones as `.tsv.gz` (every form of dynarmic's decoder table, fields swept, lanes of special values, 13 FPCR values: the variants of design section 12 and mixes) |
 | Benchmark | [src/bench/main.cpp](src/bench/main.cpp), [calls.cpp](src/bench/calls.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access; the two calling conventions on synthetic call chains and on the corpus (time per call, spills), the dispatcher per `blr` hit and miss, a jump table, int_ops natively against dynarmic, the pack stage's throughput per tier; the safepoint polls' cost, the JIT fallback's hand-over, round trip, cost per block and instance creation ("Measurements") |
 | Census | [src/analysis/census.cpp](src/analysis/census.cpp) (`nxaot census`) | phase 0's numbers over a raw code blob as `key<TAB>count` lines |
 | Reach | [src/analysis/reach.cpp](src/analysis/reach.cpp) (`nxaot opcodes --reach`) | every entry of dynarmic's A64 decoder table translated with random fields: the opcodes the A64 frontend can emit; `--check` fails when one is not lowered |
@@ -4596,8 +4596,28 @@ CRC32 (IEEE) is a 256-entry table a byte at a time (a PCLMULQDQ form is an optim
 
 Vectors per file of the committed set (all pass; `nxaot_vec` prints them per class): `fp.tsv.gz` 14,856 (with `fma_invalid` 456),
 `simd_same.tsv.gz` 42,000, `simd_misc.tsv.gz` 39,000, `simd_shift.tsv.gz` 15,600, `simd_perm.tsv.gz` 13,800, `crypto.tsv.gz` 9,600,
-`simd_ldst.tsv.gz` 14,040, `fp_seq.tsv.gz` 6,000; the integer `.tsv` files 24,400 (`dp_imm` 4,200, `dp_reg` 7,400, `branch` 2,200, `loadstore`
-4,900, `exclusive` 1,800, `system` 2,100, `sequence` 1,400, `undefined` 400).
+`simd_ldst.tsv.gz` 14,040, `fp_seq.tsv.gz` 6,000, `fp_est.tsv.gz` 3,756; the integer `.tsv` files 24,800 (`dp_imm` 4,200, `dp_reg` 7,400, `branch`
+2,200, `loadstore` 4,900, `exclusive` 2,200 with `excl_same` 400, `system` 2,100, `sequence` 1,400, `undefined` 400).
+
+### Store-exclusives whose status register is a data register
+
+`stxr` / `stlxr` / `stxp` / `stlxp` with Rs equal to Rt (or to Rt2 of a pair) is CONSTRAINED UNPREDICTABLE in the Arm ARM, and compilers emit it:
+`stlxr wzr, xzr, [x8]` (`c81ffd1f`) is a compare-and-swap to zero whose result nothing reads, both registers the zero register (Mario vs. Donkey
+Kong 1.0.0, `main+0x6a0f98` and `main+0x68a7d0`, in its audio framework's voice lists: `ldaxr x9, [x8]`; `cmp x9, x19`; `b.ne`; `stlxr wzr, xzr,
+[x8]`). The game ships with it, so the console's CPU runs it, and the store of zero is what its code needs. dynarmic's translator refuses it unless its option `define_unpredictable_behaviour` is set (the
+only place of its A64 frontend the option reaches: `frontend/A64/translate/impl/load_store_exclusive.cpp`), and the option was clear here as in
+dynarmic's defaults, so the instruction was compiled as a trap and the game ended with `[RED] aot: an undefined or unpredictable instruction at
+main+0x6a0f98` and status 7 the first time the audio thread took that path (once in four skips of a new file's world intro).
+
+The option is now set everywhere the frontend is used: the lifter's decoder ([src/decode/translate.cpp](src/decode/translate.cpp)), the JIT
+fallback (`src/rt/jit.cpp`), the vector harness's reference (`src/vec/reference.cpp`), `nxaot_run` and the function comparison
+(`src/rt/funcdiff.cpp`), as the emulators that ran this console's games on dynarmic set it. The instruction is then the store of the data
+register's value as read before the store, with the status written to Rs after it (nothing for the zero register). A status register equal to the
+base register (Rs == Rn, Rn not SP) and a load pair with Rt == Rt2 stay traps: dynarmic defines nothing for them. The class `excl_same` of
+`exclusive.tsv` (400 vectors: single stores with Rs == Rt of every size, half of them the zero register, with and without the exclusive load;
+pairs with Rs equal to either data register; the game's sequence with the expected value equal and different) passes against dynarmic with 0
+mismatches, every vector ending normally. Of the 5,931 exclusive stores in the code of that game's three modules, the two named are the only ones
+of the form, and none has Rs == Rn. Unit key format 15.
 
 ## Known issues
 

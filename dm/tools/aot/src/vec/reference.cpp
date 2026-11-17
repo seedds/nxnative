@@ -34,7 +34,7 @@ struct Reference::Impl final : A64::UserCallbacks {
         conf.tpidrro_el0 = &tpidrro;
         conf.wall_clock_cntpct = true;
         conf.enable_cycle_counting = true;
-        conf.define_unpredictable_behaviour = false;
+        conf.define_unpredictable_behaviour = true;  // a store-exclusive with Rs == Rt is the store (README.md, "Store-exclusives whose status register is a data register"); the same in every user of the frontend
         conf.code_cache_size = 16 * 1024 * 1024;
         // Without dynarmic's A64GetSetElimination pass: it forwards the value of msr nzcv, xN to a later mrs xM, nzcv of the block whole, where the
         // Arm ARM reads bits 27:0 of NZCV as 0 (README.md, "Known issues"). The pass is an optimisation: the frontend and backend semantics stay

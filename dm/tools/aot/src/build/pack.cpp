@@ -153,8 +153,10 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // the same key propagates it to the caller. 13: FPCR.FZ is a run-time state of the code (lift::LiftOptions::fz_runtime; design 7.1, module ABI 4): a
 // unit of format 12 under the same key is specialised for FZ clear. 14: FRECPE / FRSQRTE of single and double precision are table lookups inline and
 // FRECPS / FRSQRTS fix their special lanes inline (README.md, "Floating point and SIMD"): a unit of format 13 under the same key calls the helpers
-// for every estimate lane and for every lane of a step with a special one
-constexpr const char* kUnitKeyFormat = "nxaot-unit 14";
+// for every estimate lane and for every lane of a step with a special one. 15: a store-exclusive whose status register is a data register is the
+// store (decode/translate.cpp's define_unpredictable_behaviour; README.md, "Store-exclusives whose status register is a data register"): a unit of
+// format 14 under the same key traps there
+constexpr const char* kUnitKeyFormat = "nxaot-unit 15";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)

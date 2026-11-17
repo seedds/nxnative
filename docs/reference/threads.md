@@ -185,6 +185,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** `t_aot_host`'s `jit-start` rows (fp-gcc, fp-clang): run once the instance is ready (`--jit-ready`), the first use takes it, makes none and waits for none, in 0.03 to 0.07 ms (bound 20 ms), against 200 to 233 ms before; in the plain run, whose miss comes a millisecond after the load, the first use waited for the helper (193 to 265 ms here, the same as before) instead of making its own. Numbers: [dm/tools/aot/README.md](../../dm/tools/aot/README.md#the-jit-fallback).
 - **Found on:** the corpus (fp-gcc, fiber-gcc) and the 4,000-function benchmark, whose JIT samples kept about 200 after the tail-call fix; no game has run on the x86-64 engine yet.
 
+### An exclusive store whose status register is its data register ends the game
+
+- **Symptom:** on the x86-64 engine, `[RED] aot: an undefined or unpredictable instruction at <module>+0x…` and `guest code ended: status 7`, where the word at that address is a store-exclusive with Rs equal to Rt (`c81ffd1f`, `stlxr wzr, xzr, [x8]`), code the console runs.
+- **Cause:** the Arm ARM makes `stxr` / `stlxr` / `stxp` / `stlxp` with Rs == Rt (or Rs == Rt2) CONSTRAINED UNPREDICTABLE, and compilers emit the form with the zero register as both, for a compare-and-swap to zero whose result nothing reads. dynarmic's translator, which the recompiler and the JIT fallback decode with, raises `UnpredictableInstruction` for it unless its option `define_unpredictable_behaviour` is set (`frontend/A64/translate/impl/load_store_exclusive.cpp`, the option's only use in the A64 frontend); the option was clear, and the lifter compiles that exception as a trap.
+- **Fix:** the option is set in every user of the frontend (`dm/tools/aot/src/decode/translate.cpp`, `rt/jit.cpp`, `vec/reference.cpp`, `run/main.cpp`, `rt/funcdiff.cpp`): the instruction is the store of the data register's value, then the status written to Rs (nothing for the zero register). Rs == Rn stays a trap. Unit key format 15; a pack made before it still traps there until the game is packed again.
+- **Check:** the class `excl_same` of `dm/tools/aot/tests/vectors/exclusive.tsv` (400 vectors, 0 mismatches against dynarmic, every one ending normally). [dm/tools/aot/README.md](../../dm/tools/aot/README.md#store-exclusives-whose-status-register-is-a-data-register).
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) (1.0.0: `main+0x6a0f98` and `main+0x68a7d0`, its audio framework's thread, once in four skips of a new file's world intro).
+
 ## The x86-64 engine on Windows
 
 The first two found by running the cross-built test programs under Wine 9.0 ([docker/README.md](../../docker/README.md#running-the-windows-tests-under-wine)), the third by reading the host's waits against Windows' timer; none has run on Windows yet.

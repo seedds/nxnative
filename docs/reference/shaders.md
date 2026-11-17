@@ -1805,6 +1805,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Ordered not-equal becomes unordered in MSL
+
+- **Symptom:** an ordered not-equal comparison is true with a NaN operand, so a NaN guard lets it through. An inverted result is wrong too; NVIDIA's compiler can implement unordered equal by inverting ordered not-equal. No game symptom has been identified.
+- **Cause:** the ISA translator emits the correct SPIR-V `OpFOrdNotEqual`, but SPIRV-Cross's MSL emitter maps it to `!=`, which is unordered in MSL. The pinned upstream emitter has a TODO at that case. Writing `(a < b) || (a > b)` is insufficient under Metal fast math: the compiler can fold it back to `!=`.
+- **Fix:** `spirv_cross_bin/ordered-ne.patch`, applied by its pinned `build.sh`, makes the MSL emitter write `!isunordered(a, b) && a != b` and preserve both operands' expression dependencies. The ISA translator remains unchanged. Logical and integer not-equal and unordered floating-point not-equal keep their existing lowering. This fixes the shared converter used by NVN, Vulkan and OpenGL.
+- **Check:** `DMSH_TEST_GPU=1 DMSH_TEST_METAL=1 python3 dm/gfx/tests/test_spirv_ordered_ne.py`: synthetic scalar and two-, three- and four-component f32/f16 modules, assembled and validated as SPIR-V, compiled with the chain's Mac flags and checked by GPU readback; the iOS compiler checks the same modules offline. Ordered, unordered, inverted, integer and Boolean results cover signed zeros, finite values, infinities and signed quiet/signaling NaNs. The old converter fails every width and type; changing only its emitter passes. PR [#2042](https://github.com/seedds/nxnative/pull/2042)'s five targeted Orin-fixture operations also pass outside the fixture's separate denormal allowance (M4 Pro, macOS 27.2.1, Metal 32023.922).
+- **Found on:** synthetic SPIR-V and a Jetson Orin's recorded instruction results (PR #2042); no game symptom identified. The [Cuphead Mac route](../../dm/games/0100A5C00D162000/README.md#mac-routes) supplies regression coverage.
+
 ### Comparisons with .FTZ
 
 - **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).

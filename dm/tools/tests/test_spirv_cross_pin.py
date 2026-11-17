@@ -29,7 +29,7 @@ class Pin(unittest.TestCase):
         assert m, 'build.sh pins no TAG'
         tag = m[1]
         r = subprocess.run([str(BIN / 'spirv-cross'), '--revision'], capture_output=True, text=True)
-        self.assertIn(f'Git commit: {tag} ', r.stdout + r.stderr)
+        self.assertIn(f'Git commit: {tag}+ ', r.stdout + r.stderr)   # ordered-ne.patch modifies the pinned upstream source
         self.assertTrue(os.access(BIN / 'spirv-cross', os.X_OK))
         for f in ('LICENSE', 'LICENSES/Apache-2.0.txt', 'LICENSES/MIT.txt'): self.assertTrue((BIN / f).is_file(), f)
 

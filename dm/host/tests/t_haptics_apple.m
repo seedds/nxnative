@@ -167,8 +167,8 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 // A HID device in the fake registry: its entry (one per connection), and the handles made on it
 @interface TestHid : NSObject
 @property io_service_t service;
-@property int product, opens, closes;
-@property BOOL bluetooth, failOpen;
+@property int vendor, product, opens, closes, writes;
+@property BOOL bluetooth, failOpen, failReport;
 @property NSData *report;
 @end
 @implementation TestHid
@@ -185,7 +185,7 @@ static NSUInteger listedNext;
 static int objects;   // iterators and services not released yet
 static TestHid *hid_add(int product) {
     static io_service_t next = 1000;
-    TestHid *h = [TestHid new]; h.service = next++; h.product = product; h.bluetooth = YES;
+    TestHid *h = [TestHid new]; h.service = next++; h.vendor = 0x054C; h.product = product; h.bluetooth = YES;
     [registry addObject:h]; return h;
 }
 static TestHid *hid_of(int player) {
@@ -194,9 +194,14 @@ static TestHid *hid_of(int player) {
 }
 static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match, io_iterator_t *it) {
     (void)port;
-    assert(!listed && [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue] == 0x054C);
+    assert(!listed);
+    int vendor = [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue];
+    NSNumber *product = (__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDProductIDKey));
+    assert(vendor == 0x054C || vendor == 0x18D1);
+    NSMutableArray<TestHid *> *matching = [NSMutableArray array];
+    for (TestHid *h in registry) if (h.vendor == vendor && (!product || h.product == product.intValue)) [matching addObject:h];
     CFRelease(match);
-    listed = [registry copy]; listedNext = 0; objects++; *it = SONY_ITERATOR;
+    listed = matching; listedNext = 0; objects++; *it = SONY_ITERATOR;
     return KERN_SUCCESS;
 }
 static io_object_t test_iterator_next(io_iterator_t it) {
@@ -233,7 +238,9 @@ static IOReturn test_device_close(IOHIDDeviceRef d, IOOptionBits o) { (void)o; (
 static IOReturn test_device_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id, const uint8_t *r, CFIndex n) {
     TestHid *h = ((__bridge TestHandle *)d).hid;
     assert(t == kIOHIDReportTypeOutput && id == r[0] && h.opens > h.closes);
+    h.writes++;
     if (![registry containsObject:h]) return kIOReturnNoDevice;
+    if (h.failReport) return kIOReturnError;
     h.report = [NSData dataWithBytes:r length:n];
     return kIOReturnSuccess;
 }
@@ -484,6 +491,56 @@ int main(void) { @autoreleasepool {
     dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
+    // Stadia's native HID output is independent of Core Haptics and uses the same 5-byte report on USB and Bluetooth.
+    for (int bt = 0; bt < 2; bt++) {
+        TestHid *pad = hid_add(0x9400); pad.vendor = 0x18D1; pad.bluetooth = bt;
+        TestController *sc = [TestController new]; sc.vendorName = @"Stadia Controller rev. A";
+        dm_haptics_apple_controller(0, (id)sc); drain();
+        const uint8_t zero[5] = {5, 0, 0, 0, 0};
+        assert(pad.opens == 1 && !memcmp(pad.report.bytes, zero, 5) && dm_haptics_available() & 1);
+        assert(channels[0].count == 1 && [channels[0].firstObject isKindOfClass:DmStadiaChannel.class]);
+        // Even when the last acknowledged levels were zero, a failed nonzero report requires an explicit subsequent stop.
+        pad.failReport = YES; send_pair(0.2f, 0);
+        assert(stadia[0].uncertain && dm_haptics_actual(0, 0).amplitude_low == 0);
+        int failedWrites = pad.writes; pad.failReport = NO; dm_haptics_clear(0); drain();
+        assert(pad.writes > failedWrites && !stadia[0].uncertain && !memcmp(pad.report.bytes, zero, 5));
+        dm_vibration_update u[] = {{0, 0, {1, 160, 0, 320}}, {0, 1, {0, 160, 1, 320}}};
+        dm_haptics_send(u, 2); drain();
+        const uint8_t mixed[5] = {5, 0x99, 0xD9, 0x99, 0xD9};
+        assert(pad.report.length == 5 && !memcmp(pad.report.bytes, mixed, 5));
+        int writes = pad.writes; dm_haptics_send(u, 2); drain(); assert(pad.writes == writes);   // unchanged output is not resent
+        gain = 3; send_pair(1, 1); gain = 1;
+        assert(((const uint8_t *)pad.report.bytes)[1] == 255 && ((const uint8_t *)pad.report.bytes)[2] == 255);
+        dm_haptic_state old = {0, dm_haptics_epoch(0), {{1, 160, 0, 320}, {0, 160, 1, 320}}};
+        suspend(DM_HAPTICS_INACTIVE, YES); drain(); assert(!memcmp(pad.report.bytes, zero, 5));
+        suspend(DM_HAPTICS_INACTIVE, NO); apply(old); drain(); assert(!memcmp(pad.report.bytes, zero, 5));
+        dm_haptics_send(u, 2); drain(); assert(!memcmp(pad.report.bytes, mixed, 5));
+        dm_haptics_set_enabled(0); drain(); assert(!memcmp(pad.report.bytes, zero, 5));
+        dm_haptics_set_enabled(1); dm_haptics_send(u, 2); drain(); assert(!memcmp(pad.report.bytes, mixed, 5));
+        // A failed write must not suppress the later stop report or stop later commands being sent.
+        pad.failReport = YES; send_pair(0.1, 0); pad.failReport = NO;
+        suspend(DM_HAPTICS_INACTIVE, YES); drain(); assert(!memcmp(pad.report.bytes, zero, 5));
+        suspend(DM_HAPTICS_INACTIVE, NO);
+        dm_haptics_send(u, 2); drain(); dm_haptics_apple_shutdown(); drain(); assert(!memcmp(pad.report.bytes, zero, 5));
+        suspend(DM_HAPTICS_INACTIVE, NO);
+        dm_haptics_apple_controller(0, nil); drain();
+        assert(pad.closes == 1 && !stadia[0].dev && !memcmp(pad.report.bytes, zero, 5));
+        [registry removeObject:pad];
+    }
+    TestHid *bad = hid_add(0x9400); bad.vendor = 0x18D1; bad.failReport = YES;
+    TestController *sc = [TestController new]; sc.vendorName = @"Stadia Controller rev. A";
+    dm_haptics_apple_controller(0, (id)sc); drain();
+    assert(!stadia[0].dev && !(dm_haptics_available() & 1) && bad.opens == bad.closes);   // failed zero-level probe does not claim haptic support
+    [registry removeObject:bad];
+    TestHid *usb = hid_add(0x9400); usb.vendor = 0x18D1; usb.bluetooth = NO;
+    TestHid *bt = hid_add(0x9400); bt.vendor = 0x18D1;
+    TestController *other = [TestController new]; other.vendorName = @"Stadia Controller rev. A";
+    dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(0, (id)sc); dm_haptics_apple_controller(1, (id)other); drain();
+    assert(stadia[0].id != stadia[1].id && usb.opens == 1 && bt.opens == 1);   // no sharing a physical device across players
+    send_pair(1, 0); int otherWrites = bt.writes;
+    dm_haptics_apple_controller(0, nil); drain(); assert(bt.writes == otherWrites && usb.closes == 1);
+    dm_haptics_apple_controller(1, nil); drain(); assert(bt.closes == 1 && objects == 0);
+    [registry removeObject:usb]; [registry removeObject:bt];
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, the DualSense's handles, level cutoff and the DualShock 4 route passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, the DualSense's handles, level cutoff, DualShock 4 and Stadia routes passed");
 } }

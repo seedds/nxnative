@@ -335,6 +335,74 @@ static BOOL ds4_route(int p, GCController *controller) {
             ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
     return YES;
 }
+
+// GameController exposes Stadia's buttons but no haptic localities on some Macs. Its USB and Bluetooth HID protocol has the same report 5:
+// two unsigned 16-bit little-endian motor levels (low/strong, high/weak). This is also the protocol used by SDL's Stadia HID driver.
+typedef struct { IOHIDDeviceRef dev; uint64_t id; uint16_t motor[2], sent[2]; BOOL uncertain; } stadia_out;
+static stadia_out stadia[DM_PLAYERS];
+static BOOL stadia_send(int p) {
+    stadia_out *o = &stadia[p];
+    uint8_t r[5] = {0x05, o->motor[0] & 255, o->motor[0] >> 8, o->motor[1] & 255, o->motor[1] >> 8};
+    IOReturn e = IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, r[0], r, sizeof r);
+    if (e != kIOReturnSuccess) {
+        o->uncertain = YES;   // the transport error does not prove the device ignored the report
+        if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: Stadia effects report: IOReturn 0x%x\n", e);
+        return NO;
+    }
+    o->sent[0] = o->motor[0]; o->sent[1] = o->motor[1]; o->uncertain = NO;
+    return YES;
+}
+static void stadia_stop(int p) {
+    stadia_out *o = &stadia[p];
+    if (o->dev) { o->motor[0] = o->motor[1] = 0; stadia_send(p); }   // also stop after a failed nonzero write: sent[] alone cannot prove the device is silent
+}
+static void stadia_release(int p) {
+    stadia_out *o = &stadia[p];
+    if (o->dev) { stadia_stop(p); IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev); }
+    *o = (stadia_out){0};
+}
+static void stadia_apply(dm_haptic_state s) {
+    stadia_out *o = &stadia[s.player];
+    if (!o->dev) return;
+    const dm_vibration *l = &s.motor[0], *r = &s.motor[1];
+    o->motor[0] = (uint16_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 65535);
+    o->motor[1] = (uint16_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 65535);
+    if (!o->uncertain && o->motor[0] == o->sent[0] && o->motor[1] == o->sent[1]) return;
+    if (!stadia_send(s.player) && (o->motor[0] || o->motor[1])) dm_haptics_clear(s.player);
+}
+@interface DmStadiaChannel : DmRumbleChannel
+@end
+@implementation DmStadiaChannel
+- (void)apply:(dm_haptic_level)level { (void)level; }   // both bands are taken directly by stadia_apply
+- (void)stop { stadia_stop(self.player); }
+@end
+static BOOL stadia_route(int p, GCController *controller) {
+    if ([controller.vendorName rangeOfString:@"Stadia" options:NSCaseInsensitiveSearch].length == 0) return NO;
+    CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
+    if (!match) return NO;
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x18D1);
+    CFDictionarySetValue(match, CFSTR(kIOHIDProductIDKey), (__bridge CFNumberRef)@0x9400);
+    CFDictionarySetValue(match, CFSTR(kIOHIDPrimaryUsagePageKey), (__bridge CFNumberRef)@1);
+    CFDictionarySetValue(match, CFSTR(kIOHIDPrimaryUsageKey), (__bridge CFNumberRef)@5);
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;
+    BOOL found = NO;
+    for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+        uint64_t id = 0; BOOL taken = NO;
+        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS) continue;
+        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && stadia[q].dev && stadia[q].id == id;
+        IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
+        if (!dev) continue;
+        if (IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) != kIOReturnSuccess) { CFRelease(dev); continue; }
+        stadia[p] = (stadia_out){.dev = dev, .id = id};
+        if (!stadia_send(p)) { stadia_release(p); continue; }   // zero-level probe: advertise rumble only if the output route accepts reports
+        DmStadiaChannel *c = [DmStadiaChannel new]; c.player = p; c.motor = -1; c.target = @"Stadia report"; [channels[p] addObject:c];
+        fprintf(stderr, "haptics: player %d controller %s, rumble through the Stadia effects report (%s)\n", p + 1,
+                controller.vendorName.UTF8String, [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) UTF8String] ?: "unknown transport");
+        found = YES;
+    }
+    IOObjectRelease(it);
+    return found;
+}
 #endif
 
 static void (*sinks[DM_PLAYERS])(const dm_haptic_state *);   // a player's own output instead of engines (dm_haptics_apple_set_sink)
@@ -350,6 +418,7 @@ static void apply(dm_haptic_state s) {
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
+        if ([out.firstObject isKindOfClass:DmStadiaChannel.class]) { stadia_apply(s); return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route
@@ -373,7 +442,9 @@ static void configure(int p, GCController *controller) {
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
     ds4_release(p);
+    stadia_release(p);
     if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
+    if (controller && stadia_route(p, controller)) { dm_haptics_route(p, 1); return; }
 #endif
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;

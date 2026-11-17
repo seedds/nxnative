@@ -15,6 +15,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
+void crash_install(void);
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failures;
 #define CHECK(c, name) do { int check_ok = !!(c); checks++; failures += !check_ok; printf("%s: %s\n", check_ok ? "PASS" : "FAIL", name); } while (0)
@@ -66,6 +67,7 @@ static NVNcommandHandle record(NVNtexture *texture, NVNprogram *program, int wai
     return P(nvnCommandBufferEndRecording)(&command);
 }
 int main(void) { @autoreleasepool {
+    crash_install();   // CPU writes after uploads use the host dirty-page fault handler
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); mtl_init(); NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0.5,1); }\n"

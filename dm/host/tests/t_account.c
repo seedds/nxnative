@@ -54,6 +54,23 @@ int main(int argc, char **argv) {
     snprintf(save, sizeof save, "%s/save", root); setenv("DM_SAVE", save, 1);
     Uid out, list[8]; UserHandle h, other; int n;
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+    // A HOME launch inherits no user; a program handoff (DM_PREV_PROGRAM) hands over the launch user once, with a live session (MGS4 reads the first handle unchecked).
+    UserHandle handles[2] = {{{0}}, {{11, 22, 33}}}; n = -1;
+    unsetenv("DM_PREV_PROGRAM");
+    h_acc_PopOpen(&n, handles, 2); assert(n == 0 && handles[0].v[2] == 0);
+    const char *invalid[] = {"", "-1", "16", "garbage", "0junk", "99999999999999999999999999"};
+    for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; i++) { setenv("DM_PREV_PROGRAM", invalid[i], 1); h_acc_PopOpen(&n, handles, 2); assert(n == 0); }
+    setenv("DM_PREV_PROGRAM", "0", 1);
+    h_acc_PopOpen(&n, handles, 0); assert(n == 0);
+    h_acc_PopOpen(&n, NULL, 2); assert(n == 0);
+    assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+    h_acc_PopOpen(&n, handles, 2); assert(n == 1 && handles[0].v[2]);
+    assert(h_acc_GetUserId(&out, &handles[0]) == RES_OK && !memcmp(&out, &k_uid, sizeof out));
+    assert(handles[1].v[0] == 11 && handles[1].v[1] == 22 && handles[1].v[2] == 33);
+    assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 1 && dm_uid_user(list) == 0);
+    h_acc_PopOpen(&n, handles, 2); assert(n == 0);   // once
+    h_acc_CloseUser(&handles[0]); unsetenv("DM_PREV_PROGRAM");
+    assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
     assert(h_acc_TryOpenPre(&h) && h_acc_OpenPre(&other) == RES_OK && h.v[2] != other.v[2]);
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 1);
     h_acc_CloseUser(&h); h_acc_CloseUser(&h);
@@ -122,6 +139,6 @@ int main(int argc, char **argv) {
     unlink(path);
     snprintf(path, sizeof path, "%s/missing/save", root); child(argv[0], "--unwritable", path);
     rmdir(root);
-    puts("t_account: OK (selection, sessions, concurrent closes, fresh-process persistence)");
+    puts("t_account: OK (handoff, selection, sessions, concurrent closes, fresh-process persistence)");
     return 0;
 }

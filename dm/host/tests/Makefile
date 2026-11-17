@@ -275,6 +275,9 @@ $(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
 run: $(B)/t_account
 $(B)/t_account: t_account.c ../hle_account.c ../hle_account_users.c ../account_users.h ../front.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_account.c ../hle_account_users.c ../hle_bigstack.c
+.PHONY: account
+account: $(B)/t_account
+	$(B)/t_account
 run: account-saves
 .PHONY: account-saves
 account-saves: $(B)/t_account_save

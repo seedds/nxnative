@@ -1,6 +1,7 @@
 // nn::account: durable local profiles, process-local open sessions, and the native user selector.
 // Online accounts remain unavailable. DM_NICK names user 1 (default Player).
 #include "hle.h"
+#include <stdatomic.h>
 #include "front.h"
 #include "account_users.h"
 
@@ -95,9 +96,19 @@ static Result show_selector(Uid *out, const void *settings, int creator) {
 HLE_FORCE("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE", "native user choice, respecting excluded UIDs and skip settings", Result, h_acc_ShowSel, Uid *out, const void *settings) {
     DM_APPLET("user selector"); return show_selector(out, settings, 0);
 }
-// The host runs one program and has no sessions handed over by an earlier program.
-HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "no users handed over by another program", void, h_acc_PopOpen, int *n, UserHandle *out, int max) { (void)out; (void)max; *n = 0; }
-HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "the host runs only this program", void, h_acc_PushOpen, void) {}
+// A HOME launch has no inherited users (Mario falls back to TryOpenPreselectedUser). A program handoff (DM_PREV_PROGRAM is the previous program's index) hands over
+// the launch user once, with a session of its own: MGS4 calls GetUserId on the first handle without checking the count.
+// shortcut: only the launch user is handed over; serialize PushOpenUsers's open sessions across the handoff when a game hands over another user.
+static _Atomic int g_users_popped;
+HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "users inherited from the previous program: the launch user, once", void, h_acc_PopOpen, int *n, UserHandle *out, int max) {
+    *n = 0;
+    const char *prev = getenv("DM_PREV_PROGRAM");
+    if (!prev || !*prev || max <= 0 || !out) return;
+    char *end; errno = 0; long index = strtol(prev, &end, 10);
+    if (errno || *end || index < 0 || index > 15 || atomic_exchange(&g_users_popped, 1)) return;
+    if (open_user(&out[0], &k_uid) == RES_OK) *n = 1;
+}
+HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "the launch user is inherited through the program handoff (PopOpenUsers)", void, h_acc_PushOpen, void) {}
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "open a session for the launch user (returns bool)", unsigned, h_acc_TryOpenPre, UserHandle *h) { return open_user(h, &k_uid) == RES_OK; }
 // SDK 6 uses the Result; newer SDKs ignore it. Preserve that shared ABI.
 HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "open a session for the launch user", Result, h_acc_OpenPre, UserHandle *h) { return open_user(h, &k_uid); }

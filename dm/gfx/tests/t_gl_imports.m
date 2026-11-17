@@ -598,8 +598,9 @@ static void test_argument_buffers(const char *dir) {
     GLuint pr = h_glCreateProgram(), shaders[2];
     for (int st = 0; st < 2; st++) {
         char path[1024]; snprintf(path, sizeof path, "%s/resource.%s", dir, st ? "frag" : "vert");
-        FILE *f = fopen(path, "rb"); assert(f); assert(!fseek(f, 0, SEEK_END)); long len = ftell(f); assert(len > 0 && !fseek(f, 0, SEEK_SET));
-        char *source = calloc((size_t)len + 1, 1); assert(source && fread(source, 1, (size_t)len, f) == (size_t)len); fclose(f);
+        FILE *f = fopen(path, "rb"); assert(f); assert(fseek(f, 0, SEEK_END) == 0);
+        long len = ftell(f); assert(len >= 0); assert(fseek(f, 0, SEEK_SET) == 0);
+        char *source = calloc((size_t)len + 1, 1); assert(source); assert(fread(source, 1, (size_t)len, f) == (size_t)len); fclose(f);
         shaders[st] = h_glCreateShader(st ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
         const char *s = source; h_glShaderSource(shaders[st], 1, &s, NULL); free(source); h_glCompileShader(shaders[st]);
         assert(shader_of(shaders[st])->fn); h_glAttachShader(pr, shaders[st]);

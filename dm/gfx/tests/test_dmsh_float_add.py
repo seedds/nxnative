@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dmsh_rewrite.py float_add_msl: a float add to storage memory (RED.F32's compare-and-swap loop, InstEmitMemory EmitAtomicAddF32) as one native atomic_fetch_add on a device
-atomic_float. The loop as spirv-cross writes it is replaced and any other loop is left alone; and on this Mac's GPU 8,192 threads adding into the same four words, through the loop
-and through the rewrite, reach the exact sums. test_dmsh_ampere_alu.py FloatRed checks that the translator's own loop is the one rewritten (PR #1930)."""
+atomic_float. The loop as spirv-cross writes it is replaced and any other loop is left alone; a later read of its retry flag still gets false. On this Mac's GPU 8,192 threads
+adding into the same four words, through the loop and through the rewrite, reach the exact sums. test_dmsh_ampere_alu.py FloatRed checks that the translator's own loop is the one rewritten (PR #1930)."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -48,21 +48,33 @@ class FloatAdd(unittest.TestCase):
         src = loop('(*spvDescriptorSet0.cp_s4)', 0, '_2580', 10) + loop('(*spvDescriptorSet0.cp_s4)', 'int(_7)', '_2572', 20)
         out = float_add_msl(src)
         self.assertEqual(out, '    atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s4)._m0[0], _2580, memory_order_relaxed);\n'
-                              '    atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s4)._m0[int(_7)], _2572, memory_order_relaxed);\n')
+                              '    bool _10 = false;\n'
+                              '    atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s4)._m0[int(_7)], _2572, memory_order_relaxed);\n'
+                              '    bool _20 = false;\n')
 
     def test_exact_add_too(self):   # the translator's exact form (XLATE_REDUCED=0): spvFAdd(old, v)
         src = loop('b', 0, 'v', 10).replace('_11 + v;', 'spvFAdd(_11, v);')
-        self.assertEqual(float_add_msl(src), '    atomic_fetch_add_explicit((device atomic_float*)&b._m0[0], v, memory_order_relaxed);\n')
+        self.assertEqual(float_add_msl(src), '    atomic_fetch_add_explicit((device atomic_float*)&b._m0[0], v, memory_order_relaxed);\n'
+                                           '    bool _10 = false;\n')
+
+    def test_live_retry_flag_is_false_after_add(self):
+        tail = '    b._m0[0] = uint(_10);\n'
+        for add in ('_11 + v', 'spvFAdd(_11, v)'):
+            with self.subTest(add=add):
+                src = loop('b', 0, 'v', 10).replace('_11 + v', add) + tail
+                out = float_add_msl(src)
+                self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
+                self.assertIn('    bool _10 = false;\n', out)   # the do-while can only finish with this value
+                self.assertTrue(out.endswith(tail))
 
     def test_other_words_and_shapes_left_alone(self):
         other = loop('b', 0, 'v', 10).replace('&b._m0[0], &', '&b._m0[1], &')   # the swap on another word than the read
         self.assertEqual(float_add_msl(other), other)
-        used = loop('b', 0, 'v', 10) + '    out = _11;\n'   # a loop whose read is used after it is the same text: the rewrite drops only the do-block's own names
-        self.assertNotIn('_11 = as_type<float>', float_add_msl(used))
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_sums_on_gpu(self):
         body = loop('b', 0, 'v', 10) + loop('b', 1, 'w', 20) + loop('b', 2, 'v', 30) + loop('b', 3, 'w', 40)
+        body += '    if (_10 || _20 || _30 || _40) { b._m0[0] = as_type<uint>(-1.0f); }\n'
         runner = r'''#import <Metal/Metal.h>
 #include <stdio.h>
 int main(int ac, char **av) { @autoreleasepool {
@@ -97,7 +109,8 @@ int main(int ac, char **av) { @autoreleasepool {
     def test_compiles_for_iphone(self):   # atomic_float at the iPhone libraries' deployment target and flags (ios_metal.METAL)
         sys.path.insert(0, str(TOOLS.parents[1] / 'ios/tools')); import ios_metal
         with tempfile.TemporaryDirectory() as w:
-            src = Path(w) / 'n.metal'; src.write_text(KERNEL % float_add_msl(loop('b', 0, 'v', 10)))
+            body = loop('b', 0, 'v', 10) + '    if (_10) { b._m0[0] = 0u; }\n'
+            src = Path(w) / 'n.metal'; src.write_text(KERNEL % float_add_msl(body))
             r = subprocess.run([*ios_metal.METAL, str(src), '-o', str(Path(w) / 'n.air')], capture_output=True, text=True)
             if 'SDK "iphoneos" cannot be located' in r.stderr: self.skipTest('no iPhone SDK')
             self.assertEqual(r.returncode, 0, r.stderr)

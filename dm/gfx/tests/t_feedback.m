@@ -748,7 +748,8 @@ static void om_case(const char *dir) {
     int before = failed; NSString *d = @(dir);
     NSData *oj = [NSData dataWithContentsOfFile:[d stringByAppendingPathComponent:@"om.json"]];
     NSDictionary *facts = oj ? [NSJSONSerialization JSONObjectWithData:oj options:0 error:nil] : nil;
-    CHECK(facts && [facts[@"calls"] count] == 0 && [facts[@"outputs"] count] == 1, "the om-only fixture has no samples and one colour output");
+    NSArray *calls = facts[@"calls"], *outputs = facts[@"outputs"];
+    CHECK(facts && calls.count == 0 && outputs.count == 1, "the om-only fixture has no samples and one colour output");
     NSError *e = nil;
     id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543212_bf.metallib"], &e);
     CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded om-only library exposes main0_f");

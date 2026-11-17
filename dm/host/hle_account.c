@@ -7,6 +7,8 @@ typedef struct { uint64_t v[2]; } Uid;                 // nn::account::Uid, 16 b
 typedef struct { uint64_t v[3]; } UserHandle;          // nn::account::UserHandle, 24 bytes
 _Static_assert(sizeof(Uid) == 16, "Uid");
 static const Uid k_uid = {{0x78626c0000000001ull, 0x53574e4154495645ull}};   // Non-zero means valid
+// The handle's third word is the SDK's session object; the host has no sessions and writes this marker, which helps reading a dump but which nothing checks:
+// games also pass handles they built themselves (see GetUserId)
 #define HANDLE_MAGIC 0x55534552484e444cull                                    // "USERHNDL"
 
 HLE_FORCE("_ZN2nn7account10InitializeEv", "connects to the acc:u0 account service; the host has one fixed local user", void, h_acc_Init, void) {}
@@ -43,7 +45,8 @@ HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "open user; t
     h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Uid from the handle", Result, h_acc_GetUserId, Uid *out, const UserHandle *h) {
-    if (h->v[2] != HANDLE_MAGIC) die("account::GetUserId: the handle was not issued by the host (%#llx)", h->v[2]);
+    // The SDK's accessor copies the Uid, the handle's first 16 bytes, and returns 0; it never reads the third word (FC 27: nn::account::GetUserId sdk+0x1c0040 calls
+    // detail::GetUserId sdk+0x1bede0, ldp x8, x1, [x0]). EA SPORTS FC 27 passes a handle it built and never filled for a second controller's player (third word 0x2)
     out->v[0] = h->v[0]; out->v[1] = h->v[1]; return RES_OK;
 }
 // nn::account::Nickname = struct { char name[33]; }, UTF-8

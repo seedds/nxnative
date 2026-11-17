@@ -71,7 +71,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 - `main` has 125 MB of text: with the patch area 32 MB before the base, sites near the end of the text were more than 128 MB away (`B()` range assertion, then `patch area of … bytes does not fit in the … before the base`). The patch area now goes right before the base (`BIG_TEXT`); the first pass tries a 2.6 MB gap, and since the patch area is larger (3.6 MB, 34,322 sites) the rewriter runs itself again with exactly that size (`DM_PATCH_FRONT`).
 - **Resolved: `KeyError` at `site_br` for a `br x18` byte jump table** (`main+0x6b346d0`): the function held a trap word (`0xe7ffdefe`, `main+0x6b34540`) before the table, where capstone stopped. Function disassembly now goes on after undecodable words (`disasm_fn`).
-- Halfword jump tables padded only to their largest entry (`half_count`, found on Animal Crossing: New Horizons) changed 1 to 6 tables in this `main`.
+- Halfword jump tables padded only to their largest entry (found on Animal Crossing: New Horizons) changed 1 to 6 tables in this `main`.
 
 ## Mac routes
 

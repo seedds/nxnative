@@ -22,6 +22,10 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         // nxnative: a global memory access traced to no storage buffer goes through a physical storage buffer pointer (GlobalToStorage.TryGenerateRawStorageOp)
         public bool UsesPhysicalPointers { get; set; }
 
+        // A traversal descriptor, distinct from guest constant/storage buffers.
+        // Only continuation kernels opt in; ordinary shaders keep their ABI.
+        public SetBindingPair? RayQueryBinding { get; set; }
+
         // nxnative: uniform bounds (TranslationFlags.MetalUniformBounds). The binding of each game uniform slot's buffer, whose reads past the bound size give 0, with its
         // index in the size table; the words of each slot the shader reads at fixed offsets (the end of the highest one), which the host makes readable; and the binding of
         // the size table (Constants.NxUniformSizesBank) that reads at computed offsets compare with, -1 when the shader has none

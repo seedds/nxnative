@@ -1,5 +1,7 @@
 // Identical pads (pad_hid_mac.h) with fake IOKit entries and fake GameController controllers: only an entry that sends reports counts as a pad of its model, so one
-// Pro Controller with a second, silent entry stays with GameController (GitHub issue #2237), while two that both stream are read as twins (GitHub issue #1218)
+// Pro Controller with a second, silent entry stays with GameController (GitHub issue #2237), while two that both stream are read as twins (GitHub issue #1218). A pad with
+// Nintendo's report descriptor that GameController does not list (a PowerA NANO, PR #989) is asked for its device info, gets the handshake once it answers, is read from its
+// report 0x30, and falls back to its report 0x3F when it does not answer or leaves full mode
 #import <Foundation/Foundation.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <GameController/GameController.h>
@@ -12,21 +14,28 @@
 @interface TestDev : NSObject
 @property int vid, pid; @property long loc; @property uint64_t entry; @property NSString *transport;
 @property uint8_t *buffer; @property IOHIDReportCallback callback; @property void *context;
+@property NSString *name; @property NSArray *elements;
 @end
 @implementation TestDev
 @end
+@interface TestElem : NSObject
+@property uint32_t page, usage, report; @property int output;
+@end
+@implementation TestElem
+@end
+static TestElem *elem(int output, uint32_t report, uint32_t page, uint32_t usage) { TestElem *e = [TestElem new]; e.output = output; e.report = report; e.page = page; e.usage = usage; return e; }
 @interface TestGC : NSObject
 @property NSString *productCategory, *vendorName; @property id extendedGamepad;
 @end
 @implementation TestGC
-static NSMutableArray *g_gc;
+static NSMutableArray *g_gc; static BOOL g_supports = YES;
 + (NSArray *)controllers { return g_gc; }
-+ (BOOL)supportsHIDDevice:(IOHIDDeviceRef)d { (void)d; return YES; }
++ (BOOL)supportsHIDDevice:(IOHIDDeviceRef)d { (void)d; return g_supports; }
 @end
 
 static CFTypeRef test_property(IOHIDDeviceRef device, CFStringRef key) {
     TestDev *d = (__bridge id)device;
-    if (CFEqual(key, CFSTR(kIOHIDProductKey))) return (__bridge CFTypeRef)@"Pro Controller";
+    if (CFEqual(key, CFSTR(kIOHIDProductKey))) return (__bridge CFTypeRef)(d.name ?: @"Pro Controller");
     if (CFEqual(key, CFSTR(kIOHIDVendorIDKey))) return (__bridge CFTypeRef)@(d.vid);
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)@(d.pid);
     if (CFEqual(key, CFSTR(kIOHIDLocationIDKey))) return (__bridge CFTypeRef)@(d.loc);
@@ -38,10 +47,18 @@ static void test_report_cb(IOHIDDeviceRef device, uint8_t *buffer, CFIndex len, 
     d.buffer = buffer; d.callback = callback; d.context = ctx;
 }
 static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, void *ctx) { (void)device; (void)callback; (void)ctx; }
-static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)device; (void)match; (void)o; return CFBridgingRetain(@[]); }
+static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)match; (void)o; return CFBridgingRetain(((__bridge TestDev *)device).elements ?: @[]); }
+static uint32_t test_el_page(IOHIDElementRef e) { return ((__bridge TestElem *)e).page; }
+static uint32_t test_el_usage(IOHIDElementRef e) { return ((__bridge TestElem *)e).usage; }
+static uint32_t test_el_report(IOHIDElementRef e) { return ((__bridge TestElem *)e).report; }
+static IOHIDElementType test_el_type(IOHIDElementRef e) { return ((__bridge TestElem *)e).output ? kIOHIDElementTypeOutput : kIOHIDElementTypeInput_Button; }
 static io_service_t test_service(IOHIDDeviceRef device) { return (io_service_t)((__bridge TestDev *)device).entry; }
 static kern_return_t test_entry_id(io_registry_entry_t e, uint64_t *id) { *id = e; return KERN_SUCCESS; }
-static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id, const uint8_t *r, CFIndex n) { (void)d; (void)t; (void)id; (void)r; (void)n; return kIOReturnSuccess; }
+static uint8_t outs[64][3]; static int nouts;   // each output report: its id, subcommand and first argument byte
+static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id, const uint8_t *r, CFIndex n) {
+    (void)d; assert(t == kIOHIDReportTypeOutput && id == r[0] && n >= 12 && nouts < 64);
+    outs[nouts][0] = r[0]; outs[nouts][1] = r[10]; outs[nouts][2] = r[11]; nouts++; return kIOReturnSuccess;
+}
 
 static uint64_t tick = 1000000000;
 uint64_t now_ns(void) { return tick; }
@@ -53,14 +70,28 @@ uint64_t now_ns(void) { return tick; }
 #define IOHIDDeviceGetService test_service
 #define IORegistryEntryGetRegistryEntryID test_entry_id
 #define IOHIDDeviceSetReport test_set_report
+#define IOHIDElementGetUsagePage test_el_page
+#define IOHIDElementGetUsage test_el_usage
+#define IOHIDElementGetReportID test_el_report
+#define IOHIDElementGetType test_el_type
 #define GCController TestGC
+#define HIDPAD_NIN_STEP_NS 2000000ull
+#define HIDPAD_NIN_WAIT_NS 200000000ull   // waits below sit well between its multiples, so the retries are not timing-sensitive
 #include "../pad_hid_mac.h"
 
 static int attached, changes;
 static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }
 static void hidpad_read(hid_pad *d) { (void)d; }
-static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n) { (void)d; (void)s; (void)n; }
+static int motion_samples;
+static float motion_acc[3], motion_rot[3];
+static uint64_t motion_ns;
+static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], uint64_t ns) {
+    (void)d; assert(ns > motion_ns); motion_ns = ns; motion_samples++;
+    memcpy(motion_acc, acc, sizeof motion_acc); memcpy(motion_rot, rot, sizeof motion_rot);
+}
+static int player = -1;
+static int hidpad_player(const hid_pad *d) { (void)d; return player; }
 static void hidpad_models_changed(void) { changes++; hidpad_twins_eval(nil); hidpad_twins_release(); hidpad_twins_take(nil); }   // front_mac.m's pads_changed, without its slots
 
 static IOHIDDeviceRef ref(TestDev *d) { return (__bridge IOHIDDeviceRef)d; }
@@ -71,6 +102,13 @@ static void report(TestDev *d) {
     d.callback(d.context, kIOReturnSuccess, ref(d), kIOHIDReportTypeInput, 0x30, d.buffer, 49);
     tick += 15000000; drain();
 }
+static void push_report(TestDev *d, const uint8_t *r, size_t n) {
+    assert(d.callback && d.buffer); memcpy(d.buffer, r, n);
+    d.callback(d.context, kIOReturnSuccess, ref(d), kIOHIDReportTypeInput, r[0], d.buffer, (CFIndex)n);
+    tick += 15000000; drain();
+}
+static void wait_ms(int ms) { CFRunLoopRunInMode(kCFRunLoopDefaultMode, ms / 1000.0, false); }
+static void put16(uint8_t *p, int v) { p[0] = (uint8_t)v; p[1] = (uint8_t)((uint16_t)v >> 8); }
 static int twins(void) { int n = 0; for (hid_pad *d = g_hidpads; d; d = d->next) n += d->twin; return n; }
 static hid_pad *find(TestDev *t) { for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) if (d->hid == ref(t)) return d; return NULL; }
 
@@ -113,6 +151,93 @@ int main(void) { @autoreleasepool {
     hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(u1));
     assert(twins() == 0 && attached == 0);                              // one left: back to GameController
     hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(u2));
+    assert(!g_hidpads && !g_hidpads_gc);
+    // PR #989: a Pro Controller clone of another vendor (a PowerA NANO: HID vendor and product 0), which GameController does not list
+    g_supports = NO; drain(); nouts = 0;   // the twins' calibration reads above are not counted
+    hid_pad twin = {.twin = 1, .nin = PAD_NIN_PROTOCOL, .lights = -1};
+    hidpad_lights(&twin, 0); assert(nouts == 0);   // widening raw-pad LED support leaves the existing twin path alone
+    NSArray *nin = @[elem(0, 0x3F, 9, 1), elem(0, 0x3F, 1, 0x30), elem(0, 0x21, 0xFF00, 1), elem(0, 0x30, 0xFF00, 1), elem(1, 0x01, 0xFF00, 1), elem(1, 0x10, 0xFF00, 1)];
+    TestDev *nano = [TestDev new]; nano.name = @"Lic Pro Controller"; nano.loc = 0x31; nano.entry = 31; nano.transport = @"Bluetooth"; nano.elements = nin;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(nano));
+    hid_pad *n = find(nano);
+    assert(n && attached == 1 && n->proto && (n->nin & PAD_NIN_RUMBLE) && n->st.raw && n->st.map[0] == 2 && n->st.map[2] == 4);   // report 0x3F's numbering until then
+    assert(nouts == 1 && outs[0][0] == 0x01 && outs[0][1] == JC1_SUB_DEVICE_INFO && nano.callback);
+    wait_ms(300); assert(nouts == 2 && outs[1][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);   // no answer yet: asked again
+    uint8_t r[64] = {0x21}; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
+    push_report(nano, r, 49); assert(n->talks && hidpad_rumbles(n));
+    wait_ms(100);
+    static const uint8_t hs[8][2] = {{0x03, 0x30}, {0x40, 1}, {0x48, 1}, {0x10, 0x20}, {0x10, 0x3D}, {0x10, 0x10}, {0x30, 0xF0}};   // the handshake, then all four lights flashing
+    assert(nouts == 2 + 7 && !n->steps);
+    for (int i = 0; i < 7; i++) assert(outs[2 + i][0] == 0x01 && outs[2 + i][1] == hs[i][0] && outs[2 + i][2] == hs[i][1]);
+    memset(r, 0, sizeof r); r[0] = 0x30; r[1] = 1; r[3] = 0x08; for (int k = 0; k < 2; k++) { r[6 + 3 * k] = 0x00; r[7 + 3 * k] = 0x08; r[8 + 3 * k] = 0x80; }   // A, both sticks at 2048
+    push_report(nano, r, 49); assert(n->full && hidpad_full(n) && n->pro_m == DM_BTN_A && n->pro_s[0] == 0 && n->pro_s[1] == 0);
+    // The requested IMU calibration reaches the decoder: factory rest is zero rotation, with each axis's own sensitivity.
+    uint8_t cal[64] = {0x21}; cal[13] = 0x90; cal[14] = JC1_SUB_SPI_READ; cal[15] = 0x20; cal[16] = 0x60; cal[19] = JC1_IMU_CAL_LEN;
+    const int origin[3] = {100, -50, 25};
+    for (int a = 0; a < 3; a++) { put16(cal + 26 + 2 * a, a == 1 ? 8192 : 16384); put16(cal + 32 + 2 * a, origin[a]); put16(cal + 38 + 2 * a, origin[a] + 13371); }
+    push_report(nano, cal, 43); assert(!n->unit.cal.have);   // a truncated calibration cannot replace the defaults
+    push_report(nano, cal, 44); assert(n->unit.cal.have && n->unit.cal.gyro_origin[0] == 100);
+    r[1] = 2;
+    for (int k = 0; k < 3; k++) { put16(r + 17 + 12 * k, 4096); for (int a = 0; a < 3; a++) put16(r + 19 + 12 * k + 2 * a, origin[a]); }
+    motion_samples = 0; motion_ns = 0;
+    push_report(nano, r, 49);
+    assert(motion_samples == 3 && motion_acc[0] == 0 && motion_acc[1] == 0 && motion_acc[2] == -1);
+    for (int a = 0; a < 3; a++) assert(fabsf(motion_rot[a]) < 1e-6f);   // previously reported 7 deg/s for the first axis at factory rest
+    r[1] = 3;
+    for (int k = 0; k < 3; k++) { put16(r + 15 + 12 * k, 2048); put16(r + 19 + 12 * k, origin[0] + 100); }
+    push_report(nano, r, 49);
+    assert(motion_samples == 6 && fabsf(motion_acc[0] - 1) < 1e-6f);
+    assert(fabsf(motion_rot[1] - 100 * n->unit.cal.gyro_scale[0] * (float)M_PI / 180) < 1e-6f);
+    // A map survives the automatic switch to full mode; Home and Capture still address usages 13 and 14.
+    pad_hid_init(&n->st, "A=1,B=2,X=13,Y=14", 1); n->st.buttons = 1u << 1 | 1u << 12 | 1u << 13;
+    uint64_t mapped = pad_hid_buttons(&n->st); assert(mapped == (DM_BTN_B | DM_BTN_X | DM_BTN_Y));
+    r[4] = 0x30; push_report(nano, r, 49); assert(n->pro_m == mapped);
+    pad_hid_init(&n->st, NULL, 1);
+    player = 0; hidpad_lights(n, 0); assert(nouts == 10 && outs[9][1] == JC1_SUB_LEDS && outs[9][2] == 0x01);   // player 1 once it joins
+    hidpad_lights(n, 0); assert(nouts == 10);                                                                    // sent once
+    player = -1;
+    memset(r, 0, sizeof r); r[0] = PAD_HID_NIN_REPORT;
+    push_report(nano, r, 12); assert(!n->full && nouts == 11 && outs[10][1] == JC1_SUB_DEVICE_INFO);                 // back in report 0x3F: read from it, asked again
+    wait_ms(300); assert(nouts == 12 && outs[11][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);                    // that ask unanswered: asked again
+    memset(r, 0, sizeof r); r[0] = 0x21; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
+    push_report(nano, r, 49); wait_ms(100); assert(nouts == 12 + 7 && !n->steps && n->answered == n->asks);          // answered: the handshake again, lights included
+    n->lights = -1; push_report(nano, (uint8_t[12]){PAD_HID_NIN_REPORT}, 12); assert(nouts == 19);              // not in full mode: a 0x3F asks nothing more
+    // its player's rumble (output report 0x10): a buzz goes out on each tick while it lasts, then three reports of silence, then nothing
+    player = 0; dm_haptic_state hs0 = {0, 1, {{0.8f, 160, 0.5f, 320}, {0}}}; dm_hidpad_rumble(&hs0);
+    int before = nouts; hidpad_rumble_tick(); assert(nouts == before + 1 && outs[before][0] == 0x10);
+    hs0.motor[0] = (dm_vibration){0, 160, 0, 320}; dm_hidpad_rumble(&hs0);
+    for (int i = 0; i < 5; i++) hidpad_rumble_tick();
+    assert(nouts == before + 5);   // the buzz again (the value set when the last report went: held for one report), three of silence, then none
+    player = -1;
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(nano)); assert(attached == 0 && !g_hidpads);
+    int base = nouts;
+    wait_ms(300); assert(nouts == base);                                                                            // gone: nothing more asked
+    // buttons in report 0x3F but no subcommand reports: that report's numbering, no output
+    TestDev *simple = [TestDev new]; simple.name = @"Pad"; simple.entry = 32; simple.elements = @[elem(0, 0x3F, 9, 1)];
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(simple)); n = find(simple);
+    assert(n && !n->proto && n->st.raw && n->st.map[2] == 4 && nouts == base);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(simple));
+    // an 8BitDo (buttons in report 1): its own numbering, untouched
+    TestDev *ebd = [TestDev new]; ebd.vid = PAD_HID_DEFAULT_VENDOR; ebd.name = @"8BitDo"; ebd.entry = 33; ebd.elements = @[elem(0, 1, 9, 1), elem(1, 1, 0xFF00, 1)];
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(ebd)); n = find(ebd);
+    assert(n && !(n->nin & PAD_NIN_SIMPLE) && !n->proto && !n->st.raw && n->st.map[2] == 5 && nouts == base);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(ebd));
+    // Lights are independent of full input mode: the subcommand channel alone shows its player, with no device-info handshake.
+    TestDev *led = [TestDev new]; led.name = @"LED pad"; led.entry = 35;
+    led.elements = @[elem(0, 0x3F, 9, 1), elem(0, 0x21, 0xFF00, 1), elem(1, 0x01, 0xFF00, 1)];
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(led)); n = find(led);
+    assert(n && !n->proto && nouts == base + 1 && outs[base][1] == JC1_SUB_LEDS && outs[base][2] == 0xF0);
+    hidpad_lights(n, 0); hidpad_lights(n, 0);
+    assert(nouts == base + 2 && outs[base + 1][1] == JC1_SUB_LEDS && outs[base + 1][2] == 1);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(led)); base = nouts;
+    // the descriptor, but no answer: asked HIDPAD_NIN_TRIES times, then read from report 0x3F
+    TestDev *mute = [TestDev new]; mute.name = @"Mute"; mute.entry = 34; mute.elements = nin;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(mute)); n = find(mute);
+    wait_ms(700); assert(n->tries == HIDPAD_NIN_TRIES && !n->talks && nouts == base + HIDPAD_NIN_TRIES + 1 && !hidpad_rumbles(n));
+    assert(outs[nouts - 1][1] == JC1_SUB_LEDS && outs[nouts - 1][2] == 0xF0);   // the unanswered device info does not suppress lights
+    hidpad_lights(n, 0); hidpad_lights(n, 0);
+    assert(nouts == base + HIDPAD_NIN_TRIES + 2 && outs[nouts - 1][1] == JC1_SUB_LEDS && outs[nouts - 1][2] == 1);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(mute));
     assert(!g_hidpads && !g_hidpads_gc);
     printf("t_pad_hid_mac: passed (%d recounts)\n", changes);
 } }

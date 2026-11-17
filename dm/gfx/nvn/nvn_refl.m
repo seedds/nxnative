@@ -96,7 +96,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_TBUF]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
             else if ([k isEqualToString:@DMSH_KIND_IMG_UBO]) { r->kind = NVN_RB_IMGU; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
                 r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
-            else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
+                if (b[@"soff"]) { r->soff = (uint16_t)([b[@"soff"] intValue] + 1); r->sreg = (uint8_t)[b[@"sreg"] intValue]; } }
             else if ([k isEqualToString:@DMSH_KIND_SBUF]) { r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b); }
             else if ([k isEqualToString:@DMSH_KIND_UBO_PTR]) r->kind = NVN_RB_UBOP;
             else if ([k isEqualToString:@DMSH_KIND_SBUF_UBO]) { r->kind = NVN_RB_SBUFU; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
@@ -104,6 +105,12 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_GEOMETRY]) { if (reg < 0 || reg > 4) FAIL("invalid geometry helper slot"); r->kind = NVN_RB_GEOMETRY; }
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
             else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) { r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue]; }
+            else if ([k isEqualToString:@DMSH_KIND_RT_SCENE]) r->kind = NVN_RB_RT_SCENE;
+            else if ([k isEqualToString:@DMSH_KIND_RT_PARAMETERS]) r->kind = NVN_RB_RT_PARAMETERS;
+            else if ([k isEqualToString:@DMSH_KIND_RT_ERRORS]) r->kind = NVN_RB_RT_ERRORS;
+            else if ([k isEqualToString:@DMSH_KIND_RT_INSTANCE_SBT]) r->kind = NVN_RB_RT_INSTANCE_SBT;
+            else if ([k isEqualToString:@DMSH_KIND_RT_BANK0]) r->kind = NVN_RB_RT_BANK0;
+            else if ([k isEqualToString:@DMSH_KIND_RT_BANK3]) r->kind = NVN_RB_RT_BANK3;
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_CBSIZE]) r->kind = NVN_RB_CBSIZE;
@@ -177,9 +184,11 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             if (ra[@"discard"]) o->may_discard = [ra[@"discard"] intValue] != 0;
             if (ra[@"sample_mask"]) o->writes_smask = [ra[@"sample_mask"] intValue] != 0;
             o->reads_prim_id = [ra[@"primitive_id"] intValue] != 0;
+            o->pos_far = [ra[@"far"] intValue] != 0;
             for (NSNumber *c in ra[@"colors"]) if (c.intValue >= 0 && c.intValue < 8) o->color_mask |= (uint8_t)(1u << c.intValue);
             o->color_known = [ra[@"colors"] isKindOfClass:[NSArray class]];
-            if ([ra[@"float_colors"] isKindOfClass:[NSNumber class]]) { o->fcols = (uint8_t)[ra[@"float_colors"] unsignedIntValue]; o->fcols_known = 1; }
+            if ([ra[@"float_colors"] isKindOfClass:[NSNumber class]]) { o->fcols = (uint8_t)[ra[@"float_colors"] unsignedIntValue]; o->fcols_known = 1;
+                o->ucols = (uint8_t)[ra[@"uint_colors"] unsignedIntValue]; o->scols = (uint8_t)[ra[@"sint_colors"] unsignedIntValue]; }
             if ([ra[@"omap"] isKindOfClass:[NSNumber class]]) { o->omap = (uint32_t)[ra[@"omap"] unsignedLongLongValue]; o->omap_known = 1; }
         }
         memset(o->uv_attr, -1, sizeof o->uv_attr); memset(o->uv_aff_attr, -1, sizeof o->uv_aff_attr);
@@ -214,6 +223,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
         o->tg_spill = (uint32_t)[j[@"tg_spill"] unsignedIntValue];
+        o->mesh_spill = [j[@"mesh_spill"] boolValue];
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }

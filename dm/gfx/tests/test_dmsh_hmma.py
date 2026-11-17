@@ -20,7 +20,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
-import dmsh_rewrite   # noqa: E402
+import dmsh_chain, dmsh_rewrite   # noqa: E402
 from dmsh_rewrite import hmma_msl   # noqa: E402
 scope = vars(dmsh_rewrite)
 
@@ -489,7 +489,7 @@ class TranslatorFlags(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
         msl = r.stdout[r.stdout.index('kernel void main0'):]
         consts = dict(re.findall(r'int (_\d+) = (-?\d+);', msl))

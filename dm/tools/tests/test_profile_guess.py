@@ -84,6 +84,11 @@ class GlslSources(unittest.TestCase):
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)
 
+    def test_gl_prefixes_are_not_sources(self):   # DOOM 3's main: the prefix its renderer puts before the GLSL it makes at run time, so the game gets a run-time capture
+        image = b'\0#version 150\n#define PC\nfloat saturate( float v ) { return clamp( v, 0.0, 1.0 ); }\n\0#version 330\nvoid main() {}\0'
+        self.assertEqual(pg.gl_sources(image), 1)
+        self.assertEqual(pg.gl_sources(image[:image.index(b'#version 330') - 1]), 0)
+
     def test_complete_embedded_sources(self):
         image = b'#version 450\nvoid main() {}\0#version 450\nvoid main (void) {}\0'
         self.assertEqual(pg.glsl_sources(image), 2)
@@ -97,6 +102,12 @@ class GlslSources(unittest.TestCase):
             (root / 'shaders/cipher.vert').write_bytes(hashlib.sha256(b'ciphertext').digest() * 128)   # Skyward Sword HD's Dummy.vert: encrypted, read only on a cache miss
             (root / 'shaders/empty.frag').write_bytes(b'')
             self.assertEqual(pg.romfs_glsl_files(root), 2)
+
+
+    def test_glsl_files_are_gl_sources(self):   # Mega Man Legacy Collection's shaders/nx/*.glsl, which gl_shaders.py reads: no run-time capture
+        self.assertIn('.glsl', pg.GL_FILES)
+        s = pg.shader_sources({'eglCreateWindowSurface'}, 0, [], 0, 0, gl_names=1, gl_src=2, gl_files=6)
+        self.assertEqual(s['graphics'][0], 'gl'); self.assertFalse(s['gl_capture'][0])
 
 
 class Npdm(unittest.TestCase):

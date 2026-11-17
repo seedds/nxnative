@@ -680,18 +680,32 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- moves ----
 
+        private static Operand ALogicalMoveSource(EmitterContext context)
+        {
+            if (context.TranslatorContext.RayTracingProgram is RayTracingProgram program &&
+                program.LogicalMoves.TryGetValue(context.CurrOp.Address, out RayTracingLogicalMove move))
+            {
+                if (context.CurrOp.RawOpCode != move.OriginalLowWord)
+                    throw AFail(context, "logical-ID MOV template differs from metadata plan");
+                return Const(move.LogicalId);
+            }
+            return null;
+        }
+
         public static void AMov(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            Operand src = ALogicalMoveSource(context) ?? AGet(context, AOne(context, x, neg: false, abs: false));
 
-            ASet(context, x, AGet(context, AOne(context, x, neg: false, abs: false)));
+            ASet(context, x, src);
         }
 
         // UMOV URd, imm (form 4) or URb (form 6)
         public static void AUMov(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            Operand src = x.Form == 4 ? Const((int)x.Imm32) : Register(x.Bits(32, 38), RegisterType.Uniform);
+            Operand src = ALogicalMoveSource(context) ??
+                (x.Form == 4 ? Const((int)x.Imm32) : Register(x.Bits(32, 38), RegisterType.Uniform));
 
             ASet(context, x, src, uniform: true);
         }
@@ -778,7 +792,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                // nxnative: a fixed read's address is its immediate as it is; an indexed one adds it signed (InstEmitMemory.Ldc)
+                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(38, 54));
                 ALoadConstant(context, x, bank, Const(0), offset, uniform: true);
             }
         }
@@ -841,7 +856,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (x.Ra == RegisterConsts.RegisterZeroIndex)
             {
-                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(38, 54));   // fixed: the immediate as it is, as ULDC's
                 ALoadConstant(context, x, bank, Const(0), offset, uniform: false);
             }
             else

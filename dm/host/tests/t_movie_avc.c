@@ -253,6 +253,36 @@ static void tex_slots(void) {
     assert(md_rel(&d, 2) && md_rel(&d, 3) && !md_rel(&d, 3));   // a second release changes nothing
     take(&d, 1); md_reset(&d, 0); assert(!d.out[1].used && !d.out[1].rnd && d.tex_rel);
 }
+// Native output buffers describe an opaque NVN object, not a byte allocation.
+static int native_texture, native_copies;
+typedef struct { void *object; size_t capacity; } native_buffer;
+static void *native_data(const void *b) { return ((const native_buffer *)b)->object; }
+static size_t native_capacity(const void *b) { return ((const native_buffer *)b)->capacity; }
+void *guest_sym(const char *name) { (void)name; return NULL; }
+int nvn_host_signal_sync(void *sync) { (void)sync; return 0; }
+int nvn_host_write_texture(const void *tex, const void *src, int w, int h, size_t row, int *tw, int *th) {
+    if (tex != &native_texture) return -1;
+    if (tw) *tw = 2;
+    if (th) *th = 2;
+    if (src) { assert(w == 2 && h == 2 && row == 8); native_copies++; }
+    return 0x25;
+}
+static void native_buffers(void) {
+    mdec_t d = { .type = MD_TYPE_AVC, .mode = MD_MODE_TEX, .nout = 1, .w = 2, .h = 2 };
+    uint8_t pixels[16] = {0};
+    pthread_mutex_init(&d.mu, NULL);
+    d.out[0].pic = 1; d.out[0].frm = pixels;
+    G.data = native_data; G.cap = native_capacity;
+    native_buffer b = { &native_texture, 0 };
+    assert(!md_out_tex(&d, 0, &b) && native_copies == 1); // MK11
+    b.capacity = 8;
+    assert(!md_out_tex(&d, 0, &b) && native_copies == 2); // Dread
+    b.object = NULL;
+    assert(md_out_tex(&d, 0, &b) == 0x100b && native_copies == 2);
+    b.object = pixels;
+    assert(md_out_tex(&d, 0, &b) == 0x100b && native_copies == 2);
+    pthread_mutex_destroy(&d.mu);
+}
 int main(void) {
     loop_order(1); loop_order(0);
     puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with 3- and 4-byte start codes");
@@ -260,6 +290,8 @@ int main(void) {
     puts("AVC framing: leading zeros before the first start code are skipped; packets and parameter sets without a start code are refused, not read as NAL lengths");
     sequence_boundaries();
     puts("AVC boundaries: short sequences drain, non-IDR timestamps and SEI retain lookahead, Flush discards, zero-depth output stays immediate");
+    native_buffers();
+    puts("native texture buffers: zero and eight capacity accepted; null and invalid objects rejected");
     tex_slots();
     puts("native texture: a rendered slot waits for the client's release, or for its next GetOutputBuffer while it has never released one");
     writer w;

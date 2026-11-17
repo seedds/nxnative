@@ -1226,6 +1226,12 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
 // hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
 HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: the newest (cleared until a front end reports the sensor)",
           void, h_hid_JcmsState, void *out, const uint32_t *h) { if (out) { memset(out, 0, 32); if (h) jcms_copy(out, 1, *h); } }
+// Private applications label their current scene in the hid service. Welcome Tour's flow NRO calls the setter at boot (SDK 20.5.29 sdk+0x65d3b0); its detail call
+// dereferences the absent service at sdk+0x65c75c. Keep the service's setting here, shared by every module, and answer the paired getter without opening Horizon IPC.
+static _Atomic int g_private_scene;
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "private application's HID scene: recorded", void, h_hid_SetPrivateScene, int scene) { atomic_store(&g_private_scene, scene); }
+HLE_FORCE("_ZN2nn3hid23GetSceneIdForPrivateAppEv", "private application's HID scene: what the game set", int, h_hid_GetPrivateScene, void) { return atomic_load(&g_private_scene); }
+
 // A Switch 2 SDK's guard against a Home press made by accident on a controller (Drag x Drive turns it on for player 1's Joy-Con 2 as they connect, main+0x2c80c4). The SDK's own
 // opens the hid service, which the host does not serve, and calls through the null session (sdk+0x63ce10). It sets a flag in hid and returns nothing; the host handles Home itself
 // (home_quit.h: a 2 s hold, then a confirm), so the setting is recorded for the question below and logged, and changes nothing else
@@ -1674,34 +1680,48 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
 // without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
 // the states of both modes from its one count.
-// An SDK read copies one shared HID sample and does not consume its Start / End edges. A game may read the touch screen twice in one original frame (Animal Crossing: New
-// Horizons: its input manager at main+0x1b65260 and its own keyboard's reader): sampling at each read let the first reader take the Start or End and the second see only a held
-// point, so the keyboard highlighted a key and entered nothing (issue #2567). One complete 16-finger sample is published per original frame and copied whole into each caller's
-// capacity; before the first present the grid is the host's 120 Hz one.
+// A read makes a sample only when 4 ms have passed since the newest one (or the mode changed) and otherwise copies the newest, as the Switch's touch resource does: it writes the
+// screen's LIFO every 4 ms (yuzu: GestureUpdatePeriod), so two reads within 4 ms see one sample and a Start / End edge sits in exactly one sampling number. The last 16 samples are kept
+// and GetTouchScreenStates returns the newest min(n, 16) of them, newest first, as Unity's reader expects (Pokemon Friends main+0xb00670 walks them from index n - 1 down and takes each
+// number above the last it took). Two games need this. Animal Crossing: New Horizons reads twice in one original frame (its input manager at main+0x1b65260 and its own keyboard's
+// reader): a read that used up the edges let the second reader see only a held point, so the keyboard highlighted a key and entered nothing (issue #2567). Unity 2022.3 (Pokemon Friends
+// 1.1.5) polls on its own thread at 60 Hz whatever the frame rate, and a poll that takes no new state while a finger is down (main+0x60d6a0) ends every live touch as cancelled: with one
+// sample per presented frame, the second poll of a 30 fps frame cancelled every drag. Giving each read a new number instead made Unity take the same Start again on every state.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
-static pthread_mutex_t g_touch_sample_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t g_touch_sample[0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
-static uint64_t g_touch_sample_frame, g_touch_sample_boot;
-static int g_touch_sample_valid;
-static void touch_read(void *s, int n) {
+#define TOUCH_GRID_NS 4000000ull   // the touch sampler's period (250 Hz)
+#define TOUCH_HIST 16              // samples kept: the most GetTouchScreenStates<16> returns
+static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time and mode; taken before hle_touch.c's g_tl
+static uint8_t g_touch_hist[TOUCH_HIST][0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+static int g_touch_kept, g_touch_newest, g_touch_points;   // samples kept (0-16), index of the newest, the points it was made with (1 handheld, 0 console)
+static uint64_t g_touch_at;   // now_ns() of the newest
+// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid or the mode asks for one
+static int touch_read(void *s, int N, int want) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    if (dm_opmode() != 0) { touch_fill_n(s, n, now_ns(), 0); return; }   // console mode: no touch points, as before
-    pthread_mutex_lock(&g_touch_sample_mu);
-    uint64_t frame = dm_guest_frame(), now = now_ns(), boot = frame ? 0 : now / 8333333;   // 120 Hz before the first present
-    if (!g_touch_sample_valid || frame != g_touch_sample_frame || boot != g_touch_sample_boot) {
-        touch_fill_n(g_touch_sample, 16, now, 1);
-        g_touch_sample_frame = frame; g_touch_sample_boot = boot; g_touch_sample_valid = 1;
+    size_t stride = 0x10 + 0x28 * (size_t)N;
+    pthread_mutex_lock(&g_touch_mu);
+    uint64_t now = now_ns();   // under the lock: read before it, another thread's newer sample would make now - g_touch_at wrap
+    int handheld = dm_opmode() == 0;
+    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS || g_touch_points != handheld) {   // console mode: no touch points, as before
+        int next = g_touch_kept ? (g_touch_newest + 1) % TOUCH_HIST : 0;
+        touch_fill_n(g_touch_hist[next], 16, now, handheld);
+        g_touch_newest = next; g_touch_at = now; g_touch_points = handheld;
+        if (g_touch_kept < TOUCH_HIST) g_touch_kept++;
     }
-    memcpy(s, g_touch_sample, 0x10 + 0x28 * (size_t)n);
-    if (((int32_t *)s)[2] > n) ((int32_t *)s)[2] = n;   // more fingers than this reader asked for: the rest stay unseen here
-    pthread_mutex_unlock(&g_touch_sample_mu);
+    int cnt = want < g_touch_kept ? want : g_touch_kept;
+    for (int i = 0; i < cnt; i++) {
+        uint8_t *d = (uint8_t *)s + stride * (size_t)i;
+        memcpy(d, g_touch_hist[(g_touch_newest + TOUCH_HIST - i) % TOUCH_HIST], stride);
+        if (((int32_t *)d)[2] > N) ((int32_t *)d)[2] = N;   // more fingers than this reader asked for: the rest stay unseen here
+    }
+    pthread_mutex_unlock(&g_touch_mu);
+    return cnt;
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);

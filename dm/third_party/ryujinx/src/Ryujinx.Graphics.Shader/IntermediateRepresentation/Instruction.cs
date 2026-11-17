@@ -130,6 +130,9 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         SubgroupBarrier,
         // nxnative: Ampere LDSM in a compute shader (InstEmitAmpereTensor.ALdsm), lowered to its per-lane emulation by TensorPass once the HMMAs it feeds are known
         MatrixLoad,
+        // nxnative: opaque-triangle traversal for a software continuation
+        // scheduler. Writes a typed private hit context; never reads BVH bytes.
+        RayQueryTrace,
 
         Count,
 

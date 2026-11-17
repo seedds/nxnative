@@ -3,8 +3,9 @@
 // and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
 // first, the others under Advanced settings, each in the list's sections. Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
-// opened in the background (open -g) keeps its window behind until the player switches to it
+// opened in the background (open -g) keeps its window behind until the player switches to it. A controller's A is Play and its B is Quit (LauncherPad)
 import AppKit
+import GameController
 import QuartzCore
 import SwiftUI
 
@@ -117,6 +118,44 @@ enum SaveCheck {
     }
 }
 
+/// Play and Quit from a game controller: GameController's buttonA is Play and buttonB is Quit on any controller, as the host's own prompts take them (front_mac.m
+/// hq_buttons, cp_buttons). A button counts on its release, after a press the window took: the button is up again before the host starts, so the press that started
+/// the game reaches it neither as a button nor as a join (DM_PAD_PRESS_TO_JOIN). A button already down when the window starts taking input (held at launch, or through
+/// an alert) counts only from its next press. An alert, a panel or an open menu takes no button: A never picks a save (SaveCheck.ask has no default on purpose).
+/// Controllers the host reads outside GameController (raw HID pads, Switch 2 controllers) are not seen here
+struct LauncherPad {
+    enum Action { case play, quit }
+    private struct Click {
+        var ready = false, down = false   // seen up while taking input; pressed after that
+        mutating func step(_ pressed: Bool, live: Bool) -> Bool {
+            guard live else { self = Click(); return false }
+            if pressed { down = down || ready; return false }
+            defer { self = Click(ready: true, down: false) }
+            return down
+        }
+    }
+    private var a = Click(), b = Click()
+
+    /// window: the settings window is key with no alert, panel or menu open (takesInput); playEnabled: as the Play button
+    mutating func step(a pressedA: Bool, b pressedB: Bool, window: Bool, playEnabled: Bool) -> Action? {
+        let play = a.step(pressedA, live: window && playEnabled), quit = b.step(pressedB, live: window)
+        return play ? .play : quit ? .quit : nil
+    }
+
+    static let tick = Timer.publish(every: 1.0 / 60, on: .main, in: .common).autoconnect()   // common modes: it samples during an alert's modal loop and a menu's tracking too, which reset a press
+
+    static var takesInput: Bool {
+        guard let w = NSApp.keyWindow else { return false }   // macOS delivers no controller input to an app that is not frontmost (shouldMonitorBackgroundEvents off)
+        return NSApp.modalWindow == nil && w.attachedSheet == nil && RunLoop.current.currentMode != .eventTracking
+    }
+
+    static func buttons() -> (a: Bool, b: Bool) {
+        var a = false, b = false
+        for c in GCController.controllers() { if let g = c.extendedGamepad { a = a || g.buttonA.isPressed; b = b || g.buttonB.isPressed } }
+        return (a, b)
+    }
+}
+
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
@@ -125,6 +164,7 @@ struct LauncherView: View {
     @AppStorage("window.advanced") private var advanced = false
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
+    @State private var pad = LauncherPad()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -173,6 +213,16 @@ struct LauncherView: View {
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+        .onReceive(LauncherPad.tick) { _ in padStep() }
+    }
+
+    private func padStep() {
+        let live = LauncherPad.takesInput, buttons = live ? LauncherPad.buttons() : (a: false, b: false)
+        switch pad.step(a: buttons.a, b: buttons.b, window: live, playEnabled: !checking) {
+        case .play: fputs("launcher: Play from a controller (A)\n", stderr); start()
+        case .quit: fputs("launcher: Quit from a controller (B)\n", stderr); done(false)
+        case nil: break
+        }
     }
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)

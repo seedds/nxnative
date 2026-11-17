@@ -93,6 +93,7 @@ import Foundation
         let none = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=0 pull=0")!
         expect(none.localChoice == "local:none", "no cloud save: local:none")
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
+        failed += checkLauncherPad()
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

@@ -17,7 +17,9 @@ class BudgetExport(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='budget_test_', dir=root) as tmp:
             log, out = Path(tmp) / 'pass.log', Path(tmp) / 'pass.tsv'
             log.write_text(text)
-            p = subprocess.run([sys.executable, str(TOOL), str(log), '700', '170', '--tsv=' + str(out)], capture_output=True, text=True)
+            # The tool loads a game profile; without DM_GAME, the CI's (tests.yml sets it), as the sibling tests do
+            p = subprocess.run([sys.executable, str(TOOL), str(log), '700', '170', '--tsv=' + str(out)], capture_output=True, text=True,
+                               env=dict(os.environ, DM_GAME=os.environ.get('DM_GAME') or '010015100B514000'))
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertTrue(out.exists(), 'the full pass TSV was not exported')
             with out.open() as f:

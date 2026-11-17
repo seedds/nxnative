@@ -129,3 +129,5 @@ int main(void) {
     printf("audio callback statistics: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

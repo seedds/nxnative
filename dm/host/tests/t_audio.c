@@ -213,3 +213,5 @@ int main(void) {
     printf("device stall: released %d/20 in order=%d in %.0f ms (expected 1900-5000), AudioUnit restarted and calling back again=%d (silent sink stood in %d times, %.0f ms) %s\n", got3, order3, total3, back, standins, waited3, ok3 ? "✓" : "✗");
     return !ok3;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

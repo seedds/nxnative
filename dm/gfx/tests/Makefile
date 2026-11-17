@@ -118,6 +118,20 @@ t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf2d.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
+t_tbuf_access: t_tbuf_access.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_access.m $(MTL_T_SRC) $(FW)
+t_tbuf_live: t_tbuf_live.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_tbuf_live
+check_t_tbuf_live: t_tbuf_live
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_live
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_live
+.PHONY: check_t_tbuf_access
+check_t_tbuf_access: t_tbuf_access
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access shadow
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access rows
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_access shadow
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_access rows
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c ../tex/nvn_deswizzle.c
 t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)

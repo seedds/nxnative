@@ -17,6 +17,28 @@ static void check(const char *what, long want, long got) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   // A row-wrapped BUFFER binding has a lead group followed by logical widths.
+        NSArray *forms = @[
+            @{@"kind": @"tex", @"reg": @0, @"msl_name": @"cp_t_tcb_8", @"msl_type": @"texture2d<uint>"},
+            @{@"kind": @"tex_ubo", @"reg": @0, @"msl_name": @"cp_t_cb3_A", @"msl_type": @"texture2d<uint>"},
+            @{@"kind": @"tex_ubo", @"reg": @0, @"msl_name": @"cp_t_cb3_A", @"msl_type": @"array<texture2d<uint>, 2>"},
+            @{@"kind": @"tex", @"msl_name": @"cp_t_cb0_40000000", @"msl_type": @"array<texture2d<uint>, 2>"},
+            @{@"kind": @"tex_c2a", @"off": @0, @"soff": @0, @"msl_name": @"cp_t_cb2_0", @"msl_type": @"array<texture2d<uint>, 2>"}];
+        for (NSDictionary *form in forms) {
+            NSMutableDictionary *binding = [form mutableCopy]; binding[@"fetch1d"] = @YES; binding[@"tbx"] = @0;
+            NSMutableDictionary *table = [@{@"kind": @"tbias", @"n": @4, @"msl_name": @"cp_c17"} mutableCopy];
+            NSDictionary *j = @{@"route": @"B", @"bindings": @[table, binding]};
+            check("row binding: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+            check("row binding: fetch1d preserved", 1, r.b[1].f1d);
+            check("row binding: lead index", 1, r.b[1].tbx);
+            binding[@"tbx"] = @3;
+            check("row binding: width past declared table rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+            binding[@"tbx"] = @511; table[@"n"] = @512;
+            check("row binding: width past capacity rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+            binding[@"tbx"] = @0; [binding removeObjectForKey:@"fetch1d"];
+            check("ordinary 2D offset metadata rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+        }
+    }
     {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},

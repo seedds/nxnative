@@ -852,10 +852,27 @@ static void map_image(module_t *m, const char *dir) {
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
     uint8_t *slot = jit_slot(m, m->size, 0);
+    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+    if (!slot && m->nro && rx > m->data_off && sz == (uint64_t)m->patch_off && !m->fps_state_off) {
+        // A 4 KB-aligned NRO can put code and writable relocations in the same
+        // 16 KB host page. Bias its base by whole guest pages so the data starts
+        // on a host page, preserving the NRO layout and ADRP page arithmetic.
+        // With an empty patch area, no rewritten instruction needs the key page.
+        uint64_t bias = (-m->data_off) & 0x3FFF;
+        if (!(bias & 0xFFF) && m->text_end <= m->data_off) {
+            uint8_t *a = mmap(NULL, m->size + bias, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (a == MAP_FAILED) die("%s mmap", m->name);
+            m->base = a + bias;
+            memcpy(m->base, raw, sz); free(raw);
+            rx = (bias + m->text_end + 0x3FFF) & ~0x3FFFull;
+            if (mprotect(a, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
+            LOG("%s: biased NRO base by %#llx to separate code and writable data", m->name, (unsigned long long)bias);
+            return;
+        }
+    }
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
-    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);

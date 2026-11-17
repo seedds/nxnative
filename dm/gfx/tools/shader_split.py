@@ -3568,12 +3568,63 @@ def scan_file(args):
         print(f'[RED] {why} (its shaders are left out)', flush=True)
         return args[1], {}, set(), ('unreadable', why, 1)
 
+def drinkbox_shaders(data, label):
+    """SHADERS archives store each graphics code area immediately before its control section."""
+    found = []
+    end = 9
+    for entry in re.finditer(re.escape(CTL_MAGIC), data):
+        c = entry.start()
+        if c < end or c + 0x708 > len(data): continue
+        nctl = struct.unpack_from('<I', data, c + 0x20)[0]
+        ncode = struct.unpack_from('<I', data, c + 0x704)[0]
+        k = c - ncode
+        if not (0x760 <= nctl <= len(data) - c and ncode >= 0x34 and k >= end): continue
+        if data[k:k + 4] != GFX_MAGIC: continue
+        ctl, code = data[c:c + nctl], data[k:c]
+        stage = glslc_stage(ctl, code)
+        if not stage or check(label, stage, ctl, code): continue
+        found.append((f'{label}#SHADERS@{k:#x}', stage, ctl, code))
+        end = c + nctl
+    if not found: red(f'{label}: SHADERS archive contains no readable graphics shader records')
+    return found
+
+
+def vfs2_shaders(path, label):
+    """VFS2 version 7 stores GLSLC outputs in zlib streams prefixed by their inflated length."""
+    from romfs import mmap
+    found = []
+    glslc_magic = b'\x91\x68\x86\x19'
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        for match in ZLIB_HEAD.finditer(data, 8):
+            start = match.start()
+            length, = struct.unpack_from('<I', data, start - 4)
+            if length <= 0x760: continue
+            try:
+                header = zlib.decompressobj().decompress(data[start:start + 4096], len(glslc_magic))
+                if header != glslc_magic: continue
+                # A zlib stream can be slightly larger than the uncompressed data.
+                end = min(len(data), start + length + (length >> 8) + 64)
+                z = zlib.decompressobj()
+                output = z.decompress(data[start:end], length + 1)
+            except zlib.error:
+                continue
+            if z.eof and len(output) == length:
+                found.extend(glslc_shaders(output, f'{label}#VFS2@{start:#x}', need=False))
+    return found
+
+
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if head[:9] == b'SHADERS\0\1':
+        found = drinkbox_shaders(open(path, 'rb').read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:8] == b'VFS2\x07\0\0\0':
+        found = vfs2_shaders(path, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == LSPK:
         if args[2][1] is None: red(args[2][2])
         lspk_shaders(args[2][1], rel, found)

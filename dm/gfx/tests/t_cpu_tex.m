@@ -59,9 +59,15 @@ static void finalized_upload(int write_after_record) {
     pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "CPU-cached pool initialized");
     NVNtextureBuilder tb; NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    CHECK(!h_nvnTextureBuilderGetWidth(&tb) && !h_nvnTextureBuilderGetHeight(&tb), "unset texture dimensions read as zero");
     h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
     h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
     CHECK(h_nvnTextureInitialize(&tex, &tb), "texture without packaged layout initialized");
+    uint8_t oversized_pixels[80];
+    memset(oversized_pixels, 0xfe, sizeof oversized_pixels);
+    NVNcopyRegion oversized = {0,0,0,5,4,1};
+    h_nvnTextureWriteTexels(&tex, NULL, &oversized, oversized_pixels);
+    CHECK(!mem[65536], "an out-of-range upload leaves the texture untouched");
     uint64_t serial = ((tex_t *)&tex)->serial;
     uint8_t pixels[64]; for (int i=0;i<64;i++) pixels[i]=(uint8_t)(i+32);
     NVNcopyRegion region = {0,0,0,4,4,1};

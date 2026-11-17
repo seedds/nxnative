@@ -586,16 +586,33 @@ static void app_folder_claim(void) {
     EXPECT("app folder: Metal's folder", 1, [ga_dir() hasSuffix:@"/com.apple.gpuarchiver"]);
     NSString *dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test/com.apple.gpuarchiver"];
     for (NSString *n in @[@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb"]) [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:n] withIntermediateDirectories:YES attributes:nil error:nil];
-    [@"x" writeToFile:[dir stringByAppendingPathComponent:@"other"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSString *other = [dir stringByAppendingPathComponent:@"unrelated"];
+    [NSFileManager.defaultManager createDirectoryAtPath:other withIntermediateDirectories:NO attributes:nil error:nil];
+    NSString *other_file = [other stringByAppendingPathComponent:@"state"];
+    [@"keep" writeToFile:other_file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSString *file = [dir stringByAppendingPathComponent:@"gpuarchiver-file"];
+    [@"keep" writeToFile:file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSString *link = [dir stringByAppendingPathComponent:@"gpuarchiver-link"];
+    EXPECT("app folder: matching symlink fixture created", 0, symlink(other.fileSystemRepresentation, link.fileSystemRepresentation));
     int a, b, c, d;
     NSSet<NSString *> *got = ga_claim(dir, &a), *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", nil];
-    EXPECT("app folder: the first copy lists the earlier runs' folders", 1, a >= 0 && [got isEqualToSet:want]);
+    EXPECT("app folder: the first copy lists only earlier run directories", 1, a >= 0 && [got isEqualToSet:want]);
+    NSString *late = [dir stringByAppendingPathComponent:@"gpuarchiver-late"];
+    EXPECT("app folder: post-snapshot directory created", 1, [NSFileManager.defaultManager createDirectoryAtPath:late withIntermediateDirectories:NO attributes:nil error:nil]);
     EXPECT("app folder: a second copy lists none", 1, ga_claim(dir, &b) == nil && b >= 0);
     close(a);   // the first copy quits
     EXPECT("app folder: a third copy lists none while the second runs", 1, ga_claim(dir, &c) == nil && c >= 0);
     close(b); close(c);
-    EXPECT("app folder: with no copy running, a start lists them again", 2, ga_claim(dir, &d).count);
+    NSSet<NSString *> *again = ga_claim(dir, &d);
+    EXPECT("app folder: with no copy running, a start lists old directories", 3, again.count);
     close(d);
+    EXPECT("app folder: old snapshot directories removed", 2, ga_remove(dir, got));
+    struct stat st;
+    EXPECT("app folder: old matching directory gone", 0, lstat([[dir stringByAppendingPathComponent:@"gpuarchiver-aaaaaa"] fileSystemRepresentation], &st) == 0);
+    EXPECT("app folder: unrelated directory retained", 1, [NSFileManager.defaultManager fileExistsAtPath:other_file]);
+    EXPECT("app folder: matching regular file retained", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
+    EXPECT("app folder: matching symlink retained without following it", 1, lstat(link.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
+    EXPECT("app folder: directory created after snapshot retained", 1, [NSFileManager.defaultManager fileExistsAtPath:late]);
     EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
 }
 

@@ -247,6 +247,10 @@ add_test(NAME vectors_fz_off_compare COMMAND nxaot_vec --fz-only --no-fpsr-model
 set_tests_properties(vectors_fz_off_compare PROPERTIES PASS_REGULAR_EXPRESSION "under FZ \\([^)]*\\): [0-9]+ vectors, [1-9][0-9]* mismatches")
 add_test(NAME vectors_fz_clear COMMAND nxaot_vec --fz-only --lift-fpcr-clear 1000000 "${_vectors}")
 set_tests_properties(vectors_fz_clear PROPERTIES PASS_REGULAR_EXPRESSION "under FZ \\([^)]*\\): [0-9]+ vectors, [1-9][0-9]* mismatches")
+# The inline estimates (FRECPE, FRSQRTE of single and double precision; README.md, "Floating point and SIMD"): fp_est holds every entry of their
+# tables in every form under FZ and DN clear and set; the negative control changes one entry of each table (--estimate-fault), which must show
+add_test(NAME vectors_estimate_fault COMMAND nxaot_vec --estimate-fault 300 "${_vectors}/fp_est.tsv.gz")
+set_tests_properties(vectors_estimate_fault PROPERTIES PASS_REGULAR_EXPRESSION "== nxaot_vec: [0-9]+ vectors, [1-9][0-9]* mismatches")
 add_test(NAME opcodes_reach COMMAND nxaot opcodes --reach --check)
 add_test(NAME census COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_census.py" --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/census")
 add_test(NAME vectors_current COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/gen_vectors.py" --check)

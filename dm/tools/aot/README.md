@@ -23,7 +23,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Decoder glue | [src/decode/translate.cpp](src/decode/translate.cpp) | dynarmic's A64 translation loop with nxaot's options (hints raise their exceptions, wall-clock counter) and the encodings dynarmic leaves to an interpreter that nxaot translates itself (`mrs xN, cntvct_el0`) |
 | Lifter | [src/lift/lifter.cpp](src/lift/lifter.cpp), [src/lift/opcodes.cpp](src/lift/opcodes.cpp) | dynarmic IR blocks of a region to one LLVM function `void f(dm_guest_state *st)`: registers (x0..x30, SP, v0..v31) in allocas that SROA / mem2reg promote, NZCV as four `i1` compared directly against the operands of the `subs` / logical operation that set them, stored only when written; guest memory as `inttoptr` volatile accesses (alignment 1, 16 bytes for `ldr q`), `ldar` acquire, `stlr` sequentially consistent, exclusives as `cmpxchg` against `st->excl_*`, `dc zva` zeroing the aligned 64 bytes; `svc`, `brk`, `udf` and undefined encodings leave with `st->pc` and `st->exit_reason`. A region holding an IR opcode the lowering does not cover is refused whole |
 | Floating point and SIMD | [src/lift/lower_fp.cpp](src/lift/lower_fp.cpp), [lower_vector.cpp](src/lift/lower_vector.cpp), [lower_crypto.cpp](src/lift/lower_crypto.cpp), [function_lifter.h](src/lift/function_lifter.h) | the lowering of section 7: FPCR as a compile-time specialisation, the NaN chains, Arm's NaN, min / max, rounding and conversion rules, saturation with FPSR.QC, the cumulative exception flags, AES-NI / SHA-NI / PCLMULQDQ with software forms ("Floating point and SIMD" below) |
-| Run-time helpers | [src/lift/runtime.cpp](src/lift/runtime.cpp) | the operations whose exact Arm semantics are no x86 sequence (the estimates, half-precision arithmetic, FZ fused multiply-add fix-ups, some conversions, software AES): wrappers of dynarmic's own `common/fp` and `common/crypto`, which its backend calls for the same cases |
+| Run-time helpers | [src/lift/runtime.cpp](src/lift/runtime.cpp) | the operations whose exact Arm semantics are no x86 sequence (the estimates' lanes the inline tables do not take, half-precision arithmetic, FZ fused multiply-add fix-ups, some conversions, software AES): wrappers of dynarmic's own `common/fp` and `common/crypto`, which its backend calls for the same cases |
 | ORC JIT | [src/lift/jit.cpp](src/lift/jit.cpp) | LLVM 18 ORC LLJIT, the default O2 pipeline, the host's CPU (`getHostCPUName` and its features) or a named level (`--cpu x86-64-v3`); the helpers as absolute symbols; the x86 assembly of a module (nxaot_bench) |
 | Vector harness | [src/vec/](src/vec/) (`nxaot_vec`) | every vector on dynarmic's own A64 JIT (the reference) and as lifted code, from one initial state; compares x0..x30, SP, NZCV, FPCR, FPSR (QC and the cumulative flags), TPIDR_EL0, v0..v31, the exit (pc, reason, svc number) and the 64 KiB memory image byte for byte. It runs lifted code as a host gate would: MXCSR from FPCR before, its flags into FPSR after, and a continuation lifted for the new pc and FPCR after a normal exit inside the code (`msr fpcr`) |
 | Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) and [tests/gen_fp_simd.py](tests/gen_fp_simd.py) | 179,296 vectors: 24,400 integer ones as `.tsv` (encodings written by hand from the Arm ARM), 154,896 floating-point and SIMD ones as `.tsv.gz` (every form of dynarmic's decoder table, fields swept, lanes of special values, 13 FPCR values: the variants of design section 12 and mixes) |
@@ -1954,11 +1954,13 @@ Design sections 7.1 to 7.4, as lowered here.
   scalar and sequence vectors with it); `NaNMode::Unchecked` is inexact and exists only for measuring.
 - **The operations of rows 4 to 11 have their own exact lowering**, with quiet compares only so that quiet NaNs raise nothing: FMAX / FMIN
   (AND / OR of equal operands, NaN rules), FMAXNM / FMINNM (a single quiet NaN loses), FMULX (0 times infinity is 2.0), FRECPS / FRSQRTS (FMA3,
-  and dynarmic's software step when a lane is a NaN or near infinity), rounding to integral (roundss without Inexact, ties away from zero by an exact
-  trunc-and-compare sequence, FRINTX by `rint`), conversions to integer and fixed point (in double precision, saturation and NaN by compares and
-  selects, IOC / IXC computed; ties away included), from integer (one rounding in the current mode, unsigned 64-bit values halved with a sticky bit).
-  The estimates (FRECPE, FRSQRTE, FRECPX), half-precision arithmetic, FZ fused multiply-add results of +-(smallest normal) and conversions in a mode
-  other than FPCR's or with AHP / FZ16 call the run-time helpers. F16C converts halves.
+  and in the lanes where dynarmic runs its software step, a NaN or near infinity, that step's result inline: [The estimates and steps
+  inline](#the-estimates-and-steps-inline)), rounding to integral (roundss without Inexact, ties away from zero by an exact trunc-and-compare
+  sequence, FRINTX by `rint`), conversions to integer and fixed point (in double precision, saturation and NaN by compares and selects, IOC / IXC
+  computed; ties away included), from integer (one rounding in the current mode, unsigned 64-bit values halved with a sticky bit). FRECPE and
+  FRSQRTE of single and double precision are the Arm ARM's tables inline for normal operands and zeros (the same section). The other estimate
+  lanes, FRECPX, half-precision arithmetic, FZ fused multiply-add results of +-(smallest normal) and conversions in a mode other than FPCR's or
+  with AHP / FZ16 call the run-time helpers. F16C converts halves.
 - **Integer SIMD** is generic LLVM vector IR (shuffles, `smax` / `sadd.sat` and friends, widening and narrowing, `pshufb` per register for TBL /
   TBX, table lookups for URECPE / URSQRTE); polynomial multiplication is PCLMULQDQ for PMULL 1Q or a shift-and-XOR sequence.
 - **Cryptography:** AESE / AESD as AESENCLAST / AESDECLAST with a zero key, AESMC as AESDECLAST then AESENC, AESIMC; SHA256H / H2 / SU0 / SU1 with
@@ -1969,9 +1971,8 @@ Design sections 7.1 to 7.4, as lowered here.
   estimates skip them, so that the zero upper lanes raise nothing (`LowHalfOnly`; known issue 15).
 
 What is not done: the slow path of design 7.2 row 13 for add / subtract / multiply / divide / square root under FZ (they follow dynarmic, see the
-end of "Known issues"); the half-precision estimates and steps are scalar helper calls per lane; FRECPE / FRSQRTE are helper calls (a table-based
-inline form is an optimisation for later); one combined check for all the escapes of a block (four checks of a 4x4 matrix multiply cost about 1.4
-ns of its 5 per iteration).
+end of "Known issues"); the half-precision estimates and steps are scalar helper calls per lane; one combined check for all the escapes of a block
+(four checks of a 4x4 matrix multiply cost about 1.4 ns of its 5 per iteration).
 
 ### FZ as a run-time state
 
@@ -1982,7 +1983,8 @@ the host's `module_mode`). Chosen over a second set of code specialised for FZ, 
 what ran under FZ on Mario vs. Donkey Kong's physics workers ([A return no native frame took](#a-return-no-native-frame-took)), and because it serves
 a first pack, which has no profile to name the functions a second set would need. The pack ABI is 4 (include/nxaot/aot_module.h): a host of ABI 3
 would run such code under FZ without the MXCSR invariant, and a host of ABI 4 would enter an ABI 3 pack, specialised for FZ clear, under FZ; each
-refuses the other's packs, which the bundle's message says to repack. The unit key format is 13.
+refuses the other's packs, which the bundle's message says to repack. The unit key format was 13 (14 since [the estimates and steps
+inline](#the-estimates-and-steps-inline)).
 
 - **What ran under FZ there** (round 8's first pack, the route of [A return no native frame took](#a-return-no-native-frame-took); a scratch host
   recorded each profile sample in the JIT fallback, mapped through dynarmic's perf map, `PERF_BUILDID_DIR`, to its block and FPCR and through
@@ -2002,9 +2004,12 @@ refuses the other's packs, which the bundle's message says to repack. The unit k
   the specialisation with FZ of the moment): `minmax`, the FMAX / FMIN family's operands flushed (`MinMax`, a select each); `muladd`, a fused
   multiply-add's result of +-(smallest normal) computed again by the software FPMulAdd under FZ (`FzMulAddFix`: a compare and a branch weighted cold
   per FMADD / FMLA, as dynarmic's check, the cold part a call of `nxaot.fzfma.<type>`, preserve_all and defined once per pack as the NaN helpers are:
-  a helper call in place made the register allocator spill around it), and the invalid case's zero (`MulAddInvalid`, a denormal counts as zero); `steps`, FRECPS / FRSQRTS's NaN or
-  near-infinity lanes given the FPCR of the moment; `helpers`, every run-time helper given it (the estimates FRECPE, FRSQRTE, FRECPX, FCVTXN's round
-  to odd, the roundings and conversions the helpers do); `idc`, IDC for the operands of the roundings and conversions lowered in integers when the
+  a helper call in place made the register allocator spill around it), and the invalid case's zero (`MulAddInvalid`, a denormal counts as zero);
+  `steps`, when FRECPS / FRSQRTS has a lane dynarmic gives to its software step (a NaN, or near infinity), IDC for a denormal operand of any lane and
+  FRSQRTS's lanes at the top given to the helper with the FPCR of the moment (since round 10: [the estimates and steps
+  inline](#the-estimates-and-steps-inline));
+  `helpers`, every run-time helper given it (the estimates' lanes the tables do not take, FRECPX, FCVTXN's round to odd, the roundings and
+  conversions the helpers do); `idc`, IDC for the operands of the roundings and conversions lowered in integers when the
   flags are modelled, where dynarmic's software paths raise it (`InputDenormal`: the operands' test in a block of its own under FZ, which ORs IDC into
   `st->fpsr` itself, so that code never run under FZ raises no flag of its own and keeps no FPSR flush). The operations dynarmic computes natively
   (arithmetic, fused multiply-add, FMULX, compares, FMAX / FMIN, the steps' fast lanes, the pairwise add) raise no IDC under FZ, as dynarmic and so the
@@ -2014,9 +2019,9 @@ refuses the other's packs, which the bundle's message says to repack. The unit k
   to the JIT: the plan's guard (a block with such an instruction run in the JIT under FZ) was not needed once each family had its run-time lowering,
   and it is not in the code.
 - **The vectors prove them** (nxaot_vec lifts each vector as a pack does, one function for both values of FZ, and runs it under the vector's FPCR
-  and MXCSR). CTest `vectors_fz` (the 30,917 vectors whose FPCR has FZ, the flags modelled and compared, as `sdk`'s pack has them) and
-  `vectors_fz_noflags` (not modelled, as `main`'s): 0 mismatches against dynarmic under FZ, and the FPSR differences that known dynarmic issues
-  explain fewer than with FZ specialised (1,044 vectors against `--fz-specialised`'s 2,272: issue 12 explains 230, from 1,509, since the native
+  and MXCSR). CTest `vectors_fz` (the 30,917 vectors whose FPCR has FZ, 32,399 since round 10's `fp_est`, the flags modelled and compared, as `sdk`'s
+  pack has them) and `vectors_fz_noflags` (not modelled, as `main`'s): 0 mismatches against dynarmic under FZ, and the FPSR differences that known
+  dynarmic issues explain fewer than with FZ specialised (1,044 vectors against `--fz-specialised`'s 2,272: issue 12 explains 230, from 1,509, since the native
   operations raise no IDC of their own now; a vector it explained first before and that differs by another issue as well counts under that one). The negative controls, which must show mismatches:
   `vectors_fz_off_<family>` (`--fz-off <family>`, that family's test left out) `minmax` 125, `muladd` 18, `steps` 12, `helpers` 68, `idc` 70, `compare`
   5 (without the flags modelled, where LLVM folds: `vectors_fz_noflags` found them); and
@@ -2046,7 +2051,100 @@ refuses the other's packs, which the bundle's message says to repack. The unit k
   out-of-line FMA fix-up, about 2 KB a pack). Run time, `measure_packs.py` with this nxaot built with FZ specialised (A) against it as committed (B),
   5 rounds, 2 layouts, on a machine under load 7 to 8 (another agent's runs), so with wide noise: bench +3.7 % (noise 22 %), fp-gcc +1.4 % (5 %),
   fp-clang -0.6 % (5 %), simd-gcc +11.0 % (18 %; a 45 us program), simd-clang +3.8 % (19 %): every program within its noise, none shown faster or
-  slower. To be measured again on a quiet machine before a figure is quoted.
+  slower. Measured again in round 10 when the machine was quieter, A a build of 99e58a3b's sources with `LiftOptions::fz_runtime` false by default
+  (its 46 corpus packs, Linux and Windows, byte for byte those of round 9's A, whose build is not in its scripts) and B the tip, load 1.20 at the
+  start and 4.80 at the end (another agent's runs began during it): bench +2.6 % (noise 28.5 %), fp-gcc +1.9 % (7.6 %), fp-clang -0.7 % (25.1 %),
+  simd-gcc +6.5 % (12.2 %), simd-clang +3.8 % (9.8 %); a first attempt, load 1.98 to 7.63: -14.4 % (44.5 %), -1.2 % (8.6 %), +0.5 % (14.0 %),
+  -1.1 % (18.9 %), -5.8 % (12.2 %). Every program within its noise in both, as on the loaded machine: the corpus shows no cost of FZ's run-time
+  tests, and is too short and noisy to bound one below some 8 to 25 %.
+
+### The estimates and steps inline
+
+FRECPE and FRSQRTE of single and double precision are the Arm ARM's table lookups in the code, and FRECPS and FRSQRTS fix inline the lanes dynarmic
+gives to its software step (design 7.2 rows 9 and 10); the run-time helpers are left the lanes neither takes. Until round 10 every estimate lane was a
+helper call, and a step with one special lane called the helper for all of its lanes.
+
+- **What reached the helpers** on Mario vs. Donkey Kong (round 9's first pack, the route to level 1-1 from the same save, 30 s of level play
+  between two `profmark`s; a scratch host counted each helper call by its call site, the operands' classes and the thread, the call sites mapped to
+  guest instructions by the packs' positions): 32.2 million calls, 99.9 % on `Thread_0` (`AudioFrame` the rest), all but 976 from one `sdk`
+  function, `sdk+0x2231c0`, an audio limiter: an envelope follower over 15-bit fixed-point samples (`scvtf #15`, `fabs`, `fcmgt`, `bsl`), then the
+  gain as the reciprocal of the envelope by `frecpe` and two `frecps` steps, once a sample at 48 kHz, in a 2S and a 4S form. In silence the envelope
+  is 0:
+
+  | helper | guest form (sites) | operands | calls in 30 s | why the helper |
+  |---|---|---|---:|---|
+  | FRECPS | `frecps v.4s` (2) | 0 and +infinity | 11,706,960 | infinity times zero is a NaN in FMA3, so all four lanes went to the software step |
+  | FRECPS | `frecps v.2s` (2) | 0 and +infinity; 0 and 0 | 5,853,154; 5,853,120 | the same, and the zero upper lanes with them |
+  | FRECPE | `frecpe v.4s` (1) | +0 | 5,853,360 | every lane a call |
+  | FRECPE | `frecpe v.2s` (1) | +0 | 2,926,560 | every lane a call |
+  | FRECPE, FRSQRTE | `frecpe v.4s` (5, `main`), `frsqrte v.4s` (1) | normal | 976 | every lane a call |
+
+  No other helper ran in the window: no fused multiply-add fix-up, rounding or conversion. Over the whole session (start to the second mark)
+  `sdk`'s FRECPE and FRECPS made 384 million calls, `main`'s estimates 11,320. The host's profile of the same window (round 9's code, the tip
+  host): `Thread_0` 2,016 samples, 679 of them (33.7 %) in dm/host/aot_fp.c (`unpack_base` 296, `step_fused_op` 157, `nxaot_rt_fp_unary` 87,
+  `nxaot_rt_fp_binary` 66, `round_base` 57, `fused_mul_add` 16); no other host function above 2 % of the thread but the guests' wake-ups
+  (`pthread_cond_signal`, 90, 4.5 %).
+- **FRECPE / FRSQRTE** (`FunctionLifter::Estimate`, scalar and every vector arrangement): Arm's `FPRecipEstimate` / `FPRSqrtEstimate` take for a
+  normal operand an 8-bit estimate from a table (`RecipEstimate` of 256 plus the top 8 fraction bits; `RecipSqrtEstimate` of 128 plus the top 7
+  bits when the biased exponent E is odd, of 256 plus the top 8 when it is even) and an exponent from E alone: `2 * bias - 1 - E` for FRECPE,
+  `(3 * bias - 1 - E) / 2` rounded down for FRSQRTE. The lowering keeps the two tables as constants of the unit (`nxaot.frecpe.table`, 256 bytes;
+  `nxaot.frsqrte.table`, 512, indexed by E's low bit and the 8 fraction bits), built from dynarmic's `Common::RecipEstimate` /
+  `RecipSqrtEstimate` as URECPE's are, looks each lane up and composes the result with integer operations. Inline: an operand whose estimate is a
+  table's, that is a normal operand of either sign with E up to `2 * bias - 2` (FRECPE; above it the estimate is denormal, or zero under FZ) or a
+  positive normal one (FRSQRTE), and a zero (the infinity of its sign, Divide by Zero raised when the flags are modelled). The helper, given the FPCR
+  of the moment: NaNs, infinities, denormals, FRSQRTE's negative operands and FRECPE's top exponents. Those lanes go out of line: one branch for
+  the vector, then a call of `nxaot.fplanes.<which>.<type>` (`LanesFunction`), preserve_all, noinline and cold as `nxaot.fzfma`, which calls the
+  helper for each lane of a mask, so that no C call in place makes the register allocator spill around it; each unit that needs one defines its
+  own linkonce_odr copy in a comdat and the link keeps one (defined in every pack's tables' object, as the NaN helpers are, the twelve forms added
+  5.4 KB to every corpus pack, most of which have no estimate). The inline lanes are the same under both values of FZ (`FPUnpack` flushes only
+  denormals, which go to the helper) and raise no other flag. The 64-bit forms still compute two lanes only (`LowHalfOnly`).
+- **FRECPS / FRSQRTS** (`StepFused`, `StepSpecial`): the fast path is as before, FMA3 and a test of the lanes dynarmic gives to its software step
+  (a NaN result; for FRSQRTS an exponent at the top). When one is, the lowering gives each lane the software step's result itself: infinity times
+  zero (a NaN of no NaN operand; under FZ a denormal times infinity is one through DAZ, as `FPUnpack` flushes it), 2.0 or 1.5, one blend; a NaN
+  operand, `FPProcessNaNs` of (-a, b); an infinite operand, the native infinity; FRSQRTS's other lanes at the top (an overflow, which the halving
+  before rounding may bring back, or in a directed rounding mode the largest normal in its place), the helper through `nxaot.fplanes`; every other
+  lane the native result, which equals the software's because `2 - a * b` and `3 - a * b` of finite operands are 0 or at least 2^-48 of the
+  operands' scale, never tiny, so neither FZ's flush before rounding nor the halving after it changes them. dynarmic's software step unpacks
+  every lane's operands, so with the flags modelled the lowering raises IDC for a denormal operand of any lane when FZ is set at the moment (the
+  `steps` family of [FZ as a run-time state](#fz-as-a-run-time-state)). The NaN operands, that IDC and FRSQRTS's overflow lanes are parts of their
+  own behind a branch weighted cold, so that infinity times zero, the case the game runs, is a compare, a branch and the blend: with the NaN rules
+  and the IDC test in line (the round's first form) the special lanes' block was about 60 instructions, and the limiter's six estimate and step
+  instructions took twice the compiled time they take now (below). The native FMA's Invalid Operation for infinity times zero stays, as in dynarmic,
+  which computes it before its fallback too.
+- **The proof** is the vectors against dynarmic. `fp_est.tsv.gz` (3,756 vectors, gen_fp_simd.py `gen_estimates`): every entry of both tables
+  (FRECPE's 256 fraction prefixes with random signs and exponents, FRSQRTE's 256 for each parity of E) in every form (scalar S and D, 2S, 4S, 2D)
+  under each of FZ clear and set and DN clear and set, in other lane positions under each, eight instructions a vector (1,248 vectors); the
+  edges (signed zeros, infinities, quiet and signalling NaNs of both signs, the smallest and largest denormals, denormals FRECPE overflows or
+  estimates as denormal, the smallest and largest normals, FRECPE's last table exponent and the two above it, negative normals, 1.0) between normal
+  lanes under those FPCRs and the three directed rounding modes, and once more one instruction a vector so that the final FPSR is one instruction's (1,248); and the steps'
+  special lanes (infinity times zero of both orders and signs, a denormal factor, NaNs in either operand, infinite operands, products that overflow,
+  FRSQRTS's intermediate overflowing where its halved result does not, exact zeros, Newton steps of normal values, each between normal lanes and next
+  to denormal ones; 1,260). CTest: `vectors` 183,052 vectors, `vectors_perop` 20,856, `vectors_fz` and `vectors_fz_noflags` 32,399 each: 0
+  mismatches. Its first run found FRSQRTS's directed-rounding case (the largest normal halved where Arm rounds the halved overflow back to it); it
+  goes to the helper now. The negative controls: `vectors_estimate_fault` (`--estimate-fault 300`: entry 44 of FRECPE's table and 300 of FRSQRTE's
+  changed by one bit) 45 mismatches; `vectors_fz_off_steps` 92 (without the IDC of the special lanes) and `vectors_fz_off_helpers` 215 (round 9:
+  12 and 68, before `fp_est`). The unit key format is 14 (src/build/pack.cpp): units of format 13 call the helpers.
+- **Measured** on the game, the same route from the same save with the same host binary (the tip's), first packs with the bindings of the host's
+  dry run, 30 s of level play between two `profmark`s at 1,000 Hz, on a machine under load 17 to 20 (another agent's runs) in both windows:
+
+  | `Thread_0`, samples in the window | all | compiled code | host calls and SVCs | elsewhere in the host | in dm/host/aot_fp.c |
+  |---|---:|---:|---:|---:|---:|
+  | round 9's packs | 2,016 | 1,049 | 253 | 714 | 679 (33.7 %) |
+  | round 10's packs | 1,747 (-13.3 %) | 1,430 | 258 | 59 | 0 |
+  | the round's first form (the NaN rules and the IDC test in line) | 1,705 | 1,441 | 213 | 51 | 0 |
+
+  The windows' totals move with the machine's load; the profile's samples by guest instruction say more: the limiter's six estimate and step
+  instructions took 542 samples of compiled code over the session with round 9's packs (their helpers' time apart), 1,432 in the first form, 733
+  now. The helpers ran
+  no call in the window. The route: no fault, no stall, no `[RED] aot` line, 0 JIT runs. `.text` `sdk` 56,434,576 -> 56,436,192 bytes, `subsdk0`
+  27,915,296 unchanged, `main` 171,794,212 -> 171,941,332 (+0.09 %; with the helpers' lanes as calls in place, 174,157,604, +1.38 %: the spills
+  around them); pack times 91, 44 and 372 s (cold cache, 6 workers, load 6 to 12; round 9: 94, 42 and 400 s under load 7 to 8). The corpus: of the
+  23 packs of build_packs.sh only fp-gcc, fp-clang, simd-gcc and simd-clang change, Linux and Windows alike (their `.text` +4,376, +4,192,
+  +1,056 and +936 bytes: the inline lookups and the `nxaot.fplanes` copies they use), and run each estimate and step a few times only:
+  `measure_packs.py` (A the tip's nxaot, B this round's, 5 rounds, 2 layouts) under load 7.6 to 9.6 (another agent's runs) fp-gcc -1.6 % (noise
+  5.6 %), fp-clang +1.0 % (6.8 %), simd-gcc -1.1 % (8.8 %), simd-clang -1.2 % (14.8 %), the benchmark's packs identical, and again at load 4.8
+  to 7.4: -2.5 % (10.0 %), +3.4 % (4.8 %), +2.0 % (19.5 %), -2.2 % (11.9 %): each within its noise (the round's first form, at load 1.4 to
+  2.1: +2.7, +0.7, 0.0 and 0.0 %, within noise too).
 
 ## Measurements
 

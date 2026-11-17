@@ -176,7 +176,7 @@ DP_FILES = [
      ['AES', 'SHA', 'SHA512', 'Cryptographic']),
 ]
 DP_PREFIX = 'Data Processing - FP and SIMD - '
-FILE_NAMES = [name for name, _, _ in DP_FILES] + ['simd_ldst', 'fp_seq']
+FILE_NAMES = [name for name, _, _ in DP_FILES] + ['simd_ldst', 'fp_seq', 'fp_est']
 
 
 def section_slug(section):
@@ -430,6 +430,200 @@ def gen_fma_invalid(out, r):
                 out.add(r, 'fma_invalid', f'{label} ({variant})', words, regs, fpcr=fpcr)
 
 
+# ---- The estimates and steps of single and double precision (FRECPE, FRSQRTE, FRECPS, FRSQRTS), inline since round 10 ----
+
+# (name, element size, lanes, Q, z): the scalar forms (Q unused) and the vector arrangements
+EST_FORMS = [('s', 32, 1, 0, 0), ('d', 64, 1, 0, 1), ('2s', 32, 2, 0, 0), ('4s', 32, 4, 1, 0), ('2d', 64, 2, 1, 1)]
+EST_FPCRS = [0, FZ, DN, FZ | DN]
+EST_EDGE_FPCRS = [0, FZ, DN, FZ | DN, RP, RM, RZ, FZ | RM]
+# Per element size: the bias, the largest biased exponent, the fraction width
+EST_FMT = {32: (127, 254, 23), 64: (1023, 2046, 52)}
+# Operands the inline estimates leave to the helper or treat apart: signed zeros, infinities, quiet and signalling NaNs with payloads and both signs,
+# denormals (the smallest, the largest, one that FRECPE overflows and ones it estimates as denormal), the smallest and largest normals, FRECPE's
+# last table exponent (2 * bias - 2) and the two above it (a denormal estimate, or zero under FZ), negative normals (FRSQRTE: the default NaN), 1.0
+EST_EDGES = {
+    32: [0x00000000, 0x80000000, 0x7F800000, 0xFF800000, 0x7FC00001, 0xFFC12345, 0x7F800001, 0xFFA00000, 0x00000001, 0x007FFFFF, 0x80400000,
+         0x00200000, 0x001FFFFF, 0x00400001, 0x00800000, 0x80800000, 0x00FFFFFF, 0x7F7FFFFF, 0xFF7FFFFF, 0x7E7FFFFF, 0x7E000000, 0xFE7FFFFF,
+         0x7E800000, 0x7EFFFFFF, 0xFE800000, 0x7F000000, 0x3F800000, 0xBF800000, 0xC0000000, 0x80800001, 0x3F7FFFFF, 0x40000000],
+    64: [0x0000000000000000, 0x8000000000000000, 0x7FF0000000000000, 0xFFF0000000000000, 0x7FF8000000000001, 0xFFF8000000ABCDEF,
+         0x7FF0000000000001, 0xFFF4000000000000, 0x0000000000000001, 0x000FFFFFFFFFFFFF, 0x8008000000000000, 0x0004000000000000,
+         0x0003FFFFFFFFFFFF, 0x0008000000000001, 0x0010000000000000, 0x8010000000000000, 0x001FFFFFFFFFFFFF, 0x7FEFFFFFFFFFFFFF,
+         0xFFEFFFFFFFFFFFFF, 0x7FCFFFFFFFFFFFFF, 0x7FC0000000000000, 0xFFCFFFFFFFFFFFFF, 0x7FD0000000000000, 0x7FDFFFFFFFFFFFFF,
+         0xFFD0000000000000, 0x7FE0000000000000, 0x3FF0000000000000, 0xBFF0000000000000, 0xC000000000000000, 0x8010000000000001,
+         0x3FEFFFFFFFFFFFFF, 0x4000000000000000],
+}
+
+
+def est_normal(r, esize, prefix, parity=None, sign=None, emax=None):
+    """A normal operand with the given top 8 fraction bits: a random exponent (of the parity asked, up to emax), sign and low fraction bits."""
+    bias, top, mant = EST_FMT[esize]
+    hi = emax if emax is not None else top
+    e = r.range(1, hi)
+    if parity is not None and (e & 1) != parity:
+        e = e + 1 if e < hi else e - 1
+    s = r.below(2) if sign is None else sign
+    return (s << (esize - 1)) | (e << mant) | (prefix << (mant - 8)) | (r.next() & ((1 << (mant - 8)) - 1))
+
+
+def est_word(patterns, op, form, d, n, m=None):
+    name, esize, lanes, q, z = form
+    scalar = lanes == 1
+    fn = {('FRECPE', True): 'FRECPE_2', ('FRECPE', False): 'FRECPE_4', ('FRSQRTE', True): 'FRSQRTE_2', ('FRSQRTE', False): 'FRSQRTE_4',
+          ('FRECPS', True): 'FRECPS_2', ('FRECPS', False): 'FRECPS_4', ('FRSQRTS', True): 'FRSQRTS_2', ('FRSQRTS', False): 'FRSQRTS_4'}[(op, scalar)]
+    fields = dict(z=z, n=n, d=d)
+    if not scalar:
+        fields['Q'] = q
+    if m is not None:
+        fields['m'] = m
+    return enc(patterns, fn, **fields)
+
+
+def est_pack(vals, esize):
+    return sum((x & ((1 << esize) - 1)) << (i * esize) for i, x in enumerate(vals))
+
+
+def gen_estimates(out, r, patterns):
+    """FRECPE and FRSQRTE of single and double precision, every form, eight instructions a vector (v0..v7 into v16..v23): every table entry
+    (FRECPE's 256 fraction prefixes of either sign, FRSQRTE's 256 for each parity of the biased exponent) in every lane position of every form under
+    FZ clear and set, DN clear and set; then the edges (EST_EDGES) between normal lanes, under those and the other rounding modes. FRECPS and
+    FRSQRTS (a in v0..v7, b in v8..v15): infinity times zero of both orders and signs, a denormal factor (zero under FZ), quiet and signalling NaNs
+    in either operand, infinite operands, overflowing products (FRSQRTS's intermediate overflows where its halved result does not), exact zeros,
+    Newton steps of normal values, each special lane between normal ones and next to a denormal one (IDC under FZ)."""
+    for op in ('FRECPE', 'FRSQRTE'):
+        rsqrt = op == 'FRSQRTE'
+        for form in EST_FORMS:
+            name, esize, lanes, q, z = form
+            bias, top, mant = EST_FMT[esize]
+            entries = list(range(512 if rsqrt else 256))
+            per_vector = 8 * lanes
+            for fpcr in EST_FPCRS:
+                # rotate the entries so each FPCR puts them in other lane positions
+                shift = EST_FPCRS.index(fpcr) * 3
+                order = entries[shift:] + entries[:shift]
+                for start in range(0, len(order), per_vector):
+                    chunk = order[start:start + per_vector]
+                    regs = {'vk': f'f{esize}'}
+                    words = []
+                    for k in range(8):
+                        vals = []
+                        for i in range(128 // esize):
+                            j = k * lanes + i
+                            if i < lanes and j < len(chunk):
+                                e = chunk[j]
+                                if rsqrt:
+                                    vals.append(est_normal(r, esize, e & 0xFF, parity=e >> 8, sign=0))
+                                else:
+                                    vals.append(est_normal(r, esize, e, emax=2 * bias - 2))
+                            else:
+                                vals.append(r.next())   # lanes the form does not read
+                        regs[f'v{k}'] = est_pack(vals, esize)
+                        words.append(est_word(patterns, op, form, 16 + k, k))
+                    out.add(r, 'fp_est_table', f'{op} {name} entries {chunk[0]}..{chunk[-1]} (8 instructions)', words, regs, fpcr=fpcr)
+            # the edges, one or two a register between normal lanes, each edge in every lane position across the vectors
+            edges = EST_EDGES[esize]
+            for fpcr in EST_EDGE_FPCRS:
+                for rot in range(max(1, lanes)):
+                    regs = {'vk': f'f{esize}'}
+                    words = []
+                    pos = 0
+                    for k in range(8):
+                        vals = []
+                        for i in range(128 // esize):
+                            if i < lanes and (i + k + rot) % 2 == 0:
+                                vals.append(edges[(pos + rot * 5) % len(edges)])
+                                pos += 1
+                            elif i < lanes:
+                                vals.append(est_normal(r, esize, r.below(256), sign=0 if rsqrt else None, emax=2 * bias - 2))
+                            else:
+                                vals.append(r.next())
+                        regs[f'v{k}'] = est_pack(vals, esize)
+                        words.append(est_word(patterns, op, form, 16 + k, k))
+                    out.add(r, 'fp_est_edge', f'{op} {name} edges (8 instructions)', words, regs, fpcr=fpcr)
+                # one instruction a vector, under three FPCRs: the final FPSR holds that instruction's flags alone
+                if fpcr in (0, FZ, DN):
+                    for j, e in enumerate(edges):
+                        vals = [est_normal(r, esize, r.below(256), sign=0 if rsqrt else None, emax=2 * bias - 2) for _ in range(128 // esize)]
+                        vals[j % lanes] = e
+                        out.add(r, 'fp_est_edge1', f'{op} {name} edge {e:#x}', [est_word(patterns, op, form, 16, 0)],
+                                {'vk': f'f{esize}', 'v0': est_pack(vals, esize)}, fpcr=fpcr)
+                # the scalar forms: every edge in lane 0 once more
+                if lanes == 1:
+                    for start in range(0, len(edges), 8):
+                        regs = {'vk': f'f{esize}'}
+                        words = []
+                        for k, e in enumerate(edges[start:start + 8]):
+                            regs[f'v{k}'] = est_pack([e, r.next()] if esize == 64 else [e, r.next(), r.next(), r.next()], esize)
+                            words.append(est_word(patterns, op, form, 16 + k, k))
+                        out.add(r, 'fp_est_edge', f'{op} {name} edges {start}.. (scalar)', words, regs, fpcr=fpcr)
+    for op in ('FRECPS', 'FRSQRTS'):
+        for form in EST_FORMS:
+            name, esize, lanes, q, z = form
+            bias, top, mant = EST_FMT[esize]
+            sign = 1 << (esize - 1)
+            inf = ((1 << (esize - 1)) - 1) & ~((1 << mant) - 1)
+            qnan = inf | (1 << (mant - 1))
+            one, two, three = (bias << mant), ((bias + 1) << mant), ((bias + 1) << mant) | (1 << (mant - 1))
+            big = (top << mant) | ((1 << mant) - 1)   # the largest normal
+            p127 = ((bias + bias) << mant)            # 2^bias
+            p126 = ((bias + bias - 1) << mant)        # 2^(bias - 1)
+            den, den2 = 1, (1 << (mant - 1)) | 5
+
+            def normal():
+                return est_normal(r, esize, r.below(256), emax=bias + 20 if r.below(2) else None)
+
+            def newton():
+                # a and b near a reciprocal (FRECPS) or a reciprocal square root pair (FRSQRTS): small results, exact zeros sometimes
+                x = est_normal(r, esize, r.below(256), sign=0, emax=bias + 8)
+                return (x, (bias + bias - ((x >> mant) & ((1 << (esize - 1 - mant)) - 1))) << mant | (r.next() & ((1 << mant) - 1)))
+            specials = [(0, inf), (inf, 0), (sign, inf), (0, inf | sign), (sign, inf | sign), (inf, sign), (den, inf), (inf, den | sign),
+                        (den2 | sign, inf), (qnan | 1, one), (one, qnan | 2), (inf | 1, one), (one, inf | 3), (qnan | 7, inf | 1), (inf | 9, qnan | 4),
+                        (qnan | sign | 5, qnan | 6), (qnan, 0), (0, qnan | sign), (inf, one), (two, inf | sign), (inf, inf), (inf | sign, inf),
+                        (big, big), (big, big | sign), (big, three), (p127, two), (p126 | sign, three | sign), (big, one | 1), (one, two),
+                        (one, three), (two, one), (den, two), (two, den2), (den | sign, den2)]
+            for fpcr in EST_EDGE_FPCRS:
+                for rot in range(2):
+                    regs = {'vk': f'f{esize}'}
+                    words = []
+                    pos = rot * 7
+                    for k in range(8):
+                        av, bv = [], []
+                        for i in range(128 // esize):
+                            if i < lanes and (i + k + rot) % 2 == 0:
+                                a_, b_ = specials[pos % len(specials)]
+                                pos += 1
+                            elif i < lanes and (k + rot) % 3 == 0:
+                                a_, b_ = newton()
+                            elif i < lanes:
+                                a_, b_ = normal(), normal()
+                            else:
+                                a_, b_ = r.next(), r.next()
+                            av.append(a_)
+                            bv.append(b_)
+                        regs[f'v{k}'] = est_pack(av, esize)
+                        regs[f'v{k + 8}'] = est_pack(bv, esize)
+                        words.append(est_word(patterns, op, form, 16 + k, k, m=k + 8))
+                    out.add(r, 'fp_step_edge', f'{op} {name} special lanes (8 instructions)', words, regs, fpcr=fpcr)
+                # no special lane: the fast path alone, and a lone denormal (no IDC there: dynarmic's native step raises none)
+                regs = {'vk': f'f{esize}'}
+                words = []
+                for k in range(8):
+                    pairs = [newton() if (k + i) % 2 else (normal(), normal()) for i in range(128 // esize)]
+                    if k == 7:
+                        pairs[0] = (den, two)
+                    regs[f'v{k}'] = est_pack([p[0] for p in pairs], esize)
+                    regs[f'v{k + 8}'] = est_pack([p[1] for p in pairs], esize)
+                    words.append(est_word(patterns, op, form, 16 + k, k, m=k + 8))
+                out.add(r, 'fp_step_edge', f'{op} {name} normal lanes (8 instructions)', words, regs, fpcr=fpcr)
+                # one instruction a vector, each special pair in one lane between normal ones, under three FPCRs
+                if fpcr in (0, FZ, DN):
+                    for j, (a_, b_) in enumerate(specials):
+                        av = [normal() for _ in range(128 // esize)]
+                        bv = [normal() for _ in range(128 // esize)]
+                        av[j % lanes], bv[j % lanes] = a_, b_
+                        out.add(r, 'fp_step_edge1', f'{op} {name} {a_:#x} {b_:#x}', [est_word(patterns, op, form, 16, 0, m=1)],
+                                {'vk': f'f{esize}', 'v0': est_pack(av, esize), 'v1': est_pack(bv, esize)}, fpcr=fpcr)
+
+
 def build_all(Out, Rng, seed, value, only=None, seeds=5):
     """The FP / SIMD vector files: {file name: Out}, all of them or the ones named in only. seeds: vectors per encoding (5 committed; the
     sweep of gen_vectors.py --count uses more, so that the lifter compiles each encoding once for many seeds)."""
@@ -462,4 +656,9 @@ def build_all(Out, Rng, seed, value, only=None, seeds=5):
         out = Out('fp_seq', 'floating-point sequences: NaN chains with their escapes, FPSR written and read, FPCR changed mid-block, vector chains')
         gen_sequences(out, Rng(seed + 130), patterns, value, count=6000 * scale)
         files['fp_seq'] = out
+    if not only or 'fp_est' in only:
+        out = Out('fp_est', 'FRECPE, FRSQRTE, FRECPS and FRSQRTS of single and double precision: every estimate table entry in every form, the edges '
+                            'of the inline estimates and steps, under FZ and DN clear and set and the other rounding modes')
+        gen_estimates(out, Rng(seed + 140), patterns)
+        files['fp_est'] = out
     return files

@@ -771,13 +771,18 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
     case Opcode::FPRecipExponent16:
     case Opcode::FPRecipExponent32:
     case Opcode::FPRecipExponent64: {
-        // Arm's estimate algorithms (7.2 row 9): dynarmic's FPRecipEstimate / FPRSqrtEstimate / FPRecipExponent
+        // Arm's estimate algorithms (7.2 row 9): dynarmic's FPRecipEstimate / FPRSqrtEstimate / FPRecipExponent; the single and double
+        // precision estimates by the Arm ARM's tables inline (Estimate), the helper for the rest
         const unsigned bits = fsize_of();
         const uint32_t which = name.rfind("FPRecipEstimate", 0) == 0 ? NXAOT_RT_RECIP_ESTIMATE
                                : name.rfind("FPRSqrtEstimate", 0) == 0 ? NXAOT_RT_RSQRT_ESTIMATE
                                                                        : NXAOT_RT_RECIP_EXPONENT;
         if (which == NXAOT_RT_RSQRT_ESTIMATE && bits != 16) {
             Note(kIssueRSqrtEstimateNative);
+        }
+        if (which != NXAOT_RT_RECIP_EXPONENT && bits != 16) {
+            Def(inst, Estimate(which == NXAOT_RT_RSQRT_ESTIMATE, bits, ArgAs(inst, 0, B.getIntNTy(bits)), 1));
+            return true;
         }
         Value* r = HelperCall("nxaot_rt_fp_unary", B.getInt64Ty(),
                               {B.getInt32(which), B.getInt32(bits), B.CreateZExt(ArgAs(inst, 0, B.getIntNTy(bits)), B.getInt64Ty()), fpcr_v, fpsr_ptr()});
@@ -1032,10 +1037,177 @@ llvm::Function* FunctionLifter::FzFmaFunction(llvm::Type* t, bool shared, bool d
     return f;
 }
 
+// The helper's lanes of an inline estimate or of FRSQRTS's step out of line: nxaot.fplanes.<which>.<type>(x, y, r, mask, fpcr, fpsr) is r with each
+// lane whose mask lane is not zero the helper's result for that lane of x (FRECPE, FRSQRTE: nxaot_rt_fp_unary) or of x and y (FRSQRTS:
+// nxaot_rt_fp_binary). preserve_all, noinline and cold as nxaot.fzfma (FzFmaFunction), and for the same reason: C helper calls in place make the
+// register allocator spill the hot path's vector registers around them. Each unit that calls one defines its own linkonce_odr copy in a comdat
+// of its name, which the link keeps once: defined in every pack's tables' object as the NaN helpers are, the twelve forms added 5.4 KB to every
+// corpus pack, most of which have no estimate
+llvm::Function* FunctionLifter::LanesFunction(uint32_t which, llvm::Type* t) {
+    std::string type;
+    llvm::raw_string_ostream type_out{type};
+    t->print(type_out);
+    for (char& ch : type) {
+        if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
+    }
+    const std::string name = "nxaot.fplanes." + std::to_string(which) + "." + type;
+    if (llvm::Function* f = M.getFunction(name)) {
+        return f;
+    }
+    auto* f = llvm::Function::Create(llvm::FunctionType::get(t, {t, t, t, t, B.getInt32Ty(), B.getPtrTy()}, false), llvm::GlobalValue::LinkOnceODRLinkage,
+                                     name, M);
+    f->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    f->setComdat(M.getOrInsertComdat(name));
+    f->setCallingConv(llvm::CallingConv::PreserveAll);
+    f->addFnAttr(llvm::Attribute::NoInline);
+    f->addFnAttr(llvm::Attribute::Cold);
+    f->addFnAttr(llvm::Attribute::NoUnwind);
+    f->addFnAttr(llvm::Attribute::WillReturn);
+    llvm::IRBuilderBase::InsertPointGuard guard{B};
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", f));
+    std::vector<Value*> arg;
+    for (llvm::Argument& a : f->args()) arg.push_back(&a);
+    const unsigned bits = t->getScalarSizeInBits();
+    auto one = [&](Value* x, Value* y) {
+        Value* h = which == NXAOT_RT_RSQRT_STEP
+                       ? HelperCall("nxaot_rt_fp_binary", B.getInt64Ty(), {B.getInt32(which), B.getInt32(bits), B.CreateZExt(x, B.getInt64Ty()),
+                                                                           B.CreateZExt(y, B.getInt64Ty()), arg[4], arg[5]})
+                       : HelperCall("nxaot_rt_fp_unary", B.getInt64Ty(), {B.getInt32(which), B.getInt32(bits), B.CreateZExt(x, B.getInt64Ty()), arg[4], arg[5]});
+        return B.CreateTrunc(h, B.getIntNTy(bits));
+    };
+    auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(t);
+    const unsigned lanes = vt ? vt->getNumElements() : 1;
+    Value* out = arg[2];
+    for (unsigned i = 0; i < lanes; ++i) {
+        auto lane = [&](Value* v) { return vt ? B.CreateExtractElement(v, uint64_t{i}) : v; };
+        BasicBlock* here = B.GetInsertBlock();
+        auto* call_bb = BasicBlock::Create(C, "lane", f);
+        auto* next_bb = BasicBlock::Create(C, "next", f);
+        B.CreateCondBr(B.CreateICmpNE(lane(arg[3]), B.getIntN(bits, 0)), call_bb, next_bb);
+        B.SetInsertPoint(call_bb);
+        Value* r = one(lane(arg[0]), lane(arg[1]));
+        Value* with = vt ? B.CreateInsertElement(out, r, uint64_t{i}) : r;
+        B.CreateBr(next_bb);
+        B.SetInsertPoint(next_bb);
+        auto* phi = B.CreatePHI(t, 2);
+        phi->addIncoming(out, here);
+        phi->addIncoming(with, call_bb);
+        out = phi;
+    }
+    B.CreateRet(out);
+    return f;
+}
+
+// A call of nxaot.fplanes (LanesFunction) for the lanes of mask (i1, scalar or vector): r with those lanes from the helper
+Value* FunctionLifter::HelperLanes(uint32_t which, Value* x, Value* y, Value* r, Value* mask, Value* fpcr) {
+    llvm::Type* t = r->getType();
+    llvm::Function* fn = LanesFunction(which, t);
+    llvm::CallInst* call = B.CreateCall(fn, {x, y, r, B.CreateSExt(mask, t), fpcr, FpsrPtr()});
+    call->setCallingConv(fn->getCallingConv());
+    uses_fpsr = true;   // the helpers OR their flags into st->fpsr, as HelperCall's
+    return call;
+}
+
+// The Arm ARM's 8-bit estimates of FRECPE and FRSQRTE for a normal operand (RecipEstimate and RecipSqrtEstimate: dynarmic's
+// Common::RecipEstimate / RecipSqrtEstimate through lift/runtime.h, the tables of URECPE and URSQRTE), a constant table per module: FRECPE's by
+// the operand's top 8 fraction bits (RecipEstimate of 256 + them); FRSQRTE's by its biased exponent's low bit and those 8 bits (an odd biased
+// exponent is an even unbiased one, which takes the top 7 bits: RecipSqrtEstimate of 128 + them, else of 256 + the 8). LiftOptions::estimate_fault
+// changes one entry (nxaot_vec's negative control)
+llvm::GlobalVariable* FunctionLifter::EstimateTable(bool rsqrt) {
+    const std::string name = rsqrt ? "nxaot.frsqrte.table" : "nxaot.frecpe.table";
+    if (llvm::GlobalVariable* g = M.getGlobalVariable(name, true)) {
+        return g;
+    }
+    std::vector<uint8_t> entries(rsqrt ? 512 : 256);
+    for (uint32_t i = 0; i < entries.size(); ++i) {
+        entries[i] = rsqrt ? UnsignedRecipSqrtEstimate(i & 0x100 ? 128 + ((i & 0xFF) >> 1) : 256 + i) : UnsignedRecipEstimate(256 + i);
+    }
+    if (opts.estimate_fault >= 0) {
+        entries[static_cast<uint32_t>(opts.estimate_fault) % entries.size()] ^= 1;
+    }
+    auto* init = llvm::ConstantDataArray::get(C, entries);
+    return new llvm::GlobalVariable(M, init->getType(), true, llvm::GlobalValue::PrivateLinkage, init, name);
+}
+
+// FRECPE / FRSQRTE of single and double precision (7.2 row 9): Arm's FPRecipEstimate / FPRSqrtEstimate inline for the lanes whose result is the
+// table's and for zeros, dynarmic's software estimate (the helper, given the FPCR of the moment) for the others. The table's lanes: a normal
+// operand whose estimate is normal, of either sign for FRECPE with a biased exponent E up to 2 * bias - 2 (the estimate's is 2 * bias - 1 - E),
+// positive for FRSQRTE (the estimate's (3 * bias - 1 - E) / 2, rounded down); a zero gives the infinity of its sign and Divide by Zero. Those
+// lanes are the same under both values of FZ (FPUnpack flushes denormals only, FRECPE's flush of a tiny result takes E of 2 * bias - 1 and more)
+// and raise nothing else. The helper's lanes: NaNs, infinities, denormals, FRSQRTE's negative operands, FRECPE's E of 2 * bias - 1 and more.
+// x: the operand's integer bits, scalar or vector; lanes: the lanes computed (2 of the 64-bit forms' 4: LowHalfOnly), the others 0
+Value* FunctionLifter::Estimate(bool rsqrt, unsigned bits, Value* x, unsigned lanes) {
+    const FInfo f = Info(bits);
+    const bool vector = x->getType()->isVectorTy();
+    const unsigned all = vector ? 128 / bits : 1;
+    const uint64_t bias = bits == 32 ? 127 : 1023;
+    const uint64_t min_normal = 1ull << f.mant;
+    llvm::GlobalVariable* table = EstimateTable(rsqrt);
+    Value* index = B.CreateAnd(B.CreateLShr(x, SplatOf(x, f.mant - 8)), SplatOf(x, rsqrt ? 0x1FF : 0xFF));
+    auto lookup = [&](Value* i) -> Value* {
+        Value* p = B.CreateInBoundsGEP(table->getValueType(), table, {B.getInt64(0), B.CreateZExtOrTrunc(i, B.getInt64Ty())});
+        return B.CreateZExt(B.CreateAlignedLoad(B.getInt8Ty(), p, llvm::Align(1)), B.getIntNTy(bits));
+    };
+    Value* est = nullptr;
+    if (!vector) {
+        est = lookup(index);
+    } else {
+        est = llvm::Constant::getNullValue(x->getType());
+        for (unsigned i = 0; i < lanes; ++i) {
+            est = B.CreateInsertElement(est, lookup(B.CreateExtractElement(index, uint64_t{i})), uint64_t{i});
+        }
+    }
+    Value* e = B.CreateLShr(B.CreateAnd(x, SplatOf(x, f.exp)), SplatOf(x, f.mant));
+    Value* rexp = rsqrt ? B.CreateLShr(B.CreateSub(SplatOf(x, 3 * bias - 1), e), SplatOf(x, 1)) : B.CreateSub(SplatOf(x, 2 * bias - 1), e);
+    Value* sign = B.CreateAnd(x, SplatOf(x, f.sign));
+    Value* mag = B.CreateAnd(x, SplatOf(x, ~f.sign));
+    Value* table_r = B.CreateOr(B.CreateShl(rexp, SplatOf(x, f.mant)), B.CreateShl(est, SplatOf(x, f.mant - 8)));
+    if (!rsqrt) {
+        table_r = B.CreateOr(table_r, sign);
+    }
+    // FRSQRTE: x itself in [smallest normal, infinity), the sign clear; FRECPE: its magnitude in [smallest normal, 2^(bias - 1))
+    Value* table_lane = rsqrt ? B.CreateICmpULT(B.CreateSub(x, SplatOf(x, min_normal)), SplatOf(x, f.exp - min_normal))
+                              : B.CreateICmpULT(B.CreateSub(mag, SplatOf(x, min_normal)), SplatOf(x, ((2 * bias - 1) << f.mant) - min_normal));
+    Value* zero = B.CreateICmpEQ(mag, SplatOf(x, 0));
+    Value* active = nullptr;
+    if (lanes < all) {
+        std::vector<llvm::Constant*> m;
+        for (unsigned i = 0; i < all; ++i) {
+            m.push_back(B.getInt1(i < lanes));
+        }
+        active = llvm::ConstantVector::get(m);
+        table_lane = B.CreateAnd(table_lane, active);
+        zero = B.CreateAnd(zero, active);
+    }
+    Value* r = B.CreateSelect(table_lane, table_r, B.CreateSelect(zero, B.CreateOr(sign, SplatOf(x, f.exp)), SplatOf(x, 0)));
+    if (opts.fpsr_flags) {
+        OrFpsrBits(B.CreateSelect(AnyLane(zero), B.getInt32(0x02), B.getInt32(0)));  // DZC
+    }
+    Value* slow = B.CreateNot(B.CreateOr(table_lane, zero));
+    if (active) {
+        slow = B.CreateAnd(slow, active);
+    }
+    BasicBlock* from = B.GetInsertBlock();
+    auto* slow_bb = BasicBlock::Create(C, "estimate_helper", F);
+    auto* cont = BasicBlock::Create(C, "estimate_done", F);
+    llvm::MDBuilder md{C};
+    B.CreateCondBr(AnyLane(slow), slow_bb, cont, md.createBranchWeights(1, 1u << 10));
+    B.SetInsertPoint(slow_bb);
+    Value* out = HelperLanes(rsqrt ? NXAOT_RT_RSQRT_ESTIMATE : NXAOT_RT_RECIP_ESTIMATE, x, x, r, slow, FpcrArg());
+    BasicBlock* slow_end = B.GetInsertBlock();
+    B.CreateBr(cont);
+    B.SetInsertPoint(cont);
+    auto* phi = B.CreatePHI(r->getType(), 2);
+    phi->addIncoming(r, from);
+    phi->addIncoming(out, slow_end);
+    return phi;
+}
+
 Value* FunctionLifter::StepFused(bool rsqrt, unsigned bits, Value* a, Value* b) {
-    // FRECPS: 2 - a * b fused; FRSQRTS: (3 - a * b) / 2 fused. As dynarmic's x86-64 backend: the native fused operation, and the software
-    // FPRecipStepFused / FPRSqrtStepFused (0 * inf gives 2.0 / 1.5, NaN rules) when a lane of it is a NaN, or for FRSQRTS near infinity
-    // (x86 cannot fuse the halving); then for every lane, as dynarmic's fallback is
+    // FRECPS: 2 - a * b fused; FRSQRTS: (3 - a * b) / 2 fused. As dynarmic's x86-64 backend: the native fused operation; where a lane of it is a
+    // NaN, or for FRSQRTS has an exponent at the top (x86 cannot fuse the halving), dynarmic runs its software FPRecipStepFused /
+    // FPRSqrtStepFused on every lane, and so does StepSpecial with the lanes' own results
     const bool vector = a->getType()->isVectorTy();
     const unsigned lanes = vector ? 128 / bits : 1;
     if (bits == 16 || !opts.target.fma) {
@@ -1056,51 +1228,81 @@ Value* FunctionLifter::StepFused(bool rsqrt, unsigned bits, Value* a, Value* b) 
     }
     const FInfo f = Info(bits);
     NativeInputDenormal({a, b});
-    Value* fb = AsFloat(b);
-    Value* na = AsFloat(B.CreateXor(a, SplatOf(a, f.sign)));
+    Value* neg_a = B.CreateXor(a, SplatOf(a, f.sign));  // FPNeg(op1)
     Value* c = AsFloat(SplatOf(a, Pow2Bits(bits, 1) | (rsqrt ? f.quiet : 0)));  // 2.0, or 3.0 (1.5 * 2)
-    Value* t = AsInt(FPIntrinsic(B, M, ID::fma, ID::experimental_constrained_fma, {na, fb, c}));
-    Value* bad = nullptr;
+    Value* t = AsInt(FPIntrinsic(B, M, ID::fma, ID::experimental_constrained_fma, {AsFloat(neg_a), AsFloat(b), c}));
+    Value* special = nullptr;
     if (rsqrt) {
         // the intermediate's exponent near the top (dynarmic: (bits & 0x7f80...) >= 0x7f00... for single, 0x7fe0... for double)
         const uint64_t top = bits == 32 ? 0x7F000000u : 0x7FE0000000000000ull;
-        bad = B.CreateICmpEQ(B.CreateAnd(t, SplatOf(t, top)), SplatOf(t, top));
+        special = B.CreateICmpEQ(B.CreateAnd(t, SplatOf(t, top)), SplatOf(t, top));
     } else {
-        bad = IsNaN(t);
+        special = IsNaN(t);
     }
-    Value* any_bad = AnyLane(bad);
-    auto* slow = BasicBlock::Create(C, "step_fallback", F);
+    auto halve = [&](Value* v) { return rsqrt ? AsInt(B.CreateFMul(AsFloat(v), AsFloat(SplatOf(v, Pow2Bits(bits, -1))))) : v; };
+    auto* special_bb = BasicBlock::Create(C, "step_special", F);
     auto* fast_bb = BasicBlock::Create(C, "step_fast", F);
     auto* cont = BasicBlock::Create(C, "step_done", F);
-    B.CreateCondBr(any_bad, slow, fast_bb);
+    B.CreateCondBr(AnyLane(special), special_bb, fast_bb);
     B.SetInsertPoint(fast_bb);
-    Value* fast_r = rsqrt ? AsInt(B.CreateFMul(AsFloat(t), AsFloat(SplatOf(t, Pow2Bits(bits, -1))))) : t;
+    Value* fast_r = halve(t);
     B.CreateBr(cont);
-    B.SetInsertPoint(slow);
-    Value* slow_r = nullptr;
-    {
-        auto one = [&](Value* x, Value* y) {
-            Value* r = HelperCall("nxaot_rt_fp_binary", B.getInt64Ty(),
-                                  {B.getInt32(rsqrt ? NXAOT_RT_RSQRT_STEP : NXAOT_RT_RECIP_STEP), B.getInt32(bits), B.CreateZExt(x, B.getInt64Ty()),
-                                   B.CreateZExt(y, B.getInt64Ty()), FpcrArg(kFzSteps), FpsrPtr()});
-            return B.CreateTrunc(r, B.getIntNTy(bits));
-        };
-        if (!vector) {
-            slow_r = one(a, b);
-        } else {
-            slow_r = llvm::PoisonValue::get(a->getType());
-            for (unsigned i = 0; i < lanes; ++i) {
-                slow_r = B.CreateInsertElement(slow_r, one(B.CreateExtractElement(a, uint64_t{i}), B.CreateExtractElement(b, uint64_t{i})), uint64_t{i});
-            }
-        }
-    }
-    BasicBlock* slow_end = B.GetInsertBlock();
+    B.SetInsertPoint(special_bb);
+    Value* special_r = StepSpecial(rsqrt, bits, a, b, neg_a, t, special, halve(t));
+    BasicBlock* special_end = B.GetInsertBlock();
     B.CreateBr(cont);
     B.SetInsertPoint(cont);
     auto* phi = B.CreatePHI(a->getType(), 2);
     phi->addIncoming(fast_r, fast_bb);
-    phi->addIncoming(slow_r, slow_end);
+    phi->addIncoming(special_r, special_end);
     return phi;
+}
+
+// The lanes of a step whose fused result t dynarmic gives to its software step (StepFused), each with Arm's FPRecipStepFused / FPRSqrtStepFused
+// result: a NaN operand, FPProcessNaNs of (-a, b); infinity times zero (a NaN t of no NaN operand: FPUnpack's flush of a denormal under FZ is
+// MXCSR's DAZ there), 2.0 or 1.5 and no flag; an infinite operand, t, the infinity of the product's sign; FRSQRTS's other lanes at the top
+// (exponent 2 * bias and more: an overflow, which the halving before rounding may bring back, or in a directed rounding mode the largest normal
+// in its place), the helper; every other lane the native result, which the software's equals: 2 - a * b and 3 - a * b of finite operands are 0
+// or at least 2^-48 of the larger operand's scale, never tiny, so neither FZ's flush before rounding nor the halving after it changes them. The
+// software step unpacks every lane's operands under the FPCR of the moment: IDC for a denormal one under FZ, when the flags are modelled.
+// special: the lanes taken; native: the fast path's result (t, halved for FRSQRTS)
+Value* FunctionLifter::StepSpecial(bool rsqrt, unsigned bits, Value* a, Value* b, Value* neg_a, Value* t, Value* special, Value* native) {
+    const FInfo f = Info(bits);
+    llvm::MDBuilder md{C};
+    // A conditional part: its block, entered when cond, weighted cold; fn makes the value it gives in place of v
+    auto cold = [&](Value* cond, Value* v, const char* name, const std::function<Value*()>& fn) {
+        BasicBlock* here = B.GetInsertBlock();
+        auto* part = BasicBlock::Create(C, name, F);
+        auto* done = BasicBlock::Create(C, std::string(name) + "_done", F);
+        B.CreateCondBr(cond, part, done, md.createBranchWeights(1, 1u << 10));
+        B.SetInsertPoint(part);
+        Value* with = fn();
+        BasicBlock* part_end = B.GetInsertBlock();
+        B.CreateBr(done);
+        B.SetInsertPoint(done);
+        if (!v) {
+            return static_cast<Value*>(nullptr);
+        }
+        auto* phi = B.CreatePHI(v->getType(), 2);
+        phi->addIncoming(v, here);
+        phi->addIncoming(with, part_end);
+        return static_cast<Value*>(phi);
+    };
+    // Infinity times zero, the common case: a NaN t gives 2.0 or 1.5. A NaN operand (its t a NaN too) takes the NaN rules in a part of its own
+    Value* t_nan = rsqrt ? IsNaN(t) : special;
+    Value* v = B.CreateSelect(t_nan, SplatOf(t, rsqrt ? Pow2Bits(bits, 0) | f.quiet : Pow2Bits(bits, 1)), native);
+    v = cold(AnyLane(B.CreateOr(IsNaN(a), IsNaN(b))), v, "step_nan", [&] { return NaN2(neg_a, b, v); });
+    if (opts.fpsr_flags) {
+        cold(FzNow(kFzSteps), nullptr, "step_idc", [&] {
+            OrFpsrBits(B.CreateSelect(AnyLane(B.CreateOr(IsDenormal(a), IsDenormal(b))), B.getInt32(0x80), B.getInt32(0)));  // IDC
+            return nullptr;
+        });
+    }
+    if (!rsqrt) {
+        return v;
+    }
+    Value* overflow = B.CreateAnd(B.CreateAnd(special, B.CreateNot(t_nan)), B.CreateNot(B.CreateOr(IsInfF(a), IsInfF(b))));
+    return cold(AnyLane(overflow), v, "rsqrts_overflow", [&] { return HelperLanes(NXAOT_RT_RSQRT_STEP, a, b, v, overflow, FpcrArg(kFzSteps)); });
 }
 
 Value* FunctionLifter::RoundInt(unsigned bits, Value* x, unsigned rounding, bool exact) {
@@ -1537,14 +1739,7 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
         if (low) {
             Note(kIssueVectorUpperLanes);
         }
-        Value* in = ArgVec(inst, 0, e);
-        Value* out = llvm::Constant::getNullValue(VecI(e));
-        for (unsigned i = 0; i < (low ? lanes / 2 : lanes); ++i) {
-            Value* r = HelperCall("nxaot_rt_fp_unary", B.getInt64Ty(),
-                                  {B.getInt32(which), B.getInt32(e), B.CreateZExt(B.CreateExtractElement(in, uint64_t{i}), B.getInt64Ty()), fpcr_v, FpsrPtr()});
-            out = B.CreateInsertElement(out, B.CreateTrunc(r, B.getIntNTy(e)), uint64_t{i});
-        }
-        Def(inst, out);
+        Def(inst, Estimate(which == NXAOT_RT_RSQRT_ESTIMATE, e, ArgVec(inst, 0, e), low ? lanes / 2 : lanes));
     } else if (base == "RecipStepFused" || base == "RSqrtStepFused") {
         Def(inst, StepFused(base == "RSqrtStepFused", e, ArgVec(inst, 0, e), ArgVec(inst, 1, e)));
     } else if (base == "RoundInt") {

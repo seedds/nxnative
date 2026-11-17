@@ -55,6 +55,7 @@ struct Lifted::Impl {
     uint32_t lift_clear = 0;   // SetLiftFpcrClear: those bits cleared and FZ specialised (the negative control)
     uint32_t fz_off = 0;       // SetFzOff
     bool fz_specialised = false;   // SetFzSpecialised
+    int estimate_fault = -1;   // SetEstimateFault
     uint8_t* image = nullptr;
     size_t counter = 0;
     // (code, pc, FPCR as lifted) -> the continuation's function and its issues
@@ -66,6 +67,7 @@ struct Lifted::Impl {
         o.fz_runtime = !lift_clear && !fz_specialised;
         o.fpcr = fpcr & ~lift_clear;
         o.fz_off = fz_off;
+        o.estimate_fault = estimate_fault;
         o.fpsr_flags = fpsr_flags;
         o.nan_mode = nan_mode;
         o.target = target;
@@ -78,6 +80,7 @@ Lifted::Lifted() : impl(std::make_unique<Impl>()) {}
 void Lifted::SetLiftFpcrClear(uint32_t mask) { impl->lift_clear = mask; }
 void Lifted::SetFzOff(uint32_t families) { impl->fz_off = families; }
 void Lifted::SetFzSpecialised(bool on) { impl->fz_specialised = on; }
+void Lifted::SetEstimateFault(int entry) { impl->estimate_fault = entry; }
 Lifted::~Lifted() = default;
 
 std::unique_ptr<Lifted> Lifted::Create(const std::string& cpu, lift::NaNMode nan_mode, bool fpsr_flags, std::string* error) {

@@ -6,14 +6,15 @@
 //
 //   nxaot_vec [--cpu <llvm cpu>] [--filter <text>] [--dump] [--batch <n>] [--max-report <n>] [--nan-mode chains|perop|unchecked]
 //             [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [--fz-off <families>] [--fz-only]
-//             [--fz-specialised] [-v] <vectors.tsv, folder or - for standard input>...
+//             [--fz-specialised] [--estimate-fault <entry>] [-v] <vectors.tsv, folder or - for standard input>...
 //   The code is lifted as a pack's is, with FPCR.FZ a run-time state (lift::LiftOptions::fz_runtime): one function for both values of FZ, run under
 //   the vector's FPCR.
 //   --lift-fpcr-clear: the negative control: lift every vector's code as if these FPCR bits were clear and FZ specialised, while it runs under the
 //   vector's FPCR (code specialised for FZ clear run under FZ with MXCSR's FTZ and DAZ). --fz-off: the run-time test of these lift::FzFamily
 //   families (minmax, muladd, steps, helpers, idc, compare, all) left out, each family's own control. --fz-only: the vectors whose FPCR has FZ.
 //   --fz-specialised: FZ specialised as the other mode bits (code for each value of FZ; before FZ was a run-time state) (dm/tools/aot/README.md,
-//   "FZ as a run-time state")
+//   "FZ as a run-time state"). --estimate-fault: the negative control of the inline estimates (FRECPE, FRSQRTE): entry <entry> of their tables
+//   changed (lift::LiftOptions::estimate_fault), which the vectors covering every entry (fp_est) must find
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -215,7 +216,7 @@ void Usage() {
     std::fprintf(stderr,
                  "usage: nxaot_vec [--cpu <llvm cpu>] [--filter <text>] [--dump] [--batch <n>] [--max-report <n>] [--nan-mode chains|perop|unchecked]\n"
                  "                 [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [--fz-off <families>]\n"
-                 "                 [--fz-only] [--fz-specialised] [-v]\n"
+                 "                 [--fz-only] [--fz-specialised] [--estimate-fault <entry>] [-v]\n"
                  "                 <vectors.tsv, folder or - for standard input>...\n");
 }
 
@@ -231,6 +232,7 @@ int main(int argc, char** argv) {
     uint32_t fz_off = 0;       // --fz-off
     bool fz_only = false;      // --fz-only: the vectors whose FPCR has FZ
     bool fz_specialised = false;   // --fz-specialised
+    int estimate_fault = -1;       // --estimate-fault
     std::vector<std::string> paths;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -283,6 +285,8 @@ int main(int argc, char** argv) {
             fz_only = true;
         } else if (a == "--fz-specialised") {
             fz_specialised = true;
+        } else if (a == "--estimate-fault") {
+            estimate_fault = static_cast<int>(std::strtoul(next().c_str(), nullptr, 10));
         } else if (a == "--no-filters") {
             no_filters = true;
         } else if (a == "-v") {
@@ -310,6 +314,7 @@ int main(int argc, char** argv) {
         lifted->SetLiftFpcrClear(lift_clear);
         lifted->SetFzOff(fz_off);
         lifted->SetFzSpecialised(fz_specialised);
+        lifted->SetEstimateFault(estimate_fault);
     }
     if (!lifted) {
         std::fprintf(stderr, "nxaot_vec: %s\n", error.c_str());

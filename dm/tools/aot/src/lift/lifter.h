@@ -75,7 +75,7 @@ struct FunctionPlan;
 enum FzFamily : uint32_t {
     kFzMinMax = 1,     // FMAX / FMIN and the NM forms, scalar, vector and pairwise: the operands flushed
     kFzMulAdd = 2,     // FMADD and its forms, FMLA / FMLS: a result of +-(smallest normal) by the software FPMulAdd; the invalid case's zero
-    kFzSteps = 4,      // FRECPS / FRSQRTS: the software step of a NaN or near-infinity lane given the FPCR of the moment
+    kFzSteps = 4,      // FRECPS / FRSQRTS: when a lane is special (a NaN, or near infinity), IDC for denormal operands and FRSQRTS's overflow lanes' helper
     kFzHelpers = 8,    // the run-time helpers (the estimates, FCVTXN, the roundings and conversions they do): the FPCR of the moment as their argument
     kFzIdc = 16,       // IDC for the operands of operations lowered in integers (the flags modelled)
     kFzCompare = 32,   // FCMEQ / FCMGT / FCMGE (vector): the operands flushed, since LLVM folds a compare with zero into a test of the bits
@@ -91,6 +91,7 @@ struct LiftOptions {
     // --fz-specialised comparison and --lift-fpcr-clear control)
     bool fz_runtime = true;
     uint32_t fz_off = 0;          // FzFamily bits whose run-time test is left out (nxaot_vec --fz-off only)
+    int estimate_fault = -1;      // >= 0: that entry of FRECPE's and FRSQRTE's tables changed (nxaot_vec --estimate-fault only, the negative control)
     bool fpsr_flags = true;       // model the cumulative exception flags exactly (strict floating point; section 7.4)
     NaNMode nan_mode = NaNMode::Chains;
     Target target;
@@ -312,7 +313,7 @@ Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& r
 
 // The NaN chains' helpers of a pack (FunctionPlan::shared_nan_helpers), defined in module: nxaot.nan<1|2|3>.<type> for the integer bits of
 // half, single and double precision values, scalar and 128-bit vectors; hidden, preserve_all. They depend on nothing else (the default NaN
-// mode, FPCR.DN, makes no calls)
+// mode, FPCR.DN, makes no calls). With them nxaot.fzfma.<type>, the cold part of FZ's fused multiply-add fix-up
 void DefineNaNHelpers(llvm::Module& module, const LiftOptions& options);
 
 // dynarmic's text dump of the region's IR blocks, as the lifter sees them (nxaot_vec --dump)

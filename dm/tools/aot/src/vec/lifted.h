@@ -50,6 +50,9 @@ public:
     void SetLiftFpcrClear(uint32_t mask);
     void SetFzOff(uint32_t families);
     void SetFzSpecialised(bool on);
+    // --estimate-fault: entry `entry` of the tables of FRECPE and FRSQRTE's inline estimates changed (lift::LiftOptions::estimate_fault), the
+    // negative control of the vectors that cover every entry (fp_est)
+    void SetEstimateFault(int entry);
 
 private:
     Lifted();

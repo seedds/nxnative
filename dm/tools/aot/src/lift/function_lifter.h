@@ -227,6 +227,11 @@ public:
     // The exact lowerings shared by the scalar and vector forms; operands and results are integer bits (scalars or vectors)
     Value* MinMax(bool is_max, bool numeric, Value* a, Value* b);
     Value* StepFused(bool rsqrt, unsigned bits, Value* a, Value* b);
+    Value* StepSpecial(bool rsqrt, unsigned bits, Value* a, Value* b, Value* neg_a, Value* t, Value* special, Value* native);  // dynarmic's fallback
+    Value* Estimate(bool rsqrt, unsigned bits, Value* x, unsigned lanes);   // FRECPE / FRSQRTE of single and double precision, by the tables
+    llvm::GlobalVariable* EstimateTable(bool rsqrt);
+    llvm::Function* LanesFunction(uint32_t which, llvm::Type* t);   // the helper's lanes out of line (nxaot.fplanes), the unit's own copy
+    Value* HelperLanes(uint32_t which, Value* x, Value* y, Value* r, Value* mask, Value* fpcr);  // a call of it
     Value* RoundInt(unsigned bits, Value* x, unsigned rounding, bool exact);
     Value* ToFixed(Value* x, unsigned fsize, unsigned isize, bool is_unsigned, unsigned fbits, unsigned rounding);
     Value* FromFixed(Value* x, unsigned isize, bool is_unsigned, unsigned to, unsigned fbits);  // a float value

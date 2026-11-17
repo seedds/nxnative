@@ -114,7 +114,10 @@ static id<MTLRenderPipelineState> dev_mps(MTLMeshRenderPipelineDescriptor *d, NS
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithMeshDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&e]; return compile_done(ps, e, out);
 }
 static id<MTLFunction> dev_fn(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **out) {
-    plain_compile_begin(); NSError *e = nil; id f = [lib newFunctionWithName:name constantValues:cv error:&e]; return compile_done(f, e, out);
+    if (!lib || !name) return nil;
+    plain_compile_begin(); NSError *e = nil;
+    id f = cv ? [lib newFunctionWithName:name constantValues:cv error:&e] : [lib newFunctionWithName:name];
+    return compile_done(f, e, out);
 }
 static id<MTLLibrary> dev_lib(NSString *source, NSError **out) {
     plain_compile_begin(); NSError *e = nil; id lib = [g_dev newLibraryWithSource:source options:nil error:&e]; return compile_done(lib, e, out);
@@ -16403,7 +16406,7 @@ static dlss_scaler g_dlss[4];
 static uint64_t g_dlss_use;
 static id<MTL4Compiler> g_dlss_comp;
 static void dlss_scaler_drop(dlss_scaler *e) { if (e->sc) defer_obj_release(e->sc); e->sc = nil; }
-static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, id<MTLTexture> bias, NSUInteger iw, NSUInteger ih) {
+static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, id<MTLTexture> _Nullable bias, NSUInteger iw, NSUInteger ih) {
     NSUInteger bw = MIN(col.width, MIN(dep.width, mot.width)), bh = MIN(col.height, MIN(dep.height, mot.height));   // the input box every texture holds
     if (bias) { bw = MIN(bw, bias.width); bh = MIN(bh, bias.height); }
     NSUInteger key[10] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, bias ? bias.pixelFormat : 0, bw, bh, out.width, out.height, c->flags};

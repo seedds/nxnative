@@ -719,30 +719,410 @@ typedef struct { int64_t a, b, c; } os_stats;
 HLE_FORCE("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", "stream statistics: none kept", os_stats, h_os_Stats, void *g, bool reset) {
     (void)g; (void)reset; os_stats s = {0}; return s;
 }
-// SDK 21's input streams (a microphone, GameChat; Star Fox imports them), as AudioIn above: no device is listed and an open fails, so the calls that need an open stream are never reached;
-// they still answer without touching the guest object, in case a game ignores the open's result
-HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; the host has no microphone: no device", int, h_is_List, void *names, int n) { (void)names; (void)n; return 0; }
-HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; no such device", Result, h_is_Props, void *props, const char *name) { (void)props; (void)name; return RES_FAIL; }
-HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "connect to auddmg:u; no microphone on the host: fails", Result, h_is_Open,
-          void *g, void *buf, size_t size, const char *dev, const void *fmt, int frames) { (void)g; (void)buf; (void)size; (void)dev; (void)fmt; (void)frames; return RES_FAIL; }
-HLE_FORCE("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "input stream, never open", void, h_is_Close, void *g) { (void)g; }
-HLE_FORCE("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "input stream, never open", Result, h_is_Start, void *g) { (void)g; return RES_FAIL; }
-HLE_FORCE("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "input stream, never open", void, h_is_Stop, void *g) { (void)g; }
-HLE_FORCE("_ZN2nn5audio15ReadInputStreamEPNS0_15InputStreamTypeEPvi", "input stream, never open: nothing read", int, h_is_Read, void *g, void *buf, int frames) { (void)g; (void)buf; (void)frames; return 0; }
-HLE_FORCE("_ZN2nn5audio30GetInputStreamFilledFrameCountEPKNS0_15InputStreamTypeE", "input stream, never open: nothing captured", int, h_is_Filled, const void *g) { (void)g; return 0; }
-typedef struct { int32_t format, channels, rate; } os_format;   // nn::audio::StreamFormat, 12 bytes: returned in registers
-HLE_FORCE("_ZN2nn5audio20GetInputStreamFormatEPKNS0_15InputStreamTypeE", "input stream, never open: 48 kHz mono PCM16", os_format, h_is_Format, const void *g) { (void)g; return (os_format){OS_PCM16, 1, RATE}; }
-// The rest of the input stream calls. The SDK passes them to the stream'"'"'s Impl pointer, which is null for a type that never opened (sdk+0x1f7040 reads [Impl+0x340] first: SIGSEGV at address 0x340),
-// and only GetInputStreamState answers a null Impl itself (0, closed; sdk+0x1f6020). The Legend of Zelda: Ocarina of Time asks the state of its two microphone streams, purges them when they are not
-// started (main+0x336ee7c, the crash when a song is played), and reads their statistics each update (main+0x336d5d4); it opens them only when a virtual input device is listed, so here never.
-// The state is closed, a purge does nothing, the statistics are zero (InputStreamImpl::GetStatistics zeroes its result first, sdk+0x1f6ff4), the free and capacity counts 0, the gain 1
-HLE_FORCE("_ZN2nn5audio19GetInputStreamStateEPKNS0_15InputStreamTypeE", "input stream, never open: closed (0)", int, h_is_State, const void *g) { (void)g; return 0; }
-HLE_FORCE("_ZN2nn5audio16PurgeInputStreamEPNS0_15InputStreamTypeE", "input stream, never open: nothing buffered", void, h_is_Purge, void *g) { (void)g; }
-HLE_FORCE("_ZN2nn5audio24GetInputStreamStatisticsEPNS0_15InputStreamTypeEb", "input stream, never open: zero", os_stats, h_is_Stats, void *g, bool reset) { (void)g; (void)reset; os_stats s = {0}; return s; }
-HLE_FORCE("_ZN2nn5audio28GetInputStreamFreeFrameCountEPKNS0_15InputStreamTypeE", "input stream, never open: none", int, h_is_Free, const void *g) { (void)g; return 0; }
-HLE_FORCE("_ZN2nn5audio32GetInputStreamCapacityFrameCountEPKNS0_15InputStreamTypeE", "input stream, never open: none", int, h_is_Capacity, const void *g) { (void)g; return 0; }
-HLE_FORCE("_ZN2nn5audio18GetInputStreamGainEPKNS0_15InputStreamTypeE", "input stream, never open: 1", float, h_is_GetGain, const void *g) { (void)g; return 1.0f; }
-HLE_FORCE("_ZN2nn5audio18SetInputStreamGainEPNS0_15InputStreamTypeEfNS_8TimeSpanE", "input stream, never open: nothing to ramp", void, h_is_SetGain, void *g, float gain, int64_t ramp_ns) { (void)g; (void)gain; (void)ramp_ns; }
+// ---------- SDK 21 / 22 InputStream (Microphone, Voice Chat, Pitch Tracking) ----------
+// nn::audio::OpenInputStream opens an input stream on a virtual input device (ListVirtualInputDevices, GetDefaultVirtualInputDevice)
+// or raw device (GetTrueRawAudioInputDevice). The Legend of Zelda: Ocarina of Time (SDK 22.2.8) lists virtual devices at boot (main+0xf48124),
+// opens two 48 kHz mono PCM16 streams (one virtual, one raw: main+0xf48168, main+0xf481a8), purges them before starting (main+0x336ee7c), and
+// reads frames for its FFT pitch-detection loop (Pa_OcarinaMicInputPractice_00). Star Fox (SDK 21.4.4) imports the same calls.
+// Host bridge: an AudioUnit input unit (Mac AUHAL kAudioUnitSubType_HALOutput, iOS RemoteIO kAudioUnitSubType_RemoteIO) captures 48 kHz PCM16
+// from the default input device (DualSense over USB, MacBook mic, headset). A lock-free SPSC circular ring buffer transfers frames wait-free
+// to the game thread without allocations or mutex locks on the real-time audio callback; when real_audio() is false (headless/tests) or starved,
+// reads return zero-filled silence matching the silent sink.
+#if !TARGET_OS_IPHONE
+#include <CoreAudio/CoreAudio.h>
+#endif
+
+#define IRING_FRAMES 65536   // power of two: ~1.36 s of 48 kHz mono/stereo PCM16
+#define ISMAX 4
+
+typedef struct {
+    int ch, fmt, cap;
+    _Atomic int state;       // OS_NONE (0), OS_STOPPED (1), OS_STARTED (2)
+    _Atomic float gain;
+    _Atomic uint32_t head;   // consumer read pointer in frames
+    _Atomic uint32_t tail;   // producer write pointer in frames
+    int16_t ring[IRING_FRAMES];
+} istream;
+
+static istream *g_istreams[ISMAX];
+static pthread_mutex_t g_is_lock = PTHREAD_MUTEX_INITIALIZER;
+static AudioUnit g_in_au = NULL;
+static _Atomic int g_in_running = 0;
+static float g_mic_gain = 1.0f;
+static void au_in_dispose(void);
+
+static OSStatus au_input_cb(void *ctx, AudioUnitRenderActionFlags *ioActionFlags,
+                            const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber,
+                            UInt32 inNumberFrames, AudioBufferList *ioData) {
+    (void)ctx; (void)ioData;
+    if (inNumberFrames == 0 || !g_in_au) return noErr;
+
+    int16_t pcm_buf[4096];
+    UInt32 frames = inNumberFrames < 4096 ? inNumberFrames : 4096;
+    AudioBufferList bl = {.mNumberBuffers = 1,
+                          .mBuffers[0] = {.mNumberChannels = 1, .mDataByteSize = frames * sizeof(int16_t), .mData = pcm_buf}};
+
+    OSStatus st = AudioUnitRender(g_in_au, ioActionFlags, inTimeStamp, inBusNumber, frames, &bl);
+    if (st) return st;
+
+    pthread_mutex_lock(&g_is_lock);
+    for (int i = 0; i < ISMAX; i++) {
+        istream *is = g_istreams[i];
+        if (!is || atomic_load_explicit(&is->state, memory_order_relaxed) != OS_STARTED) continue;
+
+        uint32_t t = atomic_load_explicit(&is->tail, memory_order_relaxed);
+        uint32_t h = atomic_load_explicit(&is->head, memory_order_acquire);
+        float g = atomic_load_explicit(&is->gain, memory_order_relaxed);
+        float eff_gain = g * g_mic_gain;
+        int ch = is->ch;
+        uint32_t ring_max = (uint32_t)(IRING_FRAMES / (uint32_t)ch);
+        uint32_t max_backlog = (is->cap > 0 && (uint32_t)is->cap < ring_max) ? (uint32_t)is->cap : 4800;
+        if (max_backlog > ring_max) max_backlog = ring_max;
+
+        if (t - h > max_backlog) {
+            h = t - max_backlog;
+            atomic_store_explicit(&is->head, h, memory_order_relaxed);
+        }
+
+        for (UInt32 f = 0; f < frames; f++) {
+            if (t - h >= max_backlog) {
+                h++;
+                atomic_store_explicit(&is->head, h, memory_order_relaxed);
+            }
+            int32_t s = pcm_buf[f];
+            if (eff_gain != 1.0f) {
+                s = (int32_t)(s * eff_gain);
+                if (s > 32767) s = 32767;
+                else if (s < -32768) s = -32768;
+            }
+            if (ch == 2) {
+                is->ring[(t * 2) & (IRING_FRAMES - 1)] = (int16_t)s;
+                is->ring[((t * 2) + 1) & (IRING_FRAMES - 1)] = (int16_t)s;
+            } else {
+                is->ring[t & (IRING_FRAMES - 1)] = (int16_t)s;
+            }
+            t++;
+        }
+        atomic_store_explicit(&is->tail, t, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_is_lock);
+    return noErr;
+}
+
+#if !TARGET_OS_IPHONE
+static void au_in_device_changed(void *ctx, AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el) {
+    (void)ctx; (void)au; (void)id; (void)scope; (void)el;
+    LOG("audio input: default device changed");
+}
+#endif
+
+static OSStatus au_in_create(void) {
+    if (g_in_au) return noErr;
+    AudioComponentDescription d = {.componentType = kAudioUnitType_Output,
+#if TARGET_OS_IPHONE
+                                   .componentSubType = kAudioUnitSubType_RemoteIO,
+#else
+                                   .componentSubType = kAudioUnitSubType_HALOutput,
+#endif
+                                   .componentManufacturer = kAudioUnitManufacturer_Apple};
+    AudioComponent comp = AudioComponentFindNext(NULL, &d);
+    if (!comp) { LOG("[RED] audio input: AU component not found"); return -1; }
+    OSStatus st = AudioComponentInstanceNew(comp, &g_in_au);
+    if (st || !g_in_au) { LOG("[RED] audio input: cannot create AU instance (status %d)", (int)st); g_in_au = NULL; return st ? st : -1; }
+
+    UInt32 enableIO = 1;
+    st = AudioUnitSetProperty(g_in_au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &enableIO, sizeof enableIO);
+    if (st) { LOG("[RED] audio input: cannot enable input IO (status %d)", (int)st); goto fail; }
+
+    enableIO = 0;
+    st = AudioUnitSetProperty(g_in_au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableIO, sizeof enableIO);
+    if (st) { LOG("[RED] audio input: cannot disable output IO (status %d)", (int)st); goto fail; }
+
+#if !TARGET_OS_IPHONE
+    AudioDeviceID dev = kAudioObjectUnknown; UInt32 sz = sizeof dev;
+    AudioObjectPropertyAddress addr = {kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    st = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &sz, &dev);
+    if (!st && dev != kAudioObjectUnknown) {
+        AudioUnitSetProperty(g_in_au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, sizeof dev);
+    }
+    AudioUnitAddPropertyListener(g_in_au, kAudioOutputUnitProperty_CurrentDevice, au_in_device_changed, NULL);
+#endif
+
+    AudioStreamBasicDescription f = {.mSampleRate = RATE, .mFormatID = kAudioFormatLinearPCM,
+                                     .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+                                     .mBytesPerPacket = 2u, .mFramesPerPacket = 1, .mBytesPerFrame = 2u,
+                                     .mChannelsPerFrame = 1, .mBitsPerChannel = 16};
+    st = AudioUnitSetProperty(g_in_au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, &f, sizeof f);
+    if (st) { LOG("[RED] audio input: cannot set stream format (status %d)", (int)st); goto fail; }
+
+    AURenderCallbackStruct cb = {.inputProc = au_input_cb, .inputProcRefCon = NULL};
+    st = AudioUnitSetProperty(g_in_au, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, &cb, sizeof cb);
+    if (st) { LOG("[RED] audio input: cannot set input callback (status %d)", (int)st); goto fail; }
+
+    st = AudioUnitInitialize(g_in_au);
+    if (st) { LOG("[RED] audio input: AudioUnitInitialize failed (status %d)", (int)st); goto fail; }
+
+    static int s_atexit_registered = 0;
+    if (!s_atexit_registered) {
+        atexit(au_in_dispose);
+        s_atexit_registered = 1;
+    }
+
+    const char *eg = getenv("DM_MIC_GAIN");
+    g_mic_gain = eg ? (float)atof(eg) : 1.0f;
+    if (g_mic_gain <= 0.0f) g_mic_gain = 1.0f;
+
+    LOG("audio input: AU input unit initialized (48 kHz mono PCM16, gain=%.2f)", (double)g_mic_gain);
+    return noErr;
+
+fail:
+    if (g_in_au) {
+        AudioUnitUninitialize(g_in_au);
+        AudioComponentInstanceDispose(g_in_au);
+        g_in_au = NULL;
+    }
+    return st;
+}
+
+static void au_in_start(void) {
+    if (!real_audio()) return;
+    if (!g_in_au) au_in_create();
+    if (g_in_au && !atomic_load_explicit(&g_in_running, memory_order_relaxed)) {
+        OSStatus st = AudioOutputUnitStart(g_in_au);
+        if (!st) {
+            atomic_store_explicit(&g_in_running, 1, memory_order_relaxed);
+            LOG("audio input: AU recording started");
+        } else {
+            LOG("[RED] audio input: AudioOutputUnitStart failed (status %d)", (int)st);
+        }
+    }
+}
+
+static void au_in_stop_if_idle(void) {
+    pthread_mutex_lock(&g_is_lock);
+    int any_running = 0;
+    for (int i = 0; i < ISMAX; i++) {
+        if (g_istreams[i] && atomic_load_explicit(&g_istreams[i]->state, memory_order_relaxed) == OS_STARTED) {
+            any_running = 1;
+            break;
+        }
+    }
+    if (!any_running && g_in_au && atomic_load_explicit(&g_in_running, memory_order_relaxed)) {
+        AudioOutputUnitStop(g_in_au);
+        atomic_store_explicit(&g_in_running, 0, memory_order_relaxed);
+        LOG("audio input: AU recording stopped");
+    }
+    pthread_mutex_unlock(&g_is_lock);
+}
+
+static void au_in_dispose(void) {
+    pthread_mutex_lock(&g_is_lock);
+    if (g_in_au) {
+        if (atomic_load_explicit(&g_in_running, memory_order_relaxed)) AudioOutputUnitStop(g_in_au);
+#if !TARGET_OS_IPHONE
+        AudioUnitRemovePropertyListenerWithUserData(g_in_au, kAudioOutputUnitProperty_CurrentDevice, au_in_device_changed, NULL);
+#endif
+        AudioUnitUninitialize(g_in_au);
+        AudioComponentInstanceDispose(g_in_au);
+        g_in_au = NULL;
+        atomic_store_explicit(&g_in_running, 0, memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&g_is_lock);
+}
+
+static const char VDEV_IN[] = "AudioVirtualInput";
+static const char RAW_DEV_IN[] = "AudioTrueRawInput";
+
+HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; virtual input devices list", int, h_is_List, char *names, int n) {
+    if (n > 0 && names) {
+        memset(names, 0, (size_t)n * VDEV_NAME);
+        strlcpy(names, VDEV_IN, VDEV_NAME);
+        return 1;
+    }
+    return 0;
+}
+
+HLE_FORCE("_ZN2nn5audio28GetDefaultVirtualInputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; default virtual input device", void, h_is_DefDev, char *name) {
+    if (name) { memset(name, 0, VDEV_NAME); strlcpy(name, VDEV_IN, VDEV_NAME); }
+}
+
+HLE_FORCE("_ZN2nn5audio26GetTrueRawAudioInputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; default raw input device", void, h_is_RawDev, char *name) {
+    if (name) { memset(name, 0, VDEV_NAME); strlcpy(name, RAW_DEV_IN, VDEV_NAME); }
+}
+
+HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; virtual input device properties", Result, h_is_Props, vdev_props *p, const char *name) {
+    if (!p) return RES_FAIL;
+    memset(p, 0, sizeof *p);
+    strlcpy(p->name, name ? name : VDEV_IN, sizeof p->name);
+    p->min_ns = OS_MIN_NS;
+    return RES_OK;
+}
+
+typedef struct { int32_t format, channels, rate; } os_format;   // nn::audio::StreamFormat, 12 bytes
+
+HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "connect to auddmg:u; open input stream", Result, h_is_Open,
+          void *g, void *buf, size_t size, const char *dev, const os_format *fmt, int frames) {
+    (void)buf; (void)size;
+    istream *is = calloc(1, sizeof *is);
+    if (!is) die("OpenInputStream: calloc failed");
+    is->ch = (fmt && fmt->channels > 0) ? fmt->channels : 1;
+    is->fmt = (fmt && fmt->format > 0) ? fmt->format : OS_PCM16;
+    is->cap = frames > 0 ? frames : 4800;
+    atomic_store_explicit(&is->state, OS_STOPPED, memory_order_relaxed);
+    atomic_store_explicit(&is->gain, 1.0f, memory_order_relaxed);
+
+    pthread_mutex_lock(&g_is_lock);
+    int slot = -1;
+    for (int i = 0; i < ISMAX; i++) {
+        if (!g_istreams[i]) {
+            g_istreams[i] = is;
+            slot = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_is_lock);
+    if (slot < 0) {
+        LOG("[RED] audio input: max input streams reached (%d)", ISMAX);
+        free(is);
+        return RES_FAIL;
+    }
+
+    LOG("audio input: OpenInputStream dev='%s', fmt={format=%d, ch=%d, rate=%d}, cap=%d",
+        dev ? dev : "", fmt ? fmt->format : 0, fmt ? fmt->channels : 0, fmt ? fmt->rate : 0, frames);
+
+    objmap_put(g, is);
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "close input stream", void, h_is_Close, void *g) {
+    istream *is = objmap_del(g);
+    if (!is) return;
+    atomic_store_explicit(&is->state, OS_NONE, memory_order_relaxed);
+
+    pthread_mutex_lock(&g_is_lock);
+    int remaining = 0;
+    for (int i = 0; i < ISMAX; i++) {
+        if (g_istreams[i] == is) {
+            g_istreams[i] = NULL;
+        } else if (g_istreams[i]) {
+            remaining++;
+        }
+    }
+    pthread_mutex_unlock(&g_is_lock);
+
+    au_in_stop_if_idle();
+    if (remaining == 0) au_in_dispose();
+    free(is);
+}
+
+HLE_FORCE("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "start input stream recording", Result, h_is_Start, void *g) {
+    istream *is = objmap_get(g);
+    if (!is) return RES_FAIL;
+    uint32_t t = atomic_load_explicit(&is->tail, memory_order_relaxed);
+    atomic_store_explicit(&is->head, t, memory_order_relaxed);
+    atomic_store_explicit(&is->state, OS_STARTED, memory_order_relaxed);
+    au_in_start();
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "stop input stream recording", void, h_is_Stop, void *g) {
+    istream *is = objmap_get(g);
+    if (!is) return;
+    atomic_store_explicit(&is->state, OS_STOPPED, memory_order_relaxed);
+    au_in_stop_if_idle();
+}
+
+HLE_FORCE("_ZN2nn5audio15ReadInputStreamEPNS0_15InputStreamTypeEPvi", "read captured input stream frames", int, h_is_Read, void *g, void *buf, int frames) {
+    istream *is = objmap_get(g);
+    if (!is || !buf || frames <= 0) return 0;
+
+    int16_t *dst = (int16_t *)buf;
+    uint32_t h = atomic_load_explicit(&is->head, memory_order_relaxed);
+    uint32_t t = atomic_load_explicit(&is->tail, memory_order_acquire);
+    int ch = is->ch;
+    uint32_t ring_max = (uint32_t)(IRING_FRAMES / (uint32_t)ch);
+    uint32_t max_backlog = (is->cap > 0 && (uint32_t)is->cap < ring_max) ? (uint32_t)is->cap : 4800;
+    if (max_backlog > ring_max) max_backlog = ring_max;
+
+    uint32_t filled = t - h;
+    if (filled > max_backlog) {
+        h = t - max_backlog;
+        filled = max_backlog;
+    }
+
+    int to_read = (int)filled < frames ? (int)filled : frames;
+    int samples = to_read * ch;
+    for (int i = 0; i < samples; i++) {
+        dst[i] = is->ring[(h * (uint32_t)ch + (uint32_t)i) & (IRING_FRAMES - 1)];
+    }
+    atomic_store_explicit(&is->head, h + (uint32_t)to_read, memory_order_release);
+
+    if (to_read < frames) {
+        memset(dst + samples, 0, (size_t)(frames - to_read) * (size_t)ch * sizeof(int16_t));
+    }
+    return frames;
+}
+
+HLE_FORCE("_ZN2nn5audio30GetInputStreamFilledFrameCountEPKNS0_15InputStreamTypeE", "frames captured and waiting", int, h_is_Filled, const void *g) {
+    istream *is = objmap_get(g);
+    if (!is) return 0;
+    uint32_t h = atomic_load_explicit(&is->head, memory_order_relaxed);
+    uint32_t t = atomic_load_explicit(&is->tail, memory_order_acquire);
+    int ch = is->ch;
+    uint32_t ring_max = (uint32_t)(IRING_FRAMES / (uint32_t)ch);
+    uint32_t max_backlog = (is->cap > 0 && (uint32_t)is->cap < ring_max) ? (uint32_t)is->cap : 4800;
+    if (max_backlog > ring_max) max_backlog = ring_max;
+    uint32_t filled = t - h;
+    if (filled > max_backlog) filled = max_backlog;
+    return (int)filled;
+}
+
+HLE_FORCE("_ZN2nn5audio20GetInputStreamFormatEPKNS0_15InputStreamTypeE", "input stream format", os_format, h_is_Format, const void *g) {
+    istream *is = objmap_get(g);
+    if (is) return (os_format){is->fmt, is->ch, RATE};
+    return (os_format){OS_PCM16, 1, RATE};
+}
+
+HLE_FORCE("_ZN2nn5audio19GetInputStreamStateEPKNS0_15InputStreamTypeE", "input stream state", int, h_is_State, const void *g) {
+    istream *is = objmap_get(g);
+    return is ? atomic_load_explicit(&is->state, memory_order_relaxed) : OS_NONE;
+}
+
+HLE_FORCE("_ZN2nn5audio16PurgeInputStreamEPNS0_15InputStreamTypeE", "drop buffered input frames", void, h_is_Purge, void *g) {
+    istream *is = objmap_get(g);
+    if (!is) return;
+    uint32_t t = atomic_load_explicit(&is->tail, memory_order_relaxed);
+    atomic_store_explicit(&is->head, t, memory_order_release);
+}
+
+HLE_FORCE("_ZN2nn5audio24GetInputStreamStatisticsEPNS0_15InputStreamTypeEb", "input stream statistics", os_stats, h_is_Stats, void *g, bool reset) {
+    (void)g; (void)reset;
+    os_stats s = {0};
+    return s;
+}
+
+HLE_FORCE("_ZN2nn5audio28GetInputStreamFreeFrameCountEPKNS0_15InputStreamTypeE", "free frame count", int, h_is_Free, const void *g) {
+    istream *is = objmap_get(g);
+    if (!is) return 0;
+    int filled = h_is_Filled(g);
+    return is->cap > filled ? is->cap - filled : 0;
+}
+
+HLE_FORCE("_ZN2nn5audio32GetInputStreamCapacityFrameCountEPKNS0_15InputStreamTypeE", "capacity frame count", int, h_is_Capacity, const void *g) {
+    istream *is = objmap_get(g);
+    return is ? is->cap : 0;
+}
+
+HLE_FORCE("_ZN2nn5audio18GetInputStreamGainEPKNS0_15InputStreamTypeE", "input stream gain", float, h_is_GetGain, const void *g) {
+    istream *is = objmap_get(g);
+    return is ? atomic_load_explicit(&is->gain, memory_order_relaxed) : 1.0f;
+}
+
+HLE_FORCE("_ZN2nn5audio18SetInputStreamGainEPNS0_15InputStreamTypeEfNS_8TimeSpanE", "set input stream gain", void, h_is_SetGain, void *g, float gain, int64_t ramp_ns) {
+    (void)ramp_ns;
+    istream *is = objmap_get(g);
+    if (is) atomic_store_explicit(&is->gain, gain, memory_order_relaxed);
+}
 
 // Host-internal PCM output (used by the in-process audio renderer, see hle_audren.c): the same AudioOut machinery (real output / silent sink / background take-over), keyed by a host-allocated dummy object
 void *dm_pcmout_open(int ch) {

@@ -341,12 +341,12 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`). `AcquireAudioDeviceNotificationForInput` binds an event that is never signaled and returns 0x499 when acquired again, as the SDK does with a flag of its own (SDK 13.3.0 `sdk+0x56300`: `+0x851`, the output's `+0x852`; `hle_audren.c`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each); [Portal 2](../../dm/games/0100ABD01785C000/README.md) (SDK 13.3.0: its audio thread at start, `main+0x19f37c`).
 
-### No virtual audio input devices (SDK 22)
+### Virtual audio input devices and CoreAudio input streams (SDK 21, 22)
 
-- **Symptom:** `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99` at `sdk+0x1f61ac` under `audio::ListVirtualInputDevices`.
-- **Cause:** the game lists the virtual input devices when its audio starts (`main+0xf48124`) and opens the first with `audio::OpenInputStream` if there is one. The list goes through a service the host does not serve.
-- **Fix:** `ListVirtualInputDevices` reports none (`hle_audio.c` `h_is_List`), and the game skips its input stream.
-- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8); Star Fox imports the same calls.
+- **Symptom:** `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99` at `sdk+0x1f61ac` under `audio::ListVirtualInputDevices`, or microphone input features fail to receive audio.
+- **Cause:** SDK 21 and 22 games query virtual audio input devices (`ListVirtualInputDevices`, `GetDefaultVirtualInputDevice`) and open input streams (`OpenInputStream`) for microphone, voice chat, and audio processing. The SDK calls connect to `auddmg:u`, which the host does not serve. Previously, `ListVirtualInputDevices` reported none and `OpenInputStream` failed.
+- **Fix:** `hle_audio.c` implements the virtual audio input interface and streams host audio from the system default input device via CoreAudio (macOS AUHAL `kAudioUnitSubType_HALOutput`, iOS RemoteIO `kAudioUnitSubType_RemoteIO`). Incoming audio frames at 48 kHz PCM16 are buffered in a lock-free 65,536-frame SPSC circular ring buffer and read non-blockingly by `ReadInputStream`. When no audio input hardware is available or input is starved, reads fill with zero PCM samples. `t_input_stream` covers device enumeration, properties, start/stop lifecycle, gain, buffer purge, and starvation reads.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (SDK 21.4.4) imports the same calls.
 
 ### `OpenAudioOut` without a release event (SDK 22)
 

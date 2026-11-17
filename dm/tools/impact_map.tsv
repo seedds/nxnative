@@ -28,6 +28,7 @@ dm/games/*	profile	one game's profile
 scripts/build_ipa_from_nsp.py	*:*	packing: every game's build
 scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
+scripts/bench_shader_scans.py	-	the rewrite-scan benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
 dm/tools/usage.py	-	the usage manifests

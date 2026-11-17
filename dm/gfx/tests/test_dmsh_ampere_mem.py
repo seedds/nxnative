@@ -5,6 +5,7 @@ import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 EXIT = (0x000fea0003800000, 0x000000000000794d)   # hi, lo: EXIT
 # SUATOM.ADD.U32 R12, [R3], R12 on the 1D image whose handle is word 12 of c0 (AMapC0: image slot 1), as the game encodes it but unpredicated (PT)
 SUATOM = (0x002ea200001ee000, 0x00000c0c030c7593)
@@ -27,11 +28,8 @@ class Translated(unittest.TestCase):
             self.res = json.loads((work / 'k.res.json').read_text())   # the translator's own report of the shader
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            xc = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
-            if atomics:   # as dmsh_build runs it for image atomics: MSL 3.1 and the native-atomic checks and rewrites (dmsh_atomic.py)
-                import dmsh_atomic
-                xc = dmsh_atomic.cross_args(xc, str(work / 'k.spv'))
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *xc, str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *dmsh_chain.CROSS_MSL, str(work / 'k.spv')], capture_output=True, text=True)
+            import dmsh_atomic   # with image atomics: the native-atomic checks and rewrites, as dmsh_build makes them (dmsh_atomic.py)
             self.assertEqual(r.returncode, 0, r.stderr)
             return dmsh_atomic.check_msl(r.stdout) if atomics else r.stdout
 
@@ -221,7 +219,7 @@ class PixelCovered(unittest.TestCase):
             if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(m.returncode, 0, m.stderr)
             return m.stdout, r.stdout + r.stderr
 

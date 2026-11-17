@@ -38,6 +38,12 @@ The race evaluates DLSS at 960x540 to 1920x1080; the shared MetalFX temporal sca
 
 ## Validation
 
+Compute-loop containment validation (2026-11-17, Apple M6, macOS 27.2): chain `968f7d1ea898` against `19d159c0b938`. All 2,976 shaders build; 47 compute shaders have 185 guarded loop sites, including the matrix helpers' compact loops. The documented race input ran for 95 s per revision with no new red line and no cap hit. Three guarded kernels ran: `d7c073a03e9c4440`, `2f87a19306d7e575` and `cded8d0899ba4a6d` (seven sites in total). In the 70–85 s window, 59.9 → 58.8 fps and p99 frame time 17.42 → 18.07 ms; peak footprint over the runs 6,542 → 6,602 MB. This single race comparison does not isolate containment overhead. The race used no fixed-time screenshots because its clocks differ; the stable menu route below stays unchanged.
+
+The automated [`smoke.tsv`](smoke.tsv) copies the development save, enters Championship and stops at vehicle selection. Its fixed-time screenshots cover that menu. A race route is unsuitable for those comparisons: frame-based input and load stalls produced different race clocks at the same screenshot time (33.29 versus 27.58 seconds in one comparison). The diagnostic race runs are retained, but their image differences do not establish a rendering regression.
+
+DLSS alpha validation (2026-11-17, M6, macOS 27.2, Xcode 27.2): compared with main `233e68b8`, the [host's alpha correction](../../../docs/reference/rendering.md#metalfxs-dlss-stand-in-preserves-alpha) restores the selector's background, heading and controls. Its selector evaluations are RGBA16F 1920x1080 to 1920x1080. The 45-second candidate reached frame 2476 with no new red-line kinds; the harness flags the two changed screenshots, whose differences are the intended correction. Both revisions' runs were marked busy, so their frame-time numbers are not a performance comparison. The reference entry records the focused GPU checks and the separate synthetic alpha-pass cost.
+
 All 2,976 shaders build on the Mac. The focused graphics/parser suite runs 181 tests with no failures (one optional test skipped), including GPU checks of subword shared stores and synthetic indexed NVN2 texture tables. After rebasing, all 38 documentation, game-profile, chain and environment-switch checks and all 70 Mac packaging tests pass. Python lint adds no findings. The initial broader tool run's environment-switch documentation failure is fixed by current main; its three .NET runtime-selection failures pass when allowed to use the installed .NET 11 runtime.
 
 The broader native graphics suite completes its other targets but fails the clock test's two-nanosecond feedback-conversion tolerance intermittently (`feedback conversion uses the resumed guest epoch`); the same binary passes when rerun alone. The clock implementation and test are unchanged by this port. This broad run is not a clean pass.
@@ -46,9 +52,11 @@ Regression level: moderate, because shared shader extraction and translation cha
 
 ## Found on this game
 
+- [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): containment validation on its race's guarded kernels, with no cap hit; see [Validation](#validation).
 - [SHN resources and embedded shader objects](../../../docs/reference/shaders.md#shn-resources-and-embedded-shader-objects).
 - [Subword task and mesh payload accesses](../../../docs/reference/shaders.md#subword-task-and-mesh-payload-accesses).
 - [Indexed texture handles in NVN2 compute c0](../../../docs/reference/shaders.md#indexed-texture-handles-in-nvn2-compute-c0).
+- [MetalFX's DLSS stand-in preserves alpha](../../../docs/reference/rendering.md#metalfxs-dlss-stand-in-preserves-alpha).
 - [DLSS scalers released under their encoders](../../../docs/reference/rendering.md#dlss-scalers-released-under-their-encoders): already fixed before this bring-up; the earlier report reached its eighth network after about nine minutes.
 
 ## Open

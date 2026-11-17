@@ -30,7 +30,13 @@ MARKERS = [(b'nvnBootstrapLoader', 'NVN'), (b'vkCreateInstance', 'Vulkan'), (b'e
            (b'MonoGame.Framework', 'MonoGame'), (b'FMOD mixer', 'FMOD')]
 GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py glslc_shaders)
 GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
-GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from
+GL_ENTRY = rb'\bvoid\s+main\s*\('  # a whole shader has its entry point (gl_shaders.py GL_ENTRY): DOOM 3's main holds two prefixes its renderer puts before the GLSL it generates at run time
+
+
+def gl_sources(img):
+    """the GLSL sources gl_shaders.py takes from a main: '#version' strings (GL_SRC) that define an entry point"""
+    return sum(1 for m in re.finditer(GL_SRC, img) if re.search(GL_ENTRY, img[m.start() + 1:img.find(b'\0', m.start() + 1, m.start() + 0x10000)]))
+GL_FILES = ('.mvgl', '.vert', '.frag', '.glsl')   # the RomFS files gl_shaders.py reads GLSL from
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
@@ -40,7 +46,7 @@ SDK_VERSION = re.compile(rb'(?i)NintendoSDK_nnSdk-(?:[a-z]+_)?([0-9_]+)')   # SD
 def glsl_sources(img):
     """Complete embedded GLSL strings, rather than a compiler's language preamble. Snowdrop ships a #version header with typedefs but no entry point, even when it uses only archived shaders.
     Three Houses embeds nine complete boot shaders. NRO callers that assemble shaders dynamically are detected separately by their glslcCompile import (build_sources)."""
-    return sum(bool(re.search(rb'\bvoid\s+main\s*\(', s)) for s in re.findall(rb'#version [^\0]*', img))
+    return sum(bool(re.search(GL_ENTRY, s)) for s in re.findall(rb'#version [^\0]*', img))
 
 
 def glsl_text(head):
@@ -111,7 +117,7 @@ def facts_of(exefs, romfs):
         if p.name == 'main':
             F['unity'] = {v.decode() for v in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)}
             F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), img.count(b'glShaderSource')
-            F['gl_src'] = len(re.findall(GL_SRC, img))
+            F['gl_src'] = gl_sources(img)
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
     F['sysres'], F['program'] = npdm(exefs / 'main.npdm')
@@ -313,7 +319,7 @@ def romfs_glsl_files(romfs):
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
-    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = len(re.findall(GL_SRC, main))
+    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = gl_sources(main)
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
@@ -491,12 +497,20 @@ def heap_signals(log, g):
             out['mem_reserve'] = (f'{0x10000000 + keep + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
     top = [float(x) for x in re.findall(r'\[mem\] alias region mapped up to \+([0-9.]+) GB', log)]
     alias = int(g.get('mem_alias'), 0) / 2**30
-    if not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25 and int(g.get('app_pool'), 0) > 0x40000000:
+    if (not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25
+            and int(g.get('app_pool'), 0) > HEAP_CHECK_STDALLOC and not int(g.get('stdalloc_cap', '0'), 0)):
         # no heap, and the alias region nearly full within seconds: nninitStartup handed pool − used to StandardAllocator as one address region and the game reserves regions of its own
         # beside it (Unity 2020 / 2022: Ace Attorney Investigations Collection, Brain Memory Training Academy, Patrick's Parabox, Monster Train 2, AI: THE SOMNIUM FILES - nirvanA Initiative,
-        # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool)
-        out['app_pool'] = ('0x40000000', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: a 1 GB pool, so StandardAllocator\'s region leaves the game room for its own')
+        # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool).
+        # What has to shrink is that region, not the pool: the game also reads the pool as the machine's memory (Unity's SystemInfo.systemMemorySize; Pokémon Friends saves its Low
+        # graphics at 2048 MB or less and then renders its 3D at 672x378, issue #2830). The host's allocator gate gives the region stdalloc_cap (hle_svc.c "StandardAllocator's address
+        # space"), so the pool stays the hardware's and the region about what a 1 GB pool gave it (pool − used), as Sonic Superstars' hand-set 1.5 GB does
+        out['stdalloc_cap'] = (f'{HEAP_CHECK_STDALLOC:#x}', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: 1 GB of address space for StandardAllocator, '
+                               'so its region leaves the game room for its own, while the pool the game reads as its memory stays the hardware\'s')
     return out
+
+
+HEAP_CHECK_STDALLOC = 0x40000000   # a starting point, not a measured minimum: Advance Wars 1+2: Re-Boot Camp needed a 2 GB pool
 
 
 # ---- Checking the rules against the hand-made profiles ----

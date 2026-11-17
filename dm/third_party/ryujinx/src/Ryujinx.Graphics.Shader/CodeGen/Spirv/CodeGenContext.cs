@@ -32,6 +32,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         public Dictionary<int, Instruction> LocalMemories { get; } = new();
         public Dictionary<int, Instruction> SharedMemories { get; } = new();
 
+        public Instruction RayQueryScene { get; set; }
+        public Instruction RayQueryVariable { get; set; }
+
         public Dictionary<SetBindingPair, SamplerType> SamplersTypes { get; } = new();
         public Dictionary<SetBindingPair, SamplerDeclaration> Samplers { get; } = new();
         public Dictionary<SetBindingPair, ImageDeclaration> Images { get; } = new();

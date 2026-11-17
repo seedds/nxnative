@@ -17,7 +17,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import dmsh_abi as abi, dmsh_rewrite
+import dmsh_abi as abi, dmsh_chain, dmsh_rewrite
 from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
 import test_dmsh_control_flow as cf   # noqa: E402  (the translator harness; its module, so its own tests do not run here)
 PT, WORK, EXIT, bits, bra = cf.PT, cf.WORK, cf.EXIT, cf.bits, cf.bra
@@ -32,8 +32,8 @@ struct spvUnsafeArray
     threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
 };
 """
-# The downsweep's shape as the translator writes it: each lane stores its word, a fence, reads its neighbour's, adds and stores again (SPIRV-Cross's own output for the helper,
-# whose body membar_fence has already made a device fence by the time tg_fence runs)
+# The downsweep's shape as the translator writes it: each lane stores its word, a fence, reads its neighbour's, adds and stores again (SPIRV-Cross's own output for the helper
+# at MSL 3.2: the translator's workgroup-scope memory barrier as a threadgroup-scope fence)
 SCAN = """#include <metal_stdlib>
 using namespace metal;
 """ + ARRAY + """
@@ -42,7 +42,7 @@ struct B { uint _m0[1]; };
 static inline __attribute__((always_inline))
 void dmsh_tg_fence()
 {
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture);
+    atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_threadgroup);
 }
 
 kernel void main0(device B& out [[buffer(1)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
@@ -160,7 +160,7 @@ class Placement(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
         body = r.stdout[r.stdout.index('kernel void main0'):]
         self.assertEqual(body.count('dmsh_hmma16816_f16('), 2)

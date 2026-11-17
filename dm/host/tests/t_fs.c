@@ -251,6 +251,15 @@ int main(void) {
         CHECK(read_fs("rom:\\data\\a", got, sizeof got) && !strcmp(got, "mod") && read_fs("rom:\\data\\c", got, sizeof got) && !strcmp(got, "xy"), "backslash paths reach the overlay folder and the image");
         h = 0; cnt = -1; CHECK(h_fs_OpenDirectory(&h, "rom:\\data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 4, "and list the merged directory (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
+        {   // another program's RomFS by its index (Super Mario Bros. Wonder's Switch 2 program mounts its Switch 1 program's, index 0): romfs_programs/<index>.img beside DM_ROMFS
+            char pd[1100], pd2[1100]; snprintf(pd, sizeof pd, "%s/romfs_programs", root); snprintf(pd2, sizeof pd2, "%s/progs", root); mkdir(pd, 0755); mkdir(pd2, 0755);
+            memcpy(img + 32, "HELLO", 5); snprintf(fn, sizeof fn, "%s/0.img", pd); f = fopen(fn, "wb"); fwrite(img, 1, sizeof img, f); fclose(f); memcpy(img + 32, "hello", 5);
+            CHECK(h_fs_MountRomIdx("content", 0, NULL, 0) == RES_OK && read_fs("content:/data/a", got, sizeof got) && !strcmp(got, "HELLO"), "MountRom with a program index mounts that program's image (got %s)", got);
+            CHECK(h_fs_MountRomIdx("own", 1, NULL, 0) == RES_OK && read_fs("own:/data/a", got, sizeof got) && !strcmp(got, "hello"), "an index with no image mounts this program's own RomFS (got %s)", got);
+            snprintf(fn, sizeof fn, "%s/0.img", pd2); CHECK(!link(ip, fn), "stage a program image elsewhere"); setenv("DM_ROMFS_PROGRAMS", pd2, 1);
+            CHECK(h_fs_MountRomIdx("content2", 0, NULL, 0) == RES_OK && read_fs("content2:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DM_ROMFS_PROGRAMS names the folder (the iOS app's, when its RomFS is in Documents)");
+            unsetenv("DM_ROMFS_PROGRAMS"); g_nmnt = 0;
+        }
         snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);

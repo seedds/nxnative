@@ -78,9 +78,11 @@ General host changes first needed here; each applies to every game:
 - **GLSLC 0x848 / 0x850 controls and headerless compute code** (`glslc_shaders`) and the **SPKG / LINKDATA reader** (`kt_shaders`): [SPKG packages in KTGL LINKDATA](../../../docs/reference/shaders.md#spkg-packages-in-ktgl-linkdata).
 - **Yield back-off** and the **yield-progress rule** (`thr_yield`; this game's limiter is a poll that keeps its registers): [development.md, Power](../../../docs/development.md#power).
 - **Clock waits** (a yield loop that reads the clock backs off from its start and, at a steady period, sleeps to its predicted end; `clock_wait`): [Clock waits sleep to their predicted end](../../../docs/reference/threads.md#clock-waits-sleep-to-their-predicted-end). Its limiter cut is removed.
+- **A BAR.SYNC right after a MEMBAR kept** (the chain's MSL at version 3.2; an iPhone 15 Pro's GPU hung in a scene since ccd834e0, compute shader `b0a3586f7a5ead00` in the failed command buffer, [issue #2786](https://github.com/seedds/nxnative/issues/2786)): [A BAR.SYNC right after a MEMBAR lost](../../../docs/reference/shaders.md#a-barsync-right-after-a-membar-lost).
 
 ## Open
 
+- **To confirm:** the iPhone GPU hang of [issue #2786](https://github.com/seedds/nxnative/issues/2786) with the reporter's save on the fixed chain; neither the scene nor this game's shaders were run here.
 - **To confirm:** 64-pixel rectangles in the albedo where decals land; skipping the decal pass removed them. They did not appear on the Mac prologue route before or after row wrap (no 64-pixel structure in the close-up frames), so the scene where they were seen still has to be checked. The player-facing README lists "small square patches on the ground where decals land" as a known issue.
 - Deferred binds are not remapped to the pool base (red line).
 - `game.tsv` still describes the game as "In bring-up" and the memory layout as Link's Awakening's, not measured; the development notes call SDK 6.5.0 "the oldest so far", though DARK SOULS: REMASTERED (SDK 4.5.0) and Mario Kart 8 Deluxe (SDK 4.4.0) are older.

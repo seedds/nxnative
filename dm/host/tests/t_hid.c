@@ -43,8 +43,16 @@ static void touch_to(const dm_touch *t, int n) { if (n > 0) { touch_new |= !touc
 void (*_Atomic dm_touch_observer)(const dm_touch *t, int n);
 void dm_touch_set(const dm_touch *t, int n) { touch_to(t, n); void (*o)(const dm_touch *, int) = atomic_load(&dm_touch_observer); if (o) o(t, n); }
 void dm_touch_script(const dm_touch *t, int n) { touch_to(t, n); }
-static int64_t touch_samp; static int touch_points = -1;   // hle_touch.c numbers every read from 1; the last read's points argument
-int touch_fill_n(void *out, int max, uint64_t now, int points) { (void)max; (void)now; touch_points = points; memset(out, 0, 0x10); int64_t s = ++touch_samp; memcpy(out, &s, 8); return 0; }
+static int64_t touch_samp; static int touch_points = -1;   // hle_touch.c numbers every sample from 1; the last sample's points argument
+static int touch_stub_n; static uint32_t touch_stub_attr[16];   // handheld samples carry this many fingers (finger i: attributes touch_stub_attr[i], x 100 + i)
+int touch_fill_n(void *out, int max, uint64_t now, int points) {
+    (void)now; touch_points = points; if (max < 1) max = 1; else if (max > 16) max = 16;
+    uint8_t *o = out; memset(o, 0, 0x10 + 0x28 * (size_t)max);
+    int32_t k = points ? (touch_stub_n < max ? touch_stub_n : max) : 0; int64_t s = ++touch_samp;
+    memcpy(o, &s, 8); memcpy(o + 8, &k, 4);
+    for (int32_t i = 0; i < k; i++) { int32_t v[4] = {(int32_t)touch_stub_attr[i], i, 100 + i, 0}; memcpy(o + 0x10 + 0x28 * i + 0x08, v, 16); }
+    return k;
+}
 int gesture_fill(void *out, int n, uint64_t now) { (void)out; (void)n; (void)now; return 0; }
 void dm_gfx_shot_at(long frame, const char *path) { (void)frame; (void)path; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
@@ -340,9 +348,13 @@ static void t_vibration(void) {
     g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
     CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY), "no sink: no vibration devices");
     dm_haptics_init(vibration_sink, 1);
-    CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
-          "startup handles do not wait for a routed haptics output");
-    CHECK(!h_hid_VibMounted(&h[0]), "no routed output: device not mounted");
+    CHECK(h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
+          "rumble on with no controller routed: permitted, handles exist");
+    CHECK(h_hid_VibMounted(&h[0]) && h_hid_VibMounted(&h[1]),
+          "both channels are mounted before a haptics output is routed");
+    CHECK(h_hid_VibMountedOunce(&h[0]) && h_hid_VibMountedOunce(&h[1]), "Switch 2 channels are mounted before routing too");
+    h_hid_VibInfo(info, &h[0]); CHECK(info[0] == 1 && info[1] == 1, "left motor answers before routing");
+    h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2, "right motor answers before routing");
     h_hid_SendVib(&h[0], &v);
     CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "a value before routing is not retained");
     dm_haptics_route(0, 1); dm_haptics_route(1, 1);
@@ -380,11 +392,52 @@ static void t_vibration(void) {
     { int m; CHECK(!vib_targets(3, &m), "old docked handle is not valid in handheld mode"); }
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
-    CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
+    CHECK(h_hid_VibPermit(), "disconnecting controllers does not change the system's vibration setting");
     dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
+    h_hid_VibInfo(info, &h[1]);
+    CHECK(h_hid_VibMounted(&h[1]) && h_hid_VibMountedOunce(&h[1]) && info[0] == 1 && info[1] == 2, "rumble off does not remove a channel or its actuator info");
+    h_hid_SendVib(&h[0], &v);
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "rumble off still drops values for a routed channel");
     dm_haptics_set_enabled(1);
     CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
+}
+
+static void t_joycon_vibration_lifetime(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1}, 2); dm_pad_players(1);
+    h_hid_SetStyles(STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
+    dm_joy_attach(0, 3); h_hid_JoyDual(&(uint32_t){0}); dm_haptics_route(0, 1);
+    uint32_t dual[2], left, right;
+    dm_vibration values[] = {{0.2f, 160, 0, 320}, {0.7f, 160, 0, 320}};
+    CHECK(h_hid_VibHandles(dual, 2, &(uint32_t){0}, STYLE_JOYDUAL) == 2, "rumbling pair: one handle per physical motor");
+    h_hid_SendVibs(dual, values, 2);
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_VibHandles(&left, 1, &(uint32_t){0}, STYLE_JOYLEFT) == 1 &&
+          h_hid_VibHandles(&right, 1, &(uint32_t){1}, STYLE_JOYRIGHT) == 1, "split while rumbling: a handle on each npad");
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0.2f && dm_haptics_actual(0, 1).amplitude_low == 0.7f,
+          "assignment changes keep the physical motors' persistent state");
+    h_hid_SendVib(&left, &(dm_vibration){0.4f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.4f && vibration[0].motor[1].amplitude_low == 0.7f,
+          "left npad updates motor 0 without changing the right npad's motor");
+    h_hid_SendVib(&right, &(dm_vibration){0.6f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.4f && vibration[0].motor[1].amplitude_low == 0.6f,
+          "right npad updates motor 1 on the same physical pair");
+    h_hid_JoyDual(&(uint32_t){0});
+    vibration_calls = 0;
+    h_hid_SendVib(&left, &values[0]); h_hid_SendVib(&right, &values[1]);
+    CHECK(!vibration_calls && !h_hid_VibMounted(&left) && !h_hid_VibMounted(&right), "rejoin invalidates both single-npad handles");
+    h_hid_SendVibs(dual, values, 2);
+    CHECK(vibration_calls == 1 && vibration[0].motor[0].amplitude_low == 0.2f && vibration[0].motor[1].amplitude_low == 0.7f,
+          "rejoined pair accepts its original dual handles, still one per motor");
+    h_hid_JoySingleT(&(uint32_t){0}, 1);   // the right half stays on No1 this time
+    CHECK(h_hid_VibHandles(&right, 1, &(uint32_t){0}, STYLE_JOYRIGHT) == 1 &&
+          h_hid_VibHandles(&left, 1, &(uint32_t){1}, STYLE_JOYLEFT) == 1, "split keeping the right half: the npads swap");
+    h_hid_SendVib(&left, &(dm_vibration){0.3f, 160, 0, 320});
+    h_hid_SendVib(&right, &(dm_vibration){0.8f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.3f && vibration[0].motor[1].amplitude_low == 0.8f,
+          "swapping logical npads does not swap the physical motors");
+    h_hid_JoyDual(&(uint32_t){0}); dm_joy_attach(0, 0); dm_haptics_route(0, 0);
+    h_hid_SetStyles(0xffffffffu);
 }
 
 static void *vibration_sender(void *arg) {
@@ -392,6 +445,18 @@ static void *vibration_sender(void *arg) {
     const uint32_t handles[] = {3, 0};
     const dm_vibration values[] = {{0.25, 160, 0, 320}, {0.8, 160, 0, 320}};
     for (int i = 0; i < 1000; i++) h_hid_SendVibs(handles, values, 2);
+    return NULL;
+}
+static void *vibration_query(void *arg) {
+    (void)arg;
+    uint32_t h = 3, info[2];
+    for (int i = 0; i < 1000; i++) {
+        dm_haptics_set_enabled(i & 1);
+        h_hid_VibPermit();
+        h_hid_VibInfo(info, &h);
+        h_hid_VibMounted(&h);
+        h_hid_VibMountedOunce(&h);
+    }
     return NULL;
 }
 static void t_rumble_log(void) {
@@ -422,11 +487,11 @@ static void t_rumble_log(void) {
               "diagnostic totals reset once per second and retain the interval peak");
     }
     close(saved); fclose(capture);
-    // Game threads may send independently; ThreadSanitizer also covers the logger's shared totals.
-    pthread_t threads[4]; int started = 0;
-    for (int i = 0; i < 4; i++) {
-        int rc = pthread_create(&threads[started], NULL, vibration_sender, NULL);
-        CHECK(!rc, "start concurrent vibration sender"); if (!rc) started++;
+    // Game threads may send and query independently while the rumble setting changes; TSan checks all diagnostic state.
+    pthread_t threads[8]; int started = 0;
+    for (int i = 0; i < 8; i++) {
+        int rc = pthread_create(&threads[started], NULL, i < 4 ? vibration_sender : vibration_query, NULL);
+        CHECK(!rc, "start concurrent vibration sender or query"); if (!rc) started++;
     }
     for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
     unsetenv("DM_RUMBLE_LOG");
@@ -678,33 +743,98 @@ static void t_motion_hid(void) {
     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
     dm_pad_players(1); g_phone_mode = -1;
 }
-// Touch screen reads across docked <-> handheld: every read goes to hle_touch.c, which numbers the states of both modes from one count (t_touch checks the numbers), with
+// Touch screen reads across docked <-> handheld: every state comes from a hle_touch.c sample, which numbers the states of both modes from one count (t_touch checks the numbers), with
 // touch points asked for only in handheld mode. Numbered apart (docked from the npad counter, 65536; handheld from 1), a game started docked dropped every touch after
 // leaving the dock: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its sampling number is above the last one it took, empty states included.
+// A read makes a sample only 4 ms after the newest one (or on a mode change) and keeps the last 16, newest first (the touch resource's 4 ms LIFO); the clock only moves forward here.
+static void touch_hist_clear(void) { g_touch_kept = 0; }
+static int64_t touch_num(const uint8_t *p) { int64_t v; memcpy(&v, p, 8); return v; }
+static int32_t touch_cnt(const uint8_t *p) { int32_t v; memcpy(&v, p + 8, 4); return v; }
+static int touch_guard(const uint8_t *buf, size_t from, size_t to) { for (size_t i = from; i < to; i++) if (buf[i] != 0xA5) return 0; return 1; }
 static void t_touch_sampling(void) {
-    uint8_t s[0x10 + 0x28 * 16]; int64_t prev = 0, v;
+    uint8_t s[0x10 + 0x28 * 16 + 64]; int64_t prev = 0, v;
+    touch_hist_clear(); touch_stub_n = 0; memset(touch_stub_attr, 0, sizeof touch_stub_attr);
     const int modes[] = {1, 1, 0, 0, 1, 0};
     for (int i = 0; i < 6; i++) {
         g_mode = modes[i]; memset(s, 0, sizeof s);
-        test_frame++;   // one read per presented frame: the sample is published once a frame
+        motion_now += TOUCH_GRID_NS;   // one read per grid step: a new sample each
         if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
         else h_hid_Touch1_16(s);
-        memcpy(&v, s, 8);
+        v = touch_num(s);
         CHECK(touch_points == !modes[i], "touch: touch points are asked for in handheld mode only");
         CHECK(v > prev, i == 2 ? "touch: handheld after docked continues the sampling numbers" : i == 4 ? "touch: docked after handheld continues the sampling numbers"
                                 : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
         prev = v;
     }
-    // One complete sample is published per guest frame and copied whole to every reader, so two
-    // readers in one frame see the same sampling number and the same Start / End edges (issue #2567:
-    // Animal Crossing's input manager and its own keyboard both read; the second used to see a held point).
+    // Two reads within 4 ms, either API in either order, share the sample: the same number and edges (issue #2567: Animal Crossing's input manager and its own keyboard both
+    // read; the second used to see a held point), and the sampler runs once. Exactly 4 ms after the newest sample is a new one.
     uint8_t s2[sizeof s]; int64_t a, b;
-    g_mode = 0; memset(s, 0, sizeof s); memset(s2, 0, sizeof s2); test_frame++;
-    h_hid_Touch1_16(s); h_hid_Touch1_16(s2);
-    memcpy(&a, s, 8); memcpy(&b, s2, 8);
-    CHECK(a == b, "touch: two readers in one guest frame share the sampling number");
-    CHECK(memcmp(s, s2, sizeof s) == 0, "touch: two readers in one guest frame get the same sample");
-    g_mode = 1;
+    g_mode = 0; motion_now += TOUCH_GRID_NS; memset(s, 0xA5, sizeof s); memset(s2, 0xA5, sizeof s2);
+    int64_t before = touch_samp; touch_stub_n = 1; touch_stub_attr[0] = 1;   // the sample carries a finger's Start
+    h_hid_Touch1_16(s); motion_now += 1; CHECK(h_hid_TouchN_16(s2, 1) == 1, "touch: a states read within 4 ms gives one state");
+    a = touch_num(s); b = touch_num(s2); int32_t sa; memcpy(&sa, s2 + 0x10 + 0x08, 4);
+    CHECK(a == b && touch_samp == before + 1, "touch: two reads within 4 ms share the sampling number and make one sample");
+    CHECK(memcmp(s, s2, 0x10 + 0x28 * 16) == 0 && touch_cnt(s2) == 1 && sa == 1, "touch: two reads within 4 ms get the same sample, the Start in both");
+    touch_stub_n = 0; touch_stub_attr[0] = 0;
+    memset(s2, 0xA5, sizeof s2); motion_now += TOUCH_GRID_NS - 2; h_hid_TouchN_16(s2, 1);   // 4 ms - 1 after the sample
+    CHECK(touch_num(s2) == a && touch_samp == before + 1, "touch: 4 ms - 1 after the newest sample still shares it");
+    memset(s2, 0xA5, sizeof s2); motion_now += 1; h_hid_Touch1_16(s2);   // exactly 4 ms after
+    CHECK(touch_num(s2) > a && touch_samp == before + 2, "touch: exactly 4 ms after the newest sample makes a new one");
+    CHECK(touch_guard(s2, 0x10 + 0x28 * 16, sizeof s2), "touch: a one-state read writes only its state");
+    touch_hist_clear(); before = touch_samp;   // within 4 ms of the newest sample, but none is kept
+    CHECK(h_hid_TouchN_16(s2, 1) == 1 && touch_samp == before + 1, "touch: with no sample kept, a read makes one whatever the clock");
+    // The history: the newest min(n, 16), newest first, one sample per 4 ms
+    uint8_t h[20 * 0x290 + 64];
+    touch_hist_clear(); g_mode = 0; touch_stub_n = 0; int64_t base = touch_samp;
+    for (int k = 1; k <= 20; k++) {
+        motion_now += TOUCH_GRID_NS; memset(h, 0xA5, sizeof h);
+        int r = h_hid_TouchN_16(h, 20); int want = k < 16 ? k : 16;
+        CHECK(r == want, "touch: GetTouchScreenStates returns min(samples kept, 16) states");
+        int ok = touch_guard(h, 0x290 * (size_t)want, sizeof h);
+        for (int i = 0; i < want; i++) ok &= touch_num(h + 0x290 * (size_t)i) == base + k - i;
+        CHECK(ok, "touch: states are the newest samples, newest first, the oldest dropped after 16");
+    }
+    CHECK(touch_guard(h, 0x290 * 16, sizeof h), "touch: a read for 20 states writes 16 and leaves the rest");
+    // A smaller reader: n below the samples kept returns n, each state at the reader's own stride with its count clamped to N
+    touch_stub_n = 3; motion_now += TOUCH_GRID_NS; h_hid_TouchN_16(h, 1);   // one sample with 3 fingers, then more
+    for (int k = 0; k < 4; k++) { motion_now += TOUCH_GRID_NS; h_hid_TouchN_16(h, 1); }
+    int64_t top = touch_samp; memset(h, 0xA5, sizeof h);
+    const size_t st2 = 0x10 + 0x28 * 2;
+    CHECK(h_hid_TouchN_2(h, 4) == 4, "touch: n below the samples kept returns n");
+    int ok = 1; for (int i = 0; i < 4; i++) ok &= touch_num(h + st2 * (size_t)i) == top - i && touch_cnt(h + st2 * (size_t)i) == 2;
+    CHECK(ok, "touch: each state is at the reader's stride, numbered newest first, its count clamped to N");
+    CHECK(touch_guard(h, st2 * 4, sizeof h), "touch: n states are written, no more");
+    memset(h, 0xA5, sizeof h); h_hid_Touch1_2(h);
+    CHECK(touch_cnt(h) == 2 && touch_num(h) == top, "touch: a one-state read clamps the count to N too");
+    motion_now += TOUCH_GRID_NS; h_hid_Touch1_2(h); memset(h, 0xA5, sizeof h); h_hid_TouchN_16(h, 1);   // a small reader makes the sample, a 16-finger reader follows within 4 ms
+    CHECK(touch_cnt(h) == 3 && touch_num(h) == touch_samp, "touch: a sample a small reader makes holds every finger for the next reader");
+    // An edge made at one read is still found in the history by a later reader
+    touch_hist_clear(); touch_stub_n = 1; touch_stub_attr[0] = 1; motion_now += TOUCH_GRID_NS; memset(h, 0xA5, sizeof h);
+    h_hid_TouchN_16(h, 2); int64_t start_no = touch_num(h);
+    touch_stub_attr[0] = 0; motion_now += TOUCH_GRID_NS; memset(h, 0xA5, sizeof h);
+    CHECK(h_hid_TouchN_16(h, 2) == 2, "touch: the history holds the Start sample and the next one");
+    int32_t at0, at1; memcpy(&at0, h + 0x10 + 0x08, 4); memcpy(&at1, h + 0x290 + 0x10 + 0x08, 4);
+    CHECK(at0 == 0 && at1 == 1 && touch_num(h + 0x290) == start_no && touch_num(h) > start_no, "touch: a later reader finds the Start at index 1 of the history");
+    // A mode change within 4 ms still makes a sample asked for in the new mode; two console reads within 4 ms share one
+    touch_stub_n = 0; touch_stub_attr[0] = 0; motion_now += TOUCH_GRID_NS; g_mode = 0; h_hid_Touch1_16(s);
+    int64_t n0 = touch_samp; g_mode = 1; motion_now += 1; h_hid_Touch1_16(s);
+    CHECK(touch_samp == n0 + 1 && touch_points == 0, "touch: handheld to docked within 4 ms makes a sample without points");
+    motion_now += 1; h_hid_Touch1_16(s2);
+    CHECK(touch_samp == n0 + 1 && touch_num(s2) == touch_num(s), "touch: two docked reads within 4 ms share a sampling number");
+    g_mode = 0; motion_now += 1; h_hid_Touch1_16(s);
+    CHECK(touch_samp == n0 + 2 && touch_points == 1 && touch_num(s) > touch_num(s2), "touch: docked to handheld within 4 ms makes a sample asking for points");
+    // n <= 0 returns 0, writes nothing and makes no sample
+    memset(h, 0xA5, sizeof h); motion_now += TOUCH_GRID_NS; int64_t n1 = touch_samp;
+    CHECK(h_hid_TouchN_16(h, 0) == 0 && h_hid_TouchN_16(h, -1) == 0, "touch: n <= 0 returns 0");
+    CHECK(touch_samp == n1 && touch_guard(h, 0, sizeof h), "touch: n <= 0 makes no sample and writes nothing");
+    // A read applies the DM_KEYS frame steps due in its frame first (keys_sync), so a replayed touch reaches the sample made at that read
+    keys_parse("f3:T0.5x0.25~f1,\n"); g_sync_next = g_sync_held = 0; atomic_store(&g_sync_on, 1); touch_down = 0;
+    test_frame = 3; motion_now += TOUCH_GRID_NS; h_hid_Touch1_16(s);
+    CHECK(touch_down && touch_x == .5f && touch_y == .25f, "touch: a read applies the DM_KEYS frame steps due in its frame first");
+    test_frame = 4; motion_now += TOUCH_GRID_NS; h_hid_Touch1_16(s);
+    CHECK(!touch_down && !atomic_load(&g_sync_on), "touch: the step is let go at the read of the frame its hold ends");
+    free(g_steps); g_steps = NULL; g_nsteps = g_cap_steps = 0; test_frame = 0; touch_new = 0;
+    g_mode = 1; touch_stub_n = 0; memset(touch_stub_attr, 0, sizeof touch_stub_attr);
 }
 
 // Unintended Home button input protection: one flag per npad, on until the game turns it off (Nintendo Switch Sports Resort asks, then turns it off for each npad)
@@ -1585,6 +1715,7 @@ int main(void) {
     t_vibration();
     t_opmode();
     t_joycons();
+    t_joycon_vibration_lifetime();
     t_unsupported_style();
     t_jcms();
     t_rumble_log();

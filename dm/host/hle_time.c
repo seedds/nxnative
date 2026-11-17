@@ -23,6 +23,11 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
+// The C++ clock form, a time_point of seconds in x0: the SDK asks the time service's steady-clock session (a global that time::Initialize fills) for GetCurrentTimePoint and returns 0
+// without one (SDK 3.7, sdk+0x16edf4 in Mega Man Legacy Collection). Initialize is taken over and makes no session, so the clock never moved: the same seconds as GetCurrentTimePoint
+HLE_FORCE("_ZN2nn4time19StandardSteadyClock3nowEv", "steady clock (std::chrono form) → host monotonic clock (seconds)", int64_t, h_time_SteadyClockNow, void) {
+    uint8_t tp[24]; h_time_SteadyNow(tp); int64_t s; memcpy(&s, tp, 8); return s;
+}
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
 }
@@ -207,10 +212,6 @@ HLE_FORCE("_ZN2nn4time18ToPosixTimeFromUtcERKNS0_12CalendarTimeE", "UTC calendar
     struct tm tm = {.tm_year = ct->year - 1900, .tm_mon = ct->month - 1, .tm_mday = ct->day, .tm_hour = ct->hour, .tm_min = ct->minute, .tm_sec = ct->second};
     return (int64_t)timegm(&tm);
 }
-// Local time conversion is forced onto the host libc: the SDK's own localtime / localtime_r / mktime have no time zone data and always use UTC
-// (a game's local timestamps were off by the time zone's offset). The SDK on a real Switch converts by the system time zone, so only following the host system time zone here is consistent;
-// the host TZ normally = the system time zone, and is pinned to UTC only for deterministic comparison with DM_FIXED_TIME (main.c). The struct tm layout is the same on both sides (9 ints, long offset, time zone name pointer).
-// gmtime / gmtime_r / timegm are UTC anyway and are not taken over. The same-named pass-through entries in hle_table.c only take effect when the symbol has no definition (the SDK defines them), hence HLE_FORCE
-HLE_FORCE("localtime", "local time → host localtime (follows the system time zone)", struct tm *, h_localtime, const int64_t *t) { time_t v = (time_t)*t; return localtime(&v); }
-HLE_FORCE("localtime_r", "local time → host localtime_r (follows the system time zone)", struct tm *, h_localtime_r, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return localtime_r(&v, out); }
-HLE_FORCE("mktime", "local calendar → absolute seconds, host mktime (follows the system time zone)", int64_t, h_mktime, struct tm *tm) { return (int64_t)mktime(tm); }
+// The C library's localtime / localtime_r / mktime are not taken over: on a Switch they are UTC. The SDK's musl time zone helper (__secs_to_zone) is a fixed stub, offset 0, no DST, name "UTC",
+// in every sdk checked from SDK 3.5.0 to 22.2.10, so its mktime(gmtime_r(t)) == t. Local time on a Switch comes only from nn::time (ToCalendarTime / ToPosixTime above, in the host's zone).
+// The host once forced them onto its own local-time functions: Hades II then read its save times' UTC struct tm as local time and showed them shifted by the host's offset (issue #2784)

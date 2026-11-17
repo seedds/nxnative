@@ -106,6 +106,7 @@ int main(void) {
     uint64_t *call = emit(&s0, OP_CALL, 8); *call = (uint64_t)(uintptr_t)s1.p;
     uint64_t *jump = emit(&s0, OP_JUMP, 8); *jump = (uint64_t)(uintptr_t)s2.p;
     p_clear_buf *cb = emit(&s1, OP_CLEAR_BUF, sizeof *cb); *cb = (p_clear_buf){(uint64_t)(uintptr_t)pool_a + 0x8000, 0x100, 0xdeadbeef, 0};
+    p_viewports *vp = emit(&s1, OP_VIEWPORTS, sizeof *vp); vp->n = 1; vp->v[0][2] = 1280; vp->v[0][3] = 720; vp->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT + 1;
     emit(&s1, OP_END, 0);
     uint64_t *fs = emit(&s2, OP_FENCE_SYNC, 8); *fs = (uint64_t)(uintptr_t)&game_sync;
     p_render_cond *rc = emit(&s2, OP_RENDER_COND, sizeof *rc); rc->mode = 1; rc->addr = (uint64_t)(uintptr_t)pool_b + 0x2000;
@@ -127,10 +128,12 @@ int main(void) {
 
     cap_writer w; CHECK(cap_open(&w, path), "open for writing");
     const char *lay = cap_layout();
+    const char *legacy = "format 1\nops 54\n";
+    CHECK(!cap_layout_matches(legacy, strlen(legacy)), "old absolute descriptor handles require a new capture");
+    const char *origin_layout = strstr(lay, "p_viewports 392");
+    CHECK(origin_layout && cap_layout_matches(lay, (size_t)(origin_layout - lay)), "format-2 captures before recorded viewport origins remain readable");
     const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
-    CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
-    const char *strides_layout = strstr(lay, "p_copy_strides");
-    CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
+    CHECK(multi_layout && !cap_layout_matches(lay, (size_t)(multi_layout - lay)), "an incomplete format-2 layout remains rejected");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
@@ -162,6 +165,7 @@ int main(void) {
     for (int i = 0; i < 3; i++) walk(all[i], segbuf[i], &dec, NULL);
     // every field: the same offset in the fresh region, or the rebuilt object
 #define AT(i, ptr, T) (*(T *)(segbuf[i] + ((const uint8_t *)(ptr) - all[i]->p)))
+    CHECK(AT(1, vp, p_viewports).origin == vp->origin, "recorded viewport origin survives relocation");
     const p_set_rt *rt = (const p_set_rt *)(segbuf[0] + 8);
     CHECK(rt->n == 2 && rt->color[1] == &new_tex, "a texture object pointer → the rebuilt object");
     CHECK((const uint8_t *)rt->color[0] > segbuf[0] && (const uint8_t *)rt->color[0] < segbuf[0] + seglen[0], "a snapshot inside the record → the same place in the copy");

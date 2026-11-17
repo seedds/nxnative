@@ -414,7 +414,8 @@ NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NV
 
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
-    if dmsh_ampere.is_nvn2(rec[ci:]) and rec[ci + 0x56] == 8:
+    # Short NVN2 graphics control sections have no optional stage byte.
+    if dmsh_ampere.is_nvn2(rec[ci:]) and len(rec) > ci + 0x56 and rec[ci + 0x56] == 8:
         raise ValueError(f'{key}: stage8 RT record reached the ordinary shader path; correct its shader_map stage')
     extra = {}
     if dmsh_ampere.is_nvn2(rec[ci:]):

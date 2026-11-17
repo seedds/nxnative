@@ -731,6 +731,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the key hashes the first `min(0x880, control +0x20)` bytes (`ctl_len` in `shader_split.py`, `keys_hash` in `hle_nvn.c`); the other games' tables came out byte-identical.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10).
 
+### Optional stage byte in short NVN2 control sections
+
+- **Symptom:** the offline shader build raises `IndexError: index out of range` in `job_for` while reading `rec[ci + 0x56]`, after the shader split succeeds.
+- **Cause:** NVN2 identification needs only the 0x48-byte base control header. A valid short graphics control section can omit the optional stage byte at +0x56; the ordinary-job RT rejection read it without checking the section's length. The package's stored code length and control marker agree, so this is not a misplaced control boundary.
+- **Fix:** check that +0x56 exists before testing it for stage 8. Short graphics records retain their ordinary translation path; records with an explicit RT stage still fail there and must use the RT build path. Synthetic job tests cover control lengths 0x48, 0x50, 0x56, 0x57 and 0xe0, retained code/constants, and explicit RT rejection.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md), [issue #2916](https://github.com/seedds/nxnative/issues/2916): vertex key `22fff9012db5acaa`, `vs_other.bin` index 81, `agl_common.sharcb#BAHS@0x27ea4`, has a 0x50-byte NVN2 control section. Resolved, 2026-11-17.
+
 ### Program keys computed inside `nvnProgramSetShaders`
 
 - **Symptom:** shaders reported missing at random, and their dumped control sections are garbage (Unity). Also: about 130 `[RED] shader … is not in the shader map` keys a boot, nearly all different from run to run, all single-stage programs, with `program has no vertex shader`, and every frame the same picture of grey noise; with `DM_NVN_SHDUMP` set the game draws correctly.

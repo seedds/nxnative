@@ -105,6 +105,7 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 
 ## Found on this game
 
+- [Cached dirty-range lookups with overlapping pools](../../../docs/reference/nvn-objects.md#cached-dirty-range-lookups-with-overlapping-pools): sparse-texture lookup locality motivated the cache; overlapping-pool missed writes are reproduced by CPU fixtures, not attributed to a particular gameplay image.
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution never stepped down with one time per submission; with the GPU's idle gaps counted it swung and distant detail flickered
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the interval chosen from CPU time.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)

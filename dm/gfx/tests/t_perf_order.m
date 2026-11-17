@@ -169,6 +169,51 @@ static void faces(id<MTLLibrary> lib) {
     CHECK("and gives the same layers",!faces_read(&t));
 }
 
+// Face-split draws of one level size into other textures or layers join the first one's pass (fsm_plan, DM_NVN_FACE_MERGE), passing over draws into another level: X level 0,
+// X level 1, then the halves of Y (layers 0-5 and 6-11) at levels 0 and 1, the order Mario Kart World's three cube chains come in. Two passes of three attachments instead of six,
+// and every layer of both levels holds its own output (the textures are cleared to zero first, so a draw that went nowhere shows)
+static tex_t texture_lv(int target, int format, int layers, int levels) { tex_t t=texture(target,format,layers); t.d.levels=levels; nvn_tex_layout(&t.d,&t.L); return t; }
+static int layers_read(const tex_t *t, int level, int base) {   // layers base..base+5 of the level: layer base+s must hold output 5-s
+    id<MTLTexture> mt=tex_mtl(t); NSUInteger w=MAX(8u>>level,1u); NSUInteger img=w*w*4;
+    id<MTLBuffer> out=[g_dev newBufferWithLength:img*6 options:MTLResourceStorageModeShared]; if(!out) return 0x3f;
+    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+    for(int s=0;s<6;s++) [e copyFromTexture:mt sourceSlice:(NSUInteger)(base+s) sourceLevel:(NSUInteger)level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,w,1) toBuffer:out destinationOffset:(NSUInteger)s*img destinationBytesPerRow:w*4 destinationBytesPerImage:img];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    int bad=0; const uint8_t *bytes=out.contents;
+    for(int s=0;s<6;s++) { int k=5-s; uint8_t want[4]={(uint8_t)(51*k),(uint8_t)(255-51*k),255,255};
+        for(NSUInteger i=0;i<w*w;i++) if(memcmp(bytes+(NSUInteger)s*img+4*i,want,4)) { bad|=1<<s; break; } }
+    return bad;
+}
+static void layers_zero(const tex_t *t, int levels, int layers) {
+    id<MTLTexture> mt=tex_mtl(t); id<MTLCommandBuffer> cb=[g_q commandBuffer];
+    for(int l=0;l<levels;l++) for(int s=0;s<layers;s++) { MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];
+        d.colorAttachments[0].texture=mt; d.colorAttachments[0].level=(NSUInteger)l; d.colorAttachments[0].slice=(NSUInteger)s;
+        d.colorAttachments[0].loadAction=MTLLoadActionClear; d.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,0); d.colorAttachments[0].storeAction=MTLStoreActionStore;
+        [[cb renderCommandEncoderWithDescriptor:d] endEncoding]; }
+    [cb commit]; [cb waitUntilCompleted];
+}
+static void faces_target(chain *c, const tex_t *t, int level, int base) {
+    p_set_rt r={.n=6}; for(int i=0;i<6;i++) { r.color[i]=t; r.has_cview[i]=1; r.cview[i]=(view_t){.set_levels=1,.set_layers=1,.base_level=(uint8_t)level,.nlevels=1,.min_layer=(uint16_t)(base+5-i),.nlayers=1}; }
+    emit(c,OP_SET_RT,&r,sizeof r);
+}
+static void merges(id<MTLLibrary> lib) {
+    tex_t x=texture_lv(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6,2), y=texture_lv(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,12,2);
+    prog_t pg={0}; NvProg *p=make_program(lib,&pg,"six");
+    p->sh[0]->fn=fn4_note(p->sh[0]->fn,lib,@"v",nil); p->sh[1]->fn=fn4_note(p->sh[1]->fn,lib,@"six",nil); p->sh[1]->rf.color_mask=0x3f;
+    chain c={0}; bind(&c,&pg,3);
+    const struct { const tex_t *t; int level, base; } order[6]={{&x,0,0},{&x,1,0},{&y,0,0},{&y,1,0},{&y,0,6},{&y,1,6}};
+    for(int i=0;i<6;i++) { faces_target(&c,order[i].t,order[i].level,order[i].base); triangle(&c); }
+    execute(&c);   // the pipelines, if this program's are not built yet
+    for(int i=0;i<g_sm_amp_n;i++) for(int k=0;k<2000;k++) { os_unfair_lock_lock(&g_sm_amp_lock); int done=g_sm_amp[i].done; os_unfair_lock_unlock(&g_sm_amp_lock); if(done) break; usleep(1000); }
+    const char *fs=getenv("DM_NVN_FACE_SPLIT"), *fm=getenv("DM_NVN_FACE_MERGE"); int split=!(fs && !strcmp(fs,"0")), on=split && !(fm && !strcmp(fm,"0"));
+    layers_zero(&x,2,6); layers_zero(&y,2,12);
+    c.n-=8; uint64_t p0=g_fsp_npass, m0=g_fsm_npass, d0=g_fsm_moved; execute(&c);
+    CHECK("face-split draws of one level size into other textures and layers join the first one's pass",g_fsm_npass-m0==(uint64_t)(on?2:0) && g_fsm_moved-d0==(uint64_t)(on?4:0));
+    CHECK("six face-split draws in two passes, passing over the other level's",g_fsp_npass-p0==(uint64_t)(split?(on?2:6):0));
+    CHECK("every layer of both levels holds its own output",!layers_read(&x,0,0) && !layers_read(&x,1,0) && !layers_read(&y,0,0) && !layers_read(&y,0,6) && !layers_read(&y,1,0) && !layers_read(&y,1,6));
+    CHECK("no moved draw is left for a later submission",g_fsm_ntaken==0);
+}
+
 static void hoists(id<MTLLibrary> lib) {
     prog_t pg={0}, cp={.serial=910000}; make_program(lib,&pg,"red");
     NvProg *cs=[NvProg new]; cs->sh[5]=[NvShader new]; cs->sh[5]->stage=5;
@@ -352,6 +397,6 @@ int main(int argc, char **argv) { @autoreleasepool {
         "struct Args { device uint *p [[id(0)]]; };\n"
         "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n" options:nil error:&error];
     if(!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
-    slices(lib); faces(lib); hoists(lib); posts();
+    slices(lib); faces(lib); merges(lib); hoists(lib); posts();
     printf("performance ordering: %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

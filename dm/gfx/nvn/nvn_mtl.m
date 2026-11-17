@@ -5502,6 +5502,16 @@ static int g_fsp_pass, g_fsp_n; static uint8_t g_fsp_layer[8]; static __unsafe_u
 static MTLLogicalToPhysicalColorAttachmentMap *g_fsp_map[8];   // colour output i to attachment 0, made once
 static uint64_t g_fsp_npass, g_fsp_nwait;   // face-split passes; draws that kept their targets because a pipeline was not built yet
 void mtl_fsp_stats(uint64_t *np, uint64_t *nw) { *np = g_fsp_npass; *nw = g_fsp_nwait; }
+// Face-split draws merged by level (DM_NVN_FACE_MERGE, see fsm_plan): later face-split draws into other textures of the same level size join the open face-split pass, g_fsm[k] as
+// attachment k + 1, and the replay skips them where it reaches them (fsm_take)
+enum { FSM_MAX = 3, FSM_TAKEN = 64 };
+typedef struct { const uint8_t *op; p_set_rt rt; NSUInteger level, slice; uint64_t ser; int n; uint8_t layer[8]; __unsafe_unretained id<MTLRenderPipelineState> ps[8]; } fsm_draw;
+static fsm_draw g_fsm[FSM_MAX]; static int g_fsm_np, g_fsm_na, g_fsp_phys;   // planned for the pass rp_begin_ex opens next; attached to the open pass; the attachment fsp_encode draws into
+static const uint8_t *g_fsm_taken[FSM_TAKEN]; static int g_fsm_ntaken; static uint64_t g_fsm_taken_sub;   // moved draws the replay has not reached yet, in submission g_fsm_taken_sub
+static uint64_t g_fsm_moved, g_fsm_npass;
+static MTLLogicalToPhysicalColorAttachmentMap *g_fsm_map[FSM_MAX + 1][8];   // colour output i to attachment k, made once
+void mtl_fsm_stats(uint64_t *moved, uint64_t *passes) { *moved = g_fsm_moved; *passes = g_fsm_npass; }
+static void fsm_attach(MTL4RenderPassDescriptor *pd);
 void mtl_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = g_sm_npass; *nc = g_sm_ncont; *nw = g_sm_nwait; }
 static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;   // Already set on this encoder (not set again if identical)
 // Dynamic state already sent on the open render encoder: each draw used to send all nine (stencil reference, viewport, scissor, cull, winding, fill, depth bias, depth clip, blend colour);
@@ -6439,6 +6449,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
             PD("L %llu layered clear: layers %lu-%lu", g_stat_pass + 1, (unsigned long)pd.colorAttachments[k].slice, (unsigned long)(pd.colorAttachments[k].slice + (NSUInteger)g_lc_layers - 1));
         } else g_lc_layers = 1;   // not attached as lc_layer_run expected: this pass clears its first layer, and lc_land lands the others one by one
     }
+    g_fsm_na = 0;
+    if (g_fsm_np) { if (g_fsp_pass) fsm_attach(pd); g_fsm_np = 0; }   // later face-split draws of the same level size moved into this pass (fsm_plan)
     pg_render(pd, (NSUInteger)R.rt.n);
     { void td_note(id pd, NSUInteger nc); td_note(pd, (NSUInteger)R.rt.n);
       void ts_note(id pd, NSUInteger nc); ts_note(pd, (NSUInteger)R.rt.n);
@@ -14979,11 +14991,204 @@ static void fsp_encode(id<MTLRenderCommandEncoder> en, MTLPrimitiveType mp, cons
         il = ((__bridge id<MTLBuffer>)mb).length - mo; ty = di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32; }
     for (int i = 0; i < g_fsp_n; i++) { __unsafe_unretained id<MTLRenderPipelineState> ps = g_fsp_ps[i]; if (!ps) continue;
         if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
-        [(id<MTL4RenderCommandEncoder>)en setColorAttachmentMap:g_fsp_map[i]];
+        [(id<MTL4RenderCommandEncoder>)en setColorAttachmentMap:g_fsp_phys ? g_fsm_map[g_fsp_phys][i] : g_fsp_map[i]];
         MTLVertexAmplificationViewMapping vm = {0, g_fsp_layer[i]}; [(id<MTL4RenderCommandEncoder>)en setVertexAmplificationCount:1 viewMappings:&vm];
         if (di) enc_r_draw_indexed(en, mp, di->count, ty, gpu, il, 1, di->base_vertex, di->base_instance);
         else enc_r_draw(en, mp, dw->first, dw->count);
     }
+}
+// Face-split draws merged by level (DM_NVN_FACE_MERGE, on by default; 0 off, ab alternates with DM_AB). Mario Kart World filters three cube chains a frame (two cube textures, one
+// of them an array of two cubes), seven levels each, every level a face-split pass of its own (fsp_plan): 21 passes. Each level of a chain samples only the chain's source cube, so the
+// three chains' passes of one level size can be one pass with three attachments: 21 passes a frame become 7, and the GPU time of a race frame is about 0.5 ms shorter on an M3 Max
+// (docs/reference/rendering.md, "Face-split passes of one level size, one per texture"). When a face-split pass is about to open, fsm_plan scans the ops after its draw in
+// replay order (as cs_hoist_try does), applying state ops and target
+// changes, for face-split draws into other textures or layers whose level has the same size, format and layer count. One joins the pass when nothing passed over reads or writes its
+// targets and nothing passed over writes what it samples. Every draw passed over must draw into colour targets only and sample known textures (TEX and read-only IMG slots: no
+// bindless, pool, handle, buffer-texture, storage or global memory reads); the scan stops at any other draw or op (a clear, a copy, a dispatch, an inline update, a query). fsm_run
+// draws the joined draws after the pass's own draw with their own state, and the replay skips them where it reaches them (fsm_take)
+static int fsm_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_FACE_MERGE", 1); if (!m) MLOG("DM_NVN_FACE_MERGE=0: each face-split draw keeps a pass of its own"); } return sw_on(m); }
+static int fsm_taken_has(const uint8_t *p) { for (int i = 0; i < g_fsm_ntaken; i++) if (g_fsm_taken[i] == p) return 1; return 0; }
+static int fsm_take(const uint8_t *p) { for (int i = 0; i < g_fsm_ntaken; i++) if (g_fsm_taken[i] == p) { g_fsm_taken[i] = g_fsm_taken[--g_fsm_ntaken]; return 1; } return 0; }
+// The textures a draw's vertex and fragment shaders sample, added to s[*n..] once each; 0 when they read anything else that could be a render target's memory, or past cap
+static int fsm_reads(NvProg *pr, uint64_t *s, int *n, int cap) {
+    for (int st = 0; st < 2; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        if (sh->rf.bindless || sh->rf.pool || sh->rf.dyn || sh->rf.htab) return 0;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; int tid;
+            switch (b->kind) {
+                case NVN_RB_CBUF: case NVN_RB_SAMP: case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_SAMPT: case NVN_RB_UBOP: case NVN_RB_SAMPU:
+                case NVN_RB_SAMPI: case NVN_RB_SAMPD: case NVN_RB_SAMPA: case NVN_RB_SAMPP: case NVN_RB_SAMPH: case NVN_RB_BORDER: case NVN_RB_PUSH: case NVN_RB_CBSIZE: case NVN_RB_TBIAS:
+                case NVN_RB_SBLEN: continue;
+                case NVN_RB_TEX: if (b->reg >= NTEX) return 0; tid = (int)(tex_slot_h(S.tex[st], S.img[st], b->reg) & 0xfffff); break;
+                case NVN_RB_IMG: if (b->rw || b->atom || b->reg >= 32) return 0; tid = (int)(S.img[st][b->reg] & 0xfffff); break;
+                default: return 0;
+            }
+            uint64_t ser = tid_ser(tid); if (!ser) continue;
+            int seen = 0; for (int k = 0; k < *n && !seen; k++) seen = s[k] == ser;
+            if (seen) continue;
+            if (*n >= cap) return 0;
+            s[(*n)++] = ser; }
+    }
+    return 1;
+}
+// The level and layers the current targets 0..n-1 attach as one layered attachment (as rp_begin_ex's face-split pass does): one texture and level, distinct layers lo..hi within 8
+typedef struct { __unsafe_unretained id<MTLTexture> tex; NSUInteger level, lo, hi; uint64_t ser; uint8_t layer[8]; } fsm_tgt;
+static int fsm_target(int n, fsm_tgt *o) {
+    MTLRenderPassColorAttachmentDescriptor *c = [MTLRenderPassColorAttachmentDescriptor new]; NSUInteger sl[8]; o->lo = NSUIntegerMax; o->hi = 0; o->tex = nil;
+    for (int i = 0; i < n && i < 8; i++) {
+        attach(c, R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i]);
+        if (!c.texture || (i && (c.texture != o->tex || c.level != o->level))) return 0;
+        if (!i) { o->tex = c.texture; o->level = c.level; o->ser = R.rt.color[0]->serial; }
+        sl[i] = c.slice; o->lo = MIN(o->lo, sl[i]); o->hi = MAX(o->hi, sl[i]);
+        for (int j = 0; j < i; j++) if (sl[j] == sl[i]) return 0;
+    }
+    if (!o->tex || o->hi - o->lo >= 8 || o->tex.textureType == MTLTextureType3D || o->tex.textureType == MTLTextureType2D || o->tex.sampleCount != 1) return 0;
+    for (int i = 0; i < n && i < 8; i++) o->layer[i] = (uint8_t)(sl[i] - o->lo);
+    return 1;
+}
+static int fsm_scissor_empty(NSUInteger tw, NSUInteger th) {   // draw_'s test: the draw would be dropped
+    if (!R.has_sc || S.rast_discard) return 0;
+    long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+    if (x1 > (long)tw) x1 = (long)tw; if (y1 > (long)th) y1 = (long)th;
+    return x1 <= x0 || y1 <= y0;
+}
+// The draw about to open a face-split pass (fsp_plan admitted it, g_fsp_plan): plan the later draws that join it (g_fsm, g_fsm_np)
+static void fsm_plan(NvProg *pr0) {
+    g_fsm_np = 0;
+    if (!fsm_on() || !g_exec_next || g_ret_n > 8 || g_nlc || g_nubd || g_vis_counting || !pr0) return;
+    if (g_fsm_taken_sub != g_sub_serial) { g_fsm_ntaken = 0; g_fsm_taken_sub = g_sub_serial; }   // a submission's moved draws are all reached in it
+    if (g_fsm_ntaken > FSM_TAKEN - FSM_MAX) return;
+    fsm_tgt t0; int n0 = g_fsp_plan.n; uint32_t fmt0 = g_fsp_plan.fmt;
+    if (!fsm_target(n0, &t0)) return;
+    NSUInteger w0 = mip_extent(t0.tex.width, t0.level), h0 = mip_extent(t0.tex.height, t0.level), nl0 = t0.hi - t0.lo + 1;
+    enum { FW = 48, FR = 64 }; struct { uint64_t ser; NSUInteger level, lo, hi; } wr[FW]; int nw = 0; uint64_t rd[FR]; int nr = 0;   // written (targets) and sampled so far
+    if (!fsm_reads(pr0, rd, &nr, FR)) return;
+    wr[nw].ser = t0.ser; wr[nw].level = t0.level; wr[nw].lo = t0.lo; wr[nw].hi = t0.hi; nw++;
+    static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
+    __typeof__(g_fsp_plan) fp = g_fsp_plan; __unsafe_unretained id<MTLRenderPipelineState> fps[8]; for (int i = 0; i < 8; i++) fps[i] = g_fsp_ps[i];
+    op_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
+    for (int guard = 0, passed = 0; guard < 2048 && passed < 32 && g_fsm_np < FSM_MAX; guard++) {
+        const uint8_t *q; op_hdr h; const void *a;
+        if (!op_next(&cur, &q, &h, &a)) break;
+        if (h.op == OP_SET_RT) { R.rt = *(const p_set_rt *)a; R.has_rt = 1; continue; }
+        if (h.op == OP_BARRIER) continue;   // no draw that joins depends on what it orders (below)
+        if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) {
+            if (fsm_taken_has(q)) continue;   // joined an earlier pass: drawn there
+            p_draw td; p_draw_idx ti; const p_draw *d = h.op == OP_DRAW ? draw_rec(a, h.size, &td) : NULL; const p_draw_idx *x = h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &ti) : NULL;
+            prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil;
+            int n = 0; while (R.has_rt && n < R.rt.n && n < 8 && R.rt.color[n]) n++;
+            if (!pr || !pr->sh[0] || !pr->sh[1] || pr->sh[2] || pr->sh[3] || pr->sh[4] || !R.has_rt || R.rt.depth || n < 1) break;   // colour targets only
+            int nr0 = nr; if (!fsm_reads(pr, rd, &nr, FR)) break;
+            const tex_t *c0 = R.rt.color[0]; NSUInteger lv = R.rt.has_cview[0] && R.rt.cview[0].set_levels ? R.rt.cview[0].base_level : 0;
+            int join = MAX(c0->d.width >> lv, 1u) == w0 && MAX(c0->d.height >> lv, 1u) == h0 && n == n0;
+            fsm_tgt t = {0};
+            if (join) { fsp_plan(pr, d, x); join = g_fsp_plan.on && g_fsp_plan.n == n0 && g_fsp_plan.fmt == fmt0 && fsm_target(n0, &t) && t.hi - t.lo + 1 == nl0
+                        && mip_extent(t.tex.width, t.level) == w0 && mip_extent(t.tex.height, t.level) == h0 && S.poly.cull != NVN_FACE_FRONT_AND_BACK && !fsm_scissor_empty(w0, h0); }
+            for (int i = nr0; i < nr && join; i++) for (int j = 0; j < nw && join; j++) join = rd[i] != wr[j].ser;   // samples nothing written before it
+            for (int j = 0; j < nw && join; j++) join = !(wr[j].ser == t.ser && wr[j].level == t.level && wr[j].lo <= t.hi && t.lo <= wr[j].hi);   // writes no layer written before it
+            for (int i = 0; i < nr0 && join; i++) join = rd[i] != t.ser;   // nothing before it samples its texture
+            if (join) {
+                fsm_draw *m = &g_fsm[g_fsm_np++]; m->op = q; m->rt = R.rt; m->level = t.level; m->slice = t.lo; m->ser = t.ser; m->n = n0;
+                memcpy(m->layer, t.layer, sizeof m->layer); for (int i = 0; i < 8; i++) m->ps[i] = g_fsp_ps[i];
+                image_prepare(pr, 0x1f); vbuf_prepare(&pr->sh[0]->rf, d, x);   // what draw_ prepares before its pass opens
+                if (nw >= FW) break;
+                wr[nw].ser = t.ser; wr[nw].level = t.level; wr[nw].lo = t.lo; wr[nw].hi = t.hi; nw++;
+                continue; }
+            passed++;
+            for (int i = 0; i < n; i++) {   // passed over: all of its targets' layers count as written (one entry per texture level)
+                NSUInteger l = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0; uint64_t s = R.rt.color[i]->serial; int have = 0;
+                for (int j = 0; j < nw && !have; j++) have = wr[j].ser == s && wr[j].level == l && wr[j].lo == 0 && wr[j].hi == NSUIntegerMax;
+                if (have) continue;
+                if (nw >= FW) { passed = 32; break; }
+                wr[nw].ser = s; wr[nw].level = l; wr[nw].lo = 0; wr[nw].hi = NSUIntegerMax; nw++; }
+            continue; }
+        if (h.op == OP_UPDATE_UB) break;
+        if (state_op(h.op, a)) continue;
+        break;
+    }
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
+    g_fsp_plan = fp; for (int i = 0; i < 8; i++) g_fsp_ps[i] = fps[i];
+}
+static void fsm_attach(MTL4RenderPassDescriptor *pd) {
+    MTLRenderPassColorAttachmentDescriptor *c0 = pd.colorAttachments[0]; NSUInteger nl = pd.renderTargetArrayLength ? pd.renderTargetArrayLength : 1;
+    for (int k = 0; k < g_fsm_np && k < FSM_MAX; k++) { fsm_draw *m = &g_fsm[k]; MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[k + 1];
+        if (c.texture || !c0.texture) break;
+        attach(c, m->rt.color[0], &m->rt.cview[0], m->rt.has_cview[0]);
+        id<MTLTexture> t = c.texture;
+        NSUInteger layers = t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? t.arrayLength * 6 : t.arrayLength;
+        if (!t || c.level != m->level || t.pixelFormat != c0.texture.pixelFormat || t.textureType == MTLTextureType2D || t.textureType == MTLTextureType3D || m->slice + nl > layers
+            || mip_extent(t.width, c.level) != mip_extent(c0.texture.width, c0.level) || mip_extent(t.height, c.level) != mip_extent(c0.texture.height, c0.level)) { pd.colorAttachments[k + 1] = nil; break; }
+        c.slice = m->slice; c.loadAction = MTLLoadActionLoad; c.storeAction = MTLStoreActionStore;
+        uint64_t b = att_bytes(t, c.level); g_bw_load += b; g_bw_store += b;
+        PD("P %llu c%d ser=%llu fmt=%lu %lux%lu ms1 lv%lu sl%lu load mtl=%p", g_stat_pass + 1, k + 1, (unsigned long long)m->ser, (unsigned long)t.pixelFormat, (unsigned long)t.width,
+           (unsigned long)t.height, (unsigned long)c.level, (unsigned long)c.slice, (__bridge void *)t);
+        g_fsm_na = k + 1;
+    }
+    if (!g_fsm_na) return;
+    if (!g_fsm_map[1][0]) for (int k = 1; k <= FSM_MAX; k++) for (int i = 0; i < 8; i++) { g_fsm_map[k][i] = [MTLLogicalToPhysicalColorAttachmentMap new]; [g_fsm_map[k][i] setPhysicalIndex:(NSUInteger)k forLogicalIndex:(NSUInteger)i]; }
+    g_fsm_npass++;
+    static int once; if (!once++) MLOG("face-split draws merged by level: %d later face-split draws of the same level size joined the pass (first case pass %llu; DM_NVN_FACE_MERGE)", g_fsm_na, g_stat_pass + 1);
+    PD("L %llu face-split draws of %d later targets joined this pass as attachments 1-%d", g_stat_pass + 1, g_fsm_na, g_fsm_na);
+}
+// A joined draw on the open face-split pass, with the state the ops before it set: what draw_ does for a face-split draw (fsp_plan admits only a vertex and a fragment shader, no depth or
+// stencil target, no blending, logic operation, alpha test or storage writes). 1 drawn, 0 not (the replay draws it where it is), -1 the pass ended
+static int fsm_encode(id<MTL4RenderCommandEncoder> en, NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    NSUInteger tw = g_pass.tw, th = g_pass.th;
+    MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+    if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }
+    { uint32_t sw; memcpy(&sw, S.vp_sw[0], 4); if (sw == 0x100) { v.originY += v.height; v.height = -v.height; } else if (sw) return 0; }
+    MTLScissorRect sc = {0, 0, tw, th};
+    if (R.has_sc && !S.rast_discard) {
+        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        if (x1 > (long)tw) x1 = (long)tw; if (y1 > (long)th) y1 = (long)th;
+        if (x1 <= x0 || y1 <= y0) return 0;
+        sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
+    }
+    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK) return 0;
+    enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP;
+    enc_r_scissor(en, sc); g_ed.sc = sc; g_ed.ok |= ED_SC;
+    int cu = S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;
+    int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;
+    int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+    if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
+    if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
+    if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
+    if (bind_vbufs(en, &pr->sh[0]->rf) >= 0) return 0;
+    vconv_bind(en, pr->sh[0], S.rast_discard, dw, di);
+    encode_args((id<MTLCommandEncoder>)(id)en, pr->sh[0], pr->sh[0]->stage == 4 ? 4 : 0, 1);
+    encode_args((id<MTLCommandEncoder>)(id)en, pr->sh[1], 1, 0);
+    if ((id)g_enc != (id)en) return -1;   // binding upgraded a texture, which ended the pass (draw_)
+    if (pr->sh[1]->has_bz) bz_bind((id<MTLCommandEncoder>)(id)en, NULL);
+    g_stat_draw++;
+    fsp_encode((id<MTLRenderCommandEncoder>)en, (dw ? dw->prim : di->prim) == 5 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle, dw, di);
+    return 1;
+}
+// After the pass's own draw: the joined draws, each with the state the ops before it set; then the pass's state again
+static void fsm_run(id<MTL4RenderCommandEncoder> en) {
+    int n = g_fsm_na; g_fsm_na = 0;
+    if (!n || !g_exec_next) return;
+    static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty, fn = g_fsp_n;
+    uint8_t fl[8]; memcpy(fl, g_fsp_layer, sizeof fl); __unsafe_unretained id<MTLRenderPipelineState> fps[8]; for (int i = 0; i < 8; i++) fps[i] = g_fsp_ps[i];
+    op_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
+    for (int guard = 0, k = 0; guard < 4096 && k < n; guard++) {
+        const uint8_t *q; op_hdr h; const void *a;
+        if (!op_next(&cur, &q, &h, &a)) break;
+        if (h.op == OP_SET_RT) { R.rt = *(const p_set_rt *)a; R.has_rt = 1; continue; }
+        if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) {
+            if (q != g_fsm[k].op) continue;
+            p_draw td; p_draw_idx ti; const p_draw *d = h.op == OP_DRAW ? draw_rec(a, h.size, &td) : NULL; const p_draw_idx *x = h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &ti) : NULL;
+            prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil;
+            g_fsp_n = g_fsm[k].n; memcpy(g_fsp_layer, g_fsm[k].layer, sizeof g_fsp_layer); for (int i = 0; i < 8; i++) g_fsp_ps[i] = g_fsm[k].ps[i]; g_fsp_phys = k + 1;
+            int r = pr && pr->sh[0] && pr->sh[1] ? fsm_encode(en, pr, d, x) : 0;
+            g_fsp_phys = 0;
+            if (r < 0) break;   // the pass ended: the rest are drawn where they are
+            if (r > 0) { g_fsm_taken[g_fsm_ntaken++] = q; g_fsm_moved++; PD("L %llu face-split draw into ser=%llu lv%lu sl%lu joined as attachment %d", g_stat_pass, (unsigned long long)g_fsm[k].ser,
+                                                                            (unsigned long)g_fsm[k].level, (unsigned long)g_fsm[k].slice, k + 1); }
+            k++; continue; }
+        if (h.op == OP_BARRIER || state_op(h.op, a)) continue;
+        break;   // fsm_plan passed only state, targets, barriers and draws
+    }
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = 1 | pso_dirty; g_dss_dirty = 1 | dss_dirty; prog_resolve();
+    g_fsp_n = fn; memcpy(g_fsp_layer, fl, sizeof fl); for (int i = 0; i < 8; i++) g_fsp_ps[i] = fps[i];
 }
 static void wide_run(const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
@@ -15671,6 +15876,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
     if (!g_enc && !g_rp_layered && g_exec_next && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
     if (!g_enc && !g_rp_layered && !g_geo_program && !g_wl.on && !g_mtk.on && !g_geo_mesh.on) fsp_plan(pr, dw, di);
+    if (g_fsp_plan.on) fsm_plan(pr);   // later face-split draws of the same level size that can join this pass (DM_NVN_FACE_MERGE)
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
     unsigned dsi_need = (S.ds.dt ? 1u : 0u) | (S.ds.st ? 2u : 0u);   // the planes this draw tests or writes (dss_get); an open pass that attached them idle ends first (DM_NVN_DS_IDLE)
     dsi_guard(dsi_need); g_dsi_ask = dsi_need;
@@ -15862,7 +16068,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_kd_force = 0;
     udc_note_draw(pr, raster_mask);
     swrite_note(pr); order_note(pr);
-    if (g_fsp_pass) { fsp_encode(en, mp, dw, di); rp_end(); return; }
+    if (g_fsp_pass) { fsp_encode(en, mp, dw, di); if (g_fsm_na) fsm_run((id<MTL4RenderCommandEncoder>)en); rp_end(); return; }
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
     if (g_wl.on) { wl_encode(en); return; }   // nvn_wline.inc: 6 vertices a segment
@@ -17631,8 +17837,10 @@ void mtl_exec(const uint8_t *p) {
                 if (!g_rc_skip) draw_multi(a);
                 g_mdx_epoch++;
                 break;
-            case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
-            case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
+            case OP_DRAW: { if (g_rc_skip) break; if (g_fsm_ntaken && fsm_take(p)) { PD("L %llu face-split draw already drawn in an earlier pass (DM_NVN_FACE_MERGE)", g_stat_pass); break; }
+                p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
+            case OP_DRAW_IDX: { if (g_rc_skip) break; if (g_fsm_ntaken && fsm_take(p)) { PD("L %llu face-split draw already drawn in an earlier pass (DM_NVN_FACE_MERGE)", g_stat_pass); break; }
+                p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
                 if (passdump()) { NvProg *pr = S.prog ? prog_get(S.prog) : nil;

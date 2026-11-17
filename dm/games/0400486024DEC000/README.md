@@ -117,6 +117,10 @@ From the same Kakariko save, walk into Hyrule Field and continue towards Castle 
 
 The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.sav`. The Load screen lists them and reloading works. A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
 
+## Game language
+
+The game has Polish, a Switch 2 language the NACP's 16 languages lack. The packed app carries no list of the game's languages (the NUP has no NACP), so the launcher's Game language row offers every language in `dm/tools/nacp.py`, Polish (`pl`) among them. Current: Polish selected in the launcher and the game plays in Polish (v1.1.1, Mac app, M2 Max, 2026-11-17).
+
 ## Driving it on the Mac
 
 Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <log>` (with a guard that kills the host past 12.5 GB wired or 16 GB of swap; do not run without it), `ctl.sh`, `seq.sh`, `snap.sh`, `keys.sh <logs>` (adds and builds the keys the logs ask for), `white.py` (share of near-white pixels in a shot) and `run/save_ref` (autosaves in Kokiri Forest).

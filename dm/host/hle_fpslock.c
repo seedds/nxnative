@@ -270,9 +270,6 @@ void dm_fps_lock_tick(void) {
                   if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); return; }
         target = t; state = 0;
     }
-    int re_mt = 0;
-    for (int r = 0; r < nrow; r++)
-        if (!strcmp(rows[r]->what, "Resident Evil MT Framework primary frame limit")) re_mt = 1;
     if (high) target = nvn_fps_high_now();   // only a requested 120 fps target follows the dynamic 120/60 hold; 30/60 overrides remain exact
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):

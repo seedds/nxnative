@@ -108,6 +108,9 @@ static void push_report(TestDev *d, const uint8_t *r, size_t n) {
     tick += 15000000; drain();
 }
 static void wait_ms(int ms) { CFRunLoopRunInMode(kCFRunLoopDefaultMode, ms / 1000.0, false); }
+// Run the loop until n output reports were sent (at most 10 s): a retry is waited for itself, not for a time it should have come by, so a stalled runner
+// neither misses it nor lets the next one in (the caller returns within a slice of the report, a retry period before the next)
+static void wait_outs(int n) { for (int i = 0; i < 2000 && nouts < n; i++) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, false); }
 static void put16(uint8_t *p, int v) { p[0] = (uint8_t)v; p[1] = (uint8_t)((uint16_t)v >> 8); }
 static int twins(void) { int n = 0; for (hid_pad *d = g_hidpads; d; d = d->next) n += d->twin; return n; }
 static hid_pad *find(TestDev *t) { for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) if (d->hid == ref(t)) return d; return NULL; }
@@ -162,7 +165,7 @@ int main(void) { @autoreleasepool {
     hid_pad *n = find(nano);
     assert(n && attached == 1 && n->proto && (n->nin & PAD_NIN_RUMBLE) && n->st.raw && n->st.map[0] == 2 && n->st.map[2] == 4);   // report 0x3F's numbering until then
     assert(nouts == 1 && outs[0][0] == 0x01 && outs[0][1] == JC1_SUB_DEVICE_INFO && nano.callback);
-    wait_ms(300); assert(nouts == 2 && outs[1][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);   // no answer yet: asked again
+    wait_outs(2); assert(nouts == 2 && outs[1][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);   // no answer yet: asked again
     uint8_t r[64] = {0x21}; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
     push_report(nano, r, 49); assert(n->talks && hidpad_rumbles(n));
     wait_ms(100);
@@ -198,7 +201,7 @@ int main(void) { @autoreleasepool {
     player = -1;
     memset(r, 0, sizeof r); r[0] = PAD_HID_NIN_REPORT;
     push_report(nano, r, 12); assert(!n->full && nouts == 11 && outs[10][1] == JC1_SUB_DEVICE_INFO);                 // back in report 0x3F: read from it, asked again
-    wait_ms(300); assert(nouts == 12 && outs[11][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);                    // that ask unanswered: asked again
+    wait_outs(12); assert(nouts == 12 && outs[11][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);                    // that ask unanswered: asked again
     memset(r, 0, sizeof r); r[0] = 0x21; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
     push_report(nano, r, 49); wait_ms(100); assert(nouts == 12 + 7 && !n->steps && n->answered == n->asks);          // answered: the handshake again, lights included
     n->lights = -1; push_report(nano, (uint8_t[12]){PAD_HID_NIN_REPORT}, 12); assert(nouts == 19);              // not in full mode: a 0x3F asks nothing more
@@ -233,7 +236,7 @@ int main(void) { @autoreleasepool {
     // the descriptor, but no answer: asked HIDPAD_NIN_TRIES times, then read from report 0x3F
     TestDev *mute = [TestDev new]; mute.name = @"Mute"; mute.entry = 34; mute.elements = nin;
     hidpad_found(NULL, kIOReturnSuccess, NULL, ref(mute)); n = find(mute);
-    wait_ms(700); assert(n->tries == HIDPAD_NIN_TRIES && !n->talks && nouts == base + HIDPAD_NIN_TRIES + 1 && !hidpad_rumbles(n));
+    wait_outs(base + HIDPAD_NIN_TRIES + 1); wait_ms(50); assert(n->tries == HIDPAD_NIN_TRIES && !n->talks && nouts == base + HIDPAD_NIN_TRIES + 1 && !hidpad_rumbles(n));
     assert(outs[nouts - 1][1] == JC1_SUB_LEDS && outs[nouts - 1][2] == 0xF0);   // the unanswered device info does not suppress lights
     hidpad_lights(n, 0); hidpad_lights(n, 0);
     assert(nouts == base + HIDPAD_NIN_TRIES + 2 && outs[nouts - 1][1] == JC1_SUB_LEDS && outs[nouts - 1][2] == 1);

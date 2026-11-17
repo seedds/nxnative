@@ -33,6 +33,8 @@ No host or rewriter rule is specific to this game.
 
 ## Found on this game
 
+- [Local account selection, sessions and separate saves](../../../docs/reference/services.md#local-account-selection-sessions-and-separate-saves): host repair verified with synthetic accounts and saves; the original PR reported about 40 seconds of two-player play on a carried implementation. This revised implementation still needs a gameplay retest and a check of player 2's progress across boots.
+
 - [Provisional Unreal profiles asked an iPhone for 64 GB](../../../docs/reference/memory.md#provisional-unreal-profiles-asked-an-iphone-for-64-gb): resolved, the profile takes the 5 GB block (GitHub issue #2278); not yet on an iPhone
 - [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): compute shader `ce4e9fdf514d0196` (8x8x8) took 124 registers on `applegpu_g13s` / `applegpu_g14g`, which allows 384 threads, so on an M1 or M2 its dispatches ran nothing; 104 with the local size on the kernel. What it draws is not known.
 - [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name): 60 and 120 by `rhi.SyncInterval` alone

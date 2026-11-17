@@ -473,6 +473,9 @@ check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
 t_wline: t_wline.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_wline.m -framework Metal -framework Foundation
 check_t_wline: RUN_ENV = MTL_DEBUG_LAYER=1
+t_vs_unit: t_vs_unit.m ../tools/dmsh_side.py ../tools/dmsh_pull.py ../tools/dmsh_pull.metal ../tools/dmsh_vin.py ../tools/dmsh_entry.py ../tools/dmsh_geometry.py
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_vs_unit.m -framework Metal -framework Foundation
+check_t_vs_unit: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_archive: t_pso_archive.m $(MTL_T_DEP) ../../host/hle_lifecycle.c
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) ../../host/hle_lifecycle.c $(FW)
 .PHONY: check_t_pso_archive

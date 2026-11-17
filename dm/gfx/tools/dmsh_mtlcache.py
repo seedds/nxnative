@@ -18,6 +18,14 @@ OUTPUT = re.compile(r'[0-9a-f]{16}_b\.metal')   # a shader's MSL in dmsh_build.p
 _clonefile = getattr(ctypes.CDLL(None, use_errno=True), 'clonefile', None)   # APFS copy-on-write copy (no data written); elsewhere a plain copy
 
 
+def cut_from_unit(stem, names):
+    """Whether the library <stem>.metallib of a folder with these files may be a piece of a compile unit (compile_split, dmsh_side.py) instead of the compile of <stem>.metal: a pixel
+    shader's with a side (<key>_bx) or readable-tile (<key>_bf) library beside it, a vertex shader's with a pulling (<key>_bp) or shadow-input (<key>_bv) one. Such a library is
+    not taken for its source: a compile of that source alone, which a unit that does not build falls back on, gives other bytes. A vertex library compiled from its own source
+    beside the others (that fallback, a build before the vertex unit) is passed over with them: the folder does not tell the two apart"""
+    return any(stem + c + '.metallib' in names for c in 'xfpv')
+
+
 def clone(src, dst):
     tmp = f'{dst}.tmp-{os.getpid()}-{threading.get_ident()}'
     if _clonefile is None or _clonefile(os.fsencode(src), os.fsencode(tmp), 0) != 0: shutil.copyfile(src, tmp)
@@ -114,14 +122,14 @@ class Cache:
         if not romfs.os.path.isdir(mac_dir): return []   # a stopped pack's .part beside the libraries
         try: stamps = json.loads(self.store.get(STAMPS) or b'{}')
         except ValueError: stamps = {}
-        names = set(romfs.os.listdir(mac_dir))   # a library with a side or readable-tile library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
-        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and n[:-6] + 'x.metallib' not in names and n[:-6] + 'f.metallib' not in names)   # not an AppleDouble ._<name> (exFAT / FAT drives)
+        names = set(romfs.os.listdir(mac_dir))
+        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and not cut_from_unit(n[:-6], names))   # not an AppleDouble ._<name> (exFAT / FAT drives)
         todo, notes = {}, []
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
             if targets is not None and target not in targets: continue   # checking an earlier build compiles samples too
             if target not in self.targets or not d or not romfs.os.path.isdir(d): continue
             libs = names if d == mac_dir else set(romfs.os.listdir(d))
-            have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
+            have = [s for s in stems if s + '.metallib' in libs and not cut_from_unit(s, libs)]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
             if not have or stamps.get(key) == len(have): continue
             why = self._check(target, d, have, mac_dir)
             if why: notes.append(f'Metal cache: not filled from {d}: {why}')

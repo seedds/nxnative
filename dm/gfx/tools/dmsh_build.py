@@ -310,6 +310,43 @@ def vin_finish(key, full, refl):
     VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
     return refl
 
+def vs_libraries(key, msl, full):
+    """A vertex shader's libraries: <key>_b with its own entry points, its pulling library <key>_bp (pull_finish) and its shadow-input library <key>_bv (vin_finish). A shader with
+    a pulling library gets them cut from one compile through the MSL-keyed Metal cache (dmsh_side.vs_unit, dmsh_side.cut), which holds the body once where the three sources held it
+    nine or twelve times. Each target's unit holds the libraries that target gets: without the pulling entry points where DMSH_IOS_PULL=0 leaves the iPhone's library out, and a
+    target with neither side library compiles the plain source. A shader with layer entry points keeps its shadow-input library a compile of its own: that library repeats them
+    for the host (nvn_mtl.m vin_fn), and one unit cannot hold two main0_l.
+    A shader whose unit does not build, or whose source is not of the shape vs_unit knows, gets the three compiles as before, each library from its own source, with a red line; so
+    does one without a pulling library, with none. msl: the file of its source with every entry point, full. → what the reflection says of the side libraries: 'pull' and 'vin', which name
+    their entry points (a unit's: main0_p, main0_zp, main0_v, main0_zv). Raises CalledProcessError when the plain source does not compile"""
+    targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
+    pv, pinfo = dmsh_pull.variant(full); why = None
+    if pv and isinstance(pinfo, dict):
+        vv, shadows = dmsh_vin.variant(full)
+        vu = None if re.search(r'^vertex \S+ main0_l\(', full, re.M) else vv
+        try:
+            whole = dmsh_side.vs_unit(full, pv, vu); rest = dmsh_side.vs_unit(full, None, vu) if vu else None   # rest: for a target without the pulling library
+            for t, d in targets:
+                src, pn, vn = whole if t == 'mac' or IOS_PULL else rest or (None, None, None)
+                if not src: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib')); continue
+                names = ['_b'] + (['_bp'] if pn else []) + (['_bv'] if vn else []); groups = [set(n.values()) for n in (pn, vn) if n]
+                u = os.path.join(w, f'{key}_bu_{t}.metal'); open(u, 'w').write(src)
+                try: MTL.compile_split(t, u, [os.path.join(d, key + n + '.metallib') for n in names], lambda lib, groups=groups: dmsh_side.cut(lib, *groups))
+                finally: os.unlink(u)
+        except (subprocess.CalledProcessError, ValueError) as e: why = str(e)[:120]
+        else:
+            PULL_STATS['generated'] += 1; PULL_STATS['unit'] += 1
+            refl = {'stage': 'vs', 'pull': {k: v for k, v in {**pinfo, **whole[1]}.items() if v is not None}}
+            if not vu: vin_finish(key, full, refl)   # none, or the layer shader's own compile
+            else:
+                refl['vin'] = {'entry': 'main0', 'entry_z': 'main0_z', **whole[2], 'shadow': shadows}
+                VIN_STATS['generated'] += 1; VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
+            return {k: refl[k] for k in ('pull', 'vin') if k in refl}
+    for t, d in targets: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
+    if why: PULL_STATS['unit failed'] += 1; print(f'[RED] {key}: its libraries do not build from one compile ({why}): each is compiled from its own source', flush=True)   # after the plain source built: a source that does not compile at all is the caller's failure, not the unit's
+    refl = pull_finish(key, full, vin_finish(key, full, {'stage': 'vs'}))
+    return {k: refl[k] for k in ('pull', 'vin') if k in refl}
+
 def ps_libraries(key, msl, full, bindings):
     """A pixel shader's libraries, cut from one compile through the MSL-keyed Metal cache (dmsh_side.cut): <key>_b with its own entry points, <key>_bx with its alpha test and logic
     operation ones (dmsh_side.unit) and its typed-output entry point main0_u (dmsh_entry.fs_uint, which every pixel shader of a known shape has and few pipelines take, with its own alpha
@@ -850,6 +887,7 @@ def finish(key, w, j, c1):
     side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read(), binds)); return
+        if j['stage'] == 'vs': side.clear(); side.update(vs_libraries(key, msl, open(msl).read())); return   # with its pulling and shadow-input libraries, from the source with every entry point
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
@@ -878,8 +916,7 @@ def finish(key, w, j, c1):
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in dmsh_reflect.attributes(src)],
             'raster': {**dmsh_reflect.raster_facts(j['stage'], src), **({'omap': ps_omap(open(j['code'], 'rb').read())} if j['stage'] == 'ps' else {})}, 'vs_pad': pad, **({'tess': tess} if tess else {})}
-    if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
-    refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries)
+    refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries); the pulling and shadow-input libraries (vs_libraries)
     write_refl(key, refl)
     return 'ok', '', refl
 
@@ -1013,7 +1050,7 @@ def fin(key, wb):
         if key in cache_hits and restored(key, wb):
             refl = json.loads(output_of('mac', key + '_b.json'))
             src = output_of('mac', key + '_b.metal').decode() if refl['stage'] in ('ps', 'vs') else ''
-            if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
+            if refl['stage'] == 'vs': refl.pop('pull', None); refl.pop('vin', None); refl.update(vs_libraries(key, os.path.join(out, key + '_b.metal'), src)); write_refl(key, refl)   # stored without them (publish_cache)
             if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src, refl['bindings'])); write_refl(key, refl)   # stored without them (publish_cache)
             return key, 'ok', '', refl
         if key in xerr or not os.path.exists(os.path.join(wb, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
@@ -1164,7 +1201,8 @@ print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]}
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
 print(f'alpha test and logic operation libraries (<key>_bx, dmsh_side.py): {SIDE_STATS["generated"]} generated, {SIDE_STATS["failed"]} failed to compile, {SIDE_STATS["not generated"]} pixel shaders without either')
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
-      f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')
+      f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed); '
+      f'{PULL_STATS["unit"]} vertex shaders\' libraries cut from one compile (dmsh_side.vs_unit), {PULL_STATS["unit failed"]} compiled each from its own source instead')
 print('mesh libraries (<vertex>_<geometry>_m3, dmsh_mesh.py): ' + (', '.join(f'{k} {v}' for k, v in MESH_STATS.items()) or 'none'))
 print(MTL.summary())
 for lvl in [k for k in st if k != 'ok']:

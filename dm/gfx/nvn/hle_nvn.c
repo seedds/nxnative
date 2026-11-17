@@ -2439,14 +2439,19 @@ int nvn_fps_high_now(void) { return dm_movie_hz() ? 30 : (fps_high() && atomic_l
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
 int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
 int nvn_game_fps(void) {
-    // Resident Evil's 60/120 profiles present in display mode, but the game
-    // still publishes its native interval in o->interval. A sustained
-    // interval of exactly 2 is its 30 fps gameplay mode; ignore isolated
-    // interval changes (Mario-style one-frame drops) for one second.
-    if (!strcmp(DM_GAME_ID, "010050F00BC1A000") && g_display_mode &&
-        atomic_load(&g_game_itv) == 2) {
+    if (!strcmp(DM_GAME_ID, "010050F00BC1A000")) {
+        // The MT Framework clock follows the selected RE profile, not the
+        // adaptive present cap (which can alternate between 60 and 120).
+        // Only a sustained native interval-2 mode overrides that profile to 30.
+        const char *e = getenv("DM_FPS_TARGET");
+        int profile = e ? atoi(e) : DM_GAME_FPS_TARGET;
         uint64_t since = atomic_load(&g_itv2_since);
-        if (g_hz > 0 && since && now_ns() >= since + 1000000000ull) return 30;
+        int native_30 = g_display_mode && atomic_load(&g_game_itv) == 2 &&
+                        g_hz > 0 && since && now_ns() >= since + 1000000000ull;
+        if (native_30) return 30;
+        if (profile == 120) return fps_high() ? 120 : 60;
+        if (profile == 60) return 60;
+        // The native 30/uncapped profile retains the game's own interval logic.
     }
     int c = fps_present_cap();
     if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c;

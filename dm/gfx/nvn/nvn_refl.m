@@ -227,6 +227,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
         o->tg_spill = (uint32_t)[j[@"tg_spill"] unsignedIntValue];
+        o->loop_sites = (uint32_t)[j[@"loop_sites"] count];
         o->mesh_spill = [j[@"mesh_spill"] boolValue];
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);

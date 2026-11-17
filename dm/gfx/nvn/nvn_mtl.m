@@ -97,9 +97,34 @@ static int g_warm_started;
 static void warm_claim(void);
 
 static id<MTLDevice> g_dev;
+static void ser_compile_begin(void), ser_compile_end(void), plain_compile_begin(void), plain_compile_end(void);
+static void arch_died(NSError *e);
+// Every compile reports service death before leaving the serialization gate, even when its caller ignores the error. Archive lookups do not compile.
+static id compile_done(id result, NSError *error, NSError **out) {
+    if (!result) { arch_died(error); if (out) *out = error; }
+    plain_compile_end(); return result;
+}
+static id<MTLComputePipelineState> dev_cps(id<MTLFunction> f, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id ps = [g_dev newComputePipelineStateWithFunction:f error:&e]; return compile_done(ps, e, out);
+}
+static id<MTLRenderPipelineState> dev_rps(MTLRenderPipelineDescriptor *d, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e]; return compile_done(ps, e, out);
+}
+static id<MTLRenderPipelineState> dev_mps(MTLMeshRenderPipelineDescriptor *d, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithMeshDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&e]; return compile_done(ps, e, out);
+}
+static id<MTLFunction> dev_fn(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id f = [lib newFunctionWithName:name constantValues:cv error:&e]; return compile_done(f, e, out);
+}
+static id<MTLLibrary> dev_lib(NSString *source, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id lib = [g_dev newLibraryWithSource:source options:nil error:&e]; return compile_done(lib, e, out);
+}
 // The shaders the host writes itself (built-in kernels, clears, copies, index conversions, geometry packing, the present: dm/gfx/msl), compiled when the host is built and loaded by
 // name (host_msl_lib), so none is compiled at run time. The diagnostic overrides (DM_NVN_HILITE, DM_NVN_MAGSCAN, DM_NVN_TEXDUMP) still compile theirs from source
-static id<MTLLibrary> host_lib(const char *name, NSError **e) { return host_msl_lib(g_dev, nil, name, e); }
+static id<MTLLibrary> host_lib_from(id<MTL4Compiler> compiler, const char *name, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id lib = host_msl_lib(g_dev, compiler, name, &e); return compile_done(lib, e, out);
+}
+static id<MTLLibrary> host_lib(const char *name, NSError **e) { return host_lib_from(nil, name, e); }
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
@@ -2349,7 +2374,7 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("buffer fill address is in no memory pool dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
     uint8_t b0 = (uint8_t)value;
     if (value == (uint32_t)b0 * 0x01010101u) { [blit_buf(0, 0, dst, dst + n) fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
-    enum { PAT = 0x10000 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
+    enum { PAT = 64 << 10 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
     if (!pat_ok || pat_v != value) { uint32_t *tmp = malloc(PAT); for (unsigned i = 0; i < PAT / 4; i++) tmp[i] = value;
         pat = [g_dev newBufferWithBytes:tmp length:PAT options:MTLResourceStorageModeShared]; free(tmp); pat_v = value; pat_ok = 1; res_add(pat); }
     for (uint64_t off = 0; off < n; off += PAT) { uint64_t k = n - off < PAT ? n - off : PAT; enc_b_copy_buffer(blit_buf(0, 0, dst + off, dst + off + k), pat, 0, (__bridge id<MTLBuffer>)db, dof + off, k); }
@@ -3571,7 +3596,7 @@ static id<MTLComputePipelineState> sp_gather_pso(void) {
     static id<MTLComputePipelineState> ps; static int failed;
     if (!ps && !failed) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("deswz", &e); id<MTLFunction> fn = [lib newFunctionWithName:@"gather"];
-        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        ps = fn ? dev_cps(fn, &e) : nil;
         if (!ps) { failed = 1; MLOG("[RED] cannot create the GPU gather of sparse textures: %s (they are gathered on the CPU)", e.localizedDescription.UTF8String); }
     }
     return ps;
@@ -4795,7 +4820,7 @@ static int pair_layout_ok(MTLTextureDescriptor *a, MTLTextureDescriptor *b, uint
     os_unfair_lock_unlock(&lk);
     static id<MTLComputePipelineState> ps[3]; static dispatch_once_t once;
     dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> lib = host_lib("pair", &e); const char *fn[3] = {"pair_cmp_f", "pair_cmp_u", "pair_cmp_i"};
-        for (int i = 0; i < 3 && lib; i++) { id<MTLFunction> f = [lib newFunctionWithName:@(fn[i])]; ps[i] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; } });
+        for (int i = 0; i < 3 && lib; i++) { id<MTLFunction> f = [lib newFunctionWithName:@(fn[i])]; ps[i] = f ? dev_cps(f, &e) : nil; } });
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     size_t bpt = mtl_pf_block_bytes(one.pixelFormat), row = one.width * bpt, bytes = row * one.height;
     id<MTLComputePipelineState> cmp = ps[pf_int_kind(one.pixelFormat)];
@@ -5684,7 +5709,7 @@ static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, 
     if (failed) return;
     if (!ps) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("deswz", &e); id<MTLFunction> fn = [lib newFunctionWithName:@"swz"];
-        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        ps = fn ? dev_cps(fn, &e) : nil;
         if (!ps) { failed = 1; MLOG("[RED] cannot create the GPU swizzle into texture storage: %s (what the GPU writes into textures stays out of their storage)", e.localizedDescription.UTF8String); return; }
     }
     void *pb; uint64_t po, pg, pt = 0, va = (uint64_t)(uintptr_t)t->mem, lo = 0, hi = 0;
@@ -6329,6 +6354,7 @@ static void shmap_read(void) {
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
     uint32_t tess_out_cp, tess_in_bytes, tess_md; int tess_ok;   // a hull / domain shader rewritten for replay (dmsh_tess.py, nvn_tess.inc); tess_md: a domain's mode (dmsh_tess.mode_bits)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
+    uint64_t loop_sub, loop_gpu; _Atomic int loop_reported;   // this submission's per-kernel cap-hit state; feedback logs at most once per loaded kernel
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
@@ -6535,7 +6561,7 @@ static os_unfair_lock g_fn_dev_lock = OS_UNFAIR_LOCK_INIT;
 static NSMapTable *g_fn_dev;   // a function fn_spec left unspecialized → its stable specialization record (fn filled by fn_dev)
 static id<MTLFunction> fn_lib_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
     if (!lib || !name || !cv) return nil;
-    return fn4_note([lib newFunctionWithName:name constantValues:cv error:e], lib, name, cv);
+    return fn4_note(dev_fn(lib, name, cv, e), lib, name, cv);
 }
 static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
     if (!lib || !name) return nil;
@@ -6610,7 +6636,7 @@ static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
         if (!o->dev && !o->dev_failed) {
             MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)((MTL4SpecializedFunctionDescriptor *)o->d4).functionDescriptor;
             // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): fn_off made o->d4 from this ld after looking its name up; names are never nil (fn4_note, pre_fn)
-            NSError *e = nil; o->dev = [ld.library newFunctionWithName:ld.name constantValues:o->cv error:&e];
+            NSError *e = nil; o->dev = dev_fn(ld.library, ld.name, o->cv, &e);
             if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections failed: %s (its pipelines keep them)", f.name.UTF8String, e.localizedDescription.UTF8String); }
         }
         if (o->dev) return o->dev;
@@ -9009,10 +9035,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         dispatch_once(&once, ^{ const char *e = getenv("DM_NVN_HILITE");
             for (const char *q = e; q && *q && nk < 6; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(keys[nk], q, n); keys[nk++][n] = 0; }
             if (!nk) return;
-            NSError *err = nil; hl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; };\n"
+            NSError *err = nil; hl = dev_lib(@"#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; };\n"
                 "fragment O hl0() { return {float4(1,0,1,1),float4(1,0,1,1),float4(1,0,1,1)}; } fragment O hl1() { return {float4(0,1,0,1),float4(0,1,0,1),float4(0,1,0,1)}; }\n"
                 "fragment O hl2() { return {float4(0,1,1,1),float4(0,1,1,1),float4(0,1,1,1)}; } fragment O hl3() { return {float4(1,1,0,1),float4(1,1,0,1),float4(1,1,0,1)}; }\n"
-                "fragment O hl4() { return {float4(0,0,1,1),float4(0,0,1,1),float4(0,0,1,1)}; } fragment O hl5() { return {float4(1,1,1,1),float4(1,1,1,1),float4(1,1,1,1)}; }\n" options:nil error:&err];
+                "fragment O hl4() { return {float4(0,0,1,1),float4(0,0,1,1),float4(0,0,1,1)}; } fragment O hl5() { return {float4(1,1,1,1),float4(1,1,1,1),float4(1,1,1,1)}; }\n", &err);
             if (!hl) MLOG("[RED] HILITE shader compile failed %s", err.localizedDescription.UTF8String); });
         for (int i = 0; i < nk; i++) if (!strncmp(fs->key, keys[i], strlen(keys[i]))) {
             if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", i]];
@@ -9221,9 +9247,11 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // pipeline found in the files. The flush used to hold a lock against every such compile instead, and one compile that did not return (Super Mario Odyssey's alRenderMaterialUber
 // with the front end at -O2: 33.7 minutes until Metal gave up, GitHub issue #294) held the flush, and the flush every compile and draw that came after it. Now such a compile
 // holds back the file of its own period and nothing else
-@interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd, cs, ms, failed; int compacting;
+static _Atomic uint64_t g_arch_deaths;   // all unwritten periods predating a compiler-service death are untrusted, including ones already handed over
+@interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd, cs, ms, failed, crashed; int compacting; uint64_t deaths;
     NSMutableData *keys; os_unfair_lock klock; _Atomic int unkeyed; } @end
-// n: pipelines captured; vd, cs, ms: those of them that are bases with a vertex layout, compute pipelines, native mesh pipelines; failed: a capture in it failed (arch_cap_failed); compacting: it may hold
+// n: pipelines captured; vd, cs, ms: those of them that are bases with a vertex layout, compute pipelines, native mesh pipelines; failed: a capture in it failed (arch_cap_failed); crashed: the compiler service died
+// while it was current or under one of its captures (arch_died, arch_capture_try, arch_capture_cs); deaths: service deaths when created (arch_write_file rejects older periods); compacting: it may hold
 // recaptured bases (arch_flush); keys: the index keys of what it captured (arch_key, under klock), unkeyed: it captured a pipeline with no key, so its index is not complete
 @implementation ArchEpoch @end
 // The archive's index. Each file of the archive gets a list of the pipelines in it beside it (<file>.keys: arch_write_file), and a start reads every list (pso4_init), so a lookup asks
@@ -9678,7 +9706,7 @@ static NSSet<NSString *> *ga_claim(NSString *dir, int *fd) {
 }
 static ArchEpoch *ep_new(void) {   // a flush period: its compiler and serializer, nil when Metal makes none
     MTL4PipelineDataSetSerializerDescriptor *sd = [MTL4PipelineDataSetSerializerDescriptor new]; sd.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
-    ArchEpoch *ep = [ArchEpoch new]; ep->ser = [g_dev newPipelineDataSetSerializerWithDescriptor:sd];
+    ArchEpoch *ep = [ArchEpoch new]; ep->deaths = atomic_load(&g_arch_deaths); ep->ser = [g_dev newPipelineDataSetSerializerWithDescriptor:sd];
     if (!ep->ser) return nil;
     MTL4CompilerDescriptor *cd = [MTL4CompilerDescriptor new]; cd.pipelineDataSetSerializer = ep->ser;
     ep->comp = [g_dev newCompilerWithDescriptor:cd error:nil];
@@ -9700,27 +9728,33 @@ static void ep_leave(ArchEpoch *ep) { atomic_fetch_sub(&ep->active, 1); dispatch
 // back until it is written (writer first: the prebuild's 14 workers would otherwise keep it waiting for good); the compiles of the archive's own paths go through here
 static pthread_mutex_t g_ser_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_ser_cv = PTHREAD_COND_INITIALIZER;
-static int g_ser_compiles, g_ser_want;   // compiles under way; serializations waiting or under way
+static int g_ser_compiles, g_ser_plain, g_ser_want;   // compiles under way, those without a capture period, serializations waiting or under way
 static _Atomic uint64_t g_ser_held_ns, g_ser_holds;   // compiles held back by a serialization: time in all, how many
-static void ser_compile_begin(void) {
+static void ser_compile_enter(int plain) {
     pthread_mutex_lock(&g_ser_mu);
     if (g_ser_want) {
         uint64_t t0 = bp_now(); while (g_ser_want) pthread_cond_wait(&g_ser_cv, &g_ser_mu);
         atomic_fetch_add(&g_ser_held_ns, bp_now() - t0); atomic_fetch_add(&g_ser_holds, 1);
     }
-    g_ser_compiles++; pthread_mutex_unlock(&g_ser_mu);
+    g_ser_compiles++; g_ser_plain += plain; pthread_mutex_unlock(&g_ser_mu);
 }
-static void ser_compile_end(void) { pthread_mutex_lock(&g_ser_mu); if (!--g_ser_compiles && g_ser_want) pthread_cond_broadcast(&g_ser_cv); pthread_mutex_unlock(&g_ser_mu); }
-// A compile that does not return (a stuck compiler) must not stop every later one behind a waiting write: after SER_WAIT_MS the write goes ahead beside the compiles still under way,
-// the new ones still held back. Compiles take milliseconds to a few hundred, so the 14 prebuild workers' drain in time
+static void ser_compile_begin(void) { ser_compile_enter(0); }
+static void plain_compile_begin(void) { ser_compile_enter(1); }
+static void ser_compile_leave(int plain) { pthread_mutex_lock(&g_ser_mu); g_ser_plain -= plain; if (!--g_ser_compiles && g_ser_want) pthread_cond_broadcast(&g_ser_cv); pthread_mutex_unlock(&g_ser_mu); }
+static void ser_compile_end(void) { ser_compile_leave(0); }
+static void plain_compile_end(void) { ser_compile_leave(1); }
+// A stuck capture must not stop every later compile behind a waiting write: after SER_WAIT_MS the write can proceed beside captures of other periods. An unresolved plain compile
+// could still report service death, so the writer drops its period instead. New compiles stay held back until ser_end. Returns the unresolved plain count under that exclusion
 enum { SER_WAIT_MS = 2000 };
-static void ser_begin(void) {
+static int ser_begin(void) {
     pthread_mutex_lock(&g_ser_mu); g_ser_want++;
     struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += SER_WAIT_MS / 1000; until.tv_nsec += (long)(SER_WAIT_MS % 1000) * 1000000;
     if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
     while (g_ser_compiles && pthread_cond_timedwait(&g_ser_cv, &g_ser_mu, &until) != ETIMEDOUT) {}
-    int left = g_ser_compiles; pthread_mutex_unlock(&g_ser_mu);
-    static _Atomic int told; if (left && !atomic_exchange(&told, 1)) MLOG("pipeline archive: %d compiles still under way after %d ms: the write goes ahead beside them (Metal may crash on that, see ser_begin)", left, SER_WAIT_MS);
+    int left = g_ser_compiles, plain = g_ser_plain; pthread_mutex_unlock(&g_ser_mu);
+    static _Atomic int told; if (left && !atomic_exchange(&told, 1)) MLOG("pipeline archive: %d compiles still under way after %d ms (%d plain): %s", left, SER_WAIT_MS, plain,
+        plain ? "the period is not written before those compiles report their errors" : "the write goes ahead beside captures of other periods (Metal may crash on that, see ser_begin)");
+    return plain;
 }
 static void ser_end(void) { pthread_mutex_lock(&g_ser_mu); g_ser_want--; pthread_cond_broadcast(&g_ser_cv); pthread_mutex_unlock(&g_ser_mu); }
 // A flush period's size. Metal keeps each serializer's state in an LMDB environment of fixed map size (10 MB, in its own com.apple.gpuarchiver/gpuarchiver-* folder under the
@@ -9796,6 +9830,12 @@ static void ep_key(ArchEpoch *ep, MTL4PipelineDescriptor *d) {   // a capture's 
     if (!k) { atomic_store(&ep->unkeyed, 1); return; }
     os_unfair_lock_lock(&ep->klock); if (!ep->keys) ep->keys = [NSMutableData data]; [ep->keys appendBytes:&k length:sizeof k]; os_unfair_lock_unlock(&ep->klock);
 }
+// The compiler service (MTLCompilerService) died under the compile: Metal's error then names the XPC connection it lost. Its domain is the GPU family's (AGXMetalG14G on an M2)
+// and its code a generic 2, so the text is what tells it apart
+static int err_compiler_died(NSError *e) {
+    NSString *t = e.localizedDescription;
+    return t && ([t containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"] || [t containsString:@"interrupted connection"]);
+}
 static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
     const char *why = ce ? ce.localizedDescription.UTF8String : "no error given";
     int n = atomic_load(&ep->n);
@@ -9803,6 +9843,26 @@ static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
     if (atomic_exchange(&ep->failed, 1)) return;
     MLOG("[RED] pipeline archive: capturing a %s pipeline failed after %d in its flush period (%s): built without the archive, the captures go on in a new period", what, n, why);
     arch_flush_from(ep);
+}
+// Any other compile that failed because the compiler service died (a plain or MTLDevice pipeline, a function specialization): the service took every compile it held down,
+// the captures of the current period among them, whether or not one of them reported it (Ocarina of Time: a second crash met only plain compute compiles, and the period then
+// written, with 42 task / mesh pipelines, aborted the next start's lookup as in arch_cap_failed). The current period is marked and handed over, so later captures go to a sound one
+static void arch_died(NSError *e) {
+    if (!e || !g_arch_cap || !err_compiler_died(e)) return;
+    atomic_fetch_add(&g_arch_deaths, 1);
+    os_unfair_lock_lock(&g_ep_lock); ArchEpoch *ep = g_ep; os_unfair_lock_unlock(&g_ep_lock);
+    if (!ep) return;
+    if (!atomic_exchange(&ep->crashed, 1)) MLOG("[RED] pipeline archive: the compiler service died under a compile (%d captured in the flush period so far): the period is not written, the captures go on in a new one", atomic_load(&ep->n));
+    arch_flush_from(ep);
+}
+static id<MTLRenderPipelineState> plain_rps(MTL4PipelineDescriptor *d, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&e]; return compile_done(ps, e, out);
+}
+static id<MTLComputePipelineState> plain_cps(MTL4ComputePipelineDescriptor *d, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&e]; return compile_done(ps, e, out);
+}
+static id<MTLRenderPipelineState> plain_spec(MTL4RenderPipelineDescriptor *d, id<MTLRenderPipelineState> base, NSError **out) {
+    plain_compile_begin(); NSError *e = nil; id ps = [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:d pipeline:base error:&e]; return compile_done(ps, e, out);
 }
 // Captures that share a vertex-stage function (a render pipeline's vertex function, a mesh pipeline's object and mesh functions, a compute pipeline's kernel) never compile at the
 // same time. A capturing compile looks its program up in its period's archive (MultiLevelAirntBinaryCache::
@@ -9871,15 +9931,17 @@ static void fn_gave_up(const char *what) {   // a capture's wait ran out: it is 
 static id<MTLRenderPipelineState> arch_capture_try(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured, int wait_ms, int *busy) {
     if (captured) *captured = 0;
     if (busy) *busy = 0;
-    if (!arch_capturing()) { ser_compile_begin(); id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps; }
+    if (!arch_capturing()) return plain_rps(d, e);
     uint64_t fk[3]; int fn = fn_ids(d, fk);
     if (!fn_claim(fk, fn, wait_ms)) {
         if (busy) { *busy = 1; return nil; }
         fn_gave_up("render");
-        ser_compile_begin(); id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps;
+        return plain_rps(d, e);
     }
     ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    // The period may already belong to its writer. Mark it while still joined, before any fallback, even if the fallback also fails or its caller ignores the error.
+    if (!ps && err_compiler_died(ce)) { atomic_store(&ep->crashed, 1); arch_died(ce); }
     fn_release(fk, fn);
     int full = 0;
     if (ps) { ep_key(ep, d); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); }
@@ -9887,29 +9949,30 @@ static id<MTLRenderPipelineState> arch_capture_try(MTL4PipelineDescriptor *d, NS
               full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep); ser_compile_end();
     if (ps) { if (captured) *captured = 1; if (full) arch_flush_from(ep); return ps; }
-    ser_compile_begin(); ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end();
-    if (ps) arch_cap_failed(ep, ce, "render"); else if (e && !*e) *e = ce;
+    ps = plain_rps(d, e);
+    if (ps && !atomic_load(&ep->crashed)) arch_cap_failed(ep, ce, "render"); else if (!ps && e && !*e) *e = ce;
     return ps;
 }
 static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured) { return arch_capture_try(d, e, vd, captured, g_fn_wait_ms, NULL); }
 // The same for a compute pipeline (cps_new). It counts as a base with a vertex layout does: its file is a plain one, never a p<seq> file, so its lookups skip the prebuild's files
 static id<MTLComputePipelineState> arch_capture_cs(MTL4ComputePipelineDescriptor *d, NSError **e, int *captured) {
     if (captured) *captured = 0;
-    if (!arch_capturing()) { ser_compile_begin(); id<MTLComputePipelineState> ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps; }
+    if (!arch_capturing()) return plain_cps(d, e);
     uint64_t fk[3]; int fn = fn_ids(d, fk);
     if (!fn_claim(fk, fn, g_fn_wait_ms)) {
         fn_gave_up("compute");
-        ser_compile_begin(); id<MTLComputePipelineState> ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end(); return ps;
+        return plain_cps(d, e);
     }
     ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    if (!ps && err_compiler_died(ce)) { atomic_store(&ep->crashed, 1); arch_died(ce); }
     fn_release(fk, fn);
     int full = 0;
     if (ps) { ep_key(ep, d); atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep); ser_compile_end();
     if (ps) { if (captured) *captured = 1; if (full) arch_flush_from(ep); return ps; }
-    ser_compile_begin(); ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e]; ser_compile_end();
-    if (ps) arch_cap_failed(ep, ce, "compute"); else if (e && !*e) *e = ce;
+    ps = plain_cps(d, e);
+    if (ps && !atomic_load(&ep->crashed)) arch_cap_failed(ep, ce, "compute"); else if (!ps && e && !*e) *e = ce;
     return ps;
 }
 // Metal opens a pipeline archive through NSData with "mapped if safe", and Foundation takes a file on an external drive as not safe: it reads it into memory, whole and for the whole run (docs/reference/memory.md). newArchiveWithURL has no option for this, so while the host
@@ -10096,7 +10159,7 @@ static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError
         if (ps) return ps;
     }
     uint64_t t1 = bp_now();
-    ps = [g_dev newComputePipelineStateWithFunction:fn_dev_b(f, off) error:e];
+    ps = dev_cps(fn_dev_b(f, off), e);
     if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
     return ps;
 }
@@ -10111,10 +10174,20 @@ static void arch_write(ArchEpoch *ep) {
 static void arch_write_file(ArchEpoch *ep) {
     int n = atomic_load(&ep->n), vd = atomic_load(&ep->vd), cs = atomic_load(&ep->cs), ms = atomic_load(&ep->ms);   // exact: no compile of the period is under way
     if (!n) return;
+    int plain = ser_begin();   // a plain compile may report service death only after Metal's retries: an expired wait cannot certify this period
+    int crashed = atomic_load(&ep->crashed) || ep->deaths != atomic_load(&g_arch_deaths);
+    if (crashed || plain) {
+        ser_end();
+        atomic_fetch_sub(&g_arch_new, n); atomic_fetch_sub(&g_arch_new_vd, vd);
+        if (ep->compacting) g_compact_bad = 1;   // the old files keep the bases this period would have held
+        if (crashed) MLOG("[RED] pipeline archive: a flush period the compiler service died in is not written (%d pipelines: %d bases, %d compute, %d task / mesh); they are captured again at a later start",
+                          n, n - cs - ms, cs, ms);
+        else MLOG("pipeline archive: a flush period with %d unfinished plain compiles is not written (%d pipelines); their errors are not known yet, the pipelines are captured again at a later start", plain, n);
+        return;
+    }
     [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
     uint64_t t0 = bp_now(); NSError *e = nil;
     NSString *path = [g_arch_dir stringByAppendingPathComponent:vd || cs ? [NSString stringWithFormat:@"%05d-%d.mtl4a", g_arch_seq++, n] : [NSString stringWithFormat:@"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
-    ser_begin();   // no compile meanwhile (ser_compile_begin)
     if (g_pre_out) prewarm_script(ep->ser, path);   // the prebuild tool's bundle form: the period as a pipelines script too, for the other GPUs
     if (ep->compacting) arch_mark(1);
     BOOL ok = [ep->ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&e];
@@ -10154,7 +10227,7 @@ static int arch_warm_flush_due(void) {
 static void arch_hand_over(ArchEpoch *only, int any_time) {
     int warm_due = 0;
     if (!g_arch_cap || (!only && !any_time && atomic_load(&g_warm_running) && !(warm_due = arch_warm_flush_due()))) return;
-    os_unfair_lock_lock(&g_ep_lock); int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || atomic_load(&g_ep->active)); os_unfair_lock_unlock(&g_ep_lock);
+    os_unfair_lock_lock(&g_ep_lock); int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || atomic_load(&g_ep->active) || atomic_load(&g_ep->crashed)); os_unfair_lock_unlock(&g_ep_lock);
     // nothing captured or under way: the period goes on. A compaction due to close (the prewarm over, no recapture queued) closes all the same: its recaptures are all in periods
     // handed over, and the last of them to be written finishes it, or this does when they all are (before, it stayed open for the run and the next start compacted again)
     if (!any) {
@@ -10165,7 +10238,7 @@ static void arch_hand_over(ArchEpoch *only, int any_time) {
     ArchEpoch *ne = ep_new();
     if (!ne) { MLOG("[RED] pipeline archive: Metal made no compiler for a new flush period: the captures go on into the current one"); return; }
     os_unfair_lock_lock(&g_ep_lock);
-    ArchEpoch *old = g_ep; any = (!only || old == only) && (atomic_load(&old->n) || atomic_load(&old->active));   // again: another flush may just have handed it over
+    ArchEpoch *old = g_ep; any = (!only || old == only) && (atomic_load(&old->n) || atomic_load(&old->active) || atomic_load(&old->crashed));   // again: another flush may just have handed it over
     if (any) {
         g_ep = ne; atomic_store(&g_ep_t0, bp_now());
         if (warm_due) atomic_fetch_add(&g_warm_flushes, 1);
@@ -10264,9 +10337,9 @@ static void pbase_key_of(MTLRenderPipelineDescriptor *d, int off, pbase_key *k) 
 // A pipeline with no Metal 4 descriptor, through the MTLDevice: from specialized functions (fn_dev_b)
 static id<MTLRenderPipelineState> pso_build_dev(MTLRenderPipelineDescriptor *d, int off, NSError **e) {
     id<MTLFunction> vf = fn_dev_b(d.vertexFunction, off), ff = fn_dev_b(d.fragmentFunction, off);
-    if (vf == d.vertexFunction && ff == d.fragmentFunction) return [g_dev newRenderPipelineStateWithDescriptor:d error:e];
+    if (vf == d.vertexFunction && ff == d.fragmentFunction) return dev_rps(d, e);
     MTLRenderPipelineDescriptor *dd = [d copy]; dd.vertexFunction = vf; dd.fragmentFunction = ff;
-    return [g_dev newRenderPipelineStateWithDescriptor:dd error:e];
+    return dev_rps(dd, e);
 }
 // newRenderPipelineDescriptorForSpecialization's descriptor, owned by the caller whatever the driver returns. Its new prefix promises a +1 object, and macOS 27.0 returns one. iOS 26.0
 // returns it autoreleased (23A341; on an iPad Pro M4 the method is -[AGXG16GFamilyRenderPipeline newRenderPipelineDescriptorForSpecialization] in AGXMetalG16G_B0, and an iPhone 16 Pro Max
@@ -10307,7 +10380,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
     if (rast && g_comp4 && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0, off);
-        if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
+        if (whole) { if (!compile) return nil; return plain_rps(whole, e); }
     }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast, off) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
     if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, off, e); }
@@ -10375,7 +10448,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);
     pso_fixed4(s, d);   // the base's fixed state, which the specialization descriptor comes back without
     for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
-    id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:base error:e];
+    id<MTLRenderPipelineState> ps = plain_spec(s, base, e);
     if (ps) g_pb_spec++;
     g_pt_spec_ns += bp_now() - ts;
     return ps;
@@ -13690,7 +13763,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     for (int i = 0; i < nfc; i++) { int v = fx[i]; [cv setConstantValue:&v type:MTLDataTypeInt atIndex:(NSUInteger)i]; }
     for (int q = 0; q < 8; q++) { bool b = fbmask >> q & 1; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(32 + q)]; }
     for (int j = 0; j < fs->rf.nfo; j++) for (int q = 0; q < 8; q++) { bool b = lmap[q] == fs->rf.fo_color[j]; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(64 + 8 * j + q)]; }
-    NSError *e = nil; id<MTLFunction> f = fn4_note([lib newFunctionWithName:@"main0_f" constantValues:cv error:&e], lib, @"main0_f", cv);
+    NSError *e = nil; id<MTLFunction> f = fn4_note(dev_fn(lib, @"main0_f", cv, &e), lib, @"main0_f", cv);
     if (!f) MLOG("[RED] readable-tile version specialization failed %s (mask %02x): %s", fs->key, fbmask, e.localizedDescription.UTF8String);
     NvBfFn *s = [NvBfFn new]; s->k = k; s->fn = f;
     if (!fs->bffn) fs->bffn = [NSMutableArray array];
@@ -13794,8 +13867,8 @@ static id<MTLFunction> ms_fs_override(NvShader *fs) {
     if (!fs || !ms_on() || strncmp(fs->key, g_ms_key, strlen(g_ms_key))) return nil;
     int ph = ms_phase_now(); if (ph < 2) return nil;
     static id<MTLFunction> fn[2]; static int failed;
-    if (!fn[0] && !failed) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
-            "fragment float4 msg() { return float4(0.5, 0.5, 0.5, 1.0); }\nfragment float4 msm() { return float4(1500.0, 2.0, 1500.0, 0.6); }\n" options:nil error:&e];
+    if (!fn[0] && !failed) { NSError *e = nil; id<MTLLibrary> lib = dev_lib(@"#include <metal_stdlib>\nusing namespace metal;\n"
+            "fragment float4 msg() { return float4(0.5, 0.5, 0.5, 1.0); }\nfragment float4 msm() { return float4(1500.0, 2.0, 1500.0, 0.6); }\n", &e);
         fn[0] = [lib newFunctionWithName:@"msg"]; fn[1] = [lib newFunctionWithName:@"msm"];
         if (!fn[0] || !fn[1]) { failed = 1; MLOG("[RED] DM_NVN_MAGSCAN: cannot compile the constant fragment shaders %s", e.localizedDescription.UTF8String); } }
     return failed ? nil : fn[ph - 2];
@@ -13885,8 +13958,8 @@ void ms_after(void) {
     if (g_ms_cur < 0 || g_stat_pass != g_ms_apass) { for (int i = 0; i < na; i++) g_ms_att[i] = nil; return; }
     static int failed; static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int logged_att;
     if (failed) return;
-    if (!ps) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_ms_msl) options:nil error:&e]; id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"ms"] : nil;
-        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+    if (!ps) { NSError *e = nil; id<MTLLibrary> lib = dev_lib(@(k_ms_msl), &e); id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"ms"] : nil;
+        ps = fn ? dev_cps(fn, &e) : nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1; ad.maxBufferBindCount = 1; at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
         if (!ps || !at) { failed = 1; MLOG("[RED] DM_NVN_MAGSCAN: cannot create the compute pipeline %s", e.localizedDescription.UTF8String); return; } }
     ms_scan *s = &g_ms_s[g_ms_cur]; int pdist = g_ms_pframe == s->frame && g_ms_ppass != ~0ull ? (int)((int64_t)g_stat_pass - (int64_t)g_ms_ppass) : 9999;
@@ -14348,7 +14421,7 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps[2]; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
     if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("ixc", &e);
-        for (int k = 0; k < 2 && lib; k++) { id<MTLFunction> f = [lib newFunctionWithName:k ? @"ixc_expand" : @"ixc_arrays"]; ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; }
+        for (int k = 0; k < 2 && lib; k++) { id<MTLFunction> f = [lib newFunctionWithName:k ? @"ixc_expand" : @"ixc_arrays"]; ps[k] = f ? dev_cps(f, &e) : nil; }
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps[0] && ps[1] ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] indirect draw conversion: cannot create the compute pipeline %s (indirect draws of quads / fans / 8-bit indices are skipped)", e.localizedDescription.UTF8String); return; } }
     if (g_ixc_epoch != g_wr_epoch || g_ixc_sub != g_sub_serial || g_ixc_n > IXC_MAX - 8) { g_ixc_n = 0; g_ixc_epoch = g_wr_epoch; g_ixc_sub = g_sub_serial; }
@@ -14423,7 +14496,7 @@ static void wide_run(const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
     if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("wide", &e); id<MTLFunction> f = lib ? [lib newFunctionWithName:@"wide_u8"] : nil;
-        ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+        ps = f ? dev_cps(f, &e) : nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] 8-bit index GPU expansion: cannot create the compute pipeline %s (the CPU expands them as before)", e.localizedDescription.UTF8String); return; } }
     if (g_wide_epoch != g_wr_epoch || g_wide_sub != g_sub_serial || g_wide_n > WIDE_MAX - 8) { g_wide_n = 0; g_wide_epoch = g_wr_epoch; g_wide_sub = g_sub_serial; }
@@ -14624,7 +14697,7 @@ static void mdx_run(const p_draw *dw, const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
     if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("mdx", &e); id<MTLFunction> f = [lib newFunctionWithName:@"mdx_mask"];
-        ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+        ps = f ? dev_cps(f, &e) : nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] indirect-count multi-draw masking: cannot create the compute pipeline %s (those draws wait for the GPU)", e.localizedDescription.UTF8String); return; } }
     if (g_mdx_ep != g_mdx_epoch || g_mdx_sub != g_sub_serial || g_mdx_n > MDX_SLOTS / 4) { g_mdx_tag++; g_mdx_n = 0; g_mdx_ep = g_mdx_epoch; g_mdx_sub = g_sub_serial; g_mdx_wr = ~0ull; }
@@ -15214,7 +15287,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         NvShader *fs = pr->sh[1];
         if (fs->has_alpha && atest_on()) at_bind(en);
         if (fs->has_bz) bz_bind(en, draw_lmap);
-        if (fs->has_logic && lop_on()) lo_bind(en);
+        if ((fs->has_logic || fs->u_logic) && lop_on()) lo_bind(en);
     }
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;
@@ -15538,6 +15611,32 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind)
     args_dirty_all();
     return e;
 }
+// GPU-only compute containment (#2664), with one abort word per submission and one hit record per kernel in it. The captured arena buffer and shader survive until
+// completion, before the arena can be reused (g_commit_blocks runs before post_complete). The hit records are separate from the shared abort: a kernel shortened by
+// another's runaway must not be blamed. A recorded site is the lowest numbered site that exhausted its function budget, not proof that this loop caused the original bug.
+static uint64_t loop_state(NvShader *cs) {
+    if (!cs->rf.loop_sites) return 0;
+    static uint64_t sub, abort_gpu;
+    uint64_t fence = atomic_load(&g_fence) + 1;
+    if (sub != fence) {
+        __strong id<MTLBuffer> ab = nil; size_t off = arena_alloc(4, &ab);
+        *(uint32_t *)((uint8_t *)ab.contents + off) = 0;
+        abort_gpu = ab.gpuAddress + off; sub = fence;
+    }
+    if (cs->loop_sub != fence) {
+        __strong id<MTLBuffer> b = nil; size_t off = arena_alloc(DMSH_LOOP_BYTES, &b);
+        uint8_t *state = (uint8_t *)b.contents + off; uint32_t hit = UINT32_MAX;
+        memcpy(state, &abort_gpu, sizeof abort_gpu); memcpy(state + DMSH_LOOP_HIT, &hit, sizeof hit);
+        if (!cs->loop_sub) MLOG("compute loop containment: kernel %s, %u loop sites (including helpers)", cs->key, cs->rf.loop_sites);
+        cs->loop_sub = fence; cs->loop_gpu = b.gpuAddress + off;
+        [g_commit_blocks addObject:^{
+            uint32_t site; memcpy(&site, (const uint8_t *)b.contents + off + DMSH_LOOP_HIT, sizeof site);
+            if (site != UINT32_MAX && !atomic_exchange(&cs->loop_reported, 1))
+                MLOG("[RED] loop cap hit: submission %llu, kernel %s, loop site %u (loop_sites in its reflection; cause open)", (unsigned long long)fence, cs->key, site);
+        }];
+    }
+    return cs->loop_gpu;
+}
 static void dispatch_(const p_dispatch *dp) {
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
@@ -15619,6 +15718,7 @@ static void dispatch_(const p_dispatch *dp) {
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc_cs(cs, dp->ind);
     enc_c_pso(ce, ps);
+    if (cs->rf.loop_sites) enc_c_args(ce, loop_state(cs), DMSH_LOOP_SLOT);
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
         enc_c_args(ce, tb.gpuAddress + to, DMSH_TG_SLOT);
@@ -15656,7 +15756,7 @@ static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_
     if (!ps) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("rb_swap", &e);
         id<MTLFunction> fn = [lib newFunctionWithName:@"rb_swap"];
-        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        ps = fn ? dev_cps(fn, &e) : nil;
         if (!ps) { failed = 1; MLOG("[RED] cannot create the red / blue exchange for RGB565-family copies: %s", e.localizedDescription.UTF8String); return 0; }
     }
     id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);
@@ -15880,7 +15980,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     if (!ps) {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : square ? fq : ff;
         if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else pd.colorAttachments[0].pixelFormat = d.pixelFormat;
-        NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        NSError *e = nil; ps = dev_rps(pd, &e);
         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
         pso[pk] = ps;
     }
@@ -15953,7 +16053,7 @@ static void draw_tex(const p_draw_tex *c) {
         if (!ps) {
             MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = ff; pd.colorAttachments[0].pixelFormat = d.pixelFormat;
             pd.colorAttachments[0].writeMask = (wm & 1 ? MTLColorWriteMaskRed : 0) | (wm & 2 ? MTLColorWriteMaskGreen : 0) | (wm & 4 ? MTLColorWriteMaskBlue : 0) | (wm & 8 ? MTLColorWriteMaskAlpha : 0);
-            NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+            NSError *e = nil; ps = dev_rps(pd, &e);
             if (!ps) { RED_ONCE(126, "DrawTexture: cannot create the pipeline for target format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); continue; }
             pso[pk] = ps;
         }
@@ -16664,7 +16764,7 @@ static id<MTLRenderPipelineState> clr_pso(const clr_key *k) {
     for (int i = 0; i < 8; i++) if (k->cfmt[i]) { d.colorAttachments[i].pixelFormat = (MTLPixelFormat)k->cfmt[i]; d.colorAttachments[i].writeMask = MTLColorWriteMaskNone; }   // the other attachments stay as they are
     if (k->slot >= 0) d.colorAttachments[k->slot].writeMask = (MTLColorWriteMask)((k->mask & 1 ? MTLColorWriteMaskRed : 0) | (k->mask & 2 ? MTLColorWriteMaskGreen : 0) | (k->mask & 4 ? MTLColorWriteMaskBlue : 0) | (k->mask & 8 ? MTLColorWriteMaskAlpha : 0));
     d.depthAttachmentPixelFormat = (MTLPixelFormat)k->dfmt; d.stencilAttachmentPixelFormat = (MTLPixelFormat)k->sfmt; d.rasterSampleCount = k->samples ? k->samples : 1;
-    NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+    NSError *e = nil; ps = dev_rps(d, &e);
     if (!ps) { static int n; if (n++ < 4) MLOG("[RED] cannot create the clear-triangle pipeline (slot %d color format %u depth %u stencil %u samples %u): %s; this clear is skipped", k->slot, k->slot >= 0 ? k->cfmt[k->slot] : 0, k->dfmt, k->sfmt, k->samples, e.localizedDescription.UTF8String); return nil; }
     cache[kd] = ps; return ps;
 }
@@ -17203,11 +17303,11 @@ static void td_dump(void) {
             "struct V { float4 p [[position]]; float2 uv; };\n"
             "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
             "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { float4 c = t.sample(s, in.uv); return float4(c.rgb, 1); }\n";
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
+        NSError *e = nil; id<MTLLibrary> lib = dev_lib(@(src_msl), &e);
         MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
         d.vertexFunction = [lib newFunctionWithName:@"vs"]; d.fragmentFunction = [lib newFunctionWithName:@"fs"];
         d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-        ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+        ps = dev_rps(d, &e);
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
         if (!ps) { MLOG("[RED] TEXDUMP pipeline failed %s", e.localizedDescription.UTF8String); return; }
     }
@@ -17364,7 +17464,7 @@ static void present_pipeline(MTLPixelFormat format) {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
         pd.colorAttachments[0].pixelFormat = format;
-        g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        g_blit_pso = dev_rps(pd, &e);
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;

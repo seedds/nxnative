@@ -135,6 +135,7 @@ NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
     nvn_gob_switch2 = dm_sdk_ounce();   // the Switch 2's order inside a GOB, for the textures the game tiled itself (nvn_deswizzle.h)
+    nvn_timestamp_ns = dm_sdk_ounce();   // NVN2's counter reports record nanoseconds (nvn_timestamp.h)
     o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; mtl_set_origin_lower_left(1);   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
     mtl_set_depth_zero(0);   // NVN's default depth mode: near = -w (GL)
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
@@ -3235,7 +3236,7 @@ NVN(nvnCommandBufferDrawTransformFeedback, void, NVNcommandBuffer *c, NVNdrawPri
 NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, int samp) { (void)d; return (NVNtextureHandle)((uint64_t)(uint32_t)tex | (uint64_t)(uint32_t)samp << 20); }
 // Handle for texel fetches only (Monster Hunter Rise): a fetch reads the texture descriptor and no sampler, so the handle is the texture ID with sampler ID 0
 NVN(nvnDeviceGetTexelFetchHandle, NVNtextureHandle, const NVNdevice *d, int tex) { (void)d; return (NVNtextureHandle)(uint64_t)(uint32_t)tex; }
-// Convert the raw 614.4 MHz report to ns on the same guest clock as GetCurrentTimestampInNanoseconds.
+// Convert the raw report (614.4 MHz ticks, nanoseconds on NVN2: nvn_timestamp.h) to ns on the same guest clock as GetCurrentTimestampInNanoseconds.
 NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return nvn_timestamp_to_ns(c->timestamp); }
 // Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return guest_ns(); }

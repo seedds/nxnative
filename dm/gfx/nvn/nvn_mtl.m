@@ -2369,7 +2369,7 @@ static void ts_clk(void);
 void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); hw_note(addr); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk(); }
 void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_report, sizeof g_cnt_report); memcpy(rst, g_cnt_reset, sizeof g_cnt_reset); }
 
-// Counter timestamps (614.4 MHz) are taken from the guest clock (hle_os.c guest_ns, the same epoch as svc GetSystemTick / cntpct, whose ticks are 19.2 MHz, 31.25 MHz on the Switch 2: guest_ticks).
+// Counter timestamps (NVN's raw unit: 614.4 MHz, ns on NVN2, nvn_timestamp.h) are taken from the guest clock (hle_os.c guest_ns, the same epoch as svc GetSystemTick / cntpct, whose ticks are 19.2 MHz, 31.25 MHz on the Switch 2: guest_ticks).
 // They used to come from CLOCK_MONOTONIC, which keeps running while the Mac sleeps while the guest clock (mach_absolute_time) does not, so the two differed by the sleep time; once timestamps were converted to ns, Mario halved its frame rate. Graphics unit tests have a weak definition on the same clock (below)
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { return nvn_timestamp_from_ns(guest_ns()); }
@@ -2422,7 +2422,7 @@ static uint64_t place_back(seg_clk *sc, uint64_t ns, uint64_t c0, uint64_t off) 
     if (sc && (m == 1 || m == 3)) back += seg_idle_before(sc, ns, c0);
     return back < ns ? back : 0;
 }
-static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t off) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock; off: sub_place's
+static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t off) {   // the time a counter report records (NVN's raw unit, nvn_timestamp.h); c0 / c1: the last segment's GPU start / end on the guest clock; off: sub_place's
     int top = o->type == 0x10; uint64_t ns = 0;
     uint32_t bi = o->seg + !top;
     if (sc && bi < sc->nb && g_ts_heap) {   // Map the GPU boundary through the paired CPU sample. Reading the guest clock later adds CPU scheduling delay to the timestamp.

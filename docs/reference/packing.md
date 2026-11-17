@@ -2,6 +2,13 @@
 
 ## Game packages
 
+### An iOS build stops when the profile has no prewarm seed list
+
+- **Symptom:** after the shader build, `build_ipa.sh` stops at `copy shader tables` because `pso_manifest.tsv` does not exist. This also stops the shell's game-framework build.
+- **Cause:** a profile may have no recorded pipeline prewarm seeds yet. The host supports that state and still reads the device's own list, but the iOS packager required the optional seed file alongside the required shader tables.
+- **Fix:** copy a recorded seed list when present and report its absence otherwise. Required shader tables and a failed copy of an existing seed list still stop the build. No seed records are invented, and shader cache inputs are unchanged. This does not change shader rebuild or resume decisions.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), [NX2Apple issue #922](https://github.com/LNPANDY/NX2Apple/issues/922). The separate report of repeated shader compilation remains open.
+
 ### PFS0 file-name table missing its final NUL
 
 - **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.

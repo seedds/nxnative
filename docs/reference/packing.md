@@ -9,6 +9,14 @@
 - **Fix:** copy a recorded seed list when present and report its absence otherwise. Required shader tables and a failed copy of an existing seed list still stop the build. No seed records are invented, and shader cache inputs are unchanged. This does not change shader rebuild or resume decisions.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), [NX2Apple issue #922](https://github.com/LNPANDY/NX2Apple/issues/922). The separate report of repeated shader compilation remains open.
 
+### PFS0 files extend beyond a truncated package
+
+- **Symptom:** `nx_extract --aoc` aborts with an unhandled `ResultFsOutOfRange (2002-3005)` when a package's file table declares bytes that are not present.
+- **Cause:** the PFS0 header and name table were checked, but each payload-relative file offset and size was trusted. LibHac later tried to read the missing bytes, before the extractor could issue its normal damaged-package diagnostic.
+- **Fix:** `PackageStorage` validates every file range against the original payload before mounting or adding a virtual final name terminator. The size check uses subtraction to avoid 64-bit overflow, and accepts an empty file at EOF. `OpenNsp` probes the XCI header only when enough bytes exist, then routes malformed PFS0 headers and payload ranges to a named `[RED] the NSP is damaged` message and exit code 3. `--allow-damaged` cannot supply missing container bytes, so it does not bypass this check. The source is never changed.
+- **Found on:** [Diablo II: Resurrected](../../dm/games/0100726014352000/README.md), whose separate licence-only DLC package was truncated ([issue #2013](https://github.com/seedds/nxnative/issues/2013)). Main now has the shared [CASC/SHAD reader](shaders.md#blizzards-casc-storage-and-shad-containers); that separate shader-discovery fix does not repair missing package bytes. The reported base game alone (v0) remains unchecked, as the game note records.
+- **Check:** `dm/tools/tests/test_pfs0_storage.py` exercises synthetic payload truncation, out-of-range and overflowing spans, an empty file at EOF, and the CLI's damaged-input exit with and without `--allow-damaged`, with both normal and missing-final-NUL name tables.
+
 ### PFS0 file-name table missing its final NUL
 
 - **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.

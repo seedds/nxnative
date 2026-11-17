@@ -97,9 +97,31 @@ The objects in `data000.cpk/shader.dat` decode as follows:
 - **M6 Mac, full 220-second opening-flight comparison against `3e77816c`:** baseline/candidate frame rate 59.1/59.5 fps, frame p99 17.58/18.26 ms, peak footprint 2,746/2,022 MB. These are this route's measurements; the M1 performance figures from PR #416 remain author-reported. Both runs reach the route target without crashes, hangs or new red diagnostics; 902 pipeline bases prebuild without failures. At frame 12,000, the candidate's preceding 300 frames contain 11,334 mesh draws and no draws waiting for a mesh pipeline.
 - **Screenshot review:** the raw harness flags the moving formation at 180 seconds (17 dHash bits, RGB difference 8.52). An earlier repeat of unchanged `df694e3` produced a larger RGB difference (16 bits, RGB 9.90). The reviewed images retain all three ships at different positions, with animated effects. This is classified as flight-motion variance; the raw warning is retained. The 100-second flight image does not trigger the comparison threshold.
 
+## Arena allocation policy (PR #2862)
+
+**Resolved; verified on the Mac.** The general host change shares unused arena block tails between submissions and retires completed, idle blocks. Shader argument caches borrow their arena buffers so old shaders cannot keep retired scratch allocated. See [Per-frame arena blocks made for every submission in flight](../../../docs/reference/memory.md#per-frame-arena-blocks-made-for-every-submission-in-flight).
+
+**Upstream evidence, not local measurements:** kencalx's NX18 [63c4e8d64](https://github.com/kencalx/NX18/commit/63c4e8d64df8fa6af3490e30c3e53022a0b3eb6d), Mac model unspecified, reports 26–28 blocks after frame-wide allocator sharing versus eight beforehand, with roughly 100–150 MB extra graphics memory. Idle retirement alone still held 30 blocks after 160 seconds. Sharing and retirement together made two blocks; two 300-second runs reported graphics memory 790–793 MB versus 856 MB at 122 seconds and footprint 2,296–2,299 MB versus 2,388 MB at 296 seconds. Median frame time was 16.67 ms and p95 below 17.1 ms on both sides.
+
+**Current-main validation (2026-11-17):** Apple M4 Pro, macOS 27.2.1, Xcode 27.2, game 1.0.3; full 220-second opening-flight route from the same fixed save, two runs per revision against `b04c42b0`. The first retained baseline still had a window-visibility warning after its automatic retry (59.4 fps, 2,418 MB peak); the primary memory comparison uses the unobscured second baseline and both unobscured candidate runs. A separate run that overlapped another game's measurement was interrupted and excluded.
+
+| Metric | Unobscured main baseline | Integrated candidate, two runs |
+|---|---|---|
+| Arena blocks at the final logged checkpoint | 24 (96 MB) | 2 (8 MB), both runs |
+| GPU allocated at frame 12,300 | 2,401 MB | 2,313 MB in run 1 (88 MB less); run 2's last memory line is frame 10,800, 2,311 MB |
+| Resident GPU resource bytes at frame 12,000 | 1,861 MB | 1,771 / 1,772 MB (90 / 89 MB less) |
+| Peak physical footprint | 2,316 MB | 2,228 / 2,225 MB (88 / 91 MB less) |
+| Frame rate / median frame time | 59.9 fps / 16.67 ms | 59.9 fps / 16.67 ms, both runs |
+| Frame-time p99 | 17.28 ms | 17.27 / 17.24 ms |
+
+No idle arena releases were needed in either candidate run: sharing prevented the block peak; the GPU fixture separately verifies idle release. The full regression exits 0 with `CHANGED` solely for flight motion at 180 seconds (RGB difference 8.34, below the 10.67 baseline-repeat variation). Screenshot review shows the same ships, water and effects at different positions. All runs reach the route target, all 1,225 shaders build unchanged, all 902 pipeline bases prebuild, and no crash, hang or new red kind appears. Conditional rendering remains the existing red warning.
+
+The allocator fixture passes 25/25/22/20 checks with encoding off/on, trimming off and sharing off, including pending and latest-writer fences, current-block residency, large-block counters and actual buffer release while its shader cache survives. An isolated mutation restoring the strong shader reference fails the release assertion; the working tree is unchanged by that check. Existing `t_args_gen` retains the address-rollover regressions and passes all 42 checks. No iPhone run. Isaac was skipped at the user's request.
+
 ## Found on this game
 
 - [A pipeline a hybrid draw stood in for listed only once built](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built): controlled [preparation-cost measurement](#preparation-cost-of-a-recorded-backlog); the unfinished gameplay backlog was not reproduced on this Mac.
+- [Per-frame arena blocks made for every submission in flight](../../../docs/reference/memory.md#per-frame-arena-blocks-made-for-every-submission-in-flight).
 - **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - [Size-delimited PlatinumGames shader objects](../../../docs/reference/shaders.md#size-delimited-platinumgames-shader-objects).
 - [Mapped-range flushes taken as uploads](../../../docs/reference/nvn-objects.md#mapped-range-flushes-taken-as-uploads-tex_flush_upload).

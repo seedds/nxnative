@@ -2049,6 +2049,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.
 
+### GL_RG and GL_RED uploads into an RGBA8 texture
+
+- **Symptom:** a game's YUV movie plays in grey with faint green and violet patches and a green line along the bottom edge; its luma is sharp, and the rest of the game is in colour.
+- **Cause:** the game uploads a two-channel plane (`GL_RG`) into a four-channel texture (`Layton's movie chroma`: `glTexImage2D(..., GL_RGB, w, h, ..., GL_RG, GL_UNSIGNED_BYTE, ...)`, the luma next to it into an `GL_R8` one). `pixels_convert` expanded `RGB → RGBA8`, but for `GL_RG` it copied the bytes packed: `w × 2` bytes into a `w × 4` row, so the second half of every row stayed zero and the rows after the first read the wrong texels. NVIDIA's driver expands each source texel to (R, G, 0, 1).
+- **Fix:** `CV_RG8` (R, G, 0, 255) and `CV_R8` (R, 0, 0, 255), selected by `fmt_pick` when an `RGBA8` or `RGB` internal format gets a `GL_RG` / `GL_RED` upload and by `sub_cv` for `glTexSubImage2D` (`hle_gl.m`).
+- **Found on:** LAYTON'S MYSTERY JOURNEY™: Katrielle and the Millionaires' Conspiracy – Deluxe Edition (`0100FB700D224000`, v65536, no profile in the repository); the movie's chroma plane. The host's own 3D and 2D output was already correct.
+- **Check:** the movie frame from the host against the same frame decoded with ffmpeg: the green/violet cast and the bottom green line were gone and the chroma matched. No test target covers `pixels_convert`; the host was built (`GAME=010014E00DB56000`) and played on a Mac.
+
 ### GL resources exceed the direct Metal sampler table
 
 - **Symptom:** `gl_shaders.py` rejects a fragment shader with `a buffer or sampler slot above 15`; removing the check lets some compile, while others fail Metal compilation with `'sampler' attribute parameter is out of bounds: must be between 0 and 15`.

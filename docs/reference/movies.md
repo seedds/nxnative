@@ -63,6 +63,15 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** `md_format` sets the key from the stream, by the rule native-texture output already uses for its own conversion: the matrix the stream declares (the H.264 format description's `YCbCrMatrix`, the VP9 colour config), undeclared BT.709 from 720 lines up. H.264 pictures are reported as limited range, since VideoToolbox gives video range NV12 whatever the stream's range; VP8 and VP9 report the stream's range.
 - **Found on:** [Kirby Star Allies](../../dm/games/01007E3006DDA000/README.md): the opening movie and the movie after the first file start.
 
+### Full-range H.264 output and the key the game indexes its matrix with
+
+- **Symptom:** a movie's luma is right but almost all colour is gone: grey, with faint green and violet patches; the rest of the game (3D and 2D) is in colour, and the same frames decode in colour outside the game.
+- **Cause:** two faults on the GL path. The chroma plane went into an `RGBA8` texture without expanding its `GL_RG` upload ([GL_RG and GL_RED uploads into an RGBA8 texture](rendering.md#gl_rg-and-gl_red-uploads-into-an-rgba8-texture)); and the host gave the game limited-range NV12 while reporting `nv12-colorspace` 3. In this game the key selects the matrix: its movie shader's `unf_frg_movie_color_space` uniforms, read for keys 1–4, are 1 BT.601 full, 2 BT.709 limited, 3 BT.709 full, 4 BT.601 limited. Key 3 on limited planes applied the full-range matrix: lifted blacks, compressed chroma.
+- **Fix:** H.264 is decoded to full-range NV12 (`kCVPixelFormatType_420YpCbCr8BiPlanarFullRange` in `hle_movie_avc.c`) and `md_format` reports 1 for BT.601 full and 3 for BT.709 full. VP8 and VP9 keep the stream's range and the key they already used.
+- **Note:** this game's table puts 3 at BT.709 limited in [Kirby Star Allies' entry](#nv12-colorspace-picks-the-games-yuv-matrix); only LAYTON'S MYSTERY JOURNEY was checked for this change. A game whose table follows Kirby's would need the H.264 range and key reconciled.
+- **Found on:** LAYTON'S MYSTERY JOURNEY™: Katrielle and the Millionaires' Conspiracy – Deluxe Edition (`0100FB700D224000`, v65536, no profile in the repository), the opening movie: before, grey with green and violet patches and a green line at the bottom; after, the same picture as ffmpeg's decode of the movie. The game's Linux/Windows version is not involved.
+- **Check:** played on a Mac (M3, macOS 26.6.2) through the opening movie and the first 3D scene; the frame compared with ffmpeg. The host was built with this change; no `regress.py` run covers it.
+
 ### SDK 4's `movie::Decoder` constructor without a priority
 
 - **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` right after `nnMain` starts the logos.

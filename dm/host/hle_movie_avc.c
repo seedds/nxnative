@@ -326,7 +326,8 @@ static int open_session(mavc *a) {
     const uint8_t *ps[2] = {a->sps, a->pps}; size_t sz[2] = {(size_t)a->nsps, (size_t)a->npps};
     OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(NULL, 2, ps, sz, 4, &a->fd);
     if (st) { if (!a->red++) LOG("[RED] movie: AVC parameter sets give no format description (%d), outputting black frames", (int)st); return 0; }
-    int32_t pf = a->rgba ? kCVPixelFormatType_32BGRA : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;   // NV12, video range: what the SDK's decoder hands out; BGRA (converted by VideoToolbox with the stream's colour matrix) for RGBA output
+    // NV12, full range: the SDK's decoder hands out full-range planes and the games' YUV matrices expect them
+    int32_t pf = a->rgba ? kCVPixelFormatType_32BGRA : kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
     CFNumberRef n = CFNumberCreate(NULL, kCFNumberSInt32Type, &pf);
     const void *k[] = {kCVPixelBufferPixelFormatTypeKey}, *v[] = {n};
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, k, v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks); CFRelease(n);

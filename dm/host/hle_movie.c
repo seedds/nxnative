@@ -908,13 +908,14 @@ static void md_format(mdec_t *d, void *md) {
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
     G.set_i32(md, "nv12-uv-stride", stride); G.set_i32(md, "nv12-width", w); G.set_i32(md, "nv12-height", h);
-    // The picture's colour space, as DecoderImpl::GetOutputBufferFormatFromDecoder (SDK 4 subsdk0+0x2d8c60) sets it: the hardware decoder's hw-buf-ColorSpace / 32 + 1, 1 to 5. Kirby Star Allies' player
-    // (main+0x1529f8) indexes its YUV → RGB matrices with it: 1 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, 5 BT.601 limited; anything else, an unset key too, selects an
-    // all-zero matrix, which drew its movies black. By the rule md_rgba uses: what the stream declares, undeclared BT.709 from 720 lines up. VideoToolbox's H.264 pictures are always video range (open_session)
+    // The picture's colour space, as DecoderImpl::GetOutputBufferFormatFromDecoder (SDK 4 subsdk0+0x2d8c60) sets it, from the hardware decoder's hw-buf-ColorSpace.
+    // LAYTON'S MYSTERY JOURNEY indexes its YUV → RGB matrices with it (its movie shader's uniform values, checked for keys 1-4): 1 BT.601 full, 2 BT.709 limited,
+    // 3 BT.709 full, 4 BT.601 limited; an unset key selects an all-zero matrix. The matrix and range follow the stream: what it declares, undeclared BT.709 from 720 lines up.
+    // VideoToolbox's H.264 pictures are full range (hle_movie_avc.c), so H.264 reports 1 / 3; VP8 and VP9 report their stream's range.
     int b709, full = 0;
-    if (d->avc) b709 = mavc_bt709(d->avc, h);
+    if (d->avc) { b709 = mavc_bt709(d->avc, h); full = 1; }   // hle_movie_avc.c decodes H.264 to full-range NV12
     else { b709 = d->vpx_cs == VPX_CS_BT_709 || (d->vpx_cs == VPX_CS_UNKNOWN && h >= 720); full = d->vpx_full; }
-    G.set_i32(md, "nv12-colorspace", (b709 ? 3 : 1) + full);
+    G.set_i32(md, "nv12-colorspace", d->avc ? (b709 ? 3 : 1) : (b709 ? 3 : 1) + full);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;

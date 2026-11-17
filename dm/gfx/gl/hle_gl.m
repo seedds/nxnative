@@ -467,7 +467,7 @@ static void win_make(uint32_t w, uint32_t h) {
 // fmt: index into g_fmt. A swizzle only where Metal's default differs from GL's: Metal reads a channel a format lacks as 0 (alpha 1), as GL does, so only the luminance /
 // alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
 // indices through the glColorTable palette). bw / bh: block size of a compressed format, bytes: per texel or per block
-enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE };
+enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_RG8, CV_R8, CV_NONE };
 enum { K_COL, K_DEPTH, K_DS, K_BLOCK };
 typedef struct { MTLPixelFormat pf; uint8_t bytes, bw, bh, kind; MTLTextureSwizzleChannels swz; const char *name; } fmt_t;
 #define SWZ(r, g, b, a) {MTLTextureSwizzle##r, MTLTextureSwizzle##g, MTLTextureSwizzle##b, MTLTextureSwizzle##a}
@@ -513,10 +513,14 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
             if (half) return F_RGBA16F;
             if (format == GL_BGRA) return F_BGRA8;
             if (format == GL_RGB) { *cv = CV_RGB8; return F_RGBA8; }
+            if (format == GL_RG) { *cv = CV_RG8; return F_RGBA8; }
+            if (format == GL_RED) { *cv = CV_R8; return F_RGBA8; }
             return F_RGBA8;
         case GL_RGB: case GL_RGB8: case 3:
             if (fl || half) { *cv = CV_NONE; return F_RGBA16F; }
             if (format == GL_RGBA) return F_RGBA8;
+            if (format == GL_RG) { *cv = CV_RG8; return F_RGBA8; }
+            if (format == GL_RED) { *cv = CV_R8; return F_RGBA8; }
             *cv = CV_RGB8; return F_RGBA8;
         case GL_BGRA: return F_BGRA8;
         case GL_RGBA4: case GL_RGB5_A1: case GL_RGB565: return F_RGBA8;   // glTexStorage2D's sized formats (no data: the uploads are converted by their type)
@@ -588,16 +592,19 @@ static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum form
         uint8_t *d = dst + y * dp;
         switch (cv) {
             case CV_COPY: memcpy(d, s, umin((uint32_t)dp, (uint32_t)((size_t)w * comps * tbytes))); break;
-            case CV_RGB8: for (uint32_t x = 0; x < w; x++) { d[4 * x] = s[3 * x]; d[4 * x + 1] = s[3 * x + 1]; d[4 * x + 2] = s[3 * x + 2]; d[4 * x + 3] = 255; } break;
+            case CV_RGB8: for (uint32_t x = 0; x < w; x++) { memcpy(d + 4 * x, s + 3 * x, 3); d[4 * x + 3] = 255; } break;
             case CV_565: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 5 & 63) * 255 / 63; d[4 * x + 2] = (v & 31) * 255 / 31; d[4 * x + 3] = 255; } break;
             case CV_4444: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 12) * 17; d[4 * x + 1] = (v >> 8 & 15) * 17; d[4 * x + 2] = (v >> 4 & 15) * 17; d[4 * x + 3] = (v & 15) * 17; } break;
             case CV_5551: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 6 & 31) * 255 / 31; d[4 * x + 2] = (v >> 1 & 31) * 255 / 31; d[4 * x + 3] = v & 1 ? 255 : 0; } break;
             case CV_INDEX:
                 for (uint32_t x = 0; x < w; x++) {
-                    int i = ((int)s[x] << S.index_shift) + S.index_offset; uint32_t c = S.npalette ? S.palette[i < 0 ? 0 : i >= S.npalette ? S.npalette - 1 : i] : 0xff000000u | s[x] * 0x10101u;
+                    uint8_t ci; memcpy(&ci, s + x, 1);
+                    int i = ((int)ci << S.index_shift) + S.index_offset; uint32_t c = S.npalette ? S.palette[i < 0 ? 0 : i >= S.npalette ? S.npalette - 1 : i] : 0xff000000u | ci * 0x10101u;
                     memcpy(d + 4 * x, &c, 4);
                 }
                 break;
+            case CV_RG8: for (uint32_t x = 0; x < w; x++) { memcpy(d + 4 * x, s + 2 * x, 2); d[4 * x + 2] = 0; d[4 * x + 3] = 255; } break;
+            case CV_R8: for (uint32_t x = 0; x < w; x++) { memcpy(d + 4 * x, s + x, 1); d[4 * x + 1] = 0; d[4 * x + 2] = 0; d[4 * x + 3] = 255; } break;
         }
     }
     free(swapped);
@@ -1708,7 +1715,7 @@ GL(glSamplerParameteriv, void, GLuint s, GLenum p, const GLint *v) {
 static int sub_cv(int f, GLenum format, GLenum type) {
     if (f != F_RGBA8) return CV_COPY;
     return type == GL_UNSIGNED_SHORT_5_6_5 ? CV_565 : type == GL_UNSIGNED_SHORT_4_4_4_4 ? CV_4444 : type == GL_UNSIGNED_SHORT_5_5_5_1 ? CV_5551 :
-           format == GL_RGB ? CV_RGB8 : format == GL_COLOR_INDEX ? CV_INDEX : CV_COPY;
+           format == GL_RGB ? CV_RGB8 : format == GL_RG ? CV_RG8 : format == GL_RED ? CV_R8 : format == GL_COLOR_INDEX ? CV_INDEX : CV_COPY;
 }
 // glTexImage2D and glTexSubImage2D take nine arguments, the last on the stack, which the big-stack entry does not carry: they pack them here, on the game's stack, and enter there
 typedef struct { GLenum target; GLint level, ifmt, x, y; GLsizei w, h; GLenum format, type; const void *pixels; GLsizei size; int sub, compressed; } teximg_args;

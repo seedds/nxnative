@@ -76,6 +76,32 @@ static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id,
 
 static uint64_t tick = 1000000000;
 uint64_t now_ns(void) { return tick; }
+// The device and clock are synthetic; drive its one-shot timers by deadline too.
+// Real dispatch timers can run late under CI load, so seven handshake steps did
+// not reliably finish in the test's 100 ms wall-clock window.
+static dispatch_time_t timer_now = 1, timer_due[128];
+static __strong dispatch_block_t timer_block[128]; static int ntimers;
+static dispatch_time_t test_dispatch_time(dispatch_time_t when, int64_t delta) {
+    assert(when == DISPATCH_TIME_NOW && delta >= 0); return timer_now + (uint64_t)delta;
+}
+static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block) {
+    assert(queue == dispatch_get_main_queue() && ntimers < 128);
+    timer_due[ntimers] = when; timer_block[ntimers++] = [block copy];
+}
+static void advance_timers(uint64_t ns) {
+    dispatch_time_t end = timer_now + ns;
+    for (;;) {
+        int first = -1;
+        for (int i = 0; i < ntimers; i++) if (timer_due[i] <= end && (first < 0 || timer_due[i] < timer_due[first])) first = i;
+        if (first < 0) break;
+        tick += timer_due[first] - timer_now; timer_now = timer_due[first];
+        dispatch_block_t block = timer_block[first];
+        for (int i = first; i + 1 < ntimers; i++) { timer_due[i] = timer_due[i + 1]; timer_block[i] = timer_block[i + 1]; }
+        timer_block[--ntimers] = nil;
+        block();
+    }
+    tick += end - timer_now; timer_now = end;
+}
 #define LOG(...) (printf(__VA_ARGS__), putchar('\n'))
 #define IOHIDDeviceGetProperty test_property
 #define IOHIDDeviceRegisterInputReportCallback test_report_cb
@@ -93,9 +119,13 @@ uint64_t now_ns(void) { return tick; }
 #define IOHIDElementGetReportID test_el_report
 #define IOHIDElementGetType test_el_type
 #define GCController TestGC
+#define dispatch_time test_dispatch_time
+#define dispatch_after test_dispatch_after
 #define HIDPAD_NIN_STEP_NS 2000000ull
-#define HIDPAD_NIN_WAIT_NS 200000000ull   // waits below sit well between its multiples, so the retries are not timing-sensitive
+#define HIDPAD_NIN_WAIT_NS 200000000ull
 #include "../pad_hid_mac.h"
+#undef dispatch_time
+#undef dispatch_after
 
 static int attached, changes;
 static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
@@ -127,7 +157,7 @@ static void push_report(TestDev *d, const uint8_t *r, size_t n) {
     d.callback(d.context, kIOReturnSuccess, ref(d), kIOHIDReportTypeInput, r[0], d.buffer, (CFIndex)n);
     tick += 15000000; drain();
 }
-static void wait_ms(int ms) { CFRunLoopRunInMode(kCFRunLoopDefaultMode, ms / 1000.0, false); }
+static void wait_ms(int ms) { advance_timers((uint64_t)ms * NSEC_PER_MSEC); drain(); }
 static void put16(uint8_t *p, int v) { p[0] = (uint8_t)v; p[1] = (uint8_t)((uint16_t)v >> 8); }
 static int twins(void) { int n = 0; for (hid_pad *d = g_hidpads; d; d = d->next) n += d->twin; return n; }
 static hid_pad *find(TestDev *t) { for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) if (d->hid == ref(t)) return d; return NULL; }

@@ -1,5 +1,6 @@
 """NSP script with a NUP container (scripts/pack_nup.py): the container is read and checked, its versions and DLC packed into what the script's later steps read, its control data saved,
 and the script asks for no keys. The NUPs are written here (SPEC v1, https://github.com/a55uka/nup). The run stops at the prerequisite check; no game files, keys or Xcode needed."""
+import types
 import hashlib
 import importlib.util
 import json
@@ -527,6 +528,12 @@ class Pack(Base):
         (aoc / '1.img.inputs.json').write_text('{}')   # the packer's own image is stale once the container lists no DLC
         self.assertIsNone(nsp.extract_aoc('nx', 'keys', REPO, work, TID, fam, work / 'logs'))
         self.assertIsNone(nsp.extract_aoc('nx', 'keys', REPO, work, TID, {'dlc': []}, work / 'logs'))   # not a NUP: unchanged
+
+    def test_hand_placed_aoc_beside_the_nup_survives_the_cleanup(self):   # the launcher removes <build>/aoc after a build; aoc/ beside the .nup is copied in again
+        work = self.out(); game = self.dir / 'game'; (game / 'aoc').mkdir(parents=True); (game / 'aoc' / '1.img').write_bytes(b'marker')
+        fam = {'dlc': [], 'nup': types.SimpleNamespace(path=game / 'x.nup')}
+        self.assertEqual(nsp.extract_aoc('nx', 'keys', REPO, work, TID, fam, work / 'logs'), work / 'aoc')
+        self.assertEqual((work / 'aoc' / '1.img').read_bytes(), b'marker')
 
     def test_nsp_dlc_not_reused_after_nup(self):   # the NUP packs into the aoc/ the NSP extraction keyed: the same NSPs again extract again
         n = self.open(); app, _, _, dlc = pack_nup.scan(n)

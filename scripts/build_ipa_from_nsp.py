@@ -1472,6 +1472,12 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
     if not fam['dlc']:
         if fam.get('nup'):   # a NUP that lists no DLC (Pokemon Pokopia's) keeps the images the player put in aoc/ by hand: the ones the packer made have an .inputs.json beside them
+            beside = Path(getattr(fam['nup'], 'path', None) or work).parent / 'aoc'   # aoc/ beside the .nup: a front end that cleans the build folder after a build leaves this one
+            if beside.is_dir() and beside.resolve() != (work / 'aoc').resolve():
+                for p in sorted(beside.glob('*.img')):
+                    d = work / 'aoc' / p.name
+                    if p.is_file() and not (d.is_file() and d.stat().st_size == p.stat().st_size and d.stat().st_mtime_ns == p.stat().st_mtime_ns):
+                        d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, d)
             mine = sorted(p for p in (work / 'aoc').glob('*.img') if p.is_file() and not p.with_name(p.name + '.inputs.json').exists()) if (work / 'aoc').is_dir() else []
             if mine: say(f'DLC from aoc/ placed by hand: {", ".join(p.name for p in mine)}'); return work / 'aoc'
         return None

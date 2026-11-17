@@ -1321,6 +1321,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_transform_feedback` (both runs, the default and `DM_NVN_TF_CPU=0`): captures into separate ranges share a pass with no barrier; a reader of an earlier capture's output, a capture into a range written or read since the last barrier, a capture after a game barrier, and a capture with a write or an unknown read get a barrier; saves and deferred updates end the pass; the bytes and control buffers match the GPU path.
 - **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#rendering): a begin, one capture and an end with a control buffer per mesh, 73 to 182 a frame in Scarlet and Violet; 80 captures in the player's house went from 80 passes to 3.
 
+### Mesh geometry reports unused compute scratch as zero GPU addresses
+
+- **Symptom:** a composed geometry mesh renders correctly but logs zero GPU addresses for geometry argument bindings on every draw, exhausting the first 16 diagnostics.
+- **Cause:** `geo_mesh_encode` uses the lean compute kernel's argument layout. `dmsh_mesh.compose` replaces its vertex capture, vertex/index outputs and topology buffer reads with threadgroup capture, a local mask and identity indices, and rejects a kernel if those accesses remain. Their struct fields stay in the shared layout, so `encode_args` incorrectly checked the unused zero slots as live GPU pointers.
+- **Fix:** `args_check_addresses` excludes only geometry registers 0, 1, 2 and 4 while encoding the composed mesh's geometry stage. Register 3 (`vb_info`), every guest binding and every helper in the compute path are still checked. No binding, shader, draw or graphics setting changes; this fixes the diagnostic, not a measured frame-rate bottleneck.
+- **Check:** `t_geometry_mesh` fails before the fix with 12 false addresses for six draws, then passes depth, per-draw storage counters, scissor, fragment discard and samples-passed comparisons in single, gathered and encoding-thread modes. `t_cbs_fault` checks that missing `vb_info` and guest storage still report, and switching back to compute reports all missing scratch buffers.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering), geometry shader `5d537f7630ec3671_bl3`: registers 0/1/2/4 occupy argument slots 2/3/4/7. The separate performance investigation remains open.
+
 ### Geometry-shader draws encoded a run at a time
 
 - **Symptom:** a scene drawn with a geometry shader per mesh runs at 5 to 15 fps on the Mac, with the submitting thread or the GPU taking most of the frame.

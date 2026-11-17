@@ -71,7 +71,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     }
                 }
 
-                GotoElimination.Eliminate(context.GetGotos());
+                GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
 
                 LoopExitCohort.Apply(context.CurrentFunction.MainBlock, callee => callee >= 0 && callee < subgroupFunctions.Length && subgroupFunctions[callee]);
 
@@ -155,6 +155,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     if (index - 1 < inArgsCount)
                     {
                         AstOperand argTemp = context.NewTemp(FuncParameterType);
+                        argTemp.AddressTaken = true;
                         context.AddNode(new AstAssignment(argTemp, source));
                         sources[index] = argTemp;
                     }
@@ -177,6 +178,10 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 AstOperand oper = context.GetOperand(operation.GetDest(1 + index));
 
                 oper.VarType = InstructionInfo.GetSrcVarType(inst, sourcesCount + index);
+                if (inst == Instruction.Call)
+                {
+                    oper.AddressTaken = true;
+                }
 
                 sources[sourcesCount + index] = oper;
             }

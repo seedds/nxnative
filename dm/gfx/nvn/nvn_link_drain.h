@@ -17,6 +17,7 @@
 #pragma once
 #include <math.h>
 #include <stdint.h>
+#include "nvn_link_latch.h"
 
 #define LINK_DRAIN_MARGIN 0.002    // seconds a frame keeps in the queue before its tick after a drain: the callback must find it queued (the game presents about 1 ms after a tick)
 #define LINK_DRAIN_SECS 2.0        // how long the frames must have stood before a drain: a hiccup's catch-up frames are not a standing queue yet
@@ -42,12 +43,19 @@ typedef struct {
 static inline int nvn_link_drain_spare(double age, double tick) { return tick > 0 && age > LINK_DRAIN_MARGIN ? (int)floor((age - LINK_DRAIN_MARGIN) / tick) : 0; }
 
 // With the late latch: whole link ticks from the callback that woke the frame's acquire to the one that took it, when its present came early after the first one (lead
-// seconds after it, under half of room, the seconds from that callback to its targetTimestamp), so the latch would have taken it there; -1 otherwise (lead < 0: no callback
-// woke its acquire, the game was late for the tick; room 0: no latch). Ocarina of Time at 60 fps: on an external fixed 120 Hz screen (room 8.3 ms) its presents came 1.3 ms
-// after the wake; on a built-in ProMotion screen in the fixed 60 Hz mode (room 16.5 ms) some frames ran 17-20 ms, and without this test each one left an empty tick
-// (42-72 frames shown 33 ms in 25 s, against none without the latch)
+// seconds after it, under half of room, the seconds from that callback to its targetTimestamp, and an eighth of a tick or more inside the latch's wait from there,
+// nvn_link_latch_reach), so the latch would have taken it there; -1 otherwise (lead < 0: no callback woke its acquire, the game was late for the tick; room 0: no latch).
+// Ocarina of Time at 60 fps: on an external fixed 120 Hz screen (room 8.3 ms) its presents came 1.3 ms after the wake; on a built-in ProMotion screen in the fixed 60 Hz mode
+// (room 16.5 ms) some came 6-13 ms after it and some frames ran 17-20 ms, and without this test each one left an empty tick (42-72 frames shown 33 ms in 25 s, against none
+// without the latch). The margin to the wait keeps a later frame of the same scene inside it: half the room leaves 2.1 ms at 8.3 ms of room (82 % of ticks latched, no frame
+// dropped) and 6.2 ms at 16.5 ms, and an eighth of a tick (2.1 ms at 60 Hz) is that smallest one. Half the room alone passes the wait where the room is over 1.75 ticks (a
+// window on a built-in ProMotion screen: about 33 ms against a wait of 14.6 ms at 60 Hz): a present between the two counted as early and missed its tick, so a drain into
+// the latch came every 2 s and left its end tick empty; there the limit is 12.5 ms
 static inline int nvn_link_latch_spare(double age, double lead, double room, double tick) {
-    return tick > 0 && room > 0 && lead >= 0 && lead < room / 2 ? (int)floor((age + lead) / tick + 0.5) : -1;
+    if (tick <= 0 || room <= 0 || lead < 0) return -1;
+    double limit = room / 2, inside = nvn_link_latch_reach(room, tick) - tick / 8;
+    if (limit > inside) limit = inside;
+    return lead < limit ? (int)floor((age + lead) / tick + 0.5) : -1;
 }
 
 // Once per frame the display-link callback takes. now: the callback's time (seconds); age: how long that frame waited in the present queue (seconds; negative when it was

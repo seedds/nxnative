@@ -1226,6 +1226,12 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
 // hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
 HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: the newest (cleared until a front end reports the sensor)",
           void, h_hid_JcmsState, void *out, const uint32_t *h) { if (out) { memset(out, 0, 32); if (h) jcms_copy(out, 1, *h); } }
+// Private applications label their current scene in the hid service. Welcome Tour's flow NRO calls the setter at boot (SDK 20.5.29 sdk+0x65d3b0); its detail call
+// dereferences the absent service at sdk+0x65c75c. Keep the service's setting here, shared by every module, and answer the paired getter without opening Horizon IPC.
+static _Atomic int g_private_scene;
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "private application's HID scene: recorded", void, h_hid_SetPrivateScene, int scene) { atomic_store(&g_private_scene, scene); }
+HLE_FORCE("_ZN2nn3hid23GetSceneIdForPrivateAppEv", "private application's HID scene: what the game set", int, h_hid_GetPrivateScene, void) { return atomic_load(&g_private_scene); }
+
 // A Switch 2 SDK's guard against a Home press made by accident on a controller (Drag x Drive turns it on for player 1's Joy-Con 2 as they connect, main+0x2c80c4). The SDK's own
 // opens the hid service, which the host does not serve, and calls through the null session (sdk+0x63ce10). It sets a flag in hid and returns nothing; the host handles Home itself
 // (home_quit.h: a 2 s hold, then a confirm), so the setting is recorded for the question below and logged, and changes nothing else

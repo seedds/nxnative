@@ -94,7 +94,8 @@ def tg_fence(src):
 # and a float pointer to one is an OpBitcast that logical addressing forbids, which spirv-cross then writes as a reinterpret_cast of the loaded value, not its address. agl's
 # scene analysis adds every thread's value into the same few words, so the loops retried for each other: Ocarina of Time's 6e28359aa3558f61 (one workgroup of 256 threads,
 # four words) took 0.25 ms a frame and 1bba09ec4bc8ff67 0.40 ms on a MacBook Air M4, under 0.13 ms each as one atomic_fetch_add; the exposure the same (PR #1930). Only the
-# exact loop spirv-cross writes, on the same word for the load and the swap, is replaced: its names are local to the do-block, so its result is read nowhere. Anything else
+# exact loop spirv-cross writes, on the same word for the load and the swap, is replaced: the word and sum are local to the do-block, so its result is read nowhere. The retry flag
+# is declared outside the block and may be read later: keep it as false, the only value on normal loop exit. Anything else
 # (an add through the memory pool table, a bounded buffer's guarded swap, shared memory, an ATOM whose result is used) stays a loop, which is correct and only slower. test_dmsh_ampere_alu.py FloatRed checks that
 # the translator's loop still has this shape
 # The add is `old + v`, or spvFAdd(old, v) where the translator marks it exact (XLATE_REDUCED=0): one atomic add has nothing to contract, so both become the native add.
@@ -108,7 +109,8 @@ FLOAT_ADD = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=
 def float_add_msl(msl):
     if 'atomic_compare_exchange_weak_explicit' not in msl: return msl
     return FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
-                         f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n", msl)
+                         f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
+                         f"{m.group('ind')}bool {m.group('again')} = false;\n", msl)
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time

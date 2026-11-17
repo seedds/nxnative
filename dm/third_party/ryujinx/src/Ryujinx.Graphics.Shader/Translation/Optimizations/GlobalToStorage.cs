@@ -82,11 +82,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             // nxnative: Ampere (NVN2) code, the only code with bindless constant buffers (TryUnwrapHandle)
             public readonly bool Ampere;
 
-            public GtsContext(HelperFunctionManager hfm, bool ampere)
+            public readonly bool RawOnly;
+
+            public GtsContext(HelperFunctionManager hfm, bool ampere, bool rawOnly)
             {
                 _entries = [];
                 _sharedEntries = new Dictionary<LsKey, Dictionary<uint, SearchResult>>();
                 _hfm = hfm;
+                RawOnly = rawOnly;
                 Ampere = ampere;
             }
 
@@ -243,7 +246,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             TargetLanguage targetLanguage,
             bool ampere)
         {
-            GtsContext gtsContext = new(hfm, ampere);
+            GtsContext gtsContext = new(hfm, ampere, gpuAccessor.QueryRawGlobalMemory());
 
             foreach (BasicBlock block in blocks)
             {
@@ -1471,6 +1474,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         private static SearchResult FindUniqueBaseAddressCb(GtsContext gtsContext, BasicBlock block, Operand globalAddress, bool needsOffset)
         {
+            if (gtsContext.RawOnly) return SearchResult.NotFound;
             globalAddress = Utils.FindLastOperation(globalAddress, block);
 
             if (TryUnwrapHandle(gtsContext, globalAddress, block, out Operand handleCb))

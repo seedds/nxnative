@@ -65,6 +65,7 @@ DM_GL_DRAWLOG	diagnostic	`=<n>[:<seconds>]` logs the first `<n>` GL draws after 
 DM_GL_FBLOG	diagnostic	`=1` logs every framebuffer bind with its size and the draws so far
 DM_GL_LOG	diagnostic	`=1` makes the GL layer log object creation
 DM_GL_MISSES	diagnostic	`=1` reports each `eglGetProcAddress` name the layer lacks when the game first asks for it
+DM_GL_RENDERPROGS	path	`=<job file>` (written by `idtech4_programs.py`): the NSP script's capture run has an id Tech 4 BFG renderer convert every render program to GLSL itself, through its own finders in `main`, so the capture holds all of them and not only those a run happens to use (`hle_gl.m`; DOOM 3)
 DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that reports its first call and returns 0, instead of a null pointer (bring-up)
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
@@ -253,6 +254,7 @@ DM_NVN_UB_DEFER	switch	`0` ends the render pass at every inline uniform update, 
 DM_NVN_UB_LAZY	switch	`=<n>`: the most deferred inline uniform updates kept across a render pass end (default 160); they land before the next copy, a conflicting draw or dispatch, or the submission end; `0` lands them at every pass end
 DM_NVN_UB_N	diagnostic	`=<frames>`: the length of each phase of the same-process alternating measurement `DM_NVN_UB` (default 180, minimum 60)
 DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in part ends the pass, as before; by default its shadow starts from memory and takes the submission's queued updates (on by default)
+DM_NVN_UNBIND_DEFER	switch	`0` makes an empty `SetRenderTargets` end the open render pass again; by default the unbind is deferred, so a following binding of the same targets continues the pass (`nvn_mtl.m` `unb_on`, on by default)
 DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
@@ -316,10 +318,11 @@ DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipel
 DM_PSO_ARCH_WARM_FLUSH_MS	switch	`=<ms>`: during a prewarm the game plays through (no prepare step) that is not compacting, the timer's flush hands the archive's period over once it is that old, then twice as long each time up to 16 times (default 60000; `0`: no flush until the prewarm ends or the period is full)
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
 DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, a profile with `pso_mtl4 on` gets its `pso_gpu` list or `g18p` when absent; profiles with `pso_mtl4 off` get none
+DM_PSO_HOST	path	`build_ipa.sh`: the Mac host (`dm/host/dmhost`, built from the same checkout for the same game) that makes the prewarm lists' pipelines for the app (`pso_offline.py --prewarm-host`: its prebuild tool, then metal-tt; `<GPU>-prewarm-<NN>.mtl4a` beside the pipeline archive); unset, the existing `dm/host/gen/<id>/dmhost`, made current for this game; `none`: not made, and the device builds the listed pipelines at its first start
 DM_PSO_HYBRID	switch	`0`: a draw whose pipeline is not built yet waits for it instead of drawing with its shader pair's pulling pipeline meanwhile (on by default with the Metal 4 path)
 DM_PSO_IOS_MIN	switch	`build_ipa.sh`: the minimum iOS version of the offline pipeline archives (default the SDK's major version); a device of another major version cannot open them and builds the bases itself
 DM_PSO_MANIFEST	path	The prewarm manifest to use instead of the profile's `pso_manifest.tsv` and the device's `pso_user.tsv` (also the list the prebuild tool, `DM_PSO_PREBUILD=tool`, builds); `off` turns the prewarm off
-DM_PSO_MTL4	player	`0` builds render pipelines through the `MTLDevice` with no bases and no archive; `1` uses MTL4Compiler with the archive, hybrid pipelines and prebuild (default on on the Mac, the profile's `pso_mtl4` on iOS)
+DM_PSO_MTL4	player	`0` builds render pipelines through the `MTLDevice` with no bases and no archive; `1` requests MTL4Compiler with the archive, hybrid pipelines and prebuild (default on on the Mac, the profile's `pso_mtl4` on iOS); archive admission falls back to `MTLDevice` when the selected archives plus 2 GiB of runtime headroom cannot fit the task map's largest free gap, or the map cannot be read
 DM_PSO_PAIRS	path	The prebuild's second shader pair table (default: `pso_pairs.tsv` beside the shader map)
 DM_PSO_PREBUILD	player	`0` turns off the prebuild of every known shader pair's pulling base into the pipeline archive (on by default); `tool` runs on the Mac what a first start would build and exits: the pairs' bases, then the prewarm lists' pipelines
 DM_PSO_PREBUILD_DEPTH	switch	`zero`: the prebuild tool (`DM_PSO_PREBUILD=tool`) builds bases for the near = 0 depth mode; the NSP script sets it from the profile's `depth_mode`

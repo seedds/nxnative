@@ -20,6 +20,14 @@ HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; nv::InitializeGraphics recorded on the ho
 // The Switch 2's graphics system (nn::gs) check: SDK 22.2.0's (sdk+0x476d60) aborts unless the SDK's own flag reads 1, which the SDK's graphics boot sets on the console and the host, whose
 // graphics layer stands in for that system from the start, never runs. Mario Kart World 1.8.0 checks it before it makes its camera context (by pull request #1116)
 HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics system is the host's graphics layer, up from the start", void, h_gs_Check, const char *who, unsigned long n) { (void)who; (void)n; }
+// The graphics server's application GPU scheduling time: how much of [begin, end] (TimeSpan ns on the system tick clock) the GPU was given to the application rather than to
+// another client of the console's GPU (the system's own rendering). SDK 20.5.29's query (sdk+0x411dc0) asks the gsv session (command 27), which the host never opens: its
+// null context faulted at sdk+0x151fb0. The callers time GPU work with their own counter timestamps: Welcome Tour's Bezel profiler passes each render pass's GPU region
+// (main+0x30a8f4) and the whole frame's (main+0x30a808), where the frame load it feeds dynamic resolution is the frame's scheduled time + the time the application was not
+// scheduled since the last frame + 0.36 ms. A busy-time answer would count the GPU's idle time between frames as taken and read every frame as full. The host's counter
+// timestamps are its model of the console GPU's timeline (nvn_mtl.m, ts_mode), on which the application is the only client, so it holds the GPU for the whole interval
+HLE_FORCE("_ZN2nn2gs3sdk27QueryApplicationGpuTimeSpanEPNS_8TimeSpanEmm", "application GPU scheduling time: the application is the only client of the host's GPU timeline",
+          Result, h_gs_GpuTimeSpan, int64_t *out, uint64_t begin, uint64_t end) { *out = end > begin ? (int64_t)(end - begin) : 0; return RES_OK; }
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,

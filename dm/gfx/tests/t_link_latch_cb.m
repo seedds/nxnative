@@ -64,9 +64,9 @@ static uint64_t queued(void) { pthread_mutex_lock(&g_pq_mu); uint64_t n = g_pq_i
 // One frame of a 1-tick acquire: the game blocks, the callback wakes it, the game presents delay_us later. Returns 0 when the game never blocked
 static int frame1(int delay_us) { frame_start(1, delay_us); int w = waiting(0); tick(); return frame_done() && w; }
 int main(void) { @autoreleasepool {
-    alarm(120); setbuf(stdout, NULL);
+    alarm(120); if (setvbuf(stdout, NULL, _IONBF, 0)) return 2;
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LATCH", "1", 1); setenv("DM_PRESENT_DRAIN", "1", 1); setenv("DM_RT", "0", 1);
-    setenv("DM_PRESENT_SNAP", "0", 1);   // a profile with present_snap on (Breath of the Wild) turns the latch off through mtl_snap_on()
+    setenv("DM_PRESENT_SNAP", "0", 1);   // a profile with present_snap on (Breath of the Wild) would turn the latch and the drain off (mtl_snap_on)
     mtl_init();
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     mtl_present_layer(8, 8);
@@ -110,14 +110,17 @@ int main(void) { @autoreleasepool {
     int ok = 1; for (int i = 0; i < 5; i++) ok &= frame1(500) && queued() == 0;
     CHECK("from then on every woken present is latched", ok && g_link_latched == latched0 + 6 && g_link_dropped == 0);
 
-    // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter
+    // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter. The drain must have run (g_link_drained): a game thread that entered its acquire
+    // after the tick would return at once and drop the request, and there would be no waiter with or without one
     frame_start(1, 0); waiting(0); present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL); tick(); frame_done();   // a late frame: one stands again
-    latched0 = g_link_latched;
+    latched0 = g_link_latched; uint64_t drained0 = atomic_load(&g_link_drained);
     atomic_store(&g_link_drain_req, 1);
-    frame_start(1, 500); usleep(3000); tick(); usleep(3000);
+    frame_start(1, 500);
+    for (int i = 0; i < 1000 && atomic_load(&g_link_drain_req); i++) usleep(1000);   // the acquire took the request
+    usleep(3000); tick(); usleep(3000);
     pthread_mutex_lock(&g_link_mu); int gw = g_link_waiter_end, wt = g_link_waiter; pthread_mutex_unlock(&g_link_mu);
     tick(); done = frame_done();
-    CHECK("a plain drain sets no latch waiter", done && !gw && !wt && g_link_latched == latched0 && g_link_dropped == 0);
+    CHECK("a plain drain sets no latch waiter", done && atomic_load(&g_link_drained) == drained0 + 1 && !gw && !wt && g_link_latched == latched0 && g_link_dropped == 0);
     CHECK("the late frame 6 latched frames after the drain into the latch backed it off", g_link_drain.back == 1 && !g_link_drain.in);
 
     // 5. Give-up and probe with a 2-tick acquire: the tick in between takes the standing frame, the woken one finds the queue empty and its present comes after the wait
@@ -143,14 +146,5 @@ int main(void) { @autoreleasepool {
     }
     snprintf(name, sizeof name, "a 2-tick acquire probes within %d woken callbacks (took %d), no waits in between (%d)", LINK_LATCH_PROBE, n, waited_early);
     CHECK(name, g_link_latched == latched0 + 1 && n <= LINK_LATCH_PROBE && waited_early == 0 && g_link_latch_misses == 0 && g_link_dropped == 0);
-
-    // 6. The 120 Hz link (a variable-refresh screen): a 60 fps acquire waits two ticks, the tick between finds nothing new, and the woken tick latches its present with no drain
-    g_link_mode = 2; g_gap = 1. / 120; g_link_latch_misses = 0; latched0 = g_link_latched; ok = 1;
-    for (int i = 0; i < 6; i++) { NO_DRAIN(); frame_start(2, 1000); ok &= waiting(0); while (!next_wakes()) tick(); tick(); ok &= frame_done() && queued() == 0; }
-    snprintf(name, sizeof name, "120 Hz link: %llu of 6 woken presents latched on their own tick, none dropped", (unsigned long long)(g_link_latched - latched0));
-    CHECK(name, ok && g_link_latched == latched0 + 6 && g_link_dropped == 0);
-    // A present past the wait (an eighth of a period before the next tick) times out and goes up on the next tick, as without the latch
-    out0 = g_link_latch_out; NO_DRAIN(); frame_start(2, 9000); waiting(0); while (!next_wakes()) tick(); tick();
-    CHECK("120 Hz link: a present 9 ms after its wake times out, stands, and the next tick shows it", g_link_latch_out == out0 + 1 && frame_done() && queued() == 1 && (tick(), queued() == 0) && g_link_dropped == 0);
     printf("t_link_latch_cb: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -90,7 +90,7 @@
 // stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
 // to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer
 // entries (a 64-bit GPU address, then a size) or 8-byte handles there before its dispatches and draws, and its shaders load and store through those addresses
-#define DMSH_PUSH_BLOCKS 6
+#define DMSH_PUSH_BLOCKS 8              // native groups each contain eight 256-byte banks; RT consumes the compute group's full 0x800 bytes
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_SAMPLE_TABLE 0x620       // pixel stage: GLSLC's sample position table, one byte per (pixel of the location grid, sample): x and y in 1/16 pixel, low and high nibble
 #define DMSH_C0_SAMPLE_BYTES 16          // bytes of that table
@@ -130,6 +130,26 @@
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_rewrite.py border_emu): a mask of the samplers to correct, then each one's factors
 
 #define DMSH_KIND_GMEM_MAP "gmem_map"    // the memory pool table for global memory the translator traced to no storage buffer (an address the shader loaded from memory): the host binds its table (nvn_mtl.m gmem_map)
+
+// Native RT kernels use their own descriptor arena and scheduler resources;
+// these are not ordinary game UBO slots. Handles remain opaque16-byte tokens.
+#define DMSH_KIND_RT_SCENE "rt_scene"
+#define DMSH_KIND_RT_PARAMETERS "rt_parameters"
+#define DMSH_KIND_RT_ERRORS "rt_errors"
+#define DMSH_KIND_RT_INSTANCE_SBT "rt_instance_sbt"
+#define DMSH_KIND_RT_BANK0 "rt_bank0"
+#define DMSH_KIND_RT_BANK3 "rt_bank3"
+#define DMSH_RT_CORE_BYTES 0x140
+#define DMSH_RT_DESCRIPTOR_BYTES 0x1430
+#define DMSH_RT_DESCRIPTOR_C0_BYTES 0x430
+#define DMSH_RT_DESCRIPTOR_HANDLES 0x430
+#define DMSH_RT_DESCRIPTOR_PUSH 0xB98
+#define DMSH_RT_HANDLE_BYTES 16
+#define DMSH_RT_RECORD_ALIGN 32
+#define DMSH_RT_LOCAL_BIAS 0x10000
+#define DMSH_RT_IMAGE_CLASSES 16
+#define DMSH_RT_IMAGE_SLOTS 8
+#define DMSH_RT_MEMBERSHIP 24
 
 // Raw global memory: the translator reserves that table as a storage buffer under this constant buffer slot, which no game has (Ryujinx GlobalToStorage.GmemMapCbSlot), finds the pool
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer

@@ -54,13 +54,17 @@ NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
-.PHONY: run check_test_dmsh_pull check_test_tbdr_budget
+.PHONY: run check_test_dmsh_pull check_test_tbdr_budget check_test_dmsh_ast_optimizer check_test_dmsh_native_functions
 run: $(RUN_TESTS)
-	@$(MAKE) --no-print-directory -j1 $(addprefix check_,$(RUN_TESTS)) check_test_dmsh_pull check_test_tbdr_budget
+	@$(MAKE) --no-print-directory -j1 $(addprefix check_,$(RUN_TESTS)) check_test_dmsh_pull check_test_tbdr_budget check_test_dmsh_ast_optimizer check_test_dmsh_native_functions
 check_test_dmsh_pull:
 	python3 test_dmsh_pull.py
 check_test_tbdr_budget:
 	DM_GAME=$(GAME) python3 test_tbdr_budget.py
+check_test_dmsh_ast_optimizer:
+	DMSH_TEST_GPU=1 python3 test_dmsh_ast_optimizer.py
+check_test_dmsh_native_functions:
+	DMSH_TEST_GPU=1 python3 test_dmsh_native_functions.py
 t_transform_feedback: t_transform_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_transform_feedback.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_transform_feedback
@@ -70,6 +74,18 @@ t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hl
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
+t_nvn_accel: t_nvn_accel.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_accel.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_accel: RUN_ENV = MTL_DEBUG_LAYER=1
+t_nvn_accel_sbt: t_nvn_accel_sbt.m t_nvn_accel.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_accel_sbt.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_accel_sbt: RUN_ENV = MTL_DEBUG_LAYER=1
+t_nvn_resource_stages: t_nvn_resource_stages.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_resource_stages.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_resource_stages: RUN_ENV = MTL_DEBUG_LAYER=1
+t_nvn_rt_state: t_nvn_rt_state.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_rt_state.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_rt_state: RUN_ENV = MTL_DEBUG_LAYER=1
 t_rt_comp: t_rt_comp.c ../nvn/hle_nvn.c ../nvn/nvn_rt.h ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_comp.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
@@ -122,7 +138,7 @@ t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
 	clang -O1 -Wall -o $@ t_thread_rt.c
-t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h
+t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h ../nvn/nvn_link_latch.h
 	clang -O1 -Wall -o $@ t_link_drain.c
 t_link_latch_cb: t_link_latch_cb.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_latch_cb.m $(MTL_T_SRC) $(FW)
@@ -228,6 +244,9 @@ check_t_gmem_words: t_gmem_words
 t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_notes.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pool_replay: t_pool_replay.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_replay.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+check_t_pool_replay: RUN_ENV = MTL_DEBUG_LAYER=1
 t_htab_update: t_htab_update.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_htab_update.m $(MTL_T_SRC) $(FW)
 check_t_htab_update: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -395,8 +414,16 @@ t_ubc_wait: t_ubc_wait.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ubc_wait.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_look_wait: t_pso_look_wait.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_look_wait.m $(MTL_T_SRC) $(FW)
+check_t_pso_look_wait: RUN_ENV = MTL_DEBUG_LAYER=1
 t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_shmap_warm.m $(MTL_T_SRC) $(FW)
+t_pso_bg_look: t_pso_bg_look.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bg_look.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_bg_look
+check_t_pso_bg_look: t_pso_bg_look
+	MTL_DEBUG_LAYER=1 ./t_pso_bg_look
 t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_stencil.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_depth_stencil
@@ -422,6 +449,11 @@ check_t_pso_archive: t_pso_archive
 	MTL_DEBUG_LAYER=1 python3 test_pso_archive.py "$(CURDIR)/t_pso_archive"
 t_pso_bundle: t_pso_bundle.m ../tools/pso_offline.py $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bundle.m $(MTL_T_SRC) $(FW)
+t_pso_admission: t_pso_admission.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_admission.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_admission
+check_t_pso_admission: t_pso_admission
+	@for mode in aggregate fragmented empty unknown map-fail exact ample native; do ./t_pso_admission $$mode || exit $$?; done
 t_pso_stall: t_pso_stall.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_stall.m $(MTL_T_SRC) $(FW)
 check_t_pso_stall: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -38,6 +38,8 @@ The race evaluates DLSS at 960x540 to 1920x1080; the shared MetalFX temporal sca
 
 ## Validation
 
+The automated [`smoke.tsv`](smoke.tsv) copies the development save, enters Championship and stops at vehicle selection. Its fixed-time screenshots cover that menu. A race route is unsuitable for those comparisons: frame-based input and load stalls produced different race clocks at the same screenshot time (33.29 versus 27.58 seconds in one comparison). The diagnostic race runs are retained, but their image differences do not establish a rendering regression.
+
 All 2,976 shaders build on the Mac. The focused graphics/parser suite runs 181 tests with no failures (one optional test skipped), including GPU checks of subword shared stores and synthetic indexed NVN2 texture tables. After rebasing, all 38 documentation, game-profile, chain and environment-switch checks and all 70 Mac packaging tests pass. Python lint adds no findings. The initial broader tool run's environment-switch documentation failure is fixed by current main; its three .NET runtime-selection failures pass when allowed to use the installed .NET 11 runtime.
 
 The broader native graphics suite completes its other targets but fails the clock test's two-nanosecond feedback-conversion tolerance intermittently (`feedback conversion uses the resumed guest epoch`); the same binary passes when rerun alone. The clock implementation and test are unchanged by this port. This broad run is not a clean pass.

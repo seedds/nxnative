@@ -20,10 +20,16 @@
 // Up to an eighth of a period before targetTimestamp, so the present still has time to be encoded and committed, and never past an eighth of a period before the next
 // callback (cb + period), so a present that does not come cannot hold the callback thread past the next tick where the room is longer than a period (frame latency 2).
 // The callback waits only when no frame stands in the queue, so the wait delays no frame: the tick would be empty without it. After LINK_LATCH_GIVE_UP timeouts in a row it
-// waits only on every LINK_LATCH_PROBE-th woken callback (counted in woken callbacks, so an acquire of two ticks probes too) and at the end of a drain into the latch
+// waits only on every LINK_LATCH_PROBE-th woken callback (counted in woken callbacks, so an acquire of two ticks probes too) and at the end of a drain into the latch.
+// nvn_link_latch_reach is that wait's bound from room, the seconds from the callback to its targetTimestamp; the drain's early-present rule (nvn_link_latch_spare) stays
+// an eighth of a period inside it, so a present it counts as early is one the latch would have taken, with a margin for the frames after it
+static inline double nvn_link_latch_reach(double room, double period) {
+    if (period <= 0) return 0;
+    double r = room - period / 8, cap = period - period / 8;
+    if (r > cap) r = cap;
+    return r > 0 ? r : 0;
+}
 static inline double nvn_link_latch_wait(double cb, double target_ts, double period, unsigned misses, uint64_t woken, int drain_end) {
-    if (period <= 0 || (misses >= LINK_LATCH_GIVE_UP && !drain_end && woken % LINK_LATCH_PROBE)) return 0;
-    double until = target_ts - period / 8, cap = cb + period - period / 8;
-    if (until > cap) until = cap;
-    return until > cb ? until - cb : 0;
+    if (misses >= LINK_LATCH_GIVE_UP && !drain_end && woken % LINK_LATCH_PROBE) return 0;
+    return nvn_link_latch_reach(target_ts - cb, period);
 }

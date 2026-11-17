@@ -371,5 +371,7 @@ void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libra
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
+typedef void (*nvn_buffer_range_fn)(uint64_t addr, uint64_t size);
+void nvn_buffer_write_ranges(uint64_t addr, uint64_t size, nvn_buffer_range_fn note);   // Snapshot physical destinations while a copy captures its storage
 // Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
 void nvn_serial_floor(uint64_t s);

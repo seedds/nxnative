@@ -164,7 +164,7 @@ static int g_geo_split_depth;   // > 0 while geo_split draws its runs: they skip
 static int geo_sync_cpu(int *drained) {
     if (*drained) return 1;
     mdi_wait();
-    if (g_mdi_ev.signaledValue < g_mdi_v) return 0;
+    if (g_read_ev.signaledValue < g_read_v) return 0;
     memset(g_vconv, 0, sizeof g_vconv); *drained = 1;
     return 1;
 }

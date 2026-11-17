@@ -62,15 +62,46 @@ _GZERO = r'0(?:\.0|u)?'
 def _gchoice(cond, read):   # cond ? read : 0 as spirv-cross writes it, in parentheses (those after a name or > are a call's) or not as the expression around it needs
     return re.compile('|'.join(form % (n, cond, n, read % n, n, _GZERO) for n, form in
                                ((1, r'(?<![\w>])\((?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)\)'), (2, r'(?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)(?![\w.])'))))
-_GBOOL = re.compile(r'\bbool (_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
+# The comparisons start with the text "bool ", which re skips to: with \b first it tried them at every character of every source. The lookbehind takes that text in and is the \b
+# (no word character before it), so the matches are the same (test_shader_rewrites.py GuardScans)
+_GBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
 _GROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\](?:\[[^\]\n]+\]|\.[xyzw])')
 _GLEFT = re.compile(r'%s\) \?' % _GSIZE)
 # A bounded storage buffer's read (TranslationFlags.MetalStorageBounds, GitHub issue #2618): the same choice, the word when it lies in the memory the host bound there (the length table,
 # bank DMSH_SBLEN_BANK: bool _5 = (uint(idx) + before) < total) else 0, and out of bounds the index is word 0, inside the binding (_5 ? buf[_5 ? idx : 0] : 0u). Written as a select too:
 # the load needs no branch, and its words stay plain for wide_loads (dmsh_wide.py)
 _STABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
-_SBOOL = re.compile(r'\bbool (_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
+_SBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
 _SROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_s\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\]')
+_GNAME = re.compile(r'(?<!\[)\b(_\d+) \?')   # a choice on a name; a read's index has its own, after the bracket
+# _GROW, _SROW and _GNAME have no text to skip to (an alternation, a lookbehind), and re tried them at every character of a source with bounded reads. Each is tried only where
+# one of its matches can start, found from text every match holds, and the pattern itself decides there: the matches, their order and the result are those of sub and finditer
+# (GuardScans)
+_GREAD = ' ? (*spvDescriptorSet0.'   # follows the condition of every choice of a read
+
+def _gsub(pat, repl, msl):
+    """pat.sub(repl, msl) for a _gchoice pattern: a match starts at its condition, the last _ before a _GREAD, or at the parenthesis before that"""
+    k = msl.find(_GREAD)
+    if k < 0: return msl
+    out, pos, low = [], 0, 0   # copied up to pos; no match starts before low (the end of the last match, or past a _GREAD that began none)
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = (pat.match(msl, s - 1) if s > pos and msl[s - 1] == '(' else None) or (pat.match(msl, s) if s >= 0 else None)
+        if m: out += (msl[pos:m.start()], repl(m)); pos = low = m.end()
+        else: low = k + 1
+        k = msl.find(_GREAD, low)
+    out.append(msl[pos:])
+    return ''.join(out)
+
+def _gleft(msl, conds):
+    """The first match of _GNAME whose name is in conds, or None: a match ends with a " ?" and starts at the last _ before it"""
+    k, low = msl.find(' ?'), 0
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = _GNAME.match(msl, s) if s >= 0 else None
+        if m and m.group(1) in conds: return m
+        low = k + 2; k = msl.find(' ?', low)
+    return None
 
 def select_guards(msl):
     if 'spvDescriptorSet0' not in msl: return msl
@@ -79,11 +110,11 @@ def select_guards(msl):
         n = '1' if m.group('q1') else '2'; c = m.group('q' + n)
         if c not in conds or m.group('i' + n) != c: return m.group(0)
         return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
-    if bools: msl = _GROW.sub(lambda m: select(m, bools), msl)
-    if sbools: msl = _SROW.sub(lambda m: select(m, sbools), msl)
+    if bools: msl = _gsub(_GROW, lambda m: select(m, bools), msl)
+    if sbools: msl = _gsub(_SROW, lambda m: select(m, sbools), msl)
     left = _GLEFT.search(msl)
     conds = bools | sbools   # no condition names: no choice can be left over from one, so only the scan below is skipped (the size test above always runs)
-    if not left and conds: left = next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in conds), None)
+    if not left and conds: left = _gleft(msl, conds)
     if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
     return msl
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import concurrent.futures as cf, hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -134,6 +134,89 @@ class Entries(Base):
         self.store.put_file('f', src)
         self.assertTrue(self.store.to_file('f', dst)); self.assertEqual(dst.read_bytes(), b'data')
         self.assertFalse(self.store.to_file('absent', self.root / 'none')); self.assertFalse((self.root / 'none').exists())
+
+    def test_other_threads_read_on_connections_of_their_own(self):
+        # one connection gives an entry's bytes at 190 MB/s; the library image is written from 300,000 entries (shader_lib.py write), read by a few threads at once
+        for i in range(50): self.store.put(f's/{i}', bytes([i]) * 40000)
+        self.assertEqual(self.store.get('s/7'), bytes([7]) * 40000); self.assertEqual(self.store.readers, {})   # the thread that opened it: the one connection, as before
+        with cf.ThreadPoolExecutor(4) as pool: got = list(pool.map(lambda i: self.store.get(f's/{i}'), range(50)))
+        self.assertEqual(got, [bytes([i]) * 40000 for i in range(50)])
+        self.assertTrue(0 < len(self.store.readers) <= 4)
+        self.store.put('s/new', b'written since'); self.store.delete_prefix('s/1')   # what was written since is read, what was removed is gone
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(lambda: [self.store.get(n) for n in ('s/new', 's/1', 's/2', 'absent')]).result(), [b'written since', None, bytes([2]) * 40000, None])
+        self.store.close()
+        self.assertEqual(os.listdir(self.root), ['cas.db']); self.assertEqual(self.store.readers, {})   # their connections closed with it: one file is left
+
+    def test_a_read_in_another_thread_waits_for_a_batch_and_a_batch_reads_what_it_wrote(self):
+        started, read = threading.Event(), []
+        def reader(): started.wait(20); t = time.time(); read.append((self.store.get('in/batch'), time.time() - t))
+        def writer():
+            with self.store.batch():
+                self.store.put('in/batch', b'whole'); self.assertEqual(self.store.get('in/batch'), b'whole')   # its own write, on the one connection
+                started.set(); time.sleep(0.3)
+        with cf.ThreadPoolExecutor(2) as pool: a, b = pool.submit(reader), pool.submit(writer); b.result(); a.result()
+        self.assertEqual(read[0][0], b'whole'); self.assertGreater(read[0][1], 0.2)   # not "absent": the read came after the batch, as on one connection
+
+    def test_recovery_waits_for_readers_being_opened_or_queried(self):
+        # A reader's connection belongs to this database until its query finishes. Recovery used to clear the registry between registration and lookup (KeyError), close a
+        # connection during fetchall, or replace the database while a connection to the old file was still being opened. Pause real SQLite readers at both lifetime boundaries.
+        for stage in ('open', 'fetch', 'failed_fetch'):
+            with self.subTest(stage=stage): self.reader_recovery(stage)
+
+    def reader_recovery(self, stage):
+        connect = sqlite3.connect
+        entered, release, recovering, recovered = (threading.Event() for _ in range(4))
+        store = shader_cache.Store(self.root / f'{stage}.db', self.said.append); self.addCleanup(store.close)
+        store.put('entry', b'before recovery')
+        def pause():
+            entered.set()
+            if not release.wait(10): raise TimeoutError('the reader was not released')
+        class Cursor(sqlite3.Cursor):
+            def fetchall(self):
+                if stage != 'open': pause()
+                if stage == 'failed_fetch': raise sqlite3.DatabaseError('database disk image is malformed')
+                return super().fetchall()
+        class Reader(sqlite3.Connection):
+            def execute(self, sql, args=()): return self.cursor(factory=Cursor).execute(sql, args)
+            def close(self):
+                if entered.is_set() and not release.is_set(): raise AssertionError('closed an active reader')
+                super().close()
+        def opening(*args, **kwargs):
+            if kwargs.get('uri'):
+                db = connect(*args, factory=Reader, **kwargs)
+                if stage == 'open': pause()
+                return db
+            return connect(*args, **kwargs)
+        def recover():
+            recovering.set()
+            with store.lock: store._damage(sqlite3.DatabaseError('database disk image is malformed'))
+            recovered.set()
+        with mock.patch.object(shader_cache.sqlite3, 'connect', opening), cf.ThreadPoolExecutor(2) as pool:
+            read = pool.submit(store.get, 'entry')
+            try:
+                self.assertTrue(entered.wait(10))
+                recovery = pool.submit(recover)
+                self.assertTrue(recovering.wait(10))
+                self.assertFalse(recovered.wait(0.1), 'recovery replaced a database with an active reader')
+            finally: release.set()
+            self.assertEqual(read.result(10), None if stage == 'failed_fetch' else b'before recovery')
+            recovery.result(10)
+        self.assertTrue(recovered.is_set()); self.assertEqual(store.readers, {})
+        store.put('entry', b'after recovery')
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(store.get, 'entry').result(10), b'after recovery')
+
+    def test_parallel_queries_keep_independent_reader_lifetimes(self):
+        # The lifetime guard must not serialize unrelated readers: both queries need to enter SQLite before either one finishes.
+        self.store.put('entry', b'parallel'); together = threading.Barrier(2)
+        connect = sqlite3.connect
+        class Reader(sqlite3.Connection):
+            def execute(self, sql, args=()):
+                together.wait(10)
+                return super().execute(sql, args)
+        def opening(*args, **kwargs): return connect(*args, factory=Reader, **kwargs)
+        with mock.patch.object(shader_cache.sqlite3, 'connect', opening), cf.ThreadPoolExecutor(2) as pool:
+            reads = [pool.submit(self.store.get, 'entry') for _ in range(2)]
+            self.assertEqual([r.result(10) for r in reads], [b'parallel', b'parallel'])
 
     def test_one_file_is_left(self):
         self.store.put('x', b'1'); self.store.close()

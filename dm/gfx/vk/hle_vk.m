@@ -41,7 +41,7 @@ static int g_log;
 #define VK(name, ret, ...)                                                                       \
     static ret h_##name(__VA_ARGS__);                                                            \
     static const PFN_##name chk_##name __attribute__((unused)) = h_##name;                       \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name}; \
+    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name}); \
     static ret h_##name(__VA_ARGS__)
 // VKB: the same, run on the thread's big host stack (hle_bigstack.c; register arguments only): for the functions that call into Metal on game threads, whose stacks can be small
 #define VKB(name, ret, ...)                                                                      \
@@ -50,7 +50,7 @@ static int g_log;
     extern const char h_##name##_bs[];                                                           \
     __asm__(".text\n.p2align 2\n.globl _h_" #name "_bs\n.private_extern _h_" #name "_bs\n_h_" #name "_bs:\n" \
             "    adrp x16, _h_" #name "@PAGE\n    add x16, x16, _h_" #name "@PAGEOFF\n    b _dm_bigstack_enter\n"); \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
+    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name##_bs}); \
     static ret h_##name(__VA_ARGS__)
 
 static uint32_t umin(uint32_t a, uint32_t b) { return a < b ? a : b; }

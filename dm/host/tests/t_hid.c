@@ -348,9 +348,13 @@ static void t_vibration(void) {
     g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
     CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY), "no sink: no vibration devices");
     dm_haptics_init(vibration_sink, 1);
-    CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
-          "startup handles do not wait for a routed haptics output");
-    CHECK(!h_hid_VibMounted(&h[0]), "no routed output: device not mounted");
+    CHECK(h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
+          "rumble on with no controller routed: permitted, handles exist");
+    CHECK(h_hid_VibMounted(&h[0]) && h_hid_VibMounted(&h[1]),
+          "both channels are mounted before a haptics output is routed");
+    CHECK(h_hid_VibMountedOunce(&h[0]) && h_hid_VibMountedOunce(&h[1]), "Switch 2 channels are mounted before routing too");
+    h_hid_VibInfo(info, &h[0]); CHECK(info[0] == 1 && info[1] == 1, "left motor answers before routing");
+    h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2, "right motor answers before routing");
     h_hid_SendVib(&h[0], &v);
     CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "a value before routing is not retained");
     dm_haptics_route(0, 1); dm_haptics_route(1, 1);
@@ -388,9 +392,13 @@ static void t_vibration(void) {
     { int m; CHECK(!vib_targets(3, &m), "old docked handle is not valid in handheld mode"); }
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
-    CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
+    CHECK(h_hid_VibPermit(), "disconnecting controllers does not change the system's vibration setting");
     dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
+    h_hid_VibInfo(info, &h[1]);
+    CHECK(h_hid_VibMounted(&h[1]) && h_hid_VibMountedOunce(&h[1]) && info[0] == 1 && info[1] == 2, "rumble off does not remove a channel or its actuator info");
+    h_hid_SendVib(&h[0], &v);
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "rumble off still drops values for a routed channel");
     dm_haptics_set_enabled(1);
     CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
 }
@@ -400,6 +408,18 @@ static void *vibration_sender(void *arg) {
     const uint32_t handles[] = {3, 0};
     const dm_vibration values[] = {{0.25, 160, 0, 320}, {0.8, 160, 0, 320}};
     for (int i = 0; i < 1000; i++) h_hid_SendVibs(handles, values, 2);
+    return NULL;
+}
+static void *vibration_query(void *arg) {
+    (void)arg;
+    uint32_t h = 3, info[2];
+    for (int i = 0; i < 1000; i++) {
+        dm_haptics_set_enabled(i & 1);
+        h_hid_VibPermit();
+        h_hid_VibInfo(info, &h);
+        h_hid_VibMounted(&h);
+        h_hid_VibMountedOunce(&h);
+    }
     return NULL;
 }
 static void t_rumble_log(void) {
@@ -430,11 +450,11 @@ static void t_rumble_log(void) {
               "diagnostic totals reset once per second and retain the interval peak");
     }
     close(saved); fclose(capture);
-    // Game threads may send independently; ThreadSanitizer also covers the logger's shared totals.
-    pthread_t threads[4]; int started = 0;
-    for (int i = 0; i < 4; i++) {
-        int rc = pthread_create(&threads[started], NULL, vibration_sender, NULL);
-        CHECK(!rc, "start concurrent vibration sender"); if (!rc) started++;
+    // Game threads may send and query independently while the rumble setting changes; TSan checks all diagnostic state.
+    pthread_t threads[8]; int started = 0;
+    for (int i = 0; i < 8; i++) {
+        int rc = pthread_create(&threads[started], NULL, i < 4 ? vibration_sender : vibration_query, NULL);
+        CHECK(!rc, "start concurrent vibration sender or query"); if (!rc) started++;
     }
     for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
     unsetenv("DM_RUMBLE_LOG");

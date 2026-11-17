@@ -242,13 +242,13 @@ int main(void) { @autoreleasepool {
         id<MTL4Archive> real = g_arch_bundle; NSString *other = [root stringByAppendingPathComponent:@"other"];
         put([other stringByAppendingPathComponent:@"applegpu_g99x.mtl4a"], @"x");
         NSMutableArray *list = [NSMutableArray array]; g_arch_bundle = nil;
-        setenv("DM_PSO_BUNDLE", other.UTF8String, 1); pso_bundle_open(list);
+        setenv("DM_PSO_BUNDLE", other.UTF8String, 1); pso_bundle_open(list, arch_plan(nil));
         EXPECT("no file for this GPU: none opened", 0, list.count + (g_arch_bundle != nil));
         put([other stringByAppendingFormat:@"/%@.mtl4a", gpu], @"not an archive");   // Metal's own loadFromURL crashed on it: never handed to Metal
-        pso_bundle_open(list);
+        pso_bundle_open(list, arch_plan(nil));
         EXPECT("not an archive: none opened", 0, list.count + (g_arch_bundle != nil));
         EXPECT("not an archive: refused before Metal", 0, arch_file_ok([other stringByAppendingFormat:@"/%@.mtl4a", gpu]));
-        setenv("DM_PSO_BUNDLE", "off", 1); pso_bundle_open(list);
+        setenv("DM_PSO_BUNDLE", "off", 1); pso_bundle_open(list, arch_plan(nil));
         EXPECT("off: none opened", 0, list.count);
         g_arch_bundle = real;
     }

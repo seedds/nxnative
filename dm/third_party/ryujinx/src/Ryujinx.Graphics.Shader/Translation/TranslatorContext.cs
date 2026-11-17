@@ -9,6 +9,7 @@ using Ryujinx.Graphics.Shader.Translation.Transforms;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Linq;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 using static Ryujinx.Graphics.Shader.Translation.Translator;
 
@@ -33,9 +34,13 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal IGpuAccessor GpuAccessor { get; }
 
         internal TranslationOptions Options { get; }
+        internal RayTracingProgram RayTracingProgram { get; }
+        internal RayTracingResources Continuations { get; private set; }
+        public IReadOnlyDictionary<ulong, int[]> GetRayTracingAccelerationSlots() => Continuations?.GetAccelerationSlots() ??
+            throw new InvalidOperationException("No translated ray-tracing program.");
 
         private bool IsTransformFeedbackEmulated => !GpuAccessor.QueryHostSupportsTransformFeedback() && GpuAccessor.QueryTransformFeedbackEnabled();
-        public bool HasStore => _program.UsedFeatures.HasFlag(FeatureFlags.Store) || (IsTransformFeedbackEmulated && Definitions.LastInVertexPipeline);
+        public bool HasStore => RayTracingProgram != null || _program.UsedFeatures.HasFlag(FeatureFlags.Store) || (IsTransformFeedbackEmulated && Definitions.LastInVertexPipeline);
         internal bool UsesViewportMask => _program.UsedFeatures.HasFlag(FeatureFlags.ViewportMask);
         internal bool UsesDirectCbe => _program.UsedFeatures.HasFlag(FeatureFlags.DirectCbe);   // nxnative: DirectCbeWrites
 
@@ -49,7 +54,8 @@ namespace Ryujinx.Graphics.Shader.Translation
             ShaderDefinitions definitions,
             IGpuAccessor gpuAccessor,
             TranslationOptions options,
-            DecodedProgram program)
+            DecodedProgram program,
+            RayTracingProgram rayTracingProgram = null)
         {
             Address = address;
             Size = size;
@@ -59,6 +65,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             Definitions = definitions;
             GpuAccessor = gpuAccessor;
             Options = options;
+            RayTracingProgram = rayTracingProgram;
         }
 
         private static bool IsLoadUserDefined(Operation operation)
@@ -210,9 +217,10 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             ResourceManager resourceManager = CreateResourceManager(asCompute);
 
-            bool usesLocalMemory = _program.UsedFeatures.HasFlag(FeatureFlags.LocalMemory);
+            bool usesLocalMemory = RayTracingProgram != null || _program.UsedFeatures.HasFlag(FeatureFlags.LocalMemory);
 
             resourceManager.SetCurrentLocalMemory(_localMemorySize, usesLocalMemory);
+            if (RayTracingProgram != null) Continuations = new RayTracingResources(resourceManager, RayTracingProgram);
 
             if (Stage == ShaderStage.Compute)
             {
@@ -259,15 +267,45 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             ControlFlowGraph[] cfgs = new ControlFlowGraph[functions.Length];
             RegisterUsage.FunctionRegisterUsage[] frus = new RegisterUsage.FunctionRegisterUsage[functions.Length];
+            bool rayTracing = RayTracingProgram != null;
 
             for (int i = 0; i < functions.Length; i++)
             {
-                cfgs[i] = ControlFlowGraph.Create(functions[i].Code);
+                Operation[] code = functions[i].Code;
+                if (rayTracing && i != 0)
+                {
+                    RayTracingControlFlow.ValidateOperations(code);
+                    code = NativeFunctionState.CheckLocalMemory(code, resourceManager.LocalMemoryId, Continuations.Fault,
+                        RayTracingProgram.LocalMemoryBias, RayTracingProgram.LocalMemoryBytes);
+                    code = NativeFunctionState.Lower(code, Continuations.Registers, Continuations.Fault);
+                }
+                cfgs[i] = ControlFlowGraph.Create(code);
+                if (rayTracing && i != 0) NativeFunctionState.ValidateExits(cfgs[i]);
 
-                if (i != 0)
+                if (i != 0 && !rayTracing)
                 {
                     frus[i] = RegisterUsage.RunPass(cfgs[i]);
                 }
+            }
+
+            if (rayTracing)
+            {
+                // Typed current-hit provenance needs every successor's original
+                // SSA graph. No per-function optimizer runs before this proof.
+                foreach (ControlFlowGraph cfg in cfgs)
+                {
+                    Dominance.FindDominators(cfg);
+                    Dominance.FindDominanceFrontiers(cfg.Blocks);
+                    Ssa.Rename(cfg.Blocks);
+                }
+                var nativeFunctions = Enumerable.Range(1, cfgs.Length - 1).ToDictionary(i => i,
+                    i => new RayTracingHitContext.FunctionCfg(i, cfgs[i].Blocks));
+                var successors = RayTracingProgram.Entries.Where(e => e.Stage == RayTracingStage.RayGeneration && e.OwnerId != e.LogicalId)
+                    .Select(e => nativeFunctions[_program.GetFunctionByAddress(e.Address).Id]).ToArray();
+                var complete = new RayTracingHitContext.CompleteSuccessorSet(successors, nativeFunctions, Continuations.Fault);
+                foreach (RayTracingEntry entry in RayTracingProgram.Entries.Where(e => e.Stage == RayTracingStage.ClosestHit))
+                    RayTracingHitContext.Lower(cfgs[_program.GetFunctionByAddress(entry.Address).Id].Blocks,
+                        Continuations.Registers, Continuations.Hit, new(18, 19, 40), complete);
             }
 
             List<Function> funcs = new(functions.Length);
@@ -286,7 +324,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 int inArgumentsCount = 0;
                 int outArgumentsCount = 0;
 
-                if (i != 0)
+                if (i != 0 && !rayTracing)
                 {
                     RegisterUsage.FunctionRegisterUsage fru = frus[i];
 
@@ -296,12 +334,13 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 if (cfg.Blocks.Length != 0)
                 {
-                    RegisterUsage.FixupCalls(cfg.Blocks, frus);
-
-                    Dominance.FindDominators(cfg);
-                    Dominance.FindDominanceFrontiers(cfg.Blocks);
-
-                    Ssa.Rename(cfg.Blocks);
+                    if (!rayTracing)
+                    {
+                        RegisterUsage.FixupCalls(cfg.Blocks, frus);
+                        Dominance.FindDominators(cfg);
+                        Dominance.FindDominanceFrontiers(cfg.Blocks);
+                        Ssa.Rename(cfg.Blocks);
+                    }
 
                     TransformContext context = new(
                         hfm,

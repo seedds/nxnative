@@ -8,7 +8,7 @@ from test_dmsh_maxwell_ftz import EXIT, PT, RZ, TOOLS, code, s2r_tid   # noqa: E
 from test_dmsh_storage_offset import iadd_c, ldg, mov_c   # noqa: E402
 from test_dmsh_hull_cbe import mov32i, stg   # noqa: E402
 sys.path.insert(0, str(TOOLS))
-import dmsh_abi as abi, dmsh_geometry, dmsh_reflect   # noqa: E402
+import dmsh_abi as abi, dmsh_chain, dmsh_geometry, dmsh_reflect   # noqa: E402
 from dmsh_chain import MAC_METAL   # noqa: E402
 
 
@@ -75,7 +75,7 @@ class ComputeUniformHandles(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         res = json.loads((work / 'k.res.json').read_text())
         dmsh_geometry.flatten_sets(work / 'k.spv')
-        r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', str(work / 'k.spv')], capture_output=True, text=True)
+        r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native', str(work / 'k.spv')], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         return res, r.stdout, dmsh_reflect.reflect('k', stage, r.stdout, res)
 

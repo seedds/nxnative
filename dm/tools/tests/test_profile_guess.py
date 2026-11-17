@@ -104,6 +104,12 @@ class GlslSources(unittest.TestCase):
             self.assertEqual(pg.romfs_glsl_files(root), 2)
 
 
+    def test_glsl_files_are_gl_sources(self):   # Mega Man Legacy Collection's shaders/nx/*.glsl, which gl_shaders.py reads: no run-time capture
+        self.assertIn('.glsl', pg.GL_FILES)
+        s = pg.shader_sources({'eglCreateWindowSurface'}, 0, [], 0, 0, gl_names=1, gl_src=2, gl_files=6)
+        self.assertEqual(s['graphics'][0], 'gl'); self.assertFalse(s['gl_capture'][0])
+
+
 class Npdm(unittest.TestCase):
     def npdm(self, flags):
         d = bytearray(0x80); d[:4] = b'META'; d[0xc] = flags

@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <stdatomic.h>   // g_screen_hz: read on the main thread, used from the render thread (front_screen_max_fps)
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -29,6 +30,7 @@ static CAMetalLayer *g_layer;
 static void front_ios_notify_setup(void);
 static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
+static void screen_refresh(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
@@ -49,7 +51,7 @@ static UILabel *front_ios_fps_label(void);
     }
     return self;
 }
-- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }   // the phone's screen or a TV's (DmTVSceneDelegate)
+- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; screen_refresh(); }   // the phone's screen or a TV's (DmTVSceneDelegate)
 - (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
@@ -57,6 +59,7 @@ static UILabel *front_ios_fps_label(void);
     CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
+    screen_refresh();   // an iPad window moved to another display lays out again (the display scale trait above)
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
 @end
@@ -314,9 +317,11 @@ static void front_ios_power_watch(void) {
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
-    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-        (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
-    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
+    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); screen_refresh(); }];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIScreenModeDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; screen_refresh(); }];
+    screen_refresh();
+    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s, screen %d Hz", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off", front_screen_max_fps());
 }
 
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
@@ -372,6 +377,23 @@ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape 
     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
     if (a <= 0 || c <= 0) return 0;
     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
+}
+// The highest frame rate of the screen the game is shown on (front.h), which the 120 fps path needs at 120: hle_nvn.c high_cap_tick caps at 60 on a screen below 120 Hz,
+// and the display link follows it (nvn_mtl.m link_range, link_sync). Read on the main thread, as the Mac front end does (front_mac.m screen_refresh), whenever it can change:
+// at launch, when the game view moves to a window (the phone's, or a TV's: its own rate, as the picture is there) or lays out (an iPad window moved to another display),
+// when the screen's mode changes and when Low Power Mode is turned on or off. Low Power Mode holds a ProMotion screen at 60 Hz, so the rate is 60 then, whatever
+// maximumFramesPerSecond says. Before the game view has a window: the app's own scene (UIScreen.mainScreen is deprecated in iOS 26). 0 until read
+static _Atomic int g_screen_hz;
+int front_screen_max_fps(void) { return atomic_load_explicit(&g_screen_hz, memory_order_relaxed); }
+static void screen_refresh(void) {
+    UIWindowScene *ws = (g_root.game ?: g_root.view).window.windowScene;
+    if (!ws) for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+        if ([s isKindOfClass:UIWindowScene.class] && [s.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) { ws = (UIWindowScene *)s; break; }
+    int hz = ws ? (int)ws.screen.maximumFramesPerSecond : 0, lpm = dm_low_power_now();
+    if (hz <= 0) return;   // no screen yet: keep what was read
+    if (lpm && hz > 60) hz = 60;
+    int was = atomic_exchange_explicit(&g_screen_hz, hz, memory_order_relaxed);
+    if (was && was != hz) LOG("front end: screen %d Hz → %d Hz%s", was, hz, lpm ? " (Low Power Mode)" : "");
 }
 // Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
 // shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch
@@ -447,6 +469,42 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
     else LOG("front end: \"Starting %s\" shown, notification for program %d scheduled", nm.UTF8String, index);
 }
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
+
+// The account applet offers only choices allowed by the host. Native actions keep
+// the choice with the player, including creation, skip and cancellation.
+int front_user_select(const front_user *users, int count, int allow_create, int allow_skip) {
+    if (!g_layer) return FRONT_USER_CANCEL;
+    __block int result = FRONT_USER_CANCEL;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class])
+            for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        if (!vc || vc.isBeingDismissed) { dispatch_semaphore_signal(done); return; }
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Choose a user" message:@"Choose who will play. Each user keeps separate progress." preferredStyle:UIAlertControllerStyleAlert];
+        for (int i = 0; i < count; i++) {
+            int slot = users[i].slot;
+            NSString *title = [NSString stringWithFormat:@"%s (user %d)%s", users[i].nickname, slot + 1, users[i].open ? " - in use" : ""];
+            [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                (void)a; result = slot; dispatch_semaphore_signal(done);
+            }]];
+        }
+        if (allow_create) [alert addAction:[UIAlertAction actionWithTitle:@"Add user" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a; result = FRONT_USER_CREATE; dispatch_semaphore_signal(done);
+        }]];
+        if (allow_skip) [alert addAction:[UIAlertAction actionWithTitle:@"Skip" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a; result = FRONT_USER_SKIP; dispatch_semaphore_signal(done);
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
+            (void)a; dispatch_semaphore_signal(done);
+        }]];
+        dm_gamepad_reset();
+        [vc presentViewController:alert animated:YES completion:nil];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return result;
+}
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {

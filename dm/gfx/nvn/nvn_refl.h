@@ -45,6 +45,7 @@ typedef struct {
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_rewrite.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
     uint8_t raw_id;          // SAMPU: the uniform word holds a SeparateSamplerId (the sampler ID itself), not a handle with the sampler ID in its high 12 bits
     uint16_t tbx;            // IMG / IMGU / TBUF / TBUFU: a buffer image's or buffer texture's index in the shader's offset table (TBIAS, dmsh_abi.h DMSH_TBIAS_BANK) + 1, whose coordinates the shader moves by it
+                             // TEX / TEXU / TEXD / TEXA with f1d: row-fetch leads, followed by the logical widths (one of each per element)
                              // (nvn_mtl.m tbuf_lead); TEXD / TEXA of buffer textures: element 0's, element k's at tbx - 1 + k; 0 = none
     uint8_t sbx;             // SBUFU / SBUFQ: the binding's slot in the shader's length table (SBLEN, dmsh_abi.h DMSH_SBLEN_BANK) + 1, whose words bound its accesses (nvn_mtl.m sblen_put); 0 = unbounded
 } nvn_rbind;

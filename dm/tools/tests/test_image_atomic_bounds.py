@@ -494,6 +494,75 @@ class Compiler(unittest.TestCase):
             self.assertRegex(msl.read_text(), r'_c%d\s*\[\[id\(\d+\)\]\]' % TBIAS_BANK)
             self.compile_metal(msl, work, 'tbuf')
 
+    def test_buffer_pool_live_offset_msl(self):
+        import dmsh_reflect
+        source = ('#include <metal_stdlib>\nusing namespace metal;\n'
+                  'struct spvDescriptorSetBuffer0\n{\n'
+                  '    array<texture_buffer<uint>, 33> cp_t_cb0_40000000 [[id(0)]];\n'
+                  '    device uint* output [[id(33)]];\n};\n'
+                  'kernel void k(constant spvDescriptorSetBuffer0& a [[buffer(0)]]) { '
+                  'a.output[0] = a.cp_t_cb0_40000000[32].read(3).x; '
+                  'a.output[1] = a.cp_t_cb0_40000000[32].get_width(); }\n')
+        leaf = 'static uint leaf(constant array<texture_buffer<uint>, 33>& cp_t_cb0_40000000) { return cp_t_cb0_40000000[32].read(uint(cp_t_cb0_40000000[1].read(0).x)).x + cp_t_cb0_40000000[32].get_width(); }\n'
+        source = source.replace('kernel void k(', leaf + 'kernel void k(')
+        source = source.replace('a.output[1] = a.cp_t_cb0_40000000[32].get_width();', 'a.output[1] = leaf(a.cp_t_cb0_40000000);')
+        rewritten = dmsh_reflect.pool_arrays(source)
+        bindings = dmsh_reflect.reflect('pool', 'cs', rewritten, {'sbufs': []})
+        self.assertEqual(bindings[0]['kind'], dmsh_abi.KIND_TEX_POOL)
+        self.assertEqual(bindings[1]['arg_id'], 1)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-pool-') as temp:
+            work = Path(temp); msl = work / 'pool.metal'; msl.write_text(rewritten)
+            self.compile_metal(msl, work, 'pool')
+
+    def test_wrapped_buffer_fetch_offset_before_row_split(self):
+        table = (RYU / 'Decoders/InstTable.cs').read_text()
+        def base(name):
+            m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', table)
+            assert m is not None, name
+            return int(m[1].replace('x', '0'), 2)
+        def mov(reg, value): return base('Mov32i') | ((value & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | reg
+        texture = (8 << 36) | (1 << 31) | (7 << 16)
+        surface = (0x48 << 36) | (1 << 33) | (4 << 20) | (7 << 16)
+        program = [mov(0, 16383), mov(1, 0), base('Tld') | texture | (255 << 20) | 4,
+                   base('SustD') | surface | (1 << 8) | 4, mov(1, 1),
+                   base('Txq') | texture | (1 << 22) | (255 << 8) | 5,
+                   base('SustD') | (surface & ~(0xff << 20)) | (5 << 20) | (1 << 8) | 5, base('Exit') | (7 << 16) | 15]
+        words = []
+        for i, instruction in enumerate(program):
+            if i % 3 == 0: words.append(0)
+            words.append(instruction)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-rows-') as temp:
+            work = Path(temp); code = work / 'rows.bin'; code.write_bytes(struct.pack('<%dQ' % len(words), *words))
+            jobs = work / 'jobs.json'
+            jobs.write_text(json.dumps([dict(key='rows', stage='cs', code=str(code), tex={},
+                img={'0': dict(type='buffer', fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jobs), str(work)], check=True)
+            spv = work / 'rows.spv'; subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+            res = json.loads((work / 'rows.res.json').read_text())
+            self.assertTrue(res['textures'][0]['row_bias'])
+            self.assertEqual(res['textures'][0]['tbx'], 0)
+            self.assertEqual(res['images'][0]['tbx'], 2)   # row lead and logical width precede the writable image's offset
+            ops = instructions(spv)
+            defs = {a[1]: (op, a) for op, a in ops if op in (43, 61, 65, 80, 95, 124, 128, 169, 176, 194, 196, 197, 199)}
+            fetch = next(a for op, a in ops if op == 95)
+            op, coords = defs[fetch[3]]; self.assertEqual(op, 80)
+            op, xcast = defs[coords[2]]; self.assertEqual(op, 124)
+            op, x = defs[xcast[2]]; self.assertEqual(op, 199)
+            op, ycast = defs[coords[3]]; self.assertEqual(op, 124)
+            op, y = defs[ycast[2]]; self.assertEqual(op, 194)
+            self.assertEqual(x[2], y[2])   # both coordinates split the same moved linear index
+            self.assertEqual(defs[x[3]][1][2], 16383)
+            self.assertEqual(defs[y[3]][1][2], 14)
+            def depends_on_add(value, seen=None):
+                seen = set() if seen is None else seen
+                if value in seen or value not in defs: return False
+                seen.add(value); op, a = defs[value]
+                return op == 128 or (op != 43 and any(depends_on_add(v, seen) for v in a[2:]))
+            self.assertTrue(depends_on_add(x[2]))
+            msl = work / 'rows.metal'
+            subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
+            self.compile_metal(msl, work, 'rows')
+
     def test_real_translation_and_cross(self):
         self.assertTrue(os.access(SPIRV_CROSS, os.X_OK), f'{SPIRV_CROSS} required for compiler acceptance')
         self.assertIsNotNone(shutil.which('spirv-val'), 'spirv-val required for compiler acceptance')

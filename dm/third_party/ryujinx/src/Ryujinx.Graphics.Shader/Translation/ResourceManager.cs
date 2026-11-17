@@ -268,7 +268,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         private readonly Dictionary<(bool IsImage, int CbufSlot, int Handle), int> _bufferImageBiasByHandle = new();
         private int _bufferBiasEntries;
 
-        public void NoteBufferResource(bool isImage, int setIndex, int binding)
+        public void NoteBufferResource(bool isImage, int setIndex, int binding, bool rowWrap = false)
         {
             SetBindingPair pair = new(setIndex, binding);
             IReadOnlyDictionary<SetBindingPair, int> noted = isImage ? Properties.BufferImageBiases : Properties.BufferTextureBiases;
@@ -300,13 +300,13 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (!_bufferImageBiasByHandle.TryGetValue(handle.Value, out int index))
             {
-                if (_bufferBiasEntries + definition.ArrayLength > Constants.NxBufferImageBiases)
+                if (_bufferBiasEntries + definition.ArrayLength * (rowWrap ? 2 : 1) > Constants.NxBufferImageBiases)
                 {
                     return;
                 }
 
                 index = _bufferBiasEntries;
-                _bufferBiasEntries += definition.ArrayLength;
+                _bufferBiasEntries += definition.ArrayLength * (rowWrap ? 2 : 1);
                 _bufferImageBiasByHandle.Add(handle.Value, index);
             }
 
@@ -317,6 +317,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             else
             {
                 Properties.AddBufferTextureBias(pair, index);
+                if (rowWrap) Properties.BufferRowWidths[pair] = index + definition.ArrayLength;
             }
 
             Properties.BufferImageBiasBinding = GetBufferImageBiasBinding();

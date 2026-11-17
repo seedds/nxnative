@@ -58,8 +58,10 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 else if ([el hasPrefix:@"texture_buffer"]) { r->kind = NVN_RB_TEXD; r->dtt = (uint8_t)MTLTextureTypeTextureBuffer; uint8_t tt; dummy_kind(el, &tt, &r->dpf); }
                 else if ([el hasPrefix:@"texture"] || [el hasPrefix:@"depth"]) { r->kind = NVN_RB_TEXD; dummy_kind(el, &r->dtt, &r->dpf); }
                 else FAIL("B binding %s: dynamic handle array of %s", nm.UTF8String, el.UTF8String);
+                r->f1d = [b[@"fetch1d"] boolValue];
                 id dx = b[@"tbx"];   // an array of buffer textures: its first element's entry in the offset table, the rest following it (dmsh_reflect.py buffer_image_bias)
-                if (dx) { int x = [dx intValue]; if (x < 0 || x + n > DMSH_TBIAS_SLOTS || r->dtt != (uint8_t)MTLTextureTypeTextureBuffer) FAIL("B binding %s: offset table entries %d + %d of an array that is not of buffer textures", nm.UTF8String, x, n);
+                if (dx) { int x = [dx intValue], rows = r->f1d && r->dtt == MTLTextureType2D;
+                    if (x < 0 || x + n * (rows ? 2 : 1) > DMSH_TBIAS_SLOTS || (!rows && r->dtt != (uint8_t)MTLTextureTypeTextureBuffer)) FAIL("B binding %s: offset table entries %d + %d of an array that is not of buffer textures or rows", nm.UTF8String, x, n);
                     r->tbx = (uint16_t)(x + 1); }
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
             }
@@ -121,11 +123,13 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == DMSH_PUSH_BANK ? NVN_RB_PUSH : [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }
             else FAIL("B binding kind %s not implemented (%s)", k.UTF8String, [b[@"msl_name"] UTF8String]);
-            id tx = b[@"tbx"];   // a buffer image's or buffer texture's index in the offset table, an array of buffer textures' first (dmsh_reflect.py buffer_image_bias)
-            if (tx) { int x = [tx intValue], arr = r->kind == NVN_RB_TEXA;
-                if (x < 0 || x + (arr ? r->n : 1) > DMSH_TBIAS_SLOTS || (r->kind != NVN_RB_IMG && r->kind != NVN_RB_IMGU && r->kind != NVN_RB_TBUF && r->kind != NVN_RB_TBUFU &&
-                                                                            !(arr && r->dtt == (uint8_t)MTLTextureTypeTextureBuffer)))
-                    FAIL("B binding %s: offset table index %d of a binding that is not an image or buffer texture, nor an array of buffer textures", nm.UTF8String, x);
+            if (r->kind == NVN_RB_TEXU || r->kind == NVN_RB_TEXA) r->f1d = [b[@"fetch1d"] boolValue];
+            id tx = b[@"tbx"];   // a buffer image's or buffer texture's index; rows also take a logical-width group after their leads
+            if (tx) { int x = [tx intValue], arr = r->kind == NVN_RB_TEXA, rows = r->f1d && r->dtt == MTLTextureType2D;
+                int count = (r->n ? r->n : 1) * (rows ? 2 : 1);
+                if (x < 0 || x + count > DMSH_TBIAS_SLOTS || (r->kind != NVN_RB_IMG && r->kind != NVN_RB_IMGU && r->kind != NVN_RB_TBUF && r->kind != NVN_RB_TBUFU &&
+                                                                            !(arr && r->dtt == (uint8_t)MTLTextureTypeTextureBuffer) && !rows))
+                    FAIL("B binding %s: offset table index %d of a binding that is not an image or buffer texture, nor buffer rows", nm.UTF8String, x);
                 r->tbx = (uint16_t)(x + 1); }
             id sx = b[@"sbx"];   // a bounded storage buffer's slot in the length table (dmsh_reflect.py; Ryujinx TranslationFlags.MetalStorageBounds)
             if (sx) { int x = [sx intValue];
@@ -140,8 +144,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             o->nb++;
         }
         for (int i = 0; i < o->nb; i++) {   // every offset table entry a binding takes lies in the table the shader declares
-            const nvn_rbind *r = &o->b[i]; int many = r->kind == NVN_RB_TEXD || r->kind == NVN_RB_TEXA;
-            if (r->tbx && r->tbx - 1 + (many ? r->n : 1) > o->tbias_n) FAIL("B binding %d: offset table entries %d + %d past the table's %d", i, r->tbx - 1, many ? r->n : 1, o->tbias_n);
+            const nvn_rbind *r = &o->b[i]; int count = (r->n ? r->n : 1) * (r->f1d && r->dtt == MTLTextureType2D ? 2 : 1);
+            if (r->tbx && r->tbx - 1 + count > o->tbias_n) FAIL("B binding %d: offset table entries %d + %d past the table's %d", i, r->tbx - 1, count, o->tbias_n);
             if (r->sbx && !o->sblen) FAIL("B binding %d: a bounded storage buffer in a shader with no length table", i);
         }
         NSDictionary *dr = j[@"drv_reads"];

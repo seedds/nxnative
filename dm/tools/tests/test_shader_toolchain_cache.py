@@ -319,7 +319,7 @@ class TargetSelection(unittest.TestCase):
                         return p.read_bytes() if p.is_file() else None
                     ns: dict[str, Any] = dict(os=os, json=json, subprocess=subprocess, out=td, w=td, TARGETS=targets,
                               IOSOUT=str(ios) if 'ios' in targets else None, MESH_STATS=collections.Counter(),
-                              MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose),
+                              MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose), dmsh_rewrite=types.SimpleNamespace(raw_noinline=lambda src, _kind: src),
                               output=output, commit=mock.Mock())
                     exec(compile(ast.Module(body=[function], type_ignores=[]), '<mesh targets>', 'exec'), ns)
                     ns['mesh_finish'](('vertex', 'geometry'))

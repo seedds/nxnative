@@ -83,6 +83,10 @@ HOST_BINDING = [
      'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' "
             "addresses. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09)",
      'kept': "1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09)"}),
+    ('', '', '277178b7dba1b6d4949a84778d4abc58', {'what': "Tears of the Kingdom's mouse camera (DM_KBM=1), whose stubs kbm_patches.py places at fixed addresses (front_kbm_mac.m)", 'now': 'build', 'goal': 'game',
+     'purpose': 'runtime',
+     'why': "the game's own camera functions; function fingerprints (MATCH_CUTS) could find them on other updates",
+     'kept': "an opt-in Mac control scheme brought up on 1.4.3 alone; other builds run without it until its stubs are matched by fingerprint"}),
 ]
 # Translator rules keyed by one shader's code hash: (the start of the rule's comment, entry)
 SHADER_BINDING = [

@@ -26,6 +26,7 @@ Orbitals cannot be played alone: Play Local waits for a second player to join, a
 
 ## Shaders
 
+- **Open: duplicate representative labels (2026-11-17, [issue #2924](https://github.com/seedds/nxnative/issues/2924#issuecomment-6943096981)).** Packing reports 20,461 profile-only and 20,461 split-only rows. The two example keys both exist in the registered map: `10ea957750f469c4` at game vertex index 0 (`#UE100`), and `4252c1a78cd68898` at index 3029 (`#UE398`), while the report's split puts the latter at index 0 (`#UE1`). These are different keys, so comparing the first differing rows or their counts does not establish an equivalent split. Compare the complete tables joined by key, then verify complete duplicate control sections and code in the decoded archives before accepting label/index changes. Those archives are unavailable locally; the profile inputs remain unchanged. Shared mechanism: [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - 23,432 unique in [`shader_map.tsv`](shader_map.tsv) (3,556 vertex, 16,459 pixel, 3,415 compute, 2 geometry) from the container's two IoStore shader libraries (global 4,515, game 36,480 shaders), split in 57 s: [Unreal Engine 5.6 IoStore shader libraries for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-56-iostore-shader-libraries-for-the-switch-2). All build: a full Mac build took 19 minutes on the M6 the first time, 6 minutes on chain `73b94575300e` with the Metal compile cache warm.
 - Resolved: 5 global compute shaders (`3ea35c5a0f1ea749`, `45389d82b79dbf0c`, `50c768e8620cf18e`, `868f60d0648f0110`, `c2f9e9baad57e2d0`) stopped at `Ampere instruction 394 … is not implemented`: Unreal's ShaderPrint counter, an image atomic whose handle is in a register ([Ampere forms with a handle in a register](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations)).
 
@@ -58,6 +59,7 @@ On a first start the language, gamma and terms screens come before the title: `A
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): decoded-archive representative validation remains open above.
 - [Empty target bindings between draws broke continuation](../../../docs/reference/rendering.md#empty-target-bindings-between-draws-broke-continuation): redundant unbind/rebind calls prevented the host from continuing its render pass ([#2806](https://github.com/seedds/nxnative/issues/2806)).
 - [Unreal Engine 5.6 IoStore shader libraries for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-56-iostore-shader-libraries-for-the-switch-2): the split stopped at `shader 0 is not an LSLG record`.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area): the engine region started past a 1 GB node area and did not fit an iPhone's address space; the SDK-wide rule now has this SDK 21.4 build's constructor.

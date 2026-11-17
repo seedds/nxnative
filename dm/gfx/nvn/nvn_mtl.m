@@ -6905,9 +6905,9 @@ static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
     @synchronized(o) {
         if (!o->dev && !o->dev_failed) {
             MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)((MTL4SpecializedFunctionDescriptor *)o->d4).functionDescriptor;
-            // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): fn_off made o->d4 from this ld after looking its name up; names are never nil (fn4_note, pre_fn)
-            NSError *e = nil; o->dev = dev_fn(ld.library, ld.name, o->cv, &e);
-            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections failed: %s (its pipelines keep them)", f.name.UTF8String, e.localizedDescription.UTF8String); }
+            NSString *name = ld.name; NSError *e = nil;
+            o->dev = name ? dev_fn(ld.library, name, o->cv, &e) : nil;
+            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections failed: %s (its pipelines keep them)", f.name.UTF8String, name ? e.localizedDescription.UTF8String : "missing function name"); }
         }
         if (o->dev) return o->dev;
     }

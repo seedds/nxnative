@@ -6,6 +6,9 @@
 // Nintendo's report descriptor (a Pro Controller clone of another vendor, such as a PowerA NANO, GitHub PR #989) is told by its reports, not its name or vendor (pad_hid_nin_bit):
 // a pad that declares the console's protocol is driven by it (pad_hid_mac.h: the handshake into report 0x30, read as pad_pro.h reads a Pro Controller); its simple report 0x3F,
 // which such a pad sends until then or when it does not answer, has its own button numbering (pad_hid_init's nintendo) and carries the sticks raw (pad_hid_raw_axis).
+// The Xbox 360 wired pad's identity, 045e:028e, read as HID (pad_hid_x360): a real one is not a HID device on the Mac (it speaks Microsoft's own USB protocol), so this is a
+// virtual pad that copies its descriptor, such as Steam Link's / Remote Play's GamePad-N (GitHub issue #2465). Its buttons arrive as Xbox usages and its axes the Xbox way:
+// X / Y left stick, Rx / Ry right stick, Z / Rz the two triggers (pad_hid_axis_for), not the 8BitDo numbering and Z / Rz right stick of the default.
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -23,6 +26,7 @@ typedef struct {
     uint8_t has[PH_AXES];      // the device has the axis
     uint8_t map[16];           // Switch button bit (dm_input.h order) -> HID button usage, 0 none
     uint8_t raw;               // sticks go through pad_hid_raw_axis (report 0x3F)
+    uint8_t x360;              // the Xbox 360 layout (pad_hid_x360): its button map, and Z / Rz as triggers
     uint8_t rest_seen[PH_AXES];
     float rest[PH_AXES], reach[PH_AXES][2];   // a raw axis's rest, and its reach below and above it
 } pad_hid;
@@ -42,6 +46,10 @@ static inline int pad_hid_nin_lights(int bits) { int need = PAD_NIN_SIMPLE | PAD
 
 static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
 static const uint8_t pad_hid_nin_map[16] = {2, 1, 4, 3, 11, 12, 5, 6, 7, 8, 10, 9};
+// Xbox 360 usages as macOS delivers Steam Link's virtual pad's values (measured one button at a time; not the descriptor's own order): 1 A (bottom), 2 B (right), 3 X (left),
+// 4 Y (top), 5 / 6 LB / RB, 7 / 8 stick clicks, 9 start, 10 back, and the d-pad as buttons 12 up, 13 down, 14 left, 15 right; the triggers are axes
+static const uint8_t pad_hid_x360_map[16] = {2, 1, 4, 3, 7, 8, 5, 6, 0, 0, 9, 10, 14, 12, 15, 13};
+static inline int pad_hid_x360(int vid, int pid) { return vid == 0x045e && pid == 0x028e; }
 
 // Identical pads (front_mac.m, DM_PAD_IDENTICAL): whether every pad of one model is read as a player of its own, instead of through GameController.
 // n: the pads of the model IOKit has; listed: GameController's controllers of it; read: whether they are read that way already; due: a wait after the last change is over.
@@ -49,10 +57,12 @@ static const uint8_t pad_hid_nin_map[16] = {2, 1, 4, 3, 11, 12, 5, 6, 7, 8, 10, 
 static inline int pad_dupes_want(int n, int listed, int read, int due) { return n < 2 || n <= listed ? 0 : read || due ? 1 : -1; }
 
 // DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped). nintendo: the buttons come in report 0x3F, whose
-// numbering is the default instead (usages 1 B, 2 A, 3 Y, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture), and the sticks are raw
-static void pad_hid_init(pad_hid *h, const char *map, int nintendo) {
+// numbering is the default instead (usages 1 B, 2 A, 3 Y, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture), and the sticks are raw.
+// x360: the Xbox 360 layout instead (pad_hid_x360_map, pad_hid_axis_for)
+static void pad_hid_init_layout(pad_hid *h, const char *map, int nintendo, int x360) {
     static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
-    memset(h, 0, sizeof *h); h->hat = -1; h->raw = (uint8_t)!!nintendo; memcpy(h->map, nintendo ? pad_hid_nin_map : def, sizeof def);
+    memset(h, 0, sizeof *h); h->hat = -1; h->raw = (uint8_t)!!nintendo; h->x360 = (uint8_t)(!nintendo && x360);
+    memcpy(h->map, nintendo ? pad_hid_nin_map : h->x360 ? pad_hid_x360_map : def, sizeof h->map);
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;
@@ -60,11 +70,18 @@ static void pad_hid_init(pad_hid *h, const char *map, int nintendo) {
         for (int b = 0; b < 16; b++) if ((size_t)(eq - s) == strlen(pad_hid_names[b]) && !strncasecmp(s, pad_hid_names[b], eq - s) && u >= 0 && u <= 32) h->map[b] = (uint8_t)u;
     }
 }
+static void pad_hid_init(pad_hid *h, const char *map, int nintendo) { pad_hid_init_layout(h, map, nintendo, 0); }
 static int pad_hid_axis_of(uint32_t page, uint32_t usage) {   // -1: not a gamepad axis
     if (page == 1 && usage >= 0x30 && usage <= 0x35) return PH_X + (int)(usage - 0x30);
     if (page == 2 && usage == 0xC5) return PH_BRAKE;
     if (page == 2 && usage == 0xC4) return PH_ACCEL;
     return -1;
+}
+// An axis of a pad in the Xbox 360 layout: Z and Rz are its left and right trigger (its right stick is Rx / Ry, which pad_hid_sticks then reads, as there is no Z stick)
+static int pad_hid_axis_for(int x360, uint32_t page, uint32_t usage) {
+    if (x360 && page == 1 && usage == 0x32) return PH_BRAKE;
+    if (x360 && page == 1 && usage == 0x35) return PH_ACCEL;
+    return pad_hid_axis_of(page, usage);
 }
 static float pad_hid_norm(long v, long min, long max) { return max > min ? (float)(2.0 * (v - min) / (max - min) - 1) : 0; }
 // A raw axis (-1..1, report 0x3F) measured from its rest, a full deflection reaching 1: report 0x3F carries the sticks uncalibrated, off centre and short of the axis's range

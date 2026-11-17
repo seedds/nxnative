@@ -80,7 +80,7 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Hatswitch) {
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
-        int a = pad_hid_axis_of(page, usage); if (a < 0) return;
+        int a = pad_hid_axis_for(d->st.x360, page, usage); if (a < 0) return;
         float n = pad_hid_norm(x, min, max);
         d->st.axis[a] = d->st.raw ? pad_hid_raw_axis(&d->st, a, n) : n;
     }
@@ -297,7 +297,9 @@ static void hidpad_use(hid_pad *d) {
     // HID has no standard button numbering: the default map is 8BitDo's, so another vendor's pad may have its buttons in other places
     if (d->nin & PAD_NIN_SIMPLE) {
         if (!d->proto) LOG("controller '%s' (HID, %04x:%04x): buttons in Nintendo's report 0x3F: read with its numbering", d->name, d->vid, d->pid);
-    } else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
+    } else if (d->st.x360)
+        LOG("controller '%s' (HID, %04x:%04x): the Xbox 360 pad's descriptor (a virtual pad, such as Steam Link's): read with its Xbox numbering", d->name, d->vid, d->pid);
+    else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
 // The device's I/O Registry entry: IOHIDManager hands one device over once per matching dictionary it meets (a Pro Controller meets both the GamePad usage
@@ -318,13 +320,13 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     d->vid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)) intValue];
     d->pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductIDKey)) intValue];
     NSArray *els = CFBridgingRelease(IOHIDDeviceCopyMatchingElements(hid, NULL, kIOHIDOptionsTypeNone));
-    uint8_t has[PH_AXES] = {0};
+    uint8_t has[PH_AXES] = {0}; int x360 = pad_hid_x360(d->vid, d->pid);
     for (id o in els) {
         IOHIDElementRef e = (__bridge IOHIDElementRef)o; uint32_t page = IOHIDElementGetUsagePage(e);
-        int a = pad_hid_axis_of(page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
+        int a = pad_hid_axis_for(x360, page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
         d->nin |= pad_hid_nin_bit(IOHIDElementGetType(e) == kIOHIDElementTypeOutput, IOHIDElementGetReportID(e), page);
     }
-    pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->nin & PAD_NIN_SIMPLE); memcpy(d->st.has, has, sizeof has);
+    pad_hid_init_layout(&d->st, getenv("DM_HID_MAP"), d->nin & PAD_NIN_SIMPLE, x360); memcpy(d->st.has, has, sizeof has);
     d->hid = (IOHIDDeviceRef)CFRetain(hid);
     d->gc_hint = [GCController supportsHIDDevice:hid];   // once per device: the call is not cheap
     if (!d->gc_hint) { hidpad_use(d); return; }
@@ -454,7 +456,7 @@ static void hidpad_twins_take(GCController *gone) {
             IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
         } else {
             uint8_t has[PH_AXES]; memcpy(has, d->st.has, sizeof has);   // the axes hidpad_found saw
-            pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->nin & PAD_NIN_SIMPLE); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
+            pad_hid_init_layout(&d->st, getenv("DM_HID_MAP"), d->nin & PAD_NIN_SIMPLE, d->st.x360); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
             IOHIDDeviceRegisterInputValueCallback(d->hid, hidpad_value, d);
         }
         hidpad_attach(d);

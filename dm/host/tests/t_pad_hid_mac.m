@@ -193,6 +193,7 @@ static void gc_fallback(void) {
     assert(attached == 4 && !g_hidpads_waiting && !removed.valueCallback && !synthetic.valueCallback);
     for (TestDev *d in virtuals) {
         assert(find(d) && !find(d)->twin); button(d, 1); button(d, 0);
+        assert(find(d)->st.x360 == (d.vid == 0x045e));   // the Xbox 360 layout for 045e:028e only (pad_hid_x360), not for the other vendors' copies of its product number
         hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); assert(!d.valueCallback);
     }
     for (TestDev *d in physical) { assert(!d.valueCallback); hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); }

@@ -49,14 +49,14 @@ sync_dir() {   # source folder, destination folder
 sync_libraries() {   # shader libraries (a folder, or an NVN game's one file: dm/tools/shader_lib.py), the app's msl folder for them, their name there
     if [ -f "$1" ]; then
         rm -rf "${2:?}/$3"; mkdir -p "$2"
-        if [ -f "$2/$3.img" ]; then /usr/bin/rsync -a -- "$1" "$2/$3.img"; else /bin/cp -cp -- "$1" "$2/$3.img" || die "copy $1"; fi
+        /bin/cp -cp -- "$1" "$2/$3.img.tmp" && /bin/mv -f "$2/$3.img.tmp" "$2/$3.img" || die "copy $1"   # a clone, also over an app built before (rsync wrote the whole image again whenever it had changed); renamed into place, so the target is never missing
     else
         rm -f "${2:?}/$3.img"; sync_dir "$1" "$2/$3"
     fi
 }
 sync_romfs() {   # the RomFS (an image file or a folder), the app folder it goes in
     if [ -f "$1" ]; then
-        if [ -f "$2/romfs.img" ]; then /usr/bin/rsync -a -- "$1" "$2/romfs.img"; else /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"; fi
+        /bin/cp -cp -- "$1" "$2/romfs.img.tmp" && /bin/mv -f "$2/romfs.img.tmp" "$2/romfs.img" || die "copy $1"   # as the library image above
         rm -rf "$2/romfs"; rm -f "$2/romfs.id"
     else
         sync_dir "$1" "$2/romfs"

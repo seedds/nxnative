@@ -547,7 +547,7 @@ static int fg_pace(double t_in, double period, int waiting) {
              (unsigned long long)n, (unsigned long long)g_up_mfx_kept); }
     if (g_fg_upto < 9) return 0;
     if (g_fg_gate_mode) {   // see DM_FRAMEGEN_GATE
-        static uint64_t n, closes_at[3], hold_until, win_n, win_closed, last_close, opened_at, made_open, grace_until, last_late; static int room, graces, had_win; static double on_ms, off_ms, penalty; int drop = late || waiting > 2; n++;
+        static uint64_t n, closes_at[3], hold_until, win_n, win_closed, last_close, opened_at, made_open, grace_until, last_late; static int room, graces, had_win, open_grace; static double on_ms, off_ms, penalty; int drop = late || waiting > 2; n++;
         double per_ms = per * 1e3, g = nvn_last_gpu_ms(); int closed = atomic_load(&g_fg_closed);
         if (!sw_on(g_fg_gate_mode)) { if (closed) atomic_store(&g_fg_closed, 0); room = 0; }   // an ab phase with the gate off
         else {
@@ -560,6 +560,13 @@ static int fg_pace(double t_in, double period, int waiting) {
             // the 30 presents after the first of them is made is let through: three times at most, so a place that cannot hold it still closes. (Counted from the
             // opening it ran out before the first generated frame, which waits for its history: fgpin3, 11-16)
             { int w = FG.win[0] != nil; if (w && !had_win && graces < 3) { graces++; grace_until = n + 30; } had_win = w; }
+            // The same at every later opening (rslong, 11-17, cut9q at render scale 0.83, a 25 min loop): the first generated frames after an opening put two real frames at
+            // 50 ms, six frames apart (f5405 / f5411, f12603 / f12609, f13245 / f13251: the history starts again, and the GPU's clock is still where the lighter frame left
+            // it), and "two late within 30 presents" closed the gate on them. With the three graces above spent at the boot, each opening closed inside 300 frames, the second
+            // try with the penalty closed at once, and the run sat in the 1,800-present hold: 0 to 4 % generated for its first 8 minutes, at a place that then held 48 to 50 %
+            // for 4.5 minutes once one opening got through. So the 30 presents after an opening's first generated frame are let through too, unless the opening before it was
+            // judged wrong (a penalty stands): a place that cannot hold it gets one such window, then the penalty, and closes as before
+            if (!closed && open_grace && FG.made > made_open) { open_grace = 0; if (penalty <= 0) grace_until = n + 30; }
             if (!closed && drop && n < grace_until) drop = 0;
             // One late frame alone does not close it: the route has late frames of its own, the same 9 over 1.25 periods in 3,400 at 960x540 with the generator idle, with the
             // gate off and with it on, and closing at each cost 190 frames a time (28 % generated against 44 % with the gate off; fgpin4, 11-16). The overload the gate is
@@ -581,11 +588,14 @@ static int fg_pace(double t_in, double period, int waiting) {
                 room = !drop && n - last_close > 12 && off_ms > 0 && off_ms + cost <= 0.95 * per_ms ? room + 1 : 0;
                 // The penalty and the longer wait wear off while closed too (they did so only while open: one wrong opening closed the gate for the rest of a run)
                 if (!((n - last_close) % 600) && (g_fg_need > FG_NEED || penalty > 0)) { if (g_fg_need > FG_NEED) g_fg_need /= 2; penalty *= 0.5; if (penalty < 1) penalty = 0; }
-                if (room >= g_fg_need && n >= hold_until) { atomic_store(&g_fg_closed, 0); closed = 0; room = 0; opened_at = n; made_open = FG.made;
+                if (room >= g_fg_need && n >= hold_until) { atomic_store(&g_fg_closed, 0); closed = 0; room = 0; opened_at = n; made_open = FG.made; open_grace = 1;
                     uint64_t c = atomic_load(&g_fg_closes); if (c <= 20 || !(c & (c - 1))) MLOG("frame generation gate: %d frames with room (GPU %.1f ms smoothed + generator about %.1f ms %s in a period of %.1f ms), frames are generated again", g_fg_need, off_ms, cost, measured ? "measured" : "assumed", per_ms); }
             } else if (n - last_close >= 1800 && (g_fg_need > FG_NEED || penalty > 0)) { if (g_fg_need > FG_NEED) g_fg_need /= 2; penalty *= 0.5; if (penalty < 1) penalty = 0; last_close = n; }
             if (n >= hold_until) { win_n++; win_closed += closed; }   // not during a hold: it is closed by the hold, and counting that renewed the hold for the rest of the run
-            if (win_n >= 1800) { if (win_closed * 5 > win_n * 4) { hold_until = n + 1800;
+            // A hold also forgets the GPU time measured with the generator (on_ms), so the cost goes back to the assumed 5 ms: it is updated only while open, and a value
+            // taken while the GPU was power-limited (rslong: 29 to 32 ms at 1,200 MHz from minute 13) kept "GPU + cost" over the room test for the rest of the run, ten
+            // minutes after the limit had gone (closed for 1,800 of 1,800 presents, five holds in a row). After each hold the gate tries once on the assumed cost
+            if (win_n >= 1800) { if (win_closed * 5 > win_n * 4) { hold_until = n + 1800; on_ms = 0;
                     MLOG("frame generation gate: closed for %llu of the last %llu presents: frame generation cannot be held here (GPU %.1f ms without it, generator about %.1f ms, period %.1f ms); it stays off for the next 1800",
                          (unsigned long long)win_closed, (unsigned long long)win_n, off_ms > 0 ? off_ms : g, cost, per_ms); }
                 win_n = win_closed = 0; }

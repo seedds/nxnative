@@ -272,7 +272,7 @@ void dm_fps_lock_tick(void) {
     }
     int re_mt = 0;
     for (int r = 0; r < nrow; r++)
-        if (!strcmp(rows[r]->what, "Resident Evil MT Framework frame limit")) re_mt = 1;
+        if (!strcmp(rows[r]->what, "Resident Evil MT Framework primary frame limit")) re_mt = 1;
     if (high) target = nvn_fps_high_now();   // only a requested 120 fps target follows the dynamic 120/60 hold; 30/60 overrides remain exact
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):
@@ -325,21 +325,32 @@ void dm_fps_lock_tick(void) {
         }
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
-        // Resident Evil: scan the pointed-to object for plausible float frame limits.
-        // The previously documented +0x48/+0x4c currently read as 1/2, so verify the
-        // object layout instead of assuming those offsets still identify the timing fields.
+        // Resident Evil: the ELF reads the timing fields through two pointer
+        // indirections: [main + 0x157daa0] -> object -> timing object.
+        // The earlier probe stopped at the first object (whose +0x48/+0x4c
+        // are small integer fields), so inspect the second object instead.
         if (re_row) {
             static int baseline_samples, movie_samples;
             if (baseline_samples < 4 || (movie_hz && movie_samples < 8)) {
-                uint32_t slot_words[4] = {0}, mem[64] = {0};
+                uint32_t slot_words[4] = {0}, first_words[4] = {0}, mem[64] = {0};
+                uint64_t obj2 = 0;
                 int have_slot = rd((uint64_t)(uintptr_t)(base + L->ptr_off), slot_words, sizeof slot_words);
-                int have_mem = rd(obj, mem, sizeof mem);
+                int have_obj2 = rd(obj, &obj2, sizeof obj2) && obj2 >= 0x1000;
+                int have_mem = have_obj2 && rd(obj2, mem, sizeof mem);
+                float at48 = 0.0f, at78 = 0.0f;
+                if (have_obj2) {
+                    uint32_t raw48 = 0, raw78 = 0;
+                    if (rd(obj2 + 0x48, &raw48, sizeof raw48)) memcpy(&at48, &raw48, sizeof at48);
+                    if (rd(obj2 + 0x78, &raw78, sizeof raw78)) memcpy(&at78, &raw78, sizeof at78);
+                }
+                rd(obj, first_words, sizeof first_words);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE MT scan] slot=%p object=%p movie_hz=%d target=%d row_target=%d slot_raw=%08x,%08x,%08x,%08x object_raw=%s",
+                    fprintf(pf, "[RE MT double] slot=%p object1=%p object2=%p movie_hz=%d target=%d row_target=%d slot_raw=%08x,%08x,%08x,%08x first_raw=%08x,%08x,%08x,%08x second_raw=%s",
                         (void *)(uintptr_t)(base + L->ptr_off), (void *)(uintptr_t)obj,
-                        movie_hz, target, row_target,
+                        (void *)(uintptr_t)obj2, movie_hz, target, row_target,
                         slot_words[0], slot_words[1], slot_words[2], slot_words[3],
+                        first_words[0], first_words[1], first_words[2], first_words[3],
                         have_mem ? "" : "(unreadable)");
                     if (have_mem) {
                         for (int i = 0; i < 8; i++) fprintf(pf, "%s%08x", i ? "," : "", mem[i]);
@@ -347,14 +358,14 @@ void dm_fps_lock_tick(void) {
                         int found = 0;
                         for (int i = 0; i < 64; i++) {
                             float x; memcpy(&x, &mem[i], sizeof x);
-                            if (x >= 10.0f && x <= 120.0f) {
+                            if (x >= 0.001f && x <= 10000.0f) {
                                 fprintf(pf, "%s+%03x:%g", found ? "," : "", i * 4, x);
                                 found++;
                             }
                         }
                         if (!found) fprintf(pf, "none");
                     }
-                    fprintf(pf, "\\n");
+                    fprintf(pf, " second_+48=%g second_+78=%g\\n", at48, at78);
                     fclose(pf);
                 }
                 if (movie_hz) movie_samples++; else baseline_samples++;

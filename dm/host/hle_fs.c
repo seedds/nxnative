@@ -1252,8 +1252,8 @@ static int rm_tree(const char *p) {
         if ((rc = rm_entry(c))) break;   // keep the first failure, before readdir can clear errno
     }
     int err = errno; closedir(d);
-    if (err) { errno = err; return -1; }
-    return rc | rmdir(p);
+    if (rc || err) { errno = err; return -1; }
+    return rmdir(p);
 }
 HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → recursive delete (only inside writable mounts)", Result, h_fs_DeleteDirRec, const char *path) { dm_thread_service_request();
     SDK_PATH(path, "_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", Result (*)(const char *), path);
@@ -1270,8 +1270,8 @@ HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv → recursively d
         if ((rc = rm_entry(c))) break;
     }
     int err = errno; closedir(d);
-    if (err) { errno = err; return save_path_error("cleandir", path); }
-    return rc ? save_path_error("cleandir", path) : RES_OK;
+    if (rc || err) { errno = err; return save_path_error("cleandir", path); }
+    return RES_OK;
 }
 // file data cache (a global read cache in the fs process): the host reads through the page cache and leaves the buffer unused
 HLE_FORCE("_ZN2nn2fs25EnableGlobalFileDataCacheEPvm", "fsp-srv global read cache; unused by the host", void, h_fs_EnableGlobalCache, void *buf, size_t sz) { (void)buf; (void)sz; }

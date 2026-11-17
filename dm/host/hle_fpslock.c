@@ -253,6 +253,7 @@ static void lock_find(void) {
 // presenting at a cap the game does not step by runs a fixed-step game fast or slow (Tears of the Kingdom 1.4.2 at 2x with DM_FPS_TARGET=60)
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n || uq.base; }
 int nvn_fps_high_now(void);   // hle_nvn.c
+int nvn_game_fps(void);       // hle_nvn.c: sustained game-requested 30 fps interval
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
     static int state = -2, nlog[NLOCKS + 5], target, high; static const char *src;
@@ -304,7 +305,7 @@ void dm_fps_lock_tick(void) {
         int movie_hz = dm_movie_hz();
         int re_row = !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
         int re_movie = !strcmp(DM_GAME_ID, "010050F00BC1A000") && re_row && movie_hz != 0;
-        int row_target = re_movie ? movie_hz : re_row && high ? nvn_fps_high_now() : target;
+        int row_target = re_movie ? movie_hz : re_row ? nvn_game_fps() : target;
         // The macOS launcher may detach dmhost from the launching terminal, so stderr is
         // not a reliable way to retrieve this one-off investigation. Keep a small,
         // explicit diagnostic file in /tmp, independent of the app's working directory.

@@ -64,7 +64,7 @@ static uint64_t queued(void) { pthread_mutex_lock(&g_pq_mu); uint64_t n = g_pq_i
 // One frame of a 1-tick acquire: the game blocks, the callback wakes it, the game presents delay_us later. Returns 0 when the game never blocked
 static int frame1(int delay_us) { frame_start(1, delay_us); int w = waiting(0); tick(); return frame_done() && w; }
 int main(void) { @autoreleasepool {
-    alarm(120); setbuf(stdout, NULL);
+    alarm(120); if (setvbuf(stdout, NULL, _IONBF, 0)) return 2;
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LATCH", "1", 1); setenv("DM_PRESENT_DRAIN", "1", 1); setenv("DM_RT", "0", 1);
     setenv("DM_PRESENT_SNAP", "0", 1);   // a profile with present_snap on (Breath of the Wild) would turn the latch and the drain off (mtl_snap_on)
     mtl_init();

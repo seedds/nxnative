@@ -433,6 +433,13 @@ t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 t_pso_look_wait: t_pso_look_wait.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_look_wait.m $(MTL_T_SRC) $(FW)
 check_t_pso_look_wait: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_demand_record: t_pso_demand_record.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_demand_record.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_demand_record
+check_t_pso_demand_record: t_pso_demand_record
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record --off
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record --cap
 t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_shmap_warm.m $(MTL_T_SRC) $(FW)
 t_pso_bg_look: t_pso_bg_look.m $(MTL_T_DEP)

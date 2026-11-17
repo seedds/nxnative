@@ -240,11 +240,12 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
               f'  {"licenses/":<25} the licences of nxnative and of the third-party code in it',
               f'  {"VERSION":<25} the commit this bundle was built from',
               '',
-              'Moving or replacing this folder: each pack names the host it runs with (its launch file\'s host row); the launcher run from the new folder',
-              f'takes this folder\'s bin/nxhost-run{exe} instead, and so do run.sh and run.cmd when the NSP folder is inside it; otherwise set NXHOST or',
-              'pack the game again. The pack\'s game profile stays with it (<title ID>_build/game-profile-' + platform + '.tsv in the NSP folder).']
-    if python: lines += [f'The launcher\'s "Repack with profile" runs the Python the game was packed with (its launch file\'s python row), and this folder\'s own python/',
-                         f'when that one is gone, with this folder\'s packer and nxaot.']
+              'A newer bundle, or this folder moved: unpack it anywhere and open its nxlauncher. Each pack names the programs it was made with (its launch',
+              f'file\'s rows); the launcher takes its own folder\'s bin/nxhost-run{exe}, recompiler, packer and Python instead when those are another bundle\'s',
+              'or gone, so the games run with the new host at once. A game whose packs an earlier recompiler made shows "A newer recompiler: a better pack is',
+              'possible": "Repack with profile" packs it again with this folder\'s (a fix of the recompiler reaches a game only then). run.sh and run.cmd keep the host the',
+              'game was packed with while that file exists, and take the bundle the NSP folder is inside when it is gone; NXHOST names another. The pack\'s',
+              'game profile stays with it (<title ID>_build/game-profile-' + platform + '.tsv in the NSP folder).']
     lines += [f'Game profiles in this folder: {len(profiles)}. A game packed from one of them, or from the profile the packer derives for another version of the game',
               'or guesses for a game without one, runs with the same nxhost-run.']
     return '\r\n'.join(lines) + '\r\n' if win else '\n'.join(lines) + '\n'
@@ -393,8 +394,9 @@ def assemble(platform, build, aot, out, tools=None, python=None, spirv=None):
     else: put('pack.cmd', data=pack_script(platform, nxaot, program))
     put('README.txt', data=readme(platform, sha, date, profiles, bool(nxaot), bool(progs), pyver, bool(shaders)).encode())
     nl = '\r\n' if platform == 'windows' else '\n'
+    unit = recompiler_unit(nxaot) if nxaot else None
     put(MARKER, data=nl.join([f'nxnative {sha}{"-modified" if dirty else ""}', f'date {date}', f'platform {platform}-x86_64',
-                              f'host {HOST}{exe}', f'profiles {len(profiles)}', f'nxaot {"yes" if nxaot else "no"}',
+                              f'host {HOST}{exe}', f'profiles {len(profiles)}', f'nxaot {"yes" if nxaot else "no"}', *([f'recompiler {unit}'] if unit else []),
                               f'python {pyver} {program}' if program else 'python no', f'spirv {"yes" if shaders else "no"}']).encode() + nl.encode())
     for rel, mode in held:
         os.chmod(out / rel, mode); os.utime(out / rel, (ts, ts))
@@ -527,7 +529,11 @@ def check(platform, out, inputs):
             if sys.platform != 'linux': say('check: the Linux executables are not run on this system')
             else:
                 run([out / 'nxlauncher', '--list', games], r'^# title_id\t', env=env)   # the header line and no game; "0 games in <folder>" on standard error
-                if (out / 'bin/nxaot').is_file(): run([out / 'bin/nxaot', 'version'], r'^llvm\t', env=env)
+                if (out / 'bin/nxaot').is_file():
+                    r = run([out / 'bin/nxaot', 'version'], r'^llvm\t', env=env)
+                    unit, row = re.search(r'^unit\t(\d+)$', r.stdout, re.M) if r else None, bundle_rows(out).get('recompiler')
+                    if r and (unit.group(1) if unit else None) != row:   # the launcher goes by the row: it must be what this nxaot says of itself
+                        fails.append(f'VERSION\'s recompiler row is {row or "missing"} and bin/nxaot version says unit {unit.group(1) if unit else "nothing"}')
                 else: fails.append('bin/nxaot is missing')
                 if (out / 'bin/nx_extract').is_file(): run([out / 'bin/nx_extract'], r'^usage: nx_extract', env=env, codes=(2,))   # its usage, exit 2
                 if (out / 'bin/dmsh_xlate_vk').is_file(): run([out / 'bin/dmsh_xlate_vk', '--source-sha'], r'^[0-9a-f]{16}$', env=env)
@@ -562,6 +568,14 @@ assert [i.mnemonic for i in md.disasm(bytes.fromhex("1f2003d5c0035fd6"), 0)] == 
 print(f"python {sys.version.split()[0]}, lz4 {lz4.__version__}, capstone {capstone.__version__}, fontTools {fontTools.version}, zstd {compression.zstd.zstd_version}")
 for p in sys.path: print("path", p)
 '''
+
+
+def recompiler_unit(nxaot):
+    """The number of nxaot's unit key format, read out of the executable ("nxaot-unit <N>", dm/tools/aot/src/build/pack.cpp kUnitKeyFormat; a Windows nxaot.exe is not run here):
+    what `nxaot version` prints as its unit line, and VERSION's recompiler row, by which the launcher tells a game's packs of an earlier recompiler (dm/launcher/launcher_model.h,
+    "The recompiler of the packs"). None for a file that holds no such text, or more than one (an nxaot before the line, a script that runs one elsewhere): no row"""
+    found = set(re.findall(rb'nxaot-unit (\d{1,9})\0', Path(nxaot).read_bytes()))
+    return int(found.pop()) if len(found) == 1 else None
 
 
 def bundle_rows(out):   # VERSION's rows: {name: value}

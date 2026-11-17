@@ -3396,6 +3396,10 @@ std::string CacheTool() {
     return ToolIdentity();
 }
 
+unsigned UnitFormat() {
+    return static_cast<unsigned>(std::strtoul(std::strrchr(kUnitKeyFormat, ' ') + 1, nullptr, 10));
+}
+
 const char* TierName(Tier t) {
     switch (t) {
     case Tier::C:

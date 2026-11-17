@@ -638,6 +638,58 @@ static void moved_bundle(const fs::path &root) {
     fake::write(row_python, "old python");
     r = repack_command(g, "balanced", fake::str(bundle));
     CHECK(r.argv[0] == row_python && r.notes.empty(), "the row's Python when it is there, nothing logged");
+
+    // A newer bundle unpacked beside the earlier one, which is still there: the rows name the earlier bundle's programs (a folder above them holds VERSION and bin/nxhost-run), and
+    // the launcher takes its own bundle's instead, for the host and for the repack; NXHOST still wins; the earlier bundle's own launcher keeps its programs
+    fake::write(row, "old host"); fake::write(old / "VERSION", "nxnative 0000001\npython 3.14.10 " + py_rel + "\n");
+    g = game(none);
+    g.launch.nxaot = row_nxaot;
+    c = compose(g, "", none, false, fake::str(bundle));
+    CHECK(c.error.empty() && c.argv[0] == own, "another bundle's host in the row: this bundle's bin/nxhost-run is started: " + c.error);
+    const std::string theirs = " is another bundle's, " + fake::str(old) + ")";
+    CHECK_EQ(c.notes, (std::vector<std::string>{"host: the bundle's " + own + " (the launch file's " + row + theirs}), "... and the log says which host and why");
+    CHECK(compose(g, "", nxhost, false, fake::str(bundle)).argv[0] == "/opt/other/nxhost-run", "NXHOST wins over both bundles' hosts");
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK(r.error.empty() && r.argv.size() > 2 && r.argv[0] == own_python && r.argv[1] == own_packer && r.argv.back() == own_nxaot,
+          "the repack runs this bundle's Python, packer and nxaot, not the earlier bundle's: " + r.error);
+    CHECK_EQ(r.notes, (std::vector<std::string>{"Python: the bundle's " + own_python + " (the launch file's " + row_python + theirs,
+                                                "packer: the bundle's " + own_packer + " (the launch file's " + row_packer + theirs,
+                                                "recompiler: the bundle's " + own_nxaot + " (the launch file's " + row_nxaot + theirs}), "... each logged");
+    c = compose(g, "", none, false, fake::str(old));
+    CHECK(c.argv[0] == row && c.notes.empty(), "the earlier bundle's own launcher starts its own host, nothing logged");
+    r = repack_command(g, "balanced", fake::str(old));
+    CHECK(r.argv[0] == row_python && r.argv[1] == row_packer && r.argv.back() == row_nxaot && r.notes.empty(), "... and repacks with its own programs");
+    fs::remove(own);
+    c = compose(g, "", none, false, fake::str(bundle));
+    CHECK(c.argv[0] == row && c.notes.empty(), "a launcher's folder without a host of its own keeps the row's, another bundle's or not");
+    fake::write(own, "bundle host");
+
+    // The recompiler of the packs (launcher_model.h): the bundle's VERSION names its nxaot's unit key format, the launch file the one that made the packs; a later one in the
+    // bundle is a reason for the repack, first in the list, with its own headline; an equal or earlier one, a bundle or a folder without the row, and a game without packs are not
+    const std::string version = "nxnative 0123456\nnxaot yes\npython 3.14.10 " + py_rel + "\n";
+    auto state = [&](const std::string &made, const std::string &recompiler) {
+        fake::write(launch, fake::launch("Epsilon Game", id, build, run, row, false, {{"balanced", build / "aot_v0"}}, repack + made));
+        fake::write(bundle / "VERSION", version + recompiler);
+        return profile_state(game(none), "balanced", fake::str(bundle));
+    };
+    CHECK(bundle_recompiler(fake::str(bundle)) == 0 && bundle_recompiler(fake::str(root / "moved/no bundle")) == 0, "no recompiler row, no VERSION: 0");
+    ProfileState ps = state("", "");
+    CHECK(!ps.better() && !ps.recompiler && ps.pack_files > 0, "a bundle whose VERSION has no recompiler row: nothing said");
+    ps = state("", "recompiler 15\n");
+    CHECK(bundle_recompiler(fake::str(bundle)) == 15, "VERSION's recompiler row");
+    CHECK(ps.better() && ps.recompiler, "packs made before the launch file recorded their recompiler: a better pack is possible");
+    CHECK_EQ(ps.reason(), std::string("this bundle's recompiler (15) is newer than the one that made the packs (not recorded): packing again brings its fixes"), "... the reason");
+    CHECK_EQ(ps.headline(), std::string("A newer recompiler: a better pack is possible"), "... the headline");
+    ps = state("made\trecompiler\t14\n", "recompiler 15\r\n");   // a Windows bundle's CRLF line
+    CHECK_EQ(ps.reason(), std::string("this bundle's recompiler (15) is newer than the one that made the packs (14): packing again brings its fixes"), "packs of recompiler 14, the bundle's 15");
+    ps = state("made\trecompiler\t15\n", "recompiler 15\n");
+    CHECK(!ps.better() && !ps.recompiler, "the same recompiler: nothing said");
+    CHECK_EQ(ps.headline(), std::string("Profile recorded: a better pack is possible"), "the headline without the recompiler's reason");
+    ps = state("made\trecompiler\t16\n", "recompiler 15\n");
+    CHECK(!ps.better(), "packs of a later recompiler than the bundle's (an earlier bundle opened again): nothing said");
+    fake::write(launch, fake::launch("Epsilon Game", id, build, run, row, false, {{"balanced", build / "aot_v0"}}, repack + "made\trecompiler\t14\n"));
+    CHECK(!profile_state(game(none), "max", fake::str(bundle)).better(), "a mode without packs: nothing to pack better");
+    CHECK(!profile_state(game(none), "balanced", fake::str(root / "moved/no bundle")).better(), "a launcher outside a bundle (a build tree): nothing said");
 }
 
 static void config(const fs::path &root) {

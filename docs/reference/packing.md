@@ -79,6 +79,16 @@
 - **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), on Linux, when the disk of the development machine ran full.
 - **Check:** nxaot's CTest `cache` (`dm/tools/aot/tests/test_cache.py`, the `cache-prune` rows) and `test_nsp_x86.py` `test_unit_cache_pruned_after_the_packs`. [dm/tools/aot/README.md](../../dm/tools/aot/README.md#the-caches-size).
 
+## A newer bundle
+
+### A game keeps a defect that the newer bundle fixed
+
+- **Symptom:** on Windows or Linux, after unpacking a newer bundle and opening its launcher, a game still shows what the bundle fixed: the log's first lines name the earlier bundle's `nxhost-run` (the host's fixes are missing), or the host is the new one and a defect of compiled code stays (Mario vs. Donkey Kong: `[RED] aot: an undefined or unpredictable instruction at main+0x6a0f98`, fixed in the recompiler). Nothing in the launcher said the game was behind.
+- **Cause:** two gaps of the launcher. A pack's launch file names its programs by absolute path, and the launcher took its own bundle's only when a row's file was gone: with the earlier bundle still on the disk, the new launcher started the old host and repacked with the old packer and recompiler. And a fix of the recompiler reaches a game only when it is packed again, while the earlier recompiler's packs still load (the module ABI is the same), so nothing offered the repack.
+- **Fix:** the launcher takes its own bundle's host, recompiler, packer and Python when a row names another bundle's (`dm/launcher/launcher_model.cpp` `find_in_bundle`, `bundle_of`; a row outside any bundle is kept, `NXHOST` wins). The recompiler's unit key format is its version for this purpose: `nxaot version` prints it (`unit`), the packer writes it into the launch file (`made recompiler <N>`), a bundle's `VERSION` has its own (`recompiler <N>`, `scripts/package_port.py` `recompiler_unit`), and when the bundle's is higher the launcher says "A newer recompiler: a better pack is possible" and **Repack with profile** packs the game again (`profile_state`, `bundle_recompiler`). Packs made before the row count as earlier. [The port's bundles](../development.md#the-ports-bundles).
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), reading the launcher's rules after a recompiler fix that its packs needed a repack for; not seen by a player.
+- **Check:** `t_launcher_model` (`moved_bundle`: another bundle's rows, the recompiler's reason and headline), `test_nsp_x86.py` `test_the_recompiler_of_the_packs_in_the_launch_file`, `test_package_port.py` `test_recompiler_row`.
+
 ## Cartridge dumps
 
 ### A cartridge dump with its update on it extracts the update as the base game

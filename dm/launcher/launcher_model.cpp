@@ -209,6 +209,7 @@ bool load_launch(const std::string &path, LaunchFile *out, std::string *err) {
             else if (name == "python") out->python = value; else if (name == "keys") out->keys = value; else if (name == "nxaot") out->nxaot = value;
         } else if (kind == "made") {
             if (name == "profile") out->made_profile = value; else if (name == "misses") out->made_misses = value; else if (name == "targets") out->made_targets = value;
+            else if (name == "recompiler") out->made_recompiler = static_cast<unsigned>(std::strtoul(value.c_str(), nullptr, 10));
         } else if (kind == "samples" || kind == "misses" || kind == "targets") {   // '<functions> <samples> <digest>', '<addresses> <digest>', '<sites> <digest>' (made_rows)
             std::istringstream ss(value); Recorded r;
             if (kind == "samples" ? !(ss >> r.count >> r.samples >> r.digest) : !(ss >> r.count >> r.digest)) continue;
@@ -251,11 +252,30 @@ std::vector<std::string> Game::modes() const {
 // ---- The programs a launch file names, found again when they are gone (launcher_model.h) ----
 static bool is_file(const std::string &path) { std::error_code ec; return !path.empty() && fs::is_regular_file(P(path), ec); }
 
-// The row's program when it is there, else the bundle's (rel: its place in a bundle), else what to do
+// The bundle a program sits in: the nearest folder above it that holds VERSION and bin/nxhost-run, a bundle as scripts/package_port.py lays it out (its programs are at most
+// three folders deep: python/bin/python3.14); '' when there is none
+static std::string bundle_of(const std::string &path) {
+    std::error_code ec;
+    fs::path d = P(path).parent_path();
+    for (int i = 0; i < 5 && !d.empty(); i++) {
+        if (fs::is_regular_file(d / "VERSION", ec) && fs::is_regular_file(d / P(std::string("bin/nxhost-run") + kExeSuffix).make_preferred(), ec)) return S(d);
+        if (d == d.parent_path()) break;
+        d = d.parent_path();
+    }
+    return "";
+}
+
+// The row's program when it is there and not another bundle's while this bundle has its own, else the bundle's (rel: its place in a bundle), else what to do
 static Found find_in_bundle(const std::string &what, const std::string &row, const std::string &rel, const std::string &bundle, const std::string &fix) {
     Found f;
-    if (is_file(row)) { f.path = row; return f; }
     const std::string own = bundle.empty() ? std::string() : S(P(bundle) / P(rel).make_preferred());
+    if (is_file(row)) {
+        const std::string theirs = bundle_of(row);
+        std::error_code ec;
+        if (theirs.empty() || !is_file(own) || fs::equivalent(P(theirs), P(bundle), ec)) { f.path = row; return f; }
+        f.path = own; f.note = what + ": the bundle's " + own + " (the launch file's " + row + " is another bundle's, " + theirs + ")";
+        return f;
+    }
     if (is_file(own)) { f.path = own; f.note = what + ": the bundle's " + own + " (the launch file's " + row + " is missing)"; return f; }
     f.problem = "the " + what + " " + row + " is missing: " + fix;
     return f;
@@ -284,16 +304,30 @@ Found find_packer(const LaunchFile &l, const std::string &bundle) {
     return find_in_bundle("packer", l.packer, "scripts/build_ipa_from_nsp.py", bundle, pack_by_hand());
 }
 
-// The bundle's own Python: VERSION's "python <version> <program>" line (scripts/package_port.py; "python no" in a bundle without one), the program's path relative to the bundle
-static std::string bundle_python(const std::string &bundle) {
+// The words after `key` on its line of the bundle's VERSION file (scripts/package_port.py writes it: "<key> <value> ..." lines); empty without the file or the line
+static std::vector<std::string> bundle_row(const std::string &bundle, const std::string &key) {
     std::string text;
-    if (bundle.empty() || !read_file(S(P(bundle) / "VERSION"), &text)) return "";
+    std::vector<std::string> words;
+    if (bundle.empty() || !read_file(S(P(bundle) / "VERSION"), &text)) return words;
     for (auto line : lines_of(text)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();   // a Windows bundle's VERSION has CRLF lines
-        std::istringstream ss(line); std::string key, version, program;
-        if (ss >> key >> version >> program && key == "python") return program;
+        std::istringstream ss(line); std::string k, w;
+        if (!(ss >> k) || k != key) continue;
+        while (ss >> w) words.push_back(w);
+        break;
     }
-    return "";
+    return words;
+}
+
+// The bundle's own Python: VERSION's "python <version> <program>" line ("python no" in a bundle without one), the program's path relative to the bundle
+static std::string bundle_python(const std::string &bundle) {
+    const std::vector<std::string> w = bundle_row(bundle, "python");
+    return w.size() >= 2 ? w[1] : "";
+}
+
+unsigned bundle_recompiler(const std::string &bundle) {
+    const std::vector<std::string> w = bundle_row(bundle, "recompiler");
+    return w.empty() ? 0 : static_cast<unsigned>(std::strtoul(w[0].c_str(), nullptr, 10));
 }
 
 Found find_python(const LaunchFile &l, const std::string &bundle) {
@@ -1031,13 +1065,18 @@ static std::string count_text(uint64_t n) {   // 3400 -> "3,400"
 
 static std::string counted(uint64_t n, const char *one, const char *many) { return count_text(n) + " " + (n == 1 ? one : many); }
 
+std::string ProfileState::headline() const {
+    if (!recompiler) return "Profile recorded: a better pack is possible";
+    return reasons.size() == 1 ? "A newer recompiler: a better pack is possible" : "A newer recompiler and a recorded profile: a better pack is possible";
+}
+
 std::string ProfileState::reason() const {
     std::string s;
     for (const auto &r : reasons) { if (!s.empty()) s += "; "; s += r; }
     return s;
 }
 
-ProfileState profile_state(const Game &g, const std::string &mode) {
+ProfileState profile_state(const Game &g, const std::string &mode, const std::string &bundle) {
     ProfileState s; s.folder = profile_folder(g);
     const LaunchFile &l = g.launch;
     std::error_code ec;
@@ -1069,7 +1108,16 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
         }
         if (!mode.empty()) break;
     }
-    if (!pack || !s.files) return s;
+    // The recompiler of the packs (launcher_model.h): this bundle's is a later one, so a pack made now compiles the same code to something else (its fixes). The first reason,
+    // and one a profile folder without files has too
+    const auto recompiler = [&] {
+        const unsigned own = bundle_recompiler(bundle), made = l.made_recompiler;
+        if (!own || made >= own || !s.pack_files) return;
+        s.recompiler = true;
+        s.reasons.insert(s.reasons.begin(), "this bundle's recompiler (" + std::to_string(own) + ") is newer than the one that made the packs (" +
+                                                (made ? std::to_string(made) : std::string("not recorded")) + "): packing again brings its fixes");
+    };
+    if (!pack || !s.files) { recompiler(); return s; }
     // What the packer would take now: per module of the packs, its files of its image
     for (const auto &m : pack_images(pack->folder)) {
         Recorded r;
@@ -1119,6 +1167,7 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
     if (new_targets) s.reasons.push_back(counted(new_targets, "new known call target", "new known call targets"));
     if (targets_without) s.reasons.push_back(counted(targets_without, "known call target", "known call targets") + " the packs were made without");
     if (!s.known && !s.reasons.empty()) s.reasons.push_back("the packs were made before the launch file recorded what they took");
+    recompiler();
     return s;
 }
 

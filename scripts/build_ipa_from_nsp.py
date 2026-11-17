@@ -2161,6 +2161,16 @@ def nxaot_options(nxaot, env):
         ({'cache-prune'} if re.search(r'nxaot cache-prune\b', text) else set())   # the subcommand that prunes a --cache directory (prune_unit_cache)
 
 
+def nxaot_unit(nxaot, env):
+    """The number of this nxaot's unit key format, the `unit` line of `nxaot version` (dm/tools/aot/src/build/pack.h UnitFormat): it goes up whenever the same guest code compiles to
+    something else, so it tells the packs of an earlier recompiler from this one's. The launch file gets it as `made recompiler <N>` (made_rows) and the launcher offers the repack
+    when its bundle's recompiler is a later one (dm/launcher/launcher_model.h, "The recompiler of the packs"). None for an nxaot without the line"""
+    try: r = subprocess.run([str(nxaot), 'version'], env=env, capture_output=True, text=True, errors='replace', timeout=60)
+    except (OSError, subprocess.TimeoutExpired): return None
+    m = re.search(r'^unit\t(\d+)$', r.stdout, re.M) if r.returncode == 0 else None
+    return int(m.group(1)) if m else None
+
+
 def chain_vk_of(repo):   # the version dm/gfx/nvn/dmsh_chain_vk.h holds (None when it has none)
     try: m = re.search(r'#define DMSH_CHAIN_VK "(.*)"', (repo / CHAIN_VK_H).read_text())
     except OSError: return None
@@ -2580,12 +2590,13 @@ def fnv64(text):   # FNV-1a, 64 bits, over UTF-8 text, as 16 hex digits: the dig
     return f'{h:016x}'
 
 
-def made_rows(opts, aot, mods, profiles, misses, no_profile):
+def made_rows(opts, aot, mods, profiles, misses, no_profile, unit=None):
     """What the packs are made with, for the launch file (port_launch_file), so that the launcher says "a better pack is possible" only when the profile folder holds something a pack
     made now would take and these packs did not (dm/launcher/launcher_model.h, "The second pack"). Rows (kind, name, value):
       made profile  yes (the sample profiles are taken), no (--no-profile: a repack, which does not pass it, takes them) or unused (the AOT_PROFILE setting is off or this nxaot has
                     no --profile: a repack would not take them either)
       made misses   yes, or unused (this nxaot has no --misses)
+      made recompiler  <N>, the recompiler's unit key format (UNIT, nxaot_unit); no row for an nxaot that does not say it
       samples <module>  '<functions> <samples> <digest>': the sample profile its packs took (aot_profile, profile_summary): its sampled functions (nxaot's tier rule: a function
                         holding a sample is at tier H, whatever its count), their samples, and fnv64 of their entries in hexadecimal, one per line, ascending (a profile without the
                         host's function lines: its offsets with samples, as functions)
@@ -2602,6 +2613,7 @@ def made_rows(opts, aot, mods, profiles, misses, no_profile):
     made_profile = 'unused' if not AOT_PROFILE or '--profile' not in opts else 'no' if no_profile else 'yes'
     rows = [('made', 'profile', made_profile), ('made', 'misses', 'yes' if '--misses' in opts else 'unused'),
             ('made', 'targets', 'unused' if made_profile == 'unused' or not targets_read() else made_profile)]
+    if unit is not None: rows.append(('made', 'recompiler', str(unit)))
     for n in sorted(prof):   # aot_profile parsed it
         functions, samples, digest = profile_summary(prof[n].read_text().splitlines())
         rows.append(('samples', n, f'{functions} {samples} {digest}'))
@@ -2824,6 +2836,7 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
             '#         package, packer, python, keys, nxaot (what packs the game again: the NSP folder, this script, its Python, the prod.keys file\'s path, the recompiler)',
             '#   made  profile yes|no|unused (the sample profiles taken; no: --no-profile, which a repack takes them without; unused: not taken by AOT_PROFILE or this nxaot), misses yes|unused,',
             '#         targets yes|no|unused (the known targets beside the profiles taken, as profile; unused also with NXAOT_PROFILE_TARGETS=0)',
+            '#         recompiler <N> (the unit key format of the nxaot that made the packs, `nxaot version`: the launcher offers the repack when its bundle\'s is a later one)',
             '#   samples <module> <sampled functions> <samples> <digest of their entries>; misses <module> <addresses> <digest of the address and reason pairs>;',
             '#         targets <module> <call sites with a dominant target> <digest of the site and target pairs>: what each module\'s packs took',
             '#         (every pack row\'s packs took the same; the launcher compares them with the profile folder to say whether a better pack is possible)',
@@ -3351,7 +3364,7 @@ def main(args=None):
         repack = {'package': nsp_dir, 'packer': here, 'python': sys.executable, 'keys': keys, 'nxaot': nxaot}
         if takeovers is not None:   # the host runs here and nxaot takes --bind: the loader's bindings from the host itself, before any pack (loader_bindings)
             loader_bindings(host, gprof, aot, misses, logs)
-        made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile)   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
+        made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile, nxaot_unit(nxaot, env))   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
         def launch_file(modes):   # the launch file offering those pack modes
             return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host, gprof,
                                     font)

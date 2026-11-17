@@ -44,6 +44,8 @@ if os.environ.get('FAKE_NXAOT_PRUNE'):   # an nxaot with the cache-prune subcomm
     if a[:1] == ['cache-prune']:
         print('aot: cache %s: %s units, 1 analyses and 0 partial files of older tools, not used for %s s, removed (2500000 bytes); 5 units kept' % (a[1], os.environ['FAKE_NXAOT_PRUNE'], a[2]))
         sys.exit(0)
+if a[:1] == ['version'] and os.environ.get('FAKE_NXAOT_UNIT'):   # an nxaot that says its unit key format
+    print('llvm\\t18.1.3\\ndynarmic\\tabcdef\\nunit\\t' + os.environ['FAKE_NXAOT_UNIT']); sys.exit(0)
 if a[:1] != ['build'] or len(a) < 2: sys.stderr.write(usage + '\\n'); sys.exit(2)
 src, obj, so = a[1], a[a.index('-o') + 1], a[a.index('--shared') + 1]
 windows = '--target' in a and a[a.index('--target') + 1] == 'windows'
@@ -619,6 +621,17 @@ class Linux(Pack):
         self.pack('windows')   # an nxaot without the subcommand: never called
         self.assertEqual([c for c in self.tools('nxaot') if c[1] == 'cache-prune'], [])
         self.assertTrue(self.tools('nxaot'))
+
+    def test_the_recompiler_of_the_packs_in_the_launch_file(self):
+        # `nxaot version`'s unit line goes into the launch file as `made recompiler <N>`, which the launcher compares with its bundle's; none for an nxaot without the line
+        self.assertIsNone(nsp.nxaot_unit(self.nxaot, dict(os.environ)))
+        self.pack()
+        self.assertNotIn('recompiler', [n for _, n, _ in made(self.work / 'launch-linux.tsv')])
+        with mock.patch.dict(os.environ, {'FAKE_NXAOT_UNIT': '15'}):
+            self.assertEqual(nsp.nxaot_unit(self.nxaot, dict(os.environ)), 15)
+            self.pack()
+        self.assertIn(('made', 'recompiler', '15'), made(self.work / 'launch-linux.tsv'))
+        self.assertIsNone(nsp.nxaot_unit(self.work / 'no-such-nxaot', dict(os.environ)))
 
     def test_old_nxaot_without_cache_and_workers(self):
         with mock.patch.dict(os.environ, {'FAKE_NXAOT_OLD': '1'}):

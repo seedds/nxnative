@@ -327,6 +327,7 @@ FAKE_LOG	test	The file `test_measure_packs.py`'s stand-in nxaot_host appends eac
 FAKE_NO_IMAGE	test	When set, `test_run_wine_tests.py`'s stand-in `docker image inspect` finds no image (the runner stops with exit status 2 and the build command)
 FAKE_NXAOT_OLD	test	When set, `test_nsp_x86.py`'s stand-in nxaot prints the usage of an nxaot without `--workers`, `--cache`, `--target`, `--profile` and `--misses`
 FAKE_NXAOT_PRUNE	test	When set, `test_nsp_x86.py`'s stand-in nxaot has the `cache-prune` subcommand and reports that many units removed
+FAKE_NXAOT_UNIT	test	`=<N>`: `test_nsp_x86.py`'s stand-in nxaot answers `nxaot version` with that unit key format, which the packer writes into the launch file as `made recompiler <N>`
 FAKE_OUT	test	The JSON file `test_nsp_x86.py`'s stand-in for nxhost-run writes what it was started with into (environment, arguments, working folder)
 FAKE_SCENARIO	test	The JSON file of the runs `test_run_wine_tests.py`'s stand-in `docker run` writes as run_host_tests.sh would (each run's summary line and log), for `run_wine_tests.sh` to classify
 FAKE_SPEED	test	`=<seconds>`: the time `test_measure_packs.py`'s stand-in nxaot bakes into a pack, over its `--fake-speed` argument (a variant's environment in the tool's `--b-env`)

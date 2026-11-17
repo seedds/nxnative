@@ -109,8 +109,8 @@ static int print_command(const Config &cfg, const Env &env, const Game &g, const
     std::printf("\n");
     for (const auto &a : c.argv) std::printf("%s\n", a.c_str());
     std::fflush(stdout);
-    const std::string why = profile_state(g, c.mode).reason();
-    if (!why.empty()) std::fprintf(stderr, "nxlauncher: %s: Profile recorded: a better pack is possible: %s\n", g.launch.title.c_str(), why.c_str());
+    const ProfileState better = profile_state(g, c.mode);
+    if (better.better()) std::fprintf(stderr, "nxlauncher: %s: %s: %s\n", g.launch.title.c_str(), better.headline().c_str(), better.reason().c_str());
     return 0;
 }
 
@@ -141,7 +141,7 @@ static int play_now(Config &cfg, const Env &env, const Game &g, const std::strin
 // "a better pack is possible": a line for the log, '' when there is none to say
 static std::string profile_line(const Game &g, const ProfileState &p) {
     if (!p.better()) return "";
-    return g.launch.title + ": Profile recorded: a better pack is possible (" + std::to_string(p.files) + " files in " + p.folder + "; Repack with profile): " + p.reason();
+    return g.launch.title + ": " + p.headline() + " (" + std::to_string(p.files) + " files in " + p.folder + "; Repack with profile): " + p.reason();
 }
 
 // --repack: the packer for the game's mode, waited for (its output in repack.txt)
@@ -239,7 +239,7 @@ static void profile_section(App &a, const Game &g) {
         ImGui::SameLine();
         ImGui::TextDisabled("the %s pack, in the background", chosen_mode(g, a.cfg).c_str());
     } else if (p.better()) {
-        ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "Profile recorded: a better pack is possible");
+        ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "%s", p.headline().c_str());
         ImGui::TextDisabled("%s.", p.reason().c_str());
         ImGui::BeginDisabled(a.repack.running || a.child.running);
         if (ImGui::Button("Repack with profile")) start_repack(a, g);
@@ -392,7 +392,7 @@ static void games_list(App &a) {
         if (ImGui::Selectable(g.launch.title.c_str(), g.launch.title_id == a.selected, ImGuiSelectableFlags_SpanAllColumns)) a.selected = g.launch.title_id;
         if (repacking(a, g)) ImGui::TextDisabled("Repacking with the profile...");
         else if (profile_of(a, g).better()) {   // the second pack, and why
-            ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "Profile recorded: a better pack is possible");
+            ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "%s", profile_of(a, g).headline().c_str());
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", profile_of(a, g).reason().c_str());
         }
         ImGui::TableNextColumn(); ImGui::TextUnformatted(g.launch.version.c_str());

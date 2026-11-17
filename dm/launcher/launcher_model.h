@@ -84,6 +84,7 @@ struct LaunchFile {
     // made_targets yes, no or unused as made_profile (nxaot reads a module's known targets beside the profile it is given; unused also with NXAOT_PROFILE_TARGETS=0); per module what
     // its packs took. All empty in a launch file written before those rows: then what the packs took is unknown; made_targets alone empty in one written before the targets rows
     std::string made_profile, made_misses, made_targets;
+    unsigned made_recompiler = 0;   // `made recompiler <N>`: the unit key format of the nxaot that made the packs (nxaot version); 0 in a launch file written before the row
     std::map<std::string, Recorded> made_samples, made_miss, made_target;
     std::vector<Pack> packs;   // the first is the default
     std::vector<KV> env;
@@ -93,14 +94,17 @@ bool packs_complete(const std::string &folder);   // per manifest <name>.aot.tsv
 
 // ---- The programs a launch file names, found again when they are gone ----
 // The launch file's path rows are absolute (build_ipa_from_nsp.py port_launch_file), so a bundle moved or replaced by a newer one elsewhere (docs/development.md, "The port's bundles")
-// leaves them naming programs that are gone. The launcher then takes the same program from its own folder, which a bundle lays out as nxlauncher beside bin/nxhost-run (one host
-// for every game), bin/nxaot and scripts/build_ipa_from_nsp.py (the script pack.sh / pack.cmd run). The host's rule is run.sh's and run.cmd's too (they look for a bundle, a
-// folder with nxlauncher and bin/nxhost-run, in their own folder and the folders above it, since they live in the NSP folder, not in the bundle):
-//   host    NXHOST from the environment if set; else the host row if that file exists; else <bundle>/bin/nxhost-run[.exe] if it exists; else the problem "the host <row> is
-//           missing: pack the game again or set NXHOST"
-//   nxaot   the nxaot row if that file exists (no row: no --nxaot, the packer finds its own); else <bundle>/bin/nxaot[.exe] if it exists; else a problem
-//   packer  the packer row if that file exists; else <bundle>/scripts/build_ipa_from_nsp.py if it exists; else a problem
-//   python  the python row if that file exists; else the bundle's own Python, the program its VERSION file names ("python <version> <program>", the path relative to the
+// leaves them naming programs that are gone, or, when the earlier bundle is still there, the earlier bundle's programs: a player who unpacks a newer bundle beside the old one and
+// opens its launcher would go on running the old host and repacking with the old recompiler. The launcher then takes the same program from its own folder, which a bundle lays out
+// as nxlauncher beside bin/nxhost-run (one host for every game), bin/nxaot and scripts/build_ipa_from_nsp.py (the script pack.sh / pack.cmd run). "Another bundle's" is a row whose
+// file has, within five folders above it, one with VERSION and bin/nxhost-run that is not the launcher's own folder; a row outside any bundle (a developer's build tree) is kept.
+// run.sh and run.cmd keep the row while its file exists and look for a bundle (a folder with nxlauncher and bin/nxhost-run, their own folder and the folders above it, since they
+// live in the NSP folder, not in the bundle) only when it is gone:
+//   host    NXHOST from the environment if set; else the host row if that file exists and is not another bundle's while this bundle has bin/nxhost-run[.exe]; else that one if it
+//           exists; else the problem "the host <row> is missing: pack the game again or set NXHOST"
+//   nxaot   the nxaot row by the same rule (no row: no --nxaot, the packer finds its own); else <bundle>/bin/nxaot[.exe] if it exists; else a problem
+//   packer  the packer row by the same rule; else <bundle>/scripts/build_ipa_from_nsp.py if it exists; else a problem
+//   python  the python row by the same rule; else the bundle's own Python, the program its VERSION file names ("python <version> <program>", the path relative to the
 //           bundle: scripts/package_port.py --python), if it exists; else a problem (a bundle without its own Python, "python no": the player's Python, which the row named)
 // The game profile's file (the game_profile row, in <id>_build beside the launch file) has no such fallback: it belongs to the pack, not to the bundle, and nxhost-run takes the
 // game's constants from it (--profile <file>), so without it the host would run another game's profile. A launch file without the row (packed before the one host) and a row
@@ -117,6 +121,14 @@ Found find_nxaot(const LaunchFile &l, const std::string &bundle);
 Found find_packer(const LaunchFile &l, const std::string &bundle);
 Found find_python(const LaunchFile &l, const std::string &bundle);
 std::string game_profile_problem(const LaunchFile &l);   // '' when the game_profile row names a file that is there, else the problem (above)
+// ---- The recompiler of the packs ----
+// A fix of the recompiler reaches a game only when it is packed again, and nothing told the player: the packs load (the module ABI is the same) and go on trapping or missing
+// where the earlier recompiler did. nxaot numbers what it compiles guest code to (its unit key format: `nxaot version`'s unit line, dm/tools/aot/src/build/pack.h UnitFormat), the
+// packer writes the number of the nxaot that made the packs into the launch file (`made recompiler <N>`), and a bundle's VERSION file has its own nxaot's ("recompiler <N>",
+// scripts/package_port.py). When the bundle's is higher than the packs' (or the launch file has no such row: packs made before it), profile_state gives the repack a reason of its
+// own, first in the list, and the list says "A newer recompiler: a better pack is possible"; "Repack with profile" then runs this bundle's packer and nxaot (the rules above).
+// 0 for a folder that is no bundle or a bundle whose VERSION has no such row (then nothing is said: a developer's build tree, a bundle without nxaot)
+unsigned bundle_recompiler(const std::string &bundle);
 
 struct Game {
     std::string dir, launch_path;   // <id>_build and its launch file
@@ -267,10 +279,12 @@ struct ProfileState {
     bool known = false;    // the launch file says what the packs took (its made rows)
     std::map<std::string, Recorded> samples, misses, targets;   // per module of the packs, its files there that the packer would take (they parse and were recorded on its image)
     std::vector<std::string> reasons;                  // why a pack made now would be better ("12 new JIT misses", "340 new sampled functions", ...); empty when it would not be
-    bool better() const { return !reasons.empty(); }   // "Profile recorded: a better pack is possible"
+    bool recompiler = false;                           // the first reason is the bundle's newer recompiler ("The recompiler of the packs", above)
+    bool better() const { return !reasons.empty(); }   // a better pack is possible
+    std::string headline() const;                      // "Profile recorded: a better pack is possible"; with the recompiler's reason, "A newer recompiler[ and a recorded profile]: ..."
     std::string reason() const;                        // the reasons joined with "; "
 };
-ProfileState profile_state(const Game &g, const std::string &mode);
+ProfileState profile_state(const Game &g, const std::string &mode, const std::string &bundle = bundle_dir());
 // The repack ("Repack with profile", nxlauncher --repack): <python> <packer> <package_dir> --platform <this system> --pack-mode <mode> [-k <keys>] [--nxaot <nxaot>], in the NSP
 // folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes); error when the launch file names no package, packer or python
 // (a pack made before those rows: pack the game once more by hand, which writes them). The Python, the packer and nxaot as find_python, find_packer and find_nxaot find them in bundle

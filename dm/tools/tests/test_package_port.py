@@ -316,6 +316,26 @@ class Bundle(unittest.TestCase):
         self.assertTrue(any(f.startswith('dm/gfx/tools/dmsh_chain_vk.py: exit 1') for f in fails), fails)   # it hashes a file the bundle lacks
 
     @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
+    def test_recompiler_row(self):   # VERSION's recompiler row: nxaot's unit key format read out of the executable; the check holds it against `nxaot version`
+        def nxaot(unit_in_bytes, unit_said):   # a stand-in that holds "nxaot-unit <N>" as the real one does (a C string) and prints a unit line
+            text = NXAOT.replace("dynarmic\\ta466015\\n'", "dynarmic\\ta466015\\nunit\\t" + str(unit_said) + "\\n'")
+            (self.aot / 'nxaot').write_bytes(text.encode() + b'\0nxaot-unit ' + str(unit_in_bytes).encode() + b'\0')
+        self.assertIsNone(pp.recompiler_unit(self.aot / 'nxaot'))   # no such text: no row
+        rc, err, out = self.package('--check')
+        self.assertEqual((rc, err), (0, '')); self.assertFalse([l for l in (out / 'VERSION').read_text().splitlines() if l.startswith('recompiler')])
+        nxaot(15, 15)
+        self.assertEqual(pp.recompiler_unit(self.aot / 'nxaot'), 15)
+        rc, err, out = self.package('--check')
+        self.assertEqual((rc, err), (0, ''))
+        version = (out / 'VERSION').read_text().splitlines()
+        self.assertIn('recompiler 15', version); self.assertEqual(version.index('recompiler 15'), version.index('nxaot yes') + 1)
+        self.assertIn('"A newer recompiler: a better pack is possible"', flat((out / 'README.txt').read_text()))
+        nxaot(15, 16)   # the row is not what the program says of itself
+        rc, err, out = self.package('--check')
+        self.assertEqual(rc, 1); self.assertIn("VERSION's recompiler row is 15 and bin/nxaot version says unit 16", err)
+        (self.aot / 'nxaot').write_bytes(b'\0nxaot-unit 14\0 and \0nxaot-unit 15\0')   # two numbers: none taken
+        self.assertIsNone(pp.recompiler_unit(self.aot / 'nxaot'))
+
     def test_check_dynamic_nxaot(self):   # an nxaot linked with the shared LLVM (its DT_NEEDED names libLLVM, and libxml2 through it) fails the check; the static one passes
         rc, err, out = self.package()
         self.assertEqual((rc, err), (0, ''))
@@ -372,7 +392,7 @@ class Bundle(unittest.TestCase):
         for absent in ('pip install', '.NET SDK', 'does not carry'): self.assertNotIn(absent, readme)
         self.assertRegex((out / 'README.txt').read_text(), r'\n  bin/spirv-val +the SPIR-V validator .*\n  bin/spirv-link .*\n  bin/spirv-cross .*\n  bin/glslangValidator +glslang, .*\n'
                                                            r'  python/ +the packer\'s Python 3\.14\.10 with lz4, capstone and fontTools\n')
-        self.assertIn('runs the Python the game was packed with (its launch file\'s python row), and this folder\'s own python/ when that one is gone, with this folder\'s packer and nxaot.', readme)
+        self.assertIn('the launcher takes its own folder\'s bin/nxhost-run, recompiler, packer and Python instead when those are another bundle\'s or gone', readme)
         # the check: with the stand-in translator's fingerprint in the bundle's lock (and its header written again), everything passes, dmsh_chain_vk.py --check-tools with bin/ only
         lock = out / 'dm/gfx/tools/dmsh_chain_vk.lock'
         lock.write_text(lock.read_text().replace(dmsh_chain_vk.lock()['dmsh_xlate_vk_linux-x64'], dmsh_chain.sha16(out / 'bin/dmsh_xlate_vk')))

@@ -22,6 +22,7 @@
 //   nxaot opcodes --reach [--samples N] [--check]     the opcodes the A64 frontend emits (src/analysis/reach.h), with the decoder entries that emit
 //                                                     them; --check exits 1 when one of them is not lowered
 //   nxaot version                                     the toolchain of nxaot.lock this build was configured with
+//                                                     and, as `unit`, the number of its unit key format (src/build/pack.h UnitFormat)
 //   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
@@ -1273,7 +1274,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "version") {
-        std::printf("llvm\t%s\ndynarmic\t%s\n", NXAOT_LOCK_LLVM, NXAOT_LOCK_DYNARMIC);
+        std::printf("llvm\t%s\ndynarmic\t%s\nunit\t%u\n", NXAOT_LOCK_LLVM, NXAOT_LOCK_DYNARMIC, nxaot::build::UnitFormat());
         return 0;
     }
     return Usage();

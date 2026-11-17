@@ -164,6 +164,12 @@ bool IsHostImport(const std::string& name);
 // its cache with and `nxaot cache-prune` prunes by (src/cache/cache.h)
 std::string CacheTool();
 
+// The number of the unit key format (pack.cpp kUnitKeyFormat, "nxaot-unit <N>"), which goes up with every change of what the same guest code compiles
+// to: `nxaot version` prints it as its `unit` line. It is what tells the packs of an earlier recompiler from this one's: the packer writes it into a
+// game's launch file (`made recompiler <N>`), the bundle's VERSION file has it (scripts/package_port.py reads "nxaot-unit <N>" out of this executable),
+// and the launcher offers the repack when the bundle's is higher (dm/launcher/launcher_model.h, "The recompiler of the packs")
+unsigned UnitFormat();
+
 // The analysis's threads with --workers 0: one per CPU this process may run on (its result is the same with any number)
 unsigned AnalysisThreads();
 

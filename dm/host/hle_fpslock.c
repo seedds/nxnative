@@ -346,9 +346,9 @@ void dm_fps_lock_tick(void) {
                 rd(obj, first_words, sizeof first_words);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE MT double] slot=%p object1=%p object2=%p movie_hz=%d target=%d row_target=%d slot_raw=%08x,%08x,%08x,%08x first_raw=%08x,%08x,%08x,%08x second_raw=%s",
+                    fprintf(pf, "[RE MT double] slot=%p object1=%p object2=%p movie_hz=%d target=%d row_target=%d slot_read=%d slot_raw=%08x,%08x,%08x,%08x first_raw=%08x,%08x,%08x,%08x second_raw=%s",
                         (void *)(uintptr_t)(base + L->ptr_off), (void *)(uintptr_t)obj,
-                        (void *)(uintptr_t)obj2, movie_hz, target, row_target,
+                        (void *)(uintptr_t)obj2, movie_hz, target, row_target, have_slot,
                         slot_words[0], slot_words[1], slot_words[2], slot_words[3],
                         first_words[0], first_words[1], first_words[2], first_words[3],
                         have_mem ? "" : "(unreadable)");
@@ -365,7 +365,7 @@ void dm_fps_lock_tick(void) {
                         }
                         if (!found) fprintf(pf, "none");
                     }
-                    fprintf(pf, " second_+48=%g second_+78=%g\\n", at48, at78);
+                    fprintf(pf, " second_+48=%g second_+78=%g\n", at48, at78);
                     fclose(pf);
                 }
                 if (movie_hz) movie_samples++; else baseline_samples++;

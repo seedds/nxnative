@@ -7,6 +7,8 @@ static int test_fps_max = 120;
 #define DM_GAME_FPS_MAX test_fps_max
 static int test_high = 120;   // what the frame step's hold allows (hle_nvn.c)
 int nvn_fps_high_now(void) { return test_high; }
+static int test_game_fps = 60;   // the game's sustained present interval (hle_nvn.c)
+int nvn_game_fps(void) { return test_game_fps; }
 #include "../hle_fpslock.c"
 #include <assert.h>
 #include <math.h>

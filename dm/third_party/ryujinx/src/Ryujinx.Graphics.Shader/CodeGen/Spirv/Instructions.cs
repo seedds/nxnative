@@ -12,7 +12,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
     using SpvInstruction = Spv.Generator.Instruction;
     using SpvLiteralInteger = Spv.Generator.LiteralInteger;
 
-    static class Instructions
+    static partial class Instructions
     {
         private const MemorySemanticsMask DefaultMemorySemantics =
             MemorySemanticsMask.ImageMemory |
@@ -53,6 +53,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.BitwiseNot,               GenerateBitwiseNot);
             Add(Instruction.BitwiseOr,                GenerateBitwiseOr);
             Add(Instruction.Call,                     GenerateCall);
+            Add(Instruction.RayQueryTrace,            GenerateRayQueryTrace);
             Add(Instruction.Ceiling,                  GenerateCeiling);
             Add(Instruction.Clamp,                    GenerateClamp);
             Add(Instruction.ClampU32,                 GenerateClampU32);
@@ -625,11 +626,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         // end as before, so a bounds check of the view's size (the atomics') and Metal's own drop it. An array of buffer textures has an entry per element, and an access
         // reads the entry of the element it indexes (its first source, as GenerateSampledImageLoad reads it). One without a table entry (an array of images, or past the
         // table) is accessed unchanged
-        private static SpvInstruction BufferBias(CodeGenContext context, AstTextureOperation texOp)
+        private static SpvInstruction BufferBias(CodeGenContext context, AstTextureOperation texOp, bool rowWidth = false)
         {
             bool isImage = texOp.Inst.IsImage();
 
-            if (!(isImage ? context.Properties.BufferImageBiases : context.Properties.BufferTextureBiases).TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
+            if (!(rowWidth ? context.Properties.BufferRowWidths : isImage ? context.Properties.BufferImageBiases : context.Properties.BufferTextureBiases).TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
             {
                 return null;
             }
@@ -1407,6 +1408,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 pCoords = BiasBufferImageCoordinate(context, texOp, pCoords);   // nxnative: a buffer texture (see BiasBufferImageCoordinate)
             }
 
+            if (intCoords && texOp.Flags.HasFlag(TextureFlags.RowWrap))
+            {
+                SpvInstruction u32 = context.TypeU32();
+                SpvInstruction x = context.CompositeExtract(context.TypeS32(), pCoords, 0);
+                SpvInstruction y = context.CompositeExtract(context.TypeS32(), pCoords, 1);
+                SpvInstruction linear = context.BitwiseOr(u32, context.Bitcast(u32, x), context.ShiftLeftLogical(u32, context.Bitcast(u32, y), context.Constant(u32, 14)));
+                SpvInstruction moved = context.Bitcast(u32, BiasBufferImageCoordinate(context, texOp, context.Bitcast(context.TypeS32(), linear)));
+                if (BufferBias(context, texOp, true) is SpvInstruction width)
+                {
+                    SpvInstruction valid = context.LogicalOr(context.TypeBool(), context.IEqual(context.TypeBool(), width, context.Constant(u32, 0)), context.ULessThan(context.TypeBool(), linear, width));
+                    moved = context.Select(u32, valid, moved, context.Constant(u32, uint.MaxValue));
+                }
+                pCoords = context.CompositeConstruct(context.TypeVector(context.TypeS32(), 2),
+                    context.Bitcast(context.TypeS32(), context.BitwiseAnd(u32, moved, context.Constant(u32, 0x3fff))),
+                    context.Bitcast(context.TypeS32(), context.ShiftRightLogical(u32, moved, context.Constant(u32, 14))));
+            }
+
             if (!intCoords)
             {
                 SpvInstruction nfFp32 = context.TypeFP32();
@@ -1744,6 +1762,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 if (dimensions != 1)
                 {
                     result = context.CompositeExtract(context.TypeS32(), result, texOp.Index);
+                }
+
+                if (texOp.Index == 0 && BufferBias(context, texOp, true) is SpvInstruction logicalWidth)
+                {
+                    // Zero marks an ordinary 1D texture: keep Metal's width.
+                    result = context.Select(context.TypeS32(), context.INotEqual(context.TypeBool(), logicalWidth, context.Constant(context.TypeU32(), 0)), context.Bitcast(context.TypeS32(), context.Select(context.TypeU32(), context.ULessThan(context.TypeBool(), logicalWidth, context.Constant(context.TypeU32(), 16384)), logicalWidth, context.Constant(context.TypeU32(), 16384))), result);
                 }
 
                 return new OperationResult(AggregateType.S32, result);

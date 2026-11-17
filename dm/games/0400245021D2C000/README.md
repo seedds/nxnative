@@ -63,6 +63,7 @@ From `save_ref`: at 72 s `A`, 8 s later `A`, 14 s later the book is open at Chap
 - [Unreal Engine 5.4 shaders for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-54-shaders-for-the-switch-2): `shaders: 0` from the split.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area): `nninitStartup` exits. The rule for this `sdk` also matches those of Mario Kart World and Donkey Kong Bananza.
 - [More than 16 vertex attributes](../../../docs/reference/rendering.md#more-than-16-vertex-attributes): every bind refused.
+- [Attributes the vertex fetch cannot read, pulled](../../../docs/reference/rendering.md#attributes-the-vertex-fetch-cannot-read-pulled): `0b0c84c390e64a6d`, a vertex factory with an input at attribute 16, fed `RGBA8UI` to a float input and converted on the CPU (red line 99), until pulling libraries took attributes 16–31.
 - [Images and buffer textures with their handle in a uniform buffer](../../../docs/reference/shaders.md#images-and-buffer-textures-with-their-handle-in-a-uniform-buffer): compute passes skipped.
 - [A guarded load whose destination is its address](../../../docs/reference/shaders.md#a-guarded-load-whose-destination-is-its-address): the scene's instance data read at index 0.
 - [Texture and sampler words in either order](../../../docs/reference/shaders.md#texture-and-sampler-words-in-either-order): the G-buffer bound as dummies, a black picture.

@@ -73,6 +73,17 @@ class BufferImageOffsets(unittest.TestCase):
         self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_i_tcb_48_r32ui', res))
         self.assertEqual(dmsh_reflect.buffer_image_bias('cp_i_cb3_48_r32ui', res), 0)
 
+    def test_buffer_texture_keeps_both_words_of_a_separate_handle(self):
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  '    texture_buffer<float> vp_t_cb1114127_10030000 [[id(0)]];\n'
+                  '    texture_buffer<float> vp_t_cb15_0 [[id(1)]];\n'
+                  '};\n')
+        got = REFLECT('synthetic', 'vs', source, {'sbufs': []})
+        self.assertEqual((got[0]['kind'], got[0]['reg'], got[0]['off'], got[0]['sreg'], got[0]['soff']),
+                         ('tbuf_ubo', 12, 0, 13, 48))
+        self.assertEqual((got[1]['kind'], got[1]['reg'], got[1]['off']), ('tbuf_ubo', 12, 0))
+        self.assertNotIn('soff', got[1])
+
     def test_buffer_texture_indices(self):
         # A buffer texture read through a texture slot (c2 word 8: slot 0) or through a handle in a uniform buffer gets its index from the translator's textures, never from an
         # image with the same handle
@@ -91,6 +102,16 @@ class BufferImageOffsets(unittest.TestCase):
                          [(dmsh_abi.KIND_TBIAS, None), (dmsh_abi.KIND_TBUF, 0), (dmsh_abi.KIND_TBUF_UBO, 1), (dmsh_abi.KIND_TEX, None)])
         self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_t_cb4_A', res))   # another uniform slot
         self.assertEqual(got[0]['n'], 4)   # the table's length: entries 0 to 3 in one uint4 (the image's entry 3 counts)
+
+    def test_wrapped_buffer_fetch_offsets(self):
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* cp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    texture2d<uint> cp_t_tcb_8 [[id(1)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'textures': [{'binding': 1, 'cbuf_slot': -1, 'handle': 8, 'array': 1, 'tbx': 0, 'row_bias': True}]}
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual(got[0]['n'], 4)   # lead and logical width, padded to uint4
+        self.assertEqual((got[1]['tbx'], got[1]['fetch1d']), (0, True))
 
     def test_buffer_texture_arrays(self):
         # An array of buffer textures (a dynamic slot array, cb0_40000000; an array of the driver table's handles, cb2) takes an entry per element from its first; an array of

@@ -92,7 +92,7 @@ Binding conventions followed during translation (the NVN driver's layout, the sa
 | `nvn/nvn_tex.c`, `nvn/nvn_tex.h` | Storage size, alignment and per-level offsets of block-linear textures (ported from deko3d) |
 | `nvn/nvn_dirty.c`, `nvn/nvn_dirty.h` | Tracks dirty pages of game memory with write protection, to decide whether texture contents have changed and need re-uploading |
 | `nvn/nvn_refl.m`, `nvn/nvn_refl.h` | Converts shader reflection json into fixed-length C arrays, so that drawing only walks arrays |
-| `nvn/nvn_hmap.h`, `nvn/nvn_cover.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h`, `nvn/nvn_primitive.h` | Hash table, geometric proof of full-coverage draws, presentation pacer, pipeline manifest key, indexed triangle fans and quads as triangle lists (primitive restart kept) |
+| `nvn/nvn_hmap.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h`, `nvn/nvn_primitive.h` | Hash table, presentation pacer, pipeline manifest key, indexed triangle fans and quads as triangle lists (primitive restart kept) |
 | `nvn/nvn_builtin.h` | Hand-written MSL for the 4 compute shaders embedded in the main program |
 | `nvn/include/nvn.h` | NVN interface declarations (third party; for the license see the file header) |
 | `nvn/names.txt` | The NVN API name list. The per-game tables described above live in the game profile `dm/games/<id>/` (named after the base game's title ID; tools pick it with `DM_GAME`, make with `GAME`; there is no default game) |
@@ -153,7 +153,7 @@ The tests in `dm/gfx/tests` compile the production code in directly and need a M
 | `t_present_crop` | Presentation cropping |
 | `t_mip_extent` | Effective size when rendering to a mip level other than level 0 |
 | `t_serial_owner` | The resource owner alone (`nvn_owner.m` with stand-ins for the replay layer's hooks): registration, replacement, removal, finalize, the ghost ring, pins, views and renames, the held counts, the ghost ring's slots and the sharing table's index and set after every step; sRGB / linear views: the old publish-then-`serial_del` sequence (the evidence), `own_view_put` and `own_view_drop_stale` in each order of finalize, publish, eviction and resolution; the sharing table: lookups, registrations (a second under one key takes the first), the takeover's spared and taken entries, pool drops, a twin refused after its parent's pool drop or upgrade, `own_upgrade` and the generations it and a pool drop make; retirement: eligibility for live, ghost, pinned, view-parent and shared holders, the hand-back, `own_object_free` |
-| `t_fuse_check`, `t_reorder_chain`, `t_defer_chain`, `t_zskip`, `t_xv`, `t_ub`, `t_pfv`, `t_rt_range`, `t_rt_range_shape`, `t_rt_range_ro`, `t_rt_depth_ro` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
+| `t_reorder_chain`, `t_ub`, `t_pfv` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
 | `test_tbdr_budget.py` | The parsing in `tools/tbdr_budget.py` |
 
 ## Common run-time switches
@@ -171,6 +171,7 @@ Resource locations:
 | `DM_PSO_RECORD=path` | Appends the shaders and pipelines used in this run to a file, for re-recording the warm-up manifest |
 | `DM_PSO_USER=path` | Where to keep the per-device list of shaders and pipelines built on the spot (default: `pso_user.tsv` in the parent of `DM_SAVE`) |
 | `DM_PSO_ARCHIVE=folder` or `off` | Where to keep the per-game pipeline archive of pipeline bases (default: `pso_archive/` beside `pso_user.tsv`), or no archive |
+| `DM_OBSOLETE=folder` | Where the pipeline archive's unused files go, into `<date time> <archive folder>/` there (the Mac run command sets `<id>_build/obsolete`, which the next successful build empties); unset, they are removed |
 | `DM_PSO_MTL4=0` / `=1` | `0`: build render pipelines through the `MTLDevice` as before, with no unspecialized bases and no archive (the Mac's default is on). `1`: turn them on on iOS, where they are off by default |
 | `DM_PSO_HYBRID=0` | A draw whose pipeline is not built yet waits for it, instead of drawing with the pair's pulling pipeline meanwhile (docs/development.md, "Hybrid pipelines") |
 | `DM_PSO_PREBUILD=0` or `tool` | No prebuild of the pulling bases into the archive (in the prepare step, or in the background without one); `tool`: run what a first start would build and exit, the pairs' bases, then the prewarm lists' pipelines (`DM_PSO_MANIFEST` as for a run; `DM_PSO_PREBUILD_DEPTH=zero`, `DM_PSO_PREBUILD_THREADS=<n>`, `DM_PSO_PREBUILD_WARM=0` for the pairs alone); with `DM_PSO_PREBUILD_OUT=<folder>` the captures (in the `DM_PSO_ARCHIVE` work folder) go into that folder as `<GPU>-prewarm-<NN>.mtl4a` for the app to bundle, the NSP script's `--prebake` |
@@ -198,9 +199,7 @@ Comparison and testing:
 
 | Switch | Effect |
 |---|---|
-| `DM_NVN_TBDR=1` | Turns on the pass optimizations of the replay layer (store / load elision, pass merging). They are off by default: they infer which textures a draw reads from its bound slots, which bindless textures defeat ([docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 4) |
-| `DM_NVN_UNWRITTEN_DC=0` | With `DM_NVN_TBDR=1`, turns off the single item "attachments not written in this pass are not stored" |
-| `DM_NVN_FUSE_CHECK=1` | Same-frame check of pass merging; logs the comparison result every time |
+| `DM_NVN_UNWRITTEN_DC=0` | Turns off "attachments not written in this pass are not stored" (for picture comparisons) |
 | `DM_NVN_CS_HOIST=0` | A compute dispatch between the draws of a pass ends it (by default it runs ahead of the pass when that changes nothing the draws before it read: [reference](../../docs/reference/rendering.md#compute-dispatches-between-the-draws-of-a-pass-run-ahead-of-it)) |
 | `DM_NVN_SLICE_MERGE=0` | Passes into other layers of one array or cube texture level stay apart (by default they run as one layered pass: [reference](../../docs/reference/rendering.md#passes-into-other-layers-of-one-texture-level-run-as-one-layered-pass)) |
 | `DM_FPS=30` or `60` | Pins the target frame rate |

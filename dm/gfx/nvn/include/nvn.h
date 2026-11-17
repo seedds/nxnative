@@ -1140,6 +1140,7 @@ typedef NVNboolean (*PFNNVNDEVICEREGISTERFASTCLEARCOLORIPROC)(NVNdevice*, const 
 typedef NVNboolean (*PFNNVNDEVICEREGISTERFASTCLEARCOLORUIPROC)(NVNdevice*, const uint32_t*,
                                                                NVNformat);
 typedef NVNboolean (*PFNNVNDEVICEREGISTERFASTCLEARDEPTHPROC)(NVNdevice*, float);
+typedef NVNboolean (*PFNNVNDEVICEREGISTERFASTCLEARSTENCILPROC)(NVNdevice*, int);
 typedef NVNwindowOriginMode (*PFNNVNDEVICEGETWINDOWORIGINMODEPROC)(const NVNdevice*);
 typedef NVNdepthMode (*PFNNVNDEVICEGETDEPTHMODEPROC)(const NVNdevice*);
 typedef uint64_t (*PFNNVNDEVICEGETTIMESTAMPINNANOSECONDSPROC)(const NVNdevice*,

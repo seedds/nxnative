@@ -159,6 +159,17 @@ int main(void) {
         settle(dec); assert(d->vpx_ok && !d->reopen && h_gs_trywait(&sync));
         assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 6000 + round && w == 16 && d->nheld == 0);
     }
+    // The frame step's movie signal (hle_movie.c dm_movie_hz): times microseconds apart give no rate, and nn::codec does not count a stream without one; two pictures
+    // 1/60 s apart after a gap of a second (the rate is taken anew) make a 60-picture movie, a flush (a seek, a loop) keeps it and a stop ends it at once
+    assert(dm_movie_hz() == 0);
+    for (int k = 0; k < 2; k++) {
+        h_cv_vp9rel(dec, 1, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1);
+        assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000000000 + k * 16666667, false));
+        settle(dec); assert(h_gs_trywait(&sync));
+    }
+    assert(dm_movie_hz() == 60);
+    assert(!h_cv_vp9flush(dec) && dm_movie_hz() == 60);
+    assert(!h_cv_vp9stop(dec) && dm_movie_hz() == 0);
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     // A decoder initialised again in the same memory, cleared in between (Donkey Kong Bananza's second movie): its event is bound anew.
     // Finalized with packets it has not decoded: its thread ends first, and they go with it

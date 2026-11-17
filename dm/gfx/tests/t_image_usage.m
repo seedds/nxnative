@@ -7,16 +7,19 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
-static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out) {
+// The count texels of a square R16F level into out: zero first, so a level of another size or a failed readback fails the caller's pixel checks rather than leaving words unset
+static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out, size_t count) {
+    memset(out, 0, count * 2);
     NSUInteger n = texture.width >> level;
+    if (n * n != count) { CHECK(0, "readback level has the expected size"); return; }
     id<MTLBuffer> readback = [g_dev newBufferWithLength:n * n * 2 options:MTLResourceStorageModeShared];
-    if (!readback) { CHECK(0, "readback buffer allocated"); memset(out, 0, n * n * 2); return; }
+    if (!readback) { CHECK(0, "readback buffer allocated"); return; }
     id<MTLCommandBuffer> command = q_cb(); id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
     [copy copyFromTexture:texture sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
                 toBuffer:readback destinationOffset:0 destinationBytesPerRow:n * 2 destinationBytesPerImage:n * n * 2];
     [copy endEncoding]; [command commit]; [command waitUntilCompleted];
     CHECK(command.status == MTLCommandBufferStatusCompleted, "readback completed");
-    memcpy(out, readback.contents, n * n * 2);
+    memcpy(out, readback.contents, count * 2);
 }
 static void image_case(int explicit_image) { @autoreleasepool {
     tex_t texture = {.magic=MAGIC('T','E','X',0), .serial=99501 + 10 * explicit_image, .off=(uint64_t)explicit_image << 20};
@@ -62,9 +65,9 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(rid == image.gpuResourceID._impl, "image argument names the real view");
     os_unfair_lock_unlock(&g_rmu);
     mtl_sub_commit(); mtl_drain();
-    uint16_t pixels[64]; read_level(upgraded, 0, pixels);
+    uint16_t pixels[64]; read_level(upgraded, 0, pixels, 64);
     int same = 1; for (int i = 0; i < 64; i++) same &= pixels[i] == 0x3800; CHECK(same, "upgrade preserves the clear from the pass it ended");
-    read_level(upgraded, 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == 0x3a00; CHECK(same, "upgrade preserves the other mip");
+    read_level(upgraded, 1, pixels, 16); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == 0x3a00; CHECK(same, "upgrade preserves the other mip");
     NSError *error = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void put(texture2d<float, access::write> t [[texture(0)]]) { t.write(float4(0.25),uint2(1,1)); }\n" options:nil error:&error];
     id<MTLComputePipelineState> pipeline = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"put"] error:&error];
@@ -73,7 +76,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     [encoder setComputePipelineState:pipeline]; [encoder setTexture:image atIndex:0];
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)]; [encoder endEncoding]; [write commit]; [write waitUntilCompleted];
     CHECK(write.status == MTLCommandBufferStatusCompleted, "image write completed");
-    read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
+    read_level(tex_mtl(&alias), 1, pixels, 16); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
 int main(void) { @autoreleasepool {

@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -104,7 +105,7 @@ class XcodePipelineTests(unittest.TestCase):
                 self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
             else:
                 builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
-                self.assertTrue(builder.call_args.kwargs['reuse'])
+                self.assertTrue(builder.call_args.kwargs.get('reuse', True))   # reused (the default): a damaged copy is keyed by its files' times, not refused
             warnings = [event.get('msg', '') for event in events]
             self.assertEqual(any('this Xcode project uses' in message for message in warnings), derived)
             if derived:
@@ -238,6 +239,12 @@ class ImageStaging(unittest.TestCase):
             environment['DM_COPY_ROMFS'] = 'NO'; stage(); self.assertFalse((app / 'romfs.img').exists())
             self.assertTrue(romfs_image.same_identity((app / 'romfs.id').read_text(), romfs_image.identity(image)))   # the slim build names the image it needs
             environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file()); self.assertFalse((app / 'romfs.id').exists())
+            # the other programs' RomFS beside the image (scripts/pack_nup.py), where the host mounts them by program index: staged with the RomFS, also in the slim build (main.m names it)
+            programs = root / 'romfs_programs'; programs.mkdir(); (programs / '0.img').write_bytes(b'switch 1 data')
+            stage(); self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data')
+            (programs / '0.img').write_bytes(b'switch 1 data, updated'); environment['DM_COPY_ROMFS'] = 'NO'; stage()
+            self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data, updated')
+            environment.pop('DM_COPY_ROMFS'); shutil.rmtree(programs); stage(); self.assertFalse((app / 'romfs_programs').exists())
 
     def test_one_library_file_is_staged_as_it_is(self):   # an NVN game's libraries (dm/tools/shader_lib.py), and the folder of a build from before them, each replacing the other
         import romfs_image

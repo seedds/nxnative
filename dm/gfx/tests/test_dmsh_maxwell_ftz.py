@@ -6,6 +6,7 @@ import json, os, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 FLUSH = '1.1754943508222875'   # FLT_MIN, the bound under which an operand is flushed
 PT, RZ, NEU = 7, 255, 0xd
 SCHED = 0x001f8000fc0007e0     # the scheduling word before each three instructions
@@ -48,7 +49,7 @@ class MaxwellCompareFtz(unittest.TestCase):
             self.assertTrue((work / 'k.spv').exists(), r.stdout + r.stderr)
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout
 

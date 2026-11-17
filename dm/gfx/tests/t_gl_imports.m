@@ -191,9 +191,482 @@ static void test_uniform_buffer(void) {
     del_buf(1, &b[1]); assert(!S.array_buf);
 }
 
+// Compressed arrays keep each layer's block rows separate, including mip levels
+// smaller than one block. Exercise the public entry points and read Metal's bytes.
+static void test_compressed_arrays(void) {
+    void (*image)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLsizei, GLint, GLsizei, const void *) = import("glCompressedTexImage3D");
+    void (*sub)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, uint64_t, uint64_t, const void *) = import("glCompressedTexSubImage3D");
+    assert(h_eglGetProcAddress("glCompressedTexImage3D") == (void *)image);
+    assert(h_eglGetProcAddress("glCompressedTexSubImage3D") == (void *)sub);
+    GLuint name; h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    uint8_t base[128], mip[32], small[32], got[64];
+    for (unsigned i = 0; i < sizeof base; i++) base[i] = (uint8_t)(i + 1);
+    memset(mip, 0x35, 16); memset(mip + 16, 0x76, 16);
+    memset(small, 0x93, 16); memset(small + 16, 0xb2, 16);
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 8, 8, 2, 0, sizeof base, base);
+    image(GL_TEXTURE_2D_ARRAY, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof mip, mip);
+    image(GL_TEXTURE_2D_ARRAY, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 2, 2, 2, 0, sizeof small, small);
+    tex_t *t = tex_of(name); assert(tex_make(t, 0));
+    assert(t->tex.pixelFormat == MTLPixelFormatBC7_RGBAUnorm_sRGB && t->tex.arrayLength == 2 && t->tex.mipmapLevelCount == 3);
+    for (unsigned lv = 0; lv < 3; lv++) for (unsigned layer = 0; layer < 2; layer++) {
+        unsigned w = 8 >> lv, pitch = lv ? 16 : 32, bytes = lv ? 16 : 64;
+        [t->tex getBytes:got bytesPerRow:pitch bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, w, w) mipmapLevel:lv slice:layer];
+        const uint8_t *want = lv == 0 ? base : lv == 1 ? mip : small;
+        assert(!memcmp(got, want + layer * bytes, bytes));
+    }
+    uint8_t patch[16]; memset(patch, 0xdf, sizeof patch);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 4, 4, 1, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof patch, patch);
+    [t->tex getBytes:got bytesPerRow:32 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 slice:1];
+    assert(!memcmp(got, base + 64, 48) && !memcmp(got + 48, patch, 16));
+    // An upload after a consumer was encoded must use an ordered blit, and
+    // retain the copied bytes even when the caller immediately reuses its input.
+    t->use = g_serial;
+    memset(patch, 0x49, sizeof patch);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof patch, patch);
+    memset(patch, 0xef, sizeof patch);
+    void (*finish)(void) = import("glFinish"); finish();
+    [t->tex getBytes:got bytesPerRow:32 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 slice:0];
+    for (int i = 0; i < 16; i++) assert(got[i] == 0x49);
+    assert(!memcmp(got + 16, base + 16, 48));
+    // A partial last block is legal only at the texture's edge. Invalid uploads
+    // leave all bytes intact and report the GL error instead of reaching Metal.
+    sub(GL_TEXTURE_2D_ARRAY, 2, 0, 0, 0, 2, 2, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof small, small);
+    assert(h_glGetError() == GL_NO_ERROR);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 1, 0, 0, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 16, patch);
+    assert(h_glGetError() == GL_INVALID_OPERATION);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 2, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 16, patch);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 15, patch);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    // Immutable allocation uses the same upload path; NULL defines storage.
+    h_glDeleteTextures(1, &name); h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    h_glTexStorage3D(GL_TEXTURE_2D_ARRAY, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2);
+    sub(GL_TEXTURE_2D_ARRAY, 1, 0, 0, 0, 2, 2, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof small, small);
+    t = tex_of(name); assert(t->tex && t->tex.arrayLength == 2);
+    [t->tex getBytes:got bytesPerRow:16 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 slice:1];
+    assert(!memcmp(got, small + 16, 16));
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof small, small);
+    assert(h_glGetError() == GL_INVALID_OPERATION);   // immutable storage cannot be redefined
+    h_glDeleteTextures(1, &name);
+    h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof small, NULL);
+    image(GL_TEXTURE_2D_ARRAY, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 2, 2, 2, 0, sizeof small, NULL);
+    sub(GL_TEXTURE_2D_ARRAY, 1, 0, 0, 0, 2, 2, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof small, small);
+    t = tex_of(name); assert(!t->made && tex_make(t, 0) && t->tex.mipmapLevelCount == 2);   // the fill waited in the pending level
+    [t->tex getBytes:got bytesPerRow:16 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 slice:0];
+    assert(!memcmp(got, small, 16));
+    h_glDeleteTextures(1, &name);
+    // Each level allocated with no data (imageSize 0) and filled before the next is given: the fills go into the pending levels, so the texture is made
+    // with every level, not with the levels given at the first fill
+    h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 8, 8, 2, 0, 0, NULL);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 8, 8, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof base, base);
+    memset(patch, 0x5a, sizeof patch);
+    sub(GL_TEXTURE_2D_ARRAY, 0, 4, 0, 1, 4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof patch, patch);
+    image(GL_TEXTURE_2D_ARRAY, 1, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, 0, NULL);
+    sub(GL_TEXTURE_2D_ARRAY, 1, 0, 0, 0, 4, 4, 2, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof mip, mip);
+    assert(h_glGetError() == GL_NO_ERROR);
+    t = tex_of(name); assert(!t->made && tex_make(t, 0) && t->tex.mipmapLevelCount == 2);
+    [t->tex getBytes:got bytesPerRow:32 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 slice:1];
+    assert(!memcmp(got, base + 64, 16) && !memcmp(got + 16, patch, 16) && !memcmp(got + 32, base + 96, 32));
+    [t->tex getBytes:got bytesPerRow:16 bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:1 slice:1];
+    assert(!memcmp(got, mip + 16, 16));
+    h_glDeleteTextures(1, &name);
+    // The host's gaps (a volume target, a compressed format the layer does not map) record no GL error; an uncompressed format is the caller's error
+    h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_3D, name);
+    image(GL_TEXTURE_3D, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 4, 4, 2, 0, sizeof small, small);
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glDeleteTextures(1, &name); h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D_ARRAY, name);
+    image(GL_TEXTURE_2D_ARRAY, 0, 0x9274 /* GL_COMPRESSED_RGB8_ETC2 */, 4, 4, 1, 0, 8, small);
+    assert(h_glGetError() == GL_NO_ERROR);
+    image(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 4, 4, 1, 0, 64, small);
+    assert(h_glGetError() == GL_INVALID_ENUM);
+    h_glDeleteTextures(1, &name);
+}
+
+// What DOOM 3's renderer (id Tech 4's BFG Edition) needs of the layer: its ARB names and extension check, named uniform blocks bound by range, two-sided stencil, frame copies into
+// a texture, streamed compressed images, byte-swapped 16-bit images, programs with a vertex shader alone, sync queries and wireframe
+static void test_doom3(void) {
+    // An ARB name of a core function gets the core entry; ARB_fragment_program's own names have theirs; an ARB name of nothing stays missing
+    assert(gl_lookup("glBindBufferARB") == gl_lookup("glBindBuffer") && gl_lookup("glBindBuffer"));
+    assert(gl_lookup("glActiveTextureARB") == (void *)h_glActiveTexture);
+    assert(gl_lookup("glCompressedTexSubImage2DARB") == import("glCompressedTexSubImage2D"));
+    assert(gl_lookup("glGenProgramsARB") == import("glGenProgramsARB") && !gl_lookup("glNoSuchFunctionARB") && !gl_lookup("ARB"));
+    static const char *const need[] = {"GL_ARB_multitexture", "GL_ARB_texture_compression", "GL_EXT_texture_compression_s3tc", "GL_ARB_vertex_buffer_object", "GL_ARB_map_buffer_range",
+        "GL_ARB_draw_elements_base_vertex", "GL_ARB_vertex_array_object", "GL_ARB_uniform_buffer_object", "GL_ARB_buffer_storage", "GL_ATI_separate_stencil", "GL_ARB_fragment_program"};
+    const char *ext = h_glGetString(GL_EXTENSIONS); GLint next = 0; h_glGetIntegerv(GL_NUM_EXTENSIONS, &next);
+    for (size_t i = 0; i < sizeof need / sizeof *need; i++) {
+        char word[64]; snprintf(word, sizeof word, " %s ", need[i]); char all[2048]; snprintf(all, sizeof all, " %s ", ext); assert(strstr(all, word));   // a whole name
+        int listed = 0; for (GLint k = 0; k < next; k++) listed |= !strcmp(h_glGetStringi(GL_EXTENSIONS, (GLuint)k), need[i]);
+        assert(listed);
+    }
+    GLint v = 0; h_glGetIntegerv(0x8a34, &v); assert(v == 256);   // UNIFORM_BUFFER_OFFSET_ALIGNMENT
+
+    // A named block, merged over the stages by name: its index, its binding point, and the range a draw reads there (whole, or with zeros past a short range or the buffer's end)
+    GLuint (*blkidx)(GLuint, const GLchar *) = import("glGetUniformBlockIndex"); void (*blkbind)(GLuint, GLuint, GLuint) = import("glUniformBlockBinding");
+    void (*range)(GLenum, GLuint, GLuint, GLintptr, GLsizeiptr) = import("glBindBufferRange");
+    static shblk vb = {"matrices_ubo", 1, 64}, fb = {"matrices_ubo", 2, 64};
+    static shinfo vsi = {.ub_slot = -1, .nb = 1, .b = &vb}, fsi = {.frag = 1, .ub_slot = -1, .nb = 1, .b = &fb};
+    GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER), fs = h_glCreateShader(GL_FRAGMENT_SHADER);
+    id vfn = [NSObject new], ffn = [NSObject new];
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = vfn; shader_of(fs)->si = &fsi; shader_of(fs)->fn = ffn;
+    h_glAttachShader(pr, vs); h_glAttachShader(pr, fs); h_glLinkProgram(pr);
+    prog_t *p = prog_of(pr); assert(p->linked && p->nblk == 1 && p->blk[0].slot[0] == 1 && p->blk[0].slot[1] == 2 && p->blk[0].size == 64 && !p->blk[0].binding);
+    assert(blkidx(pr, "matrices_ubo") == 0 && blkidx(pr, "other") == 0xffffffffu);
+    blkbind(pr, 0, 5); assert(p->blk[0].binding == 5);
+    blkbind(pr, 1, 5); assert(h_glGetError() == GL_INVALID_VALUE);
+    uint8_t data[256]; for (int i = 0; i < 256; i++) data[i] = (uint8_t)(i + 1);
+    GLuint ub; gen_buf(1, &ub); bind_buf(GL_UNIFORM_BUFFER, ub); h_glBufferData(GL_UNIFORM_BUFFER, sizeof data, data, 0);
+    size_t mo; id<MTLBuffer> mb;
+    range(GL_UNIFORM_BUFFER, 5, ub, 128, 64); mb = blk_buffer(&p->blk[0], &mo); assert(mb == buf_of(ub)->mb && mo == 128);   // the range itself
+    range(GL_UNIFORM_BUFFER, 5, ub, 192, 16); mb = blk_buffer(&p->blk[0], &mo); assert(mb != buf_of(ub)->mb);               // 16 of the block's 64 bytes: a copy
+    const uint8_t *c = (const uint8_t *)mb.contents + mo; assert(!memcmp(c, data + 192, 16)); for (int i = 16; i < 64; i++) assert(!c[i]);
+    h_glBindBufferBase(GL_UNIFORM_BUFFER, 5, ub); mb = blk_buffer(&p->blk[0], &mo); assert(mb == buf_of(ub)->mb && !mo);    // the whole buffer
+    range(GL_UNIFORM_BUFFER, 5, ub, 224, 64); mb = blk_buffer(&p->blk[0], &mo); c = (const uint8_t *)mb.contents + mo;      // past the buffer's end
+    assert(!memcmp(c, data + 224, 32)); for (int i = 32; i < 64; i++) assert(!c[i]);
+    del_buf(1, &ub); assert(!S.ubo[5].buf); mb = blk_buffer(&p->blk[0], &mo); c = (const uint8_t *)mb.contents + mo; for (int i = 0; i < 64; i++) assert(!c[i]);
+    h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs);
+
+    // A program with a vertex shader alone links, and its pipeline has no fragment function and writes no colour
+    static const char *src = "#include <metal_stdlib>\n using namespace metal;\n struct VIn { float4 p [[attribute(0)]]; };\n"
+        "vertex float4 vmain(VIn in [[stage_in]]) { return in.p; }\n";
+    NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; assert(lib);
+    static shattr at = {.name = "p", .slot = 0}; static shinfo vonly = {.ub_slot = -1, .na = 1, .a = &at};
+    pr = h_glCreateProgram(); vs = h_glCreateShader(GL_VERTEX_SHADER); shader_of(vs)->si = &vonly; shader_of(vs)->fn = [lib newFunctionWithName:@"vmain"];
+    h_glAttachShader(pr, vs); h_glLinkProgram(pr); p = prog_of(pr);
+    assert(p->linked && p->fn[0] && !p->fn[1] && p->si[1]->frag && !p->si[1]->nu && !p->si[1]->nt && !p->si[1]->nb && p->si[1]->ub_slot < 0);
+    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask = 15;
+    k.cpf = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
+    assert(pso_get(p, &k));
+    h_glDeleteProgram(pr); h_glDeleteShader(vs);
+
+    // Two-sided stencil: each face its own function, reference, masks and operations; the one-sided calls set both
+    void (*fsep)(GLenum, GLenum, GLint, GLuint) = import("glStencilFuncSeparate"), (*osep)(GLenum, GLenum, GLenum, GLenum) = import("glStencilOpSeparate");
+    void (*fsep_ati)(GLenum, GLenum, GLint, GLuint) = import("glStencilFuncSeparateATI"), (*msep)(GLenum, GLuint) = import("glStencilMaskSeparate");
+    osep(GL_BACK, GL_KEEP, GL_INCR_WRAP, GL_KEEP); osep(GL_FRONT, GL_KEEP, GL_DECR_WRAP, GL_KEEP);
+    assert(S.st[0].zfail == GL_DECR_WRAP && S.st[1].zfail == GL_INCR_WRAP && S.st[0].pass == GL_KEEP);
+    fsep(GL_FRONT_AND_BACK, GL_NEVER + 7, 128, 0xff); assert(S.st[0].func == GL_NEVER + 7 && S.st[1].ref == 128 && S.st[1].mask == 0xff);
+    fsep_ati(GL_NEVER + 1, GL_NEVER + 3, 1, 0xf); assert(S.st[0].func == GL_NEVER + 1 && S.st[1].func == GL_NEVER + 3 && S.st[0].ref == 1);
+    msep(GL_BACK, 0x0f); assert(S.st[1].wmask == 0x0f && S.st[0].wmask == 0xffffffff);
+    S.stencil = 1; P.spf = MTLPixelFormatDepth32Float_Stencil8;
+    id<MTLDepthStencilState> two = dss_get();
+    osep(GL_BACK, GL_KEEP, GL_DECR_WRAP, GL_KEEP); assert(dss_get() != two);   // the back face's operations are its own
+    h_glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP); h_glStencilFunc(GL_NEVER + 7, 0, 0xffffffff); h_glStencilMask(0xffffffff);
+    assert(S.st[1].zfail == GL_KEEP && S.st[1].func == GL_NEVER + 7 && S.st[1].wmask == 0xffffffff);
+    osep(0x1234, GL_KEEP, GL_KEEP, GL_KEEP); assert(h_glGetError() == GL_INVALID_ENUM);
+    S.stencil = 0; P.spf = MTLPixelFormatInvalid;
+
+    // glCopyTexImage2D / glCopyTexSubImage2D: the read framebuffer's rectangle into the texture, rows as they are, the part outside the framebuffer left alone
+    uint32_t px[16]; for (int i = 0; i < 16; i++) px[i] = 0xff000000u | (uint32_t)(i * 9);
+    GLuint a, b, fbo; h_glGenTextures(1, &a); h_glBindTexture(GL_TEXTURE_2D, a);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    h_glGenFramebuffers(1, &fbo); h_glBindFramebuffer(GL_FRAMEBUFFER, fbo); h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, a, 0);
+    h_glGenTextures(1, &b); h_glBindTexture(GL_TEXTURE_2D, b);
+    h_glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 2, 2, 0);
+    h_glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 1, 0, 3, 3, 4, 4);   // from (3, 3): one pixel inside the framebuffer
+    h_glFinish();
+    tex_t *tb = tex_of(b); assert(tb->tex && tb->tex.width == 2 && tb->tex.height == 2);
+    uint32_t got[4]; [tb->tex getBytes:got bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+    assert(got[0] == px[5] && got[1] == px[15] && got[2] == px[9] && got[3] == px[10]);
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fbo); h_glDeleteTextures(1, &a); h_glDeleteTextures(1, &b);
+
+    // glCompressedTexSubImage2D into a level not made yet goes into its pending copy, next to the zeros of the allocation
+    void (*sub2d)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void *) = import("glCompressedTexSubImage2D");
+    uint8_t blk[16], out[64]; memset(blk, 0x6c, sizeof blk);
+    h_glGenTextures(1, &a); h_glBindTexture(GL_TEXTURE_2D, a);
+    h_glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, 8, 8, 0, 64, NULL);
+    sub2d(GL_TEXTURE_2D, 0, 4, 4, 4, 4, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof blk, blk); assert(h_glGetError() == GL_NO_ERROR);
+    tex_t *ta = tex_of(a); assert(!ta->made && tex_make(ta, 0));
+    [ta->tex getBytes:out bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    for (int i = 0; i < 48; i++) assert(!out[i]);
+    assert(!memcmp(out + 48, blk, 16));
+    sub2d(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 4, 4, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, sizeof blk, blk); assert(h_glGetError() == GL_INVALID_ENUM);   // a 3D target in the 2D call
+    h_glDeleteTextures(1, &a);
+
+    // GL_UNPACK_SWAP_BYTES: RGB565 stored big-endian reads as the same colours stored little-endian
+    const uint8_t be[4] = {0xf8, 0x00, 0x07, 0xe0};   // red, green
+    h_glGenTextures(1, &a); h_glBindTexture(GL_TEXTURE_2D, a);
+    h_glPixelStorei(0xcf0, 1); h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 1, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, be); h_glPixelStorei(0xcf0, 0);
+    const uint8_t *d = tex_of(a)->pend[0][0].data; assert(d);
+    assert(d[0] == 255 && d[1] == 0 && d[2] == 0 && d[3] == 255 && d[4] == 0 && d[5] == 255 && d[6] == 0 && d[7] == 255);
+    h_glDeleteTextures(1, &a);
+
+    // Sync queries, wireframe and its polygon offset enable
+    void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
+    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
+    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
+}
+
+// GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green).
+// Hardware check: sampler LOD-bias readback fails on CI's virtual Metal device.
+static void test_lod_bias(void) {
+    NSError *err = nil; GLuint a; tex_t *ta;
+    static const char *bsrc = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
+        "vertex V bv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
+        "fragment float4 bf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
+    id<MTLLibrary> blib = [g_dev newLibraryWithSource:@(bsrc) options:nil error:&err]; assert(blib);
+    MTLRenderPipelineDescriptor *bpd = [MTLRenderPipelineDescriptor new];
+    bpd.vertexFunction = [blib newFunctionWithName:@"bv"]; bpd.fragmentFunction = [blib newFunctionWithName:@"bf"]; bpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> bpso = [g_dev newRenderPipelineStateWithDescriptor:bpd error:&err]; assert(bpso);
+    uint32_t red[16], green[4]; for (int i = 0; i < 16; i++) red[i] = 0xff0000ffu; for (int i = 0; i < 4; i++) green[i] = 0xff00ff00u;
+    h_glGenTextures(1, &a); h_glBindTexture(GL_TEXTURE_2D, a);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    ta = tex_of(a); assert(tex_make(ta, 0) && ta->levels == 2);
+    for (int bias = 0; bias <= 1; bias++) {
+        h_glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, (float)bias);
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        [e setRenderPipelineState:bpso]; [e setFragmentTexture:ta->tex atIndex:0]; [e setFragmentSamplerState:tex_sampler(ta, 0) atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+        assert(px[5] == (bias ? green[0] : red[0]));
+    }
+    h_glDeleteTextures(1, &a);
+}
+
+// A 4x4 texture of two levels (red, then green) drawn 1:1 into a 4x4 target with the sampler a unit would use: the colour of a middle texel
+static uint32_t draw_texel(tex_t *t, id<MTLSamplerState> s) {
+    static id<MTLRenderPipelineState> pso;
+    if (!pso) {
+        static const char *src = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V sv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
+            "fragment float4 sf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
+        NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; assert(lib);
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"sv"]; pd.fragmentFunction = [lib newFunctionWithName:@"sf"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err]; assert(pso);
+    }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:pso]; [e setFragmentTexture:t->tex atIndex:0]; [e setFragmentSamplerState:s atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    uint32_t px[16]; [rt getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+    return px[5];
+}
+
+// GL sampler objects (Mega Man Legacy Collection sets its filters and wraps on one per unit, none on its textures), and uniform locations, of which none is 0
+static void test_sampler_objects(int gpu) {
+    const uint32_t red = 0xff0000ffu, green = 0xff00ff00u;
+    uint32_t l0[16], l1[4]; for (int i = 0; i < 16; i++) l0[i] = red; for (int i = 0; i < 4; i++) l1[i] = green;
+    GLuint t; h_glGenTextures(1, &t); h_glActiveTexture(GL_TEXTURE0 + 2); h_glBindTexture(GL_TEXTURE_2D, t);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, l0); h_glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, l1);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    tex_t *ta = tex_of(t); assert(tex_make(ta, 0) && ta->levels == 2);
+    GLuint s[2]; h_glGenSamplers(2, s); assert(s[0] && s[1] != s[0] && h_glIsSampler(s[0]) && !h_glIsSampler(s[1] + 100));
+    so_t *o = so_of(s[0]); assert(o->sp.minf == GL_NEAREST_MIPMAP_LINEAR && o->sp.ws == GL_REPEAT && o->sp.aniso == 1);   // GL's defaults
+    h_glSamplerParameteri(s[0], GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); h_glSamplerParameteri(s[0], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    h_glSamplerParameterf(s[0], GL_TEXTURE_LOD_BIAS, 1);
+    h_glSamplerParameteri(s[0], GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); h_glSamplerParameterf(s[0], GL_TEXTURE_MIN_LOD, -1000);
+    const GLfloat border[4] = {0, 0, 0, 1}; h_glSamplerParameterfv(s[0], GL_TEXTURE_BORDER_COLOR, border);
+    h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_FUNC, 0x206); assert(o->sp.cfunc == 0x206 && !o->sp.cmode);   // a function set before the mode is kept
+    h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_MODE, 0); assert(o->sp.ws == GL_CLAMP_TO_EDGE && o->sp.border[3] == 1 && o->sp.lodbias == 1);
+    // the texture's own parameters read level 0; the sampler bound to its unit (a mipmap filter, a bias of 1) level 1; unbound, level 0 again
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    h_glBindSampler(2, s[0]); assert(S.units[2].samp == s[0] && !S.units[0].samp);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
+    h_glBindSampler(2, 0); if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    // a sampler's MAX_LOD below 1 keeps level 0 whatever the bias
+    h_glSamplerParameterf(s[0], GL_TEXTURE_MAX_LOD, 0); h_glBindSampler(2, s[0]); if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    // deleting a bound sampler unbinds it
+    h_glDeleteSamplers(1, &s[0]); assert(!so_of(s[0]) && !S.units[2].samp && !h_glIsSampler(s[0]));
+    h_glDeleteSamplers(1, &s[1]); h_glDeleteTextures(1, &t); h_glActiveTexture(GL_TEXTURE0);
+
+    // Uniform locations: (index + 1) x 4096 + element, never 0 (the game skips its glUniform1f of u_flip at location 0); a location below 4096 names nothing
+    GLuint pr = h_glCreateProgram(); prog_t *p = prog_of(pr); assert(p);
+    static puni_t u[2] = {{.name = "u_flip", .type = T_FLOAT, .off = {-1, -1}}, {.name = "T0", .type = T_SAMP2D, .off = {-1, -1}}};
+    p->linked = 1; p->nu = 2; p->u = u; GLuint was = S.prog; S.prog = pr;
+    GLint lf = h_glGetUniformLocation(pr, "u_flip"), lt = h_glGetUniformLocation(pr, "T0");
+    assert(lf == 4096 && lt == 2 * 4096 && h_glGetUniformLocation(pr, "u_flip[1]") == -1 && h_glGetUniformLocation(pr, "none") == -1);
+    h_glUniform1i(lt, 3); assert(u[1].unit == 3);
+    h_glUniform1i(0, 5); h_glUniform1i(4095, 5); assert(u[1].unit == 3);
+    GLint back = -1; h_glGetUniformiv(pr, lt, &back); assert(back == 3);
+    S.prog = was; p->linked = 0; p->nu = 0; p->u = NULL; h_glDeleteProgram(pr);
+}
+
+// Extension names by gl_aliases.h (Fate/hollow ataraxia REMASTERED asks for its framebuffer functions by their EXT names, issue #2818), never by a stripped suffix; binds that
+// make a name glGen* never gave; EGL's current context, display and surfaces, per thread
+typedef struct { void *before, *after; EGLBoolean bound; EGLint error, next_error; } egl_attempt;
+static void *other_thread(void *arg) {
+    egl_attempt *seen = arg; seen->before = h_eglGetCurrentContext();
+    seen->bound = h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, (EGLContext)2);
+    seen->after = h_eglGetCurrentContext(); seen->error = h_eglGetError(); seen->next_error = h_eglGetError();
+    return NULL;
+}
+static void test_extension_names_and_egl(void) {
+    assert(gl_lookup("glGenFramebuffersEXT") == (void *)h_glGenFramebuffers && gl_lookup("glCheckFramebufferStatusEXT") == (void *)h_glCheckFramebufferStatus);
+    assert(gl_lookup("glBindRenderbufferEXT") == (void *)h_glBindRenderbuffer && gl_lookup("glBindFramebufferEXT") == gl_lookup("glBindFramebuffer"));
+    assert(gl_lookup("glGenFramebuffersOES") == (void *)h_glGenFramebuffers && gl_lookup("glBindVertexArrayOES") == (void *)h_glBindVertexArray);
+    assert(!gl_lookup("glVertexAttribPointerNV") && !gl_lookup("glPolygonOffsetEXT") && !gl_lookup("glDrawArraysEXTRA"));   // another function under the stripped name
+    assert(gl_lookup("glGetProgramivARB") == (void *)h_glGetProgramivARB && gl_lookup("glGetProgramivARB") != gl_lookup("glGetProgramiv"));
+    GLint v = 0; h_glGetProgramivARB(0x8804, 0x88b6, &v); assert(v == 1);   // FRAGMENT_PROGRAM_ARB: within the native limits
+    // a bind of a name never generated makes it (GL ES, the compatibility profile, EXT_framebuffer_object)
+    assert(!rb_of(77) && !fb_of(78));
+    h_glBindRenderbuffer(GL_RENDERBUFFER, 77); assert(rb_of(77) && S.rb == 77);
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 78); assert(fb_of(78) && S.fb == 78 && S.read_fb == 78);
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    GLuint n = 78; h_glDeleteFramebuffers(1, &n); n = 77; h_glDeleteRenderbuffers(1, &n); assert(!rb_of(77) && !fb_of(78));
+    // EGL names through eglGetProcAddress; the current binding per thread, read and draw apart, released by a make-current of no context or eglReleaseThread
+    assert(h_eglGetProcAddress("eglGetCurrentDisplay") == (void *)h_eglGetCurrentDisplay_bs && h_eglGetProcAddress("eglMakeCurrent") == (void *)h_eglMakeCurrent_bs);
+    assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
+    EGLDisplay d = (EGLDisplay)&g_egl;
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)4, (EGLContext)2);
+    assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentDisplay() == d);
+    assert(h_eglGetCurrentSurface(0x3059) == (EGLSurface)3 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && !h_eglGetCurrentSurface(0x3000));
+    egl_attempt seen = {0}; pthread_t th; pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
+    assert(!seen.before && !seen.bound && !seen.after && seen.error == 0x3002 && seen.next_error == 0x3000);   // BAD_ACCESS, cleared on read
+    assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && h_eglGetError() == 0x3000);
+    h_eglMakeCurrent(d, NULL, NULL, NULL); assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
+    pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
+    assert(!seen.before && seen.bound && seen.after == (EGLContext)2 && seen.error == 0x3000);   // released here, acquired there; thread exit releases it too
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
+}
+
+// The other calls Fate/hollow ataraxia REMASTERED makes that the layer lacked (issue #2818): glValidateProgram after each link, glLineWidth, glClearTexImage on its new textures
+static void test_program_validation(void) {
+    static shsamp samplers[] = {{"flat", 0, T_SAMP2D}, {"cube", 1, T_SAMPCUBE}};
+    static shinfo vsi = {.ub_slot = -1}, fsi = {.frag = 1, .ub_slot = -1, .nt = 2, .t = samplers};
+    GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER), fs = h_glCreateShader(GL_FRAGMENT_SHADER), was = S.prog;
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = (id)[NSObject new]; shader_of(fs)->si = &fsi; shader_of(fs)->fn = (id)[NSObject new];
+    h_glAttachShader(pr, vs); h_glAttachShader(pr, fs); h_glLinkProgram(pr); h_glUseProgram(pr);
+    GLint v; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // no validation yet
+    h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // both types start at unit 0
+    char log[160] = {0}; GLsizei len = 0; h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(strstr(log, "different types"));
+    h_glGetProgramiv(pr, GL_INFO_LOG_LENGTH, &v); assert(v == len + 1);
+    GLint cube = h_glGetUniformLocation(pr, "cube"); h_glUniform1i(cube, 1);
+    h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1);
+    h_glUniform1i(cube, NUNITS); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1);   // the previous validation's snapshot
+    h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);
+    h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(strstr(log, "outside"));
+    h_glUniform1i(cube, -1); h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);
+    h_glUniform1i(cube, 1); h_glValidateProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 1);
+    h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len == 0 && !log[0]);
+    h_glLinkProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // relinking invalidates validation
+    h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
+}
+
+static void test_fate_calls(void) {
+    assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
+    assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
+    GLuint pr = h_glCreateProgram(); h_glValidateProgram(pr); GLint v = 0; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0 && h_glGetError() == GL_NO_ERROR);
+    char log[160]; GLsizei len; h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len > 0 && strstr(log, "linked"));
+    h_glDeleteProgram(pr); h_glLineWidth(1);
+    // a 4x2 RGBA8 texture of two levels: level 0 cleared to one RGBA value, level 1 to one RGB value (alpha 1), then to zeros (no data)
+    GLuint t; h_glGenTextures(1, &t); h_glBindTexture(GL_TEXTURE_2D, t); h_glTexStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 4, 2);
+    const uint8_t rgba[4] = {1, 2, 3, 4}, rgb[3] = {9, 8, 7};
+    h_glClearTexImage(t, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba); h_glClearTexImage(t, 1, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+    tex_t *x = tex_of(t); assert(x && x->made && x->levels == 2 && h_glGetError() == GL_NO_ERROR);
+    uint32_t px[8]; [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0x04030201u);
+    [x->tex getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:1]; assert(px[0] == 0xff070809u && px[1] == 0xff070809u);
+    h_glClearTexImage(t, 1, GL_RGBA, GL_UNSIGNED_BYTE, NULL); [x->tex getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:1]; assert(!px[0] && !px[1]);
+    h_glClearTexImage(t, 2, GL_RGBA, GL_UNSIGNED_BYTE, rgba); assert(h_glGetError() == GL_INVALID_OPERATION);   // a level the texture does not have
+    h_glClearTexImage(t + 100, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba); assert(h_glGetError() == GL_INVALID_OPERATION);   // no such texture
+    const float red[4] = {1, 0, 0, 1};
+    h_glPixelStorei(0xcf0, 1); h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 99);   // clear values have no unpack state
+    h_glClearTexImage(t, 0, GL_RGBA, GL_FLOAT, red);
+    assert(S.unpack_swap == 1 && S.unpack_row == 99); h_glPixelStorei(0xcf0, 0); h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xff0000ffu);
+    const uint8_t bgra[4] = {255, 128, 0, 255}; h_glClearTexImage(t, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xffff8000u);
+    uint16_t half_red = 32768; h_glClearTexImage(t, 0, GL_RED, GL_UNSIGNED_SHORT, &half_red);
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xff000080u);
+    h_glClearTexImage(t, 0, GL_DEPTH_COMPONENT, GL_FLOAT, red); assert(h_glGetError() == GL_INVALID_OPERATION);
+    GLuint fb; h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+    h_glClearColor(1, 0, 0, 1); h_glClear(GL_COLOR_BUFFER_BIT);
+    const uint8_t blue[4] = {0, 0, 255, 255}; h_glClearTexImage(t, 0, GL_RGBA, GL_UNSIGNED_BYTE, blue); h_glFinish();
+    [x->tex getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 2) mipmapLevel:0];
+    for (int i = 0; i < 8; i++) assert(px[i] == 0xffff0000u);   // the later texture clear wins
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
+    h_glDeleteTextures(1, &t);
+    h_glGenTextures(1, &t); h_glBindTexture(GL_TEXTURE_2D, t); h_glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA16F, 1, 1);
+    h_glClearTexImage(t, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra);
+    _Float16 fp[4]; [tex_of(t)->tex getBytes:fp bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+    assert(fp[0] == 0 && fabs((double)fp[1] - 128.0 / 255) < 0.001 && fp[2] == 1 && fp[3] == 1);
+    h_glDeleteTextures(1, &t);
+}
+
+// Generated GLSL, reflected table and metallib through the real compile/link/draw path. Seventeen distinct sampler states, vertex attribute 15, a texture shared by both
+// stages and a named uniform block: three draws in one command buffer must retain their own uniforms, sampler units and block ranges.
+static void test_argument_buffers(const char *dir) {
+    __typeof__(S) was = S;
+    GLuint pr = h_glCreateProgram(), shaders[2];
+    for (int st = 0; st < 2; st++) {
+        char path[1024]; snprintf(path, sizeof path, "%s/resource.%s", dir, st ? "frag" : "vert");
+        FILE *f = fopen(path, "rb"); assert(f); assert(fseek(f, 0, SEEK_END) == 0);
+        long len = ftell(f); assert(len >= 0); assert(fseek(f, 0, SEEK_SET) == 0);
+        char *source = calloc((size_t)len + 1, 1); assert(source); assert(fread(source, 1, (size_t)len, f) == (size_t)len); fclose(f);
+        shaders[st] = h_glCreateShader(st ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        const char *s = source; h_glShaderSource(shaders[st], 1, &s, NULL); free(source); h_glCompileShader(shaders[st]);
+        assert(shader_of(shaders[st])->fn); h_glAttachShader(pr, shaders[st]);
+    }
+    h_glLinkProgram(pr); assert(prog_of(pr)->linked && prog_of(pr)->ae[0] && prog_of(pr)->ae[1]); h_glUseProgram(pr);
+    GLuint textures[17], samplers[17], vao, vb, ub, target, fb;
+    h_glGenTextures(17, textures); h_glGenSamplers(17, samplers);
+    for (int i = 0; i < 17; i++) {
+        uint8_t pixels[8] = {(uint8_t)(32 + i * 4), i ? 0 : 64, 0, 255, (uint8_t)(128 + i * 4), i ? 0 : 64, 0, 255};
+        h_glActiveTexture(0x84c0 + i); h_glBindTexture(GL_TEXTURE_2D, textures[i]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        h_glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, GL_NEAREST); h_glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        h_glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_S, i & 1 ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+        h_glSamplerParameterf(samplers[i], GL_TEXTURE_LOD_BIAS, (float)i / 16);   // distinct even when filter and wrap match
+        h_glBindSampler(i, samplers[i]);
+        char name[32]; snprintf(name, sizeof name, "tex%d", i); GLint loc = h_glGetUniformLocation(pr, name); assert(loc >= 0); h_glUniform1i(loc, i);
+    }
+    h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glGenBuffers(1, &vb); h_glBindBuffer(GL_ARRAY_BUFFER, vb);
+    const float vertices[] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    h_glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, 0); h_glVertexAttribPointer(15, 4, GL_FLOAT, 0, 16, NULL); h_glEnableVertexAttribArray(15);
+    float blocks[128] = {0}; blocks[0] = blocks[64] = -0.25f; blocks[1] = 1; blocks[65] = 0.5f; blocks[2] = blocks[66] = 0.125f;
+    h_glGenBuffers(1, &ub); h_glBindBuffer(GL_UNIFORM_BUFFER, ub); h_glBufferData(GL_UNIFORM_BUFFER, sizeof blocks, blocks, 0);
+    h_glUniformBlockBinding(pr, h_glGetUniformBlockIndex(pr, "Block"), 5); h_glBindBufferRange(GL_UNIFORM_BUFFER, 5, ub, 0, 16);
+    h_glUniform4f(h_glGetUniformLocation(pr, "shift"), 0.25f, 0.25f, 0, 0);
+    GLint weight = h_glGetUniformLocation(pr, "weight"), last = h_glGetUniformLocation(pr, "tex16"); assert(weight >= 0 && last >= 0);
+    h_glActiveTexture(0x84c0 + 31); h_glGenTextures(1, &target); h_glBindTexture(GL_TEXTURE_2D, target);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 51, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb); h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST); h_glColorMask(1, 1, 1, 1);
+    for (int draw = 0; draw < 3; draw++) {
+        h_glViewport(17 * draw, 0, 17, 1); h_glUniform4f(weight, draw ? 0.5f : 1, 1, 1, 1);
+        if (draw == 1) h_glUniform1i(last, 0);
+        if (draw == 2) h_glBindBufferRange(GL_UNIFORM_BUFFER, 5, ub, 256, 16);
+        h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    uint8_t got[51 * 4]; h_glReadPixels(0, 0, 51, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+    for (int draw = 0; draw < 3; draw++) for (int i = 0; i < 17; i++) {
+        int unit = draw && i == 16 ? 0 : i, expected = (unit & 1 ? 128 : 32) + unit * 4;
+        expected /= draw == 2 ? 4 : draw == 1 ? 2 : 1;
+        assert(abs((int)got[4 * (17 * draw + i)] - expected) <= 1);
+        assert(abs((int)got[4 * (17 * draw + i) + 1] - (draw == 2 ? 48 : 96)) <= 1);   // vertex default and named uniforms both contribute
+    }
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glUseProgram(0); h_glDeleteProgram(pr); h_glDeleteShader(shaders[0]); h_glDeleteShader(shaders[1]);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(1, &target); h_glDeleteTextures(17, textures); h_glDeleteSamplers(17, samplers);
+    h_glDeleteBuffers(1, &vb); h_glDeleteBuffers(1, &ub); h_glDeleteVertexArrays(1, &vao); S = was;
+    puts("GL argument buffers: 17 samplers, both stages, uniforms and block ranges: OK");
+}
+
 int main(int argc, char **argv) {
-    (void)argv;
-    int stubs = argc > 1;
+    int stubs = 0, cpu = 0; const char *fixture = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--stubs")) stubs = 1;
+        else if (!strcmp(argv[i], "--cpu")) cpu = 1;
+        else if (!strcmp(argv[i], "--fixture") && i + 1 < argc) fixture = argv[++i];
+        else { fprintf(stderr, "usage: %s [--cpu] [--stubs] [--fixture DIR]\n", argv[0]); return 2; }
+    }
+    if (fixture) setenv("DM_MSL_DIR", fixture, 1);
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
@@ -293,8 +766,16 @@ int main(int argc, char **argv) {
     delprog(pr4); delete(vs4); delete(fs4); assert(geterr() == GL_NO_ERROR);
 
     test_vertex_binding();
-    test_literal_stride_fetch();
+    if (!cpu) test_literal_stride_fetch();
     test_uniform_buffer();
+    test_compressed_arrays();
+    test_doom3();
+    if (!cpu) test_lod_bias();
+    test_sampler_objects(!cpu);
+    test_extension_names_and_egl();
+    test_program_validation();
+    test_fate_calls();
+    if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
@@ -308,11 +789,13 @@ int main(int argc, char **argv) {
     assert((void *)resolve_import(NULL, "eglGetProcAddress") == (void *)h_eglGetProcAddress_bs);
     assert(!h_eglGetProcAddress(NULL));
     assert(!h_eglGetProcAddress("not_a_GL_function"));
+    assert((h_eglGetProcAddress("eglNoSuchFunctionForTest") != NULL) == stubs);   // an EGL name the layer lacks: as a GL one
     const char *missing = "glMissingFunctionForTest";
     assert(!hle_implements(missing));
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL rendering (stride 0, texture LOD bias, sampler objects): %s\n", cpu ? "not run (--cpu)" : "OK");
     return 0;
 }

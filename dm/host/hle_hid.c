@@ -1226,6 +1226,12 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
 // hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
 HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: the newest (cleared until a front end reports the sensor)",
           void, h_hid_JcmsState, void *out, const uint32_t *h) { if (out) { memset(out, 0, 32); if (h) jcms_copy(out, 1, *h); } }
+// Private applications label their current scene in the hid service. Welcome Tour's flow NRO calls the setter at boot (SDK 20.5.29 sdk+0x65d3b0); its detail call
+// dereferences the absent service at sdk+0x65c75c. Keep the service's setting here, shared by every module, and answer the paired getter without opening Horizon IPC.
+static _Atomic int g_private_scene;
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "private application's HID scene: recorded", void, h_hid_SetPrivateScene, int scene) { atomic_store(&g_private_scene, scene); }
+HLE_FORCE("_ZN2nn3hid23GetSceneIdForPrivateAppEv", "private application's HID scene: what the game set", int, h_hid_GetPrivateScene, void) { return atomic_load(&g_private_scene); }
+
 // A Switch 2 SDK's guard against a Home press made by accident on a controller (Drag x Drive turns it on for player 1's Joy-Con 2 as they connect, main+0x2c80c4). The SDK's own
 // opens the hid service, which the host does not serve, and calls through the null session (sdk+0x63ce10). It sets a flag in hid and returns nothing; the host handles Home itself
 // (home_quit.h: a 2 s hold, then a confirm), so the setting is recorded for the question below and logged, and changes nothing else
@@ -1525,7 +1531,12 @@ HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_1
 // Vibration handles: byte 0 = SDK style index (FullKey 3, Handheld 4), byte 1 = npad id, byte 2 = motor.
 // See libnx hid.c _hidGetVibrationDeviceHandles. Only the styles this host connects are exposed.
 // A Joy-Con style's handle (type 5 JoyDual, 6 JoyLeft, 7 JoyRight) reaches the pad's motor of its Joy-Con: the left one's is motor 0, the right one's motor 1, whichever npad the right one is on
-static uint32_t vib_targets(uint32_t h, int *motor) {
+// The players a vibration handle names, before its haptics output is asked about: the handle bytes are
+// checked and the npad's style decides the rest. A game asks whether a channel is mounted once, often
+// at boot: on the console the controller is there then, while a Bluetooth pad here may connect seconds
+// later, so mounted and GetVibrationDeviceInfo answer from this; sends keep only the players that have
+// a routed output (vib_targets).
+static uint32_t vib_valid(uint32_t h, int *motor) {
     unsigned type = h & 0xff, id = h >> 8 & 0xff, dev = h >> 16 & 0xff;
     *motor = (int)(dev & 1);
     if (h >> 24 || dev > 1 || type < 3 || type > 7) return 0;
@@ -1533,10 +1544,10 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
     int p = player_of(id);
     uint32_t pad_players = p == 0 ? 1u | merged_players() : p > 0 ? 1u << p : 0;   // a whole controller's motors: player 1's merged controllers too
     if (type >= 5) {
-        if (type == 5 && r.kind == KIND_PAD && kind_style(r, id) == STYLE_JOYDUAL) return dm_haptics_available() & pad_players;   // a controller shown as a pair (pad_style)
+        if (type == 5 && r.kind == KIND_PAD && kind_style(r, id) == STYLE_JOYDUAL) return pad_players;   // a controller shown as a pair (pad_style)
         if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
         if (type != 5) *motor = type == 7;
-        return dm_haptics_available() & (1u << r.pad);
+        return 1u << r.pad;
     }
     if (type > 4) return 0;
     // A full-key handle on an npad that now holds Joy-Cons still reaches them: a game keeps the handles it got before the Joy-Cons connected (Super Mario Odyssey asks for the
@@ -1544,12 +1555,15 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
     if (p >= 0 && r.kind >= KIND_DUAL && type == 3 && id != NPAD_HANDHELD) {
         if (r.kind == KIND_LEFT && dev) return 0;
         if (r.kind == KIND_RIGHT && !dev) return 0;
-        return dm_haptics_available() & (1u << r.pad);
+        return 1u << r.pad;
     }
     // A controller shown as a pair because the game supports no full-key style keeps the full-key handles it got before the game changed its styles, as a pair's Joy-Cons do
     uint32_t st = kind_style(r, id);
     if (p < 0 || r.kind != KIND_PAD || (st != (1u << (type - 3)) && !(type == 3 && st == STYLE_JOYDUAL))) return 0;
-    return dm_haptics_available() & pad_players;
+    return pad_players;
+}
+static uint32_t vib_targets(uint32_t h, int *motor) {
+    return vib_valid(h, motor) & dm_haptics_available();
 }
 static void vib_send(const uint32_t *handles, const dm_vibration *values, int n) {
     if (!handles || !values || n <= 0) return;
@@ -1577,7 +1591,11 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     }
     dm_haptics_send(updates, count);
 }
-HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
+HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: the app's rumble setting with an output sink installed", unsigned, h_hid_VibPermit, void) {
+    unsigned on = dm_haptics_enabled() != 0;
+    if (getenv("DM_RUMBLE_LOG")) { static _Atomic int was = -1; if (atomic_exchange(&was, (int)on) != (int)on) LOG("rumble: IsVibrationPermitted -> %u", on); }
+    return on;
+}
 // Games can cache handles once at startup, before GameController routes the pad's haptics (Unicorn Overlord kept an empty answer and sent every value to handle 0).
 // On Horizon handles are computed from npad id and style (libnx _hidGetVibrationDeviceHandles); vib_send checks for an output at each send. With rumble off they are handed out too,
 // as on a Switch whose vibration setting is off (IsVibrationPermitted answers false and nothing is felt), so turning it on while the game runs works in a game that asked only once.
@@ -1674,34 +1692,48 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
 // without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
 // the states of both modes from its one count.
-// An SDK read copies one shared HID sample and does not consume its Start / End edges. A game may read the touch screen twice in one original frame (Animal Crossing: New
-// Horizons: its input manager at main+0x1b65260 and its own keyboard's reader): sampling at each read let the first reader take the Start or End and the second see only a held
-// point, so the keyboard highlighted a key and entered nothing (issue #2567). One complete 16-finger sample is published per original frame and copied whole into each caller's
-// capacity; before the first present the grid is the host's 120 Hz one.
+// A read makes a sample only when 4 ms have passed since the newest one (or the mode changed) and otherwise copies the newest, as the Switch's touch resource does: it writes the
+// screen's LIFO every 4 ms (yuzu: GestureUpdatePeriod), so two reads within 4 ms see one sample and a Start / End edge sits in exactly one sampling number. The last 16 samples are kept
+// and GetTouchScreenStates returns the newest min(n, 16) of them, newest first, as Unity's reader expects (Pokemon Friends main+0xb00670 walks them from index n - 1 down and takes each
+// number above the last it took). Two games need this. Animal Crossing: New Horizons reads twice in one original frame (its input manager at main+0x1b65260 and its own keyboard's
+// reader): a read that used up the edges let the second reader see only a held point, so the keyboard highlighted a key and entered nothing (issue #2567). Unity 2022.3 (Pokemon Friends
+// 1.1.5) polls on its own thread at 60 Hz whatever the frame rate, and a poll that takes no new state while a finger is down (main+0x60d6a0) ends every live touch as cancelled: with one
+// sample per presented frame, the second poll of a 30 fps frame cancelled every drag. Giving each read a new number instead made Unity take the same Start again on every state.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
-static pthread_mutex_t g_touch_sample_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t g_touch_sample[0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
-static uint64_t g_touch_sample_frame, g_touch_sample_boot;
-static int g_touch_sample_valid;
-static void touch_read(void *s, int n) {
+#define TOUCH_GRID_NS 4000000ull   // the touch sampler's period (250 Hz)
+#define TOUCH_HIST 16              // samples kept: the most GetTouchScreenStates<16> returns
+static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time and mode; taken before hle_touch.c's g_tl
+static uint8_t g_touch_hist[TOUCH_HIST][0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+static int g_touch_kept, g_touch_newest, g_touch_points;   // samples kept (0-16), index of the newest, the points it was made with (1 handheld, 0 console)
+static uint64_t g_touch_at;   // now_ns() of the newest
+// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid or the mode asks for one
+static int touch_read(void *s, int N, int want) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    if (dm_opmode() != 0) { touch_fill_n(s, n, now_ns(), 0); return; }   // console mode: no touch points, as before
-    pthread_mutex_lock(&g_touch_sample_mu);
-    uint64_t frame = dm_guest_frame(), now = now_ns(), boot = frame ? 0 : now / 8333333;   // 120 Hz before the first present
-    if (!g_touch_sample_valid || frame != g_touch_sample_frame || boot != g_touch_sample_boot) {
-        touch_fill_n(g_touch_sample, 16, now, 1);
-        g_touch_sample_frame = frame; g_touch_sample_boot = boot; g_touch_sample_valid = 1;
+    size_t stride = 0x10 + 0x28 * (size_t)N;
+    pthread_mutex_lock(&g_touch_mu);
+    uint64_t now = now_ns();   // under the lock: read before it, another thread's newer sample would make now - g_touch_at wrap
+    int handheld = dm_opmode() == 0;
+    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS || g_touch_points != handheld) {   // console mode: no touch points, as before
+        int next = g_touch_kept ? (g_touch_newest + 1) % TOUCH_HIST : 0;
+        touch_fill_n(g_touch_hist[next], 16, now, handheld);
+        g_touch_newest = next; g_touch_at = now; g_touch_points = handheld;
+        if (g_touch_kept < TOUCH_HIST) g_touch_kept++;
     }
-    memcpy(s, g_touch_sample, 0x10 + 0x28 * (size_t)n);
-    if (((int32_t *)s)[2] > n) ((int32_t *)s)[2] = n;   // more fingers than this reader asked for: the rest stay unseen here
-    pthread_mutex_unlock(&g_touch_sample_mu);
+    int cnt = want < g_touch_kept ? want : g_touch_kept;
+    for (int i = 0; i < cnt; i++) {
+        uint8_t *d = (uint8_t *)s + stride * (size_t)i;
+        memcpy(d, g_touch_hist[(g_touch_newest + TOUCH_HIST - i) % TOUCH_HIST], stride);
+        if (((int32_t *)d)[2] > N) ((int32_t *)d)[2] = N;   // more fingers than this reader asked for: the rest stay unseen here
+    }
+    pthread_mutex_unlock(&g_touch_mu);
+    return cnt;
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);
@@ -1749,12 +1781,16 @@ HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorH
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor firmware update: none", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
 // GetActual returns the sanitized guest value accepted by the host, before output-device adaptation.
 HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration: linear resonant actuator, left or right", void, h_hid_VibInfo, uint32_t *info, const uint32_t *h) {
-    int m = 0, on = h && vib_targets(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
+    int m = 0, on = h && vib_valid(*h, &m) != 0;
+    info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
+    if (getenv("DM_RUMBLE_LOG")) { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) LOG("rumble: GetVibrationDeviceInfo %#x -> mounted %u, actuator %u", h ? *h : 0, info[0], info[1]); }
 }
 // The SDK's own call reaches the hid service (a null read in hid::detail::IsVibrationDeviceMounted; Super Mario Odyssey asks for each handle of a controller).
-// On Horizon a device is mounted when the npad's connected controller has that style and an actuator on that side: here, when the channel has an output, as GetVibrationDeviceInfo reports it
-HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
-    int m; return h && vib_targets(*h, &m);
+// Mounting and device info describe a valid channel of the npad's reported controller, independently of the rumble setting or a routed haptics output (vib_valid).
+HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the handle names a valid npad channel", unsigned, h_hid_VibMounted, const uint32_t *h) {
+    int m = 0, on = h && vib_valid(*h, &m) != 0;
+    if (getenv("DM_RUMBLE_LOG")) { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) LOG("rumble: IsVibrationDeviceMounted %#x -> %d", h ? *h : 0, on); }
+    return on;
 }
 // A forced vibration session lets the application vibrate while the system's vibration setting is off (hid's Begin/EndPermitVibrationSession). The host has no such system setting: its own
 // rumble switch is the player's and a session does not override it, so there is nothing to begin or end. The SDK's own calls read the null hid service object: Super Mario Party (SDK 9.4)
@@ -1762,8 +1798,8 @@ HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE",
 HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: the host has no system vibration setting for it to override", void, h_hid_VibForceBegin, void) {}
 HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session ends: nothing to restore", void, h_hid_VibForceEnd, void) {}
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
-HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
-    int m; return h && vib_targets(*h, &m);
+HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the handle names a valid npad channel", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
+    int m; return h && vib_valid(*h, &m);
 }
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {
     int m = 0; uint32_t targets = h ? vib_targets(*h, &m) : 0;

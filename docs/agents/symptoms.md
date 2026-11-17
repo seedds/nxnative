@@ -1451,6 +1451,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Game state
 
+- saved progress appears in Continue but the slot-selection screen is empty, including after a restart. → [Empty slots after a successful save](../reference/game-state.md#empty-slots-after-a-successful-save)
 - "stuck" at a screen with one draw per frame. → [Most draws are in command buffers replayed later](../reference/game-state.md#most-draws-are-in-command-buffers-replayed-later)
 - menus ignore A. → [Buttons mapped by position: B confirms](../reference/game-state.md#buttons-mapped-by-position-b-confirms)
 - a crash in `main+0x339c00` a second or two into the title, in love-nx's video module teardown (`love::video::theora::Video` → `~Worker`; its thread released the worker that the closing module deletes too). → [Any Lua error quits a LÖVE game](../reference/game-state.md#any-lua-error-quits-a-löve-game)

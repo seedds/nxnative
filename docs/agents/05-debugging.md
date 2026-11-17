@@ -144,6 +144,8 @@ Instruments' Metal Resource Events didn't record this process from the command l
 
 `DM_TEST_FS_FAILAT=<point>[:<count>][,…]` makes steps of the save transaction fail with ENOSPC (`mountclone`, `reclone`, `guestname`, `renameback`; `dm/host/tests/t_fs.c` section 6). The game must keep running: a mount that cannot clone its work directory falls back to the committed saves read-only, and the iOS front end shows a notice.
 
+[Empty-slots](../reference/game-state.md#empty-slots-after-a-successful-save).
+
 ## Render-pass investigation
 
 See [04](04-graphics.md) section 7. Notes: pass dumps are large and may contain non-UTF-8 bytes; filter with `LC_ALL=C grep -a "\[pass\] F600 " | grep -av " o cmd"`. A Python one-liner with PIL (the dm venv has it) gives mean colour and non-black share of each dumped PNG, which is quicker than opening 20 images.

@@ -2,6 +2,24 @@
 
 The games' own state: saves, scripted state, and behaviour that looks like a host bug but is not. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Save investigations
+
+### Empty slots after a successful save
+
+- **Symptom:** saved progress appears in Continue but the slot-selection screen is empty, including after a restart.
+- **Cause to distinguish:** a failed write or commit versus persisted data rejected by the game's slot-population logic. The symptom alone establishes neither; the configuration-loading cause in issue #2930 is still open.
+- **Investigation (not a production fix):** separate persistence from slot selection before changing filesystem behavior:
+
+1. Stop the test process before copying its committed save and any sibling work directory. Keep the originals untouched, record file sizes and SHA-256 hashes, and point an isolated run's `DM_SAVE` at a writable copy. Disable cloud sync for that run so it cannot publish the experiment. Keep runs and save snapshots outside the repository.
+2. Use `DM_CTL` to observe, press, and capture a screenshot at each transition. Mark separate windows for saving, returning to the title, entering the slot screen, and loading a slot. A title's Continue button can reflect in-memory state; test a fresh process too.
+3. Start with `DM_FS=1` and `DM_FSLOG=<file>` (`DM_FSLOG_HASH=1` adds hashes of read buffers). The read log is not a write audit. If needed, temporarily instrument the actual filesystem entry points in `dm/host/hle_fs.c`: record the API, guest path or handle, open mode, offset, requested and transferred bytes, result, and host error on failure. Preserve `errno` and the guest result. Include create, truncate, read, write, close, rename/delete, and Commit; a path resolver being successful is not proof that any of those operations succeeded.
+4. Compare a completed write buffer with the file in the committed directory after Commit. Restart from a copy of that snapshot and compare the bytes read back. Distinguish the expected truncate-before-write sequence from a file left empty, and check whether entering the slot screen writes again rather than assuming it reads. A resource-pack read is not a save read: attribute it by path and handle, not timing alone.
+5. If the bytes persist and read back unchanged, follow the game's deserialization and slot-population branch. Inspect the metadata it actually uses and trace any validity or version check back to its configuration source and default. A missing sidecar path may belong to DeleteFile or a type query, not a failed ReadFile; a cloud-service string alone does not establish a network dependency.
+6. A/B only on copies of the same committed snapshot. If a temporary change to a suspected UI filter restores the slots, record the exact main build ID, branch, inputs, and resulting UI. This localizes a rejection; it does not prove why the rejected metadata or configuration is wrong, nor justify disabling integrity checks in production. Keep fixed-address experiments restricted to the inspected build and out of generic filesystem code.
+7. Remove temporary instrumentation and bypasses after preserving their diff outside the repository. Check the complete source against the intended baseline and rebuild if it changed; do not restore from a truncated tool excerpt. An eventual fix needs both a cold-start load and the save-to-slot-screen round trip; validate iOS separately from Mac evidence.
+
+The motivating game's observations and open configuration-loading question are tracked in [issue #2930](https://github.com/seedds/nxnative/issues/2930); this recipe does not deploy a fix or a version-check bypass.
+
 ## Game behaviour that is not a host bug
 
 ### Most draws are in command buffers replayed later

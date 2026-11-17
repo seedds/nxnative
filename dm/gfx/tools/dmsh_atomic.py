@@ -9,47 +9,11 @@ the texture every other access of the image uses, for buffer, 2D, 2D-array and
 3D images. The translator still guards each coordinate (IGN bounds) before the
 atomic.
 
-Only shaders with image atomics (OpImageTexelPointer) are written at MSL 3.1:
-every other shader keeps its MSL 2.3 source byte for byte, so its library comes
-from the MSL-keyed compile cache. The emulation must never come back silently:
-check_msl fails the shader when SPIRV-Cross writes the pointer form anyway.
+Every shader is written at MSL 3.2 (dmsh_chain.CROSS_MSL), so SPIRV-Cross always
+takes the native form. The emulation must never come back silently: check_msl
+fails the shader when SPIRV-Cross writes the pointer form anyway.
 """
 import re
-import struct
-
-MSL_VERSION = '20300'
-MSL_VERSION_ATOMICS = '30100'
-OP_IMAGE_TEXEL_POINTER = 60
-
-
-def uses_image_atomics(spv):
-    """Whether the SPIR-V module (path) has an image texel pointer, the operand of every image atomic"""
-    with open(spv, 'rb') as f:
-        data = f.read()
-    if len(data) < 20 or data[:4] != b'\x03\x02\x23\x07':
-        raise ValueError('not a SPIR-V module: ' + spv)
-    if b'\x3c\x00\x06\x00' not in data:   # the instruction's first word (always 6 words long, opcode 60), nowhere in the module: most shaders, without walking their instructions in Python
-        return False
-    words = struct.unpack('<%dI' % (len(data) // 4), data[:len(data) // 4 * 4])
-    i = 5
-    while i < len(words):
-        n, op = words[i] >> 16, words[i] & 0xffff
-        if op == OP_IMAGE_TEXEL_POINTER:
-            return True
-        if n == 0:
-            raise ValueError('malformed SPIR-V instruction in ' + spv)
-        i += n
-    return False
-
-
-def cross_args(xc, spv):
-    """spirv-cross arguments for this module: xc with its --msl-version raised to 3.1 when the module has image atomics"""
-    if not uses_image_atomics(spv):
-        return list(xc)
-    args = list(xc)
-    args[args.index('--msl-version') + 1] = MSL_VERSION_ATOMICS
-    return args
-
 
 _EMULATED = re.compile(r'\bspvImage2DAtomicCoord\b|device\s+atomic_u?int\s*\*\s*\w+_atomic\b')
 

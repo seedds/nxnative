@@ -6,32 +6,40 @@
 #include <stdatomic.h>
 
 // ---------- Side table ----------
+// Guest object -> host state, linear probing with backward-shift deletion: no deleted markers, so every key sits once in the run of
+// occupied slots from its home slot, and an empty slot ends every search (t_objmap). Keys are guest pointers, never NULL.
 #define OM_SIZE (1u << 18)
+#define OM_MASK (OM_SIZE - 1)
 static struct { const void *k; void *v; } g_om[OM_SIZE];
 static pthread_mutex_t g_om_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & (OM_SIZE - 1); }
+static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & OM_MASK; }
+// The key's slot, or the empty slot that ends its run. Called with g_om_lock held
+static unsigned om_find(const void *k) {
+    unsigned i = om_h(k);
+    while (g_om[i].k && g_om[i].k != k) i = (i + 1) & OM_MASK;
+    return i;
+}
 void *objmap_get(const void *k) {
     pthread_mutex_lock(&g_om_lock);
-    void *r = NULL;
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
-        if (g_om[i].k == k) { r = g_om[i].v; break; }
-        if (!g_om[i].k) break;
-    }
+    void *r = g_om[om_find(k)].v;   // an empty slot holds NULL
     pthread_mutex_unlock(&g_om_lock);
     return r;
 }
 void objmap_put(const void *k, void *v) {
     pthread_mutex_lock(&g_om_lock);
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1))
-        if (g_om[i].k == k || !g_om[i].k || g_om[i].k == (void *)1) { g_om[i].k = k; g_om[i].v = v; break; }
+    unsigned i = om_find(k);
+    g_om[i].k = k; g_om[i].v = v;
     pthread_mutex_unlock(&g_om_lock);
 }
 void *objmap_del(const void *k) {
     pthread_mutex_lock(&g_om_lock);
-    void *r = NULL;
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
-        if (g_om[i].k == k) { r = g_om[i].v; g_om[i].k = (void *)1; g_om[i].v = NULL; break; }
-        if (!g_om[i].k) break;
+    unsigned i = om_find(k);
+    void *r = g_om[i].v;
+    if (g_om[i].k) {
+        // Close the hole: each later entry of the run whose home slot is not after the hole (cyclically) moves back into it
+        for (unsigned j = (i + 1) & OM_MASK; g_om[j].k; j = (j + 1) & OM_MASK)
+            if (((j - om_h(g_om[j].k)) & OM_MASK) >= ((j - i) & OM_MASK)) { g_om[i] = g_om[j]; i = j; }
+        g_om[i].k = NULL; g_om[i].v = NULL;
     }
     pthread_mutex_unlock(&g_om_lock);
     return r;

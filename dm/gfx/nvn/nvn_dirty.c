@@ -367,6 +367,30 @@ void nvn_dirty_protect_sparse(const void *addr, size_t len) {
 }
 uint64_t nvn_dirty_sparse_writes(void) { return atomic_load(&g_sparse_writes); }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
+// A GPU blit does not fault on CPU page protection. Keep the protection in place for the next CPU write.
+void nvn_dirty_gpu_written(uintptr_t addr, size_t len) {
+    if (!len) return;
+    pthread_mutex_lock(&g_slot_mu);
+    for (int i = 0, n = atomic_load(&g_nr); i < n; i++) {
+        range_t *r = rg(i);
+        if (!live_at(i)) continue;
+        uintptr_t base = rb(r), end = re(r);
+        uintptr_t lo = addr > base ? addr : base, hi = addr + len < end ? addr + len : end;
+        if (hi <= lo) continue;
+        for (uintptr_t p = (lo - base) >> g_shift; p <= (hi - 1 - base) >> g_shift; p++) {
+            // A writable page has no clean reader. A CPU writer that has taken a protected page
+            // already publishes its stamp. Serialize with it so the generation cannot move back.
+            uint8_t state = PG_PROT;
+            if (atomic_compare_exchange_strong(&r->state[p], &state, PG_BUSY)) {
+                stamp_page(r, p);
+                sparse_note(r, p);
+                atomic_store(&r->state[p], PG_PROT);
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_slot_mu);
+    own_note();   // a copy replayed here is ordered with this submission's texture reads, unlike a concurrent CPU writer
+}
 void nvn_dirty_touch(void) { atomic_fetch_add(&g_now, 1); }
 // As nvn_dirty_since, with the caller's last range kept in *span (rechecked, scanned again only if it no longer holds the span; a slot reused by another pool over the same memory
 // holds it too, and a stamp older than that pool's registration then counts as written: born): a packaged texture keeps its handle (the scan over every range ran twice per texture lookup), and a sparse texture's page-table walk (hle_nvn.c vpt_walk) asks once per run of

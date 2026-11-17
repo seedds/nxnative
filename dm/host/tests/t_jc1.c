@@ -17,6 +17,20 @@ int main(void) {
     memset(out, 0xff, sizeof out);
     jc1_output_report(out, 0, JC1_SUB_ENABLE_IMU, &(uint8_t){1}, 1);
     assert(out[11] == 1 && out[12] == 0 && out[48] == 0);
+    // The console's handshake: device info, full mode 0x30, IMU on, vibration on, then SPI reads of the IMU, factory and user stick calibrations; nothing past it
+    {
+        static const uint8_t subs[JC1_HANDSHAKE_SUBS] = {0x02, 0x03, 0x40, 0x48, 0x10, 0x10, 0x10};
+        for (int s = 0; s < JC1_HANDSHAKE_SUBS; s++) { assert(jc1_handshake_report(s, (uint8_t)s, out) == subs[s] && out[0] == 0x01 && out[1] == s && out[10] == subs[s]); }
+        jc1_handshake_report(0, 0, out); assert(out[11] == 0);
+        jc1_handshake_report(1, 0, out); assert(out[11] == 0x30 && out[12] == 0);
+        jc1_handshake_report(5, 0, out); assert(out[11] == 0x3D && out[12] == 0x60 && out[13] == 0 && out[14] == 0 && out[15] == PAD_PRO_SPI_FACTORY_LEN);
+        jc1_handshake_report(6, 0, out); assert(out[11] == 0x10 && out[12] == 0x80 && out[15] == PAD_PRO_SPI_USER_LEN);
+        assert(jc1_handshake_report(JC1_HANDSHAKE_SUBS, 0, out) == 0 && jc1_handshake_report(-1, 0, out) == 0);
+        uint8_t r[20] = {0x21}; r[13] = 0x82; r[14] = 0x02;
+        assert(jc1_reply_sub(r, sizeof r) == 0x02 && jc1_reply_sub(r, 14) == -1);
+        r[13] = 0x02; assert(jc1_reply_sub(r, sizeof r) == -1);   // no ack
+        r[13] = 0x80; r[0] = 0x30; assert(jc1_reply_sub(r, sizeof r) == -1);
+    }
 
     // SPI 0x6020: 4 x 3 int16 (accel origin/coeff, gyro origin/coeff); scales from the notes, the gyro origin the still offset
     uint8_t reply[64] = {0};
@@ -246,8 +260,9 @@ int main(void) {
         assert(e[0] == (uint8_t)(((0xDF - 0x60) * 4) & 0xff) && e[1] == (uint8_t)(2 * 2 + 1) && e[2] == (0x01 | 0x80) && e[3] == 0x40);
         dm_vibration mid = {0, 160, 0.5f, 1000}; jc1_rumble_encode(&mid, e);   // 1000 Hz: code round(32 log2 100) = 213, (213 - 96) * 4 = 468 = 0x1D4; 0.5: code round(32 log2 4.35) = 68
         assert(e[0] == 0xD4 && e[1] == 2 * 68 + 1);
-        uint8_t rep[JC1_RUMBLE_LEN]; jc1_rumble_report(rep, 0x13, e);
+        uint8_t rep[JC1_RUMBLE_LEN]; jc1_rumble_report(rep, 0x13, e, e);
         assert(rep[0] == 0x10 && rep[1] == 3 && memcmp(rep + 2, e, 4) == 0 && memcmp(rep + 6, e, 4) == 0);
+        { uint8_t q[4] = {1, 2, 3, 4}; jc1_rumble_report(rep, 0, e, q); assert(memcmp(rep + 2, e, 4) == 0 && memcmp(rep + 6, q, 4) == 0); }   // a Pro Controller: one sample per actuator
         // a pulse set and cleared between two reports still plays in the next one, then what is set now
         jc1_rumble_hold h = {0}; dm_vibration pulse[2] = {{0.8f, 160, 0, 320}, {0}}, quiet[2] = {{0, 160, 0, 320}, {0}}, got[2];
         jc1_rumble_set(&h, pulse); jc1_rumble_set(&h, quiet);

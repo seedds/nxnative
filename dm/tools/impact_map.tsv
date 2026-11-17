@@ -18,6 +18,12 @@ dm/host/hle.h	*:*	HLE and service registration declarations shared by every game
 dm/host/registration.h	*:*	linker registration layout shared by every game and graphics API
 dm/host/hle_table.c	*:*	C library import registrations shared by every game
 dm/host/hle_offline.c	*:*	offline service registrations present in every host
+dm/host/hle_movie_av1.*	hle:*Av1Decoder*	AV1 decoding on the codec worker, beyond the static caller graph
+dm/host/hle_movie_avc.*	hle:*H264Decoder*	H.264 decoding on the codec worker, beyond the static caller graph
+dm/host/hle_movie_avc.*	hle:_ZN*5movie7Decoder*	H.264 decoding on the movie worker, beyond the static caller graph
+dm/host/hle_movie_vt.h	hle:*Av1Decoder*	VideoToolbox reference history and lifecycle recovery
+dm/host/hle_movie_vt.h	hle:*H264Decoder*	VideoToolbox reference history and lifecycle recovery
+dm/host/hle_movie_vt.h	hle:_ZN*5movie7Decoder*	VideoToolbox reference history and lifecycle recovery
 dm/ios/tests/*	-	iOS tests
 .github/*	-	CI
 dm/games/*/README.md	-	a game's note

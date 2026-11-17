@@ -7036,7 +7036,8 @@ enum { TB2_STAGE = 64 };
 static struct { __unsafe_unretained id<MTLTexture> src, view; uint64_t epoch, rid; } g_tb2_stage[TB2_STAGE];   // view: alive until the submission is done (defer_obj_release)
 static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, id<MTLBuffer> src, size_t off, MTLPixelFormat pf, uint32_t w, uint32_t h, uint32_t row, NSUInteger al, uint64_t *rid) {   // off: the texture's own pool offset
     if (!src || off >= src.length) return nil;
-    if (!src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
+    // Querying contents itself is invalid for private storage under Metal validation.
+    if (src.storageMode == MTLStorageModePrivate || !src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TB2_STAGE);
     if (g_tb2_stage[k].src == t && g_tb2_stage[k].epoch == g_fence + 1) { *rid = g_tb2_stage[k].rid; return g_tb2_stage[k].view; }   // copied for this submission already
     while (h > 1 && off + (uint64_t)row * h > src.length) h--;   // as the aligned rows: a last row running past the pool buffer
@@ -11422,7 +11423,8 @@ static id<MTLTexture> tbuf_shadow(int tid, id<MTLTexture> t, uint64_t *rid) {
     int bw, bh, bpb = nvn_fmt_bpb(g_treg[tid].t.d.format, &bw, &bh);
     id<MTLBuffer> src = root.buffer; NSUInteger off = root.bufferOffset + (NSUInteger)lead * (NSUInteger)bpb, w = t.width - lead;
     if (!src || bpb <= 0 || off >= src.length) return t;
-    if (!src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (below Metal's view alignment) in a pool the CPU cannot access, read through a binding with no offset table entry: read %u elements early", (unsigned long)off, lead); return t; }
+    // Preserve the unsupported-storage fallback without making an invalid CPU-access query.
+    if (src.storageMode == MTLStorageModePrivate || !src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (below Metal's view alignment) in a pool the CPU cannot access, read through a binding with no offset table entry: read %u elements early", (unsigned long)off, lead); return t; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TBS_CACHE);
     if (g_tbs_cache[k].src == t && g_tbs_cache[k].epoch == g_fence + 1) { *rid = g_tbs_cache[k].rid; return g_tbs_cache[k].copy; }
     size_t bytes = (size_t)w * (size_t)bpb, row = (bytes + 255u) & ~(size_t)255u, n = bytes < src.length - off ? bytes : src.length - off;   // 256: a multiple of every view alignment

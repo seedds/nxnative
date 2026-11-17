@@ -1,5 +1,5 @@
 # Translation chain tool fingerprints (written by tool_lock.py --update-lock; regenerate after changing tools and commit it)
-dmsh_xlate	429289d36957c743
+dmsh_xlate	45840a18368929ce
 xlate_source	e2d3359d2a182f50
 spirv-cross	e37945d8e441d34d
 metal_macosx	Apple metal version 32023.922 (metalfe-32023.922.4)

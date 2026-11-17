@@ -48,9 +48,17 @@ int main(void) { @autoreleasepool {
     pool_t vb; vpool_init(&vb);
     NVNbufferAddress ab = h_nvnMemoryPoolGetBufferAddress((const NVNmemoryPool *)&vb);
     CHECK("address noted", vb.vp && vb.vp->taken);
+    NvShader *raw = [NvShader new]; raw->rf.ngptr = 1; raw->rf.gptr[0].reg = 0;
+    S.ssbo[0][0] = (p_bind_buf){.addr = ab, .size = 8};
+    CHECK("raw pointer source is an unmapped sparse page", !nvn_host_readable(ab, 8));
+    gmem_discover(raw, 0);   // the old direct memcpy here faults on the reservation's PROT_NONE page
     CHECK("map addressed pool", map_whole(&vb));
     CHECK("addressed pool sparse", vb.vmode == 2 && vb.vp && (NVNbufferAddress)vb.mem == ab);
     CHECK("its address reads the physical pages", !memcmp((const void *)ab, g_phys_mem, POOL_SZ));
+    S.ssbo[0][0].addr = ab + POOL_SZ - 4;
+    CHECK("raw pointer source crosses the mapped run's end", !nvn_host_readable(S.ssbo[0][0].addr, 8));
+    gmem_discover(raw, 0);
+    memset(&S.ssbo[0][0], 0, sizeof S.ssbo[0][0]);
 
     // A texture made first: its storage pointer stays valid
     pool_t vc; vpool_init(&vc);

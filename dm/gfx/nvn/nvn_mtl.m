@@ -966,8 +966,8 @@ static int reg_read(uint64_t g, int *id_, int *samp) {   // → 0 when note g is
     if (atomic_load_explicit(&n->gen, memory_order_relaxed) != g) return 0;
     *id_ = (int)(uint32_t)w; *samp = (int)(w >> 32); return 1;
 }
-// A shader's pointer is an address the driver gave out, or one worked out from it, and the driver gives addresses out by buffer, pool or texture (hle_nvn.c pool_mark_addressed). A pool with none holds
-// only textures, which Metal keeps in textures of its own, so the table leaves it out and nothing wires it for the table's sake. Ocarina of Time: 172 pools of 3,721 MB of the 4,588 MB, its whole 2,432 MB
+// The raw table admits pools noted by address getters (hle_nvn.c pool_mark_addressed) or reached by fixed pointers read before binding (gmem_discover). Other pools stay out, avoiding residency
+// for texture-only storage that Metal keeps in textures of its own. With the original getter-only filter, Ocarina of Time excluded 172 pools of 3,721 MB of the 4,588 MB, its whole 2,432 MB
 // graphics pool among them; with them in, the first scene passed 12 GB of Metal's 12.1 GB working set and took a 16 GB Mac into swap, and once into a kernel panic in IOGPUGroupMemory
 static struct { uintptr_t lo, hi; } *g_addr; static int g_naddr, g_addr_cap;   // sorted, disjoint. Under g_mu
 static int addr_first(uintptr_t lo) { int a = 0, b = g_naddr; while (a < b) { int m = (a + b) / 2; if (g_addr[m].hi <= lo) a = m + 1; else b = m; } return a; }   // the first range that ends after lo
@@ -1176,6 +1176,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     return n;
 }
 static int pool_held(uint64_t addr, uint64_t len) {   // the entry of g_pools holding [addr, addr + len), made by no lookup: an ordinary pool, or an existing chunk
+    if (len > UINT64_MAX - addr) return -1;   // an overflowing exclusive end cannot lie in a pool, including the cached one
     if (g_plast >= 0 && g_plast < g_npool && addr >= g_pools[g_plast].lo && addr + len <= g_pools[g_plast].hi) return g_plast;
     pidx_sort();
     int lo = 0, hi = g_npool - 1, hit = -1;   // the last one whose start ≤ addr
@@ -5278,6 +5279,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
 // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
+static _Atomic uint64_t g_gptr_bindings, g_gptr_reads, g_gptr_added, g_gptr_bytes;   // gmem_discover: bindings with sources, readable words, newly addressed logical pool/run ranges and bytes
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
@@ -5325,6 +5327,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("GPU allocation growth by op: op%d %llu MB, op%d %llu MB, op%d %llu MB, op%d %llu MB", top[0], g_ap_bytes[top[0]] >> 20, top[1], g_ap_bytes[top[1]] >> 20, top[2], g_ap_bytes[top[2]] >> 20, top[3], g_ap_bytes[top[3]] >> 20); }
     { void mtl_gmem_words(uint64_t *, uint64_t *, uint64_t *); uint64_t gw, go, gb; mtl_gmem_words(&gw, &go, &gb);
       if (gw) MLOG("raw pool table words at commit: %llu, of them %llu held an older table than the current one and %llu the current one behind the pools", (unsigned long long)gw, (unsigned long long)go, (unsigned long long)gb); }
+    if (g_gptr_bindings) MLOG("raw pointer discovery up to frame %llu: %llu bindings, %llu pointer words read, %llu previously unaddressed ranges (%llu logical MB)", frame,
+                            (unsigned long long)g_gptr_bindings, (unsigned long long)g_gptr_reads, (unsigned long long)g_gptr_added, (unsigned long long)(g_gptr_bytes >> 20));
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
 uint64_t mtl_pkg_edge_skips(void) { return g_pkg_edge_skips; }
@@ -12479,6 +12483,35 @@ static id<MTLBuffer> gmem_map(void) {
     return b;
 }
 static uint64_t gmem_map_gpu(void) { return gmem_map().gpuAddress; }
+// A raw pointer read from a fixed storage-buffer word can reach a pool whose address no NVN getter handed out. Discover it before the draw, including when its argument block is
+// reused; gmem_commit_patch then gives every block the complete table. Record the logical pool/run, not each interior pointer or the Metal buffer's page-rounded padding.
+// The CPU sees only pointer values available now (or a complete queued inline update). GPU-generated values still rely on the table; this does not fix task/mesh ordering hangs.
+static void gmem_discover(NvShader *sh, int stage) {
+    g_gptr_bindings++;
+    for (int q = 0; q < sh->rf.ngptr; q++) {
+        const p_bind_buf *u = &S.ssbo[stage][sh->rf.gptr[q].reg]; uint64_t off = sh->rf.gptr[q].off, ptr = 0;
+        if (!u->addr || (u->size && (off > u->size || u->size - off < 8))) continue;
+        uint64_t at = u->addr + off;
+        if (at < u->addr || at > UINT64_MAX - 8) continue;
+        int kind;
+        if (!pend_read(at, 8, &ptr, &kind)) {
+            // A declared size does not prove the source is mapped: sparse holes read zero on the GPU and may be PROT_NONE on the CPU.
+            if (!nvn_host_readable(at, 8) || !mtl_addr_known(at, 8)) continue;
+            memcpy(&ptr, (const void *)(uintptr_t)at, 8);
+        }
+        g_gptr_reads++;
+        if (!ptr) continue;
+        uintptr_t lo = 0, hi = 0;
+        pthread_mutex_lock(&g_mu);
+        int b = big_of(ptr), p = b < 0 ? pool_held(ptr, 1) : -1;
+        if (b >= 0) { lo = g_big[b].lo; hi = g_big[b].hi; }
+        else if (p >= 0) { lo = g_pools[p].lo; hi = g_pools[p].hi; }
+        int fresh = hi > lo && !addr_meets(lo, hi);
+        pthread_mutex_unlock(&g_mu);
+        if (fresh) { g_gptr_added++; g_gptr_bytes += hi - lo; }
+        if (hi > lo) mtl_pool_addressed((const void *)lo, hi - lo);
+    }
+}
 // An argument block holds the pool table that was current when it was encoded. A pool made after that, later in the submission or on another thread while it is encoded, is not in it, and a raw
 // read of that pool gets 0: the failure that hung agl's task shaders (docs/reference/shaders.md, More memory pools than the raw pool table had entries). The GPU has not read the blocks of the
 // command buffer yet, so at each commit, whole, segment or before a count wait (mdi_wait), their table words are pointed at a table of the pools as they are then (as #1407 does). A new table is built when the pools changed,
@@ -12938,6 +12971,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
 static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex, const rt_argument_values *rt) {
     if ((unsigned)nvn_stage >= NVN_RESOURCE_STAGES) MDIE("argument encoding has unsupported resource stage %d", nvn_stage);
     if (!sh->ae) return 1;
+    if (sh->rf.ngptr) gmem_discover(sh, nvn_stage);
     args_sync_dirty();
     int reusable = !passdump() && sh->ab_gen == g_args_gen[nvn_stage] && sh->ab_pass == g_pass.serial && sh->ab_buf && nvn_stage != 5 && nvn_stage != NVN_RT_RESOURCE_STAGE && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !((sh->rf.pool || sh->rf.htab) && sh->ab_pgen != g_psnap_gen);
     if (reusable && sh->ab_ugen == g_args_ugen[nvn_stage]) {

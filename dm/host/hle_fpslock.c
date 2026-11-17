@@ -325,18 +325,20 @@ void dm_fps_lock_tick(void) {
         }
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
-        // Resident Evil: sample the frame-loop's movie signal and both MT Framework
-        // limits together. Keep a few baseline ticks, then sample while a movie is recognized.
+        // Resident Evil: inspect the pointed-to MT object around the documented limit fields.
+        // Log raw words and addresses so a stale/wrong object cannot masquerade as tiny floats.
         if (re_row) {
             static int baseline_samples, movie_samples;
-            uint32_t v[2];
-            if ((baseline_samples < 8 || (movie_hz && movie_samples < 32)) && rd(obj + 0x48, v, sizeof v)) {
+            uint32_t v[8] = {0};
+            if ((baseline_samples < 8 || (movie_hz && movie_samples < 12)) && rd(obj + 0x40, v, sizeof v)) {
                 float cap0, cap1;
-                memcpy(&cap0, &v[0], 4); memcpy(&cap1, &v[1], 4);
+                memcpy(&cap0, &v[2], 4); memcpy(&cap1, &v[3], 4);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE MT tick] movie_hz=%d target=%d row_target=%d MT_limits=%g/%g\n",
-                        movie_hz, target, row_target, cap0, cap1);
+                    fprintf(pf, "[RE MT raw] slot=%p object=%p movie_hz=%d target=%d row_target=%d +40..5c=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x floats48/4c=%g/%g\\n",
+                        (void *)(uintptr_t)(base + L->ptr_off), (void *)(uintptr_t)obj,
+                        movie_hz, target, row_target,
+                        v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], cap0, cap1);
                     fclose(pf);
                 }
                 if (movie_hz) movie_samples++; else baseline_samples++;

@@ -147,6 +147,7 @@ static void *ctl_main(void *arg) {
                 off += (long)n; line[--n] = 0; if (n && line[n - 1] == '\r') line[--n] = 0;
                 if (!n || line[0] == '#') continue;
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
+                if (!strcmp(line, "threads")) { crash_dump_now("DM_CTL threads"); continue; }   // every guest thread's wait, pc and frames, and the graphics wait points: where a game that still draws is stuck
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
                 if (!strncmp(line, "peek ", 5)) { void dm_ctl_peek(uint64_t a, int n); char *e2; uint64_t a = strtoull(line + 5, &e2, 16); dm_ctl_peek(a, (int)strtol(e2, NULL, 0)); continue; }
@@ -211,9 +212,42 @@ static uint32_t unsupported_players(void) {
 }
 static int one_player(void) { return !(atomic_load(&g_ids_supported) & ((1u << DM_PLAYERS) - 2)); }
 static uint32_t merged_players(void) { return one_player() ? unsupported_players() : 0; }
-static int player_of(uint32_t id) {   // the reported player on npad id; -1 when none
+static int seated(uint32_t id) {   // the player whose controller sits on npad id; -1 when none
     if (id == connected_id()) return 0;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
+}
+// nn::hid::DisconnectNpad: on Horizon the controller on that npad is disconnected, and the npad has none (style set 0, no state) until a controller connects again: the
+// player presses a button on it (a disconnected controller wakes and connects, which takes on the order of a second) or connects it in the controller applet
+// (ShowControllerSupport). The host's controllers stay with their players, so the disconnect is kept per npad (g_gone, bit n = No n+1; Handheld is the console's own
+// controls and cannot be disconnected): the npad reports no controller until its player presses a button that was not down at the disconnect, no sooner than
+// RECONNECT_NS after it, or until the controller applet runs. Games disconnect a controller to make the player register it again: Mario vs. Donkey Kong's
+// "Change controllers?" disconnects all eight npads and then waits for its controller check to find player 1's gone before it opens the applet (main+0x31296c,
+// main+0xe304bc, main+0xe2eb34 of its 1.0.0); with the disconnect ignored the check passed every frame and the menu took no input again.
+enum { RECONNECT_NS = 500000000 };
+static _Atomic uint32_t g_gone;
+static _Atomic uint64_t g_gone_held[DM_PLAYERS], g_gone_at[DM_PLAYERS];
+static void style_changed(uint32_t id);
+static uint64_t buttons_down(int pl) {   // what the player holds now, latches left for the state read
+    uint32_t src = pl ? 1u << pl : 1u | merged_players();
+    uint64_t b = pl ? 0 : atomic_load(&g_btn) | atomic_load(&g_latch) | atomic_load(&g_sc_btn) | atomic_load(&g_sc_latch);
+    for (int p = 0; p < DM_PLAYERS; p++) if (src >> p & 1) b |= atomic_load(&g_pad_btn[p]) | atomic_load(&g_pad_latch[p]);
+    return b & 0xffffull;
+}
+static void npad_back(uint32_t id, const char *how) {
+    if (!(atomic_fetch_and(&g_gone, ~(1u << id)) >> id & 1)) return;
+    LOG("hid: npad %u has its controller again (%s)", id, how);
+    style_changed(id);
+}
+static int npad_gone(uint32_t id, int pl) {
+    if (id >= DM_PLAYERS || !(atomic_load(&g_gone) >> id & 1)) return 0;
+    uint64_t now = buttons_down(pl), held = atomic_fetch_and(&g_gone_held[id], now) & now;
+    if (!(now & ~held) || now_ns() - atomic_load(&g_gone_at[id]) < RECONNECT_NS) return 1;
+    npad_back(id, "a button pressed on it");
+    return 0;
+}
+static int player_of(uint32_t id) {   // the reported player on npad id; -1 when none, or when the game disconnected the npad
+    int pl = seated(id);
+    return pl >= 0 && npad_gone(id, pl) ? -1 : pl;
 }
 static uint32_t style_for_player(uint32_t id, int p) { return p < 0 ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
 static uint32_t style_of(uint32_t id) { return style_for_player(id, player_of(id)); }
@@ -303,7 +337,20 @@ HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld c
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states (not connected on the host)", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYDUAL); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "left Joy-Con states (not connected on the host)", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYLEFT); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-Con states (not connected on the host)", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYRIGHT); }
-HLE_FORCE("_ZN2nn3hid14DisconnectNpadERKj", "disconnect a controller; ignored by the host", void, h_hid_Disconnect, const uint32_t *id) { (void)id; }
+// Apple's hosts still ignore the call, as before: the disconnect was found and run on the Linux port only, and no Mac run has checked the games there
+// (docs/reference/services.md, "DisconnectNpad leaves the npad without a controller": Open). Taking this guard out is the whole change for them
+HLE_FORCE("_ZN2nn3hid14DisconnectNpadERKj", "disconnect a controller: the npad has none until a button is pressed on it or the controller applet connects it; ignored on Apple", void, h_hid_Disconnect, const uint32_t *id) {
+#if defined(__APPLE__)
+    (void)id;
+#else
+    uint32_t i = id ? *id : NPAD_HANDHELD; int pl = i < DM_PLAYERS ? seated(i) : -1;
+    if (pl < 0 || atomic_load(&g_gone) >> i & 1) return;   // Handheld, an npad without a controller, or one already disconnected (games disconnect unused npads every frame)
+    atomic_store(&g_gone_held[i], buttons_down(pl)); atomic_store(&g_gone_at[i], now_ns());
+    atomic_fetch_or(&g_gone, 1u << i);
+    LOG("hid: the game disconnected npad %u (DisconnectNpad): no controller there until a button is pressed on it or the controller applet connects it", i);
+    style_changed(i);
+#endif
+}
 static uint32_t g_hold_type;
 HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold orientation; the host only records it", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
 HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: dual", int, h_hid_GetJoyAssign, const uint32_t *id) { (void)id; return 0; }
@@ -312,12 +359,16 @@ HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStop, void) {}
 // Controller applet (system UI): report the connected players right away, with player 1's controller selected. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; };
-// ControllerSupportArg starts with { int8 playerCountMin, playerCountMax }: the count is capped at the maximum (a min the connected players do not reach is not waited for, as before)
+// ControllerSupportArg starts with { int8 playerCountMin, playerCountMax }: the count is capped at the maximum (a min the connected players do not reach is not waited for, as before).
+// The applet is where the player connects controllers, so the npads the game disconnected (g_gone above) have theirs again when it returns
 HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players right away",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
+    for (uint32_t id = 0; id < DM_PLAYERS; id++) npad_back(id, "the controller applet");
     int count = 0; for (int p = 0; p < DM_PLAYERS; p++) count += reported(p);
     if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
+    static _Atomic unsigned calls; unsigned n = atomic_fetch_add(&calls, 1) + 1;   // the first calls and every 2^k-th: a game that keeps asking does not accept the answer
+    if (n <= 4 || !(n & (n - 1))) LOG("hid: controller applet (call %u): the game asks for %d to %d players; answered %d, npad %#x selected", n, arg ? arg[0] : -1, arg ? arg[1] : -1, count, connected_id());
     return RES_OK;
 }
 // Six-axis sensor (accelerometer + gyroscope) of the connected controller. SixAxisSensorState (0x60): acceleration in G, angular velocity in revolutions / s, angle in revolutions,

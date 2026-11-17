@@ -28,6 +28,7 @@ void dm_touch_set(const dm_touch *t, int n) { (void)t; (void)n; }
 int touch_fill_n(void *out, int max, uint64_t now) { (void)out; (void)max; (void)now; return 0; }
 int gesture_fill(void *out, int n, uint64_t now) { (void)out; (void)n; (void)now; return 0; }
 void dm_gfx_shot_at(long frame, const char *path) { (void)frame; (void)path; }
+void crash_dump_now(const char *why) { (void)why; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { g_signalled = g; g_signals++; }
 int hle_signal_bound_system_event(void *g) { g_signalled = g; g_signals++; return 1; }
@@ -122,6 +123,55 @@ static void t_npads(void) {
     h_hid_ShowCtrl(info, NULL);
     CHECK(info[0] == 2 && info[1] == NPAD_HANDHELD, "handheld: the applet selects the handheld controller");
 }
+
+#if !defined(__APPLE__)   // Apple's hosts still ignore DisconnectNpad (hle_hid.c h_hid_Disconnect)
+// nn::hid::DisconnectNpad: the npad has no controller until its player presses a button that was not down at the disconnect (no sooner than RECONNECT_NS after it)
+// or the controller applet runs; Handheld and an npad without a controller are left alone
+static void t_disconnect(void) {
+    static uint8_t ev0[0x40], ev1[0x40]; int32_t info[2];
+    g_mode = 1; ids((const uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(0x3);
+    dm_input_set(0, 0, 0, 0, 0); dm_pad_set(DM_BTN_A, 0, 0, 0, 0); dm_pad_set_player(1, 0, 0, 0, 0, 0);
+    h_hid_BindStyleEv(&(uint32_t){0}, ev0, 0); h_hid_BindStyleEv(&(uint32_t){1}, ev1, 0);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_A, "player 1 holds A on No1");
+    g_signals = 0; h_hid_Disconnect(&(uint32_t){0});
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == 0 && buttons_of(0, STYLE_FULLKEY) == 0, "a disconnected npad has no controller: no style, no state");
+    CHECK(g_signals == 1 && g_signalled == ev0, "the npad's style event is signalled at the disconnect");
+    h_hid_Disconnect(&(uint32_t){0});
+    CHECK(g_signals == 1, "a second disconnect of the same npad does nothing");
+    CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "the other player's npad keeps its controller");
+    motion_now += 2 * (uint64_t)RECONNECT_NS;
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == 0, "the button held since the disconnect does not connect the controller again");
+    dm_pad_set(0, 0, 0, 0, 0); CHECK(h_hid_GetStyle(&(uint32_t){0}) == 0, "releasing it neither");
+    dm_pad_set(DM_BTN_A, 0, 0, 0, 0);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && g_signals == 2 && g_signalled == ev0, "a new press connects it again and signals the style event");
+    CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_A, "its state is read again");
+
+    // No sooner than RECONNECT_NS after the disconnect: a game looks for the missing controller in the frames after it
+    dm_pad_set(0, 0, 0, 0, 0); h_hid_Disconnect(&(uint32_t){0});
+    dm_pad_set(DM_BTN_B, 0, 0, 0, 0); motion_now += RECONNECT_NS / 2;
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == 0, "a press right after the disconnect does not connect yet");
+    motion_now += RECONNECT_NS;
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "the same press connects once the time has passed");
+    dm_pad_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
+
+    // The controller applet connects every npad the game disconnected (Mario vs. Donkey Kong's "Change controllers?": all eight npads disconnected, then the applet)
+    g_signals = 0; for (uint32_t id = 0; id < DM_PLAYERS; id++) h_hid_Disconnect(&id);
+    CHECK(g_signals == 2 && h_hid_GetStyle(&(uint32_t){0}) == 0 && h_hid_GetStyle(&(uint32_t){1}) == 0, "both players' npads disconnected, the six without a controller left alone");
+    CHECK(!(atomic_load(&g_gone) >> 2), "an npad without a controller is not marked");
+    CHECK(h_hid_ShowCtrl(info, (const int8_t[8]){1, 2}) == RES_OK && info[0] == 2 && info[1] == 0, "the applet reports both players");
+    CHECK(g_signals == 4 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "and their npads have their controllers again");
+
+    // Handheld: the console's own controls cannot be disconnected, and No1 has no controller to disconnect
+    g_mode = 0; g_signals = 0;
+    h_hid_Disconnect(&(uint32_t){NPAD_HANDHELD}); h_hid_Disconnect(&(uint32_t){0});
+    CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD && !atomic_load(&g_gone) && g_signals == 0, "handheld: nothing disconnected");
+    h_hid_Disconnect(&(uint32_t){1});
+    CHECK(h_hid_GetStyle(&(uint32_t){1}) == 0 && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "handheld: player 2's npad can be");
+    h_hid_ShowCtrl(info, NULL);
+    CHECK(info[0] == 2 && info[1] == NPAD_HANDHELD && h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "handheld: the applet connects it again");
+    g_mode = 1; dm_pad_players(1); atomic_store(&g_style_ev[0], NULL); atomic_store(&g_style_ev[1], NULL);
+}
+#endif
 
 static dm_haptic_state vibration[DM_PLAYERS];
 static int vibration_calls;
@@ -360,6 +410,9 @@ int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
     t_npads();
+#if !defined(__APPLE__)
+    t_disconnect();
+#endif
     t_script();
     t_vibration();
     t_rumble_log();

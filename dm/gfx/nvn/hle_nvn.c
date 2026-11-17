@@ -1961,6 +1961,15 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         // Accounting: number of synchronous creations on the submit thread this frame + a timestamp on the same clock as UIMSG (offline, frames are split into front end / loading / in-run by the loading screen intervals)
         static uint64_t plib, ppso; uint64_t lib_, pso_; be_create_stats(&lib_, &pso_);
         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
+        if (frame_rec()) {   // the x86-64 engine's JIT fallback (guest addresses it ran for the first time, its runs) and the game's file reads this frame: a stutter's other causes
+            void dm_fs_read_stats(uint64_t *bytes, uint64_t *ns);   // hle_fs.c
+            static uint64_t pja, pjr, pfb, pfn; dm_aot_stats_t es; dm_aot_stats(&es); uint64_t fb, fn; dm_fs_read_stats(&fb, &fn);
+            trow(f, "@jit_new", (double)(es.jit_addresses - pja)); trow(f, "@jit_runs", (double)(es.jit_runs - pjr));
+            trow(f, "@fs_mb", (double)(fb - pfb) / 1048576.0); trow(f, "@fs_ms", (double)(fn - pfn) / 1e6);
+            pja = es.jit_addresses; pjr = es.jit_runs; pfb = fb; pfn = fn;
+        }
+#endif
         {   // long-frame log: this frame's items are first recorded into the ring; whether to print is decided 8 frames later, once the GPU time has arrived (see below)
             static uint64_t plns, ppns, pup, prup, pub, phy; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_; be_create_ns(&lns, &pns); be_pkg_stats(&up, &rup); ub = be_upload_bytes(); be_hybrid_stats(&hy, &hm_, &hn_);
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);

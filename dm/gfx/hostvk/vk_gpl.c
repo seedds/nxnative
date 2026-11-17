@@ -823,10 +823,11 @@ void hvk_pso_shutdown(void) {
     pthread_mutex_unlock(&g_mu);
     hvk_predict_stats w; hvk_predict_stats_get(&w);
     uint64_t built = s_pred_built, ready = s_pred_ready, infl = s_pred_inflight;
-    hostvk_log("[hostvk] prediction: %s%llu walks of the rest of a submission after a draw waited (%llu records, %.2f ms on the submit thread, the longest %.3f ms; %llu stopped at the budget, "
+    hostvk_log("[hostvk] prediction: %s%llu walks of the rest of a submission after a draw waited (%llu records, %.2f ms on the submit thread of which %.2f ms loading programs and layouts, "
+               "the longest %.3f ms; %llu stopped at the budget, "
                "%llu at a call deeper than the return stack), %llu draws walked, %llu keys made; %llu pipelines queued: %llu made ahead by the workers (%llu found made already, %llu failed); "
                "at their draw %llu ready in time, %llu still being made (the draw waited for the rest), %llu not started (made by the draw), %llu made ahead and not drawn",
-               w.on ? "" : "off (DM_NVN_PREDICT=0), ", (unsigned long long)w.walks, (unsigned long long)w.records, w.ns / 1e6, w.max_ns / 1e6, (unsigned long long)w.budget_stops,
+               w.on ? "" : "off (DM_NVN_PREDICT=0), ", (unsigned long long)w.walks, (unsigned long long)w.records, w.ns / 1e6, w.load_ns / 1e6, w.max_ns / 1e6, (unsigned long long)w.budget_stops,
                (unsigned long long)w.depth_stops, (unsigned long long)w.draws, (unsigned long long)w.keys, (unsigned long long)s_pred_queued, (unsigned long long)built,
                (unsigned long long)s_pred_found, (unsigned long long)s_pred_failed, (unsigned long long)ready, (unsigned long long)infl, (unsigned long long)s_pred_made,
                (unsigned long long)(built > ready + infl ? built - ready - infl : 0));

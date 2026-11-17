@@ -27,7 +27,11 @@
 // pipeline of its own key, made by whichever thread.
 //
 // Bounds: at most 200,000 records (the Metal walk's guard) and 2 ms (the wait budget of the P5 acceptance) a walk, then it stops, counted and logged (the first 8 times); a call
-// deeper than its return stack stops it too. DM_NVN_PREDICT=0 turns it off, as it turns off the Metal backend's.
+// deeper than its return stack stops it too. DM_NVN_PREDICT=0 turns it off, as it turns off the Metal backend's. The 2 ms leave out the time the walk takes to load the programs
+// and make the layouts of the draws it reaches (draw_key: hvk_prog_get, hvk_layout_for, which keep them for the draws): those draws are in this submission and the replay makes
+// them in this frame, so loading their programs a little earlier adds nothing to the frame. Counted against the budget, the loads stopped a walk after one to six draws at a
+// scene's first frames (2 to 11 ms for 64 to 128 records), and the draws past it made their own pipelines one after the other: 8 of the 101 pipelines of level 1-1's first
+// frames were queued for the workers (Mario vs. Donkey Kong on lavapipe, a first run without a prewarm list).
 #include "plat/plat.h"
 #include "vk_pso.h"
 #include "../nvn/nvn_state.h"
@@ -40,7 +44,8 @@ enum { MAX_RECORDS = 200000, NRET = 2 * NVN_REPLAY_RET_MAX };
 static const uint64_t *g_rest; static int g_nrest;   // the submission's handles still to be replayed after the current one (be_exec_rest)
 static uint64_t g_mark;                                 // the submission walked last (its fence): one walk a submission
 static _Atomic int g_on = -1; static int g_sync; static uint32_t g_max_records = MAX_RECORDS; static uint64_t g_max_ns = MAX_NS;
-static _Atomic uint64_t s_walks, s_records, s_ns, s_max_ns, s_budget, s_depth, s_draws, s_keys, s_queued;
+static _Atomic uint64_t s_walks, s_records, s_ns, s_max_ns, s_budget, s_depth, s_draws, s_keys, s_queued, s_load_ns;
+static uint64_t g_load_ns;   // this walk's time in draw_key loading programs and making layouts (submit thread): left out of the budget
 
 static int on(void) {
     int v = atomic_load(&g_on);
@@ -57,7 +62,7 @@ void hvk_predict_test(int on_, int sync, uint32_t max_records, uint64_t max_ns) 
 void hvk_predict_stats_get(hvk_predict_stats *s) {
     memset(s, 0, sizeof *s);
     s->walks = s_walks; s->records = s_records; s->ns = s_ns; s->max_ns = s_max_ns; s->budget_stops = s_budget; s->depth_stops = s_depth;
-    s->draws = s_draws; s->keys = s_keys; s->queued = s_queued; s->on = on();
+    s->draws = s_draws; s->keys = s_keys; s->queued = s_queued; s->load_ns = s_load_ns; s->on = on();
 }
 
 // ---------- The private state ----------
@@ -131,8 +136,10 @@ static uint64_t flush(void) { int n = g_nbatch; g_nbatch = 0; return n ? (uint64
 // A draw walked: its key, added to the batch (flushed when full: the pipelines queued then)
 static uint64_t draw_key(const wstate *w, int klass) {
     hvk_shader *sh[6];
-    if (!shaders_of(w->bst, sh) || !sh[0] || (sh[4] && !sh[3])) return 0;   // no program, no vertex shader, tessellation without a control shader: the draw is skipped
-    hvk_layout *l = hvk_layout_for(sh);
+    uint64_t t = plat_now_ns();   // the programs and the layout, which the draw would load and make: timed apart from the budget
+    int ok = shaders_of(w->bst, sh) && sh[0] && !(sh[4] && !sh[3]);   // no program, no vertex shader, tessellation without a control shader: the draw is skipped
+    hvk_layout *l = ok ? hvk_layout_for(sh) : NULL;
+    g_load_ns += plat_now_ns() - t;
     if (!l) return 0;
     uint32_t bound = 0; for (int s = 0; s < 16; s++) if (w->vbuf[s]) bound |= 1u << s;
     hvk_vin v; hvk_vertex_input(sh[0], w->attr, w->stream, bound, &v);
@@ -146,7 +153,7 @@ static uint64_t draw_key(const wstate *w, int klass) {
 }
 #define SET(dst, src, n) do { if (memcmp(&(dst), (src), (n))) { memcpy(&(dst), (src), (n)); dirty = 1; } } while (0)
 static void walk(const uint8_t *p) {
-    uint64_t t0 = plat_now_ns();
+    uint64_t t0 = plat_now_ns(); g_load_ns = 0;
     wstate w; memset(&w, 0, sizeof w);
     memcpy(w.bst, S.bst, sizeof w.bst); memcpy(w.blend, S.blend, sizeof w.blend); w.color = S.color; w.chmask = S.chmask; w.ms = S.ms; w.poly = S.poly;
     memcpy(w.attr, S.attr, sizeof w.attr); memcpy(w.stream, S.stream, sizeof w.stream); for (int s = 0; s < 16; s++) w.vbuf[s] = S.vbuf[s].address;
@@ -158,7 +165,7 @@ static void walk(const uint8_t *p) {
     int rest_i = 0, dirty = 1, last_klass = -1, stop = 0;
     uint64_t n = 0, draws = 0, queued = 0;
     while (p) {
-        if (n >= g_max_records || (!(n & 63) && plat_now_ns() - t0 > g_max_ns)) { stop = 1; break; }
+        if (n >= g_max_records || (!(n & 63) && plat_now_ns() - t0 - g_load_ns > g_max_ns)) { stop = 1; break; }
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         n++;
         if (h.op == OP_END) {
@@ -209,16 +216,18 @@ static void walk(const uint8_t *p) {
     uint64_t dt = plat_now_ns() - t0, o = atomic_load(&s_max_ns);
     while (dt > o && !atomic_compare_exchange_weak(&s_max_ns, &o, dt)) {}
     atomic_fetch_add(&s_walks, 1); atomic_fetch_add(&s_records, n); atomic_fetch_add(&s_ns, dt); atomic_fetch_add(&s_draws, draws); atomic_fetch_add(&s_queued, queued);
+    atomic_fetch_add(&s_load_ns, g_load_ns);
     if (stop == 1) {
         static int logged; atomic_fetch_add(&s_budget, 1);
-        if (logged++ < 8) hostvk_log("[hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (%llu records in %.3f ms; the budget %u records, %.1f ms) after %llu draws, "
-                                     "%llu pipelines queued; the draws past it make their own", (unsigned long long)n, dt / 1e6, g_max_records, g_max_ns / 1e6, (unsigned long long)draws, (unsigned long long)queued);
+        if (logged++ < 8) hostvk_log("[hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (%llu records in %.3f ms, %.3f ms of them loading programs "
+                                     "and layouts, which the budget leaves out; the budget %u records, %.1f ms) after %llu draws, %llu pipelines queued; the draws past it make their own",
+                                     (unsigned long long)n, dt / 1e6, g_load_ns / 1e6, g_max_records, g_max_ns / 1e6, (unsigned long long)draws, (unsigned long long)queued);
     } else if (stop == 2) {
         atomic_fetch_add(&s_depth, 1);
         HVK_NOTE_ONCE("pipeline prediction: a walk stopped at a list nested deeper than its return stack holds (%d lists, the decoder's %d): the draws past it make their own", NRET, NVN_REPLAY_RET_MAX);
     }
-    static int told; if (queued && stop != 1 && told++ < 8) hostvk_log("[hostvk] pipeline prediction: %llu draws ahead in this submission, %llu pipelines queued on the background workers (%llu records walked in %.3f ms)",
-                                                                       (unsigned long long)draws, (unsigned long long)queued, (unsigned long long)n, dt / 1e6);
+    static int told; if (queued && stop != 1 && told++ < 8) hostvk_log("[hostvk] pipeline prediction: %llu draws ahead in this submission, %llu pipelines queued on the background workers (%llu records walked in %.3f ms, "
+                                                                       "%.3f ms of them loading programs and layouts)", (unsigned long long)draws, (unsigned long long)queued, (unsigned long long)n, dt / 1e6, g_load_ns / 1e6);
     if (g_sync) hvk_work_drain(HVK_Q_PRED);   // test hook: the draws ahead find their pipelines made
 }
 void hvk_predict_after_draw(const uint8_t *next) {

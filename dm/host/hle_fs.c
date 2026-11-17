@@ -748,6 +748,10 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }
+// The game's file reads so far: bytes and the time in pread (dm_fs_read_stats: the per-frame table's @fs_mb and @fs_ms, hle_nvn.c, which a stutter is matched against)
+static _Atomic uint64_t g_rd_bytes, g_rd_ns;
+void dm_fs_read_stats(uint64_t *bytes, uint64_t *ns);
+void dm_fs_read_stats(uint64_t *bytes, uint64_t *ns) { *bytes = atomic_load(&g_rd_bytes); *ns = atomic_load(&g_rd_ns); }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
     size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
@@ -757,6 +761,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
     }
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
+    const uint64_t rd0 = now_ns();
     while (got < sz) {
         ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
         if (r < 0) { if (errno == EINTR) continue;
@@ -776,6 +781,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         got += r;
     }
     *out = got;
+    atomic_fetch_add_explicit(&g_rd_bytes, got, memory_order_relaxed); atomic_fetch_add_explicit(&g_rd_ns, now_ns() - rd0, memory_order_relaxed);
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;

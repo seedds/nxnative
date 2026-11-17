@@ -147,6 +147,7 @@ typedef struct {
     uint64_t walks, records, ns, max_ns;      // walks made, records walked, their time on the submit thread, the longest
     uint64_t budget_stops, depth_stops;       // walks stopped at the budget, at a call deeper than the return stack holds
     uint64_t draws, keys, queued;             // draw records walked, keys made for them (the state had changed), pipelines queued
+    uint64_t load_ns;                         // of ns, the time loading the programs and making the layouts of the draws walked (left out of the budget)
     int on;
 } hvk_predict_stats;
 void hvk_predict_stats_get(hvk_predict_stats *s);

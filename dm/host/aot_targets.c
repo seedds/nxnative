@@ -10,9 +10,11 @@
 // B 1. A count of calls needs a counter on the hit path, an increment at every indirect call of every pack, so there is none (README.md, "Hot indirect targets", measured
 // nothing for it). The misses that bind nothing of the caller's module are counted, not written: a target in another pack (bound, but its offset is another module's), one handed
 // to another pack of another signature, a host function (the host-function page, the stub page), an address with no compiled entry (the JIT fallback: the misses file has it).
-// Recording: dm_aot_target_note from nxaot_rt_dispatch, only with DM_AOT_PROFILE, into an open-addressing table of (pack, site, target, kind) under one lock, grown by doubling.
-// The miss path already takes desc_for's lock and runs on a guest thread, never in a signal handler (the sampler's handler does not touch this table); without DM_AOT_PROFILE a
-// note returns after one relaxed load.
+// Recording: dm_aot_target_note from nxaot_rt_dispatch, only with DM_AOT_PROFILE, into a small cache of the thread's own (TGT_CACHE rows, direct-mapped): a note that finds its
+// row there adds one with no lock and no atomic read-modify-write; one that does not takes the lock once, to move the row it replaces into an open-addressing table of
+// (pack, site, target, kind) under one lock, grown by doubling, and to take the row. Recording a profile is the launcher's default: one lock per miss was 6 ms of a level frame
+// on Mario vs. Donkey Kong's Thread_0 (the game note, "where a frame goes"). The miss path runs on a guest thread, never in a signal handler (the sampler's handler does not
+// touch this table); without DM_AOT_PROFILE a note returns after one relaxed load.
 // The file, per module with rows this session: '#' lines naming the module, its build ID, its image's SHA-256 and its pack (as the profile and the misses file), then
 // `0x<site> 0x<target> <binds>` per site and target, by site then target (module offsets). Merged across sessions of the same image, as the misses file is: a pack whose guard calls
 // a hot target directly never binds that target again (the guard's hits skip the cache), so a file rewritten per session would lose the targets a guarded pack was built from, and
@@ -73,21 +75,50 @@ static int grow(void) {   // under g_lock: twice the slots, the rows rehashed; -
 
 static void write_at_exit(void) { dm_aot_targets_write(); }
 
-void dm_aot_target_note(const dm_aot_pack *caller, uint64_t site, uint64_t target, int kind) {
-    if (!caller || !targets_on() || atomic_load_explicit(&g_written, memory_order_relaxed)) return;
-    pthread_mutex_lock(&g_lock);
-    if (!g_registered) { g_registered = 1; atexit(write_at_exit); }
-    // At most half full; a table that cannot grow takes rows until one slot is left
+// count notes of (p, site, target, kind) into the table, under g_lock. At most half full; a table that cannot grow takes rows until one slot is left
+static void table_add(const dm_aot_pack *p, uint64_t site, uint64_t target, uint32_t kind, uint64_t count) {
     if ((g_used + 1) * 2 > g_cap && grow() && g_used + 1 >= g_cap) {
-        g_dropped++;
-        pthread_mutex_unlock(&g_lock);
+        g_dropped += count;
         return;
     }
-    for (size_t h = slot_hash(caller, site, target, (uint32_t)kind, g_cap - 1);; h = (h + 1) & (g_cap - 1)) {
+    for (size_t h = slot_hash(p, site, target, kind, g_cap - 1);; h = (h + 1) & (g_cap - 1)) {
         tgt_slot *s = &g_slots[h];
-        if (!s->pack) { *s = (tgt_slot){caller, site, target, 1, (uint32_t)kind}; g_used++; break; }
-        if (s->pack == caller && s->site == site && s->target == target && s->kind == (uint32_t)kind) { s->n++; break; }
+        if (!s->pack) { *s = (tgt_slot){p, site, target, count, kind}; g_used++; return; }
+        if (s->pack == p && s->site == site && s->target == target && s->kind == kind) { s->n += count; return; }
     }
+}
+
+// A thread's cache (above): its rows change only under g_lock, so the writer, which holds it, reads whole rows; their counts the thread alone adds to, and the writer reads
+// them relaxed. Every thread's cache lives to the process's end, on g_caches: the writer adds the exited threads' counts too
+#define TGT_CACHE 256
+typedef struct { const dm_aot_pack *pack; uint64_t site, target; uint32_t kind; _Atomic uint64_t n; } tgt_row;
+typedef struct tgt_cache { struct tgt_cache *next; tgt_row row[TGT_CACHE]; } tgt_cache;
+static _Thread_local tgt_cache *t_cache;
+static tgt_cache *g_caches;
+
+void dm_aot_target_note(const dm_aot_pack *caller, uint64_t site, uint64_t target, int kind) {
+    if (!caller || !targets_on() || atomic_load_explicit(&g_written, memory_order_relaxed)) return;
+    tgt_cache *c = t_cache;
+    if (!c) {
+        c = calloc(1, sizeof *c);
+        pthread_mutex_lock(&g_lock);
+        if (!g_registered) { g_registered = 1; atexit(write_at_exit); }
+        if (c) { c->next = g_caches; g_caches = c; }
+        else table_add(caller, site, target, (uint32_t)kind, 1);   // no memory for a cache: this note straight into the table, the next tries again
+        pthread_mutex_unlock(&g_lock);
+        if (!c) return;
+        t_cache = c;
+    }
+    tgt_row *e = &c->row[slot_hash(caller, site, target, (uint32_t)kind, TGT_CACHE - 1)];
+    if (e->pack == caller && e->site == site && e->target == target && e->kind == (uint32_t)kind) {
+        atomic_store_explicit(&e->n, atomic_load_explicit(&e->n, memory_order_relaxed) + 1, memory_order_relaxed);   // this thread alone adds to it
+        return;
+    }
+    pthread_mutex_lock(&g_lock);
+    const uint64_t had = atomic_load_explicit(&e->n, memory_order_relaxed);
+    if (e->pack && had) table_add(e->pack, e->site, e->target, e->kind, had);
+    e->pack = caller; e->site = site; e->target = target; e->kind = (uint32_t)kind;
+    atomic_store_explicit(&e->n, 1, memory_order_relaxed);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -160,8 +191,16 @@ int dm_aot_targets_write(void) {
     char dir[1024];
     if (!env || !*env || strlen(env) >= sizeof dir - 96) return -1;   // aot_profile.c said so already
     snprintf(dir, sizeof dir, "%s", env);
-    // A copy of the table: a note after this finds g_written set and records nothing
+    // A copy of the table, every thread's cache added into it first: a note after this finds g_written set and records nothing (one already past that test adds to a
+    // cache row whose count was read here: it is lost, a bind at exit)
     pthread_mutex_lock(&g_lock);
+    for (tgt_cache *c = g_caches; c; c = c->next) {
+        for (unsigned i = 0; i < TGT_CACHE; i++) {
+            tgt_row *e = &c->row[i];
+            const uint64_t had = atomic_exchange_explicit(&e->n, 0, memory_order_relaxed);
+            if (e->pack && had) table_add(e->pack, e->site, e->target, e->kind, had);
+        }
+    }
     const size_t used = g_used;
     const uint64_t dropped = g_dropped;
     tgt_slot *all = used ? malloc(used * sizeof *all) : NULL;

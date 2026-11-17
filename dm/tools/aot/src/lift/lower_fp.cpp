@@ -136,6 +136,26 @@ Value* FunctionLifter::FlushDenormal(Value* bits) {
     return B.CreateSelect(IsDenormal(bits), B.CreateAnd(bits, SplatOf(bits, f.sign)), bits);
 }
 
+// ---- FZ as a run-time state (7.1; lifter.h, FzFamily) ----
+
+// FPCR.FZ of the moment for family's lowering: st->fpcr's bit when FZ is a run-time state and the family tests it, else the specialisation's FZ
+// (the constant false of code compiled for both states with the family's test left out: nxaot_vec's negative control)
+Value* FunctionLifter::FzNow(uint32_t family) {
+    if (!FzTest(family)) {
+        return B.getInt1(FZ());
+    }
+    return B.CreateICmpNE(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(kFpcrFz)), B.getInt32(0), "fz");
+}
+
+// The FPCR a run-time helper is given: the specialisation's mode bits, with FZ of the moment (the helpers are dynarmic's soft float, which reads FZ;
+// family: the helpers' own, or the steps' slow path)
+Value* FunctionLifter::FpcrArg(uint32_t family) {
+    if (!FzTest(family)) {
+        return B.getInt32(fpcr);
+    }
+    return B.CreateOr(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(kFpcrFz)), B.getInt32(fpcr), "fpcr_now");
+}
+
 Value* FunctionLifter::NaNResult(Value* r) {
     return B.CreateSelect(IsNaN(r), DefaultNaN(r->getType()), r);
 }
@@ -220,6 +240,7 @@ void FunctionLifter::DefineNaNHelpers() {
         llvm::Type* scalar = B.getIntNTy(bits);
         for (llvm::Type* t : {scalar, static_cast<llvm::Type*>(llvm::FixedVectorType::get(scalar, 128 / bits))}) {
             for (unsigned arity = 1; arity <= 3; ++arity) NaNFunction(arity, t, true, true);
+            if (bits != 16) FzFmaFunction(t, true, true);   // FzMulAddFix's cold part (FZ a run-time state, 7.1)
         }
     }
 }
@@ -268,7 +289,8 @@ Value* FunctionLifter::NaN3(Value* a, Value* b, Value* c, Value* r) {
 }
 
 Value* FunctionLifter::MulAddInvalid(Value* a, Value* m1, Value* m2) {
-    auto zero = [this](Value* bits) { return FZ() ? B.CreateOr(IsZeroF(bits), IsDenormal(bits)) : IsZeroF(bits); };
+    Value* fz = FzNow(kFzMulAdd);
+    auto zero = [this, fz](Value* bits) { return B.CreateSelect(fz, B.CreateOr(IsZeroF(bits), IsDenormal(bits)), IsZeroF(bits)); };
     Value* infzero = B.CreateOr(B.CreateAnd(IsInfF(m1), zero(m2)), B.CreateAnd(zero(m1), IsInfF(m2)));
     Value* invalid = B.CreateAnd(IsQNaN(a), infzero);
     if (opts.fpsr_flags) {
@@ -337,17 +359,45 @@ Value* FunctionLifter::RoundIntegral(Value* x, unsigned arm_rounding) {
     }
 }
 
+// IDC for the operands of an operation dynarmic computes natively (add, subtract, multiply, divide, square root, fused multiply-add, FMULX, the compares,
+// FMAX / FMIN, the steps, the pairwise add): dynarmic's DAZ raises none (known issue 12), Arm's FPUnpack does. With FZ specialised the lowering raises it
+// as Arm does; with FZ a run-time state it does as dynarmic, and so as the JIT fallback does: a test of the operands under FZ at every such operation of a
+// module whose flags are modelled was 2 MB of sdk's 58 MB of code on Mario vs. Donkey Kong (dm/tools/aot/README.md, "FZ as a run-time state")
+void FunctionLifter::NativeInputDenormal(std::initializer_list<Value*> operand_bits) {
+    if (FZ()) {
+        InputDenormal(operand_bits);
+    }
+}
+
 void FunctionLifter::InputDenormal(std::initializer_list<Value*> operand_bits) {
-    if (!FZ() || !opts.fpsr_flags) {
+    if (!opts.fpsr_flags || (!FZ() && !FzTest(kFzIdc))) {
         return;
     }
-    Value* any = nullptr;
-    for (Value* v : operand_bits) {
-        Value* d = AnyLane(IsDenormal(AsInt(v)));
-        any = any ? B.CreateOr(any, d) : d;
-    }
-    OrFpsrBits(B.CreateSelect(any, B.getInt32(0x80), B.getInt32(0)));
+    auto any_denormal = [&]() {
+        Value* any = nullptr;
+        for (Value* v : operand_bits) {
+            Value* d = AnyLane(IsDenormal(AsInt(v)));
+            any = any ? B.CreateOr(any, d) : d;
+        }
+        return any;
+    };
     Note(kIssueNoInputDenormal);
+    if (FZ()) {   // FZ specialised: always
+        OrFpsrBits(B.CreateSelect(any_denormal(), B.getInt32(0x80), B.getInt32(0)));
+        return;
+    }
+    // FZ of the moment (7.1): the operands' test in a block of its own that runs only under FZ, which ORs IDC into st->fpsr itself, so that code
+    // that never runs under FZ keeps the plain path (a test of st->fpcr's bit) and raises no flag of its own (FnCleanup drops its FPSR flushes)
+    auto* idc_bb = BasicBlock::Create(C, "idc_fz", F);
+    auto* cont = BasicBlock::Create(C, "idc_done", F);
+    llvm::MDBuilder md{C};
+    B.CreateCondBr(FzNow(kFzIdc), idc_bb, cont, md.createBranchWeights(1, 1u << 16));
+    B.SetInsertPoint(idc_bb);
+    Value* ptr = FpsrPtr();
+    Value* old = B.CreateAlignedLoad(B.getInt32Ty(), ptr, llvm::Align(4));
+    B.CreateAlignedStore(B.CreateOr(old, B.CreateSelect(any_denormal(), B.getInt32(0x80), B.getInt32(0))), ptr, llvm::Align(4));
+    B.CreateBr(cont);
+    B.SetInsertPoint(cont);
 }
 
 bool FunctionLifter::LowHalfOnly(const IR::Inst& inst) const {
@@ -472,7 +522,7 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
     const Opcode op = inst.GetOpcode();
     const std::string name = OpcodeName(op);
     auto fsize_of = [&]() -> unsigned { return name.back() == '6' ? 16 : name.back() == '2' ? 32 : 64; };  // ...16, ...32, ...64
-    Value* fpcr_v = B.getInt32(fpcr);
+    Value* fpcr_v = FpcrArg();   // the helpers read FZ of the moment (7.1)
 
     // A chain node of a binary P operation (scalar or vector): fast native result now, Arm NaN rules on the exact operands later
     auto binary_p = [&](llvm::Type* t, std::function<Value*(Value*, Value*)> fn) {
@@ -483,7 +533,7 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
         node.dn_select = true;
         Value* a = ChainArg(inst, 0, t);
         Value* b = ChainArg(inst, 1, t);
-        InputDenormal({a, b});
+        NativeInputDenormal({a, b});
         node.fast = fn(a, b);
         node.exact = [this, t, fn](const std::vector<Value*>& a) {
             Value* x = As(a[0], t);
@@ -501,7 +551,7 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
         node.dn_select = dn_select;
         Value* a = ChainArg(inst, 0, t);
         if (nan_rule) {
-            InputDenormal({a});  // fsqrt unpacks its operand; fabs / fneg do not
+            NativeInputDenormal({a});  // fsqrt unpacks its operand; fabs / fneg do not
         }
         node.fast = fn(a);
         node.exact = [this, t, fn, nan_rule](const std::vector<Value*>& a) {
@@ -606,7 +656,11 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
             node.type = t;
             node.dn_select = true;
             node.exact_flags = opts.fpsr_flags;
-            node.fast = native(ChainArg(inst, 0, t), ChainArg(inst, 1, t), ChainArg(inst, 2, t));
+            Value* x = ChainArg(inst, 0, t);
+            Value* y = ChainArg(inst, 1, t);
+            Value* z = ChainArg(inst, 2, t);
+            NativeInputDenormal({x, y, z});   // IDC under FZ of the moment
+            node.fast = FzMulAddFix(native(x, y, z), x, y, z, sub);
             node.exact = [native, exact, t, this](const std::vector<Value*>& a) {
                 Value* x = As(a[0], t);
                 Value* y = As(a[1], t);
@@ -662,7 +716,7 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
         const FInfo f = Info(bits);
         Value* a = FArg(inst, 0, bits);
         Value* b = FArg(inst, 1, bits);
-        InputDenormal({a, b});
+        NativeInputDenormal({a, b});
         Value* r = AsInt(B.CreateFMul(a, b));
         Value* ai = AsInt(a);
         Value* bi = AsInt(b);
@@ -695,7 +749,7 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
         Value* a = ChainArg(inst, 0, t);
         Value* b = ChainArg(inst, 1, t);
         const bool signalling = inst.GetArg(2).GetU1();
-        InputDenormal({a, b});
+        NativeInputDenormal({a, b});
         auto cmp = [&](llvm::CmpInst::Predicate p) { return signalling ? B.CreateFCmpS(p, a, b) : B.CreateFCmp(p, a, b); };
         Flags fl;
         fl.n = cmp(llvm::CmpInst::FCMP_OLT);
@@ -855,7 +909,7 @@ Value* FunctionLifter::MinMax(bool is_max, bool numeric, Value* a, Value* b) {
     // (smaller). The numeric forms (row 5) first replace a single quiet NaN by the infinity that loses. FZ flushes the operands first. Quiet
     // compares only: Invalid Operation for signalling NaNs, as Arm raises it
     const FInfo f = Info(ScalarBits(a));
-    InputDenormal({a, b});
+    NativeInputDenormal({a, b});
     if (numeric) {
         Value* qa = IsQNaN(a);
         Value* qb = IsQNaN(b);
@@ -865,8 +919,10 @@ Value* FunctionLifter::MinMax(bool is_max, bool numeric, Value* a, Value* b) {
         a = na;
         b = nb;
     }
-    Value* af = FZ() ? FlushDenormal(a) : a;
-    Value* bf = FZ() ? FlushDenormal(b) : b;
+    // FZ of the moment (7.1): the AND / OR of equal values and the compares read the operands' bits, which MXCSR's DAZ does not flush
+    Value* fz = FzNow(kFzMinMax);
+    Value* af = B.CreateSelect(fz, FlushDenormal(a), a);
+    Value* bf = B.CreateSelect(fz, FlushDenormal(b), b);
     Value* fa = AsFloat(af);
     Value* fb = AsFloat(bf);
     Value* larger = B.CreateFCmp(is_max ? llvm::CmpInst::FCMP_OGT : llvm::CmpInst::FCMP_OLT, fa, fb);
@@ -875,6 +931,105 @@ Value* FunctionLifter::MinMax(bool is_max, bool numeric, Value* a, Value* b) {
     Value* r = B.CreateSelect(equal, is_max ? B.CreateAnd(af, bf) : B.CreateOr(af, bf), pick);
     Value* any_nan = B.CreateOr(IsNaN(a), IsNaN(b));
     return B.CreateSelect(any_nan, NaN2(a, b, r), r);
+}
+
+// A fused multiply-add's native result r (scalar or vector) under FZ of the moment (7.1, 7.2 row 13): x86 flushes after rounding, Arm before, so a
+// result of +-(smallest normal) may be one Arm flushes to zero; those lanes are computed again by the software FPMulAdd with the FPCR of the moment
+// (dynarmic's check, as under FZ specialised). Not a NaN: NaN results take the chain's exact path, whose invalid case reads FZ too (MulAddInvalid).
+// r unchanged when FZ is no run-time state or the family's test is left out. The operands are exact here: the result is no NaN. The hot path is a
+// compare and a branch; the cold one a call of the out-of-line form (FzFmaFunction), preserve_all as the NaN helpers, so that the hot path keeps
+// its registers across it (a helper call in place made the register allocator spill around it: fp-gcc 8 % more code)
+Value* FunctionLifter::FzMulAddFix(Value* r, Value* addend, Value* op1, Value* op2, bool sub) {
+    if (!FzTest(kFzMulAdd)) {
+        return r;
+    }
+    Value* ri = AsInt(r);
+    const unsigned bits = ScalarBits(ri);
+    const FInfo f = Info(bits);
+    Value* tiny = B.CreateICmpEQ(B.CreateAnd(ri, SplatOf(ri, ~f.sign)), SplatOf(ri, Pow2Bits(bits, bits == 32 ? -126 : -1022)));
+    BasicBlock* from = B.GetInsertBlock();
+    auto* slow = BasicBlock::Create(C, "fma_fz_rt", F);
+    auto* cont = BasicBlock::Create(C, "fma_fz_rt_done", F);
+    llvm::MDBuilder md{C};
+    B.CreateCondBr(B.CreateAnd(FzNow(kFzMulAdd), AnyLane(tiny)), slow, cont, md.createBranchWeights(1, 1u << 16));
+    B.SetInsertPoint(slow);
+    const bool shared = plan && plan->shared_nan_helpers && SharedNaNType(ri->getType());
+    llvm::Function* fn = FzFmaFunction(ri->getType(), shared, !shared);
+    llvm::CallInst* fixed = B.CreateCall(fn, {ri, AsInt(addend), AsInt(op1), AsInt(op2), B.getInt32(sub ? 1 : 0), FpcrArg(kFzMulAdd), FpsrPtr()});
+    fixed->setCallingConv(fn->getCallingConv());
+    B.CreateBr(cont);
+    B.SetInsertPoint(cont);
+    auto* phi = B.CreatePHI(ri->getType(), 2);
+    phi->addIncoming(ri, from);
+    phi->addIncoming(fixed, slow);
+    return AsFloat(phi);
+}
+
+// FzMulAddFix's cold part, nxaot.fzfma.<type>(r, addend, op1, op2, sub, fpcr, fpsr): every lane of r equal to +-(smallest normal) from
+// nxaot_rt_fp_muladd, the others as they are. Shared and defined once as the NaN helpers are (DefineNaNHelpers), or a unit's own linkonce_odr copy
+llvm::Function* FunctionLifter::FzFmaFunction(llvm::Type* t, bool shared, bool define) {
+    std::string type;
+    llvm::raw_string_ostream type_out{type};
+    t->print(type_out);
+    for (char& ch : type) {
+        if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
+    }
+    const std::string name = "nxaot.fzfma." + type;
+    if (llvm::Function* f = M.getFunction(name)) {
+        return f;
+    }
+    auto* f = llvm::Function::Create(llvm::FunctionType::get(t, {t, t, t, t, B.getInt32Ty(), B.getInt32Ty(), B.getPtrTy()}, false),
+                                     shared ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::LinkOnceODRLinkage, name, M);
+    f->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    if (!shared) f->setComdat(M.getOrInsertComdat(name));
+    f->setCallingConv(llvm::CallingConv::PreserveAll);
+    f->addFnAttr(llvm::Attribute::NoInline);
+    f->addFnAttr(llvm::Attribute::Cold);
+    f->addFnAttr(llvm::Attribute::NoUnwind);
+    f->addFnAttr(llvm::Attribute::WillReturn);
+    if (!define) {
+        return f;
+    }
+    llvm::IRBuilderBase::InsertPointGuard guard{B};
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", f));
+    std::vector<Value*> arg;
+    for (llvm::Argument& x : f->args()) arg.push_back(&x);
+    const unsigned bits = t->getScalarSizeInBits();
+    const FInfo fi = Info(bits);
+    auto one = [&](Value* x, Value* y, Value* z) {
+        Value* h = HelperCall("nxaot_rt_fp_muladd", B.getInt64Ty(), {B.getInt32(bits), arg[4], B.CreateZExt(x, B.getInt64Ty()), B.CreateZExt(y, B.getInt64Ty()),
+                                                                     B.CreateZExt(z, B.getInt64Ty()), arg[5], arg[6]});
+        return B.CreateTrunc(h, B.getIntNTy(bits));
+    };
+    auto tiny_of = [&](Value* v) {
+        return B.CreateICmpEQ(B.CreateAnd(v, B.getIntN(bits, ~fi.sign)), B.getIntN(bits, Pow2Bits(bits, bits == 32 ? -126 : -1022)));
+    };
+    auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(t);
+    if (!vt) {
+        B.CreateRet(B.CreateSelect(tiny_of(arg[0]), one(arg[1], arg[2], arg[3]), arg[0]));
+        return f;
+    }
+    Value* out = arg[0];
+    for (unsigned i = 0; i < vt->getNumElements(); ++i) {
+        Value* lane = B.CreateExtractElement(arg[0], uint64_t{i});
+        BasicBlock* here = B.GetInsertBlock();
+        auto* call_bb = BasicBlock::Create(C, "lane", f);
+        auto* next_bb = BasicBlock::Create(C, "next", f);
+        B.CreateCondBr(tiny_of(lane), call_bb, next_bb);
+        B.SetInsertPoint(call_bb);
+        Value* with = B.CreateInsertElement(out, one(B.CreateExtractElement(arg[1], uint64_t{i}), B.CreateExtractElement(arg[2], uint64_t{i}),
+                                                    B.CreateExtractElement(arg[3], uint64_t{i})),
+                                            uint64_t{i});
+        B.CreateBr(next_bb);
+        B.SetInsertPoint(next_bb);
+        auto* phi = B.CreatePHI(t, 2);
+        phi->addIncoming(out, here);
+        phi->addIncoming(with, call_bb);
+        out = phi;
+    }
+    B.CreateRet(out);
+    return f;
 }
 
 Value* FunctionLifter::StepFused(bool rsqrt, unsigned bits, Value* a, Value* b) {
@@ -887,7 +1042,7 @@ Value* FunctionLifter::StepFused(bool rsqrt, unsigned bits, Value* a, Value* b) 
         auto one = [&](Value* x, Value* y) {
             Value* r = HelperCall("nxaot_rt_fp_binary", B.getInt64Ty(),
                                   {B.getInt32(rsqrt ? NXAOT_RT_RSQRT_STEP : NXAOT_RT_RECIP_STEP), B.getInt32(bits), B.CreateZExt(x, B.getInt64Ty()),
-                                   B.CreateZExt(y, B.getInt64Ty()), B.getInt32(fpcr), FpsrPtr()});
+                                   B.CreateZExt(y, B.getInt64Ty()), FpcrArg(kFzSteps), FpsrPtr()});
             return B.CreateTrunc(r, B.getIntNTy(bits));
         };
         if (!vector) {
@@ -900,7 +1055,7 @@ Value* FunctionLifter::StepFused(bool rsqrt, unsigned bits, Value* a, Value* b) 
         return out;
     }
     const FInfo f = Info(bits);
-    InputDenormal({a, b});
+    NativeInputDenormal({a, b});
     Value* fb = AsFloat(b);
     Value* na = AsFloat(B.CreateXor(a, SplatOf(a, f.sign)));
     Value* c = AsFloat(SplatOf(a, Pow2Bits(bits, 1) | (rsqrt ? f.quiet : 0)));  // 2.0, or 3.0 (1.5 * 2)
@@ -927,7 +1082,7 @@ Value* FunctionLifter::StepFused(bool rsqrt, unsigned bits, Value* a, Value* b) 
         auto one = [&](Value* x, Value* y) {
             Value* r = HelperCall("nxaot_rt_fp_binary", B.getInt64Ty(),
                                   {B.getInt32(rsqrt ? NXAOT_RT_RSQRT_STEP : NXAOT_RT_RECIP_STEP), B.getInt32(bits), B.CreateZExt(x, B.getInt64Ty()),
-                                   B.CreateZExt(y, B.getInt64Ty()), B.getInt32(fpcr), FpsrPtr()});
+                                   B.CreateZExt(y, B.getInt64Ty()), FpcrArg(kFzSteps), FpsrPtr()});
             return B.CreateTrunc(r, B.getIntNTy(bits));
         };
         if (!vector) {
@@ -955,7 +1110,7 @@ Value* FunctionLifter::RoundInt(unsigned bits, Value* x, unsigned rounding, bool
     if (bits == 16 || (exact && rounding != RMode()) || rounding > 4) {
         auto one = [&](Value* v) {
             Value* r = HelperCall("nxaot_rt_fp_round_int", B.getInt64Ty(),
-                                  {B.getInt32(bits), B.CreateZExt(v, B.getInt64Ty()), B.getInt32(rounding), B.getInt32(exact ? 1 : 0), B.getInt32(fpcr),
+                                  {B.getInt32(bits), B.CreateZExt(v, B.getInt64Ty()), B.getInt32(rounding), B.getInt32(exact ? 1 : 0), FpcrArg(),
                                    FpsrPtr()});
             return B.CreateTrunc(r, B.getIntNTy(bits));
         };
@@ -1081,7 +1236,7 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
     const std::string base = name.substr(8, name.size() - 10);  // FPVectorAdd32 -> Add
     llvm::Type* vt = e == 16 ? static_cast<llvm::Type*>(VecI(16)) : static_cast<llvm::Type*>(VecF(e));
     const unsigned lanes = 128 / e;
-    Value* fpcr_v = B.getInt32(fpcr);
+    Value* fpcr_v = FpcrArg();   // the helpers read FZ of the moment (7.1)
 
     auto binary_p = [&](std::function<Value*(Value*, Value*)> fn) {
         ChainNode node;
@@ -1091,7 +1246,7 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
         node.dn_select = true;
         Value* a = ChainArg(inst, 0, vt);
         Value* b = ChainArg(inst, 1, vt);
-        InputDenormal({a, b});
+        NativeInputDenormal({a, b});
         node.fast = fn(a, b);
         node.exact = [this, fn, vt](const std::vector<Value*>& args) {
             Value* x = As(args[0], vt);
@@ -1206,7 +1361,7 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
         Value* b = ChainArg(inst, 1, vt);
         Value* p0 = pairs(a, b, false);
         Value* p1 = pairs(a, b, true);
-        InputDenormal({p0, p1});
+        NativeInputDenormal({p0, p1});
         node.fast = B.CreateFAdd(p0, p1);
         node.exact = [this, pairs, vt](const std::vector<Value*>& args) {
             Value* x = As(args[0], vt);
@@ -1225,7 +1380,7 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
         node.dn_select = true;
         auto fn = [this](Value* a) { return FPIntrinsic(B, M, ID::sqrt, ID::experimental_constrained_sqrt, {a}); };
         Value* x = ChainArg(inst, 0, vt);
-        InputDenormal({x});
+        NativeInputDenormal({x});
         node.fast = fn(x);
         node.exact = [this, fn, vt](const std::vector<Value*>& args) {
             Value* x = As(args[0], vt);
@@ -1283,8 +1438,8 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
             Value* x = ChainArg(inst, 0, vt);
             Value* y = ChainArg(inst, 1, vt);
             Value* z = ChainArg(inst, 2, vt);
-            InputDenormal({x, y, z});
-            node.fast = native(x, y, z);
+            NativeInputDenormal({x, y, z});
+            node.fast = FzMulAddFix(native(x, y, z), x, y, z, false);
             node.exact = [native, exact, vt, this](const std::vector<Value*>& args) {
                 Value* x = As(args[0], vt);
                 Value* y = As(args[1], vt);
@@ -1347,7 +1502,7 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
         const FInfo f = Info(e);
         Value* a = FVecArg(inst, 0, e);
         Value* b = FVecArg(inst, 1, e);
-        InputDenormal({a, b});
+        NativeInputDenormal({a, b});
         Value* r = AsInt(B.CreateFMul(a, b));
         Value* ai = AsInt(a);
         Value* bi = AsInt(b);
@@ -1358,14 +1513,15 @@ bool FunctionLifter::LowerFPVector(IR::Inst& inst) {
         Note(kIssueVectorMinMaxQNaN);
         Def(inst, MinMax(base.rfind("Max", 0) == 0, base.find("Numeric") != std::string::npos, ArgVec(inst, 0, e), ArgVec(inst, 1, e)));
     } else if (base == "Equal" || base == "Greater" || base == "GreaterEqual") {
-        // fcmeq (quiet), fcmgt / fcmge (signalling: Invalid Operation for any NaN), on flushed operands under FZ
+        // fcmeq (quiet), fcmgt / fcmge (signalling: Invalid Operation for any NaN), on flushed operands under FZ. MXCSR's DAZ would do it for
+        // cmpps, but LLVM folds a compare with zero into a test of the bits (fcmeq #0.0: (x & ~sign) == 0), "dynamic" denormal mode or not, and
+        // that test sees a denormal as no zero: the flush of the moment makes both right (nxaot_vec --fz-only --no-fpsr-model, FCMEQ_zero)
         Value* a = ArgVec(inst, 0, e);
         Value* b = ArgVec(inst, 1, e);
-        InputDenormal({a, b});
-        if (FZ()) {
-            a = FlushDenormal(a);
-            b = FlushDenormal(b);
-        }
+        NativeInputDenormal({a, b});
+        Value* fz = FzNow(kFzCompare);
+        a = B.CreateSelect(fz, FlushDenormal(a), a);
+        b = B.CreateSelect(fz, FlushDenormal(b), b);
         Value* fa = AsFloat(a);
         Value* fb = AsFloat(b);
         Value* c = base == "Equal" ? B.CreateFCmp(llvm::CmpInst::FCMP_OEQ, fa, fb)

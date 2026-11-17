@@ -182,7 +182,8 @@ then on the PC, from the repository root, with `nxaot.exe` and the reference fil
 
 ```sh
 build/aot/nxaot_vec dm/tools/aot/tests/vectors            # every .tsv and .tsv.gz of the folder; or name files; - reads standard input
-build/aot/nxaot_vec --lift-fpcr-clear 1000000 dm/tools/aot/tests/vectors/fp.tsv.gz   # code lifted for FZ = 0 run under each vector's FPCR
+build/aot/nxaot_vec --fz-only dm/tools/aot/tests/vectors            # the vectors under FZ (CTest vectors_fz)
+build/aot/nxaot_vec --fz-only --fz-off minmax dm/tools/aot/tests/vectors   # a family's run-time FZ test left out: its mismatches (a control)
 build/aot/nxaot_vec --cpu x86-64-v3 dm/tools/aot/tests/vectors/crypto.tsv.gz   # a named target: no AES-NI, SHA or PCLMULQDQ, their software forms
 build/aot/nxaot_vec --filter excl_seq --dump dm/tools/aot/tests/vectors/exclusive.tsv   # dynarmic IR and optimised LLVM IR of the matches
 build/aot/nxaot_vec --state --filter fp.00612 dm/tools/aot/tests/vectors/fp.tsv.gz      # a mismatch with the initial registers
@@ -200,8 +201,10 @@ mismatches, refusals, FPSR differences of known dynarmic issues and normal exits
 issue, which lowered opcodes the passing vectors exercised, and last `== nxaot_vec: N vectors, M mismatches, U unsupported (listed), F FPSR
 differences of known dynarmic issues ==`; it exits with 1 on a mismatch. Options: `--no-fpsr-model` lifts without modelling the cumulative flags
 (and compares QC only), `--ignore-fpsr-flags` compares QC only, `--no-filters` compares the whole FPSR without the known-issue relaxations,
-`--lift-fpcr-clear <hex>` lifts every vector's code as if those FPCR bits were clear while it runs under the vector's FPCR and its MXCSR (an
-experiment: [FZ as a run-time state](#fz-as-a-run-time-state)), `--batch`, `--max-report`, `-v`. The vectors' format (8 tab-separated fields: id, class, text, code, seed, FPCR, register overrides, memory
+FZ is a run-time state of the code, as in a pack; `--fz-only` runs the vectors whose FPCR has FZ, `--fz-specialised` lifts with FZ specialised as
+the other mode bits, and the negative controls `--fz-off <families>` (a family's run-time test left out) and `--lift-fpcr-clear <hex>` (every vector's
+code lifted as if those FPCR bits were clear and FZ specialised, while it runs under the vector's FPCR and its MXCSR) must show mismatches ([FZ as a
+run-time state](#fz-as-a-run-time-state)); `--batch`, `--max-report`, `-v`. The vectors' format (8 tab-separated fields: id, class, text, code, seed, FPCR, register overrides, memory
 overrides; `vk=` names the lane kind the seed fills v0..v31 with) and the memory layout (the image at `0x10000000`, code at `0x10008000`) are in
 [src/vec/vectors.h](src/vec/vectors.h); the image is mapped at that address in the harness process with guard pages around it, since lifted code uses
 guest addresses as host addresses.
@@ -1487,7 +1490,8 @@ no `nonlocal`; round 7's nxaot's pack 64 runs and a `nonlocal` miss at F's call 
 FZ, R(1) checks and tail-calls the clearing function, whose return reaches R(2)'s call site with R(1)'s entry SP; R(0)'s frame, the same return address
 and a lower SP, passes it on and R(1)'s takes it: 1 JIT run, no `nonlocal` (round 7: 4 runs and a `nonlocal`). `fprec` with a resume point at that address
 (a `nonlocal` row in a misses file, as a landing pad or a setjmp continuation is one): 1 run, R(1)'s own return before R(2)'s resume point. `fpret` and
-`fpresume`: 2 misses, both `fpcr`, none `nonlocal`. The unit key's format is 12.
+`fpresume`: 2 misses, both `fpcr`, none `nonlocal`. The unit key's format is 12. Since FZ is a run-time state of compiled code ([FZ as a run-time
+state](#fz-as-a-run-time-state)) the rows set round towards zero instead, whose check is 1 + 0.75 ulp rounded down to 1; the counts are the same.
 
 **Measured** on the game's first pack (the bindings of the host's dry run, as a player's), the same route from the same save, round 7's nxaot and host
 against this round's:
@@ -1921,22 +1925,23 @@ frame-based handler behind the host's vectored one, dm/host/aot_fault.c) is writ
 
 Design sections 7.1 to 7.4, as lowered here.
 
-- **FPCR is a compile-time specialisation (7.1).** `LiftOptions::fpcr` names the FPCR a region is compiled for; only its mode bits count (AHP, DN,
-  FZ, RMode, FZ16: `kFpcrModeMask`, what dynarmic's location descriptor keeps), and the blocks are translated with it. Guest code runs with the
-  MXCSR of that FPCR (`lift::GuestMxcsr`: RMode as the rounding control, FZ as FTZ and DAZ, every exception masked), which the host sets once when a
-  thread enters guest code and nxaot_vec sets around each run; lifted functions never load MXCSR themselves. LLVM is told the rounding mode through
-  constrained intrinsics with that static mode, so that nothing is folded in another mode, and FZ through `denormal-fp-math`. Chosen over a
+- **FPCR is a compile-time specialisation, except FZ (7.1).** `LiftOptions::fpcr` names the FPCR a region is compiled for; only AHP, DN, RMode and
+  FZ16 count (`kFpcrSpecMask`; dynarmic's location descriptor keeps those and FZ, `kFpcrModeMask`), and FZ is a run-time state of the same code
+  (`LiftOptions::fz_runtime`, [FZ as a run-time state](#fz-as-a-run-time-state)). Guest code runs with the MXCSR of the thread's FPCR
+  (`lift::GuestMxcsr`: RMode as the rounding control, FZ as FTZ and DAZ, every exception masked), which the host sets on every way into compiled code
+  and nxaot_vec sets around each run; lifted functions never load MXCSR themselves, but `msr fpcr`. LLVM is told the rounding mode through
+  constrained intrinsics with that static mode, so that nothing is folded in another mode, and `"denormal-fp-math"="dynamic"`. Chosen over a
   `ldmxcsr` / `stmxcsr` pair at every function entry and exit: the pair costs tens of cycles per call and serialises, and every function of a module
-  shares one FPCR anyway; with round to nearest and the flags unmodelled the operations are plain LLVM ones and optimise freely. `msr fpcr` writes
-  `st->fpcr` and the new mode bits into MXCSR, and its block leaves the function when the mode bits differ from the specialisation, for the
-  dispatcher to continue in code compiled for the new value (the JIT of section 11 later; nxaot_vec lifts a continuation).
+  shares one specialisation anyway; with round to nearest and the flags unmodelled the operations are plain LLVM ones and optimise freely. `msr fpcr`
+  writes `st->fpcr` and the new mode bits into MXCSR, and its block leaves the function when the new value differs from the specialisation in those
+  bits, for the dispatcher to continue in code compiled for the new value (the JIT of section 11; nxaot_vec lifts a continuation); FZ alone goes on.
 - **FPSR (7.4).** `LiftOptions::fpsr_flags` models the cumulative exception flags exactly: the function is `strictfp` and every floating-point
   operation is a constrained intrinsic with strict exception behaviour (none removed, speculated or folded). Native operations raise their flags in
   MXCSR, which `mrs fpsr` and the host's gate read (`lift::FpsrFromMxcsr`); operations lowered in integers raise none of their own and add the Arm
   bits explicitly (conversions to integers: IOC, IXC; FZ: IDC per flushed operand); the helpers OR theirs into `st->fpsr`. QC is a flag of the
   function stored at exit, from every saturating operation, scalar or vector, as dynarmic ORs `fpsr_qc`. A pack sets `fpsr_flags` for modules where
   the census finds an FPSR read (`answer.fpsr_read`), as decision 5 says; nxaot_vec always sets it.
-- **NaN chains (7.3).** The P operations (add, subtract, multiply, divide, square root, fused multiply-add with FMA3 and FZ = 0, negate, absolute
+- **NaN chains (7.3).** The P operations (add, subtract, multiply, divide, square root, fused multiply-add with FMA3 (`FzMulAddFix` under FZ), negate, absolute
   value, single / double conversions, pairwise add; scalar and vector) are chain nodes (`ChainNode`): the native result, and how to rebuild the Arm
   result from the operands' exact values. A use outside the chain (a register write that survives the block, a store, an integer or another
   floating-point operation that keeps NaN bits) takes the node's escaped value: one NaN check (`ucomiss` / `vcmpunordps` and a branch weighted
@@ -1970,17 +1975,22 @@ ns of its 5 per iteration).
 
 ### FZ as a run-time state
 
-A candidate for code that runs under FPCR.FZ (Mario vs. Donkey Kong's physics jobs: [A return no native frame took](#a-return-no-native-frame-took)),
-measured and not implemented: one set of code right under both FZ states, the state being MXCSR's FTZ and DAZ (which `msr fpcr` already sets) plus
-a run-time test where a lowering depends on FZ itself, instead of a second set of code specialised for FZ.
+One set of code runs under both values of FPCR.FZ (design 7.1): FZ is MXCSR's FTZ and DAZ, which `msr fpcr` sets in compiled code and the host
+sets on every way in (dm/host/aot_run.c, the MXCSR invariant), plus a test of `st->fpcr` where a lowering depends on FZ itself; every check whether code
+may run under the FPCR of the moment leaves FZ out (`kFpcrSpecMask`: entries, resume points, a function's own return, `msr fpcr`, the JIT's stops,
+the host's `module_mode`). Chosen over a second set of code specialised for FZ, and over FP-free functions entered natively under any FPCR, for
+what ran under FZ on Mario vs. Donkey Kong's physics workers ([A return no native frame took](#a-return-no-native-frame-took)), and because it serves
+a first pack, which has no profile to name the functions a second set would need. The pack ABI is 4 (include/nxaot/aot_module.h): a host of ABI 3
+would run such code under FZ without the MXCSR invariant, and a host of ABI 4 would enter an ABI 3 pack, specialised for FZ clear, under FZ; each
+refuses the other's packs, which the bundle's message says to repack. The unit key format is 13.
 
-- **What runs under FZ there** (round 8's first pack, the route of [A return no native frame took](#a-return-no-native-frame-took); a scratch host
+- **What ran under FZ there** (round 8's first pack, the route of [A return no native frame took](#a-return-no-native-frame-took); a scratch host
   recorded each profile sample in the JIT fallback, mapped through dynarmic's perf map, `PERF_BUILDID_DIR`, to its block and FPCR and through
   `nxaot discover` to its function): 233,780 sections, 701,340 JIT runs, 2.18 s. Of the 1,615 samples in the JIT, 772 fell outside any block
   (dynarmic's dispatcher and translation, the host's callbacks: the cost of a run, about 3 runs per section) and 829 in blocks under FZ: 92.8 % of
   those in functions with no FPCR-dependent instruction at all (job and lock code: `sdk+0x131804`, `sdk+0x131734`, `main+0x481c18`,
   `main+0xa01194`, ...; 142 such functions sampled), 98.4 % in functions with none of the instructions listed below as differing under FZ. A
-  second set of code or FP-free functions entered natively would leave each section's start and end in the JIT; one set of code right under FZ
+  second set of code or FP-free functions entered natively would have left each section's start and end in the JIT; one set of code right under FZ
   leaves none of it there.
 
 - **dynarmic** sets FTZ and DAZ from FZ (`A64JitState::SetFpcr`), but it too translates a block per FPCR (the FPCR is in its location descriptor and
@@ -1988,20 +1998,55 @@ a run-time test where a lowering depends on FZ itself, instead of a second set o
   compares are flushed explicitly (`DenormalsAreZero`), a fused multiply-add result of +-(smallest normal) is computed again by the software FPMulAdd
   (x86 flushes after rounding, Arm before), FRSQRTE's fast path changes its bounds, and its soft float, which every fallback runs, flushes inputs
   (`FPUnpack`, IDC), tiny results (`FPRound`) and FRECPE's tiny inputs.
-- **The lowerings here that depend on FZ beyond MXCSR** (`src/lift/lower_fp.cpp`): the FMAX / FMIN family's operand flush, the scalar and vector
-  fused multiply-add's FZ path and its invalid case (a denormal counts as zero), IDC for the operands of operations lowered in integers when the flags
-  are modelled (`InputDenormal`), the vector compares' flush (which DAZ gives as well: no compare differs below), the helpers' FPCR argument (a constant: the estimates and steps, FCVTXN's round to odd,
-  rounding and conversions in another mode), and `denormal-fp-math`.
-- **The vectors prove the rest.** `nxaot_vec --lift-fpcr-clear 1000000` lifts each vector as if FZ were clear and runs it under the vector's FPCR and
-  MXCSR. Of the 30,909 vectors under FZ in the FP, SIMD and crypto suites, 194 differ in a value (FPSR ignored): the FMAX / FMIN family 125, the
-  estimates and steps 31, FCVTXN 21, fused multiply-adds 17. With the FPSR compared, 104 more: IDC and IXC of FRINTA, FRINTX, FCVTAS, FCVTAU and FCVT,
-  lowered in integers, and of the estimates. Every other instruction (arithmetic, compares, conversions, rounding, integer SIMD, crypto) is right
-  under FZ with MXCSR alone.
-- **LLVM** is told the mode by `"denormal-fp-math"`; `"dynamic"` (LLVM 17 on) says neither holds, so nothing is folded for one. The corpus's FP and
-  SIMD programs (gcc and clang) and the benchmark pack to the same bytes with `"dynamic,dynamic"` as with `"ieee,ieee"`.
-- **`msr fpcr`** whose new value differs from the specialisation only in FZ would set MXCSR, as now, and stay native; the entries', resume points' and
-  the JIT's FPCR checks would ignore FZ. DN, RMode, AHP and FZ16 stay specialisations: the NaN chains are built for one DN, RMode is the constrained
-  intrinsics' static rounding (a dynamic one needs `strictfp` in every function), and the half-precision forms are helpers or F16C by AHP and FZ16.
+- **The lowerings that test FZ at run time** (`lift::FzFamily`, src/lift/lower_fp.cpp; `FzNow` loads `st->fpcr`'s bit, `FpcrArg` gives the helpers
+  the specialisation with FZ of the moment): `minmax`, the FMAX / FMIN family's operands flushed (`MinMax`, a select each); `muladd`, a fused
+  multiply-add's result of +-(smallest normal) computed again by the software FPMulAdd under FZ (`FzMulAddFix`: a compare and a branch weighted cold
+  per FMADD / FMLA, as dynarmic's check, the cold part a call of `nxaot.fzfma.<type>`, preserve_all and defined once per pack as the NaN helpers are:
+  a helper call in place made the register allocator spill around it), and the invalid case's zero (`MulAddInvalid`, a denormal counts as zero); `steps`, FRECPS / FRSQRTS's NaN or
+  near-infinity lanes given the FPCR of the moment; `helpers`, every run-time helper given it (the estimates FRECPE, FRSQRTE, FRECPX, FCVTXN's round
+  to odd, the roundings and conversions the helpers do); `idc`, IDC for the operands of the roundings and conversions lowered in integers when the
+  flags are modelled, where dynarmic's software paths raise it (`InputDenormal`: the operands' test in a block of its own under FZ, which ORs IDC into
+  `st->fpsr` itself, so that code never run under FZ raises no flag of its own and keeps no FPSR flush). The operations dynarmic computes natively
+  (arithmetic, fused multiply-add, FMULX, compares, FMAX / FMIN, the steps' fast lanes, the pairwise add) raise no IDC under FZ, as dynarmic and so the
+  JIT fallback raise none (known issue 12; `NativeInputDenormal` raises it only with FZ specialised): the test at every such operation of `sdk`, whose
+  flags are modelled, was 2 MB of its 58 MB of code; `compare`, the vector compares' operands flushed: DAZ would do it for `cmpps`, but LLVM folds a compare
+  with zero into a test of the bits (`fcmeq #0.0` became `(x & ~sign) == 0`, `"dynamic"` or not), which sees a denormal as no zero. No family is left
+  to the JIT: the plan's guard (a block with such an instruction run in the JIT under FZ) was not needed once each family had its run-time lowering,
+  and it is not in the code.
+- **The vectors prove them** (nxaot_vec lifts each vector as a pack does, one function for both values of FZ, and runs it under the vector's FPCR
+  and MXCSR). CTest `vectors_fz` (the 30,917 vectors whose FPCR has FZ, the flags modelled and compared, as `sdk`'s pack has them) and
+  `vectors_fz_noflags` (not modelled, as `main`'s): 0 mismatches against dynarmic under FZ, and the FPSR differences that known dynarmic issues
+  explain fewer than with FZ specialised (1,044 vectors against `--fz-specialised`'s 2,272: issue 12 explains 230, from 1,509, since the native
+  operations raise no IDC of their own now; a vector it explained first before and that differs by another issue as well counts under that one). The negative controls, which must show mismatches:
+  `vectors_fz_off_<family>` (`--fz-off <family>`, that family's test left out) `minmax` 125, `muladd` 18, `steps` 12, `helpers` 68, `idc` 70, `compare`
+  5 (without the flags modelled, where LLVM folds: `vectors_fz_noflags` found them); and
+  `vectors_fz_clear` (`--lift-fpcr-clear 1000000`, code specialised for FZ clear run under FZ) 293. Every other instruction (arithmetic, compares,
+  conversions, rounding, integer SIMD, crypto) is right under FZ with MXCSR alone.
+- **LLVM** is told `"denormal-fp-math"="dynamic"` (LLVM 17 on): neither mode holds, so nothing is folded for one. The corpus's FP and SIMD programs
+  (gcc and clang) and the benchmark packed to the same bytes with it as with `"ieee"` (round 8's experiment).
+- **`msr fpcr`** whose new value differs from the specialisation only in FZ sets MXCSR and the code goes on; DN, RMode, AHP and FZ16 stay
+  specialisations: the NaN chains are built for one DN, RMode is the constrained intrinsics' static rounding (a dynamic one needs `strictfp` in
+  every function), and the half-precision forms are helpers or F16C by AHP and FZ16. A change of those leaves the function for the JIT, as before.
+- **The host** (dm/host/aot_run.c, the MXCSR invariant; `rt/host.cpp`, nxaot_host, the same): compiled code runs with FTZ and DAZ equal to
+  `st->fpcr`'s FZ, the host's C code with them clear. Into compiled code: `native_call`, `run_guest` and the return of `nxaot_rt_jit` set MXCSR from
+  `st->fpcr`, and compiled code's own `msr fpcr`; out of it, `dm_aot_svc`, `nxaot_rt_jit` (the JIT driver, its host calls and SVCs), `nxaot_rt_gate`,
+  `nxaot_rt_safepoint`, `dm_aot_cntpct` and `nxaot_rt_trap` clear FTZ and DAZ when FZ is set and set them again before the code goes on (a test of
+  the block's FPCR when FZ is clear), and a compiled entry's return into the JIT driver clears them. The JIT keeps its own (dynarmic loads its MXCSR
+  from its FPCR and puts back the caller's around its callbacks); the run-time helpers (integer arithmetic) and the dispatcher keep the guest's.
+  Checked by t_aot_host's `fzsec` rows: a flush-to-zero section in compiled code that calls FP-free code, FP code of the families above, a host
+  function doing float work (`t_aot_fz_host`: 2^-126 * 0.5 and 2^-127 * 2, which need FTZ and DAZ clear), a poll's safepoint path, and a function
+  that clears FZ and returns: PASS with no JIT run, and the same with every instruction in the JIT (`DM_AOT_JIT_ALL`). Without the switch at
+  `nxaot_rt_jit` the host function's products flush and the row fails. Without the JIT (`-DNXHOST_JIT=OFF`) the row runs the same: an FZ section
+  needs no JIT.
+- **Measured** on Mario vs. Donkey Kong's first pack (the bindings of the host's dry run), the same route from the same save: no JIT run at all
+  (round 8: 2.67 % of the sampled guest CPU time, 0.70 million runs, 2.12 s, all from the workers' `msr fpcr`), no misses file, no `[RED] aot` line;
+  `.text` `sdk` 56.43 MB, `subsdk0` 27.92 MB, `main` 171.79 MB (+0.21, +0.02, +1.23 %: the FMA fix-up's compare and branch in `main`, which has 2,673
+  of them; in place, with the helper call in the hot code, `main` grew 2.4 %, and the IDC test of every native operation 2 MB of `sdk`); the corpus's
+  18 program packs 1,437,028 -> 1,480,656 bytes of `.text` (+3.0 %; `fp-clang` the most, +8.6 %: the run-time tests of the families above and the
+  out-of-line FMA fix-up, about 2 KB a pack). Run time, `measure_packs.py` with this nxaot built with FZ specialised (A) against it as committed (B),
+  5 rounds, 2 layouts, on a machine under load 7 to 8 (another agent's runs), so with wide noise: bench +3.7 % (noise 22 %), fp-gcc +1.4 % (5 %),
+  fp-clang -0.6 % (5 %), simd-gcc +11.0 % (18 %; a 45 us program), simd-clang +3.8 % (19 %): every program within its noise, none shown faster or
+  slower. To be measured again on a quiet machine before a figure is quoted.
 
 ## Measurements
 
@@ -4495,8 +4540,9 @@ Values, QC and the other registers are compared exactly in every case.
     which the Arm ARM's `FPMulAdd` (a NaN addend is the result) does not raise. Example: `1f020c20` (`fmadd s0, s1, s2, s3`) with s1 = s2 =
     1.1 and s3 a quiet NaN: reference IXC. Reference-only IXC / OFC / UFC.
 12. **No Input Denormal under FZ.** dynarmic's native operations flush denormal operands through MXCSR.DAZ, which raises nothing; the Arm ARM's
-    `FPUnpack` raises Input Denormal (IDC) for each operand it flushes. The lowering raises IDC as Arm does (`FunctionLifter::InputDenormal`),
-    as dynarmic's own software paths also do. Example: `1e222820` (`fadd s0, s1, s2`) with s1 = 0x00000001 under FZ: Arm IDC, reference nothing.
+    `FPUnpack` raises Input Denormal (IDC) for each operand it flushes. With FZ specialised (nxaot_vec `--fz-specialised`) the lowering raises IDC as
+    Arm does (`FunctionLifter::InputDenormal`), as dynarmic's own software paths also do; with FZ a run-time state, as packs are built, the operations
+    dynarmic computes natively raise none either (`NativeInputDenormal`: [FZ as a run-time state](#fz-as-a-run-time-state)), the same as the JIT. Example: `1e222820` (`fadd s0, s1, s2`) with s1 = 0x00000001 under FZ: Arm IDC, reference nothing.
     Lifted-only IDC.
 13. **FMAX / FMIN / FMAXNM / FMINNM of vectors raise Invalid Operation for quiet NaNs.** dynarmic computes `maxps` / `minps` on every lane,
     which signal for any NaN operand (`emit_x64_vector_floating_point.cpp:950`); the Arm ARM signals for signalling NaNs only (the scalar

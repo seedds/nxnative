@@ -82,6 +82,7 @@ typedef struct prof_thread {
     // The JIT fallback's runs on this thread and its CPU time in them (dm_aot_profile_jit_run, below): all; begun under another FPCR than the packs'; the stretches of CPU time
     // under another FPCR (from the first run begun under it, or ended under it, to the end of the run that leaves it), their number and the last such FPCR
     uint64_t jit_runs, jit_ns, fpcr_runs, fpcr_ns, other_n, other_ns, other_t0;
+    uint64_t jit_tick;          // the runs dm_aot_profile_jit_begin saw (one in JIT_TIMED_EVERY timed)
     uint32_t fpcr_last;
     int in_other;
     uint64_t origin;            // the miss that began the thread's current JIT continuation (dm_aot_profile_jit_origin): its runs' time goes to it
@@ -186,7 +187,10 @@ static void write_at_exit(void) { dm_aot_profile_write(); }
 // Besides the samples, the JIT fallback's own share of each thread's CPU time, measured rather than sampled, and what of it the FPCR caused (design 7.1: code runs compiled only
 // under the FPCR the packs were specialised for; under any other, every guest instruction runs in the JIT fallback until the FPCR comes back). aot_run.c run_jit reports each run of
 // dm_jit_run / dm_jit_run_past (the SVCs answered inside a run count in it; a host call or a compiled entry the run stops at does not): its CPU time on the thread's own clock, whether
-// the FPCR was another than the packs' when it began and when it ended. Only with DM_AOT_PROFILE (two clock reads per run)
+// the FPCR was another than the packs' when it began and when it ended. Only with DM_AOT_PROFILE, which the launcher sets on every Play: the thread's CPU clock is a system call
+// on Linux (no vDSO for it), two per run were 1.8 ms of a title-screen frame on Mario vs. Donkey Kong's physics workers before FZ became a run-time state. So one run in
+// JIT_TIMED_EVERY reads it, and its time counts that many times over (in the thread's total and its origin's: an unbiased estimate, every run counted); a run under another
+// FPCR, or in a stretch under one, is timed every time (the stretches' ends are clock reads), which a run that begins one reads at its end
 uint64_t dm_aot_profile_cpu_ns(void) {
 #if defined(_WIN32)
     FILETIME c, e, k, u;   // the scheduler's charge (15.6 ms ticks): coarse, enough for the totals
@@ -257,10 +261,21 @@ static void origins_log(void) {
     const uint64_t lost = atomic_load_explicit(&g_origin_lost_ns, memory_order_relaxed);
     if (n > 80 || lost) LOG("aot: profile: JIT time from %zu more origins, and %.3f s of origins the table had no room for", n > 80 ? n - 80 : 0, lost * 1e-9);
 }
-void dm_aot_profile_jit_run(uint64_t cpu0, uint32_t fpcr0, uint32_t fpcr1, int other0, int other1) {
+#define JIT_TIMED_EVERY 16u
+unsigned dm_aot_profile_jit_begin(int other0, uint64_t *cpu0) {
+    prof_thread *r = t_prof;
+    if (!r) return 0;
+    const int every = other0 || r->in_other;
+    if (!every && r->jit_tick++ % JIT_TIMED_EVERY) return 0;
+    *cpu0 = dm_aot_profile_cpu_ns();
+    return every ? 1 : JIT_TIMED_EVERY;
+}
+void dm_aot_profile_jit_run(uint64_t cpu0, unsigned weight, uint32_t fpcr0, uint32_t fpcr1, int other0, int other1) {
     prof_thread *r = t_prof;
     if (!r) return;
-    const uint64_t now = dm_aot_profile_cpu_ns(), d = now > cpu0 ? now - cpu0 : 0;
+    uint64_t now = 0, d = 0;
+    if (weight) { now = dm_aot_profile_cpu_ns(); d = (now > cpu0 ? now - cpu0 : 0) * weight; }
+    else if (other1) now = dm_aot_profile_cpu_ns();   // a stretch under another FPCR begins at this run's end (in_other and other0 runs are timed: weight 1)
     r->jit_runs++; r->jit_ns += d;
     origin_add(r, d);
     if (other0) { r->fpcr_runs++; r->fpcr_ns += d; }

@@ -5,9 +5,15 @@
 // issue instead of as mismatches, and only when the FPSR is all that differs. README.md has the usage.
 //
 //   nxaot_vec [--cpu <llvm cpu>] [--filter <text>] [--dump] [--batch <n>] [--max-report <n>] [--nan-mode chains|perop|unchecked]
-//             [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [-v] <vectors.tsv, folder or - for standard input>...
-//   --lift-fpcr-clear: lift every vector's code as if these FPCR bits were clear while it runs under the vector's FPCR (an experiment: compiled code
-//   specialised for FPCR 0 run under FZ with MXCSR's FTZ and DAZ, dm/tools/aot/README.md, "FZ as a run-time state")
+//             [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [--fz-off <families>] [--fz-only]
+//             [--fz-specialised] [-v] <vectors.tsv, folder or - for standard input>...
+//   The code is lifted as a pack's is, with FPCR.FZ a run-time state (lift::LiftOptions::fz_runtime): one function for both values of FZ, run under
+//   the vector's FPCR.
+//   --lift-fpcr-clear: the negative control: lift every vector's code as if these FPCR bits were clear and FZ specialised, while it runs under the
+//   vector's FPCR (code specialised for FZ clear run under FZ with MXCSR's FTZ and DAZ). --fz-off: the run-time test of these lift::FzFamily
+//   families (minmax, muladd, steps, helpers, idc, compare, all) left out, each family's own control. --fz-only: the vectors whose FPCR has FZ.
+//   --fz-specialised: FZ specialised as the other mode bits (code for each value of FZ; before FZ was a run-time state) (dm/tools/aot/README.md,
+//   "FZ as a run-time state")
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -208,7 +214,8 @@ Diff Compare(const Vector& v, const Outcome& ref, const Outcome& got, uint32_t f
 void Usage() {
     std::fprintf(stderr,
                  "usage: nxaot_vec [--cpu <llvm cpu>] [--filter <text>] [--dump] [--batch <n>] [--max-report <n>] [--nan-mode chains|perop|unchecked]\n"
-                 "                 [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [-v]\n"
+                 "                 [--no-fpsr-model] [--ignore-fpsr-flags] [--no-filters] [--state] [--lift-fpcr-clear <hex>] [--fz-off <families>]\n"
+                 "                 [--fz-only] [--fz-specialised] [-v]\n"
                  "                 <vectors.tsv, folder or - for standard input>...\n");
 }
 
@@ -221,6 +228,9 @@ int main(int argc, char** argv) {
     lift::NaNMode nan_mode = lift::NaNMode::Chains;
     size_t batch_size = 256, max_report = 50;
     uint32_t lift_clear = 0;   // --lift-fpcr-clear
+    uint32_t fz_off = 0;       // --fz-off
+    bool fz_only = false;      // --fz-only: the vectors whose FPCR has FZ
+    bool fz_specialised = false;   // --fz-specialised
     std::vector<std::string> paths;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -262,6 +272,17 @@ int main(int argc, char** argv) {
             show_state = true;
         } else if (a == "--lift-fpcr-clear") {
             lift_clear = static_cast<uint32_t>(std::strtoul(next().c_str(), nullptr, 16));
+        } else if (a == "--fz-off") {
+            std::string why;
+            fz_off = lift::FzFamilies(next(), &why);
+            if (!fz_off) {
+                std::fprintf(stderr, "nxaot_vec: --fz-off: %s\n", why.c_str());
+                return 2;
+            }
+        } else if (a == "--fz-only") {
+            fz_only = true;
+        } else if (a == "--fz-specialised") {
+            fz_specialised = true;
         } else if (a == "--no-filters") {
             no_filters = true;
         } else if (a == "-v") {
@@ -285,7 +306,11 @@ int main(int argc, char** argv) {
 
     std::string error;
     auto lifted = Lifted::Create(cpu, nan_mode, fpsr_model, &error);
-    if (lifted) lifted->SetLiftFpcrClear(lift_clear);
+    if (lifted) {
+        lifted->SetLiftFpcrClear(lift_clear);
+        lifted->SetFzOff(fz_off);
+        lifted->SetFzSpecialised(fz_specialised);
+    }
     if (!lifted) {
         std::fprintf(stderr, "nxaot_vec: %s\n", error.c_str());
         return 2;
@@ -306,6 +331,7 @@ int main(int argc, char** argv) {
     const uint32_t fpsr_mask = ignore_flags ? 0x08000000u : 0xFFFFFFFFu;
 
     size_t total = 0, mismatches = 0, unsupported = 0, passed = 0, reported = 0, filtered = 0;
+    size_t fz_total = 0, fz_failed = 0;   // the vectors under FZ (above the summary)
     std::map<std::string, size_t> per_class, per_class_fail, per_class_filtered;
     std::map<uint32_t, size_t> exits;                // reference exit reasons, normalised
     std::map<std::string, size_t> per_class_normal;  // vectors whose reference run ended normally (not an exception or an escape)
@@ -327,6 +353,9 @@ int main(int argc, char** argv) {
                 }
                 more = false;
                 break;
+            }
+            if (fz_only && !(v.fpcr & lift::kFpcrFz)) {
+                continue;
             }
             if (filter.empty() || v.id.find(filter) != std::string::npos || v.cls.find(filter) != std::string::npos) {
                 batch_storage.push_back(std::move(v));
@@ -380,6 +409,7 @@ int main(int argc, char** argv) {
             std::vector<uint8_t> image;
             SeedState(v, init, image);
             Diff diff;
+            const bool under_fz = v.fpcr & lift::kFpcrFz;
             if (!p.error.empty() || !p.fn) {
                 diff.lines.push_back("lifter: " + (p.error.empty() ? std::string("no function") : p.error));
             } else {
@@ -426,6 +456,10 @@ int main(int argc, char** argv) {
                         diff.lines.push_back(line);
                     }
                 }
+            }
+            if (under_fz) {
+                ++fz_total;
+                fz_failed += !diff.lines.empty();
             }
             if (diff.lines.empty()) {
                 ++passed;
@@ -514,6 +548,13 @@ int main(int argc, char** argv) {
     std::printf("\nlowered opcodes exercised by passing vectors: %zu of %zu; not exercised:%s\n", hit, lowered, unexercised.empty() ? " none" : unexercised.c_str());
     std::printf("continuations lifted (a pc inside the code after a normal exit: msr fpcr, computed branches): %zu\n", lifted->Continuations());
     std::printf("\n%zu passed: the reference and the lifted code agree on registers, vector registers, flags, FPSR, exit and memory\n", passed);
+    // The vectors whose FPCR has FZ, and how their code was lifted
+    std::printf("under FZ (%s): %zu vectors, %zu mismatches\n",
+                lift_clear       ? "the --lift-fpcr-clear control: FZ specialised as clear"
+                : fz_specialised ? "FZ specialised (--fz-specialised)"
+                : fz_off         ? "run-time FZ, families left out by --fz-off"
+                                 : "run-time FZ, one function for both values",
+                fz_total, fz_failed);
     std::printf("== nxaot_vec: %zu vectors, %zu mismatches, %zu unsupported (listed), %zu FPSR differences of known dynarmic issues ==\n", total, mismatches,
                 unsupported, filtered);
     return mismatches ? 1 : 0;

@@ -23,3 +23,15 @@ HLE("t_aot_poll_self", uint64_t, t_aot_poll_self, uint64_t x) {
     t_aot_poll_request();
     return x;
 }
+
+// The fzsec test's host function (t_aot_host.c fzsec_nro), called from a flush-to-zero section of compiled code: float work in C, whose results need the host's MXCSR
+// (FTZ and DAZ clear: aot_run.c, the MXCSR invariant): 2^-126 * 0.5 is the denormal 2^-127 (0 under FTZ), 2^-127 * 2 is 2^-126 (0 under DAZ). Returns
+// 0x0040000000800000 + x
+HLE("t_aot_fz_host", uint64_t, t_aot_fz_host, uint64_t x) {
+    volatile float a = 0x1p-126f, half = 0.5f, d = 0x1p-127f, two = 2.0f;
+    const float p = a * half, q = d * two;
+    uint32_t pb, qb;
+    memcpy(&pb, &p, 4);
+    memcpy(&qb, &q, 4);
+    return ((uint64_t)pb << 32 | qb) + x;
+}

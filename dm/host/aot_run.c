@@ -33,7 +33,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc
 void thr_svc_enter(uint64_t *regs, uint64_t pc);                       // hle_thread.c
 void thr_svc_leave(void);
 
-#define FPCR_MODE 0x07C80000u   // the FPCR bits code is specialised on (AHP, DN, FZ, RMode, FZ16: dynarmic's location descriptor keeps these)
+// What compiled code is specialised on (lift::kFpcrSpecMask): the FPCR's mode bits that dynarmic's location descriptor keeps (AHP, DN, FZ, RMode, FZ16)
+// without FZ, a run-time state of the same code (design 7.1)
+#define FPCR_SPEC 0x06C80000u
+#define FPCR_FZ 0x01000000u
+#define MXCSR_FTZ_DAZ 0x8040u
 // Why the JIT fallback runs at an address (run_jit's reason), besides the NXAOT_TRAP_* reasons compiled code hands over: host-private values. REASON_HOSTCALL and
 // REASON_CROSS are st->exit_reason's (the dispatcher's hand-overs, which need no JIT); REASON_HOST, a guest call from the host; REASON_NONLOCAL, a non-local transfer no
 // native frame took; REASON_FORCED, DM_AOT_JIT_ALL; REASON_FPCR_RETURN, a return to a native frame that waits for it but cannot go on under the FPCR it came back with
@@ -75,7 +79,28 @@ uint32_t dm_aot_guest_mxcsr(uint32_t fpcr) {
     if ((fpcr >> 24) & 1) m |= 0x8040;                                 // FZ: FTZ and DAZ
     return m;
 }
-static int module_mode(const dm_guest_state *st) { return (st->fpcr & FPCR_MODE) == (dm_aot_module_fpcr() & FPCR_MODE); }
+// Whether compiled code runs under the thread's FPCR: its specialisation, FZ left out (design 7.1: FZ is a run-time state of the same code)
+static int module_mode(const dm_guest_state *st) { return (st->fpcr & FPCR_SPEC) == (dm_aot_module_fpcr() & FPCR_SPEC); }
+
+// MXCSR (design 7.1, the invariant). Compiled code runs with MXCSR's FTZ and DAZ equal to st->fpcr's FZ, the host's C code with them clear (the rest of
+// MXCSR is the specialisation's rounding mode and masks, the same on both sides, with the native operations' sticky flags):
+// - into compiled code: native_call and run_guest set the whole value from st->fpcr before enter, nxaot_rt_jit before it returns; compiled code's
+//   own msr fpcr sets it (lifter.cpp SetMxcsr); a guest call from the host (guest_vcall) enters with FZ's bits clear and puts back the host's value;
+// - out of compiled code into the host's C code (an SVC, a host call through the dispatcher's jit_entry and the JIT driver, a gate, a pause, the
+//   counter, a trap): mxcsr_host at the entry clears FTZ and DAZ when st->fpcr has FZ, mxcsr_guest sets them again before compiled code goes on,
+//   and native_call / run_guest clear them when a compiled entry returns into the host. With FZ clear each is a test of a bit of the block the call
+//   already has, nothing else;
+// - the JIT keeps its own: dynarmic loads its guest MXCSR from the FPCR it is handed and puts back the caller's around its SVC and memory callbacks
+//   and at its exit; signal handlers start with the kernel's default MXCSR, and a handler's return restores the interrupted one;
+// - a guest fiber or context switch the guest makes itself changes the FPCR only through msr fpcr (above), and a pause or another thread's
+//   SetThreadContext that changed st->fpcr is followed by mxcsr_guest from the block. The run-time helpers the code calls for floating point
+//   (aot_fp.c: integer arithmetic only) and the dispatcher (no floating point) keep the guest's MXCSR
+static inline void mxcsr_host(const dm_guest_state *st) {
+    if (st->fpcr & FPCR_FZ) _mm_setcsr(_mm_getcsr() & ~MXCSR_FTZ_DAZ);
+}
+static inline void mxcsr_guest(const dm_guest_state *st) {
+    if (st->fpcr & FPCR_FZ) _mm_setcsr(_mm_getcsr() | MXCSR_FTZ_DAZ);
+}
 
 static const char *jit_why(uint32_t reason) {
     switch (reason) {
@@ -225,6 +250,7 @@ static __attribute__((noinline)) void native_call(dm_aot_thread *t, const dm_aot
     _mm_setcsr(dm_aot_guest_mxcsr(t->st.fpcr));
     t->st.pending = 0;
     dm_aot_pack_desc(p)->enter(&t->st, entry);
+    mxcsr_host(&t->st);   // back in the JIT driver, the host's C code (the MXCSR invariant above)
     t->jit_calls = c.outer;
 }
 
@@ -355,7 +381,7 @@ static void jit_code_give(int n, int first) {
         dm_jit_host h;
         memset(&h, 0, sizeof h);
         h.code = r; h.code_count = k;
-        h.fpcr = dm_aot_module_fpcr() & FPCR_MODE;
+        h.fpcr = dm_aot_module_fpcr() & FPCR_SPEC;   // the JIT stops at compiled code under any FZ (rt/jit.h)
         h.max_threads = JIT_MAX_THREADS; h.code_cache = JIT_CODE_CACHE;
         h.stop_at = jit_stop_at; h.svc = jit_svc; h.cntpct = jit_cntpct;
         dm_jit_init(&h);
@@ -392,11 +418,13 @@ static _Thread_local int t_jit_running;   // dm_jit_run is on this thread's stac
 static uint64_t jit_run_one(dm_aot_thread *t, dm_jit *j, uint64_t pc, int past, int step) {
     const int prof = dm_aot_profile_on();
     const uint32_t fpcr0 = t->st.fpcr;
-    const uint64_t c0 = prof ? dm_aot_profile_cpu_ns() : 0;
+    const int other0 = (fpcr0 & FPCR_SPEC) != (dm_aot_module_fpcr() & FPCR_SPEC);
+    uint64_t c0 = 0;
+    const unsigned weight = prof ? dm_aot_profile_jit_begin(other0, &c0) : 0;   // one run in 16 timed (aot_profile.c JIT_TIMED_EVERY)
     t_jit_running = 1; t->prof_at = DM_AOT_PROF_JIT;   // prof_at: the sampler's (aot_profile.c), the JIT fallback's samples
     const uint64_t stop = past ? dm_jit_run_past(j, pc, step) : dm_jit_run(j, pc);
     t_jit_running = 0; t->prof_at = 0;
-    if (prof) dm_aot_profile_jit_run(c0, fpcr0, t->st.fpcr, (fpcr0 & FPCR_MODE) != (dm_aot_module_fpcr() & FPCR_MODE), !module_mode(&t->st));
+    if (prof) dm_aot_profile_jit_run(c0, weight, fpcr0, t->st.fpcr, other0, !module_mode(&t->st));
     return stop;
 }
 #endif
@@ -588,6 +616,7 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
                 _mm_setcsr(dm_aot_guest_mxcsr(st->fpcr));
                 st->pending = 0;
                 dm_aot_pack_desc(p)->enter(st, dm_aot_entry_of(e));
+                mxcsr_host(st);
                 if (!st->pending) return;
                 pc = st->pending; st->pending = 0;
                 if (t->depth > 1 && st->sp > sp0) nonlocal_out(t, pc);
@@ -675,7 +704,7 @@ static uint64_t guest_vcall(dm_guest_state *st, uint64_t addr, int nargs, va_lis
     }
     st->x[30] = DM_AOT_HOST_RETURN;
     st->pending = 0;
-    _mm_setcsr(dm_aot_guest_mxcsr(st->fpcr));
+    _mm_setcsr(dm_aot_guest_mxcsr(st->fpcr & ~FPCR_FZ));   // the host's side of the MXCSR invariant: run_guest sets FZ's bits for compiled code itself
     run_guest(t, addr);
     const uint64_t r = st->x[0];
     memcpy(&st->x[19], keep, sizeof keep);
@@ -790,7 +819,9 @@ static int aot_svc(dm_guest_state *st, uint32_t n) {
 
 DM_AOT_EXPORT void dm_aot_svc(dm_guest_state *st, uint32_t n) {
     dm_aot_thread *t = (dm_aot_thread *)st;
+    mxcsr_host(st);   // the MXCSR invariant: the SVC's host code under the host's MXCSR, compiled code's again after it
     if (aot_svc(st, n)) dm_aot_leave(t->left != DM_AOT_LEFT_NONE ? t->left : atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);
+    mxcsr_guest(st);
 }
 
 // The descriptors the inline caches point at (4): one per guest address, immutable once published, never freed
@@ -838,12 +869,14 @@ DM_AOT_EXPORT void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const
 }
 
 DM_AOT_EXPORT void nxaot_rt_trap(dm_guest_state *st, uint64_t offset, uint32_t reason) {
+    mxcsr_host(st);   // the MXCSR invariant (the report's host code)
     const dm_aot_pack *caller = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
     trap((dm_aot_thread *)st, caller ? dm_aot_pack_base(caller) + offset : offset, reason);
 }
 
 DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp) {
     dm_aot_thread *t = (dm_aot_thread *)st;
+    mxcsr_host(st);   // the MXCSR invariant: the JIT driver, its host calls and SVCs under the host's MXCSR
     const uint32_t reason = st->exit_reason;
     st->exit_reason = 0;
     // An encoding the lifter does not translate: compiled code stored the block and hands over at that instruction. When it is an observation gate's (a block starts
@@ -860,7 +893,8 @@ DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp) {
         served = g && g->kind == NXAOT_GATE_OBS;
     }
     jit_loop(t, lr, sp, 0, reason, first, served);
-    _mm_setcsr(dm_aot_guest_mxcsr(dm_aot_module_fpcr()));   // back to compiled code under its specialisation (jit_loop returns pending otherwise)
+    // Back to compiled code, which runs under the thread's FPCR (jit_loop returns pending otherwise): MXCSR from it, FZ included (the invariant above)
+    _mm_setcsr(dm_aot_guest_mxcsr(st->fpcr));
 }
 
 // The poll byte was set: clear it first (a request made after the clear sets it again), then the stop, the pause, the stop again
@@ -871,12 +905,18 @@ static void safepoint(dm_aot_thread *t) {
     check_stop(t);
 }
 
-DM_AOT_EXPORT void nxaot_rt_safepoint(dm_guest_state *st) { safepoint((dm_aot_thread *)st); }
+DM_AOT_EXPORT void nxaot_rt_safepoint(dm_guest_state *st) {
+    mxcsr_host(st);   // the MXCSR invariant (a pause may run anything of the host's; st->fpcr may have changed meanwhile)
+    safepoint((dm_aot_thread *)st);
+    mxcsr_guest(st);
+}
 
 DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st) {
-    (void)st;
+    mxcsr_host(st);   // the MXCSR invariant
     guest_clock_read_wait();          // waits while the app is in the background (hle_os.c)
-    return guest_ns() * 12 / 625;     // 19.2 MHz, as svcGetSystemTick (hle_svc.c) and the counter gate (hle.c) compute it
+    const uint64_t r = guest_ns() * 12 / 625;     // 19.2 MHz, as svcGetSystemTick (hle_svc.c) and the counter gate (hle.c) compute it
+    mxcsr_guest(st);
+    return r;
 }
 
 // An observation gate or a spin wait's back-edge (aot.h): hle.c's gate table, as dm_gate's frame reaches it on Apple, with the block's registers as the frame
@@ -893,5 +933,7 @@ DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site) {
     const dm_aot_pack *p = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
     const nxaot_gate_site *g = p ? nxaot_gate_at(dm_aot_pack_desc(p), site) : NULL;
     if (!g) die("[RED] aot: a gate call at module offset %#llx that no loaded pack's gate table lists (return address %p)", (unsigned long long)site, __builtin_return_address(0));
+    mxcsr_host(st);   // the MXCSR invariant: the observers' host code
     serve_gate(t, dm_aot_pack_base(p) + site, g->kind);
+    mxcsr_guest(st);
 }

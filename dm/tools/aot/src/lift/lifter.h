@@ -69,8 +69,28 @@ enum class NaNMode {
 
 struct FunctionPlan;
 
+// The families of instructions whose lowering depends on FPCR.FZ beyond MXCSR's FTZ and DAZ (aot-recompiler.md 7.1; dm/tools/aot/README.md, "FZ as a
+// run-time state", where the vectors under FZ found them): each tests FZ at run time when LiftOptions::fz_runtime is set. LiftOptions::fz_off names
+// families whose test is left out: the negative control of nxaot_vec (--fz-off), never a pack's
+enum FzFamily : uint32_t {
+    kFzMinMax = 1,     // FMAX / FMIN and the NM forms, scalar, vector and pairwise: the operands flushed
+    kFzMulAdd = 2,     // FMADD and its forms, FMLA / FMLS: a result of +-(smallest normal) by the software FPMulAdd; the invalid case's zero
+    kFzSteps = 4,      // FRECPS / FRSQRTS: the software step of a NaN or near-infinity lane given the FPCR of the moment
+    kFzHelpers = 8,    // the run-time helpers (the estimates, FCVTXN, the roundings and conversions they do): the FPCR of the moment as their argument
+    kFzIdc = 16,       // IDC for the operands of operations lowered in integers (the flags modelled)
+    kFzCompare = 32,   // FCMEQ / FCMGT / FCMGE (vector): the operands flushed, since LLVM folds a compare with zero into a test of the bits
+};
+const char* FzFamilyName(uint32_t family);                          // "minmax", "muladd", "steps", "helpers", "idc", "compare"
+uint32_t FzFamilies(const std::string& names, std::string* error);  // a comma-separated list of those names, or "all"
+
 struct LiftOptions {
-    uint32_t fpcr = 0;            // the FPCR the region is specialised for; only its mode bits (AHP, DN, FZ, RMode, FZ16) matter
+    // The FPCR the region is specialised for; only its mode bits (AHP, DN, FZ, RMode, FZ16) matter, and FZ only when fz_runtime is false
+    uint32_t fpcr = 0;
+    // FZ as a run-time state (7.1): the code is the same under both values of FPCR.FZ, the state being MXCSR's FTZ and DAZ (which msr fpcr and the
+    // host set) and a test of st->fpcr where a lowering depends on FZ itself (FzFamily). False: FZ is specialised like the other mode bits (nxaot_vec's
+    // --fz-specialised comparison and --lift-fpcr-clear control)
+    bool fz_runtime = true;
+    uint32_t fz_off = 0;          // FzFamily bits whose run-time test is left out (nxaot_vec --fz-off only)
     bool fpsr_flags = true;       // model the cumulative exception flags exactly (strict floating point; section 7.4)
     NaNMode nan_mode = NaNMode::Chains;
     Target target;
@@ -209,6 +229,10 @@ struct FunctionPlan {
 
 // The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
 constexpr uint32_t kFpcrModeMask = 0x07C80000;
+constexpr uint32_t kFpcrFz = 0x01000000;
+// What compiled code is specialised on with FZ a run-time state (7.1): AHP, DN, RMode and FZ16. Every check whether code may run under the FPCR of
+// the moment compares these: entries, resume points, a function's own return, msr fpcr, the JIT's stops and the host's
+constexpr uint32_t kFpcrSpecMask = kFpcrModeMask & ~kFpcrFz;
 
 // What a call may change, for a region that continues past it (Region::calls): the registers that may hold another value when the callee
 // returns (its interprocedural summary, src/analysis/summary.h). Everything else keeps its value across the call

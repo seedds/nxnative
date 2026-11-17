@@ -175,7 +175,16 @@ public:
     // ---- Floating point (lower_fp.cpp) ----
     uint32_t Fpcr() const { return fpcr; }
     bool DN() const { return (fpcr >> 25) & 1; }
-    bool FZ() const { return (fpcr >> 24) & 1; }
+    bool FZ() const { return (fpcr >> 24) & 1; }   // FZ specialised (LiftOptions::fz_runtime false); with FZ a run-time state, always false
+    // FZ as a run-time state (7.1; LiftOptions::fz_runtime): whether family's lowering tests FZ at run time; FzNow, FPCR.FZ of the moment (an i1 from
+    // st->fpcr, or the specialisation's constant); FpcrArg, the FPCR a helper is given (the specialisation's mode bits with FZ of the moment);
+    // SpecMask, the FPCR bits code is specialised on (kFpcrSpecMask, or kFpcrModeMask with FZ specialised)
+    bool FzTest(uint32_t family) const { return opts.fz_runtime && !(opts.fz_off & family); }
+    Value* FzNow(uint32_t family);
+    Value* FpcrArg(uint32_t family = kFzHelpers);
+    uint32_t SpecMask() const { return opts.fz_runtime ? kFpcrSpecMask : kFpcrModeMask; }
+    Value* FzMulAddFix(Value* r, Value* addend, Value* op1, Value* op2, bool sub);   // lower_fp.cpp: FZ of the moment on a fused multiply-add's result
+    llvm::Function* FzFmaFunction(llvm::Type* t, bool shared, bool define);          // its cold part, out of line (as NaNFunction)
     bool AHP() const { return (fpcr >> 26) & 1; }
     bool FZ16() const { return (fpcr >> 19) & 1; }
     unsigned RMode() const { return (fpcr >> 22) & 3; }
@@ -269,6 +278,7 @@ public:
     void Note(int issue) { issues.insert(issue); }
     // Arm's Input Denormal (IDC) under FPCR.FZ for the operands of an operation that unpacks them (FPUnpack): x86's DAZ flushes silently
     void InputDenormal(std::initializer_list<Value*> operand_bits);
+    void NativeInputDenormal(std::initializer_list<Value*> operand_bits);   // the same for an operation dynarmic computes natively (lower_fp.cpp)
     // The 64-bit vector forms (2S, 4H): the result's only uses keep its low 64 bits (VectorZeroUpper, SetD), so the upper lanes, zeros from
     // GetD, are computed by nobody on Arm and must raise no exception here
     bool LowHalfOnly(const IR::Inst& inst) const;

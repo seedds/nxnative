@@ -729,7 +729,7 @@ BasicBlock* FunctionLifter::OwnReturn() {
     B.SetInsertPoint(own_return_bb);
     // Its own return: st->pending is this function's entry lr, SP its entry SP and the FPCR the packs'
     Value* lr_ok = B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, pending)), entry_lr);
-    Value* fp_ok = B.CreateICmpEQ(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(kFpcrModeMask)), B.getInt32(fpcr));
+    Value* fp_ok = B.CreateICmpEQ(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(SpecMask())), B.getInt32(fpcr));
     Value* sp_ok = B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), F->getArg(1));
     B.CreateCondBr(B.CreateAnd(B.CreateAnd(lr_ok, sp_ok), fp_ok), take, away);
     B.SetInsertPoint(take);
@@ -1339,7 +1339,8 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
         Value* same_fpcr = nullptr;
         const auto here_of = [&](uint64_t r) {
             if (!same_fpcr) {
-                same_fpcr = B.CreateICmpEQ(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(kFpcrModeMask)),
+                // FZ is no specialisation (7.1): MXCSR follows st->fpcr on the way back (the host sets it when nxaot_rt_jit returns)
+                same_fpcr = B.CreateICmpEQ(B.CreateAnd(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)), B.getInt32(SpecMask())),
                                            B.getInt32(fpcr), "same_fpcr");
             }
             return B.CreateAnd(B.CreateAnd(B.CreateICmpEQ(pending, Rel(r)),

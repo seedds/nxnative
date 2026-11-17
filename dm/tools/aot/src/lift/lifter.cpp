@@ -64,13 +64,45 @@ uint32_t FpsrFromMxcsr(uint32_t mxcsr) {
     return (mxcsr & 0x1) | ((mxcsr & 0x3C) >> 1);
 }
 
+const char* FzFamilyName(uint32_t family) {
+    switch (family) {
+    case kFzMinMax: return "minmax";
+    case kFzMulAdd: return "muladd";
+    case kFzSteps: return "steps";
+    case kFzHelpers: return "helpers";
+    case kFzIdc: return "idc";
+    case kFzCompare: return "compare";
+    default: return "?";
+    }
+}
+
+uint32_t FzFamilies(const std::string& names, std::string* error) {
+    uint32_t out = 0;
+    size_t at = 0;
+    while (true) {
+        const size_t comma = names.find(',', at);
+        const std::string name = names.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        uint32_t one = name == "all" ? (kFzMinMax | kFzMulAdd | kFzSteps | kFzHelpers | kFzIdc | kFzCompare) : 0;
+        for (uint32_t f = 1; f <= kFzCompare && !one; f <<= 1) {
+            if (name == FzFamilyName(f)) one = f;
+        }
+        if (!one) {
+            *error = "no FZ family named '" + name + "' (minmax, muladd, steps, helpers, idc, compare, all)";
+            return 0;
+        }
+        out |= one;
+        if (comma == std::string::npos) return out;
+        at = comma + 1;
+    }
+}
+
 namespace detail {
 
 using namespace Dynarmic;
 
 FunctionLifter::FunctionLifter(llvm::Module& module, const Region& region, const decode::CodeReader& read, const LiftOptions& options)
         : M(module), C(module.getContext()), B(module.getContext(), llvm::InstSimplifyFolder(module.getDataLayout())), region(region), read(read),
-          opts(options), fpcr(options.fpcr & kFpcrModeMask), plan(options.plan) {}
+          opts(options), fpcr(options.fpcr & (options.fz_runtime ? kFpcrSpecMask : kFpcrModeMask)), plan(options.plan) {}
 
 // ---- Phase 1 ----
 
@@ -350,7 +382,9 @@ Lifted FunctionLifter::Run(const std::string& name) {
 
     // Floating point (section 7.1): the code runs under the MXCSR of the specialised FPCR. LLVM is told the rounding mode (constrained
     // intrinsics with a static mode, so that nothing is folded in another mode) and, when the cumulative flags are modelled (section 7.4), that
-    // the exceptions are observable (strict: no operation is removed, speculated or folded away). FZ is flush-to-zero and denormals-are-zero
+    // the exceptions are observable (strict: no operation is removed, speculated or folded away). FZ is flush-to-zero and denormals-are-zero, a
+    // run-time state (LiftOptions::fz_runtime): "dynamic" tells LLVM that either mode may hold, so that nothing is folded for one of them (the corpus's
+    // FP and SIMD programs and the benchmark compile to the same bytes as with "ieee": dm/tools/aot/README.md, "FZ as a run-time state")
     const bool constrained = opts.fpsr_flags || RMode() != 0;
     if (constrained) {
         F->addFnAttr(llvm::Attribute::StrictFP);
@@ -358,8 +392,9 @@ Lifted FunctionLifter::Run(const std::string& name) {
         B.setDefaultConstrainedRounding(RoundingOf(RMode()));
         B.setDefaultConstrainedExcept(opts.fpsr_flags ? llvm::fp::ebStrict : llvm::fp::ebIgnore);
     }
-    F->addFnAttr("denormal-fp-math", FZ() ? "preserve-sign,preserve-sign" : "ieee,ieee");
-    F->addFnAttr("denormal-fp-math-f32", FZ() ? "preserve-sign,preserve-sign" : "ieee,ieee");
+    const char* denormal = opts.fz_runtime ? "dynamic,dynamic" : FZ() ? "preserve-sign,preserve-sign" : "ieee,ieee";
+    F->addFnAttr("denormal-fp-math", denormal);
+    F->addFnAttr("denormal-fp-math-f32", denormal);
 
     for (auto& [pc, block] : blocks) {
         bbs[pc] = BasicBlock::Create(C, "pc_" + llvm::utohexstr(pc), F);
@@ -595,7 +630,7 @@ void FunctionLifter::LowerTerminal(const IR::Terminal& t) {
             // specialised for the new value (section 7.1: the JIT, or another specialisation)
             auto* same_bb = BasicBlock::Create(C, "fpcr_same", F);
             auto* other_bb = BasicBlock::Create(C, "fpcr_changed", F);
-            Value* same = B.CreateICmpEQ(B.CreateAnd(new_fpcr, kFpcrModeMask), B.getInt32(fpcr));
+            Value* same = B.CreateICmpEQ(B.CreateAnd(new_fpcr, SpecMask()), B.getInt32(fpcr));   // FZ alone: MXCSR changed above, the code goes on
             B.CreateCondBr(same, same_bb, other_bb);
             B.SetInsertPoint(other_bb);
             Exit(last_pc, DM_EXIT_NONE, I(32, 0));

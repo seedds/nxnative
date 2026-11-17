@@ -41,9 +41,15 @@ public:
     std::string Cpu() const;
     lift::Target Target() const;
     size_t Continuations() const;  // functions lifted for a continuation (Run)
-    // --lift-fpcr-clear: lift every region as if these FPCR bits were clear, while it runs under the vector's FPCR (MXCSR from it): what compiled code
-    // specialised for FPCR 0 does under another FPCR at run time (dm/tools/aot/README.md, "FZ as a run-time state")
+    // FZ is a run-time state (lift::LiftOptions::fz_runtime), as in a pack: one function for a vector's code under both values of FZ, run under the
+    // vector's FPCR and its MXCSR.
+    // --lift-fpcr-clear: the negative control: lift every region as if these FPCR bits were clear and FZ were specialised (no run-time test), while
+    // it runs under the vector's FPCR (MXCSR from it): what code specialised for FZ clear does under FZ (dm/tools/aot/README.md, "FZ as a run-time
+    // state"). --fz-off: the run-time test of these lift::FzFamily families left out (each family's own control). --fz-specialised: FZ specialised
+    // like the other mode bits, as before FZ was a run-time state (the comparison)
     void SetLiftFpcrClear(uint32_t mask);
+    void SetFzOff(uint32_t families);
+    void SetFzSpecialised(bool on);
 
 private:
     Lifted();

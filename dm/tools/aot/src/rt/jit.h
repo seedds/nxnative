@@ -64,7 +64,8 @@ typedef struct dm_jit_range {
 typedef struct dm_jit_host {
     const dm_jit_range *code;    // the guest code the JIT may translate (copied): no instruction anywhere else (DM_JIT_NO_CODE)
     unsigned code_count;
-    uint32_t fpcr;               // the FPCR mode bits compiled code is specialised for: DM_JIT_ENTRY and DM_JIT_RETURN apply only under them
+    uint32_t fpcr;               // the FPCR mode bits compiled code is specialised for: DM_JIT_ENTRY and DM_JIT_RETURN apply only under them (FZ is no
+                                 // specialisation, design 7.1: neither this value's nor the guest's FZ counts)
     unsigned max_threads;        // the shared exclusive monitor's processors: at most this many instances at a time
     size_t code_cache;           // bytes of code cache per instance (16 MB)
     void *ctx;                   // passed to the callbacks

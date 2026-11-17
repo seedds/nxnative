@@ -42,9 +42,12 @@
 //     caller's frame then takes its own return (lower_calls.cpp FnCall)
 //   fpresume, with the JIT built in and nxaot (it packs it, with a misses file the test writes): fpret's shape with the caller's call site a resume point, which the
 //     JIT runs through under RZ: its frame never resumes there natively under another FPCR (lower_calls.cpp FnCall)
-//   fpframe, fprec, with the JIT built in and nxaot (it packs them): a frame's own return taken from a pending transfer after a flush-to-zero section the JIT ran
-//     (dm/tools/aot/README.md, "A return no native frame took"): a job wrapper called through a pointer, a recursion whose frames share their return address, and
-//     that recursion with a resume point at that address; no `nonlocal` miss, the JIT runs bounded
+//   fpframe, fprec, with the JIT built in and nxaot (it packs them): a frame's own return taken from a pending transfer after a section under round towards zero
+//     the JIT ran (dm/tools/aot/README.md, "A return no native frame took"): a job wrapper called through a pointer, a recursion whose frames share their return
+//     address, and that recursion with a resume point at that address; no `nonlocal` miss, the JIT runs bounded
+//   fzsec, with nxaot (it packs it), natively and with the JIT built in also with every instruction in the JIT (DM_AOT_JIT_ALL): a flush-to-zero section in compiled
+//     code (FZ a run-time state, design 7.1): FP-free code, FP code of each family whose lowering tests FZ, a host function's float work (the host's MXCSR), a
+//     pause at a poll inside the section, and a return across the section's end; no JIT run natively, and the same results as the JIT's
 //   pollkeep, with nxaot (it packs it): a module this test writes word by word whose leaf keeps x19 but stores its own x19 in a loop's poll (the poll byte set by a host
 //     function first): the leaf stores the restored x19 again before it returns, and its caller's caller, which reloads x19 after an indirect call, finds its own
 //     (lower_calls.cpp FnDataflow: a poll's and a gate's stores count in restore_block)
@@ -113,6 +116,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc
 uint64_t t_aot_hidden(uint64_t x);   // t_aot_host_entries.c
 void t_aot_pause_tester(uint64_t arg);
 uint64_t t_aot_poll_self(uint64_t x);
+uint64_t t_aot_fz_host(uint64_t x);
 // t_aot_poll_self's request: the calling thread's poll byte (guest_state.h), as a pause request sets it
 void t_aot_poll_request(void) {
     dm_guest_state *st = dm_aot_self_state();
@@ -229,6 +233,7 @@ typedef struct {
     int bt;                                         // --bt <mode>: guestbt's mode, with the host function and the address no page backs it reads (guestbt_nro)
     long hostfn;                                    // --hostfn <module offset>: the guest-visible address of t_aot_hidden written there (fpret_nro), 0: none
     long pollfn;                                    // --pollfn <module offset>: the guest-visible address of t_aot_poll_self written there (pollkeep_nro), 0: none
+    long fzfn;                                      // --fzfn <module offset>: the guest-visible address of t_aot_fz_host written there (fzsec_nro), 0: none
 } run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -282,6 +287,10 @@ static void *guest_main(void *p) {
     if (a->pollfn) {   // pollkeep_nro's request through a pointer in its data
         const uint64_t fn = dm_guest_fn((const void *)t_aot_poll_self);
         memcpy((uint8_t *)m->base + a->pollfn, &fn, 8);
+    }
+    if (a->fzfn) {   // fzsec_nro's host function that does float work
+        const uint64_t fn = dm_guest_fn((const void *)t_aot_fz_host);
+        memcpy((uint8_t *)m->base + a->fzfn, &fn, 8);
     }
     if (a->hidden) {   // fnptr's hidden_ptr: the guest-visible address of a host function (2.4)
         uint64_t *hp = module_sym(m, "hidden_ptr");
@@ -446,6 +455,7 @@ static int child(int argc, char **argv) {
         else if (!strcmp(argv[i], "--hidden-host")) a.hidden = 1;
         else if (!strcmp(argv[i], "--hostfn") && i + 1 < argc) a.hostfn = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pollfn") && i + 1 < argc) a.pollfn = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--fzfn") && i + 1 < argc) a.fzfn = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
         else if (!strcmp(argv[i], "--positions")) a.positions = 1;
         else if (!strcmp(argv[i], "--jit-ready")) a.jit_ready = 1;
@@ -2759,23 +2769,25 @@ static void casecall_rows_packed(const char *self, const char *nxaot) {
 }
 
 // ---------- A return no native frame took (dm/tools/aot/README.md, "A return no native frame took") ----------
-// Words both NROs below share: SETFZ (mrs x1, fpcr; movz x2, #0x100, lsl #16; orr x1, x1, x2; msr fpcr, x1; ret) sets FZ, RESTORE (the same with bic) clears it,
-// keeping x0; FPCHECK (adr x10, the two floats; ldr s0; ldr s1; fmul s2, s0, s1; fcmp s2, #0.0; cset w9, eq) gives w9 = 1 when 2^-126 * 0.5 flushed to zero
-// (FZ: the JIT under the FPCR the guest set), 0 when not (compiled code, specialised for FPCR 0)
-static size_t fp_setfz(uint32_t *w, size_t n, int clear) {
+// Words the NROs below share: SETRZ (mrs x1, fpcr; movz x2, #0xc0, lsl #16; orr x1, x1, x2; msr fpcr, x1; ret) sets FPCR.RMode to round towards zero, RESTORE (the
+// same with bic) clears it, keeping x0 (fp_setbits; fzsec's SETFZ and ENDFZ the same with FZ, bit 24); FPCHECK (adr x10, the two floats; ldr s0; ldr s1; fadd s2,
+// s0, s1; fcmp s2, s0; cset w9, eq) gives w9 = 1 when 1 + 0.75 ulp rounded down to 1 (RZ: the JIT under the FPCR the guest set), 0 when not (compiled code,
+// specialised for round to nearest). Round 8 wrote these rows with FZ; FZ is a run-time state of compiled code since (design 7.1), RMode still leaves it
+static size_t fp_setbits(uint32_t *w, size_t n, int clear, unsigned bits_lsl16) {
     w[n++] = 0xD53B4401u;               // mrs x1, fpcr
-    w[n++] = 0xD2A02002u;               // movz x2, #0x100, lsl #16 (FZ, bit 24)
+    w[n++] = a_movz16(2, bits_lsl16);   // movz x2, #bits, lsl #16 (0xc0: RMode = 3, RZ; 0x100: FZ, bit 24)
     w[n++] = clear ? 0x8A220021u : 0xAA020021u;   // bic / orr x1, x1, x2
     w[n++] = 0xD51B4401u;               // msr fpcr, x1
     w[n++] = 0xD65F03C0u;               // ret
     return n;
 }
+static size_t fp_setfz(uint32_t *w, size_t n, int clear) { return fp_setbits(w, n, clear, 0xC0); }   // SETRZ / RESTORE
 static size_t fp_check(uint32_t *w, size_t n, size_t consts) {   // consts: the floats' module offset
     w[n] = a_adr(10, (int64_t)consts - (int64_t)n * 4); n++;   // adr x10, the floats
-    w[n++] = 0xBD400140u;               // ldr s0, [x10]
-    w[n++] = 0xBD400541u;               // ldr s1, [x10, #4]
-    w[n++] = 0x1E210802u;               // fmul s2, s0, s1
-    w[n++] = 0x1E202048u;               // fcmp s2, #0.0
+    w[n++] = 0xBD400140u;               // ldr s0, [x10]       (1.0)
+    w[n++] = 0xBD400541u;               // ldr s1, [x10, #4]   (1.5 * 2^-24: 0.75 ulp of 1.0)
+    w[n++] = 0x1E212802u;               // fadd s2, s0, s1
+    w[n++] = 0x1E202040u;               // fcmp s2, s0
     w[n++] = 0x1A9F17E9u;               // cset w9, eq
     return n;
 }
@@ -2794,13 +2806,13 @@ static void fp_image(uint8_t *img, const uint32_t *w, size_t n, size_t start, co
     snprintf(fail, sizeof fail, "%s FAIL", name);
     memcpy(img + pass_at, pass, strlen(pass));
     memcpy(img + fail_at, fail, strlen(fail));
-    const uint32_t f[2] = {0x00800000u, 0x3F000000u};   // 2^-126 (the smallest normal float) and 0.5
+    const uint32_t f[2] = {0x3F800000u, 0x33C00000u};   // 1.0 and 1.5 * 2^-24 (FPCHECK)
     memcpy(img + consts, f, sizeof f);
 }
 
 // The NRO fpframe, the physics workers' shape (Mario vs. Donkey Kong's main+0xa012f4 calling a job through a pointer, the job's FP environment scope around its work):
-// start calls F FPFRAME_N times; F calls D through a pointer (blr); D calls SETFZ, whose msr fpcr hands the rest of D to the JIT (FZ, design 7.1), checks FZ
-// (FPCHECK), calls RESTORE and returns 1 + w9 to F. The JIT runs from SETFZ's hand-over through D's return, where the packs' FPCR is back: a pending transfer
+// start calls F FPFRAME_N times; F calls D through a pointer (blr); D calls SETRZ, whose msr fpcr hands the rest of D to the JIT (RZ, design 7.1), checks RZ
+// (FPCHECK), calls RESTORE and returns 1 + w9 to F. The JIT runs from SETRZ's hand-over through D's return, where the packs' FPCR is back: a pending transfer
 // to D's own return address with F's SP, which D's frame takes as its own return, so F and start go on natively. Before: no frame took it, a `nonlocal`
 // miss at F's call site, and the rest of start's loop in the JIT
 enum { FPFRAME_N = 16 };
@@ -2853,11 +2865,11 @@ static size_t fpframe_nro(uint8_t *img, size_t cap, uint64_t *f_ret) {
     w[n++] = 0xA9BE7BFDu;               // stp x29, x30, [sp, #-32]!
     w[n++] = 0x910003FDu;
     w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
-    const size_t call_set = n++;        // bl SETFZ
+    const size_t call_set = n++;        // bl SETRZ
     n = fp_check(w, n, CONSTS);
     w[n++] = a_mov(19, 9);
     const size_t call_restore = n++;    // bl RESTORE
-    w[n++] = a_addi(0, 19, 1);          // 1 + (FZ flushed)
+    w[n++] = a_addi(0, 19, 1);          // 1 + (rounded towards zero)
     w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
     w[n++] = 0xA8C27BFDu;               // ldp x29, x30, [sp], #32
     w[n++] = 0xD65F03C0u;               // ret
@@ -2873,8 +2885,8 @@ static size_t fpframe_nro(uint8_t *img, size_t cap, uint64_t *f_ret) {
     return SIZE;
 }
 
-// The NRO fprec, recursion: start calls R(3). R(0) calls SETFZ and returns 100 (under FZ: the JIT runs on through R(0)'s return into R(1)); R(n) calls R(n - 1)
-// (every frame's return address the same, RR) and adds n; R(1) also adds 1000 when FZ flushed its FPCHECK, and tail-calls RESTORE, whose return under the packs'
+// The NRO fprec, recursion: start calls R(3). R(0) calls SETRZ and returns 100 (under RZ: the JIT runs on through R(0)'s return into R(1)); R(n) calls R(n - 1)
+// (every frame's return address the same, RR) and adds n; R(1) also adds 1000 when its FPCHECK rounded towards zero, and tail-calls RESTORE, whose return under the packs'
 // FPCR goes to R(2)'s call site, RR, with R(1)'s entry SP. R(0)'s frame sees that transfer first: its return address is RR too, but its entry SP is lower, so it
 // passes it on; R(1)'s frame takes it as its own return. 1106 = 100 + 1 + 1000 + 2 + 3. The resume variant packs it with a misses file that makes RR a resume point
 // of R's call sites (a `nonlocal` row, as a landing pad or a setjmp continuation is one): each frame tries its resume points first, and RR at a frame's own SP
@@ -2911,7 +2923,7 @@ static size_t fprec_nro(uint8_t *img, size_t cap, uint64_t *rr) {
     w[n++] = 0xF9000BF3u;               // str x19, [sp, #16]
     w[n++] = a_mov(19, 0);
     const size_t to_rec = n++;          // cbnz x19, rec
-    const size_t call_set = n++;        // bl SETFZ
+    const size_t call_set = n++;        // bl SETRZ
     w[n++] = a_movz(0, 100);
     w[n++] = 0xF9400BF3u;               // ldr x19, [sp, #16]
     w[n++] = 0xA8C27BFDu;               // ldp x29, x30, [sp], #32
@@ -2949,8 +2961,8 @@ static size_t fprec_nro(uint8_t *img, size_t cap, uint64_t *rr) {
     return SIZE;
 }
 
-// The rows: fpframe (no `nonlocal` miss, two JIT runs per call of D: SETFZ's hand-over to D's call of RESTORE, then on to D's return), fprec and fprec with a resume
-// point at RR (no `nonlocal`, one JIT run). Each run's FZ check proves the FP work ran under FZ (the JIT): the sum would be short by it otherwise
+// The rows: fpframe (no `nonlocal` miss, two JIT runs per call of D: SETRZ's hand-over to D's call of RESTORE, then on to D's return), fprec and fprec with a resume
+// point at RR (no `nonlocal`, one JIT run). Each run's RZ check proves the FP work ran under RZ (the JIT): the sum would be short by it otherwise
 static void fpframe_rows(const char *self, const char *nxaot) {
     if (!NXHOST_JIT) { printf("%-14s %-9s note: no JIT fallback (NXHOST_JIT): not run\n", "fpframe", "own-ret"); return; }
     if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): fpframe is not packed here\n", "fpframe", "own-ret"); return; }
@@ -2993,14 +3005,189 @@ static void fpframe_rows(const char *self, const char *nxaot) {
         const uint64_t max_runs = k == 0 ? 2 * FPFRAME_N : 1;
         const int ok = r.status == 0 && !strcmp(r.guest, want) && r.have_jit && r.jit[3] == 0 && r.jit[0] <= max_runs;
         if (k == 0) {
-            snprintf(note, sizeof note, "%d calls of D through a pointer, each setting FZ: %llu JIT runs (want at most %llu), %llu nonlocal (want 0), %llu misses; its return at F's call site +%#llx",
+            snprintf(note, sizeof note, "%d calls of D through a pointer, each setting RZ: %llu JIT runs (want at most %llu), %llu nonlocal (want 0), %llu misses; its return at F's call site +%#llx",
                      FPFRAME_N, (unsigned long long)r.jit[0], (unsigned long long)max_runs, (unsigned long long)r.jit[3], (unsigned long long)r.jit[2], (unsigned long long)addr);
         } else {
-            snprintf(note, sizeof note, "R(3), FZ set in R(0) and cleared by R(1)'s tail call%s: %llu JIT runs (want at most 1), %llu nonlocal (want 0), %llu misses; RR +%#llx",
+            snprintf(note, sizeof note, "R(3), RZ set in R(0) and cleared by R(1)'s tail call%s: %llu JIT runs (want at most 1), %llu nonlocal (want 0), %llu misses; RR +%#llx",
                      k == 2 ? ", RR a resume point" : "", (unsigned long long)r.jit[0], (unsigned long long)r.jit[3], (unsigned long long)r.jit[2], (unsigned long long)addr);
         }
         if (r.red[0] && strlen(note) + strlen(r.red) + 3 < sizeof note) { strcat(note, "; "); strcat(note, r.red); }
         row(name, run, ok, &r, note);
+        if (r.guest != no_lines) free(r.guest);
+    }
+}
+
+// ---------- FZ a run-time state of compiled code (design 7.1; dm/tools/aot/README.md, "FZ as a run-time state") ----------
+// The NRO fzsec, a flush-to-zero section in compiled code: start calls SETFZ (msr fpcr with FZ: compiled code goes on, MXCSR's FTZ and DAZ set by it), then under FZ:
+// G, FP-free (a loop whose count comes from data, so that its back-edge keeps its poll), H, FP code of the families whose lowering tests FZ, a host function that does
+// float work (t_aot_fz_host through a pointer in data, FZSEC_FZFN: 2^-126 * 0.5 and 2^-127 * 2 in C, whose results need the host's MXCSR, FTZ and DAZ clear), the host
+// function that sets the thread's poll byte (FZSEC_POLLFN), G again (its poll takes the path a pause takes: aot_run.c nxaot_rt_safepoint), H again (MXCSR after it),
+// ENDFZ (clears FZ and returns: a return across the section's end), H once more (now 0). H gives 1 for each of: fmul 2^-126 * 0.5 flushed (MXCSR's FTZ),
+// fmax(+smallest denormal, -0) = +0 (the operands flushed: kFzMinMax), fmadd(1 - 2^-24, 2^-126, +0) = +0 (flushed before rounding where x86 rounds to the smallest
+// normal: kFzMulAdd), frecpe(2^-127) = +infinity (the operand flushed: the helper given FZ, kFzHelpers); 4 under FZ, 0 without. PASS when G gave 136 twice, H 4
+// twice and 0 after the section, and the host function 0x0040000000800000
+enum { FZSEC_FZFN = 0x2000, FZSEC_POLLFN = 0x2008 };
+static size_t fzsec_nro(uint8_t *img, size_t cap) {
+    enum { RO = 0x1000, DATA = 0x2000, SIZE = 0x3000, PASS_AT = RO + 0x100, FAIL_AT = RO + 0x120, CONSTS = RO + 0x140, COUNT = DATA + 16 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[256] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BD7BFDu;               // stp x29, x30, [sp, #-48]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = 0xA9025BF5u;               // stp x21, x22, [sp, #32]
+    w[n++] = a_movz(19, 0);
+    w[n++] = a_movz(20, 0);
+    const size_t call_set = n++;        // bl SETFZ
+    const size_t call_g1 = n++;         // bl G
+    w[n++] = a_addr(19, 19, 0, 0);
+    const size_t call_h1 = n++;         // bl H
+    w[n++] = a_addr(20, 20, 0, 0);
+    w[n] = a_adr(9, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x9, DATA
+    w[n++] = 0xF9400130u;               // ldr x16, [x9]        (t_aot_fz_host)
+    w[n++] = a_movz(0, 0);
+    w[n++] = 0xD63F0200u;               // blr x16
+    w[n++] = a_movz16(9, 0x80);         // movz x9, #0x80, lsl #16
+    w[n++] = 0xF2E00809u;               // movk x9, #0x40, lsl #48   (0x0040000000800000)
+    w[n++] = a_cmp(0, 9);
+    w[n++] = 0x9A9F17F5u;               // cset x21, eq
+    w[n] = a_adr(9, (int64_t)DATA - (int64_t)n * 4); n++;
+    w[n++] = 0xF9400530u;               // ldr x16, [x9, #8]    (t_aot_poll_self)
+    w[n++] = a_movz(0, 0);
+    w[n++] = 0xD63F0200u;               // blr x16
+    const size_t call_g2 = n++;         // bl G (its poll: the pause path)
+    w[n++] = a_addr(19, 19, 0, 0);
+    const size_t call_h2 = n++;         // bl H
+    w[n++] = a_addr(20, 20, 0, 0);
+    const size_t call_end = n++;        // bl ENDFZ
+    const size_t call_h3 = n++;         // bl H (FZ clear)
+    w[n++] = a_mov(22, 0);
+    w[n++] = a_movz(9, 272);
+    w[n++] = a_cmp(19, 9);
+    const size_t to_fail1 = n++;
+    w[n++] = a_movz(9, 8);
+    w[n++] = a_cmp(20, 9);
+    const size_t to_fail2 = n++;
+    w[n++] = a_cmpi(21, 1);
+    const size_t to_fail3 = n++;
+    w[n++] = a_cmpi(22, 0);
+    const size_t to_fail4 = n++;
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 10);             // "fzsec PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27
+    const size_t to_exit = n++;
+    w[to_fail1] = a_bcond(A_NE, (int64_t)(n - to_fail1) * 4);
+    w[to_fail2] = a_bcond(A_NE, (int64_t)(n - to_fail2) * 4);
+    w[to_fail3] = a_bcond(A_NE, (int64_t)(n - to_fail3) * 4);
+    w[to_fail4] = a_bcond(A_NE, (int64_t)(n - to_fail4) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 10);             // "fzsec FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit] = a_b((int64_t)(n - to_exit) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    const size_t G = n;                 // G: x0 = count + ... + 1, the count from data
+    w[call_g1] = a_bl((int64_t)(G - call_g1) * 4);
+    w[call_g2] = a_bl((int64_t)(G - call_g2) * 4);
+    w[n] = a_adr(9, (int64_t)DATA - (int64_t)n * 4); n++;
+    w[n++] = 0xF9400921u;               // ldr x1, [x9, #16]
+    w[n++] = a_movz(0, 0);
+    const size_t loop = n;
+    w[n++] = a_addr(0, 0, 1, 0);        // add x0, x0, x1
+    w[n++] = 0xD1000421u;               // sub x1, x1, #1
+    w[n] = 0xB5000000u | (uint32_t)(((int64_t)(loop - n) & 0x7FFFF) << 5) | 1; n++;   // cbnz x1, loop
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t H = n;                 // H: the four checks
+    w[call_h1] = a_bl((int64_t)(H - call_h1) * 4);
+    w[call_h2] = a_bl((int64_t)(H - call_h2) * 4);
+    w[call_h3] = a_bl((int64_t)(H - call_h3) * 4);
+    w[n] = a_adr(10, (int64_t)CONSTS - (int64_t)n * 4); n++;
+    w[n++] = 0xBD400140u;               // ldr s0, [x10]        2^-126
+    w[n++] = 0xBD400541u;               // ldr s1, [x10, #4]    0.5
+    w[n++] = 0x1E210802u;               // fmul s2, s0, s1
+    w[n++] = 0x1E202048u;               // fcmp s2, #0.0
+    w[n++] = 0x1A9F17E9u;               // cset w9, eq
+    w[n++] = 0xBD400945u;               // ldr s5, [x10, #8]    +smallest denormal
+    w[n++] = 0xBD400D46u;               // ldr s6, [x10, #12]   -0
+    w[n++] = 0x1E2648A4u;               // fmax s4, s5, s6
+    w[n++] = 0x1E26008Bu;               // fmov w11, s4
+    w[n++] = a_cmpwi(11, 0);
+    w[n++] = 0x1A9F17ECu;               // cset w12, eq
+    w[n++] = 0xBD40114Du;               // ldr s13, [x10, #16]  1 - 2^-24
+    w[n++] = 0xBD40154Eu;               // ldr s14, [x10, #20]  2^-126
+    w[n++] = 0xBD40194Fu;               // ldr s15, [x10, #24]  +0
+    w[n++] = 0x1F0E3DA7u;               // fmadd s7, s13, s14, s15
+    w[n++] = 0x1E2600EBu;               // fmov w11, s7
+    w[n++] = a_cmpwi(11, 0);
+    w[n++] = 0x1A9F17EDu;               // cset w13, eq
+    w[n++] = 0xBD401D4Au;               // ldr s10, [x10, #28]  2^-127
+    w[n++] = 0x5EA1D949u;               // frecpe s9, s10
+    w[n++] = 0x1E26012Bu;               // fmov w11, s9
+    w[n++] = 0x52AFF00Eu;               // movz w14, #0x7f80, lsl #16   (+infinity)
+    w[n++] = 0x6B0E017Fu;               // cmp w11, w14
+    w[n++] = 0x1A9F17EEu;               // cset w14, eq
+    w[n++] = a_addr(0, 9, 12, 0);
+    w[n++] = a_addr(0, 0, 13, 0);
+    w[n++] = a_addr(0, 0, 14, 0);
+    w[n++] = 0xD65F03C0u;               // ret
+    const size_t setfz = n;
+    w[call_set] = a_bl((int64_t)(setfz - call_set) * 4);
+    n = fp_setbits(w, n, 0, 0x100);
+    const size_t endfz = n;
+    w[call_end] = a_bl((int64_t)(endfz - call_end) * 4);
+    n = fp_setbits(w, n, 1, 0x100);
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    fp_image(img, w, n, start, "fzsec", PASS_AT, FAIL_AT, CONSTS);
+    const uint32_t f[8] = {0x00800000u, 0x3F000000u, 0x00000001u, 0x80000000u, 0x3F7FFFFFu, 0x00800000u, 0x00000000u, 0x00400000u};
+    memcpy(img + CONSTS, f, sizeof f);
+    const uint64_t count = 16;
+    memcpy(img + COUNT, &count, 8);
+    return SIZE;
+}
+
+// The rows: natively, PASS with no JIT run and no miss (the poll inside the section runs the safepoint path a pause runs); with the JIT built in, also every instruction in the JIT (DM_AOT_JIT_ALL):
+// PASS, the same results. Without the JIT (NXHOST_JIT off) the native row runs as well: an FZ section needs no JIT (design 7.1)
+static void fzsec_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): fzsec is not packed here\n", "fzsec", "native"); return; }
+    static uint8_t img[0x3000];
+    static char no_lines[1];
+    char nro[200], pack[200], line[600] = "", note[1400], extra[96];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/fzsec", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/fzsec/fzsec.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/fzsec/fzsec%s", PACK_EXT);
+    const size_t len = fzsec_nro(img, sizeof img);
+    result r;
+    memset(&r, 0, sizeof r);
+    r.guest = no_lines;
+    const int wrote = len && write_file(nro, img, len);
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("fzsec", "native", 0, &r, note);
+        return;
+    }
+    snprintf(extra, sizeof extra, "--fzfn %#x --pollfn %#x", FZSEC_FZFN, FZSEC_POLLFN);
+    for (int k = 0; k < 2; k++) {
+        if (k == 1 && !NXHOST_JIT) { printf("%-14s %-9s note: no JIT fallback (NXHOST_JIT): not run\n", "fzsec", "jit-all"); break; }
+        memset(&r, 0, sizeof r);
+        r.guest = no_lines;
+        if (k == 1) set_env("DM_AOT_JIT_ALL", "1");
+        run_child(self, pack, nro, extra, &r);
+        if (k == 1) set_env("DM_AOT_JIT_ALL", NULL);
+        const int pass = r.status == 0 && !strcmp(r.guest, "fzsec PASS\n");
+        int ok = pass;
+        if (k == 0) {
+            ok = ok && r.have_jit && r.jit[0] == 0 && r.jit[2] == 0;
+            snprintf(note, sizeof note, "a flush-to-zero section in compiled code (FP-free code, the FZ families, a host function's float work, a pause, a return across its end): "
+                     "%s, %llu JIT runs (want 0), %llu misses (want 0)", pass ? "PASS" : "FAIL", r.jit[0], r.jit[2]);
+        } else {
+            snprintf(note, sizeof note, "the same with every instruction in the JIT (DM_AOT_JIT_ALL): %s (the same results)", pass ? "PASS" : "FAIL");
+        }
+        if (r.red[0] && strlen(note) + strlen(r.red) + 3 < sizeof note) { strcat(note, "; "); strcat(note, r.red); }
+        row("fzsec", k ? "jit-all" : "native", ok, &r, note);
         if (r.guest != no_lines) free(r.guest);
     }
 }
@@ -3544,6 +3731,9 @@ int main(int argc, char **argv) {
     int fpframe = !nonly;
     for (int i = 0; i < nonly; i++) fpframe |= !strcmp(only[i], "fpframe") || !strcmp(only[i], "fprec");
     if (fpframe) fpframe_rows(argv[0], nxaot);   // 13. A return no native frame took: a frame's own return from a pending transfer
+    int fzsec = !nonly;
+    for (int i = 0; i < nonly; i++) fzsec |= !strcmp(only[i], "fzsec");
+    if (fzsec) fzsec_rows(argv[0], nxaot);   // 14. FZ a run-time state: a flush-to-zero section in compiled code
     printf("t_aot_host: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

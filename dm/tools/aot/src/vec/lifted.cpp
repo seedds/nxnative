@@ -52,14 +52,32 @@ struct Lifted::Impl {
     lift::Target target;
     lift::NaNMode nan_mode = lift::NaNMode::Chains;
     bool fpsr_flags = true;
-    uint32_t lift_clear = 0;   // SetLiftFpcrClear
+    uint32_t lift_clear = 0;   // SetLiftFpcrClear: those bits cleared and FZ specialised (the negative control)
+    uint32_t fz_off = 0;       // SetFzOff
+    bool fz_specialised = false;   // SetFzSpecialised
     uint8_t* image = nullptr;
     size_t counter = 0;
+    // (code, pc, FPCR as lifted) -> the continuation's function and its issues
     std::map<std::tuple<std::vector<uint32_t>, uint64_t, uint32_t>, std::pair<void*, std::vector<int>>> continuations;
+
+    // The options a region is lifted with: as a pack's (FZ a run-time state), or with FZ specialised (the comparison, and the control)
+    lift::LiftOptions Options(uint32_t fpcr) const {
+        lift::LiftOptions o;
+        o.fz_runtime = !lift_clear && !fz_specialised;
+        o.fpcr = fpcr & ~lift_clear;
+        o.fz_off = fz_off;
+        o.fpsr_flags = fpsr_flags;
+        o.nan_mode = nan_mode;
+        o.target = target;
+        return o;
+    }
+    static uint32_t KeyFpcr(const lift::LiftOptions& o) { return o.fpcr & (o.fz_runtime ? lift::kFpcrSpecMask : lift::kFpcrModeMask); }
 };
 
 Lifted::Lifted() : impl(std::make_unique<Impl>()) {}
 void Lifted::SetLiftFpcrClear(uint32_t mask) { impl->lift_clear = mask; }
+void Lifted::SetFzOff(uint32_t families) { impl->fz_off = families; }
+void Lifted::SetFzSpecialised(bool on) { impl->fz_specialised = on; }
 Lifted::~Lifted() = default;
 
 std::unique_ptr<Lifted> Lifted::Create(const std::string& cpu, lift::NaNMode nan_mode, bool fpsr_flags, std::string* error) {
@@ -112,7 +130,8 @@ std::vector<Prepared> Lifted::Prepare(const std::vector<const Vector*>& batch, b
     std::map<std::pair<std::vector<uint32_t>, uint32_t>, size_t> same;  // (code, FPCR) -> the first vector of the batch with them
     for (size_t i = 0; i < batch.size(); ++i) {
         const Vector& v = *batch[i];
-        const auto key = std::make_pair(v.code, v.fpcr & lift::kFpcrModeMask & ~impl->lift_clear);
+        const lift::LiftOptions options = impl->Options(v.fpcr);
+        const auto key = std::make_pair(v.code, Impl::KeyFpcr(options));
         const auto first = same.find(key);
         if (first != same.end()) {
             out[i] = out[first->second];
@@ -130,11 +149,6 @@ std::vector<Prepared> Lifted::Prepare(const std::vector<const Vector*>& batch, b
             }
             return v.code[(vaddr - kCodeBase) / 4];
         };
-        lift::LiftOptions options;
-        options.fpcr = v.fpcr & ~impl->lift_clear;
-        options.fpsr_flags = impl->fpsr_flags;
-        options.nan_mode = impl->nan_mode;
-        options.target = impl->target;
         names[i] = "v" + std::to_string(impl->counter++);
         lift::Lifted l = lift::LiftRegion(*module, names[i], region, read, options);
         out[i].unsupported = std::move(l.unsupported);
@@ -173,8 +187,8 @@ std::vector<Prepared> Lifted::Prepare(const std::vector<const Vector*>& batch, b
 }
 
 void* Lifted::Continuation(const Vector& v, uint64_t pc, uint32_t fpcr, std::vector<int>* issues, std::string* error) {
-    fpcr &= ~impl->lift_clear;
-    const auto key = std::make_tuple(v.code, pc, fpcr & lift::kFpcrModeMask);
+    const lift::LiftOptions options = impl->Options(fpcr);
+    const auto key = std::make_tuple(v.code, pc, Impl::KeyFpcr(options));
     const auto it = impl->continuations.find(key);
     if (it != impl->continuations.end()) {
         issues->insert(issues->end(), it->second.second.begin(), it->second.second.end());
@@ -192,11 +206,6 @@ void* Lifted::Continuation(const Vector& v, uint64_t pc, uint32_t fpcr, std::vec
         }
         return v.code[(vaddr - kCodeBase) / 4];
     };
-    lift::LiftOptions options;
-    options.fpcr = fpcr;
-    options.fpsr_flags = impl->fpsr_flags;
-    options.nan_mode = impl->nan_mode;
-    options.target = impl->target;
     const std::string name = "c" + std::to_string(impl->counter++);
     lift::Lifted l = lift::LiftRegion(*module, name, region, read, options);
     if (!l.function) {

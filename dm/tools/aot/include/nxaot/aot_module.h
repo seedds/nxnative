@@ -68,8 +68,11 @@
 extern "C" {
 #endif
 
-// 3: the standard entries' common signature (std_x, std_v; rv 0), the gate sites, the line table per function (fn_lines, lines)
-#define NXAOT_MODULE_ABI 3u
+// 3: the standard entries' common signature (std_x, std_v; rv 0), the gate sites, the line table per function (fn_lines, lines). 4: FPCR.FZ is a run-time
+// state (design 7.1): the code runs under either value of FZ, its checks of the FPCR leave FZ out, and it relies on the host for MXCSR on every way in and
+// out (FTZ and DAZ from st->fpcr into compiled code, the host's MXCSR for the host's C code). A host of ABI 3 would run such a pack's code under FZ
+// without that, and a host of ABI 4 would enter an ABI 3 pack's code, specialised for FZ clear, under FZ: each refuses the other's packs (repack)
+#define NXAOT_MODULE_ABI 4u
 #define NXAOT_LOOKUP_EMPTY UINT64_MAX  // the module offset of an empty lookup slot
 
 // Why compiled code stopped (nxaot_rt_trap), and why it handed a continuation to the JIT fallback (st->exit_reason before nxaot_rt_jit): the

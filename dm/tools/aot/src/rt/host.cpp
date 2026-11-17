@@ -317,6 +317,23 @@ uint32_t GuestMxcsr(uint32_t fpcr) {
     return m;
 }
 
+constexpr uint32_t kFpcrFz = 0x01000000u;
+constexpr uint32_t kFpcrSpec = 0x06C80000u;  // what compiled code is specialised on: AHP, DN, RMode, FZ16 (lift::kFpcrSpecMask; FZ is a run-time state)
+
+// MXCSR's FTZ and DAZ (design 7.1; dm/host/aot_run.c, the MXCSR invariant, the reference): compiled code runs with them equal to st->fpcr's FZ, this
+// host's code with them clear. MxcsrHost on the way from compiled code into the host (an SVC, the JIT driver, a pause, a gate, the counter, a trap)
+// and when a compiled entry returns into it, MxcsrGuest on the way back; with FZ clear each is a test of the block's FPCR
+void MxcsrHost(const dm_guest_state* st) {
+    if (st->fpcr & kFpcrFz) {
+        _mm_setcsr(_mm_getcsr() & ~0x8040u);
+    }
+}
+void MxcsrGuest(const dm_guest_state* st) {
+    if (st->fpcr & kFpcrFz) {
+        _mm_setcsr(_mm_getcsr() | 0x8040u);
+    }
+}
+
 const char* StatusName(int status) {
     switch (status) {
     case kExited: return "exited";
@@ -412,7 +429,7 @@ std::unique_ptr<Host> Host::Create(const std::string& library, const module::Ima
                                   {kModuleBase + image.aux_off, kModuleBase + image.aux_off + image.aux_size}};
     jh.code = code;
     jh.code_count = image.aux_size ? 2 : 1;
-    jh.fpcr = d.fpcr & 0x07C80000u;
+    jh.fpcr = d.fpcr & kFpcrSpec;  // the JIT stops at compiled code under any FZ (jit.h)
     jh.max_threads = kMaxThreads;
     jh.code_cache = 16u * 1024 * 1024;
     jh.stop_at = JitStopAt;
@@ -976,6 +993,7 @@ void Host::NativeCall(Thread& t, const void* entry) {
     _mm_setcsr(GuestMxcsr(t.st->fpcr));
     t.st->pending = 0;
     desc->enter(t.st, entry);
+    MxcsrHost(t.st);  // back in the JIT driver
 }
 
 // The JIT driver: st->pc is where the guest continues and st holds the whole register file. It runs until the guest returns to lr (the native
@@ -992,7 +1010,7 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
     for (;;) {
         CheckStop();
         const uint64_t pc = st->pc;
-        const bool module_fpcr = (st->fpcr & 0x07C80000u) == (desc->fpcr & 0x07C80000u);
+        const bool module_fpcr = (st->fpcr & kFpcrSpec) == (desc->fpcr & kFpcrSpec);  // FZ is no specialisation (design 7.1)
         // The return the native frame waits for: lr alone decides, as a compiled function's own return does (design 3.3: the target equal to
         // the entry's lr). SP is not compared: a branch through jit_entry from the middle of a function (an unbounded br) hands over the SP
         // of its body, while the return comes back with the SP of its entry
@@ -1136,11 +1154,12 @@ void Host::JitLoop(Thread& t, uint64_t lr, uint64_t sp, bool outermost, const ch
 void Host::Jit(dm_guest_state* st, uint64_t lr, uint64_t sp) {
     // nxaot_rt_jit: compiled code hands a continuation to the JIT (st->exit_reason says why; jit_entry stored what it was passed)
     Thread& t = *t_self;
+    MxcsrHost(st);
     const uint32_t reason = st->exit_reason;
     st->exit_reason = 0;
     JitLoop(t, lr, sp, false, JitWhy(reason));
-    // Back to compiled code under its specialisation (FPCR's mode equal: JitLoop returns pending otherwise)
-    _mm_setcsr(GuestMxcsr(desc->fpcr));
+    // Back to compiled code, which runs under the thread's FPCR (its specialisation equal, FZ either: JitLoop returns pending otherwise)
+    _mm_setcsr(GuestMxcsr(st->fpcr));
 }
 
 void Host::Safepoint(dm_guest_state*) {
@@ -1158,12 +1177,13 @@ void Host::RunGuest(Thread& t, uint64_t pc) {
             return;
         }
         st->pc = pc;
-        const bool module_fpcr = (st->fpcr & 0x07C80000u) == (desc->fpcr & 0x07C80000u);
+        const bool module_fpcr = (st->fpcr & kFpcrSpec) == (desc->fpcr & kFpcrSpec);  // FZ is no specialisation (design 7.1)
         if (options.jit != JitMode::All && module_fpcr && InModule(pc)) {
             if (const void* e = Lookup(pc - kModuleBase)) {
                 _mm_setcsr(GuestMxcsr(st->fpcr));
                 st->pending = 0;
                 desc->enter(st, e);
+                MxcsrHost(st);
                 if (!st->pending) {
                     return;
                 }
@@ -1508,9 +1528,11 @@ Result Host::Call(uint64_t offset, dm_guest_state* st, bool svc_stops, unsigned 
 extern "C" {
 
 __attribute__((visibility("default"))) void dm_aot_svc(dm_guest_state* st, uint32_t number) {
+    nxaot::rt::MxcsrHost(st);
     if (nxaot::rt::g_run.host->Svc(st, number)) {
         nxaot::rt::LeaveThread();
     }
+    nxaot::rt::MxcsrGuest(st);
 }
 
 __attribute__((visibility("default"))) void* nxaot_rt_dispatch(dm_guest_state* st, uint64_t target, const nxaot_ic_desc** slot, uint64_t site) {
@@ -1518,6 +1540,7 @@ __attribute__((visibility("default"))) void* nxaot_rt_dispatch(dm_guest_state* s
 }
 
 __attribute__((visibility("default"))) void nxaot_rt_trap(dm_guest_state* st, uint64_t offset, uint32_t reason) {
+    nxaot::rt::MxcsrHost(st);
     nxaot::rt::g_run.host->Trap(st, offset, reason);
 }
 
@@ -1526,19 +1549,23 @@ __attribute__((visibility("default"))) void nxaot_rt_jit(dm_guest_state* st, uin
 }
 
 __attribute__((visibility("default"))) void nxaot_rt_safepoint(dm_guest_state* st) {
+    nxaot::rt::MxcsrHost(st);
     nxaot::rt::g_run.host->Safepoint(st);
+    nxaot::rt::MxcsrGuest(st);
 }
 
 // Design 1.1: an observation gate or a spin wait's back-edge. This run time has no observers (dm/host's gate table, hle.c, has them) and runs only
 // the corpus, whose NROs have no gate rows: a gate here is a pause point like a safepoint, and its observer returns after one pass, as Apple's gate
 // returns with no callback attached
 __attribute__((visibility("default"))) void nxaot_rt_gate(dm_guest_state* st, uint64_t) {
+    nxaot::rt::MxcsrHost(st);
     nxaot::rt::g_run.host->Safepoint(st);
+    nxaot::rt::MxcsrGuest(st);
 }
 
 // Section 8: the guest counter in 19.2 MHz ticks (svcGetSystemTick's unit, guest_ns * 12 / 625)
 __attribute__((visibility("default"))) uint64_t dm_aot_cntpct(dm_guest_state*) {
-    return nxaot::rt::Counter();
+    return nxaot::rt::Counter();  // no floating point: the guest's MXCSR stays
 }
 
 }  // extern "C"

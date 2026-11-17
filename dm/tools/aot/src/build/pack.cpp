@@ -150,8 +150,9 @@ constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 // follows: the function's blocks and the facts its callers and callees see from them change with them; a unit of format 10 under the same key was made by
 // a discovery that never guessed, whose blocks the key does not hold. 12: a pending transfer to a function's own return address, with its caller's SP
 // and the packs' FPCR, is that function's normal return (lower_calls.cpp FnCall; README.md, "A return no native frame took"): a unit of format 11 under
-// the same key propagates it to the caller
-constexpr const char* kUnitKeyFormat = "nxaot-unit 12";
+// the same key propagates it to the caller. 13: FPCR.FZ is a run-time state of the code (lift::LiftOptions::fz_runtime; design 7.1, module ABI 4): a
+// unit of format 12 under the same key is specialised for FZ clear
+constexpr const char* kUnitKeyFormat = "nxaot-unit 13";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)

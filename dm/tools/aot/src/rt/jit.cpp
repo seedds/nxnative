@@ -174,8 +174,9 @@ struct dm_jit final : A64::UserCallbacks {
         st->tpidr_el0 = tpidr_el0;  // msr tpidr_el0 in JIT code
     }
 
-    static bool Under(uint64_t fpcr) { return (fpcr & nxaot::lift::kFpcrModeMask) == g_host.fpcr; }
-    // Where the JIT stops under FPCR fpcr: DM_JIT_ENTRY or DM_JIT_RETURN where compiled code goes on (only under the FPCR it was compiled for;
+    // Compiled code runs under FPCR fpcr: its specialisation, FZ left out (design 7.1: FZ is a run-time state of the same code)
+    static bool Under(uint64_t fpcr) { return (fpcr & nxaot::lift::kFpcrSpecMask) == (g_host.fpcr & nxaot::lift::kFpcrSpecMask); }
+    // Where the JIT stops under FPCR fpcr: DM_JIT_ENTRY or DM_JIT_RETURN where compiled code goes on (only under an FPCR it runs under, Under;
     // it calls a gate there itself), else DM_JIT_GATE at a gate site (under any FPCR), else 0
     static int StopKind(uint64_t pc, uint64_t fpcr) {
         if (!g_host.stop_at || !InCode(pc)) {

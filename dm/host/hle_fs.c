@@ -354,7 +354,7 @@ static int path_component(char *parent, size_t n, const char *name, int create, 
     DIR *d = opendir(parent); if (!d) return 0;
     struct dirent *e; char physical[0x301] = "", guest[0x301];
     while ((e = dir_next(d))) {
-        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { closedir(d); return 0; }
+        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { int err = errno; closedir(d); errno = err; return 0; }   // the caller reports errno (err_res)
         if (!strcmp(guest, name)) { strlcpy(physical, e->d_name, sizeof physical); break; }
     }
     if (!e && errno) { int err = errno; closedir(d); errno = err; return 0; }   // not "not found": the name may be in what was not read

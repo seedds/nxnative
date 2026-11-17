@@ -48,13 +48,16 @@ sys_resource	0x0
 shader_groups	/.nro/=nro /shdump/=nro /harry1_dll/=harry1dll /harry2_dll/=harry2dll /launcher_dll/=launcherdll /.nrr/=nrr
 shader_note	LEGO® Harry Potter™ Collection shaders (372 keys the split reads from the three NROs, 1,024 from the run-time dump in this profile's shdump/)
 
-# ---- Present path (Years 5-7: the configuration the user called "really really improved") ----
-# 1920x1080 -> 5120x2880 drawable in a fullscreen window, MetalFX's spatial scaler, and a 4-deep ring of present
+# ---- Present path (Years 5-7: the configuration the user called "really really improved", MetalFX removed) ----
+# 1920x1080 -> 5120x2880 drawable in a fullscreen window, bilinear present, and a 4-deep ring of present
 # snapshots: every present is copied into a host texture of its own, so the guest's next frame cannot overwrite the
 # texture the screen is showing. At a fixed 2560x1440 drawable, per 100 presents: bilinear with no ring 15.58,
 # bilinear with ring 4 1.68, MetalFX with ring 4 0.00 — and real GPU serialisation on the first (DM_NVN_PASSGPU_SERIAL)
 # leaves it at 15.00, so the present path is the carrier and GPU load is not. The drawable is not a shippable knob:
 # only the fullscreen window reaches 5120x2880 (front_mac.m consults DM_FULLSCREEN, never a size).
+# present_upscale is off: MetalFX's 0.00 was a measurement, not an absence — its spatial scaler anti-aliases the
+# glyph edges, so the residual lattice reads nbrh ~39.5 with white under the 0.06 companion line, and it costs GPU
+# time every frame (orch/nometalfx/REPORT.md, the windowed 2560x1440 arm with the detector at nbrh>=30).
 # ui_republish stays 0. The republish copies the guest's 5 MB UI staging array over the pool block its draws name
 # three times a frame, after the frame produced it and with no ordering against a GPU holding 2 submissions in
 # flight; at this configuration it does no work the draws can see (its flagged population is identical to OFF) and
@@ -63,6 +66,6 @@ shader_note	LEGO® Harry Potter™ Collection shaders (372 keys the split reads 
 # its own defaults (Upscaling=Standard, Window, Frame buffering off) over this compiled profile, so the bundle
 # carries both.
 fullscreen	on
-present_upscale	metalfx
+present_upscale	off
 present_snap	4
 ui_republish	0

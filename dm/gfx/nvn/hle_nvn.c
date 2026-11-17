@@ -2440,10 +2440,11 @@ int nvn_fps_high_now(void) { return dm_movie_hz() ? 30 : (fps_high() && atomic_l
 int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
 int nvn_game_fps(void) {
     // Resident Evil's 60/120 profiles present in display mode, but the game
-    // still publishes its native interval in o->interval. A sustained even
-    // interval (normally 2) is its 30 fps gameplay mode; ignore isolated
+    // still publishes its native interval in o->interval. A sustained
+    // interval of exactly 2 is its 30 fps gameplay mode; ignore isolated
     // interval changes (Mario-style one-frame drops) for one second.
-    if (!strcmp(DM_GAME_ID, "010050F00BC1A000") && g_display_mode) {
+    if (!strcmp(DM_GAME_ID, "010050F00BC1A000") && g_display_mode &&
+        atomic_load(&g_game_itv) == 2) {
         uint64_t since = atomic_load(&g_itv2_since);
         if (g_hz > 0 && since && now_ns() >= since + 1000000000ull) return 30;
     }

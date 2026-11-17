@@ -190,6 +190,15 @@
 - **Fix:** `dm/tools/vol_space.py` `free_bytes` returns macOS's `kCFURLVolumeAvailableCapacityForImportantUsageKey` for the path's volume (the capacity for writes a user asked for, queried through CoreFoundation), never less than `statvfs`'s figure, and `statvfs` alone where macOS gives none. It asks the nearest existing folder of a path not made yet. The NSP script's `free_gb`, `pack_app.py`'s copy check and `pso_offline.py`'s checks before `metal-tt` and before the merge use it. Two reads keep `statvfs`: `tree_tar.pack_quiet`, housekeeping nobody asked for, which should make macOS purge nothing, and `pso_offline.py`'s diagnosis of a failed `metal-tt`, which reports what was really left. Tests: `dm/tools/tests/test_vol_space.py`.
 - **Found on:** a user's APFS volume with a local Time Machine snapshot holding over 50 GB of deleted files ([PR #2257](https://github.com/seedds/nxnative/pull/2257)): `statvfs` showed 18.84 GiB free and the capacity for important usage 68.02 GiB. With the capacity, an [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072 `--platform mac-app` build wrote 57 GB of work and a 35.2 GB app there, with 24 GiB still unallocated at the end. Applies to every game built on a Mac.
 
+## Diagnostic reports
+
+### A large log can retain key material after redaction
+
+- **Symptom:** `scripts/bug_report.py` can include key material from a log larger than 4 MB in the report zip, despite removing the same key line from a smaller log.
+- **Cause:** `read_text` kept fixed byte windows before `redact` matched key lines. The first window could end partway through a value, below the matcher’s 32-hex-digit threshold; the last could start after the key name. Neither fragment was recognized as a key line. Whitespace before a detached value can also keep it inside the bundle’s final byte cap.
+- **Fix:** keep only complete lines at the two read boundaries before redaction, using the byte before the tail to distinguish a complete first line from a fragment. The omitted-byte count includes the discarded fragments; reading stays bounded. Files within the limit and a complete final line without a newline are unchanged.
+- **Found on:** synthetic logs in `dm/tools/tests/test_bug_report.py`, including a key value surviving in the final zip on the old code. No game files or real keys are needed; this is a diagnostic collector finding, not a game-runtime failure.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

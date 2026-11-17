@@ -25,6 +25,7 @@ The base game (1.0.0, `v0`) is also playable: on 2026-11-12 a self-contained Mac
 - `CPK/ALL_USEU.CPK` contains 94,631 files, 74,521 CRILAYLA-compressed; `CPK/PATCH1.CPK` contains one USM movie. The host reads the archives through the game's own CRI file system.
 - The available release supports English, French, German, Spanish and Italian language codes. The build defaults to American English.
 - Only the merged update is extracted and registered. Fixed addresses in this note refer to `main` build `d4b150b29a931cd381e2a30318fc299f`.
+- The Asian title `01004B10157F2000` v65536 (1.0.2) has the same `main` build but ships `CPK/ALL_ASIA.CPK` instead of `CPK/ALL_USEU.CPK`, and packs from a profile derived under its own title ID, whose marker is taken from its own RomFS ([the finding](../../../docs/reference/packing.md#another-editions-files-lack-the-profiles-romfs-marker)). Its Mac app packed and passed its codesign check; its gameplay and iOS are not tested.
 
 ## Shaders
 
@@ -48,6 +49,7 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - [Needle shader containers in main and GFD archives](../../../docs/reference/shaders.md#needle-shader-containers-in-main-and-gfd-archives): descriptor-based extraction of NVN control/code sections.
 
 - [Texture clears with partial channel masks or regions](../../../docs/reference/rendering.md#texture-clears-with-partial-channel-masks-or-regions): a load/store draw applies the requested write mask and rectangle.
+- [Another edition's files lack the profile's RomFS marker](../../../docs/reference/packing.md#another-editions-files-lack-the-profiles-romfs-marker): the Asian title's derived profile takes its marker from its own RomFS, and its extraction is reused.
 
 ## Open
 

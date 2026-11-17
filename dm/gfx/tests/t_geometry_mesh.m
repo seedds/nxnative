@@ -86,7 +86,7 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
     #undef EMIT
     state_reset(); memset(&R, 0, sizeof R); S.ds.dt = 1; S.ds.dw = 1; S.ds.df = 2;   // LESS, written
     uint64_t runs0 = g_mrun_runs, rdraws0 = g_mrun_draws, mesh0 = g_geo_mesh_n;
-    mtl_sub_begin(); uint64_t h = (uint64_t)mem; mtl_sub_index(&h, 1); mtl_exec(mem);
+    mtl_sub_begin(); mtl_exec(mem);
     id<MTLBuffer> b = [g_dev newBufferWithLength:MR_W * MR_H * 4 options:MTLResourceStorageModeShared]; res_add(b);
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MR_W, MR_H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:MR_W * 4 destinationBytesPerImage:MR_W * MR_H * 4];
     finish(); if (counting) mtl_drain();   // the report is written when the command buffer's completion work runs

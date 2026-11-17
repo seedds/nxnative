@@ -47,7 +47,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 - **Resolved: the game never read the controller** (the title's "Press L+R" saw no press; no `GetNpadState` call): it waits for the event bound by `hid::BindNpadStyleSetUpdateEvent`, which the host now signals when bound for a connected controller and when a player's controller connects or goes away.
 - `nvnWindowGetPresentInterval` and `nvnCommandBufferSetCopyImageStride` (the layer stride of texture ↔ buffer copies) implemented.
 - Shared fonts: SDK 8, so the address is the plain TTF. Focus handling mode 2 (focus notifications are sent).
-- Rewriter: offset jump tables in its GLSLC and movie `subsdk`s with the bounds check on another register (the index in `w0`, a copy, or a masked copy), which `jump_offsets` now follows.
+- Rewriter: offset jump tables in its GLSLC and movie `subsdk`s with the bounds check on another register (the index in `w0`, a copy, or a masked copy), which the rewriter now follows.
 
 ## Files and shaders
 
@@ -70,7 +70,7 @@ General host changes first needed here; each applies to every game:
 - **Vertex outputs start at (0, 0, 0, 1)** (`vs_init`): [Unwritten components of a written output start as (0, 0, 0, 1)](../../../docs/reference/shaders.md#unwritten-components-of-a-written-output-start-as-0-0-0-1).
 - **`shader_facts_manual.tsv`** for facts the machine code cannot tell: [dm/games/README.md](../README.md).
 - **The DeviceSink found by its size** (`capture` in `hle_audren.c`), the SDK 8 parameter size, `oe` notifications, the npad style event: [SDK 8: command IDs numbered differently](../../../docs/reference/audio.md#sdk-8-command-ids-numbered-differently), [SDK 8's longer `AudioRendererParameter`](../../../docs/reference/audio.md#sdk-8s-longer-audiorendererparameter), [The oe notification event and its queue](../../../docs/reference/threads.md#the-oe-notification-event-and-its-queue), [Npad style set update event](../../../docs/reference/services.md#npad-style-set-update-event).
-- **Jump tables checked on another register** (`jump_offsets`): [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
+- **Jump tables checked on another register** (now the [jump solver](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow)): [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
 - **Racy crashes under CPU load and observation gates**: [05, Racy crashes](../../../docs/agents/05-debugging.md#racy-crashes-load-trace-gates).
 - **Saves from before backslash paths** (it names its files `save:\savedata0.bin`): [Saves named before backslash paths](../../../docs/reference/services.md#saves-named-before-backslash-paths).
 

@@ -61,7 +61,6 @@ static int run(const char *name, uint8_t *pool, prog_t *green, prog_t *red, int 
     S.ds.dt = S.ds.dw = S.ds.st = 0; S.poly.cull = 0; S.color.blend_en = 0; S.chmask.mask = 0xffff;
     uint64_t splits = g_mdx_splits, pre = g_mdx_pre, waits = g_mdi_waits;
     mtl_sub_begin();
-    mtl_sub_index(&handle, 1);
     mtl_exec((const uint8_t *)(uintptr_t)handle);
     int done = mtl_wait(mtl_sub_commit(), 10000000000ull) && !mtl_last_commit_error();
     free((void *)(uintptr_t)handle);   // the linear copy (nvn_rec_linear); the replay is done with it

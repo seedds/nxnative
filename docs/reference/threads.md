@@ -150,6 +150,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## Synchronization and address arbitration
 
+### Wakes signalled after the scheduler lock is let go
+
+- **Symptom:** a busy guest thread spends 5–7% of its time in `_pthread_mutex_firstfit_lock_slow` under `pthread_cond_wait` (Breath of the Wild's main thread in a `sample` of the Mac host); guest CPU and power above what the work needs.
+- **Cause:** `wake()` signalled the woken thread's condition while the waker still held `G`, the scheduler lock every thread SVC takes. Darwin's condition variables do not move a woken waiter onto the mutex's queue, so the woken thread ran, found `G` held and slept again on it until the waker let go.
+- **Fix:** `G` is taken, let go and waited on only through `g_lock`, `g_unlock` and `g_cond_wait` (`hle_thread.c`). `wake()` (and `StartThread`) queue the thread on the waker's short list (8; past that it signals at once); `g_unlock` signals the list after the unlock; `g_cond_wait`, whose wait can only let `G` go inside it, first lets `G` go to signal the list and returns as a spurious wakeup, which every wait loop rechecks. `thr_free` waits out a signal still in flight to the thread it frees (`sig_pend`). `g_lock` stops the host when a hold left wakes queued, so a `G` let go any other way fails the unit tests instead of delaying a wake. `DM_WAKE_UNLOCKED=0` signals under `G`, as before.
+- **Check:** the host unit tests and `tsan-threads` (the thread tests use the wrappers too; with `DM_WAKE_UNLOCKED=0` as well). Breath of the Wild 1.9.0, M4 Max, three alternating A/B pairs ([PR #1466](https://github.com/seedds/nxnative/pull/1466)): lock-slow samples in the main thread 51–70 → 18, guest threads 503–512 → 494–498 ms/s, CPU energy 1.21 → 1.18 W, 59.8 fps on both. Octopath Traveler II (Unreal, route `battle`, M4 Pro, two runs each of main, this, and this with `DM_WAKE_UNLOCKED=0`): no change beyond run-to-run noise; process CPU 500–552 → 503–542 ms/s (300–440 s), CPU energy 1.45–1.50 → 1.46 W, 59.75 fps and frame p99 18.3 → 18.2 ms, screenshots alike.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
+
 ### `SignalToAddress` type 2 with count ≤ 0
 
 - **Symptom:** none seen; found while investigating [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md)'s demo crash, which it did not change (that was the address-space shortage, [Size-aligned regions exhaust the alias address space](memory.md#size-aligned-regions-exhaust-the-alias-address-space)).

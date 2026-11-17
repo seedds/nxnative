@@ -34,12 +34,12 @@ import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
 import dmsh_abi   # noqa: E402
 TBIAS_BANK = dmsh_abi.TBIAS_BANK
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
-XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
+XC = dmsh_chain.CROSS_MSL  # dmsh_build.XC without fragment padding
 
 
 def cross(spv, msl):
-    """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
-    subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
+    """spirv-cross as dmsh_build runs it (MSL 3.2): image atomics must come out as native texture atomics"""
+    subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
     source = atomic.check_msl(msl.read_text())
     assert ('.atomic_fetch_' in source or re.search(r'<ulong, access::read_write>.*\.atomic_(max|min)\(', source, re.S)) and 'access::read_write' in source, msl
     return source
@@ -174,25 +174,6 @@ class Portable(unittest.TestCase):
         self.assertEqual(offset((0, 0, 0), (8, 4, 3)), 0)
         self.assertEqual(offset((7, 3, 2), (8, 4, 3)), 95)
         self.assertEqual([offset((0, 0, z), (8, 4, 3)) for z in range(3)], [0, 32, 64])
-
-    def test_msl_version_follows_image_atomics(self):
-        with tempfile.TemporaryDirectory(prefix='dm-atomic-spv-') as temp:
-            def module(name, ops):
-                path = Path(temp) / name
-                path.write_bytes(struct.pack('<5I', 0x07230203, 0x10000, 0, 100, 0) + b''.join(struct.pack('<%dI' % len(o), *o) for o in ops))
-                return str(path)
-            capability = [(2 << 16) | 17, 1]  # OpCapability Shader
-            plain = module('plain.spv', [capability])
-            texel = module('texel.spv', [capability, [(6 << 16) | 60, 1, 2, 3, 4, 5]])  # OpImageTexelPointer
-            self.assertFalse(atomic.uses_image_atomics(plain))
-            self.assertTrue(atomic.uses_image_atomics(texel))
-            self.assertEqual(atomic.cross_args(XC, plain), XC)
-            self.assertEqual(atomic.cross_args(XC, texel), XC[:2] + ['30100'] + XC[3:])
-            self.assertEqual(XC[2], '20300')  # not changed in place
-            # A zero-length instruction stops the walk. A module without the texel pointer's word is not walked, and spirv-cross, which runs next, rejects it
-            with self.assertRaises(ValueError): atomic.uses_image_atomics(module('zero.spv', [[0, 0], [(6 << 16) | 60, 1, 2, 3, 4, 5]]))
-            not_spirv = Path(temp) / 'not.spv'; not_spirv.write_bytes(b'\0' * 20)
-            with self.assertRaises(ValueError): atomic.uses_image_atomics(str(not_spirv))
 
     def test_pointer_emulation_rejected(self):
         native = 'uint _1 = spvDescriptorSet0.img.atomic_fetch_add(uint3(c), 1u).x;'

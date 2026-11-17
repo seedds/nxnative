@@ -32,6 +32,8 @@ static uint64_t g_frame = 1;        // the frame being replayed
 void own_hook_drop(id o, int keep_resident) { [g_dropped addObject:o]; [g_dropped_keep addObject:@(keep_resident)]; }
 uint64_t own_hook_submission(void) { return g_sub; }
 uint64_t own_hook_frame(void) { return g_frame; }
+static NSMapTable *g_parts;   // object → the part own_hook_parts names (a packaged texture's texture)
+void own_hook_parts(id o, void (^add)(id part)) { id p = g_parts ? [g_parts objectForKey:o] : nil; if (p) add(p); }
 static int dropped(id o, int keep) { for (NSUInteger i = 0; i < g_dropped.count; i++) if (g_dropped[i] == o && g_dropped_keep[i].intValue == keep) return 1; return 0; }
 static int ndropped(id o, int keep) { int n = 0; for (NSUInteger i = 0; i < g_dropped.count; i++) n += g_dropped[i] == o && g_dropped_keep[i].intValue == keep; return n; }
 static int retire(id o) { pthread_mutex_lock(&g_smu); int r = own_retire_locked(o); pthread_mutex_unlock(&g_smu); return r; }   // the drain's question, once the fence has passed
@@ -396,17 +398,47 @@ int main(void) { @autoreleasepool {
             CHECK(del && !again && !shared(x2), "removal: once");
             step("removal");
         }
-        // a pool drop: that pool's entries go, another pool's stay; a lookup after it finds nothing, and the serial it had published keeps its texture (held)
+        // a pool drop: that pool's entries go, another pool's stay, and so do the serial entries that named their textures (each a note; the pool's memory is gone on NVN, so a
+        // texture object finalized after its pool keeps nothing: Ocarina of Time's shadow target, docs/reference/memory.md); a lookup after it finds nothing
         id q = [NSObject new]; tex_t s8 = texture(97009); tex_live(&s8);
         own_alias_publish(s8.serial, &kq, q);
         own_alias_stats before = ast();
         uint64_t g0 = atomic_load(&g_ser_gen), noted = 0;
-        pthread_mutex_lock(&g_smu); uint32_t gone = own_alias_drop_pool_locked((const void *)(uintptr_t)P); pthread_mutex_unlock(&g_smu);
-        CHECK(atomic_load(&g_ser_gen) == g0 + 1 && !own_note_at(g0 + 1, &noted), "a pool drop is one change no serial is noted for (a new epoch)");
+        pthread_mutex_lock(&g_smu); uint32_t gone = own_pool_finalize_locked((const void *)(uintptr_t)P, NULL); pthread_mutex_unlock(&g_smu);
+        uint64_t g1 = atomic_load(&g_ser_gen); int s7_noted = 0;
+        for (uint64_t g = g0 + 1; g < g1; g++) if (own_note_at(g, &noted) && noted == s7.serial) s7_noted = 1;
+        CHECK(g1 > g0 + 1 && s7_noted && !own_note_at(g1, &noted), "a pool drop notes each serial whose entry went with a texture of the pool, then makes a new epoch");
         own_alias_stats after = ast();
         CHECK(gone == before.n - 1 && after.n == 1 && has(&kq) && after.evicted == before.evicted + gone, "a pool drop takes the pool's entries, counted, and leaves another pool's");
-        CHECK(!own_alias_take(s7.serial + 100, &ka) && serial_get(s7.serial) == a3 && live_holds(a3) && !shared(a3), "after it a lookup finds nothing; a serial keeps the texture it had, no longer shared");
+        CHECK(!own_alias_take(s7.serial + 100, &ka) && !serial_get(s7.serial) && !live_holds(a3) && !shared(a3) && after.pool_entries > before.pool_entries, "after it a lookup finds nothing, and the serial that held a texture of the pool holds it no more");
         step("pool drop");
+        {   // a pool's live texture objects: their entries go whatever they hold (here a packaged texture, which the sharing table never names), and so does a finalized serial's entry
+            // that holds the package's texture (the GPU's first write over its storage hands it to the package's serials, own_hook_parts); another pool's texture keeps its entry, and
+            // the object's own Finalize, later, finds nothing to end
+            const uint64_t R = 0x7000, S = 0x8000;
+            id pkg = [NSObject new], ptex = [NSObject new], other = [NSObject new];
+            g_parts = [NSMapTable strongToStrongObjectsMapTable]; [g_parts setObject:ptex forKey:pkg];
+            tex_t l = texture(97020), o2 = texture(97021), f = texture(97022);
+            l.pool = (void *)(uintptr_t)R; o2.pool = (void *)(uintptr_t)S; f.pool = (void *)(uintptr_t)R;
+            tex_live(&l); tex_live(&o2); tex_live(&f);
+            tex_put(l.serial, pkg); tex_put(o2.serial, other);
+            tex_end(&f); tex_put(f.serial, ptex);   // finalized before its pool, and resolved since: a ghost entry
+            CHECK(live(l.serial) && live(o2.serial) && ghost(f.serial), "the pool's live object, another pool's, and a finalized one");
+            step("pool index");
+            own_alias_stats b0 = ast(); uint64_t g0 = atomic_load(&g_ser_gen);
+            pthread_mutex_lock(&g_smu); uint32_t shared_gone = own_pool_finalize_locked((const void *)(uintptr_t)R, NULL); pthread_mutex_unlock(&g_smu);
+            int l_noted = 0, f_noted = 0; uint64_t sn = 0;
+            for (uint64_t g = g0 + 1; g <= atomic_load(&g_ser_gen); g++) if (own_note_at(g, &sn)) { l_noted |= sn == l.serial; f_noted |= sn == f.serial; }
+            CHECK(!shared_gone && !live(l.serial) && !ghost(f.serial) && !holds(pkg) && !holds(ptex) && dropped(pkg, 0) && dropped(ptex, 0) && l_noted && f_noted,
+                  "a pool's Finalize ends its live object's entry and the finalized serial's entry that holds a part of it, each noted, though the sharing table names neither");
+            CHECK(serial_get(o2.serial) == other && ast().pool_entries == b0.pool_entries + 2, "another pool's texture keeps its entry; the entries that went are counted");
+            step("pool finalize: its live objects");
+            CHECK(tex_end(&l) == 1 && !live(l.serial), "the object's own Finalize, later: it was live, and there is nothing left to end");
+            pthread_mutex_lock(&g_smu); own_pool_finalize_locked((const void *)(uintptr_t)S, NULL); pthread_mutex_unlock(&g_smu);
+            CHECK(!live(o2.serial) && tex_end(&o2) == 1, "the other pool's Finalize ends its texture's entry in turn");
+            step("pool finalize: the index emptied");
+            g_parts = nil;
+        }
         // a twin's lookup (peek), then its parent's pool goes, then the publication: refused
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
@@ -416,7 +448,7 @@ int main(void) { @autoreleasepool {
             alias_key kt = akey(P, 1 << 20, NVN_FORMAT_RGBA8); tex_t base = texture(97010), twin = texture(97011); tex_live(&base); tex_live(&twin);
             own_alias_publish(base.serial, &kt, pt);
             id<MTLTexture> b = own_alias_peek(&kt), v = [b newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
-            pthread_mutex_lock(&g_smu); own_alias_drop_pool_locked((const void *)(uintptr_t)P); pthread_mutex_unlock(&g_smu);
+            pthread_mutex_lock(&g_smu); own_pool_finalize_locked((const void *)(uintptr_t)P, NULL); pthread_mutex_unlock(&g_smu);
             CHECK(b == pt && own_view_put(twin.serial, &kt, v) == 0 && !tex_get(twin.serial), "a twin whose parent's pool went between its lookup and its publication is not published");
             own_alias_publish(base.serial, &kt, pt);
             v = [pt newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
@@ -438,9 +470,9 @@ int main(void) { @autoreleasepool {
             CHECK(own_view_drop_stale(twin.serial, nv) == 1 && !serial_get(twin.serial), "the twin's view of the replaced parent is stale");
             step("upgrade");
             tex_end(&base); tex_end(&twin);
-            pthread_mutex_lock(&g_smu); own_alias_drop_pool_locked((const void *)(uintptr_t)P); pthread_mutex_unlock(&g_smu);
+            pthread_mutex_lock(&g_smu); own_pool_finalize_locked((const void *)(uintptr_t)P, NULL); pthread_mutex_unlock(&g_smu);
         }
-        pthread_mutex_lock(&g_smu); own_alias_drop_pool_locked((const void *)(uintptr_t)Q); pthread_mutex_unlock(&g_smu);
+        pthread_mutex_lock(&g_smu); own_pool_finalize_locked((const void *)(uintptr_t)Q, NULL); pthread_mutex_unlock(&g_smu);
         tex_end(&s5); tex_end(&s7); tex_end(&s8);
         pthread_mutex_lock(&g_smu); int keeps = own_keeps_locked(a3); pthread_mutex_unlock(&g_smu);
         CHECK(!keeps && !has(&kq) && !has(&kg), "the pools gone, nothing is shared");
@@ -503,6 +535,38 @@ int main(void) { @autoreleasepool {
             CHECK(st.ghost == 0 && st.live == 0 && !holds(p), "after teardown no serial resolves and nothing is held");
             CHECK(as.n == 0 && as.cells == 0 && !shared(p) && st.retire_wait == 0, "and the sharing table, its index and the retired objects waiting are empty");
             step("teardown");
+        }
+    }
+
+    {   // The memory report's count of what only the sharing table keeps (issue #2629): each texture's bytes once, however many keys name it; the part made to be drawn into;
+        // the longest any has gone without a lookup; textures a serial, a view's serial or a pin holds are left out
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (dev) {
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+            d.usage = MTLTextureUsageShaderRead; id<MTLTexture> rd = [dev newTextureWithDescriptor:d], held = [dev newTextureWithDescriptor:d], parent = [dev newTextureWithDescriptor:d];
+            d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; id<MTLTexture> rt = [dev newTextureWithDescriptor:d];
+            id<MTLTexture> view = [parent newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+            alias_key k1 = akey(0x7000, 0, NVN_FORMAT_RGBA8), k2 = akey(0x7000, 1ll << ALIAS_CELL, NVN_FORMAT_RGBA8), k3 = akey(0x7000, 2ll << ALIAS_CELL, NVN_FORMAT_RGBA8),
+                      k4 = akey(0x7000, 3ll << ALIAS_CELL, NVN_FORMAT_RGBA8), k5 = akey(0x7000, 4ll << ALIAS_CELL, NVN_FORMAT_RGBA8);
+            uint64_t t0 = g_sub;
+            pthread_mutex_lock(&g_smu);
+            own_alias_put_locked(&k1, rd, t0); own_alias_put_locked(&k2, rd, t0 + 50); own_alias_put_locked(&k3, rt, t0 + 70);
+            own_alias_put_locked(&k4, held, t0); own_alias_put_locked(&k5, parent, t0);
+            pthread_mutex_unlock(&g_smu);
+            serial_put(970001, held); serial_put(970002, view);
+            g_sub = t0 + 100;
+            pthread_mutex_lock(&g_smu); own_alias_unheld u = own_alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(u.entries == 3, "the unheld count takes the sharing table's entries no serial, view or pin holds (two keys of one texture, a render target)");
+            CHECK(u.bytes == rd.allocatedSize + rt.allocatedSize, "their bytes count each texture once, leaving out the serial-held one and the parent of a held view");
+            CHECK(u.writable_bytes == rt.allocatedSize, "the part made to be drawn into is the render target's");
+            CHECK(u.oldest_idle == 100, "the oldest idle age is the longest since any unheld entry's last lookup");
+            serial_del(970001); serial_del(970002);
+            pthread_mutex_lock(&g_smu); u = own_alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(u.entries == 5 && u.bytes == rd.allocatedSize + rt.allocatedSize + held.allocatedSize + parent.allocatedSize, "once their serials go, the held texture and the view's parent count too");
+            pthread_mutex_lock(&g_smu); own_alias_del_locked(&k1); own_alias_del_locked(&k2); own_alias_del_locked(&k3); own_alias_del_locked(&k4); own_alias_del_locked(&k5); pthread_mutex_unlock(&g_smu);
+            pthread_mutex_lock(&g_smu); u = own_alias_unheld_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(u.entries == 0 && u.bytes == 0 && u.oldest_idle == 0, "an empty sharing table reports nothing unheld");
+            step("unheld report");
         }
     }
 

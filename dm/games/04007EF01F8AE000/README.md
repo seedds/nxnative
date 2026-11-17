@@ -54,7 +54,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 
 - Nothing past the first map has been played on this build.
 - `stage 1 cb4 has no uniform buffer bound`, once a run, with no effect seen.
-- MetalFX's jitter sign and DLSS's bias mask are unchecked; the bias mask is only logged. No ghosting has been seen so far.
+- MetalFX's jitter sign is unchecked, and what this game's DLSS bias mask holds has not been looked at (it reaches MetalFX as its reactive mask: [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx)). No ghosting has been seen so far.
 - An IPA: the 16 GB alias region is over iOS's limit, as for [Splatoon Raiders](../0400380020056000/README.md).
 - `dm/games/profile_guess.py` does not recognise the SDK's `Generic` version name.
 

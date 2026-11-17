@@ -68,7 +68,7 @@ ends exactly where `g_pass` begins in this build. Its tenth, 56-byte stencil
 record overlaps the pass cache: write flags at offsets 34/35 change depth
 `0x00000104` to `0x01010104`. The general correction is
 [ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil).
-Disabling only the unwritten-store tracking (`g_udc_ab=0`, TBDR still off) in
+Disabling only the unwritten-store tracking (`g_udc=0`, TBDR still off) in
 the running app clears Rex at the same camera angle; this is a diagnostic
 control, not the shipped fix. AddressSanitizer reproduces the old overflow
 without game files. The corrected ledger and lookahead arrays pass the GPU
@@ -268,3 +268,4 @@ that diagnostic launch did not yet have a shader map configured.
 - [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).
 - [Ordering barriers before a draw that writes](../../../docs/reference/rendering.md#ordering-barriers-before-a-draw-that-writes): the skinning draws; see [Rendering](#rendering).
 - [Present thread rescues a silent display link](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link): the motion review's windowed timing comparison is confounded by repeated stalls; see [Controller motion review](#controller-motion-review).
+- [LDC's 16-bit immediate: signed beside a register, the address alone](../../../docs/reference/shaders.md#ldcs-16-bit-immediate-signed-beside-a-register-the-address-alone): 76 pixel shaders read c6 at R − 8 to R − 128, the case that keeps the immediate signed beside a register.

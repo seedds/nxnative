@@ -29,6 +29,7 @@ void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
     hlecount_flush();                               // DM_HLECOUNT: _exit does not run atexit, write a copy here
     dm_rec_finish();                                // DM_REC: the held state and the buffered steps (hle_hid.c)
     dm_cheats_exit();                               // a clean exit: no safe mode for the cheats at the next launch (atexit does not run either)
+    dm_fs_stall_summary();                          // the image reads' first-use totals (atexit does not run either)
     dm_audio_suspend(1);
     dm_gfx_quit_begin();                            // no more prewarm compiles; what the pipeline archive holds starts writing now, beside the drain
     dispatch_semaphore_t drained = dispatch_semaphore_create(0);

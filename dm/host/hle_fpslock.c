@@ -302,7 +302,7 @@ void dm_fps_lock_tick(void) {
         // rates. Keep that clock separate from the movie's 30 Hz presentation;
         // outside movies, the 120 fps profile still follows the dynamic hold.
         int movie_hz = dm_movie_hz();
-        int re_movie = !strcmp(DM_GAME_ID, "010050F00BC1A000") && target >= 60 &&
+        int re_movie = !strcmp(DM_GAME_ID, "010050F00BC1A000") && high &&
                        !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && movie_hz != 0;
         int re_row = !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
         int row_target = re_row && high && !re_movie ? nvn_fps_high_now() : re_movie ? 60 : target;
@@ -367,6 +367,13 @@ void dm_fps_lock_tick(void) {
                 }
                 if (movie_hz) movie_samples++; else baseline_samples++;
             }
+        }
+        // Resident Evil's timing fields are in the second object: [main + 0x157daa0] -> object1 -> timing object.
+        // The generic lock path above resolves only object1, so advance once more before writing +0x48/+0x4c.
+        if (re_row) {
+            uint64_t timing_obj = 0;
+            if (!rd(obj, &timing_obj, sizeof timing_obj) || timing_obj < 0x1000) continue;
+            obj = timing_obj;
         }
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {

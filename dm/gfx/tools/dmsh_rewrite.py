@@ -652,9 +652,12 @@ def gather_quad(off):
 # took 1.9 s to compile cold on an M2 Air (25 s for the route's 54 at the first start), while the GPU waited at its first draw (Native mesh pipelines compiled at their first draw).
 # Written noinline, it is one function the misses branch to. Only the search: the last entry's check and the access stay inline, since keeping the whole access helper apart
 # put the last entry and the vector words behind the call at every access (2.5 ms of a 15 ms frame on an M4 Pro)
-RAW_FIND = re.compile(r'\nstatic inline __attribute__\(\(always_inline\)\)\n(\w+ dmsh_raw_find\w*\()')
-def raw_noinline(msl):
-    return RAW_FIND.sub(lambda m: '\nstatic __attribute__((noinline))\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
+# Workaround for Apple's M1/M2 mesh compiler: some mesh programs calling this helper crash in MachineOperand::setReg. Keep the search inline in every final mesh library,
+# including one composed from vertex/geometry sources already rewritten noinline. Other stages retain one search; the compiler defect itself remains open.
+RAW_FIND = re.compile(r'\nstatic (?:inline __attribute__\(\(always_inline\)\)|__attribute__\(\(noinline\)\))\n(\w+ dmsh_raw_find\w*\()')
+def raw_noinline(msl, stage='cs'):
+    attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
+    return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 

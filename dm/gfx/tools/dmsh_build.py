@@ -818,7 +818,7 @@ def finish(key, w, j, c1):
         except ValueError as e: return 'compute loop containment failed', str(e)[:160], None
         src = dmsh_rewrite.max_threads(src, j.get('local')); open(msl, 'w').write(src)   # the local size as the kernel's thread limit, so its pipeline allows the dispatch (see max_threads)
     if 'dmsh_raw_find' in src:
-        src = dmsh_rewrite.raw_noinline(src); open(msl, 'w').write(src)   # one copy of the pool table search (see raw_noinline)
+        src = dmsh_rewrite.raw_noinline(src, mesh['kind'] if mesh else j['stage']); open(msl, 'w').write(src)   # native stages were translated as cs; mesh searches stay inline (see raw_noinline)
     pad = []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = dmsh_entry.vs_base_instance(dmsh_entry.vs_layer(dmsh_entry.vs_init(src))); open(msl, 'w').write(src)
@@ -1139,6 +1139,7 @@ def mesh_finish(pair):
     if vs is None or gs is None or gj is None: MESH_STATS['missing a library'] += 1; return
     try: msl = dmsh_mesh.compose(vs.decode(), gs.decode(), json.loads(gj)['geometry']['capture_reads'])
     except ValueError as e: MESH_STATS['not composed'] += 1; print(f'[RED] mesh {vk} {gk}: {e}', flush=True); return
+    msl = dmsh_rewrite.raw_noinline(msl, 'ms')   # final mesh code: undo noinline inherited from the vertex/geometry libraries (see raw_noinline)
     path = os.path.join(w, f'{vk}_{gk}_m3.metal'); open(path, 'w').write(msl)
     try:
         if 'mac' in TARGETS: MTL.compile('mac', path, libs[0])

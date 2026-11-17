@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Bethesda BSA v105 shader files
+
+- **Symptom:** the shader split finds no shaders in the RomFS or `main`, even though the game carries a `Skyrim - Shaders.bsa`.
+- **Cause:** Skyrim Switch's version-105 BSA contains `shaders011.fxp`, whose NVN programs are records with a 0x848-byte control section followed immediately by the code area. Neither the BSA nor the FXP records are recognized by the general loose-file reader.
+- **Fix:** `dm/gfx/tools/skyrim_bsa.py` extracts only `.fxp` members into the build's `skyrim_shaders/` directory. `shader_split.py` skips BSA files and invokes its FXP reader only for title ID `01000A10041EA000`; it validates each adjacent control/code pair using the existing NVN checks. The extractor can also be run directly with `DM_GAME=01000A10041EA000 python3 dm/gfx/tools/skyrim_bsa.py <Skyrim - Shaders.bsa> <output dir>`.
+- **Check:** `dm/tools/tests/test_skyrim_shaders.py` covers BSA extraction, the FXP record layout, rejection of unsafe member paths, and the title-ID gate. The supplied v0 archive yielded 23,063 shaders (19,600 pixel and 3,463 vertex); the runtime has not yet been validated.
+- **Found on:** The Elder Scrolls V: Skyrim, Switch title ID `01000A10041EA000` (provisional profile).
+
 ### Firaxis CIVBSF shader libraries
 
 - **Symptom:** the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture.

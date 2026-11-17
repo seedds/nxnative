@@ -8,6 +8,8 @@ Do not stop at the obvious archive. In Mario the main `bfsha` held 4,888 of the 
 
 `dm/gfx/tools/shader_split.py <RomFS> <ExeFS main> <pkg dir> <map out> <facts out> [<pairs out>]` scans **every** RomFS file (zstd-decompressed, SARC expanded recursively) and `main`, and recognizes the containers listed by engine in [reference/shaders.md](../reference/shaders.md#containers-by-engine). The pairs table lists the (vertex key, pixel key) of every BNSH variation or Unity program. Unity shaders need a second pass: files whose type trees are missing are scanned again once the bundles have supplied the `Shader` tree (or with the one `unityfs.py` has written out for that hash, when no bundle has it). For a base game plus an update, give RomFS and `main` as comma-separated lists, base first: keys are content hashes, so the output is the union of both versions and one shader build serves both (Mario 1.2.1 recompiled 3,451 of its pixel shaders; v0 rows keep their package indices).
 
+The Skyrim Switch title ID `01000A10041EA000` has a game-gated BSA v105 / FXP reader; see [Bethesda BSA v105 shader files](../reference/shaders.md#bethesda-bsa-v105-shader-files).
+
 Validate a new title's coverage at run time: `DM_NVN_SHDUMP=<dir>` makes the host dump the control section and code of every program it can't find in the map; the host makes the directory if it is missing; search those bytes in the game files to find the container that was missed.
 
 ## 2. Key shaders by control section + code

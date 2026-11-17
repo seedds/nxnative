@@ -30,6 +30,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 
 ## Found on this game
 
+- [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): compute-only containment with attributable cap-hit logging, including helpers. The queue mismatch's root cause and binding remain open in [#2664](https://github.com/seedds/nxnative/issues/2664); this does not close it or establish a fresh reproduction.
 - [A registered build without the profile's DLC stops at the shader split](../../../docs/reference/packing.md#a-registered-build-without-the-profiles-dlc-stops-at-the-shader-split): resolved; `re_dlc_000.pak` holds 45 of the game's shaders, which are now the game's rows in `shader_map.tsv` (36,779 shaders with the DLC, 36,649 without).
 - [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): 73 of its 255 compute shaders above 384 threads (69 of them 1,024 threads) took more registers on `applegpu_g13s` / `applegpu_g14g` than their size allows, so on an M1 or M2 their dispatches ran nothing; with the local size on the kernel all fit, and the M4 Pro's code is unchanged. What each draws is not known.
 - [H.264 parameter sets past the eighth argument](../../../docs/reference/movies.md#h264-parameter-sets-past-the-eighth-argument): its opening movies.

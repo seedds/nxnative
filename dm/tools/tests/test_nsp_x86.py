@@ -39,6 +39,11 @@ import os, sys
 a = sys.argv[1:]
 usage = ('usage: nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--mode balanced|max]'
          + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows] [--profile <file>] [--misses <file>] [--bind <file>]'))
+if os.environ.get('FAKE_NXAOT_PRUNE'):   # an nxaot with the cache-prune subcommand
+    usage += '\\n       nxaot cache-prune <cache dir> <seconds>'
+    if a[:1] == ['cache-prune']:
+        print('aot: cache %s: %s units, 1 analyses and 0 partial files of older tools, not used for %s s, removed (2500000 bytes); 5 units kept' % (a[1], os.environ['FAKE_NXAOT_PRUNE'], a[2]))
+        sys.exit(0)
 if a[:1] != ['build'] or len(a) < 2: sys.stderr.write(usage + '\\n'); sys.exit(2)
 src, obj, so = a[1], a[a.index('-o') + 1], a[a.index('--shared') + 1]
 windows = '--target' in a and a[a.index('--target') + 1] == 'windows'
@@ -596,6 +601,24 @@ class Linux(Pack):
         (self.game / 'RomFS/.nrr/game.nrr').unlink()   # an update without NRRs
         self.pack()
         self.assertEqual(sorted(p.name for p in self.aot.iterdir()), ['.keys', 'main.aot.so', 'main.aot.tsv', 'main.image.bin'])
+
+    def test_unit_cache_pruned_after_the_packs(self):
+        # an nxaot with the cache-prune subcommand: run once after the packs on the game's unit cache with one day; said only when units went
+        cache = self.wdir / 'aot-cache'
+        with mock.patch.dict(os.environ, {'FAKE_NXAOT_PRUNE': '3'}):
+            self.assertIn('cache-prune', nsp.nxaot_options(self.nxaot, dict(os.environ)))
+            self.pack()
+            prunes = [c for c in self.tools('nxaot') if c[1] == 'cache-prune']
+            self.assertEqual([c[2:] for c in prunes], [[str(cache), '86400']])
+            self.assertEqual(self.tools('nxaot')[-1][1], 'cache-prune')   # after the packs
+            self.assertTrue(any(m.startswith(f'unit cache: 3 units of older recompilers removed from {cache} (2 MB;') for m in self.said), self.said)
+        with mock.patch.dict(os.environ, {'FAKE_NXAOT_PRUNE': '0'}):   # nothing removed: the subcommand runs, nothing is said
+            self.pack('linux', '--pack-mode', 'max')
+            self.assertEqual(len([c for c in self.tools('nxaot') if c[1] == 'cache-prune']), 1)
+            self.assertFalse(any(m.startswith('unit cache:') for m in self.said), self.said)
+        self.pack('windows')   # an nxaot without the subcommand: never called
+        self.assertEqual([c for c in self.tools('nxaot') if c[1] == 'cache-prune'], [])
+        self.assertTrue(self.tools('nxaot'))
 
     def test_old_nxaot_without_cache_and_workers(self):
         with mock.patch.dict(os.environ, {'FAKE_NXAOT_OLD': '1'}):

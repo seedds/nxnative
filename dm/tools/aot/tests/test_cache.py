@@ -25,6 +25,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, '..', 'corpus')
@@ -206,8 +207,88 @@ def main():
             bad += not ok
             print(f'analysis cache, an entry {what}: {p.analysis}, then {again.analysis}; pack {"identical" if same else "DIFFERS"}'
                   f'{"" if ok else "  FAIL"}')
-    print(f'pack caches: {len(nros)} NROs cold and warm, a changed word, a changed tier, untrusted analysis entries: {bad} failures')
+    bad += prune_checks(a.nxaot, src, a.work)
+    print(f'pack caches: {len(nros)} NROs cold and warm, a changed word, a changed tier, untrusted analysis entries, the cache pruned: {bad} failures')
     return 1 if bad else 0
+
+
+def prune_checks(nxaot, src, work):
+    """`nxaot cache-prune` (src/cache/cache.h; README.md, "The cache's size"): a hit refreshes an entry's time; a tool's own entries stay whatever their
+    age; the entries of older tools (last used before this tool's first use of the cache) go once they were not used for the given time, with objects
+    whose facts never came, interrupted packs' temporary files and analysis entries; a tool that never packed into a cache removes nothing"""
+    bad = 0
+    cache = os.path.join(work, 'prune-cache')
+    shutil.rmtree(cache, ignore_errors=True)
+    so = os.path.join(work, 'prune', os.path.basename(src) + '.so')
+    os.makedirs(os.path.dirname(so), exist_ok=True)
+    cold = build(nxaot, src, so, cache)
+    facts = sorted(glob.glob(os.path.join(cache, '[0-9a-f][0-9a-f]', '*.tsv')))
+    marks = glob.glob(os.path.join(cache, 'tools', '*'))
+    day = 86400
+
+    def prune(seconds, where=cache):
+        r = subprocess.run([nxaot, 'cache-prune', where, str(seconds)], capture_output=True, text=True)
+        m = re.search(r'(\d+) units, (\d+) analyses and (\d+) partial files of older tools, not used for \d+ s, removed \((\d+) bytes\); (\d+) units kept', r.stdout)
+        return r, tuple(int(x) for x in m.groups()) if m else None
+
+    def age(path, days):
+        at = time.time() - days * day
+        os.utime(path, (at, at))
+
+    def check(what, ok, got):
+        nonlocal bad
+        bad += not ok
+        print(f'cache-prune, {what}: {got}{"" if ok else "  FAIL"}')
+
+    check('a pack marks its tool', len(marks) == 1 and len(facts) == cold.misses and cold.misses > 2, f'{len(marks)} mark, {len(facts)} entries of {cold.misses} units')
+    r, got = prune(0)
+    check('the tool\'s own entries, no time allowed', got == (0, 0, 0, 0, len(facts)), r.stdout.strip())
+    # a hit refreshes the time of an entry not used for over an hour
+    for f in facts:
+        age(f, 3)
+    warm = build(nxaot, src, so, cache)
+    fresh = sum(os.path.getmtime(f) > time.time() - 600 for f in facts)
+    check('a hit refreshes an entry\'s time', warm.misses == 0 and fresh == len(facts), f'{warm.hits} hits, {fresh} of {len(facts)} refreshed')
+    # an older tool's leftovers: its mark and entries older than this tool's mark (the mark is a day old, they are three)
+    for m in marks:
+        age(m, 1)
+    old = facts[:len(facts) // 2]
+    for f in old:
+        age(f, 3)
+    stale_key = 'f' * 64
+    shard = os.path.join(cache, 'ff')
+    os.makedirs(shard, exist_ok=True)
+    extra = {'entry': [os.path.join(shard, stale_key + '.tsv'), os.path.join(shard, stale_key + '.o')], 'orphan': [os.path.join(shard, 'e' * 64 + '.o')],
+             'temporary': [os.path.join(shard, 'd' * 64 + '.o.tmp.1.2')], 'analysis': [os.path.join(cache, 'analysis', 'c' * 64 + '.bin')],
+             'other': [os.path.join(cache, 'notes.txt'), os.path.join(shard, 'README')]}   # files the cache never wrote: left alone
+    os.makedirs(os.path.join(cache, 'analysis'), exist_ok=True)
+    for paths in extra.values():
+        for q in paths:
+            with open(q, 'wb') as f:
+                f.write(b'x' * 100)
+            age(q, 3)
+    r, got = prune(10 * day)
+    check('ten days allowed', got == (0, 0, 0, 0, len(facts) + 1), r.stdout.strip())
+    r, got = prune(3600)
+    gone = [f for f in old if not os.path.exists(f) and not os.path.exists(f[:-4] + '.o')]
+    left = {k: sum(os.path.exists(q) for q in v) for k, v in extra.items()}
+    ok = got is not None and got[0] == len(old) + 1 and got[1] == 1 and got[2] == 2 and got[3] > 0 and got[4] == len(facts) - len(old) and \
+        len(gone) == len(old) and left == {'entry': 0, 'orphan': 0, 'temporary': 0, 'analysis': 0, 'other': 2}
+    check('an hour allowed', ok, f'{r.stdout.strip()}; left {left}')
+    again = build(nxaot, src, so, cache)
+    check('the pack after it', again.misses == len(old) and again.hits == len(facts) - len(old), f'{again.hits} hits, {again.misses} misses')
+    # a tool that never packed into a cache: its mark is made, nothing is removed
+    for m in glob.glob(os.path.join(cache, 'tools', '*')):
+        os.remove(m)
+    for f in glob.glob(os.path.join(cache, '[0-9a-f][0-9a-f]', '*.tsv')):
+        age(f, 3)
+    n = len(glob.glob(os.path.join(cache, '[0-9a-f][0-9a-f]', '*.tsv')))
+    r, _ = prune(0)
+    after = len(glob.glob(os.path.join(cache, '[0-9a-f][0-9a-f]', '*.tsv')))
+    check('a first use', 'first use' in r.stdout and after == n and len(glob.glob(os.path.join(cache, 'tools', '*'))) == 1, r.stdout.strip())
+    r = subprocess.run([nxaot, 'cache-prune', os.path.join(work, 'no-such-cache'), '0'], capture_output=True, text=True)
+    check('no directory', r.returncode == 0, r.stdout.strip())
+    return bad
 
 
 if __name__ == '__main__':

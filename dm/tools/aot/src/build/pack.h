@@ -160,6 +160,10 @@ bool LinkWindows(const std::vector<std::string>& objects, const std::string& wor
 // The run-time entries a pack may import (include/nxaot/aot_module.h, src/lift/runtime.h): what dm/host and src/rt export to it
 bool IsHostImport(const std::string& name);
 
+// The toolchain's identity, which every cache key holds (nxaot.lock's LLVM and dynarmic, LLVM's version, this executable's SHA-256): what a pack marks
+// its cache with and `nxaot cache-prune` prunes by (src/cache/cache.h)
+std::string CacheTool();
+
 // The analysis's threads with --workers 0: one per CPU this process may run on (its result is the same with any number)
 unsigned AnalysisThreads();
 

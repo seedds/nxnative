@@ -52,6 +52,30 @@ private:
     std::string dir_;
 };
 
+// The cache's size over time. Nothing else ever removed an entry: every nxaot a bundle brings (its executable is in every key) leaves the units of the
+// one before, which no key of the new one can reach: about 600 MB a generation for a game of 250 MB of packs. Two records make them removable:
+// - which tool uses the cache since when: MarkTool, at a pack's start, makes <dir>/tools/<16 hex of the tool's identity> once; its time is the tool's
+//   first use of this cache, and every entry of that tool is younger;
+// - when an entry was last used: a hit sets the modification time of its facts file to now (Touch: only when it is over an hour old, so a warm pack
+//   writes nothing), as does the analysis cache's load.
+// Prune, run by a tool (`nxaot cache-prune <dir> <seconds>`, which the packer runs after a game's packs with one day: scripts/build_ipa_from_nsp.py),
+// removes the entries last used before both that tool's first use and <seconds> ago: the units of older tools. The tool's own entries stay whatever
+// their age (the first pack's units, which a later profile pack takes: README.md, "The second pack's cached units"), and so do those of another tool
+// used within the time (the other platform's nxaot on the same folder).
+bool MarkTool(const std::string& dir, const std::string& tool, std::string* error);
+void Touch(const std::string& path);
+struct PruneStats {
+    uint64_t units = 0, analyses = 0, partial = 0;  // removed: whole entries, analysis entries, objects without facts and temporary files
+    uint64_t bytes = 0;                             // of everything removed
+    uint64_t kept = 0;                              // whole entries left
+    bool first_use = false;                         // the tool had no mark in this cache: it has one now, and nothing was removed
+};
+// Removes from dir the entries last used before tool's first use of the cache and before unused_seconds ago: <2 hex>/<key>.tsv with its <key>.o (the
+// facts first, so the entry never looks whole without its object), analysis/<key>.bin, objects whose facts never came, and the temporary files of
+// interrupted packs. Only files of those names in those folders are looked at. A directory that does not exist is an empty cache. False with *error
+// set when dir cannot be read
+bool Prune(const std::string& dir, const std::string& tool, uint64_t unused_seconds, PruneStats* stats, std::string* error);
+
 // The SHA-256 of a file's contents as 64 hex digits; empty when it cannot be read (the tool's own executable, part of every key)
 std::string FileSha256(const std::string& path);
 

@@ -2157,7 +2157,8 @@ def nxaot_options(nxaot, env):
     if 'nxaot build' not in text:
         raise BuildError(f'{nxaot} does not run as nxaot (exit code {r.returncode}): {text.strip()[-400:] or "no output"}. Built in its Docker image it links the image\'s libLLVM-18.so: run this '
                          'script where that library is installed (LLVM 18), configure nxaot with -DNXAOT_LLVM_STATIC=ON, or give --nxaot a script that runs it in the image')
-    return {o for o in ('--cache', '--workers', '--target', '--profile', '--misses', '--bind') if re.search(r'\[' + o + r'\b', text)}
+    return {o for o in ('--cache', '--workers', '--target', '--profile', '--misses', '--bind') if re.search(r'\[' + o + r'\b', text)} | \
+        ({'cache-prune'} if re.search(r'nxaot cache-prune\b', text) else set())   # the subcommand that prunes a --cache directory (prune_unit_cache)
 
 
 def chain_vk_of(repo):   # the version dm/gfx/nvn/dmsh_chain_vk.h holds (None when it has none)
@@ -2641,6 +2642,25 @@ def packs_ready(nxaot, opts, aot, nro_dir, mods, platform, profiles=None, misses
            all((dest / f'{m}{s}').is_file() for m in mods for s in ('.aot.tsv', '.image.bin')) and (not nro_rows or (dest / 'nro.tsv').is_file()):
             ready.append(mode)
     return ready
+
+
+CACHE_UNUSED_SECONDS = 86400   # prune_unit_cache: an older nxaot's units go once they were not used for a day
+
+
+def prune_unit_cache(nxaot, opts, cache, env, logs):
+    """After a game's packs: `nxaot cache-prune <cache> <seconds>` when this nxaot has it (dm/tools/aot/README.md, "The cache's size"). Every key of the unit cache
+    <NSP folder>/<id>-work/aot-cache holds the nxaot that made it, so a new bundle's packs reach none of the units of the one before, and nothing removed them: about
+    600 MB a bundle for a game of 250 MB of packs. nxaot removes the entries last used before its own first use of the cache and before a day ago: the units of older
+    recompilers. Its own stay whatever their age (a later profile pack takes the first pack's), and so do those of another nxaot used within the day (the other
+    platform's). A failure only leaves the cache as it is"""
+    if 'cache-prune' not in opts or not cache.is_dir(): return
+    log = logs / 'nxaot_cache_prune.log'
+    try: run([nxaot, 'cache-prune', cache, CACHE_UNUSED_SECONDS], log, env=env)
+    except BuildError as e:
+        say(f'[RED] the unit cache {cache} was not pruned ({e}): the units of older recompilers stay in it'); return
+    line = next((l for l in reversed(log.read_text(errors='replace').splitlines()) if l.startswith('aot: cache ')), '')
+    m = re.search(r'(\d+) units, .* removed \((\d+) bytes\)', line)
+    if m and int(m.group(1)): say(f'unit cache: {int(m.group(1)):,} units of older recompilers removed from {cache} ({int(m.group(2)) / 1e6:,.0f} MB; {log})')
 
 
 def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, tmp, platform='linux', profiles=None, misses=None, takeovers=None):
@@ -3342,6 +3362,7 @@ def main(args=None):
         say(f'recompiler\'s input: {aot} ({", ".join(mods)}' + (f'; nro.tsv lists {len(nros)} NRO{"" if len(nros) == 1 else "s"}' if nros else '') + f'); shaders: {ios}; run script: {script}; '
             f'launch file: {launch}; game profile file: {gprof}')
         aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, nro_dir, mods, env, logs, work / 'tmp/aot', platform, profiles, misses, takeovers)
+        prune_unit_cache(nxaot, nxaot_opts, wdir / 'aot-cache', env, logs)   # the units of older recompilers, not used for a day
         ready = sorted(packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses, takeovers), key=lambda m: m != pack_mode)   # the mode just packed first: run.sh's default
         launch_file(ready)
         rmtree(work / 'tmp')

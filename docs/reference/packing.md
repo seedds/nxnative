@@ -69,6 +69,16 @@
 - **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), `nxlauncher --play` under `timeout` on Linux.
 - **Check:** `t_lifecycle` (a profile writer that takes 2.5 s: its file written in full, no `.tmp` left; it fails on the old order).
 
+## The recompiler's unit cache
+
+### The unit cache in the work folder grows with every bundle
+
+- **Symptom:** on Windows or Linux, `<NSP folder>/<id>-work/aot-cache/` gets larger each time the game is packed with another bundle, by about the size of the game's packs and more (Mario vs. Donkey Kong: 600 MB a bundle for 250 MB of packs; 1.8 GB after three), and never shrinks.
+- **Cause:** every key of the cache holds the recompiler that made the unit (its executable's SHA-256: `dm/tools/aot/src/build/pack.cpp` `UnitKey`), so the packs of a new bundle reach none of the units of the one before, and nothing ever removed an entry.
+- **Fix:** a pack marks the cache with its recompiler once (`<cache>/tools/<16 hex>`, the time of its first use), a hit sets the entry's time to now, and `nxaot cache-prune <cache> <seconds>` removes the entries last used before both the recompiler's first use and `<seconds>` ago, which are the units of older recompilers (`dm/tools/aot/src/cache/cache.cpp` `MarkTool`, `Touch`, `Prune`). The packer runs it after a game's packs with one day (`scripts/build_ipa_from_nsp.py` `prune_unit_cache`). The recompiler's own units stay whatever their age (a later pack with a profile takes the first pack's), and so do those of another recompiler used within the day (the other platform's on the same folder). Deleting the folder by hand is always safe: the next pack compiles everything again.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), on Linux, when the disk of the development machine ran full.
+- **Check:** nxaot's CTest `cache` (`dm/tools/aot/tests/test_cache.py`, the `cache-prune` rows) and `test_nsp_x86.py` `test_unit_cache_pruned_after_the_packs`. [dm/tools/aot/README.md](../../dm/tools/aot/README.md#the-caches-size).
+
 ## Cartridge dumps
 
 ### A cartridge dump with its update on it extracts the update as the base game

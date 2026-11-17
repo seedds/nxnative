@@ -13,6 +13,8 @@
 //                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites; --memory as for discover
 //   nxaot image <module.nro> <out dir> [<name>]       the behaviour-image form of an NRO: <name>.image.bin and its manifest <name>.aot.tsv
 //                                                     (layout and data rows), the input form patch_nso.py --aot will write for NSOs
+//   nxaot cache-prune <cache dir> <seconds>           the entries of older nxaot builds in a --cache directory, not used for that long, removed
+//                                                     (src/cache/cache.h Prune)
 //   nxaot manifest <name.aot.tsv>                     parses a manifest and prints it back in canonical form (src/module/manifest.h)
 //   nxaot module <module.nro | name.aot.tsv>          what the loader read: layout, MOD0, symbols, relocations, FDEs and LSDAs, data blocks
 //   nxaot census <raw ARM64 code file> --base <hex>   phase 0's census of a code blob, as key<TAB>count lines (src/analysis/census.h)
@@ -82,6 +84,7 @@
 #include "analysis/reach.h"
 #include "build/pack.h"
 #include "build/plan.h"
+#include "cache/cache.h"
 #include "dynarmic/ir/opcodes.h"
 #include "lift/opcodes.h"
 #include "module/image.h"
@@ -119,6 +122,7 @@ int Usage() {
                  "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--misses <file>] [--bind <file>] [--memory]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
+                 "       nxaot cache-prune <cache dir> <seconds>\n"
                  "       nxaot module <module.nro | name.aot.tsv>\n"
                  "       nxaot census <raw ARM64 code file> --base <hex>\n"
                  "       nxaot opcodes [--reach [--samples N] [--check]]\n"
@@ -1244,6 +1248,29 @@ int main(int argc, char** argv) {
     }
     if (cmd == "opcodes") {
         return Opcodes(argc, argv);
+    }
+    if (cmd == "cache-prune") {
+        // The entries of a --cache directory not used for <seconds> removed (src/cache/cache.h Prune; README.md, "The cache's size"): the packer
+        // runs it after a game's packs
+        char* end = nullptr;
+        const unsigned long long seconds = argc == 4 ? std::strtoull(argv[3], &end, 10) : 0;
+        if (argc != 4 || end == argv[3] || *end) {
+            return Usage();
+        }
+        nxaot::cache::PruneStats s;
+        std::string error;
+        if (!nxaot::cache::Prune(argv[2], nxaot::build::CacheTool(), seconds, &s, &error)) {
+            std::fprintf(stderr, "nxaot cache-prune: %s\n", error.c_str());
+            return 1;
+        }
+        if (s.first_use) {
+            std::printf("aot: cache %s: this nxaot's first use of it, nothing removed\n", argv[2]);
+            return 0;
+        }
+        std::printf("aot: cache %s: %llu units, %llu analyses and %llu partial files of older tools, not used for %llu s, removed (%llu bytes); %llu units kept\n", argv[2],
+                    static_cast<unsigned long long>(s.units), static_cast<unsigned long long>(s.analyses), static_cast<unsigned long long>(s.partial), seconds,
+                    static_cast<unsigned long long>(s.bytes), static_cast<unsigned long long>(s.kept));
+        return 0;
     }
     if (cmd == "version") {
         std::printf("llvm\t%s\ndynarmic\t%s\n", NXAOT_LOCK_LLVM, NXAOT_LOCK_DYNARMIC);

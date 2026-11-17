@@ -317,6 +317,7 @@ bool LoadAnalysis(const std::string& path, const std::string& key, CachedAnalysi
         *why = "it does not parse";
         return false;
     }
+    cache::Touch(path);  // used now (cache::Prune)
     return true;
 }
 

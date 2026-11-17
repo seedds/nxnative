@@ -2735,10 +2735,32 @@ referenced addresses are module offsets in the key, and a function that moved in
 reusing it needs the lowering to reach other code through symbols only, phase 5b). A change to a function's convention facts (a callee's WRITES,
 say) misses the functions that read them, as it must.
 
+### The cache's size
+
+Nothing removed an entry, and every key holds the tool that made it (`ToolIdentity`: nxaot.lock's LLVM and dynarmic, LLVM's version, this
+executable's SHA-256), so the packs of a new nxaot reach none of the entries of the one before: about 600 MB a bundle for a game of 250 MB of packs
+(Mario vs. Donkey Kong's cache was 1.8 GB after three). Two records make the old ones removable ([src/cache/cache.h](src/cache/cache.h)):
+
+- a pack marks the cache with its tool once, `<dir>/tools/<16 hex of the tool's identity>` (`MarkTool`): the file's time is the tool's first use of
+  this cache, and every entry the tool can reach is younger;
+- a hit sets the modification time of the entry's facts file to now (`Touch`; only when it is over an hour old, so a warm pack writes nothing), and
+  so does a load from the analysis cache.
+
+`nxaot cache-prune <dir> <seconds>` removes the entries last used before both this tool's first use of the cache and `<seconds>` ago: the facts
+first, then the object (an entry never looks whole without its object), the analysis entries, objects whose facts never came and the temporary
+files of interrupted packs; only files of those names in the cache's folders are looked at. The tool's own entries stay whatever their age: a pack
+with a profile takes the first pack's units ("The second pack's cached units"), which may be weeks old. Those of another tool used within the time
+stay too (the other platform's nxaot on the same folder). A tool that never packed into the cache gets its mark and removes nothing. The packer
+runs it after a game's packs with one day (`scripts/build_ipa_from_nsp.py` `prune_unit_cache`). Not removed: the tool's own entries that no pack
+reaches any more (the units of functions a profile moved to another tier, of an older version of the game): they grow with the packs made, not with
+the bundles, and deleting the cache folder is always safe.
+
 CTest `cache` ([tests/test_cache.py](tests/test_cache.py)): every corpus NRO packed cold into a new cache (every function a miss) and warm with
 another number of workers (every function a hit, the shared object byte for byte the cold one's); a copy of fnptr-gcc with one `movz` immediate
 changed, in a function without a jump table, whose discovery tables are otherwise the original's: one miss, the other functions hits; fnptr-gcc
-at tier C: every function a miss.
+at tier C: every function a miss. The `cache-prune` rows: a pack marks its tool; the tool's own entries stay with no time allowed; a hit refreshes an entry set
+three days back; an older tool's entries, an object without facts, a temporary file and an analysis entry go with an hour allowed and stay with ten
+days, files the cache never wrote stay; the pack after it misses exactly the removed units; a first use removes nothing.
 
 Measured with 8 workers (the default here): the corpus's packs (`build_packs.sh` with `NXAOT_ARGS='--cache <dir>'`: the eighteen NROs and the
 synthetic module) cold in 12.7 s, 891 misses, 5,792,296 bytes written (891 objects, 5.9 MB with the facts files); warm in 3.3 s, 891 hits, every
@@ -4684,6 +4706,13 @@ smallest normal raises UFC on Arm and not here (FZ = 0); with FZ = 1, x86 flushe
 divide and square root of such a result give the smallest normal here and zero on Arm (design 7.2, row 13). The brief of phase 2 asks the
 FZ handling to follow dynarmic's: fused multiply-add gets the software slow path dynarmic has (`FPMulAdd` for a result of +-smallest normal), the
 other operations take x86's FTZ as dynarmic does. Random vectors do not hit these boundaries; a slow path for them is a later, measured change.
+
+Also shared with dynarmic, not filtered (the two agree, so no vector differs), and open: FRECPS and FRSQRTS of infinity times zero. The Arm ARM's
+`FPRecipStepFused` and `FPRSqrtStepFused` return 2.0 and 1.5 for it and raise nothing; dynarmic computes the native FMA before its software step and
+the lowering before its blend ([the estimates and steps inline](#the-estimates-and-steps-inline)), and x86's FMA raises Invalid Operation for
+infinity times zero, so both set IOC where Arm sets nothing. The values are Arm's. A guest that reads the FPSR after such a step sees the bit; the
+fix here would be a test of the operands before the FMA (measured against the audio limiter that runs this case once a sample), with a filter for
+the reference.
 
 ## What is not done yet
 

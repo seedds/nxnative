@@ -3390,6 +3390,10 @@ uint64_t MemoryAvailable() {
 
 }  // namespace
 
+std::string CacheTool() {
+    return ToolIdentity();
+}
+
 const char* TierName(Tier t) {
     switch (t) {
     case Tier::C:
@@ -3935,6 +3939,9 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
             return false;
         }
         tool = ToolIdentity();
+        if (!cache::MarkTool(o.cache_dir, tool, error)) {  // this tool's first use of the cache: what `nxaot cache-prune` goes by (cache.h)
+            return false;
+        }
     }
     auto t = Clock::now();
     CachedAnalysis cached;

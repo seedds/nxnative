@@ -65,6 +65,7 @@ DM_GL_DRAWLOG	diagnostic	`=<n>[:<seconds>]` logs the first `<n>` GL draws after 
 DM_GL_FBLOG	diagnostic	`=1` logs every framebuffer bind with its size and the draws so far
 DM_GL_LOG	diagnostic	`=1` makes the GL layer log object creation
 DM_GL_MISSES	diagnostic	`=1` reports each `eglGetProcAddress` name the layer lacks when the game first asks for it
+DM_GL_RENDERPROGS	path	`=<job file>` (written by `idtech4_programs.py`): the NSP script's capture run has an id Tech 4 BFG renderer convert every render program to GLSL itself, through its own finders in `main`, so the capture holds all of them and not only those a run happens to use (`hle_gl.m`; DOOM 3)
 DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that reports its first call and returns 0, instead of a null pointer (bring-up)
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
@@ -253,6 +254,7 @@ DM_NVN_UB_DEFER	switch	`0` ends the render pass at every inline uniform update, 
 DM_NVN_UB_LAZY	switch	`=<n>`: the most deferred inline uniform updates kept across a render pass end (default 160); they land before the next copy, a conflicting draw or dispatch, or the submission end; `0` lands them at every pass end
 DM_NVN_UB_N	diagnostic	`=<frames>`: the length of each phase of the same-process alternating measurement `DM_NVN_UB` (default 180, minimum 60)
 DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in part ends the pass, as before; by default its shadow starts from memory and takes the submission's queued updates (on by default)
+DM_NVN_UNBIND_DEFER	switch	`0` makes an empty `SetRenderTargets` end the open render pass again; by default the unbind is deferred, so a following binding of the same targets continues the pass (`nvn_mtl.m` `unb_on`, on by default)
 DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs

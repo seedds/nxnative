@@ -278,6 +278,14 @@ def bahs_shaders(d, label):
     # length (ctl_len), not the length an entry gives it, which for such a false entry covers real entries after it
     spans = {(c, c + ctl_len(s[2])) for _, c, s in found}
     out = [s for a, _, s in found if not any(lo <= a < hi for lo, hi in spans)]
+    # A validated binary array is authoritative: descriptor-shaped words may also
+    # occur after the control header, inside a record's other payload. Mario Kart
+    # World 1.8.0's DrivePassShaderDefault has one at 0xa1de4, outside its 2,580
+    # record entries, pairing compute control with unrelated vertex code.
+    array = bahs_binary_records(d, [o[0] for o in out])
+    if array is not None:
+        entries = {a for a, _ in array[0]}
+        out = [s for s in out if int(s[0].rsplit('@', 1)[1], 16) in entries]
     bahs_variations(d, label, [o[0] for o in out])
     return out
 
@@ -345,12 +353,9 @@ def ndve_shaders(d, label):
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
-def bahs_variations(d, label, entries):
-    """The variations of an agl BAHS file's programs, for var_pairs. The table area holds a binary array (u32 byte size, u32 count, then per binary a record: u32 record size, u32 kind
-    (0 vertex, 1 fragment, 3 compute), two u32, the 16-byte entry bahs_shaders reads) and right after it a program array (u32 byte size, u32 count, then per program: u32 record size,
-    u32 name length, u32 stage mask, u32 index of its first binary, its name, its macros). A program's binaries run from its first index to the next program's; the n-th vertex binary
-    and the n-th fragment binary in that range are one variation. Breath of the Wild: 109 of the 543 pairs drawn on a cold start in Zora's Domain came from these files, and none was in
-    shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
+def bahs_binary_records(d, entries):
+    """Validated binary array: (entry-offset/kind records, array end), or None for
+    an unrecognized layout. Used both to identify shaders and pair variations."""
     if not entries: return
     taken = {int(e.rsplit('@', 1)[1], 16) for e in entries}
     arr = min(taken) - 0x18
@@ -363,9 +368,23 @@ def bahs_variations(d, label, entries):
         rs, kind = struct.unpack_from('<II', d, o)
         if rs < 0x20: return
         recs.append((o + 0x10, kind)); o += rs
-    # every entry bahs_shaders took is a record's, but for a stray match of its scan (Donkey Kong Bananza's agl_common: 1,556 taken, 1,555 records): up to 1 % may lie
-    # outside the array; only the records' entries are paired
+    # Every candidate is a record's entry, apart from stray scan matches (Donkey
+    # Kong Bananza's agl_common: 1,556 candidates, 1,555 records). At most 1 % may
+    # lie outside the array; a larger disagreement leaves the layout unrecognized.
     if o != arr + asz or len(taken - {a for a, _ in recs}) > max(1, len(taken) // 100): return
+    return recs, o
+
+def bahs_variations(d, label, entries):
+    """The variations of an agl BAHS file's programs, for var_pairs. The table area holds a binary array (u32 byte size, u32 count, then per binary a record: u32 record size, u32 kind
+    (0 vertex, 1 fragment, 3 compute), two u32, the 16-byte entry bahs_shaders reads) and right after it a program array (u32 byte size, u32 count, then per program: u32 record size,
+    u32 name length, u32 stage mask, u32 index of its first binary, its name, its macros). A program's binaries run from its first index to the next program's; the n-th vertex binary
+    and the n-th fragment binary in that range are one variation. Breath of the Wild: 109 of the 543 pairs drawn on a cold start in Zora's Domain came from these files, and none was in
+    shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
+    array = bahs_binary_records(d, entries)
+    if array is None: return
+    recs, o = array
+    acnt = len(recs)
+    taken = {int(e.rsplit('@', 1)[1], 16) for e in entries}
     psz, pcnt = struct.unpack_from('<II', d, o)
     if o + psz > len(d) or not pcnt: return
     q, bases = o + 8, []

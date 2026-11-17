@@ -2369,7 +2369,7 @@ static void ts_clk(void);
 void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); hw_note(addr); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk(); }
 void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_report, sizeof g_cnt_report); memcpy(rst, g_cnt_reset, sizeof g_cnt_reset); }
 
-// Counter timestamps (614.4 MHz) are taken from the guest clock (hle_os.c guest_ns, the same epoch as svc GetSystemTick / cntpct, whose ticks are 19.2 MHz, 31.25 MHz on the Switch 2: guest_ticks).
+// Counter timestamps (NVN's raw unit: 614.4 MHz, ns on NVN2, nvn_timestamp.h) are taken from the guest clock (hle_os.c guest_ns, the same epoch as svc GetSystemTick / cntpct, whose ticks are 19.2 MHz, 31.25 MHz on the Switch 2: guest_ticks).
 // They used to come from CLOCK_MONOTONIC, which keeps running while the Mac sleeps while the guest clock (mach_absolute_time) does not, so the two differed by the sleep time; once timestamps were converted to ns, Mario halved its frame rate. Graphics unit tests have a weak definition on the same clock (below)
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { return nvn_timestamp_from_ns(guest_ns()); }
@@ -2422,7 +2422,7 @@ static uint64_t place_back(seg_clk *sc, uint64_t ns, uint64_t c0, uint64_t off) 
     if (sc && (m == 1 || m == 3)) back += seg_idle_before(sc, ns, c0);
     return back < ns ? back : 0;
 }
-static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t off) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock; off: sub_place's
+static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t off) {   // the time a counter report records (NVN's raw unit, nvn_timestamp.h); c0 / c1: the last segment's GPU start / end on the guest clock; off: sub_place's
     int top = o->type == 0x10; uint64_t ns = 0;
     uint32_t bi = o->seg + !top;
     if (sc && bi < sc->nb && g_ts_heap) {   // Map the GPU boundary through the paired CPU sample. Reading the guest clock later adds CPU scheduling delay to the timestamp.
@@ -7036,7 +7036,8 @@ enum { TB2_STAGE = 64 };
 static struct { __unsafe_unretained id<MTLTexture> src, view; uint64_t epoch, rid; } g_tb2_stage[TB2_STAGE];   // view: alive until the submission is done (defer_obj_release)
 static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, id<MTLBuffer> src, size_t off, MTLPixelFormat pf, uint32_t w, uint32_t h, uint32_t row, NSUInteger al, uint64_t *rid) {   // off: the texture's own pool offset
     if (!src || off >= src.length) return nil;
-    if (!src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
+    // Querying contents itself is invalid for private storage under Metal validation.
+    if (src.storageMode == MTLStorageModePrivate || !src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TB2_STAGE);
     if (g_tb2_stage[k].src == t && g_tb2_stage[k].epoch == g_fence + 1) { *rid = g_tb2_stage[k].rid; return g_tb2_stage[k].view; }   // copied for this submission already
     while (h > 1 && off + (uint64_t)row * h > src.length) h--;   // as the aligned rows: a last row running past the pool buffer
@@ -7689,14 +7690,20 @@ void arena_begin(void) {
 void arena_commit(uint64_t fence) { for (NvArena *a in g_sub_arenas) { a->fence = fence; [g_arenas addObject:a]; } [g_sub_arenas removeAllObjects]; g_cur_arena = nil; }
 // An unqualified id * out-parameter is __autoreleasing under ARC; __strong avoids autoreleasing the arena buffer at every allocation.
 // Measurements: docs/reference/frame-rate.md, Arena buffer ownership on allocation.
-static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
+// arena_take: n bytes in the current arena (*buf its buffer), with their offset in it and their CPU and GPU addresses as of the allocation. Use these, never g_cur_arena after
+// it: any allocation in between (a helper that takes a slot of its own) can roll g_cur_arena over to a new block, and its base plus this offset then names the wrong arena (PR #2847:
+// an argument block patched across cbsize_table's rollover pointed into the new arena)
+typedef struct { size_t off; uint8_t *cpu; uint64_t gpu; } arena_at;
+static arena_at arena_take(size_t n, __strong id<MTLBuffer> *buf) {
     n = (n + 255) & ~(size_t)255;
     if (!g_cur_arena || g_cur_arena->used + n > g_cur_arena->len) {
         pthread_mutex_lock(&g_mu); g_cur_arena = arena_new(n); pthread_mutex_unlock(&g_mu);
         [g_sub_arenas addObject:g_cur_arena];
     }
-    size_t off = g_cur_arena->used; g_cur_arena->used += n; *buf = g_cur_arena->buf; return off;
+    NvArena *a = g_cur_arena; size_t off = a->used; a->used += n; *buf = a->buf;
+    return (arena_at){off, a->cpu + off, a->gpu + off};
 }
+static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) { return arena_take(n, buf).off; }   // the offset alone: for a caller that addresses its slot through *buf
 
 // ---------- Draw state ----------
 static struct {
@@ -11422,7 +11429,8 @@ static id<MTLTexture> tbuf_shadow(int tid, id<MTLTexture> t, uint64_t *rid) {
     int bw, bh, bpb = nvn_fmt_bpb(g_treg[tid].t.d.format, &bw, &bh);
     id<MTLBuffer> src = root.buffer; NSUInteger off = root.bufferOffset + (NSUInteger)lead * (NSUInteger)bpb, w = t.width - lead;
     if (!src || bpb <= 0 || off >= src.length) return t;
-    if (!src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (below Metal's view alignment) in a pool the CPU cannot access, read through a binding with no offset table entry: read %u elements early", (unsigned long)off, lead); return t; }
+    // Preserve the unsupported-storage fallback without making an invalid CPU-access query.
+    if (src.storageMode == MTLStorageModePrivate || !src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (below Metal's view alignment) in a pool the CPU cannot access, read through a binding with no offset table entry: read %u elements early", (unsigned long)off, lead); return t; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TBS_CACHE);
     if (g_tbs_cache[k].src == t && g_tbs_cache[k].epoch == g_fence + 1) { *rid = g_tbs_cache[k].rid; return g_tbs_cache[k].copy; }
     size_t bytes = (size_t)w * (size_t)bpb, row = (bytes + 255u) & ~(size_t)255u, n = bytes < src.length - off ? bytes : src.length - off;   // 256: a multiple of every view alignment
@@ -11462,6 +11470,19 @@ enum { POOL_IDS_MAX = 8192 };   // the IDs a patch takes at most, and a list hol
 typedef struct { int *v, n, cap; } pool_ids;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
+// Each table's log of the entries written into it since its build: the patches' (pool_walk) and the in-place writes (pool_seen_scan, pool_stand_scan), so a spare the table left at log
+// position lpos is brought up to date by the entries after it (pool_patch_take). A ring of a quarter of the table's entries: past that a whole copy is cheaper than the writes. build: the
+// table's build (g_pool_build), which a spare names, so a spare of an earlier build, or of another table in that slot, is never brought up to date from this log
+static struct { uint32_t *at; uint64_t *v; uint64_t n, build; uint32_t cap; } g_plog[POOL_SNAPS]; static uint64_t g_pool_build;
+static inline void plog_add(const pool_snap *q, uint32_t at, uint64_t v) {
+    int k = (int)(q - g_psnap); if (!g_plog[k].cap) return;
+    uint32_t j = (uint32_t)(g_plog[k].n++ % g_plog[k].cap); g_plog[k].at[j] = at; g_plog[k].v[j] = v;
+}
+static void plog_build(const pool_snap *q, int n) {   // q's table built anew with n IDs: its log starts over
+    int k = (int)(q - g_psnap); uint32_t cap = MAX(64u, (uint32_t)(n + 1) / 4);
+    if (cap != g_plog[k].cap) { g_plog[k].at = realloc_or_die(g_plog[k].at, cap * sizeof *g_plog[k].at, "a pool table's log"); g_plog[k].v = realloc_or_die(g_plog[k].v, cap * sizeof *g_plog[k].v, "a pool table's log"); g_plog[k].cap = cap; }
+    g_plog[k].n = 0; g_plog[k].build = ++g_pool_build;
+}
 static uint64_t g_psnap_gen = 1;   // bumped by each rebuild or patch: an argument block holding a pool address is not reused past it (encode_args_)
 static uint64_t g_stat_pool_builds; static double g_stat_pool_ms;
 static uint64_t g_stat_pool_why[5];   // why a table was built whole: no table of its kind, a registration changed (g_reg_gen), a texture's storage changed (g_ser_gen), retired IDs of an earlier submission, textures left out (the walk goes on)
@@ -11469,7 +11490,6 @@ static uint64_t g_stat_pool_why[5];   // why a table was built whole: no table o
 // [2] resized, [3] a change without a note, [4] a new submission over more than POOL_IDS_MAX retired IDs. pchg / schg: of those patched or kept, the ones over memory pool changes
 // and over a new submission
 static uint64_t g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_nopatch[5], g_stat_pool_pchg, g_stat_pool_schg;
-void mtl_pool_stats(uint64_t s[6]) { s[0] = g_stat_pool_builds; s[1] = (uint64_t)(g_stat_pool_ms * 1000); s[2] = g_stat_pool_patched; s[3] = g_stat_pool_kept; s[4] = g_stat_pool_pchg; s[5] = g_stat_pool_schg; }   // the power line's pool table counts (hle_nvn.c)
 static void ids_push(pool_ids *l, int id_) {   // past POOL_IDS_MAX the list is dropped (n -1)
     if (l->n < 0) return;
     if (l->n == POOL_IDS_MAX) { free(l->v); *l = (pool_ids){NULL, -1, 0}; return; }
@@ -11723,7 +11743,7 @@ static void pool_stand_scan(void) {
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
                 if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents || q->dtt != r->stand_tt1 - 1) continue;
                 uint64_t *e = (uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD);
-                if (e[at] == e[*(uint32_t *)q->buf.contents]) e[at] = r->stand_rid; }
+                if (e[at] == e[*(uint32_t *)q->buf.contents]) { e[at] = r->stand_rid; plog_add(q, (uint32_t)at, r->stand_rid); } }
         }
 }
 // A first read of an ID whose texture is not made: what it found. DM_NVN_POOL_FIRST=1 logs each (up to 32 a frame); the totals go to the log every 300 frames in which they changed
@@ -11776,29 +11796,73 @@ static void pool_seen_scan(void) {
                     if (!pool_seen_t(id_, q->dtt)) continue;
                     er = pool_bridge_pair((int)tt, q->dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, q->dtt) : 0;
                     if (!er) { pool_type_note(id_, (int)tt, q->dtt); continue; } }
-                ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = er;
+                ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = er; plog_add(q, (uint32_t)at, er);
                 if (trans) { ids_push(&q->trans, id_); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
         }
     }
 }
-// A table replaced by a new walk is reused once the submission that may read it has completed, the last segment's fence covering every segment before it: a new buffer each time meant an allocation, a residency add and remove, and a kernel call or more each way,
-// about 3 a frame in Ocarina of Time. Sizes round up to 64 KB, as a pool grows by a few IDs at a time. What cannot be used again soon leaves when the spares are full (the idea is from PR 1428)
-enum { POOL_SPARES = 16 };
-static struct { __strong id<MTLBuffer> buf; uint64_t fence; } g_pool_spare[POOL_SPARES]; static int g_npool_spare; static uint64_t g_pool_made, g_pool_reused;
+// The tables' spare buffers. A table a new walk replaced, or the buffer a patch left, is used again once the submission that may read it has completed, the last segment's fence covering every
+// segment before it: a new buffer each time meant an allocation, a residency add and remove, and a kernel call or more each way, about 3 a frame in Ocarina of Time. Sizes round up to 64 KB, as a
+// pool grows by a few IDs at a time (the idea is from PR 1428).
+// A patched table goes into another buffer, as draws already encoded read the old one: copying the whole table was about 5 MB a frame in Ocarina of Time (16-24 patches a frame of its
+// 33,025-entry tables in Kokiri Forest, 0.13-0.18 ms of the submit thread on an M6 against 0.015-0.025 with spares; PR #2663). So the buffer a patch leaves names its table, that table's build and the log position it holds (g_plog): a later patch of the table takes its finished
+// spare furthest along and writes the entries logged since, and copies the table whole only when it has none, or the log has moved past them. A table built whole takes a spare of no live
+// table first. The spares hold at most POOL_SPARE_BYTES together; past that the oldest go. 16 MB holds about 50 of that game's 320 KB tables, enough for its patches
+// over the frames in flight: 8 MB took a spare for 85-90% of them, 4 MB for about half, slower than copying, as its copies found no finished buffer and allocated one
+enum { POOL_SPARE_MAX = 64, POOL_SPARE_BYTES = 16 << 20 };
+static size_t g_pool_spare_cap = POOL_SPARE_BYTES;   // a variable for t_pool_replay
+typedef struct { __strong id<MTLBuffer> buf; uint64_t fence, build, lpos; int k; } pool_spare;   // k: the table (g_psnap) of build whose state at log position lpos it holds; -1 none
+static pool_spare g_pool_spare[POOL_SPARE_MAX]; static int g_npool_spare; static uint64_t g_pool_spare_bytes, g_pool_made, g_pool_reused;
+// Patches: into a spare of their own table, the entries that took, copied whole because the table had no spare of its own, none finished or the log had moved past them; the time they took
+static uint64_t g_stat_pool_replayed, g_stat_pool_replay_n, g_stat_pool_copied[3], g_stat_pool_take_ns;
+static int spare_live(const pool_spare *s) { return s->k >= 0 && g_plog[s->k].build == s->build; }
+static id<MTLBuffer> spare_out(int i) { id<MTLBuffer> b = g_pool_spare[i].buf; g_pool_spare_bytes -= b.length; g_pool_spare[i] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; return b; }
 static id<MTLBuffer> pool_table_take(size_t need) {
-    size_t len = (need + 0xffff) & ~(size_t)0xffff; uint64_t done = g_done;
-    for (int i = 0; i < g_npool_spare; i++) if (g_pool_spare[i].fence <= done && g_pool_spare[i].buf.length == len) {
-        id<MTLBuffer> b = g_pool_spare[i].buf; g_pool_spare[i] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; g_pool_reused++; return b; }
+    size_t len = (need + 0xffff) & ~(size_t)0xffff; uint64_t done = g_done; int o = -1;
+    for (int i = 0; i < g_npool_spare; i++) { const pool_spare *s = &g_pool_spare[i];
+        if (s->fence > done || s->buf.length != len) continue;
+        if (o < 0 || (spare_live(&g_pool_spare[o]) && !spare_live(s)) || (spare_live(&g_pool_spare[o]) == spare_live(s) && s->fence < g_pool_spare[o].fence)) o = i; }
+    if (o >= 0) { g_pool_reused++; return spare_out(o); }
     id<MTLBuffer> b = [g_dev newBufferWithLength:len options:MTLResourceStorageModeShared];
     if (b) { res_add(b); g_pool_made++; }
     return b;
 }
-static void pool_table_give(id<MTLBuffer> b) {
+static void pool_table_give(id<MTLBuffer> b, int k, uint64_t lpos) {   // k: the table (g_psnap) whose current build b holds at log position lpos; -1 none
     if (!b) return;
-    if (g_npool_spare == POOL_SPARES) {   // the oldest goes: a size the pools have left behind, most likely
-        int o = 0; for (int i = 1; i < POOL_SPARES; i++) if (g_pool_spare[i].fence < g_pool_spare[o].fence) o = i;
-        defer_obj_release(g_pool_spare[o].buf); g_pool_spare[o] = g_pool_spare[--g_npool_spare]; g_pool_spare[g_npool_spare].buf = nil; }
-    g_pool_spare[g_npool_spare].buf = b; g_pool_spare[g_npool_spare].fence = g_fence + 1; g_npool_spare++;
+    while (g_npool_spare && (g_npool_spare == POOL_SPARE_MAX || g_pool_spare_bytes + b.length > g_pool_spare_cap)) {   // the oldest go: a size the pools have left behind, or a table far behind its log
+        int o = 0; for (int i = 1; i < g_npool_spare; i++) if (g_pool_spare[i].fence < g_pool_spare[o].fence) o = i;
+        defer_obj_release(spare_out(o)); }
+    if (b.length > g_pool_spare_cap) { defer_obj_release(b); return; }
+    g_pool_spare[g_npool_spare] = (pool_spare){b, g_fence + 1, k >= 0 ? g_plog[k].build : 0, lpos, k}; g_pool_spare_bytes += b.length; g_npool_spare++;
+}
+// A buffer for the next version of q's table, holding what q->buf holds now (the patch writes its entries after): its finished spare furthest along, brought up to date from the log, or a copy
+static id<MTLBuffer> pool_patch_take(const pool_snap *q) {
+    uint64_t t0 = mach_absolute_time(), done = g_done, ln; int k = (int)(q - g_psnap), o = -1, own = 0, fin = 0; ln = g_plog[k].n;
+    for (int i = 0; i < g_npool_spare; i++) { const pool_spare *s = &g_pool_spare[i];
+        if (s->k != k || s->build != g_plog[k].build || s->buf.length != q->buf.length) continue;
+        own = 1; if (s->fence > done) continue;
+        fin = 1; if (ln - s->lpos > g_plog[k].cap) continue;
+        if (o < 0 || s->lpos > g_pool_spare[o].lpos) o = i; }
+    id<MTLBuffer> b;
+    if (o < 0) { g_stat_pool_copied[!own ? 0 : !fin ? 1 : 2]++; b = pool_table_take(q->buf.length); if (b) memcpy(b.contents, q->buf.contents, q->buf.length); }
+    else {
+        uint64_t from = g_pool_spare[o].lpos; b = spare_out(o); g_pool_reused++;
+        uint64_t *e = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); const uint32_t *at = g_plog[k].at; const uint64_t *v = g_plog[k].v; uint32_t cap = g_plog[k].cap;
+        memcpy(b.contents, q->buf.contents, DMSH_POOL_HEAD);   // the head: the bound and the read bitmap's address
+        for (uint64_t j = from; j < ln; j++) e[at[j % cap]] = v[j % cap];
+        g_stat_pool_replayed++; g_stat_pool_replay_n += ln - from;
+    }
+    g_stat_pool_take_ns += mach_absolute_time() - t0;   // ticks: mtl_pool_stats converts
+    return b;
+}
+// The power line's pool table counts (hle_nvn.c): builds, their time (us), patched, kept, of those over pool changes and over a new submission; patches into a spare of their own and the entries
+// that took, patches copied whole (no spare of their own, none finished, the log past them), the patches' copy and replay time (us); the bytes of the tables' buffers in use and spare
+void mtl_pool_stats(uint64_t s[POOL_STATS]) {
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    uint64_t used = 0; for (int k = 0; k < POOL_SNAPS; k++) if (g_psnap[k].buf) used += g_psnap[k].buf.length;
+    uint64_t v[POOL_STATS] = {g_stat_pool_builds, (uint64_t)(g_stat_pool_ms * 1000), g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_pchg, g_stat_pool_schg, g_stat_pool_replayed, g_stat_pool_replay_n,
+        g_stat_pool_copied[0], g_stat_pool_copied[1], g_stat_pool_copied[2], g_stat_pool_take_ns * tb.numer / tb.denom / 1000, used, g_pool_spare_bytes};
+    memcpy(s, v, sizeof v);
 }
 // One entry of a pool table, as the walk takes it: the resource ID of what the ID holds (0: nothing of the type, or a texture not made). gone counts IDs without storage, and *dead is set for
 // one whose storage does not exist (yet): one marked gone stays so until it is registered again, which is noted. left / left_req count the textures past limit (what this frame may still
@@ -11876,7 +11940,7 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
         if (!known) { g_stat_pool_nopatch[3]++; break; }
         if (nid >= POOL_IDS_MAX) { g_stat_pool_nopatch[0]++; break; }
         uint64_t *e = (uint64_t *)((uint8_t *)p->buf.contents + DMSH_POOL_HEAD), dummy = e[nn], room = samp ? UINT64_MAX : pool_room(), spent = g_walk_spent;
-        int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL;
+        int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL, lpos = 0;   // lpos: the log position the old buffer holds, where this patch's entries begin
         pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
         if (!pools) ids_keep(0, &nd, &p->dead);    // not taken again: they stay on the list for the next pool change
         if (!stale) ids_keep(1, &nt, &p->trans);   // this submission's views, still good
@@ -11887,14 +11951,14 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
             if (d) ids_add(0, &nd, ids[k]);
             if (t) ids_add(1, &nt, ids[k]);
             if (r == (be ? be[i] : e[i])) continue;
-            if (!b) { b = pool_table_take(p->buf.length); memcpy(b.contents, p->buf.contents, p->buf.length); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); }
-            be[i] = r;
+            if (!b) { b = pool_patch_take(p); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); lpos = g_plog[p - g_psnap].n; }
+            be[i] = r; plog_add(p, (uint32_t)i, r);
         }
         g_stat_pool_pchg += pools; g_stat_pool_schg += stale; free(p->dead.v); free(p->trans.v);
         p->reg = rg; p->ser = sg; p->sub = nt.n ? g_sub_serial : 0; p->dead = nd; p->trans = nt;
         if (left) { p->left += left; p->left_req += left_req; p->frame = atomic_load(&g_cur_frame); }   // textures past this frame's room: the walk goes on next frame, as for its own
         if (!b) { g_stat_pool_kept++; *out = p->buf; return p->gpu; }
-        pool_table_give(p->buf); p->buf = b; p->gpu = b.gpuAddress;
+        pool_table_give(p->buf, (int)(p - g_psnap), lpos); p->buf = b; p->gpu = b.gpuAddress;
         g_psnap_gen++; g_stat_pool_patched++;
         *out = b; return p->gpu;
     } while (0);
@@ -11920,7 +11984,7 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
         e[i] = r ? r : dummy; real += r != 0;
     }
     e[n] = dummy;
-    pool_table_give(p->buf); free(p->dead.v); free(p->trans.v);
+    pool_table_give(p->buf, -1, 0); free(p->dead.v); free(p->trans.v); plog_build(p, n);   // the spares of the table's earlier build, or of another table in this slot, are of no live table now
     // Retired registrations drop their views at submission end; their resource IDs cannot outlive that submission (trans, taken again by the next one)
     *p = (pool_snap){b, b.gpuAddress, rg, sg, atomic_load(&g_cur_frame), nt.n ? g_sub_serial : 0, samp, dtt, dpf, base, left, left_req, nd, nt, samp || g_walk_over};
     g_psnap_gen++;
@@ -12535,7 +12599,7 @@ static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // fr
 static inline uint64_t ub_bound(uint64_t size) { return (size + 255) & ~UINT64_C(255); }
 static uint64_t g_ub_short;
 static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, uint64_t live, uint32_t need, const uint8_t *mem, __strong id<MTLBuffer> *buf) {
-    size_t off = arena_alloc(need, buf); uint64_t gpu = g_cur_arena->gpu + off; uint8_t *d = (uint8_t *)g_cur_arena->cpu + off; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;
+    arena_at at = arena_take(need, buf); uint64_t gpu = at.gpu; uint8_t *d = at.cpu; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;
     if (!mem) mem = (const uint8_t *)(uintptr_t)lo;
     if (g_nubd && ubd_hits(lo, hi) && ubd_covers(lo, hi)) {   // as ubd_shadow_: the updates in order
         for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
@@ -12577,10 +12641,10 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
 // The uniform slots' bound sizes (DMSH_CBSIZE_BANK), which the translator's reads at computed offsets compare with: one past its slot's size, rounded up to 256 bytes (ub_bound), gives 0, as on Maxwell. 0 for an unbound slot,
 // whose reads go to the zero bank (cbuf_slot) and get 0 here too
 static uint64_t cbsize_table(int nvn_stage, __strong id<MTLBuffer> *use) {
-    size_t off = arena_alloc(16 * ((DMSH_CBSIZE_SLOTS + 3) / 4), use); uint32_t *d = (uint32_t *)(void *)(g_cur_arena->cpu + off);
+    arena_at at = arena_take(16 * ((DMSH_CBSIZE_SLOTS + 3) / 4), use); uint32_t *d = (uint32_t *)(void *)at.cpu;
     memset(d, 0, 16 * ((DMSH_CBSIZE_SLOTS + 3) / 4));
     for (int r = 0; r < DMSH_CBSIZE_SLOTS; r++) { const p_bind_buf *u = &S.ubo[nvn_stage][r]; if (u->addr) d[r] = u->size < 65536 ? (uint32_t)ub_bound(u->size) : 65536; }   // rounded up to 256, as the driver gives it to the GPU (ub_bound)
-    return g_cur_arena->gpu + off;
+    return at.gpu;
 }
 // A storage buffer by address (SBUFU / SBUFQ) has no size: on the console the shader reads the GPU's page table as far as it indexes from the address, the pages mapped there and 0 for an
 // unmapped one. The host binds the Metal buffer that holds the address, a memory pool, a large pool's chunk or a sparse pool's mapped run, and a read past its end reached whatever lay
@@ -12666,9 +12730,9 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
     }
     NSUInteger arg_len = sh->arg_len ? sh->arg_len : sh->ae.encodedLength;
     if (reusable && args_cbuf_only(sh)) {   // only what the uniform bindings point at changed since this shader's block: copy it and write its uniform slots and their size table again
-        id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
-        uint64_t ab_gpu = g_cur_arena->gpu + off;   // save before cbuf_slot / cbsize_table allocate and may roll g_cur_arena over to a new block
-        uint64_t *p = (uint64_t *)(void *)(g_cur_arena->cpu + off);
+        id<MTLBuffer> ab; arena_at at = arena_take(arg_len, &ab); size_t off = at.off;
+        uint64_t ab_gpu = at.gpu;   // cbuf_slot / cbsize_table below allocate too (arena_take)
+        uint64_t *p = (uint64_t *)(void *)at.cpu;
         memcpy(p, (const uint8_t *)sh->ab_buf.contents + sh->ab_off, arg_len);
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; id<MTLBuffer> use;
             if (b->kind == NVN_RB_CBUF) p[b->aid] = cbuf_slot(sh, nvn_stage, b, &use);
@@ -12691,10 +12755,10 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
     // The offset table (dmsh_abi.h DMSH_TBIAS_BANK), as long as the shader declares it: each buffer image's and buffer texture's element offset (tbuf_lead), an array's one per element;
     // 0 for an aligned texture, an unbound slot or a texture of another kind
     uint32_t *tbias = NULL; uint64_t tbias_gpu = 0; __strong id<MTLBuffer> tbias_buf = nil;
-    if (sh->rf.tbias_n) { size_t doff = arena_alloc(sh->rf.tbias_n * 4u, &tbias_buf); tbias = (uint32_t *)(void *)(g_cur_arena->cpu + doff); tbias_gpu = g_cur_arena->gpu + doff; memset(tbias, 0, sh->rf.tbias_n * 4u); }
+    if (sh->rf.tbias_n) { arena_at at = arena_take(sh->rf.tbias_n * 4u, &tbias_buf); tbias = (uint32_t *)(void *)at.cpu; tbias_gpu = at.gpu; memset(tbias, 0, sh->rf.tbias_n * 4u); }
     // The length table of the bounded storage buffers (dmsh_abi.h DMSH_SBLEN_BANK, sblen_put), filled as they are encoded; 0 for a slot with no buffer, which reads nothing
     uint32_t *sblen = NULL; uint64_t sblen_gpu = 0; __strong id<MTLBuffer> sblen_buf = nil;
-    if (sh->rf.sblen) { size_t doff = arena_alloc(DMSH_SBLEN_SLOTS * 8u, &sblen_buf); sblen = (uint32_t *)(void *)(g_cur_arena->cpu + doff); sblen_gpu = g_cur_arena->gpu + doff; memset(sblen, 0, DMSH_SBLEN_SLOTS * 8u); }
+    if (sh->rf.sblen) { arena_at at = arena_take(DMSH_SBLEN_SLOTS * 8u, &sblen_buf); sblen = (uint32_t *)(void *)at.cpu; sblen_gpu = at.gpu; memset(sblen, 0, DMSH_SBLEN_SLOTS * 8u); }
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
@@ -12940,16 +13004,16 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         } else if (b->kind == NVN_RB_SBLEN) {   // the bounded storage buffers' lengths (sblen above), filled as they are encoded
             slots[aid] = sblen_gpu; USE(sblen_buf, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants (c[24]): the stage group's current block
-            id<MTLBuffer> db; size_t doff = arena_alloc(sizeof S.push[0], &db);
-            memcpy(g_cur_arena->cpu + doff, S.push[nvn_stage == 5 ? 1 : 0], sizeof S.push[0]);
-            slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
+            id<MTLBuffer> db; arena_at at = arena_take(sizeof S.push[0], &db);
+            memcpy(at.cpu, S.push[nvn_stage == 5 ? 1 : 0], sizeof S.push[0]);
+            slots[aid] = at.gpu; USE(db, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
             // c2 = the handle tables (DMSH_C2_*), the values being the NVN handles the game gave at bind time; positions read outside the tables are registered at packaging time and reported a failure at load time
             int bank = b->kind == NVN_RB_DRV2 ? 2 : 0;
             if (!sh->rf.drv_read[bank]) { slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); }
             else {
-                id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_DRV_SIZE, &db); uint8_t *d = g_cur_arena->cpu + doff; memset(d, 0, DMSH_DRV_SIZE);
+                id<MTLBuffer> db; arena_at at = arena_take(DMSH_DRV_SIZE, &db); size_t doff = at.off; uint8_t *d = at.cpu; memset(d, 0, DMSH_DRV_SIZE);
                 if (bank == 0) {
                     int base = c0_ssbo_base(nvn_stage);
                     if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
@@ -12993,7 +13057,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
                     for (int r = 0; r < DMSH_C2_SEP_SLOTS; r++) { uint64_t h = S.samp[nvn_stage][r]; uint32_t v = !dyn ? C2_HANDLE(h) : h ? (uint32_t)r << 20 : 0; memcpy(d + DMSH_C2_SAMP + DMSH_C2_ROW * r, &v, 4); }
                     #undef C2_HANDLE
                 }
-                slots[aid] = g_cur_arena->gpu + doff;
+                slots[aid] = at.gpu;
                 USE(db, MTLResourceUsageRead);
             }
         } else if (b->kind == NVN_RB_BORDER) continue;   // filled below, once every twin has been seen
@@ -13003,9 +13067,9 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         int reg = 0, aid = sh->rf.b[sh->rf.border - 1].aid;
         if (!bmask) { slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); }
         else {
-            int n = 32 - __builtin_clz(bmask); id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_BORDER_K + 16 * n, &db); uint8_t *d = g_cur_arena->cpu + doff;
+            int n = 32 - __builtin_clz(bmask); id<MTLBuffer> db; arena_at at = arena_take(DMSH_BORDER_K + 16 * n, &db); uint8_t *d = at.cpu;
             memset(d, 0, DMSH_BORDER_K); memcpy(d, &bmask, 4); memcpy(d + DMSH_BORDER_K, bk, 16 * n);
-            slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
+            slots[aid] = at.gpu; USE(db, MTLResourceUsageRead);
             if (bl) PD("B %llu st%d border mask=%#x", g_stat_pass, nvn_stage, bmask);
         }
     }
@@ -13013,11 +13077,11 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
     os_unfair_lock_unlock(&g_rmu);
     for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];   // the slots that hold an address, not a resource ID (za_check)
         if ((ZA_ADDR_KINDS >> b->kind & 1) && (size_t)b->aid * 8 < arg_len && slots[b->aid] < ZA_LOW) { char w[64]; snprintf(w, sizeof w, "stage %d argument block (binding kind %d) slot", nvn_stage, b->kind); za_note(w, b->aid, slots[b->aid]); } }
-    id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
-    memcpy(g_cur_arena->cpu + off, slots, arg_len);
-    if (gmem_aid >= 0) gmem_slot_note((uint64_t *)(void *)(g_cur_arena->cpu + off) + gmem_aid, gml_taken ? (__bridge void *)g_gml_last : NULL);   // the arena arena_alloc took it from (no contents message: see ubo_read)
-    bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
-    sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; sh->ab_pass = g_pass.serial; sh->ab_binst = g_draw_binst; sh->ab_pgen = g_psnap_gen; sh->ab_gen = g_args_gen[nvn_stage]; sh->ab_ugen = g_args_ugen[nvn_stage]; g_args_wrote[nvn_stage] = g_args_seq;
+    id<MTLBuffer> ab; arena_at at = arena_take(arg_len, &ab); size_t off = at.off;
+    memcpy(at.cpu, slots, arg_len);
+    if (gmem_aid >= 0) gmem_slot_note((uint64_t *)(void *)at.cpu + gmem_aid, gml_taken ? (__bridge void *)g_gml_last : NULL);   // the arena's own CPU address (no contents message: see ubo_read)
+    bind_args(en, nvn_stage, metal_vertex, ab, at.gpu, off, sh->rf.abi);
+    sh->ab_buf = ab; sh->ab_gpu = at.gpu; sh->ab_off = off; sh->ab_pass = g_pass.serial; sh->ab_binst = g_draw_binst; sh->ab_pgen = g_psnap_gen; sh->ab_gen = g_args_gen[nvn_stage]; sh->ab_ugen = g_args_ugen[nvn_stage]; g_args_wrote[nvn_stage] = g_args_seq;
     g_stat_args_enc++;
     return 1;
 }
@@ -15112,12 +15176,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
             if (!mtl_addr(di->ibuf, (uint64_t)di->count * isz, &mb, &mo) || !(src = [(__bridge id<MTLBuffer>)mb contents])) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
             if (pend_hits(di->ibuf, (uint64_t)di->count * isz)) RED_ONCE(73, "triangle fan / quad index buffer has GPU-side writes in this submission: expanded from the current content");
             src += mo;
-            id<MTLBuffer> ab; size_t off = arena_alloc(((size_t)nt * 12 + 15) & ~(size_t)15, &ab);
-            uint32_t *d = (uint32_t *)((uint8_t *)ab.contents + off);
+            id<MTLBuffer> ab; arena_at at = arena_take(((size_t)nt * 12 + 15) & ~(size_t)15, &ab);
+            uint32_t *d = (uint32_t *)(void *)at.cpu;
             // With primitive restart on, the restart index (compared before the base vertex is added) ends a fan or quad and the next one starts after it: they were joined across it,
             // and the extra triangles cleared parts of Luigi's Mansion 3's cached shadow depth (straight light edges on the garage floor, PR #110). At most nt triangles come out
             uint32_t count = nvn_expand_primitive(d, src, (uint32_t)di->count, (unsigned)isz, (unsigned)prim, S.restart.on, S.restart.index);
-            if (count) enc_r_draw_indexed(en, mp, count, MTLIndexTypeUInt32, g_cur_arena->gpu + off, (NSUInteger)count * 4, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
+            if (count) enc_r_draw_indexed(en, mp, count, MTLIndexTypeUInt32, at.gpu, (NSUInteger)count * 4, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
             return;
         }
         if (di->itype == 0) {
@@ -15132,10 +15196,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
             void *mb; uint64_t mo; const uint8_t *src;
             if (!mtl_addr(di->ibuf, di->count, &mb, &mo) || !(src = [(__bridge id<MTLBuffer>)mb contents])) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
             if (pend_hits(di->ibuf, di->count)) RED_ONCE(48, "8-bit index buffer has GPU-side writes in this submission and the GPU expansion failed: expanded from the current content");
-            id<MTLBuffer> ab; size_t off = arena_alloc(((size_t)di->count * 2 + 15) & ~(size_t)15, &ab);
-            uint16_t *d = (uint16_t *)((uint8_t *)ab.contents + off); src += mo;
+            id<MTLBuffer> ab; arena_at at = arena_take(((size_t)di->count * 2 + 15) & ~(size_t)15, &ab);
+            uint16_t *d = (uint16_t *)(void *)at.cpu; src += mo;
             for (int32_t i = 0; i < di->count; i++) d[i] = src[i];
-            enc_r_draw_indexed(en, mp, di->count, MTLIndexTypeUInt16, g_cur_arena->gpu + off, (NSUInteger)di->count * 2, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
+            enc_r_draw_indexed(en, mp, di->count, MTLIndexTypeUInt16, at.gpu, (NSUInteger)di->count * 2, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
             return;
         }
         void *mb; uint64_t mo;
@@ -18423,7 +18487,7 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (g_link_tick_n >= started_tick + step) { started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 1; }
     uint64_t w0 = now_ns();
     struct timespec ts = link_deadline(timeout_ns);
-    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (with the gate's drain, the tick that ends it, below)
+    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (with a drain into the latch, the tick that ends it, below)
     while (g_link_tick_n < started_tick + step) if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) { g_link_waiter = 0; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 0; }
     g_link_waiter = 0;
     uint64_t w1 = now_ns(), drained = 0;

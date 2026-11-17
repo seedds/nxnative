@@ -1,7 +1,8 @@
 // Identical pads (pad_hid_mac.h) with fake IOKit entries and fake GameController controllers: only an entry that sends reports counts as a pad of its model, so one
 // Pro Controller with a second, silent entry stays with GameController (GitHub issue #2237), while two that both stream are read as twins (GitHub issue #1218). A pad with
 // Nintendo's report descriptor that GameController does not list (a PowerA NANO, PR #989) is asked for its device info, gets the handshake once it answers, is read from its
-// report 0x30, and falls back to its report 0x3F when it does not answer or leaves full mode
+// report 0x30, and falls back to its report 0x3F when it does not answer or leaves full mode. Virtual devices must actually appear as usable GameController controllers,
+// regardless of their vendor, or be read as HID after the wait (Steam Link, issue #2465).
 #import <Foundation/Foundation.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <GameController/GameController.h>
@@ -14,6 +15,8 @@
 @interface TestDev : NSObject
 @property int vid, pid; @property long loc; @property uint64_t entry; @property NSString *transport;
 @property uint8_t *buffer; @property IOHIDReportCallback callback; @property void *context;
+@property NSNumber *virtualDevice; @property BOOL synthetic;
+@property IOHIDValueCallback valueCallback; @property void *valueContext;
 @property NSString *name; @property NSArray *elements;
 @end
 @implementation TestDev
@@ -24,6 +27,11 @@
 @implementation TestElem
 @end
 static TestElem *elem(int output, uint32_t report, uint32_t page, uint32_t usage) { TestElem *e = [TestElem new]; e.output = output; e.report = report; e.page = page; e.usage = usage; return e; }
+@interface TestValue : NSObject
+@property TestElem *element; @property CFIndex value;
+@end
+@implementation TestValue
+@end
 @interface TestGC : NSObject
 @property NSString *productCategory, *vendorName; @property id extendedGamepad;
 @end
@@ -35,6 +43,8 @@ static NSMutableArray *g_gc; static BOOL g_supports = YES;
 
 static CFTypeRef test_property(IOHIDDeviceRef device, CFStringRef key) {
     TestDev *d = (__bridge id)device;
+    if (CFEqual(key, CFSTR(kIOHIDVirtualHIDevice))) return (__bridge CFTypeRef)d.virtualDevice;
+    if (CFEqual(key, CFSTR(kIOHIDGCSyntheticDeviceKey))) return d.synthetic ? kCFBooleanTrue : NULL;
     if (CFEqual(key, CFSTR(kIOHIDProductKey))) return (__bridge CFTypeRef)(d.name ?: @"Pro Controller");
     if (CFEqual(key, CFSTR(kIOHIDVendorIDKey))) return (__bridge CFTypeRef)@(d.vid);
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)@(d.pid);
@@ -46,7 +56,11 @@ static void test_report_cb(IOHIDDeviceRef device, uint8_t *buffer, CFIndex len, 
     TestDev *d = (__bridge id)device; assert(len >= 49);
     d.buffer = buffer; d.callback = callback; d.context = ctx;
 }
-static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, void *ctx) { (void)device; (void)callback; (void)ctx; }
+static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, void *ctx) { TestDev *d = (__bridge id)device; d.valueCallback = callback; d.valueContext = ctx; }
+static IOHIDElementRef test_val_element(IOHIDValueRef v) { return (__bridge IOHIDElementRef)((__bridge TestValue *)v).element; }
+static CFIndex test_val_int(IOHIDValueRef v) { return ((__bridge TestValue *)v).value; }
+static CFIndex test_el_min(IOHIDElementRef e) { (void)e; return 0; }
+static CFIndex test_el_max(IOHIDElementRef e) { (void)e; return 1; }
 static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)match; (void)o; return CFBridgingRetain(((__bridge TestDev *)device).elements ?: @[]); }
 static uint32_t test_el_page(IOHIDElementRef e) { return ((__bridge TestElem *)e).page; }
 static uint32_t test_el_usage(IOHIDElementRef e) { return ((__bridge TestElem *)e).usage; }
@@ -66,6 +80,10 @@ uint64_t now_ns(void) { return tick; }
 #define IOHIDDeviceGetProperty test_property
 #define IOHIDDeviceRegisterInputReportCallback test_report_cb
 #define IOHIDDeviceRegisterInputValueCallback test_value_cb
+#define IOHIDValueGetElement test_val_element
+#define IOHIDValueGetIntegerValue test_val_int
+#define IOHIDElementGetLogicalMin test_el_min
+#define IOHIDElementGetLogicalMax test_el_max
 #define IOHIDDeviceCopyMatchingElements test_elements
 #define IOHIDDeviceGetService test_service
 #define IORegistryEntryGetRegistryEntryID test_entry_id
@@ -82,7 +100,9 @@ uint64_t now_ns(void) { return tick; }
 static int attached, changes;
 static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }
-static void hidpad_read(hid_pad *d) { (void)d; }
+static int reads;
+static uint64_t buttons;
+static void hidpad_read(hid_pad *d) { reads++; buttons = pad_hid_buttons(&d->st); }
 static int motion_samples;
 static float motion_acc[3], motion_rot[3];
 static uint64_t motion_ns;
@@ -112,8 +132,68 @@ static void put16(uint8_t *p, int v) { p[0] = (uint8_t)v; p[1] = (uint8_t)((uint
 static int twins(void) { int n = 0; for (hid_pad *d = g_hidpads; d; d = d->next) n += d->twin; return n; }
 static hid_pad *find(TestDev *t) { for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) if (d->hid == ref(t)) return d; return NULL; }
 
+static TestDev *virtual_pad(NSString *name, int vid, uint64_t entry) {
+    TestDev *d = [TestDev new]; d.name = name; d.vid = vid; d.pid = 0x028e; d.virtualDevice = @YES; d.entry = entry;
+    d.elements = @[elem(0, 1, kHIDPage_Button, 1)]; return d;
+}
+static TestGC *controller(NSString *name, int usable) {
+    TestGC *c = [TestGC new]; c.vendorName = name; c.extendedGamepad = usable ? @1 : nil; [g_gc addObject:c]; return c;
+}
+static void button(TestDev *d, int down) {
+    assert(d.valueCallback);
+    TestValue *v = [TestValue new]; v.element = d.elements[0]; v.value = down;
+    int before = reads; d.valueCallback(d.valueContext, kIOReturnSuccess, ref(d), (__bridge IOHIDValueRef)v);
+    assert(reads == before + 1 && buttons == (down ? DM_BTN_B : 0));
+}
+static void gc_fallback(void) {
+    // No GameController delivery: all virtual vendors use the existing wait, even the trusted physical-controller vendors. No Steam name or product gate.
+    NSArray *virtuals = @[virtual_pad(@"GamePad-1", 0x045e, 100), virtual_pad(@"Virtual Sony", 0x054c, 101),
+        virtual_pad(@"Virtual Nintendo", 0x057e, 102), virtual_pad(@"Other virtual pad", 0x1234, 103)];
+    for (TestDev *d in virtuals) hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
+    // Missing and false virtual flags both retain physical-controller trust, including a HID name that differs from GameController's.
+    NSArray *physical = @[pro(0x41, 104, @"Bluetooth"), virtual_pad(@"Wireless Controller", 0x054c, 105), virtual_pad(@"Xbox pad", 0x045e, 106)];
+    for (TestDev *d in physical) { d.virtualDevice = d.vid == 0x054c ? @NO : nil; hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d)); assert(find(d) && !d.valueCallback); }
+    // Apple's synthetic devices stay excluded; a device removed during the wait must never acquire a reader.
+    TestDev *synthetic = virtual_pad(@"Synthetic pad", 0x045e, 107); synthetic.synthetic = YES;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(synthetic)); assert(!find(synthetic));
+    TestDev *removed = virtual_pad(@"Removed pad", 0x045e, 108);
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(removed)); hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(removed));
+    assert(attached == 0);
+    wait_ms(2200);
+    assert(attached == 4 && !g_hidpads_waiting && !removed.valueCallback && !synthetic.valueCallback);
+    for (TestDev *d in virtuals) {
+        assert(find(d) && !find(d)->twin); button(d, 1); button(d, 0);
+        hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); assert(!d.valueCallback);
+    }
+    for (TestDev *d in physical) { assert(!d.valueCallback); hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); }
+    assert(attached == 0 && !g_hidpads && !g_hidpads_gc);
+
+    // An already usable controller and one published during the wait stay with GameController. An unusable matching controller or an unrelated usable one cannot vouch.
+    TestDev *listed = virtual_pad(@"Listed pad", 0x045e, 109), *before = virtual_pad(@"Before timeout", 0x045e, 110);
+    TestDev *unusable = virtual_pad(@"Unusable pad", 0x045e, 111), *after = virtual_pad(@"After timeout", 0x045e, 112);
+    controller(@"Listed pad", 1); TestGC *no_profile = controller(@"Unusable pad", 0);
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(listed)); assert(find(listed) && !g_hidpads_waiting);
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(before));
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(unusable)); hidpad_found(NULL, kIOReturnSuccess, NULL, ref(after));
+    TestGC *early = controller(@"Before timeout", 1); hidpad_gc_connected(early);
+    wait_ms(2200);
+    assert(attached == 2 && !g_hidpads_waiting && !listed.valueCallback && !before.valueCallback);
+    button(unusable, 1); button(after, 1);
+    // A late notification without the profile front_mac.m reads must not remove the working HID reader.
+    hidpad_gc_connected(no_profile); assert(attached == 2 && unusable.valueCallback); button(unusable, 0);
+    no_profile.extendedGamepad = @1; hidpad_gc_connected(no_profile);
+    assert(attached == 1 && !unusable.valueCallback && find(unusable));
+    TestGC *late = controller(@"After timeout", 1); hidpad_gc_connected(late);
+    assert(attached == 0 && !after.valueCallback && find(after));
+    for (TestDev *d in @[listed, before, unusable, after]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d));
+    [g_gc removeAllObjects];
+    assert(!g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
+    puts("t_pad_hid_mac: virtual fallback and GameController handoff passed");
+}
+
 int main(void) { @autoreleasepool {
     g_gc = [NSMutableArray new];
+    gc_fallback();
     TestGC *gc = [TestGC new]; gc.productCategory = @"Switch Pro Controller"; gc.vendorName = @"Pro Controller"; gc.extendedGamepad = @1;
     // issue #2237: one Pro Controller over Bluetooth, which GameController lists, and a second entry of its model at location 0 that sends nothing
     [g_gc addObject:gc];

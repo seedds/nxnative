@@ -118,6 +118,14 @@ t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf2d.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
+t_tbuf_access: t_tbuf_access.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_access.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_tbuf_access
+check_t_tbuf_access: t_tbuf_access
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access shadow
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access rows
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_access shadow
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_access rows
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c ../tex/nvn_deswizzle.c
 t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
@@ -138,7 +146,7 @@ t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
 	clang -O1 -Wall -o $@ t_thread_rt.c
-t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h
+t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h ../nvn/nvn_link_latch.h
 	clang -O1 -Wall -o $@ t_link_drain.c
 t_link_latch_cb: t_link_latch_cb.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_latch_cb.m $(MTL_T_SRC) $(FW)
@@ -244,6 +252,9 @@ check_t_gmem_words: t_gmem_words
 t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_notes.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pool_replay: t_pool_replay.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_replay.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+check_t_pool_replay: RUN_ENV = MTL_DEBUG_LAYER=1
 t_htab_update: t_htab_update.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_htab_update.m $(MTL_T_SRC) $(FW)
 check_t_htab_update: RUN_ENV = MTL_DEBUG_LAYER=1

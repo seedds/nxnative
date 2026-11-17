@@ -662,6 +662,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py FloatRed` (the translator's loop, and that `float_add_msl` still finds it); `test_dmsh_float_add.py` (the rewrite, and on the GPU the loop and the native add reach the same sums).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 28 of its seen shaders; the frame's mean brightness at Navi's close-up went from 0.71 to 0.38. With the native add, on a MacBook Air M4, `6e28359aa3558f61` (one workgroup of 256 threads, four words) went from 0.25 ms a frame to under 0.13 ms and `1bba09ec4bc8ff67` from 0.40 ms, the exposure the same (mean luminance 116-117 of 255 both ways); the Hyrule Field view's frame p50 went from 23.42 to 22.39 ms, between two builds (PR #1930).
 
+### A float atomic add's retry flag survives the rewrite
+
+- **Symptom:** a shader that reads a float-add loop's retry flag after the loop has an undeclared identifier after the native-atomic rewrite.
+- **Cause:** `float_add_msl` removed the flag with the loop, although the flag is declared before the do-block and remains in scope after it. Only the word, sum and CAS temporaries are local to the block.
+- **Fix:** retain the flag as `bool <flag> = false` after the native add. The original loop exits only when that flag is false, so later reads keep their value. An unused flag is left for the compiler to eliminate; the matcher and atomic operation are unchanged.
+- **Check:** `test_dmsh_float_add.py` consumes the flag after both ordinary and exact adds; its GPU sum test and iPhone compile also consume the flags.
+- **Found on:** no game: reproduced with a synthetic shader while reviewing the existing matcher.
+
 ### textureGatherOffsets and a loop over its offsets
 
 - **Symptom:** dotted horizontal rows in blocks of the picture, in smooth and blurred areas, from a Switch 2 game's upscaler: the frame before it is clean and the frame after it is not. The same input gives a different picture each run. Bright scenes show more of them.

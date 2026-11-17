@@ -135,6 +135,7 @@ NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
     nvn_gob_switch2 = dm_sdk_ounce();   // the Switch 2's order inside a GOB, for the textures the game tiled itself (nvn_deswizzle.h)
+    nvn_timestamp_ns = dm_sdk_ounce();   // NVN2's counter reports record nanoseconds (nvn_timestamp.h)
     o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; mtl_set_origin_lower_left(1);   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
     mtl_set_depth_zero(0);   // NVN's default depth mode: near = -w (GL)
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
@@ -1113,7 +1114,10 @@ static void ctl_put(cmd_t *o, uint64_t e) {
         if (!o->cb || tries == 2) { ctl_set(o, ctlseg_take(), CTLSEG_SZ); break; }
         o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_CONTROL_MEMORY, need, o->cb_data);
     }
-    uint8_t *p = o->ctl_mem + o->ctl_used; memcpy(p, &e, 8); o->ctl_used += 8;
+    uint8_t *p = o->ctl_mem + o->ctl_used;
+    // ctlseg_take aborts on allocation failure; otherwise the loop requires non-null ctl_mem with room for this entry. The analyzer loses the allocator's check in the SBT test.
+    memcpy(p, &e, 8);   // NOLINT(clang-analyzer-unix.cstring.NullArg)
+    o->ctl_used += 8;
     if (!o->ctl_list) o->ctl_list = p;   // the list's first entry is the recording's handle
 }
 // Entries wait in ctl_q: the newest until the next one shows whether it is the last; one closed by a segment switch until host code writes it (ctl_flush), not inside AddCommandMemory
@@ -2111,9 +2115,13 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
-        void mtl_pool_stats(uint64_t s[6]); static uint64_t pps[6]; uint64_t ps[6]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
-        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission",
-            frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);
+        static uint64_t pps[POOL_STATS]; uint64_t ps[POOL_STATS]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
+        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) {
+            uint64_t into = ps[6] - pps[6], whole = ps[8] - pps[8] + ps[9] - pps[9] + ps[10] - pps[10];
+            LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission; "
+                "patches into a spare of their table %.2f (%.0f entries written each), copied whole %.2f (no spare of the table %.2f, none finished %.2f, the log past them %.2f), %.3f ms; buffers %.1f MB in tables, %.1f MB spare",
+                frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf,
+                into / nf, into ? (double)(ps[7] - pps[7]) / (double)into : 0.0, whole / nf, (ps[8] - pps[8]) / nf, (ps[9] - pps[9]) / nf, (ps[10] - pps[10]) / nf, (ps[11] - pps[11]) / 1e3 / nf, ps[12] / 1048576.0, ps[13] / 1048576.0); }
         memcpy(pps, ps, sizeof pps);
         void mtl_gsb_stats(uint64_t *, uint64_t *); static uint64_t pgn, pgb; uint64_t gn, gb; mtl_gsb_stats(&gn, &gb);   // GPU textures' writes stored into their storage (nvn_mtl.m gsb_store)
         if (gn != pgn) LOG("[nvn] GPU texture storage up to frame %llu: %llu regions, %.1f MB written into their storage on the GPU (%.2f regions, %.2f MB per frame)",
@@ -3235,7 +3243,7 @@ NVN(nvnCommandBufferDrawTransformFeedback, void, NVNcommandBuffer *c, NVNdrawPri
 NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, int samp) { (void)d; return (NVNtextureHandle)((uint64_t)(uint32_t)tex | (uint64_t)(uint32_t)samp << 20); }
 // Handle for texel fetches only (Monster Hunter Rise): a fetch reads the texture descriptor and no sampler, so the handle is the texture ID with sampler ID 0
 NVN(nvnDeviceGetTexelFetchHandle, NVNtextureHandle, const NVNdevice *d, int tex) { (void)d; return (NVNtextureHandle)(uint64_t)(uint32_t)tex; }
-// Convert the raw 614.4 MHz report to ns on the same guest clock as GetCurrentTimestampInNanoseconds.
+// Convert the raw report (614.4 MHz ticks, nanoseconds on NVN2: nvn_timestamp.h) to ns on the same guest clock as GetCurrentTimestampInNanoseconds.
 NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return nvn_timestamp_to_ns(c->timestamp); }
 // Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return guest_ns(); }

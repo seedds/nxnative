@@ -297,15 +297,15 @@ void dm_fps_lock_tick(void) {
     if (uq.base) unity_vsync_tick(target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
-        // Resident Evil's movie presents follow the decoder's picture rate, but its
-        // subtitle timeline needs the 60 Hz engine clock at both selectable high
-        // rates. Keep that clock separate from the movie's 30 Hz presentation;
-        // outside movies, the 120 fps profile still follows the dynamic hold.
+        // Controlled Resident Evil movie-clock experiment: while the 30 fps decoder
+        // is active, set both MT Framework timing fields to 30 as well. This tests
+        // whether the subtitle timeline is advancing against a 60 Hz engine clock.
+        // Outside movies, the 120 fps profile still follows the dynamic hold.
         int movie_hz = dm_movie_hz();
         int re_movie = !strcmp(DM_GAME_ID, "010050F00BC1A000") && high &&
                        !strcmp(L->what, "Resident Evil MT Framework primary frame limit") && movie_hz != 0;
         int re_row = !strcmp(L->what, "Resident Evil MT Framework primary frame limit");
-        int row_target = re_row && high && !re_movie ? nvn_fps_high_now() : re_movie ? 60 : target;
+        int row_target = re_row && high && !re_movie ? nvn_fps_high_now() : re_movie ? 30 : target;
         // The macOS launcher may detach dmhost from the launching terminal, so stderr is
         // not a reliable way to retrieve this one-off investigation. Keep a small,
         // explicit diagnostic file in /tmp, independent of the app's working directory.

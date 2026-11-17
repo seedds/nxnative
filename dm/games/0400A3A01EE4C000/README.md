@@ -32,6 +32,15 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 
 The first boot shows the language list: `A`, `LUp`, `A` picks English. The character choice takes `LLeft` before `A`. From a warm cache, `A A LLeft A A Plus` reaches walking in about 300 s. On later boots, `A` at the title screen a few times continues the save and reaches walking in about 110 s. The work folder has `run/boot.sh`, `run/hdrive.sh` (no window, timed control lines) and `run/spam.sh`. The packed app takes about a minute to reach the language list (14 s of it the prepare step on a second start), so the fixed times in `run/spam.sh` miss it: press the keys once the list shows.
 
+## A taller screen
+
+`DM_SCREEN_ASPECT=<width / height>` from 1.3 to 1.77 (a 16:10 or 3:2 screen; a MacBook Air's 2560x1664 is 1.54) makes v655360 render 1920 wide and as tall as the screen's ratio gives (1.54: 1920x1248), with the 3D view showing more above and below and the UI 1:1 in the middle ([`patches.py`](patches.py) has the sites). Played on an M2 MacBook Air (macOS 27) at 1.54: the world fills the screen, characters stand on the ground, the button guide and the tool wheel sit at their corners, and the DLC marker still loads.
+
+- The cameras: a 16:9 camera takes the screen's ratio with its last bit flipped (a mark), and a marked camera's half-angle tan, or one of a camera at the screen's ratio by itself, grows by (16/9) / ratio. The UI layers build their cameras from a canvas size in both branches of main+0x1f528d0; a UI camera at the screen's ratio is marked there with bit 1 flipped and left alone. Widening the UI cameras too shrank the title screen by 1080 / 1248 and left button labels below their icons; widening only the converted cameras left characters standing above the ground.
+- `DM_SCREEN_ASPECT_SITES` turns groups off for trials: bit 0 cameras, 1 full-screen HUD pictures, 2 world points on the canvas, 3 the renderer's 1080.0 constants, 4 render sizes. With bit 0 off characters stand on the ground but the view is stretched.
+- Not done: the cameras' fovy field keeps the narrower angle (only the tan the projection uses grows), the door wipe's full-canvas rects keep 1080, and no HUD widget moves to the new edges.
+- In every tall run the frame time rose from 16.7 ms to 20 to 35 ms after about 3,000 frames, on a Mac with 20 GB of disk free. Whether the taller output or the machine causes it is not checked (open).
+
 ## Open
 
 - The picture has not been compared with a Switch 2. The user's playtest found it fine. Sunlit ground matches published iPhone shots of the game. Shaded ground and walls are lavender. The player carries fine contour lines, already present in colour target 5435, which may be the material. In some moving shots far blocks showed through near ones; this has not been rechecked since the fixes below.

@@ -43,6 +43,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
+| `build` → `game` | screen shape taller than 16:9 (v655360): the render heights, the 16:9 render targets and textures, the renderer's 1080.0 constants, the 3D cameras' vertical angle and the full-screen HUD pictures (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | the output size is the host's, but where KTGL takes its sizes and its cameras' angle is this build's code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -75,6 +76,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Ori and the Will of the Wisps](#ori-and-the-will-of-the-wisps) | 0 | 0 | 10 | 0 | 0 | `build` → `engine` |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 0 | 21 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
@@ -460,6 +462,40 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.0.1 `main`** `0effe4af…` ([patches.py:5](../../dm/games/0100ECD018EBE000/patches.py#L5))
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
+
+### Pokemon Pokopia
+
+[Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), `0400A3A01EE4C000`, [patches.py](../../dm/games/0400A3A01EE4C000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape taller than 16:9 (v655360): the render heights, the 16:9 render targets and textures, the renderer's 1080.0 constants, the 3D cameras' vertical angle and the full-screen HUD pictures (DM_SCREEN_ASPECT). The output size is the host's, but where KTGL takes its sizes and its cameras' angle is this build's code
+
+- **v655360 `main`** `76a489f3…` ([patches.py:141](../../dm/games/0400A3A01EE4C000/patches.py#L141))
+  <details><summary>21 frame-step sites</summary>
+
+  - frame step `+0x10ee1a8`: screen shape, taller: the renderer's 1080.0 becomes the output height (bit 3, DM_SCREEN_ASPECT, state +0x64)
+  - frame step `+0x10ee390`: screen shape, taller: the renderer's 1080.0 becomes the output height (bit 3, DM_SCREEN_ASPECT, state +0x64)
+  - frame step `+0x10fc11c`: screen shape, taller: a world point lands where the taller camera draws it, in the canvas's coordinates (bit 2, DM_SCREEN_ASPECT)
+  - frame step `+0x10fd904`: screen shape, taller: the album's photo textures keep their size (state +0xac set) (DM_SCREEN_ASPECT)
+  - frame step `+0x10fdb70`: screen shape, taller: the album's photo textures keep their size (state +0xac cleared) (DM_SCREEN_ASPECT)
+  - frame step `+0x10fe4e8`: screen shape, taller: the renderer's 1080.0 becomes the output height (bit 3, DM_SCREEN_ASPECT, state +0x64)
+  - frame step `+0x11082c0`: screen shape, taller: the renderer's 1080.0 becomes the output height (bit 3, DM_SCREEN_ASPECT, state +0x64)
+  - frame step `+0x11299c4`: screen shape, taller: render height (1080) takes the screen's height (bit 4, DM_SCREEN_ASPECT, state +0x48)
+  - frame step `+0x11299ec`: screen shape, taller: render height of a dynamic resolution level (the table) takes the screen's height (bit 4, DM_SCREEN_ASPECT, state +0x48)
+  - frame step `+0x11299f4`: screen shape, taller: render height of a level out of range (1080) takes the screen's height (bit 4, DM_SCREEN_ASPECT, state +0x48)
+  - frame step `+0x113ec8c`: screen shape, taller: the renderer's 1080.0 becomes the output height (bit 3, DM_SCREEN_ASPECT, state +0x64)
+  - frame step `+0x113ef44`: screen shape, taller: the renderer's 1080.0 becomes the output height (bit 3, DM_SCREEN_ASPECT, state +0x64)
+  - frame step `+0x114ba00`: screen shape, taller: texture descriptor: a 16:9 size takes the screen's height (bit 4) (DM_SCREEN_ASPECT)
+  - frame step `+0x179e0c8`: screen shape, taller: render target descriptor: a 16:9 size takes the screen's height (bit 4) (DM_SCREEN_ASPECT)
+  - frame step `+0x1f1212c`: screen shape, taller: camera projection: a 16:9 camera takes the screen's ratio, marked (bit 0) (DM_SCREEN_ASPECT)
+  - frame step `+0x1f12164`: screen shape, taller: camera projection: the half angle tan of a 3D camera at the screen's ratio grows by (16/9) / ratio (Vert+) (DM_SCREEN_ASPECT)
+  - frame step `+0x1f121c8`: screen shape, taller: camera projection by distance: the half angle tan of a 3D camera grows by (16/9) / ratio (DM_SCREEN_ASPECT)
+  - frame step `+0x1f12248`: screen shape, taller: camera projection (its other branch): the half angle tan of a 3D camera grows by (16/9) / ratio (DM_SCREEN_ASPECT)
+  - frame step `+0x1f52958`: screen shape, taller: a UI layer camera built at the screen's ratio by itself is marked (bit 1 of its ratio flipped) so its angle is left alone (DM_SCREEN_ASPECT)
+  - frame step `+0x1f52a98`: screen shape, taller: a UI layer camera of the builder's fixed-angle branch at the screen's ratio is marked as well (DM_SCREEN_ASPECT)
+  - frame step `+0x1f721d0`: screen shape, taller: full-screen pictures stretch to the screen's height (bit 1) (DM_SCREEN_ASPECT)
+
+  </details>
+
 
 ### Pokémon Legends: Arceus
 

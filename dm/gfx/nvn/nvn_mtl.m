@@ -2406,6 +2406,8 @@ static uint64_t place_back(seg_clk *sc, uint64_t ns, uint64_t c0, uint64_t off) 
     if (sc && (m == 1 || m == 3)) back += seg_idle_before(sc, ns, c0);
     return back < ns ? back : 0;
 }
+static int tsdbg(void);   // defined with the DM_NVN_TSDBG block below
+static uint64_t g_tsd_raw, g_tsd_back;   // tsdbg: the last report's time before place_back, and how far it moved
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t off) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock; off: sub_place's
     int top = o->type == 0x10; uint64_t ns = 0;
     uint32_t bi = o->seg + !top;
@@ -2420,7 +2422,8 @@ static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t
     }
     if (!ns && sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
-    if (ns) ns -= place_back(sc, ns, c0, off);
+    if (tsdbg()) g_tsd_raw = ns;
+    if (ns) { uint64_t bk = place_back(sc, ns, c0, off); ns -= bk; if (tsdbg()) g_tsd_back = bk; }
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 
@@ -2610,6 +2613,41 @@ static uint64_t sub_place(const post_rec *r, uint64_t c0, uint64_t c1) {
     g_line_fence = fence;
     return off;
 }
+// DM_NVN_TSDBG=1 (diagnostic): per frame, the span the game's counter reports read against the GPU work and the GPU's span of that frame. A game that steers its
+// dynamic resolution by two reports (a frame's start and end) reads that span; the GPU's work is the sum of its command buffers' durations, and the GPU's span is
+// the time from its first command buffer's start to its last one's end. The three differ by the GPU's idle time, which is the host's translation between the
+// segments it commits (docs/reference/frame-rate.md, "A dynamic resolution whose frame span does not follow its render size")
+static struct { _Atomic int mode; uint64_t frame, n, mn, mx, rmn, rmx, back_first, back_last; } g_tsd = {0, 0, 0, UINT64_MAX, 0, UINT64_MAX, 0, 0};   // mode: 0 unread, 1 on, 2 off; the rest under g_post_mu
+static int tsdbg(void) {
+    int v = atomic_load(&g_tsd.mode);
+    if (!v) { v = getenv("DM_NVN_TSDBG") ? 1 : 2; atomic_store(&g_tsd.mode, v); }
+    return v == 1;
+}
+static void tsd_log(void) {   // the reports of the frame that just ended
+    if (!g_tsd.n) return;
+    uint64_t f = g_tsd.frame, d = g_tsd.mx > g_tsd.mn ? g_tsd.mx - g_tsd.mn : 0;
+    double work = -1, span = -1;
+    int i = (int)(f % GRING);
+    if (atomic_load(&g_gpu[i].frame) == f && !atomic_load(&g_gpu[i].pending)) {
+        work = (double)atomic_load(&g_gpu[i].ns) / 1e6;
+        uint64_t t0 = atomic_load(&g_gpu[i].t0), t1 = atomic_load(&g_gpu[i].t1);
+        if (t1 > t0) span = (t1 - t0) / 1e6;
+    }
+    uint64_t raw = g_tsd.rmx > g_tsd.rmn ? g_tsd.rmx - g_tsd.rmn : 0;
+    MLOG("[tsdbg] frame %llu: %llu reports, read span %.2f ms (raw %.2f, moved back %.2f first / %.2f last), GPU work %.2f ms, GPU span %.2f ms",
+         (unsigned long long)f, (unsigned long long)g_tsd.n, nvn_timestamp_to_ns(d) / 1e6, nvn_timestamp_to_ns(raw) / 1e6,
+         nvn_timestamp_to_ns(g_tsd.back_first) / 1e6, nvn_timestamp_to_ns(g_tsd.back_last) / 1e6, work, span);
+}
+static void tsd_note(uint64_t t, uint64_t raw, uint64_t back) {   // one report: its placed and unmoved guest ns, and how far it moved back; under g_post_mu
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (f != g_tsd.frame) { tsd_log(); g_tsd.frame = f; g_tsd.n = 0; g_tsd.mn = UINT64_MAX; g_tsd.mx = 0; g_tsd.rmn = UINT64_MAX; g_tsd.rmx = 0; g_tsd.back_first = g_tsd.back_last = 0; }
+    g_tsd.n++;
+    if (g_tsd.n == 1) g_tsd.back_first = back;
+    g_tsd.back_last = back;
+    if (t < g_tsd.mn) g_tsd.mn = t;
+    if (t > g_tsd.mx) g_tsd.mx = t;
+    if (raw) { if (raw < g_tsd.rmn) g_tsd.rmn = raw; if (raw > g_tsd.rmx) g_tsd.rmx = raw; }
+}
 static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // A guest SyncWait may run completion on a thread whose outer pool never drains.
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
@@ -2624,7 +2662,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
             free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
+        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); if (tsdbg()) tsd_note(nvn_timestamp_to_ns(t), g_tsd_raw, g_tsd_back); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     // Forwarded counter values expire once their CPU-visible reports have landed.
     // This precedes event publication so a released CPU writer is never hidden by stale knowledge.

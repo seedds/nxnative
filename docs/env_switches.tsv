@@ -242,6 +242,7 @@ DM_NVN_TEXRAW	diagnostic	`=<serial>,…` or `info` (the textures `DM_NVN_TEXINFO
 DM_NVN_TEXSNAP	diagnostic	`=<in-frame pass index>,…`: with `DM_NVN_TEXDUMP`, copies those passes' colour attachments as they end and saves them with the end-of-frame dump
 DM_NVN_TF_CPU	switch	`0` sends every transform feedback capture through the `tf_prepare` dispatch in a render pass of its own, as before; by default the capture state is kept on the CPU from a begin until a resume or a geometry capture takes it from the GPU, and captures that follow each other share one pass, behind barriers inside it where one may touch what another read or wrote
 DM_NVN_TREG_ID	diagnostic	`=<n>` logs every registration of texture ID n: what it holds from then on, and the frame being recorded
+DM_NVN_TSDBG	diagnostic	`=1`: per frame, the span a game's counter reports read against the GPU work and the GPU's span of that frame (`[tsdbg]` lines), for a dynamic resolution that steps its render size for a frame span the host's translation inflates
 DM_NVN_TSV	diagnostic	`=<path>` writes the per-frame NVN call table and timing rows (frame, metric, value) to a TSV, read by `scripts/bench.py`
 DM_NVN_TSV_CALLS	diagnostic	`0` makes `DM_NVN_TSV` write only the timing rows, without the call counts (about two thirds of the file)
 DM_NVN_UB	diagnostic	`="name=item,…;…"`: alternating measurement in one run; odd phases of `DM_NVN_UB_N` frames (default 180) take one category in turn (`@set:<global>=<value>` or dropped shader keys) and log present times

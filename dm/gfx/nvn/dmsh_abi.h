@@ -207,3 +207,8 @@
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
+// Compute loop containment (#2664): a state at this compute buffer slot holds the submission's GPU abort address (u64) and this kernel's capped loop site
+// (atomic u32, initially UINT32_MAX). Only a kernel reaching its own per-function budget records a site; aborting another kernel's loop does not report a cap hit.
+#define DMSH_LOOP_SLOT 28
+#define DMSH_LOOP_BYTES 16
+#define DMSH_LOOP_HIT 8

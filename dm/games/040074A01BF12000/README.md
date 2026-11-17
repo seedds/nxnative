@@ -80,6 +80,8 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved; DLC additions still use a derived profile.
+
 - [Reads past a uniform binding's size](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size): the comparison at every uniform read took a fifth of the GPU's time on the Freezer Layer (14.6 → 17.5-18.1 ms on an M4, 55 → 30 fps, [issue #2066](https://github.com/seedds/nxnative/issues/2066), the reporter's measurement); 95.5% of its shaders' uniform reads are at fixed offsets, which the host now bounds once a binding. Resolved in the chain; the frame time on that level is not measured again yet (open).
 - Calls copy the called list's pieces: its control memory comes from one arena reset twice per arena of command memory, so a call that pointed at the called list replayed overwritten entries: [A recording's end and links are in control memory](../../../docs/reference/nvn-objects.md#a-recordings-end-and-links-are-in-control-memory).
 - [Early fragment tests from the control section](../../../docs/reference/shaders.md#early-fragment-tests-from-the-control-section): 2,855 of its 13,546 pixel shaders set the NVN2 flag (control +0x5b), none of them writes depth; before, no NVN2 shader got the attribute.

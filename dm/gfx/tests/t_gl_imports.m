@@ -391,7 +391,16 @@ static void test_doom3(void) {
     assert(d[0] == 255 && d[1] == 0 && d[2] == 0 && d[3] == 255 && d[4] == 0 && d[5] == 255 && d[6] == 0 && d[7] == 255);
     h_glDeleteTextures(1, &a);
 
-    // GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green)
+    // Sync queries, wireframe and its polygon offset enable
+    void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
+    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
+    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
+}
+
+// GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green).
+// Hardware check: sampler LOD-bias readback fails on CI's virtual Metal device.
+static void test_lod_bias(void) {
+    NSError *err = nil; GLuint a; tex_t *ta;
     static const char *bsrc = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
         "vertex V bv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
         "fragment float4 bf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
@@ -418,11 +427,6 @@ static void test_doom3(void) {
         assert(px[5] == (bias ? green[0] : red[0]));
     }
     h_glDeleteTextures(1, &a);
-
-    // Sync queries, wireframe and its polygon offset enable
-    void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
-    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
-    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
 }
 
 // A 4x4 texture of two levels (red, then green) drawn 1:1 into a 4x4 target with the sampler a unit would use: the colour of a middle texel
@@ -450,7 +454,7 @@ static uint32_t draw_texel(tex_t *t, id<MTLSamplerState> s) {
 }
 
 // GL sampler objects (Mega Man Legacy Collection sets its filters and wraps on one per unit, none on its textures), and uniform locations, of which none is 0
-static void test_sampler_objects(void) {
+static void test_sampler_objects(int gpu) {
     const uint32_t red = 0xff0000ffu, green = 0xff00ff00u;
     uint32_t l0[16], l1[4]; for (int i = 0; i < 16; i++) l0[i] = red; for (int i = 0; i < 4; i++) l1[i] = green;
     GLuint t; h_glGenTextures(1, &t); h_glActiveTexture(GL_TEXTURE0 + 2); h_glBindTexture(GL_TEXTURE_2D, t);
@@ -466,13 +470,13 @@ static void test_sampler_objects(void) {
     h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_FUNC, 0x206); assert(o->sp.cfunc == 0x206 && !o->sp.cmode);   // a function set before the mode is kept
     h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_MODE, 0); assert(o->sp.ws == GL_CLAMP_TO_EDGE && o->sp.border[3] == 1 && o->sp.lodbias == 1);
     // the texture's own parameters read level 0; the sampler bound to its unit (a mipmap filter, a bias of 1) level 1; unbound, level 0 again
-    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     h_glBindSampler(2, s[0]); assert(S.units[2].samp == s[0] && !S.units[0].samp);
-    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
-    assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
-    h_glBindSampler(2, 0); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
+    h_glBindSampler(2, 0); if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     // a sampler's MAX_LOD below 1 keeps level 0 whatever the bias
-    h_glSamplerParameterf(s[0], GL_TEXTURE_MAX_LOD, 0); h_glBindSampler(2, s[0]); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    h_glSamplerParameterf(s[0], GL_TEXTURE_MAX_LOD, 0); h_glBindSampler(2, s[0]); if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     // deleting a bound sampler unbinds it
     h_glDeleteSamplers(1, &s[0]); assert(!so_of(s[0]) && !S.units[2].samp && !h_glIsSampler(s[0]));
     h_glDeleteSamplers(1, &s[1]); h_glDeleteTextures(1, &t); h_glActiveTexture(GL_TEXTURE0);
@@ -655,8 +659,13 @@ static void test_argument_buffers(const char *dir) {
 }
 
 int main(int argc, char **argv) {
-    int stubs = argc > 1 && !strcmp(argv[1], "--stubs");
-    const char *fixture = argc == 3 && !strcmp(argv[1], "--fixture") ? argv[2] : NULL;
+    int stubs = 0, cpu = 0; const char *fixture = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--stubs")) stubs = 1;
+        else if (!strcmp(argv[i], "--cpu")) cpu = 1;
+        else if (!strcmp(argv[i], "--fixture") && i + 1 < argc) fixture = argv[++i];
+        else { fprintf(stderr, "usage: %s [--cpu] [--stubs] [--fixture DIR]\n", argv[0]); return 2; }
+    }
     if (fixture) setenv("DM_MSL_DIR", fixture, 1);
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
     // The calls from the issue must bind without using a GL loader first.
@@ -757,11 +766,12 @@ int main(int argc, char **argv) {
     delprog(pr4); delete(vs4); delete(fs4); assert(geterr() == GL_NO_ERROR);
 
     test_vertex_binding();
-    test_literal_stride_fetch();
+    if (!cpu) test_literal_stride_fetch();
     test_uniform_buffer();
     test_compressed_arrays();
     test_doom3();
-    test_sampler_objects();
+    if (!cpu) test_lod_bias();
+    test_sampler_objects(!cpu);
     test_extension_names_and_egl();
     test_program_validation();
     test_fate_calls();
@@ -785,6 +795,7 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL rendering (stride 0, texture LOD bias, sampler objects): %s\n", cpu ? "not run (--cpu)" : "OK");
     return 0;
 }

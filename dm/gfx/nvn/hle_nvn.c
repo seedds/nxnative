@@ -3633,9 +3633,8 @@ uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_unlock(&g_vp_mu); return miss;
 }
 // Runs of consecutive physical pages behind [a, a+n): fn on each (nonzero stops the walk and is returned), or 1 at the first page mapped after gen (gen ~0 = do not look)
-static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
-    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int r = 0;
-    if (!v) { pthread_mutex_unlock(&g_vp_mu); return 1; }
+static int vpt_walk_locked(const struct vpool *v, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
+    int r = 0;
     const uint8_t *rs = NULL, *re = NULL; uint64_t o = a - (uint64_t)(uintptr_t)v->base;
     for (uint64_t at = o & ~0xFFFull; at < o + n && at < v->size && !r; at += 0x1000) {
         const vpte *e = vpt_get(v, at);
@@ -3647,7 +3646,28 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
         rs = e->phys; re = rs + 0x1000;
     }
     if (!r && rs) r = fn(rs, (uint64_t)(re - rs), arg);
+    return r;
+}
+static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
+    int r = v ? vpt_walk_locked(v, a, n, gen, fn, arg) : 1;
     pthread_mutex_unlock(&g_vp_mu); return r;
+}
+static int run_buffer_range(const uint8_t *p, uint64_t n, uint64_t arg) {
+    nvn_buffer_range_fn note = *(nvn_buffer_range_fn *)(uintptr_t)arg;
+    note((uint64_t)(uintptr_t)p, n); return 0;
+}
+// Capture physical attribution with the copy, not at completion: an unmap drops the page-table entry immediately while its Metal buffer keeps the old physical pages alive.
+void nvn_buffer_write_ranges(uint64_t a, uint64_t n, nvn_buffer_range_fn note) {
+    if (!n) return;
+    int sparse = 0;
+    pthread_mutex_lock(&g_vp_mu);
+    for (int i = 0; i < g_nvp; i++) {
+        const struct vpool *v = g_vp[i]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a >= base && a - base < v->size) { sparse = 1; vpt_walk_locked(v, a, n, ~0ull, run_buffer_range, (uint64_t)(uintptr_t)&note); break; }
+    }
+    pthread_mutex_unlock(&g_vp_mu);
+    if (!sparse) note(a, n);
 }
 static _Thread_local const void *t_rw_span;   // the dirty tracker's range of the last run (nvn_dirty_since_cached)
 static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) { return nvn_dirty_since_cached(&t_rw_span, p, n, stamp); }

@@ -347,6 +347,23 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         private static void GuardEntryCondition(AstBlock block, IAstNode guard, bool either,
             Func<AggregateType, AstOperand> newTemp)
         {
+            // Constants are defined on every entry path. Keep the direct
+            // condition, including the false label condition LoopExitCohort
+            // recognizes when moving a subgroup block back into its loop.
+            if (block.Condition is AstOperand { Type: OperandType.Constant })
+            {
+                if (either)
+                {
+                    block.OrCondition(guard);
+                }
+                else
+                {
+                    block.AndCondition(guard);
+                }
+
+                return;
+            }
+
             // A goto can enter this block after bypassing the original
             // condition's definition. Neither an eager logical operation nor
             // oldCondition || gotoFlag may read that undefined value. Evaluate

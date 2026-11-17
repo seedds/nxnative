@@ -1,6 +1,6 @@
 // nn::friends (friends / presence / invitations, out of scope): every interface that connects to the friends service is cut to "unavailable".
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
-// Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
+// Unless stated otherwise, Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
 
 // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
@@ -60,7 +60,8 @@ HLE_FORCE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAcco
 // Online play sessions (DRAGON QUEST XI S)
 HLE_FORCE("_ZN2nn7friends28DeclareOpenOnlinePlaySessionERKNS_7account3UidE", "online play session unavailable (cut)", Result, h_fr_OpenSession, const void *uid) { (void)uid; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends29DeclareCloseOnlinePlaySessionERKNS_7account3UidE", "online play session unavailable (cut)", Result, h_fr_CloseSession, const void *uid) { (void)uid; return RES_FAIL; }
-// Presence
-HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "presence unavailable (cut)", Result, h_fr_UpInit, void *self, const void *uid) { (void)self; (void)uid; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "presence unavailable (cut)", Result, h_fr_UpDesc, void *self, const char *s) { (void)self; (void)s; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends12UserPresence6CommitEv", "presence unavailable (cut)", Result, h_fr_UpCommit, void *self) { (void)self; return RES_FAIL; }
+// A user's own presence succeeds offline. The host accepts initialization, description and commit without publishing to the friends service.
+// Returning failure here can stop a game's startup; see services.md, "Friends presence is accepted offline".
+HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "presence accepted, not published (cut)", Result, h_fr_UpInit, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "presence accepted, not published (cut)", Result, h_fr_UpDesc, void *self, const char *s) { (void)self; (void)s; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends12UserPresence6CommitEv", "presence accepted, not published (cut)", Result, h_fr_UpCommit, void *self) { (void)self; return RES_OK; }

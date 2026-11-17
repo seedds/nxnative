@@ -57,6 +57,7 @@ typedef struct {
     uint8_t has_vin;         // has a shadow-input library <key>_bv (nvn_mtl.m vin_fn)
     uint16_t tg[3];          // Compute thread group size (none = 0)
     uint32_t tg_spill;       // Compute: threadgroup memory bytes per workgroup the shader takes from a device buffer at DMSH_TG_SLOT (dmsh_rewrite.py tg_spill; 0 = none)
+    uint32_t loop_sites;     // Compute: number of contained loop sites, including helpers (dmsh_rewrite.py compute_loops); 0: no containment state to bind
     uint8_t mesh_spill;      // Mesh: the stage array is a device slice of a scratch buffer bound at DMSH_MESH_SCRATCH_SLOT (dmsh_meshstage.py to_stage; nvn_geometry.inc mesh_scratch)
     struct { uint8_t reg; uint16_t word; uint32_t value; } first[4]; uint8_t nfirst;   // Stores to storage buffer words the host makes before each dispatch (dmsh_rewrite.py first_store)
     uint8_t route_b, has_c1; // Route B; has a c1 constant segment

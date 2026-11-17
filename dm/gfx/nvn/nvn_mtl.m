@@ -14705,7 +14705,8 @@ static const p_multi_draw *g_mdx_range;   // only while replaying a compact rang
 typedef struct { uint64_t ind, cnt, out, tag; } mdx_ent;   // out: GPU address of the copy, 0 when the record or count is in no Metal buffer (those draws wait, mdi_live)
 static mdx_ent g_mdx[MDX_SLOTS]; static int g_mdx_n; static uint64_t g_mdx_tag = 1, g_mdx_ep = ~0ull, g_mdx_sub, g_mdx_runs, g_mdx_splits, g_mdx_draws, g_mdx_fast, g_mdx_pre, g_mdx_wr = ~0ull; static const uint8_t *g_mdx_stop;
 // g_mdx_wr: the shader-write count (g_vbuf_write_epoch, swrite_note) when this tag's first copies were made, ~0 before. Draws can write records too, which NVN orders for indirect
-// fetch only by a barrier with ORDER_INDIRECT_DATA: such a barrier after a shader write since then ends the copies (g_mdx_epoch, at OP_BARRIER), and the draws after it copy again
+// fetch by ORDER_PRIMITIVES or ORDER_INDIRECT_DATA (GAME_BARRIER_FULL): such a barrier after a shader write since then ends the copies (g_mdx_epoch, at OP_BARRIER), and the draws after it copy again.
+// A primitive barrier also orders a draw-written visibility flag used as a count; keeping its earlier zero copy hid Bayonetta 3's colour draws after its depth prepass.
 // The kernel mdx_mask: dm/gfx/msl/mdx.metal
 static int mdx_wanted(const p_draw *dw, const p_draw_idx *di) { return dw ? dw->mdi_cnt && !ixc_wanted(dw, NULL) : di->mdi_cnt && !ixc_wanted(NULL, di); }
 static mdx_ent *mdx_slot(uint64_t ind, uint64_t cnt) {   // its entry in this tag, or the free slot for it
@@ -17144,7 +17145,7 @@ void mtl_exec(const uint8_t *p) {
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (g_tf_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_tf_bar = 1;   // the next capture of the open capture pass waits for its earlier ones (tf_order)
-                if ((bits & NVN_BARRIER_ORDER_INDIRECT_DATA_BIT) && g_mdx_wr != ~0ull && g_mdx_wr != g_vbuf_write_epoch) g_mdx_epoch++;   // a draw may have written a record that was copied before it (g_mdx_wr)
+                if ((bits & GAME_BARRIER_FULL) && g_mdx_wr != ~0ull && g_mdx_wr != g_vbuf_write_epoch) g_mdx_epoch++;   // a draw may have written a record or count that was copied before it (g_mdx_wr)
                 if (bits) { g_game_barrier |= bits; g_fb_bar++; g_dsp_game_bar = 1; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;

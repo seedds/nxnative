@@ -114,6 +114,7 @@ static id<MTLRenderPipelineState> dev_mps(MTLMeshRenderPipelineDescriptor *d, NS
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithMeshDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&e]; return compile_done(ps, e, out);
 }
 static id<MTLFunction> dev_fn(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **out) {
+    if (!name || !cv) return nil;
     plain_compile_begin(); NSError *e = nil; id f = [lib newFunctionWithName:name constantValues:cv error:&e]; return compile_done(f, e, out);
 }
 static id<MTLLibrary> dev_lib(NSString *source, NSError **out) {

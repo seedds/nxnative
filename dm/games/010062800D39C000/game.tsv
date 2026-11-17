@@ -1,0 +1,7 @@
+title_id	010062800D39C000
+name	SpongeBob SquarePants: Battle for Bikini Bottom - Rehydrated
+display_name	SpongeBob Rehydrated
+engine	ue4
+pso_mtl4	on
+fps_target	60
+mem_alias	256M

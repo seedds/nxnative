@@ -96,6 +96,18 @@ static const uint8_t vp9[] = {
 
 // Real VideoToolbox sessions invalidated between packets, as can happen while
 // iOS takes the app out of focus. The decoder must still return every picture.
+static int vt_av1_supported(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) cached = 0;
+        else {   // a VM on an AV1-capable host reports support while VTDecompressionSessionCreate refuses (-12906)
+            mav1 *a = mav1_new(NULL); mav1_picture pic;
+            cached = mav1_decode(a, av1, sizeof av1, 0, &pic) == 1 && a->vs && !a->soft;
+            mav1_free(a);
+        }
+    }
+    return cached;
+}
 static void vt_session_lifecycle(void) {
     mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts;
     int avc_pictures = 0, av1_pictures = 3;
@@ -105,7 +117,7 @@ static void vt_session_lifecycle(void) {
         while (mavc_take(c, 1, nv12, 64, 64, &pts)) avc_pictures++;
     }
     mavc_free(c);
-    if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
+    if (vt_av1_supported()) {
         mav1 *a = mav1_new(NULL); mav1_picture pic; av1_pictures = 0;
         for (int i = 0; i < 3; i++) {
             if (i == 1) { assert(a->vs && !a->soft); VTDecompressionSessionInvalidate(a->vs); }
@@ -150,7 +162,7 @@ static void vt_reference_recovery(void) {
             got++;
         }
         assert(got == 36); mavc_drop(c); assert(!c->history.count); mavc_free(c);
-        if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (!vt_av1_supported()) continue;
         mav1 *a = mav1_new(NULL); mav1_picture pic; got = 0;
         for (int loop = 0; loop < 3; loop++) for (int i = 0; i < 12; i++) {
             if ((loss < 12 ? loss : 7) == i && a->vs) {
@@ -180,7 +192,7 @@ static void vt_av1_random_access(void) {
 }
 static void vt_worker_lifecycle(void) {
     for (int codec = CV_H264; codec <= CV_AV1; codec++) {
-        if (codec == CV_AV1 && !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (codec == CV_AV1 && !vt_av1_supported()) continue;
         for (int action = 0; action < 4; action++) {
             _Alignas(16) uint8_t dec[0x400] = {0}; uint64_t id;
             const uint8_t *packet = codec == CV_H264 ? h264 : av1;

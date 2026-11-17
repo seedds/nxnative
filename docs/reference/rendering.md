@@ -1986,6 +1986,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
   - The body runs twice a corner, 12 times a segment, so a vertex shader with stores would run them that often; no line-drawing shader seen has any.
 - **Found on:** [Mario Golf: Super Rush](../../dm/games/0100C9C00E25C000/README.md): the tee's aiming grid and a green's putting grid, 480 segments a draw (PR #2352 recorded the width and drew the lines as shifted strokes).
 
+### Clear values of integer attachments
+
+- **Symptom:** none seen in a game. An integer colour attachment opened with `VK_ATTACHMENT_LOAD_OP_CLEAR` would hold another value than the game's clear value (in the check below, 0 instead of 4,000,000,000 and instead of −5), and a signed integer image cleared by `vkCmdClearColorImage` to a negative value would hold `INT32_MAX`.
+- **Cause:** `VkClearColorValue` is a union, and the format of what is cleared names the member: `int32` for a signed integer format, `uint32` for an unsigned one, `float32` for every other. Metal takes a clear colour as four doubles and converts them to the attachment's type. The render pass's clear (`begin_rp`) read `float32` for every format, so an integer's bits were taken as a float; the image clear (`C_CLEARI`) read `uint32` for both integer kinds, so a negative value became one above `INT32_MAX`.
+- **Fix:** both clears take the colour from `fmt_clear_color` (`hle_vk.m`), which reads the member the format names (`fmt_is_signed_int` for the signed formats).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_vk_clear_int` clears an `R32_UINT`, an `R32_SINT` and an `R32_SFLOAT` image each way and reads the texels back; before the fix 3 of its 12 checks failed (the two integer render-pass clears and the signed image clear).
+- **Found on:** no game. Found by reading `begin_rp` beside the image clear, then reproduced in `t_vk_clear_int`. Which games clear an integer attachment this way is not known.
+
 ### What a game tears down that it should not
 
 - **Symptom:** a crash in `set_free` from `vkFreeDescriptorSets` as a game leaves.

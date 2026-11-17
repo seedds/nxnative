@@ -740,6 +740,10 @@ t_vk_swapchain_life: t_vk_swapchain_life.m ../vk/hle_vk.m $(MTL_T_DEP)
 t_vk_1d: t_vk_1d.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_1d.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 check_t_vk_1d: RUN_ENV = MTL_DEBUG_LAYER=1
+# A clear reads the member of VkClearColorValue the format names: uint32, int32 or float32, by a render pass's LOAD_OP_CLEAR and by vkCmdClearColorImage
+t_vk_clear_int: t_vk_clear_int.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_clear_int.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_clear_int: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

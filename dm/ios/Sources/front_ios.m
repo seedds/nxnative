@@ -470,6 +470,42 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
 }
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
+// The account applet offers only choices allowed by the host. Native actions keep
+// the choice with the player, including creation, skip and cancellation.
+int front_user_select(const front_user *users, int count, int allow_create, int allow_skip) {
+    if (!g_layer) return FRONT_USER_CANCEL;
+    __block int result = FRONT_USER_CANCEL;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class])
+            for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        if (!vc || vc.isBeingDismissed) { dispatch_semaphore_signal(done); return; }
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Choose a user" message:@"Choose who will play. Each user keeps separate progress." preferredStyle:UIAlertControllerStyleAlert];
+        for (int i = 0; i < count; i++) {
+            int slot = users[i].slot;
+            NSString *title = [NSString stringWithFormat:@"%s (user %d)%s", users[i].nickname, slot + 1, users[i].open ? " - in use" : ""];
+            [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                (void)a; result = slot; dispatch_semaphore_signal(done);
+            }]];
+        }
+        if (allow_create) [alert addAction:[UIAlertAction actionWithTitle:@"Add user" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a; result = FRONT_USER_CREATE; dispatch_semaphore_signal(done);
+        }]];
+        if (allow_skip) [alert addAction:[UIAlertAction actionWithTitle:@"Skip" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a; result = FRONT_USER_SKIP; dispatch_semaphore_signal(done);
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
+            (void)a; dispatch_semaphore_signal(done);
+        }]];
+        dm_gamepad_reset();
+        [vc presentViewController:alert animated:YES completion:nil];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return result;
+}
+
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     (void)max_chars;

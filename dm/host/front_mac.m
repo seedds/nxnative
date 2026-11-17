@@ -32,6 +32,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "user_select_mac.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -1736,6 +1737,17 @@ void front_web_detach(NSView *box) { if (box.window && box.window.firstResponder
 
 // Software keyboard input box (front.h): the main thread shows an NSAlert + text field and the guest thread waits synchronously for the result. Not shown in windowless mode (returns -1, the caller treats it as cancel)
 extern int g_swkbd_min_chars;   // hle_swkbd.c: this input's minimum length from ShowKeyboardArg; the applet keeps OK disabled until the text is long enough
+int front_user_select(const front_user *users, int count, int allow_create, int allow_skip) {
+    if (!g_layer) return FRONT_USER_CANCEL;
+    __block int result = FRONT_USER_CANCEL;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        g_text_box = 1; input_release();
+        result = user_select_mac(users, count, allow_create, allow_skip);
+        g_text_box = 0;
+        if (g_win.isKeyWindow) input_resume();
+    });
+    return result;
+}
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     if (!g_layer) return -1;
     __block int r = 0;

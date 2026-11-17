@@ -283,7 +283,8 @@ static class SwshXlate
                     foreach (var t in list)
                     {
                         var o = new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags };
-                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
+                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;
+                        if (t.BufferBias >= 0 && (t.Type & SamplerType.Mask) == SamplerType.Texture2D) o["row_bias"] = true;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
                         res[name].AsArray().Add((JsonNode)o);
                     }
                 if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add((JsonNode)JsonValue.Create(h)); res["fetch1d"] = f1; }

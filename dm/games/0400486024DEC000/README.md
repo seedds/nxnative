@@ -176,6 +176,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Live BUFFER ordering and mapping](../../../docs/reference/rendering.md#sampled-buffer-reads-follow-source-writes-and-mappings): synthetic source-review proof for issue #2247. No Ocarina floor/glow artifact or performance improvement is attributed to this change.
+
 - [Private buffer texture fallback API guards](../../../docs/reference/rendering.md#private-buffer-texture-fallbacks-must-not-query-cpu-contents): synthetic source-review tests reproduce a validation abort when the existing unsupported-storage fallback queries private buffer contents. The guard preserves that fallback; GPU snapshot ordering and Ocarina artifact reachability remain open.
 
 - [A patched pool table copied whole](../../../docs/reference/nvn-objects.md#a-patched-pool-table-copied-whole): resolved on the Mac (2026-11-17). Walking through Kokiri Forest the game patches 16-24 of its 33,025-entry pool tables a frame; a patch now writes the logged entries into a finished spare of its table, 0.015-0.025 ms a frame on an Apple M6 against 0.13-0.18 ms for whole copies. Open: an iPhone run, where the copies cost more.

@@ -62,6 +62,14 @@ Settings a player chose in a front end and wants kept, also for a start from Fin
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.
 
+## Local users and the account selector
+
+The account applet uses `front_user_select()` (`dm/host/front.h`) on the guest thread; the front end presents native UI on its main thread and blocks the caller until a choice or cancellation. The built-in Mac dialog accepts mouse/keyboard input, and the iOS dialog accepts touches. Show the host-supplied users (including their in-use labels), and Add user / Skip only when allowed. Return the user's slot or the named `FRONT_USER_*` action. A front end without an interactive surface returns `FRONT_USER_CANCEL`; it must not guess an account from the number of controllers. The host validates the answer, owns registration and session state, and applies the game's exclusions and permitted automatic selection.
+
+User 1 keeps the original UID, `DM_NICK`, and `DM_SAVE` directory. Additional local users have stable UIDs and `Player N` names; their saves are sibling directories `<DM_SAVE>_userN` (N = 2 through 8). Registered slots are stored in `<DM_SAVE>.users` (a small `nxnative-users-1` record with a hexadecimal slot mask); do not edit it while the game runs. Registration is atomic and separate from save commits. Open sessions are never persisted.
+
+When moving, backing up or restoring an app's local saves, preserve the registry and all of these committed account directories together, as well as the existing device save. The transaction work directories (`.work` / `.new`) are not committed saves. The current cloud-sync package still covers only the primary account and device save: additional local users and their saves do not sync. A primary-save-only export does not contain the other users' progress.
+
 ## Saved choices
 
 Each app keeps the player's choices in its own preferences domain, its bundle ID (`CFBundleIdentifier` in `Info.plist`, `org.nxnative.<title ID>` unless the app was packed with another): one string per setting, under the key `launcher.<env>` (`launcher.DM_FPS_TARGET` = `"30"`). The iPhone app's settings screen keeps them there, and a Mac app's launcher (`dm/mac/launcher.c`) reads them at every start, so a start from Finder or the Dock has them too. A front end writes the same keys (`CFPreferencesSetAppValue` with the app's bundle ID, or `defaults write org.nxnative.<title ID> launcher.DM_FPS_TARGET -string 30`), and a settings window inside the app would too: there is one set of choices, and every view of it agrees.

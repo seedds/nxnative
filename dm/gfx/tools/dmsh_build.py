@@ -414,7 +414,8 @@ NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NV
 
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
-    if dmsh_ampere.is_nvn2(rec[ci:]) and rec[ci + 0x56] == 8:
+    # Short NVN2 graphics control sections have no optional stage byte.
+    if dmsh_ampere.is_nvn2(rec[ci:]) and len(rec) > ci + 0x56 and rec[ci + 0x56] == 8:
         raise ValueError(f'{key}: stage8 RT record reached the ordinary shader path; correct its shader_map stage')
     extra = {}
     if dmsh_ampere.is_nvn2(rec[ci:]):
@@ -795,7 +796,7 @@ def finish(key, w, j, c1):
     blend0 = 0
     if j['stage'] == 'ps': src, blend0 = dmsh_rewrite.blend_zero(src)   # a zero blend weight makes 0 of a NaN colour, as NVIDIA's blender does; before the entry points that share main0's body (see blend_zero)
     open(msl, 'w').write(src)
-    first, spill = [], 0
+    first, spill, loop_sites = [], 0, []
     mesh = j.get('mesh_stage')
     tess = None
     if j['stage'] in ('hs', 'ds') and not mesh:   # hull as a plain kernel, domain as a plain vertex function on the host's grid (dmsh_tess.py); unsupported shapes keep the old source
@@ -813,6 +814,8 @@ def finish(key, w, j, c1):
         try: src, spill = dmsh_rewrite.tg_spill(src)   # shared memory past Metal's 32 KB in a device buffer (see tg_spill)
         except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
         if spill: open(msl, 'w').write(src)
+        try: src, loop_sites = dmsh_rewrite.compute_loops(src); open(msl, 'w').write(src)
+        except ValueError as e: return 'compute loop containment failed', str(e)[:160], None
         src = dmsh_rewrite.max_threads(src, j.get('local')); open(msl, 'w').write(src)   # the local size as the kernel's thread limit, so its pipeline allows the dispatch (see max_threads)
     if 'dmsh_raw_find' in src:
         src = dmsh_rewrite.raw_noinline(src); open(msl, 'w').write(src)   # one copy of the pool table search (see raw_noinline)
@@ -870,6 +873,7 @@ def finish(key, w, j, c1):
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u', **{f'entry_u_{k}': True for k, v in dmsh_entry.typed_ops(fu).items() if v}} if fu else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'blend_zero': True} if blend0 else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
+            **({'loop_sites': loop_sites} if j['stage'] == 'cs' and loop_sites else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': dmsh_reflect.unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in dmsh_reflect.attributes(src)],

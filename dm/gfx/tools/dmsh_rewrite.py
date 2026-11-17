@@ -243,6 +243,141 @@ def block_end(src, start):   # the index of the brace closing the block opened a
         if depth == 0: return b.start()
     raise ValueError('dmsh_hmma16816_f16: block not closed')
 
+# Compute loop containment, based on uncraftablexd / FifteenPen's #2254 and computerguy526 / uncraftablexd's #2709. A platform workaround, not the runaway's cause's fix:
+# committed GPU work can survive process exit and wedge the Mac (#2664). The per-function budget also counts nested and consecutive loops; legitimate work can exhaust it.
+# Only compute is guarded. A GPU-written abort word shortens the submission's other loops; CPU writes to a running kernel were unreliable. Helpers carry the same state, but
+# have their own function budget. A loop containing an execution barrier (also through calls) has a fresh private budget, only raises the abort, and never reads it:
+# differing work before or inside it must not make threads leave its barriers on different iterations. Cap hits record a loop site separately
+# for each kernel, so a kernel shortened by another's abort is not blamed. Source sites are written into the reflection; the host reports hits after completion, once per kernel.
+LOOP_CAP = 1 << 18
+LOOP_ABORT_EVERY = 1024
+_LOOP = re.compile(r'\b(for|while)\s*\(')
+_LOOP_COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.S)
+
+
+def compute_loops(msl):
+    """(MSL, loop sites): cap compute entry functions and their reachable helpers, carrying the submission's abort and kernel's hit record through callers.
+    SPIRV-Cross's function braces stand alone; loop bodies may be compact (the chain's matrix helpers). Other stages and loop-free compute shaders are unchanged."""
+    if not re.search(r'^kernel\s+void\s+main0\s*\(', msl, re.M): return msl, []
+    fns = []
+    for m in FUNC_OPEN.finditer(msl):
+        close = m.start() - 1
+        if close < 0 or msl[close] != ')': continue
+        depth, op = 1, close
+        while depth and op:
+            op -= 1; depth += (msl[op] == ')') - (msl[op] == '(')
+        name = re.search(r'(\w+)\s*$', msl[:op])
+        if not name: continue
+        start = msl.rfind('\n', 0, op) + 1
+        body = m.end() + 2
+        end = block_end(msl, body - 1)
+        fns.append((name[1], start, op, close, body, end))
+    names = {f[0] for f in fns}
+    calls = {n: set() for n in names}
+    bodies = {n: '' for n in names}
+    def code(text): return _LOOP_COMMENT.sub(lambda m: re.sub(r'[^\n]', ' ', m[0]), text)
+    for n, _, _, _, b, e in fns: bodies[n] += code(msl[b:e])
+    def uses(text, n): return re.search(rf'\b{re.escape(n)}\s*(?:<[^;\n()]*>)?\s*\(', text)
+    for n in names: calls[n] = {c for c in names if uses(bodies[n], c)}
+    def grow(seed, edges):
+        found = set(seed)
+        while True:
+            more = {n for n in names if edges(n, found)} - found
+            if not more: return found
+            found |= more
+    reach = grow({'main0'}, lambda n, s: any(n in calls[c] for c in s))
+    loops = {n for n in reach if _LOOP.search(bodies[n])}
+    guarded = grow(loops, lambda n, s: bool(calls[n] & s)) & reach
+    if not loops: return msl, []
+    if re.search(rf'\[\[buffer\({abi.LOOP_SLOT}\)\]\]', msl): raise ValueError(f'compute buffer {abi.LOOP_SLOT} is taken')
+    barriers = grow({n for n in names if re.search(r'\b(?:threadgroup|simdgroup)_barrier\s*\(', bodies[n])}, lambda n, s: bool(calls[n] & s))
+    edits, sites = [], []
+    def call_edits(text):
+        out = []
+        for c in guarded:
+            for call in re.finditer(rf'\b{re.escape(c)}\s*(?:<[^;\n()]*>)?\s*\(', code(text)):
+                tail = dmsh_side._close(text, call.end(), '(', ')')
+                if tail < 0: raise ValueError(f'loop containment: unclosed call to {c}')
+                out.append((tail - 1, (', ' if text[call.end():tail - 1].strip() else '') + 'dm_loop'))
+        return out
+    for n, _, op, close, b, e in fns:
+        if n not in guarded: continue
+        param = 'device dm_loop_state& dm_loop' + (f' [[buffer({abi.LOOP_SLOT})]]' if n == 'main0' else '')
+        edits.append((close, close, (', ' if msl[op + 1:close].strip() else '') + param))
+        body, conditions = msl[b:e], []
+        masked = code(body)
+        if n in loops: edits.append((b, b, '\n    uint dm_lg = 0u;'))
+        for loop in _LOOP.finditer(masked):
+            close = dmsh_side._close(masked, loop.end(), '(', ')') - 1
+            if close < 0: raise ValueError(f'loop containment: unclosed condition in {n}')
+            lo, hi = loop.end(), close
+            if loop[1] == 'for':
+                semis = [m.start() for m in re.finditer(';', masked[lo:hi])]
+                if len(semis) != 2: raise ValueError(f'loop containment: unknown loop in {n}')
+                lo, hi = lo + semis[0] + 1, lo + semis[1]
+            after = close + 1
+            while after < len(masked) and masked[after].isspace(): after += 1
+            before = masked[:loop.start()].rstrip()
+            begin = loop.start()
+            if loop[1] == 'while' and after < len(masked) and masked[after] == ';' and before.endswith('}'):
+                # A do/while: locate its body backwards, including any nested blocks.
+                depth, start = 1, len(before) - 1
+                while depth and start:
+                    start -= 1; depth += (masked[start] == '}') - (masked[start] == '{')
+                do = re.search(r'\bdo\s*$', masked[:start])
+                if not do: raise ValueError(f'loop containment: no do in {n}')
+                begin, end = do.start(), after + 1
+                inside = masked[start:len(before)]
+            elif after < len(masked) and masked[after] == '{':
+                end = block_end(masked, after) + 1
+                inside = masked[after:end]
+            else:
+                end = masked.find(';', after)
+                if end < 0: raise ValueError(f'loop containment: no loop body in {n}')
+                inside = masked[after:end]
+                end += 1
+            context = masked[loop.end():close] + inside
+            barrier = bool(re.search(r'\b(?:threadgroup|simdgroup)_barrier\s*\(', context)) or any(uses(context, c) for c in barriers)
+            site = len(sites) + 1
+            sites.append({'site': site, 'function': n, 'line': msl.count('\n', 0, b + loop.start()) + 1, 'barrier': barrier})
+            counter = f'dm_lg_b{site}' if barrier else 'dm_lg'
+            if barrier:
+                edits.extend(((b + begin, b + begin, f'{{ uint {counter} = 0u; '), (b + end, b + end, ' }')))
+            check = f'dm_lg_{"cap" if barrier else "go"}({counter}, dm_loop, {site}u)'
+            out = body[lo:hi].strip() or 'true'
+            for at, text in sorted(call_edits(out), reverse=True): out = out[:at] + text + out[at:]
+            edits.append((b + lo, b + hi, f'({out}) && {check} /* dm_loop_site {site}: {n} */'))
+            conditions.append((lo, hi))
+        # Calls inside conditions were rewritten with their condition; the remaining calls include loop-free wrappers and nested calls in ordinary statements.
+        for at, text in call_edits(body):
+            if not any(lo <= at <= hi for lo, hi in conditions): edits.append((b + at, b + at, text))
+    for a, b, text in sorted(edits, reverse=True): msl = msl[:a] + text + msl[b:]
+    head = re.search(r'^using namespace metal;\s*\n', msl, re.M)
+    if not head: raise ValueError('loop containment: no metal namespace')
+    helper = f'''
+struct dm_loop_state
+{{
+    device atomic_uint* abort;
+    atomic_uint hit;
+}};
+static inline __attribute__((always_inline)) bool dm_lg_cap(thread uint& n, device dm_loop_state& s, uint site)
+{{
+    if (++n < {LOOP_CAP}u) return true;
+    if (n == {LOOP_CAP}u)
+    {{
+        atomic_fetch_min_explicit(&s.hit, site, memory_order_relaxed);
+        atomic_store_explicit(s.abort, 1u, memory_order_relaxed);
+    }}
+    return false;
+}}
+static inline __attribute__((always_inline)) bool dm_lg_go(thread uint& n, device dm_loop_state& s, uint site)
+{{
+    if (!dm_lg_cap(n, s, site)) return false;
+    return (n & {LOOP_ABORT_EVERY - 1}u) != 0u || atomic_load_explicit(s.abort, memory_order_relaxed) == 0u;
+}}
+'''
+    return msl[:head.end()] + helper + msl[head.end():], sites
+
 # B kept in the SIMD-group (hmma_bslots). The lanes hold B in registers and the matrix hardware fills its matrices only from memory: a lane writing its elements through
 # thread_elements() from SIMD shuffles (the 8x8 lane layout measured on an M6: lane l holds row (l/16)*4 + (l/2)%4, columns 2(l%2) + 4((l/8)%2) and the next) took a chain of
 # calls 1.716 ms against 1.448 through the scratch, and every operand that way 8.9 ms. So B's trip through the block (2 stores, a barrier, 2 loads) cannot get cheaper; it can only

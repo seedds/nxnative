@@ -1117,6 +1117,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                             Operand fetchX = sources[^1];
                             sources[^1] = context.BitwiseAnd(fetchX, Const(0x3FFF));
                             sources.Add(context.ShiftRightU32(fetchX, Const(14)));
+                            flags |= TextureFlags.RowWrap;
                             context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle);
                         }
                         else

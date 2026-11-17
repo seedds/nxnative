@@ -767,6 +767,55 @@ int main(void) {
         EXPECT("lists checked", 126, lists);
         P(nvnCommandBufferFinalize)(&c3); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // Small real grants are guest memory too (Borderlands 3's UE callback gives 40/56 bytes). Keep an overflow's guest origin, but a regrant alone must keep its live list.
+    {
+        static uint8_t m[8192] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer tiny, other;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&tiny, &dev); P(nvnCommandBufferInitialize)(&other, &dev);
+        const size_t grants[] = {8, 40, 56};
+        for (size_t k = 0; k < sizeof grants / sizeof grants[0]; k++) {
+            size_t n = grants[k];
+            P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, n);
+            EXPECT("small grant uses the guest pool", (uintptr_t)m, (uintptr_t)CB(&tiny)->cur);
+            P(nvnCommandBufferBeginRecording)(&tiny); P(nvnCommandBufferBarrier)(&tiny, 1);
+            NVNcommandHandle h = P(nvnCommandBufferEndRecording)(&tiny);
+            EXPECT("8-byte barrier fits a small guest grant", 1, one_piece(h, m, 8));
+            EXPECT("small grant size is what the game added", n, P(nvnCommandBufferGetCommandMemorySize)(&tiny));
+            EXPECT("small guest grant counts the record only", 8, P(nvnCommandBufferGetCommandMemoryUsed)(&tiny));
+            EXPECT("small guest grant reports its remaining bytes", n - 8, P(nvnCommandBufferGetCommandMemoryFree)(&tiny));
+        }
+        for (size_t k = 1; k < sizeof grants / sizeof grants[0]; k++) for (int lead = 0; lead < 2; lead++) {
+            size_t n = grants[k];
+            P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, n);
+            NVNcommandHandle h = rec_vp_binds(&tiny, lead, 0);
+            int segment = -1;
+            for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].rec_id == CB(&tiny)->rec_id) segment = i;
+            EXPECT("small-grant overflow retains its guest origin", 1, segment >= 0 && g_hostseg[segment].org_lo == (uintptr_t)m &&
+                   g_hostseg[segment].org_hi > (uintptr_t)m && g_hostseg[segment].org_hi <= (uintptr_t)(m + n));
+            P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, n);
+            EXPECT("regrant alone keeps small-grant overflow live", 1, segment >= 0 && g_hostseg[segment].busy);
+            P(nvnCommandBufferBeginRecording)(&tiny); P(nvnCommandBufferEndRecording)(&tiny);
+            EXPECT("empty recording keeps small-grant overflow live", 1, segment >= 0 && g_hostseg[segment].busy);
+            P(nvnCommandBufferAddCommandMemory)(&other, &mp, 4096, n); rec_vp_binds(&other, 0, 0xdead);
+            EXPECT("small-grant list survives another buffer's overflow", VP_NB, vp_binds_ok(h, 0));
+            P(nvnCommandBufferBeginRecording)(&tiny); P(nvnCommandBufferBarrier)(&tiny, 1); P(nvnCommandBufferEndRecording)(&tiny);
+            EXPECT("writing over the small grant reclaims its overflow", 0, segment >= 0 ? g_hostseg[segment].busy : -1);
+            int nseg = g_nhostseg, good = 1;
+            for (int frame = 0; frame < 16; frame++) {
+                P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, n);
+                h = rec_vp_binds(&tiny, lead, (uint64_t)frame << 32);
+                good &= vp_binds_ok(h, (uint64_t)frame << 32) == VP_NB;
+            }
+            EXPECT("reused small grants replay each recording whole", 1, good);
+            EXPECT("reused small grants need no additional host segments", nseg, g_nhostseg);
+            // Retire the final lists by writing their guest bytes, before reusing this fixture's pool.
+            P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, n);
+            P(nvnCommandBufferBeginRecording)(&tiny); P(nvnCommandBufferBarrier)(&tiny, 1); P(nvnCommandBufferEndRecording)(&tiny);
+            P(nvnCommandBufferAddCommandMemory)(&other, &mp, 4096, n);
+            P(nvnCommandBufferBeginRecording)(&other); P(nvnCommandBufferBarrier)(&other, 1); P(nvnCommandBufferEndRecording)(&other);
+        }
+        P(nvnCommandBufferFinalize)(&tiny); P(nvnCommandBufferFinalize)(&other); P(nvnMemoryPoolFinalize)(&mp);
+    }
     // 5b''. A grant is not a write. Slot A (at 512) overflows its 64 bytes into a host-lent segment; slot B before it is then re-recorded with a grant of 512 bytes that
     //       reaches over A's bytes but writes only one record (max(S, 512), as above). A is still live: another buffer's overflow must not be handed A's segment
     {

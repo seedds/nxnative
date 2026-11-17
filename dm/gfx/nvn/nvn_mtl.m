@@ -18360,7 +18360,7 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (g_link_tick_n >= started_tick + step) { started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 1; }
     uint64_t w0 = now_ns();
     struct timespec ts = link_deadline(timeout_ns);
-    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (with the gate's drain, the tick that ends it, below)
+    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (with a drain into the latch, the tick that ends it, below)
     while (g_link_tick_n < started_tick + step) if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) { g_link_waiter = 0; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 0; }
     g_link_waiter = 0;
     uint64_t w1 = now_ns(), drained = 0;

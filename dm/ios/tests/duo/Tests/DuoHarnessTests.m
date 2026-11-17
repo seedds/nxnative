@@ -105,6 +105,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 @interface DuoHarnessTests : XCTestCase
 @property (nonatomic, strong) id savedLayout;
+@property (nonatomic, strong) id savedShoulderPositions;
 @property (nonatomic) BOOL controllerListOverridden;
 - (void)setHarnessControllers:(NSArray<GCController *> * _Nullable)controllers notification:(NSNotificationName _Nullable)notification;
 - (UIViewController *)harnessRootViewController;
@@ -116,6 +117,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [super setUp];
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     self.savedLayout = [defaults objectForKey:@"DmPadLayout"];
+    self.savedShoulderPositions = [defaults objectForKey:@"DmShoulderPositions.v1"];
+    [defaults removeObjectForKey:@"DmShoulderPositions.v1"];
     [defaults setObject:@1 forKey:@"DmPadLayout"];
     [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
     duo_harness_clear();
@@ -123,6 +126,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 - (void)tearDown {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (self.savedShoulderPositions) [defaults setObject:self.savedShoulderPositions forKey:@"DmShoulderPositions.v1"];
+    else [defaults removeObjectForKey:@"DmShoulderPositions.v1"];
     if (self.savedLayout) [defaults setObject:self.savedLayout forKey:@"DmPadLayout"];
     else [defaults removeObjectForKey:@"DmPadLayout"];
     if (self.controllerListOverridden) {
@@ -688,6 +693,86 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(dm_pad_layout(), 0, @"Tap cannot be picked while docked");
     XCTAssertEqualObjects([NSUserDefaults.standardUserDefaults objectForKey:@"DmPadLayout"], @0);
     dm_set_opmode(0);
+}
+
+- (void)testShoulderDraggingIsSilentPersistsAndMovesTheHitTarget {
+    dm_set_opmode(0);
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    NSArray *names = @[@"L", @"R", @"ZL", @"ZR"];
+    uint64_t bits[] = {DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR};
+    CGPoint destinations[] = {{170, 180}, {670, 180}, {250, 260}, {590, 260}};
+    for (int i = 0; i < 4; i++) {
+        CATextLayer *label = [self textLayerNamed:names[i] inLayer:pad.layer];
+        CGPoint old = CGPointMake(CGRectGetMidX(label.frame), CGRectGetMidY(label.frame));
+        DuoFakeTouch *held = [self touchAt:old time:1]; [self beginTouches:@[held] onPad:pad];
+        XCTAssertEqual(duo_harness_input().buttons, bits[i]);
+        dm_pad_edit_set(true);
+        XCTAssertEqual(duo_harness_input().buttons, 0, @"Entering edit releases a held key");
+        [self endTouches:@[held] onPad:pad cancelled:NO];
+        DuoFakeTouch *drag = [self touchAt:old time:2]; [self beginTouches:@[drag] onPad:pad];
+        [self moveTouch:drag to:destinations[i] onPad:pad]; [pad layoutIfNeeded];
+        XCTAssertEqual(duo_harness_input().buttons, 0);
+        XCTAssertEqual(duo_harness_input().touch_count, 0, @"Dragging does not reach the game's touch screen");
+        [self endTouches:@[drag] onPad:pad cancelled:NO]; dm_pad_edit_set(false); [pad layoutIfNeeded];
+        label = [self textLayerNamed:names[i] inLayer:pad.layer];
+        XCTAssertEqualWithAccuracy(CGRectGetMidX(label.frame), destinations[i].x, 0.01);
+        XCTAssertEqualWithAccuracy(CGRectGetMidY(label.frame), destinations[i].y, 0.01);
+    }
+    pad = [self padForLayout:layout bounds:bounds];
+    for (int i = 0; i < 4; i++) {
+        DuoFakeTouch *press = [self touchAt:destinations[i] time:3]; [self beginTouches:@[press] onPad:pad];
+        XCTAssertEqual(duo_harness_input().buttons, bits[i], @"Saved position is also the real hit target");
+        [self endTouches:@[press] onPad:pad cancelled:NO];
+    }
+    dm_pad_positions_reset(); [pad layoutIfNeeded];
+    XCTAssertEqual([[NSUserDefaults.standardUserDefaults dictionaryForKey:@"DmShoulderPositions.v1"] count], 0);
+    XCTAssertNotEqualWithAccuracy(CGRectGetMidY([self textLayerNamed:@"L" inLayer:pad.layer].frame), destinations[0].y, 1);
+}
+
+- (void)testShoulderEditorKeepsControlsInsideTheScreenAndGearReachable {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    CATextLayer *label = [self textLayerNamed:@"ZL" inLayer:pad.layer];
+    CGPoint old = CGPointMake(CGRectGetMidX(label.frame), CGRectGetMidY(label.frame));
+    dm_pad_edit_set(true);
+    DuoFakeTouch *drag = [self touchAt:old time:1]; [self beginTouches:@[drag] onPad:pad];
+    [self moveTouch:drag to:CGPointMake(-500, 900) onPad:pad]; [pad layoutIfNeeded];
+    CGRect rect = CGPathGetBoundingBox(((CAShapeLayer *)label.superlayer).path);
+    XCTAssertTrue(CGRectContainsRect(bounds, rect));
+    [self endTouches:@[drag] onPad:pad cancelled:YES];
+    CGPoint moved = CGPointMake(CGRectGetMidX(label.frame), CGRectGetMidY(label.frame));
+    drag = [self touchAt:moved time:2]; [self beginTouches:@[drag] onPad:pad];
+    UIButton *menu = [self menuButtonInPad:pad]; [self moveTouch:drag to:menu.center onPad:pad];
+    [self endTouches:@[drag] onPad:pad cancelled:NO]; dm_pad_edit_set(false); [pad layoutIfNeeded];
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+    dm_pad_layout_set(2); dm_pad_edit_set(true);
+    XCTAssertFalse(dm_pad_editing(), @"No invisible editing mode in Tap layout");
+}
+
+- (void)testShoulderPositionsAreSeparateByOrientationAndResetOnlyTheCurrentOne {
+    CGRect bounds[] = {CGRectMake(0, 0, 844, 390), CGRectMake(0, 0, 390, 844)};
+    CGPoint destinations[] = {{180, 180}, {100, 650}};
+    for (int i = 0; i < 2; i++) {
+        UIView *pad = [self padForLayout:dm_layout(bounds[i], UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds[i]];
+        CATextLayer *label = [self textLayerNamed:@"L" inLayer:pad.layer];
+        CGPoint old = CGPointMake(CGRectGetMidX(label.frame), CGRectGetMidY(label.frame));
+        dm_pad_edit_set(true);
+        DuoFakeTouch *drag = [self touchAt:old time:1]; [self beginTouches:@[drag] onPad:pad];
+        [self moveTouch:drag to:destinations[i] onPad:pad];
+        [self endTouches:@[drag] onPad:pad cancelled:NO]; dm_pad_edit_set(false);
+    }
+    for (int i = 0; i < 2; i++) {
+        UIView *pad = [self padForLayout:dm_layout(bounds[i], UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds[i]];
+        CATextLayer *label = [self textLayerNamed:@"L" inLayer:pad.layer];
+        XCTAssertEqualWithAccuracy(CGRectGetMidX(label.frame), destinations[i].x, 0.01);
+        XCTAssertEqualWithAccuracy(CGRectGetMidY(label.frame), destinations[i].y, 0.01);
+    }
+    dm_pad_positions_reset();
+    UIView *landscape = [self padForLayout:dm_layout(bounds[0], UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds[0]];
+    CATextLayer *label = [self textLayerNamed:@"L" inLayer:landscape.layer];
+    XCTAssertEqualWithAccuracy(CGRectGetMidY(label.frame), destinations[0].y, 0.01, @"Resetting portrait keeps the landscape position");
 }
 
 - (void)testInGameMenuSettingsTakeEffectAtOnce {

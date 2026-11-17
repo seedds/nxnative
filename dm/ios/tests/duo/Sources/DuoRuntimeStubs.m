@@ -101,10 +101,14 @@ void dm_set_opmode(int mode) { g_opmode = mode; }
 static int g_rumble = 1;
 void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
+void dm_audio_route_changed(void) {}   // no audio renderer in this UI harness
+void dm_movie_active(int active) { (void)active; }   // no movie decoder in this UI harness
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 
 int front_ios_boot_ok(void) { return 1; }
+int front_web_touch(void) { return 0; }   // the harness presents no offline web page
+int dm_players_reported(void) { return __builtin_popcount(duo_harness_state().connected_players | 1u); }
 void front_ios_boot(void) {}
 bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
 

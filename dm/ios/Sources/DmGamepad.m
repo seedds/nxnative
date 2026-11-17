@@ -131,6 +131,7 @@ static const CGFloat
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+static NSString *const k_positions_key = @"DmShoulderPositions.v1";
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
@@ -164,6 +165,12 @@ static void pads_start(void);   // Physical controllers, below
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     DmLayout _layout;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
+    NSMutableDictionary *_shoulderPositions;       // normalized centres; separate portrait, tabletop and landscape layouts
+    BOOL _editing;
+    UITouch *_editTouch;
+    int _editButton;
+    CGPoint _editStart, _editCentre;
+    UILabel *_editHint;
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
@@ -193,6 +200,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [_touchFeedback prepare];
         }
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
+        _shoulderPositions = [[NSUserDefaults.standardUserDefaults dictionaryForKey:k_positions_key] mutableCopy] ?: [NSMutableDictionary dictionary];
         static dispatch_once_t once;
         dispatch_once(&once, ^{
             // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
@@ -217,6 +225,11 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         __weak DmGamepad *weakSelf = self;
         [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
         [self addSubview:_menu];
+        _editHint = [[UILabel alloc] init]; _editHint.text = @"Drag L, R, ZL or ZR.\nOpen the gear menu to finish.";
+        _editHint.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1]; _editHint.numberOfLines = 2;
+        _editHint.textColor = UIColor.whiteColor; _editHint.backgroundColor = [UIColor colorWithWhite:0 alpha:0.7];
+        _editHint.textAlignment = NSTextAlignmentCenter; _editHint.layer.cornerRadius = 8; _editHint.clipsToBounds = YES;
+        _editHint.hidden = YES; _editHint.userInteractionEnabled = NO; [self addSubview:_editHint];
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
@@ -240,6 +253,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 }
 - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
 - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
+    [self setEditing:NO];
     if (l == 2 && dm_opmode() != 0) l = 0;
     [self reset];
     _full = l == 1; _tap = l == 2;
@@ -305,7 +319,27 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)dpadR { return K_DPAD_R * self.u; }
 static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
 static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
+- (NSString *)positionGroup {
+    return self.bounds.size.height > self.bounds.size.width ? @"portrait" : (_layout.separated ? @"tabletop" : @"landscape");
+}
+- (NSString *)positionKey:(int)b { return [NSString stringWithFormat:@"%@.%d", self.positionGroup, b]; }
+- (CGPoint)clampShoulder:(CGPoint)p button:(int)b {
+    CGRect s = self.safe; CGFloat r = MAX([self dropR:b] * K_DROP_TIP, 22);
+    CGFloat rx = MIN(r, s.size.width / 2), ry = MIN(r, s.size.height / 2);
+    p.x = MAX(CGRectGetMinX(s) + rx, MIN(CGRectGetMaxX(s) - rx, p.x));
+    p.y = MAX(CGRectGetMinY(s) + ry, MIN(CGRectGetMaxY(s) - ry, p.y));
+    // Keep the fixed gear reachable, including when a saved layout is resized.
+    CGPoint m = self.menuCenter; CGFloat gap = r + MAX(K_MENU_R * self.u * 1.6, 22) + 8;
+    if (hypot(p.x - m.x, p.y - m.y) < gap) p.y = MIN(CGRectGetMaxY(s) - ry, m.y + gap);
+    return p;
+}
 - (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
+    id saved = _shoulderPositions[[self positionKey:b]];
+    if ([saved isKindOfClass:NSArray.class] && [saved count] == 2 && [saved[0] isKindOfClass:NSNumber.class] && [saved[1] isKindOfClass:NSNumber.class]) {
+        double x = [saved[0] doubleValue], y = [saved[1] doubleValue];
+        if (isfinite(x) && isfinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1)
+            return [self clampShoulder:CGPointMake(s.origin.x + x * s.size.width, s.origin.y + y * s.size.height) button:b];
+    }
     CGFloat edge = _layout.separated ? 22 : 0;
     return side(s, b == B_ZR || b == B_R, MAX((z ? K_ZL_X : K_L_X) * u, edge), CGRectGetMinY(s) + MAX((z ? K_ZL_Y : K_L_Y) * u, edge)); }
 - (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u; }
@@ -341,6 +375,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (CGFloat)menuDistance:(CGPoint)p { return dist(p, self.menuCenter) / MAX(K_MENU_R * self.u * 1.6, 22); }
 - (BOOL)menuTakes:(CGPoint)p {   // the menu button takes a touch in its hit circle unless a locked key's target is nearer (the drawn keys are hidden in Tap and with a controller)
     CGFloat d = [self menuDistance:p]; if (d > 1) return NO;
+    if (_editing) return YES;
     if (_tap || _padOff || (_layout.separated && !CGRectContainsPoint(_layout.controls, p))) return YES;
     int hit = [self btnAt:p];
     return hit < 0 || d < [self buttonDistance:hit point:p];
@@ -427,9 +462,17 @@ int front_web_touch(void);
 }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
     UIView *v = [super hitTest:p withEvent:e];
-    return v == self && front_web_touch() && ![self controlAt:p] ? nil : v;
+    return v == self && !_editing && front_web_touch() && ![self controlAt:p] ? nil : v;
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    if (_editing) {
+        if (!_editTouch) for (UITouch *t in ts) {
+            CGPoint p = [t locationInView:self]; int best = -1; CGFloat distance = 1;
+            for (int b = B_L; b <= B_ZR; b++) { CGFloat d = [self buttonDistance:b point:p]; if (d <= distance) { best = b; distance = d; } }
+            if (best >= 0) { _editTouch = t; _editButton = best; _editStart = p; _editCentre = [self dropCenter:best]; break; }
+        }
+        return;
+    }
     BOOL game = NO;
     for (UITouch *t in ts) {
         if (_padOff) { game |= [self gameBegin:t]; continue; }
@@ -453,6 +496,16 @@ int front_web_touch(void);
     [self recompute];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    if (_editing) {
+        if (_editTouch && [ts containsObject:_editTouch]) {
+            CGPoint p = [_editTouch locationInView:self];
+            p = [self clampShoulder:CGPointMake(_editCentre.x + p.x - _editStart.x, _editCentre.y + p.y - _editStart.y) button:_editButton];
+            CGRect s = self.safe;
+            if (s.size.width > 0 && s.size.height > 0) _shoulderPositions[[self positionKey:_editButton]] = @[@((p.x - s.origin.x) / s.size.width), @((p.y - s.origin.y) / s.size.height)];
+            [self setNeedsLayout];
+        }
+        return;
+    }
     BOOL game = NO;
     for (UITouch *t in ts) {
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff); CGPoint p = [t locationInView:self];
@@ -466,6 +519,7 @@ int front_web_touch(void);
     [self recompute];
 }
 - (void)endTouches:(NSSet<UITouch *> *)ts tapped:(BOOL)ended {
+    if (_editing) { if (_editTouch && [ts containsObject:_editTouch]) { _editTouch = nil; [self savePositions]; } return; }
     BOOL game = NO;
     for (UITouch *t in ts) {
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue;
@@ -477,7 +531,21 @@ int front_web_touch(void);
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)savePositions { [NSUserDefaults.standardUserDefaults setObject:_shoulderPositions forKey:k_positions_key]; }
+- (BOOL)editing { return _editing; }
+- (BOOL)editOffered { return !_padOff && !_tap; }
+- (void)setEditing:(BOOL)editing {
+    [self reset]; _editing = editing && [self editOffered]; _editHint.hidden = !_editing;
+    [self setNeedsLayout];
+    if (_editing) UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, _editHint.text);
+}
+- (void)resetPositions {
+    [self reset];
+    NSString *prefix = [self.positionGroup stringByAppendingString:@"."];
+    for (NSString *key in _shoulderPositions.allKeys) if ([key hasPrefix:prefix]) [_shoulderPositions removeObjectForKey:key];
+    [self savePositions]; [self setNeedsLayout];
+}
+- (void)reset { if (_editTouch) { [self savePositions]; _editTouch = nil; } [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
@@ -534,6 +602,8 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
     for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * u, K_ARM_IN * u, arms[i].angle, 6 * u));
     CGFloat mr = K_MENU_R * u; CGPoint mc = self.menuCenter;
+    CGFloat hintWidth = MIN(280, self.safe.size.width - 20);
+    _editHint.frame = CGRectMake(CGRectGetMidX(self.safe) - hintWidth / 2, mc.y + mr + 12, hintWidth, 44);
     _menu.frame = CGRectMake(mc.x - mr, mc.y - mr, 2 * mr, 2 * mr); _menu.layer.cornerRadius = mr;
     _menu.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:_menu.bounds].CGPath;
     [_menu setImage:[UIImage systemImageNamed:@"gearshape.fill" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 * u weight:UIImageSymbolWeightSemibold]] forState:UIControlStateNormal];
@@ -550,7 +620,8 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     uint64_t all = _faceBits | _dpadBits | _btnBits;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
-        _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
+        _key[b].fillColor = (_editing && isDrop(b) ? [UIColor colorWithRed:0.1 green:0.65 blue:1 alpha:0.7] : (on ? k_on : k_idle)).CGColor;
+        _label[b].foregroundColor = (_editing && isDrop(b) ? UIColor.whiteColor : (on ? k_textOn : k_text)).CGColor; }
     CGPoint h = self.stickHome, o = [self knobOffset:0];
     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
     [CATransaction commit];
@@ -647,7 +718,7 @@ static BOOL pads_slotted(GCController *gone) {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; if (any) [self setEditing:NO]; [self reset]; });   // the touch gamepad hides while any controller is in use
 }
 @end
 
@@ -749,6 +820,10 @@ void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
+bool dm_pad_editing(void) { return [g_view editing]; }
+bool dm_pad_edit_offered(void) { return [g_view editOffered]; }
+void dm_pad_edit_set(bool editing) { [g_view setEditing:editing]; }
+void dm_pad_positions_reset(void) { [g_view resetPositions]; }
 void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); }); }   // On become active: motion_apple.h
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
     dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });

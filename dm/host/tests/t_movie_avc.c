@@ -2,7 +2,11 @@
 // presentation time, in presentation order (a queue as deep as the reordering B-frames need, none for Baseline), and the end of the stream flushes the rest. No movie file:
 // the access units' bytes do not matter to the stopgap, only their times and the SPS's profile byte. Before, the stopgap handed out no picture, and a player that waits for
 // its pictures (Mario vs. Donkey Kong's) held the game's main thread
+#if defined(_WIN32)
+#include "../hle_movie_win32.c"   // Windows: these black pictures are Media Foundation's fallback where its H.264 transform is missing, taken as absent in main
+#else
 #include "../hle_movie_avc.c"
+#endif
 #include <stdio.h>
 
 static int checks, fails;
@@ -22,6 +26,9 @@ int main(void) {
     puts("t_movie_avc: the port's stopgap only (Apple decodes with VideoToolbox): nothing to check");
     return 0;
 #else
+#if defined(_WIN32)
+    g_mf_test_absent = 1;
+#endif
     uint8_t nv12[W * H * 3 / 2], rgba[W * H * 4];
     const uint8_t au[] = {0, 0, 0, 1, 0x65, 0x88, 0x84};   // an IDR slice's first bytes: the stopgap does not read them
     // 1. Main profile (B-frames): times in decode order, pictures in presentation order, one per access unit, each black

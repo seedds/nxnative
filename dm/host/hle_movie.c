@@ -30,13 +30,17 @@
 #include <unistd.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
-#include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "hle_movie_avc.h"   // H.264 on VideoToolbox (Windows: Media Foundation, hle_movie_win32.c)
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 #else
-// No AAC decoder on this platform yet: a declared stopgap until Phase 1 brings one; md_aac_open reports it once with a red line and the decoder outputs no samples
+// No AAC decoder on Linux yet: a declared stopgap until Phase 1 brings one; md_aac reports it once with a red line and the decoder outputs no samples. On Windows the AAC goes
+// through Media Foundation (hle_movie_aac.h, hle_movie_win32.c); the AudioToolbox names below only keep the shared code compiling
 typedef void *AudioConverterRef; typedef uint32_t UInt32; typedef struct { int64_t mStartOffset; uint32_t mVariableFramesInPacket, mDataByteSize; } AudioStreamPacketDescription;
 static int AudioConverterDispose(AudioConverterRef c) { (void)c; return 0; }   // never reached: no converter is made
+#if defined(_WIN32)
+#include "hle_movie_aac.h"
+#endif
 #endif
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
@@ -114,6 +118,9 @@ typedef struct {
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
+#if defined(_WIN32)
+    maac *maac; int maac_none;   // Windows: Media Foundation's AAC transform (hle_movie_win32.c), made at the first packet; maac_none: it cannot be made, silence
+#endif
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
     unsigned long ncall[24];
 } mdec_t;
@@ -428,6 +435,17 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
     d->out[slot].bytes = (size_t)frames * 2 * d->ch;
     return frames > 0;
 }
+#elif defined(_WIN32)
+// one packet → PCM16 interleaved in the slot through Media Foundation's AAC transform, made at the first packet from the AudioSpecificConfig (csd-0) and the MediaData's
+// channels and rate; where it cannot be made (an N edition without the Media Feature Pack), silence, as on Linux
+static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
+    if (!d->maac && !d->maac_none) { int ch = d->ch, rate = d->rate; if ((d->maac = maac_new(d->vhdr[0], d->vhdr_n[0], &ch, &rate))) { d->ch = ch; d->rate = rate; } else d->maac_none = 1; }
+    if (!d->maac || n <= 0) return 0;
+    if (d->out[slot].cap < MD_PCM_CAP) { free(d->out[slot].frm); d->out[slot].frm = malloc(MD_PCM_CAP); d->out[slot].cap = MD_PCM_CAP; }
+    int fr = maac_decode(d->maac, p, n, (int16_t *)d->out[slot].frm, (int)(MD_PCM_CAP / (2 * d->ch)));
+    d->out[slot].bytes = fr > 0 ? (size_t)fr * 2 * d->ch : 0;
+    return fr > 0;
+}
 #else
 static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {   // the stopgap of the top of the file: the movie plays without its AAC sound
     (void)p; (void)n; (void)slot;
@@ -447,7 +465,11 @@ static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
     return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
 }
-static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
+static void md_close(mdec_t *d) {
+#if defined(_WIN32)
+    if (d->maac) { maac_free(d->maac); d->maac = NULL; } d->maac_none = 0;
+#endif
+    if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
 void dm_host_helper_qos(plat_qos_t q);   // hle_thread.c
 static void *md_worker(void *arg) {
     mdec_t *d = arg;

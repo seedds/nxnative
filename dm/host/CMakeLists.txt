@@ -220,6 +220,12 @@ add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
 target_include_directories(nxhost PUBLIC ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
 target_link_libraries(nxhost PUBLIC nxprofile nxplat vpx SDL3::SDL3-static)
+if(WIN32)
+    # Movies on Windows (hle_movie_win32.c): COM (ole32) and Media Foundation's attribute and format GUIDs (mfuuid, a static library). mfplat.dll is loaded at the first movie,
+    # not linked, so the programs start on a Windows without Media Foundation (an N edition without the Media Feature Pack)
+    set(MOVIE_WIN32_LIBS ole32 mfuuid)
+    target_link_libraries(nxhost PUBLIC ${MOVIE_WIN32_LIBS})
+endif()
 # The JIT fallback of the engine (design section 11): dynarmic's A64 JIT behind the C interface of dm/tools/aot/src/rt/jit.h, the glue nxaot's own run time uses
 # (jit.cpp, with the decoder glue it calls). dynarmic needs a C++20 compiler and Boost's headers: the system's where CMake finds them (the Linux images' libboost-dev:
 # docker/Dockerfile.build since its Boost layer, Dockerfile.aot), else the subset of Boost 1.83.0 in dm/third_party/boost (the headers dynarmic includes and every header
@@ -472,8 +478,23 @@ host_test(t_condvar_old SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PRO
 host_test(t_preempt SOURCES t_preempt.c t_condvar_stub.c PROFILE DEFS DM_TEST_GUEST_C RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_notify_sched SOURCES t_notify_sched.c t_condvar_stub.c PROFILE DEFS DM_TEST_THREAD_ENTER DM_TEST_GUEST_C RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_movie_vpx SOURCES t_movie_vpx.c PROFILE VPX DEFS DM_TEST_GUEST_C)
-# The port's H.264 stopgap: a black picture per access unit, in presentation order (hle_movie_avc.c without VideoToolbox)
+# The port's H.264 stopgap: a black picture per access unit, in presentation order (hle_movie_avc.c without VideoToolbox; on Windows the same pictures from hle_movie_win32.c
+# with Media Foundation taken as absent, an N edition's case)
 host_test(t_movie_avc SOURCES t_movie_avc.c PROFILE DEFS DM_TEST_GUEST_C)
+if(WIN32)
+    target_link_libraries(t_movie_avc PRIVATE ${MOVIE_WIN32_LIBS})
+    # Media Foundation's H.264 and AAC transforms behind the movie decoder's interfaces (hle_movie_win32.c), on streams a script writes without an encoder (tests/movie_streams.py:
+    # I_PCM, P_Skip and B_Skip pictures whose decoded samples are known exactly, silent AAC frames). Skipped with its reason where the transforms are missing (an N edition, or
+    # Wine without GStreamer's plugins)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gen/tests/movie_streams.h
+        COMMAND ${Python3_EXECUTABLE} ${TESTS}/movie_streams.py ${CMAKE_BINARY_DIR}/gen/tests/movie_streams.h
+        DEPENDS ${TESTS}/movie_streams.py COMMENT "movie test streams (movie_streams.py)" VERBATIM)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/gen/tests)
+    add_custom_target(movie_streams DEPENDS ${CMAKE_BINARY_DIR}/gen/tests/movie_streams.h)
+    host_test(t_movie_mf SOURCES t_movie_mf.c PROFILE DEFS DM_TEST_GUEST_C INCLUDES ${CMAKE_BINARY_DIR}/gen/tests)
+    add_dependencies(t_movie_mf movie_streams)
+    target_link_libraries(t_movie_mf PRIVATE ${MOVIE_WIN32_LIBS})
+endif()
 # The NVN replay's draw and render-target state and its GPU-write ledger (dm/gfx/nvn, plain C; dm/gfx/tests/Makefile builds the same two on the Mac)
 host_test(t_state SOURCES ../../gfx/tests/t_state.c ../../gfx/nvn/nvn_state.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 host_test(t_gpuwrite SOURCES ../../gfx/tests/t_gpuwrite.c ../../gfx/nvn/nvn_gpuwrite.c INCLUDES ${REPO}/dm/gfx/nvn)

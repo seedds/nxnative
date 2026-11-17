@@ -5,7 +5,9 @@
 // in presentation order, so pictures wait in a queue sorted by presentation time and leave it once more than `depth` are queued (4 when the profile has B-frames, 0 for Baseline), or all at the end of the stream
 #include "hle.h"
 #include "hle_movie_avc.h"
-#if !defined(__APPLE__)
+#if defined(_WIN32)
+// Windows: Media Foundation's H.264 transform behind the same functions, in hle_movie_win32.c, with this stopgap's black pictures where the transform is missing
+#elif !defined(__APPLE__)
 // No H.264 decoder on this platform yet: a declared stopgap until Phase 1 brings one (a decoder library is a dependency the user decides on). Each access unit gives a black
 // picture at its presentation time, as the AAC stopgap gives silence (hle_movie.c), so a player that waits for its pictures runs at the movie's pace: Mario vs. Donkey Kong's
 // movie player held the game's main thread from its second movie on, and the game presented no frame, while this decoder took every access unit and handed out none

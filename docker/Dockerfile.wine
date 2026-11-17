@@ -36,6 +36,21 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && /opt/wine-stable/bin/wine --version \
  && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' wine-stable-amd64 xvfb mesa-vulkan-drivers libvulkan1 python3 | sed -n 's/^ii *//p'
+# GStreamer for Wine's Media Foundation decoders, in a layer of its own (the layer above is 1.4 GB and stays as built). Wine makes the H.264 and AAC decoder transforms the
+# Windows host's movie backend uses (dm/host/hle_movie_win32.c) from GStreamer elements (dlls/winegstreamer/wg_transform.c): avdec_h264 and avdec_aac
+# (gstreamer1.0-libav), videoconvert and audioconvert (gstreamer1.0-plugins-base), and h264parse, without which no picture ever comes out (Wine keeps a reference to the
+# input caps, and its avdec_h264 branch then cannot add alignment=au to them). h264parse is in gstreamer1.0-plugins-bad, whose 117 dependencies are 152 MB: only its
+# videoparsersbad plugin and the codec parser library that plugin links are taken out of the two packages. Without this layer t_movie_mf skips with Wine's own message
+# ("GStreamer doesn't support H.264 decoding"); with it the image is about 128 MB larger
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gstreamer1.0-plugins-base gstreamer1.0-libav \
+ && mkdir /tmp/gst && cd /tmp/gst && apt-get download gstreamer1.0-plugins-bad libgstreamer-plugins-bad1.0-0 \
+ && for f in *.deb; do dpkg -x "$f" x; done \
+ && cp x/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstvideoparsersbad.so /usr/lib/x86_64-linux-gnu/gstreamer-1.0/ \
+ && cp -P x/usr/lib/x86_64-linux-gnu/libgstcodecparsers-1.0.so.0* /usr/lib/x86_64-linux-gnu/ && ldconfig \
+ && cd / && rm -rf /tmp/gst /var/lib/apt/lists/* \
+ && if ldd /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstvideoparsersbad.so | grep "not found"; then echo "h264parse's plugin lacks a library" >&2; exit 1; fi \
+ && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' gstreamer1.0-plugins-base gstreamer1.0-libav | sed -n 's/^ii *//p'
 # No Mono or Gecko install prompt when a prefix is made. A UTF-8 Unix locale: Wine writes a Windows file name to the Unix file system in the locale's character set, and
 # in the image's default C locale (ASCII) creating a file named with any non-ASCII character fails with STATUS_OBJECT_NAME_NOT_FOUND, where NTFS takes any Unicode name
 ENV PATH=/opt/wine-stable/bin:$PATH WINEDLLOVERRIDES="mscoree,mshtml=" WINEARCH=win64 LANG=C.UTF-8

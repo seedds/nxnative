@@ -244,6 +244,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the game crashed on a null right after the failed open. → [`movie::Extractor` runs natively](../reference/movies.md#movieextractor-runs-natively)
 - VP8 WebM movies play black; `movie::Decoder` is created with decoder type 2. → [VP8 uses the same libvpx worker and output paths](../reference/movies.md#vp8-uses-the-same-libvpx-worker-and-output-paths)
 - on Linux or Windows the game presents frames until a movie starts, then none: `[RED] movie: no H.264 decoder on this platform yet (Phase 1: the video of H.264 movies is not shown)`, a stall watchdog (`DM_WATCH`) finds no present for 15 s, the main thread waits on an address under the game's movie player, and the decoder's last line says `3283 packets in, 4 frames out`. → [H.264 movies without a decoder](../reference/movies.md#h264-movies-without-a-decoder)
+- on Windows the movies played black and silent: `[RED] movie: no H.264 decoder on this platform yet (Phase 1)` and `[RED] movie: no AAC decoder on this platform yet (Phase 1), outputting silence` (H.264 movies without a decoder). → [H.264 and AAC on Windows through Media Foundation](../reference/movies.md#h264-and-aac-on-windows-through-media-foundation)
 
 ## Audio
 

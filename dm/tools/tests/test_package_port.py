@@ -415,6 +415,7 @@ class Bundle(unittest.TestCase):
         everything = pp.readme('windows', 'abc1234', '2026-11-15', profiles, True, True, '3.14.10', True)
         self.assertIn('nothing to install', flat(everything)); self.assertNotIn('pip', everything); self.assertIn('\r\n', everything)
         self.assertNotIn('Linux program', everything)
+        self.assertIn('install the Media Feature Pack', flat(everything)); self.assertNotIn('Media Feature Pack', no_spirv)   # Windows' movies: Media Foundation, absent on N editions
         self.assertIn('The recompiler nxaot is a Linux program: this folder has none', flat(pp.readme('windows', 'abc1234', '2026-11-15', profiles, False, True, '3.14.10', True)))
         self.assertTrue(all(len(l) <= 172 for l in everything.splitlines()), [l for l in everything.splitlines() if len(l) > 172])
 

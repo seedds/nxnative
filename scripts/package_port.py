@@ -191,6 +191,8 @@ def readme(platform, sha, date, profiles, nxaot, tools=False, python=None, spirv
                                          ' and the Vulkan loader (libvulkan.so.1: the package libvulkan1 on Ubuntu and Debian, which the drivers\' packages bring): without it a game '
                                          'starts and draws nothing. Games are given a font of the system as their standard font, and the packer draws the button icons with its '
                                          'letters: DejaVu Sans, Liberation Sans, Noto Sans or FreeSans (every desktop distribution installs one of them).'))
+    if win: lines += bullet('Movies (H.264 video, AAC sound) are decoded by Windows\' Media Foundation. The N editions of Windows come without it: install the Media Feature Pack '
+                            '(Settings, Apps, Optional features), or a game\'s movies play black and silent.')
     need = []   # what packing needs that this folder does not carry
     if not python: need.append(f'Python 3.12 or later with lz4, capstone 5.0.2 or a later 5.0.x, fonttools and backports.zstd ({py} -m pip install lz4 "capstone>=5.0.2,<6" fonttools backports.zstd; '
                                'backports.zstd only before Python 3.14; without fonttools the button icons show as \'?\')')

@@ -409,7 +409,10 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     static _Atomic int nopen;
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
-    if (rate && rate != RATE) die("AudioOut sample rate %d not supported (48 kHz only)", rate);
+    if (rate && rate != RATE) {   // audout takes 0 (the default) or 48000 and refuses any other rate with ResultInvalidSampleRate, module 153 description 3
+        char sb[64]; LOG("[RED] AudioOut sample rate %d: audout takes 48 kHz only, the open fails with 0x699 (call site %s)", rate, site(lr, sb, sizeof sb));
+        return 0x699u;
+    }
     aout *a = calloc(1, sizeof *a);
     const char *mute = getenv("DM_AUDIO_MUTE"); a->mute = mute && atoi(mute);
     pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch;

@@ -33,6 +33,8 @@ Orbitals cannot be played alone: Play Local waits for a second player to join, a
 
 - Current: 30 fps, the game's own: it sets present interval 2 at the title (`the game sets present interval 1 → 2`). In the first area: frame time p50 33.3 ms, p95 34.2 ms, an occasional long frame of 200 ms; CPU 113% of one core, 4.7 W.
 - Not tried: 60 fps (`fps_target`).
+- Host pass-continuity fix (#2806): the reporter's M4 split-screen scene was GPU-bound, with about 550 passes and GPU p50 97 ms; the original general continuity patch reportedly reduced these to about 270 and 40 ms. See [empty target bindings](../../../docs/reference/rendering.md#empty-target-bindings-between-draws-broke-continuation). The revised patch excludes fixed-offset cvar forcing and preserves conservative alias/unknown-handle guards. Open: local Orbitals gameplay and a same-scene performance comparison (the title is unavailable in this machine's local regression set); the newer depth/stencil-plane and depth-only/vertex-handle proposals are not included.
+- Other-game validation: [NieR Automata](../010056B015FE8000/README.md#status-on-the-mac) (feedback/postprocessing, including a captured-frame comparison) and [Octopath Traveler II](../0100A3501946E000/README.md#mac-routes) (Unreal), the two lighter local games chosen for this uncertain shared NVN change. Their notes record the results and existing limitations; the [reference entry](../../../docs/reference/rendering.md#empty-target-bindings-between-draws-broke-continuation) records the graphics-suite checks.
 
 ## Memory
 
@@ -56,6 +58,7 @@ On a first start the language, gamma and terms screens come before the title: `A
 
 ## Found on this game
 
+- [Empty target bindings between draws broke continuation](../../../docs/reference/rendering.md#empty-target-bindings-between-draws-broke-continuation): redundant unbind/rebind calls prevented the host from continuing its render pass ([#2806](https://github.com/seedds/nxnative/issues/2806)).
 - [Unreal Engine 5.6 IoStore shader libraries for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-56-iostore-shader-libraries-for-the-switch-2): the split stopped at `shader 0 is not an LSLG record`.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area): the engine region started past a 1 GB node area and did not fit an iPhone's address space; the SDK-wide rule now has this SDK 21.4 build's constructor.
 - [Ampere forms with a handle in a register](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations): 5 compute shaders stopped at `Ampere instruction 394`.

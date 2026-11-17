@@ -1070,4 +1070,44 @@ class ShaderProfileKey(Base):   # the shader step's key takes the profile's shad
 
 
 
+class BuildSources(unittest.TestCase):   # profile_guess.py build_sources reads the head of every file of the RomFS: 19 s of every build of Ocarina of Time, kept beside the image
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t)
+        self.game = self.t / 'v0'; (self.game / 'ExeFS').mkdir(parents=True)
+        (self.game / 'ExeFS/main').write_bytes(b'code'); (self.game / 'RomFS.img').write_bytes(b'image')
+        self.reader = self.t / 'reader.py'; self.reader.write_text('# the readers\n')
+        self.calls, self.src = [], {'graphics': ('nvn', 'main imports nvnBootstrapLoader'), 'glslc_capture': (False, ''), 'ue_decode': (0, 'no shader code archive'), 'modules': (['main'], '')}
+        def read(exefs, romfs, mods): self.calls.append((exefs, romfs, list(mods))); return dict(self.src)
+        for patch in (mock.patch.object(nsp, 'pg', mock.Mock(build_sources=read)), mock.patch.object(nsp, 'python_tool_files', lambda *a: [self.reader])):
+            patch.start(); self.addCleanup(patch.stop)
+
+    def sources(self, mods=('main',)): return nsp.build_sources(REPO, self.game, list(mods))
+
+    def test_kept_while_the_image_the_modules_and_the_readers_are_the_same(self):
+        self.assertEqual(self.sources(), self.src)
+        self.assertEqual(self.calls, [(self.game / 'ExeFS', nsp.rfs.source(self.game), ['main'])])
+        got = self.sources(); self.assertEqual(len(self.calls), 1)   # from RomFS.img.sources
+        self.assertEqual(got, self.src); self.assertEqual(got['graphics'][0], 'nvn'); self.assertIs(got['glslc_capture'][0], False)
+        changes = (lambda: (self.game / 'RomFS.img').write_bytes(b'another image'), lambda: (self.game / 'ExeFS/main').write_bytes(b'c0de'),
+                   lambda: (self.game / 'ExeFS/subsdk0').write_bytes(b'more'), lambda: self.reader.write_text('# other readers\n'),
+                   lambda: (self.game / 'RomFS.img.sources').write_text('not what it wrote'))
+        for n, change in enumerate(changes, 2):
+            with self.subTest(change=n):
+                change(); self.assertEqual(self.sources(), self.src); self.assertEqual(len(self.calls), n)
+                self.sources(); self.assertEqual(len(self.calls), n)
+        self.sources(('main', 'sdk')); self.assertEqual(len(self.calls), 7)   # the modules the profile loads
+        st = (self.game / 'RomFS.img').stat(); os.utime(self.game / 'RomFS.img', ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))   # the image written again, the same size
+        self.sources(('main', 'sdk')); self.assertEqual(len(self.calls), 8)
+
+    def test_a_romfs_folder_is_read_each_time(self):
+        (self.game / 'RomFS.img').unlink(); (self.game / 'RomFS').mkdir()
+        self.sources(); self.sources(); self.assertEqual(len(self.calls), 2)
+        self.assertEqual(sorted(p.name for p in self.game.iterdir()), ['ExeFS', 'RomFS'])
+
+    def test_what_json_does_not_give_back_is_not_kept(self):
+        self.src['nro_imports'] = (frozenset({'glslcCompile'}), '')
+        self.assertEqual(self.sources(), self.src); self.assertEqual(self.sources(), self.src); self.assertEqual(len(self.calls), 2)
+        self.assertFalse((self.game / 'RomFS.img.sources').exists())
+
+
 if __name__ == '__main__': unittest.main()

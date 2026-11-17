@@ -22,6 +22,8 @@ int main(void) {
     int probes = 0; for (uint64_t w = 1; w <= 2 * LINK_LATCH_PROBE; w++) probes += nvn_link_latch_wait(cb, cb + 0.020, T60, LINK_LATCH_GIVE_UP, w, 0) > 0;
     CHECK(probes == 2, "counted in woken callbacks, not ticks: two probes in 2 x LINK_LATCH_PROBE woken callbacks, whatever ticks each acquire waits");
     CHECK(nvn_link_latch_wait(cb, cb + 0.020, T60, LINK_LATCH_GIVE_UP, 1, 1) > 0, "the end of a drain into the latch waits through a give-up");
+    CHECK(NEAR(nvn_link_latch_reach(0.033, T60), T60 - T60 / 8) && NEAR(nvn_link_latch_wait(cb, cb + 0.033, T60, 0, 1, 0), nvn_link_latch_reach(0.033, T60)),
+          "the wait is its reach: 14.6 ms of 33 ms room (a window on a built-in ProMotion screen)");
     printf("t_link_latch: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }

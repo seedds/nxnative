@@ -90,7 +90,8 @@ enum {
     RO_R_TABLE, RO_R_PSO, RO_R_DSS, RO_R_VIEWPORT, RO_R_SCISSOR, RO_R_CULL, RO_R_WINDING, RO_R_FILL, RO_R_BIAS, RO_R_CLIP, RO_R_SREF, RO_R_BLEND, RO_R_VIS, RO_R_AMP,
     RO_R_DRAW, RO_R_DRAW_INST, RO_R_DRAW_IND, RO_R_DRAW_IDX, RO_R_DRAW_IDX_IND, RO_R_MESH, RO_R_MESH_IND, RO_R_STORE_C, RO_R_STORE_D, RO_R_STORE_S,
     RO_C_TABLE, RO_C_PSO, RO_C_DISPATCH, RO_C_DISPATCH_IND, RO_C_COPY_BB, RO_C_COPY_BT, RO_C_COPY_BT_OPT, RO_C_COPY_TB, RO_C_COPY_TB_OPT, RO_C_COPY_TT, RO_C_FILL, RO_C_TGMEM,
-    RO_T_ADDR, RO_T_TEX, RO_T_SAMP,
+    RO_T_ADDR, RO_T_TEX, RO_T_SAMP, RO_T_RESOURCE,
+    RO_C_AS_BUILD, RO_C_AS_REFIT, RO_C_AS_COPY, RO_C_AS_SIZE,
     RO_LABEL, RO_R_TS, RO_C_TS,   // diagnostics: DM_NVN_ENC_LABEL, DM_NVN_GPUPROF
     RO_NOTE,   // a[0] an _Atomic uint64_t, a[1] a value: the encode thread has made every call before this one (rec_note_wait)
 };
@@ -288,9 +289,14 @@ static void rec_exec(const rec_t *r) {
                            toTexture:rec_id(a[1]) destinationSlice:a[10] destinationLevel:a[11] destinationOrigin:MTLOriginMake(a[12], a[13], a[14])]; break;
     case RO_C_FILL: [(id<MTL4ComputeCommandEncoder>)e fillBuffer:rec_id(a[0]) range:NSMakeRange(a[1], a[2]) value:(uint8_t)a[3]]; break;
     case RO_C_TGMEM: [(id<MTL4ComputeCommandEncoder>)e setThreadgroupMemoryLength:a[0] atIndex:a[1]]; break;
+    case RO_C_AS_BUILD: [(id<MTL4ComputeCommandEncoder>)e buildAccelerationStructure:rec_id(a[0]) descriptor:rec_id(a[1]) scratchBuffer:(MTL4BufferRange){a[2],a[3]}]; break;
+    case RO_C_AS_REFIT: [(id<MTL4ComputeCommandEncoder>)e refitAccelerationStructure:rec_id(a[0]) descriptor:rec_id(a[1]) destination:rec_id(a[2]) scratchBuffer:(MTL4BufferRange){a[3],a[4]}]; break;
+    case RO_C_AS_COPY: if(a[2])[(id<MTL4ComputeCommandEncoder>)e copyAndCompactAccelerationStructure:rec_id(a[0]) toAccelerationStructure:rec_id(a[1])];else[(id<MTL4ComputeCommandEncoder>)e copyAccelerationStructure:rec_id(a[0]) toAccelerationStructure:rec_id(a[1])]; break;
+    case RO_C_AS_SIZE: [(id<MTL4ComputeCommandEncoder>)e writeCompactedAccelerationStructureSize:rec_id(a[0]) toBuffer:(MTL4BufferRange){a[1],a[2]}]; break;
     case RO_T_ADDR: [(id<MTL4ArgumentTable>)rec_id(a[0]) setAddress:a[1] atIndex:a[2]]; break;
     case RO_T_TEX: [(id<MTL4ArgumentTable>)rec_id(a[0]) setTexture:(MTLResourceID){a[1]} atIndex:a[2]]; break;
     case RO_T_SAMP: [(id<MTL4ArgumentTable>)rec_id(a[0]) setSamplerState:(MTLResourceID){a[1]} atIndex:a[2]]; break;
+    case RO_T_RESOURCE: [(id<MTL4ArgumentTable>)rec_id(a[0]) setResource:(MTLResourceID){a[1]} atBufferIndex:a[2]]; break;
     case RO_LABEL: [(id<MTL4CommandEncoder>)e setLabel:rec_id(a[0])]; break;
     case RO_R_TS: [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:a[1] afterStage:a[2] intoHeap:rec_id(a[0]) atIndex:a[3]];
         if (g_rx_want_stamp && g_rx_npend && rec_id(a[0]) == (id)g_ts_heap) { g_rx_stamp_heap[g_rx_npend - 1] = rec_id(a[0]); g_rx_stamp[g_rx_npend - 1] = (int)a[3]; g_rx_want_stamp = 0; }   // the submission's begin stamp: where the deferred one before it ends
@@ -392,6 +398,7 @@ static inline void rec_table_op(uint32_t op, id t, uint64_t v, NSUInteger i) { r
 - (void)setAddress:(uint64_t)gpu atIndex:(NSUInteger)i { rec_table_op(RO_T_ADDR, self, gpu, i); }
 - (void)setTexture:(MTLResourceID)t atIndex:(NSUInteger)i { rec_table_op(RO_T_TEX, self, t._impl, i); }
 - (void)setSamplerState:(MTLResourceID)t atIndex:(NSUInteger)i { rec_table_op(RO_T_SAMP, self, t._impl, i); }
+- (void)setResource:(MTLResourceID)t atBufferIndex:(NSUInteger)i { rec_table_op(RO_T_RESOURCE,self,t._impl,i); }
 - (id)forwardingTargetForSelector:(SEL)s { rec_missing(self, s); }
 @end
 static inline id rec_table_real(id t) { return [t isKindOfClass:[DmRecTable class]] ? ((DmRecTable *)t)->real : t; }
@@ -436,6 +443,11 @@ static inline id rec_table_real(id t) { return [t isKindOfClass:[DmRecTable clas
 // Compute and copies (Metal 4 copies are on the compute encoder)
 - (void)setArgumentTable:(id)t { id x = rec_table_real(t); int keep = x != t; rec_t *r = rec_put(RO_C_TABLE, !keep); r->a[0] = keep ? (uint64_t)(uintptr_t)(__bridge void *)x : rec_obj(x); }
 - (void)setComputePipelineState:(id)p { rec_t *r = rec_put(RO_C_PSO, 1); r->a[0] = rec_obj(p); }
+- (void)buildAccelerationStructure:(id)a descriptor:(id)d scratchBuffer:(MTL4BufferRange)s { rec_t *r=rec_put(RO_C_AS_BUILD,2);r->a[0]=rec_obj(a);r->a[1]=rec_obj(d);r->a[2]=s.bufferAddress;r->a[3]=s.length; }
+- (void)refitAccelerationStructure:(id)a descriptor:(id)d destination:(id)b scratchBuffer:(MTL4BufferRange)s { rec_t *r=rec_put(RO_C_AS_REFIT,3);r->a[0]=rec_obj(a);r->a[1]=rec_obj(d);r->a[2]=rec_obj(b);r->a[3]=s.bufferAddress;r->a[4]=s.length; }
+- (void)copyAccelerationStructure:(id)a toAccelerationStructure:(id)b { rec_t *r=rec_put(RO_C_AS_COPY,2);r->a[0]=rec_obj(a);r->a[1]=rec_obj(b); }
+- (void)copyAndCompactAccelerationStructure:(id)a toAccelerationStructure:(id)b { rec_t *r=rec_put(RO_C_AS_COPY,2);r->a[0]=rec_obj(a);r->a[1]=rec_obj(b);r->a[2]=1; }
+- (void)writeCompactedAccelerationStructureSize:(id)a toBuffer:(MTL4BufferRange)b { rec_t *r=rec_put(RO_C_AS_SIZE,1);r->a[0]=rec_obj(a);r->a[1]=b.bufferAddress;r->a[2]=b.length; }
 - (void)dispatchThreadgroups:(MTLSize)n threadsPerThreadgroup:(MTLSize)t { rec_t *r = rec_put(RO_C_DISPATCH, 0); r->a[0] = n.width; r->a[1] = n.height; r->a[2] = n.depth; r->a[3] = t.width; r->a[4] = t.height; r->a[5] = t.depth; }
 - (void)dispatchThreadgroupsWithIndirectBuffer:(uint64_t)g threadsPerThreadgroup:(MTLSize)t { rec_t *r = rec_put(RO_C_DISPATCH_IND, 0); r->a[0] = g; r->a[1] = t.width; r->a[2] = t.height; r->a[3] = t.depth; }
 - (void)copyFromBuffer:(id)s sourceOffset:(NSUInteger)so toBuffer:(id)d destinationOffset:(NSUInteger)doff size:(NSUInteger)n {

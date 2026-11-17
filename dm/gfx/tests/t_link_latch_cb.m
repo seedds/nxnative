@@ -66,6 +66,7 @@ static int frame1(int delay_us) { frame_start(1, delay_us); int w = waiting(0); 
 int main(void) { @autoreleasepool {
     alarm(120); setvbuf(stdout, NULL, _IONBF, 0);
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LATCH", "1", 1); setenv("DM_PRESENT_DRAIN", "1", 1); setenv("DM_RT", "0", 1);
+    setenv("DM_PRESENT_SNAP", "0", 1);   // a profile with present_snap on (Breath of the Wild) would turn the latch and the drain off (mtl_snap_on)
     mtl_init();
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     mtl_present_layer(8, 8);
@@ -109,14 +110,17 @@ int main(void) { @autoreleasepool {
     int ok = 1; for (int i = 0; i < 5; i++) ok &= frame1(500) && queued() == 0;
     CHECK("from then on every woken present is latched", ok && g_link_latched == latched0 + 6 && g_link_dropped == 0);
 
-    // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter
+    // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter. The drain must have run (g_link_drained): a game thread that entered its acquire
+    // after the tick would return at once and drop the request, and there would be no waiter with or without one
     frame_start(1, 0); waiting(0); present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL); tick(); frame_done();   // a late frame: one stands again
-    latched0 = g_link_latched;
+    latched0 = g_link_latched; uint64_t drained0 = atomic_load(&g_link_drained);
     atomic_store(&g_link_drain_req, 1);
-    frame_start(1, 500); usleep(3000); tick(); usleep(3000);
+    frame_start(1, 500);
+    for (int i = 0; i < 1000 && atomic_load(&g_link_drain_req); i++) usleep(1000);   // the acquire took the request
+    usleep(3000); tick(); usleep(3000);
     pthread_mutex_lock(&g_link_mu); int gw = g_link_waiter_end, wt = g_link_waiter; pthread_mutex_unlock(&g_link_mu);
     tick(); done = frame_done();
-    CHECK("a plain drain sets no latch waiter", done && !gw && !wt && g_link_latched == latched0 && g_link_dropped == 0);
+    CHECK("a plain drain sets no latch waiter", done && atomic_load(&g_link_drained) == drained0 + 1 && !gw && !wt && g_link_latched == latched0 && g_link_dropped == 0);
     CHECK("the late frame 6 latched frames after the drain into the latch backed it off", g_link_drain.back == 1 && !g_link_drain.in);
 
     // 5. Give-up and probe with a 2-tick acquire: the tick in between takes the standing frame, the woken one finds the queue empty and its present comes after the wait

@@ -1509,7 +1509,14 @@ Most service calls can be found before they crash, before the first boot or the 
   - The pointer (Nmouse): `GetNmouseHandles` gives a handle per Joy-Con whose sensor reports, the one last used on a surface first (it stays first while lifted, to press a button), since Welcome Tour moves its pointer by the first handle only. `GetNmouseState` fills a 48-byte NmouseState: 8 bytes, then the Switch's MouseState fields (sampling number, position on the game's pointer range, movement, wheel), the buttons at 0x28 (left 1: R or ZR on a right Joy-Con, L or ZL on a left one; right 2) and the attributes at 0x2c (bit 1 connected, which the game requires). `SetNmousePointerPosition` moves it. The movement is a quarter of the sensor's counts.
   - The Switch 2 transport turns the sensor on with its own feature bit, `0x10` (`S2_FEATURE_MOUSE`, `switch2_proto.h`), only once the game has set up the sensors or the pointer (`InitializeJcms` / `InitializeNmouse`, `dm_joy_mouse_wanted`), as the console does for a game that uses them; a controller that connected before is sent the two feature commands again with the bit (not yet checked on hardware), and keeps it on while connected. Measured on a right Joy-Con 2 slid on a desk: report bytes 0x10 and 0x12 are 16-bit position counters that wrap (x right, y toward the player). 0x14 and 0x16 jump from about 1,600 and 150 on a surface to about 4,600 and 3,200 when lifted, and 0x16 under 1,000 counts as on a surface. While lifted, no movement is reported. The Pro Controller 2 has no sensor.
   - `DM_JCMS_LOG=1` logs the game's sensor and pointer calls, at most once a second each kind.
-- **Found on:** Nintendo Switch 2 Welcome Tour (040057C02159A000; its note and profile are their own pull request): its cursor and its mouse exhibits, with a left and a right Joy-Con 2. `t_hid` checks the states, the handles and their order, and the styles.
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md): its cursor and its mouse exhibits, with a left and a right Joy-Con 2. `t_hid` checks the states, the handles and their order, and the styles.
+
+### A private application's HID scene
+
+- **Symptom:** a null read at `sdk+0x65c75c` during startup, after `[RED] sf: the game connects to service hid itself, which the host does not serve`.
+- **Cause:** SDK 20.5.29's `nn::hid::SetSceneIdForPrivateApp(int)` calls the HID service's scene setter through its absent session. Welcome Tour's flow NRO calls it before its first frame.
+- **Fix:** `hle_hid.c` owns the scene setting across modules. The setter records the integer and `GetSceneIdForPrivateApp()` returns it; neither opens Horizon IPC. The controller transport does not use this scene label.
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md), update v262144 (`sdk+0x65d3b0`, from `nro12+0x3e38`).
 
 ### Home button protection on a Switch 2 controller
 
@@ -1560,6 +1567,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the SDK asks the `am` session at vtable +0x238, and the host never opens that session (`oe::Initialize` is taken over).
 - **Fix:** hooked: no limit; the host's language is `DM_LANG` alone (`hle_oe.c`).
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md).
+
+### Application GPU scheduling time
+
+- **Symptom:** a null read in `nn::os::SdkMutexType::Lock`, at `sdk+0x151fb0`, called from `nn::gs::sdk::QueryApplicationGpuTimeSpan` after the first rendered frame.
+- **Cause:** the query asks the graphics server's session (command 27), which the host never opens, how much of an interval the GPU was given to the application rather than to another of the console GPU's clients (the system's own rendering). Its two times are nanoseconds on the system tick clock; callers pass intervals bracketed by their own GPU counter timestamps.
+- **Fix:** `hle_nv.c` answers the whole interval (`end - begin`, 0 if `end` is not later) with success. The host's counter timestamps are its model of the console GPU's timeline ([GPU timestamps per submission segment](frame-rate.md#gpu-timestamps-per-submission-segment)), on which the application is the only client. It is not the GPU's busy time: Welcome Tour's Bezel profiler queries each render pass's GPU region (`main+0x30a8f4`) and the whole frame's (`main+0x30a808`), and the frame load its dynamic resolution reads is the frame's scheduled time, plus the time the application was not scheduled since the previous frame, plus 0.36 ms. With busy time the GPU's idle time between frames would count as taken, and every frame would read as full. The earlier stub returned `0xaf3` (not even the SDK's own unavailable-session result, `0x30af3` at `sdk+0x41200c`); Bezel then took each region's length and left out the 0.36 ms margin.
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md), update v262144 (`sdk+0x411dc0`, called from `main+0x30a840`).
 
 ### The target frame rate (graphics frame length)
 

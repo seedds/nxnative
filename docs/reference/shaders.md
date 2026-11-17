@@ -779,6 +779,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Translation
 
+### Optimized shader calls and memory snapshots
+
+- **Symptom:** with shader job `debug = false`, SPIR-V generation throws `GetLocalPointer` / `KeyNotFoundException` or casts an `AstOperation` to an `AstOperand`. Other inputs compile but read a call's output before calling it, lose an unused-return call's side effects, or read local memory after an intervening store instead of preserving its earlier value.
+- **Cause:** AST expression propagation treated every single-use assignment as a movable value. SPIR-V call arguments require local storage passed by reference; propagating their temporaries destroyed those lvalues. Moving call results or memory loads changed evaluation order, and dead-assignment removal could discard a call or atomic whose result was unused. A snapshot of an output argument could also move past another call that overwrote it.
+- **Fix:** mark address-taken call locals and retain their storage. Propagate only pure expression trees with immutable leaves; keep memory reads and call/atomic effects at their original evaluation points, and retain unused assignments with side effects. This is shared translator behavior, without shader, game or build gates. Default shader builds use `DebugMode` and already skip this AST optimizer; their generated source is expected to remain unchanged.
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md#ray-tracing-open), while testing original RT bodies in an isolated callable-region prototype. The pointer and effect failures also reproduce in ordinary compute IR without that prototype mode. This does not establish playable RT graphics.
+- **Check:** ordinary compute GPU fixtures cover nested calls, constant/expression/formal arguments, output lvalues, return ordering, storage side effects and memory snapshots. An independent aliased Ampere carry fixture fails 7 of 736 state words before the fix and zero afterward; plain register-SSA and debug-mode controls pass both before and after.
+
+### A jump enters a condition whose definition it bypassed
+
+- **Symptom:** Metal warns that a boolean is used uninitialized on a path through a translated shader. A generated `if (!bypass) predicate = ...; if (predicate || bypass)` reads `predicate` before testing the bypass flag; the analogous AND form has the same defect.
+- **Cause:** goto elimination widened an existing IF/ELSE condition with the jump flag. The jump can bypass the original condition's definition. Combining those operands does not preserve their original evaluation paths, even when the flag alone determines the combined result.
+- **Fix:** materialize the entry condition in a registered boolean temporary, initialized from the jump flag. Evaluate the original condition only on its original entry path. Place that initialization after the enclosure that skips the bypassed statements, so the jump cannot skip the temporary's initialization too. This is shared structured-control-flow lowering, in both debug and optimized translation; it does not initialize arbitrary shader locals.
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md#ray-tracing-open), six native RT condition sites. Ordinary compute CFGs independently reproduce the same error.
+- **Check:** 64 synthetic twelve-block CFGs, including conditional and unconditional jumps, exhaust 2,048 input patterns in debug and optimized modes: 3,145,728 path/output checks, with an eager AST interpreter rejecting every undefined read. The old lowering fails that interpreter and emits 103 conditional-uninitialized warnings per mode; current SPIR-V validates and Metal compiles with `-Werror=sometimes-uninitialized`. The full build's early warnings come from rechecking the previous library for cache prefill: shader `009135d86e77a09e_b` reproduces those exact old diagnostics, while its current source passes the strict compile.
+
 ### Tested tools and compiler-specific shader caches
 
 - **Symptom:** a shader build accepts tools that differ from `dmsh_chain.lock`; after an override build, returning to the tested Metal compiler can still restore the override's libraries.
@@ -1621,6 +1637,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** a chain change (vendored `InstEmitAmpereMem.cs`: `ATex` takes 0xf66, `ASuatomCas`; `InstEmitAmpereAlu.cs`: `AI2f` reads no select from an immediate).
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): 17 shaders with 0xf66 (11 vertex, 6 pixel), compute shader `50fece0d891feba4` with 0x595, 3 compute shaders with the I2F. All build; none has been watched drawing.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py -k I2fImmediate`; the other two forms are checked by PRAGMATA's build only.
+
+### Indexed Ampere patch outputs
+
+- **Symptom:** `[translation failed] NotSupportedException: Ampere 322 at 0x6d0: AST with an offset register and an address` for a hull shader.
+- **Cause:** `AST.P` can select a patch word with a register plus its immediate byte offset. The emitter rejected every such non-physical attribute store, and usage tracking treated its outputs as per-control-point attributes instead of patch attributes. Welcome Tour's hull sets the register to `InvocationId * 4`, writes an outer tessellation factor there, then writes its inner factor at 0x10. The instruction fields are independently described by [Mesa NAK's SM70 encoder](https://github.com/chaotic-cx/mesa-mirror/blob/main/src/nouveau/compiler/nak/sm70_encode.rs).
+- **Fix:** `InstEmitAmpereMem.cs` emits each component at register + immediate + 4 times its component index. Patch words 0–3 select the outer factors, 4–5 the inner factors, and the rest select the patch's user location and component. Locations are dispatched as constants for the SPIR-V interface; components remain indexed. `DecoderAmpere.cs` records patch output usage without enabling indexing of per-control-point outputs. Scalar and vector stores, immediate offsets, the end of the patch map and 32-bit address wrap are checked numerically on Metal. Ordinary non-physical indexed `AST` without `.P` remains unsupported.
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md), Bezel PBR hull shader `0b9e5d475e9afd21`, in `_SystemBuiltinRenderer.ounce.bea` (`bezel_pbr.bfsha`). Its repaired hull compiles through the production tessellation lowering; no draw using it was observed in Area A.
+- **Check:** `DMSH_TEST_XLATE=<translator> DMSH_TEST_GPU=1 python3 dm/gfx/tests/test_dmsh_ampere_patch.py`: every valid patch word, out-of-range and wrapping addresses, and four-component stores crossing factor and user-output boundaries. A translation-chain change, with no game or build binding.
 
 ### IPA at an offset, and the barycentric coordinates
 

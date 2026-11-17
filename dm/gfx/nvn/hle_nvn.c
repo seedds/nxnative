@@ -17,6 +17,7 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_rt.h"
+#include "nvn_raytrace.h"
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
@@ -134,6 +135,7 @@ NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
     nvn_gob_switch2 = dm_sdk_ounce();   // the Switch 2's order inside a GOB, for the textures the game tiled itself (nvn_deswizzle.h)
+    nvn_timestamp_ns = dm_sdk_ounce();   // NVN2's counter reports record nanoseconds (nvn_timestamp.h)
     o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; mtl_set_origin_lower_left(1);   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
     mtl_set_depth_zero(0);   // NVN's default depth mode: near = -w (GL)
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
@@ -808,6 +810,7 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
+int nvn_shader_key(const NVNshaderData *sd, uint8_t key[8]) { return keys_hash(sd, 0, key); }
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     if (!p->serial) return keys_hash(&p->sd[st], 0, key);   // not set by SetShaders (the game wrote the struct itself): no record to keep the key in
@@ -1455,13 +1458,13 @@ NVN(nvnCommandBufferClearColorui, void, NVNcommandBuffer *c, int index, const ui
 NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, uint32_t dmask, int stencil, int smask) {
     p_clear_ds *r = REC(c, OP_CLEAR_DS, p_clear_ds); *r = (p_clear_ds){depth, (int)B(dmask), stencil, smask};
 }
-// The leading slots of a guest's range [first, first + n) that lie in a stage's table of `slots`: 0 for a stage beyond the six the replay keeps or a negative first or count (the replay
+// The leading slots of a guest's range [first, first + n) that lie in a stage's resource table of `slots`: 0 for an unsupported stage or a negative first or count (the replay
 // would index before its table: SetViewports with first -1 wrote S.vp[-1]); computed without forming first + n, which a first near INT_MAX overflows. st 0 for state without a stage
-static inline int slots_fit(int st, int first, int n, int slots) { return (unsigned)st >= 6 || first < 0 || n < 0 || first >= slots ? 0 : n < slots - first ? n : slots - first; }
+static inline int slots_fit(int st, int first, int n, int slots) { return (unsigned)st >= NVN_RESOURCE_STAGES || first < 0 || n < 0 || first >= slots ? 0 : n < slots - first ? n : slots - first; }
 // A bind whose range leaves its table binds the slots inside it (the replay dropped the others before, without a word): named in a red line
 static int slots_bound(const char *what, int st, int first, int n, int slots) {
     int k = slots_fit(st, first, n, slots);
-    if (k != n) { static _Atomic int red; if (red++ < 16) LOG("[RED] %s stage %d first=%d n=%d: the host keeps %d slots a stage (6 stages), %d bound", what, st, first, n, slots, k); }
+    if (k != n) { static _Atomic int red; if (red++ < 16) LOG("[RED] %s stage %d first=%d n=%d: the host keeps %d slots a stage (%d resource stages), %d bound", what, st, first, n, slots, NVN_RESOURCE_STAGES, k); }
     return k;
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
@@ -1512,27 +1515,31 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
     if (fit) { uint8_t *q = crec(c, OPC_VBUFS, (uint32_t)first | (uint32_t)n << 8, 12 * (size_t)n); for (int i = 0; i < n; i++) { put64(&q, rg[i].address); put32(&q, (uint32_t)rg[i].size); } return; }
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, n); r->first = first; r->n = n; memcpy(r->r, rg, sizeof *rg * n);
 }
-// NVN2's task and mesh stages (6, 7) keep their bindings in the tessellation stages' places (3, 4): a program has mesh shaders or tessellation, never both, and the replay keeps six stages
-static inline NVNshaderStage st_host(NVNshaderStage st) { return (unsigned)st == 6 ? 3 : (unsigned)st == 7 ? 4 : st; }
+// NVN2 task/mesh resources share hull/domain (programs use one pair or the
+// other). Ray tracing has a separate resource table, apart from compute5.
+// Only public entry points normalize: internal record helpers take host slots.
+static inline NVNshaderStage st_host(NVNshaderStage st) { return (unsigned)st == 6 ? 3 : (unsigned)st == 7 ? 4 : (unsigned)st == 8 ? NVN_RT_RESOURCE_STAGE : st; }
 // Uniform bindings with a 256-aligned address (the device's uniform buffer alignment) and a size below 2^18 (NVN's limit is 64 KB) take 8 bytes each after one header (OPC_UBO)
 static int rec_ubo(NVNcommandBuffer *c, int st, int first, int n, const NVNbufferRange *rg) {
-    if (!g_rec_compact || (unsigned)st >= 6 || first < 0 || n < 1 || first + n > 16) return 0;
+    if (!g_rec_compact || (unsigned)st >= NVN_RESOURCE_STAGES || first < 0 || n < 1 || first >= 16 || n > 16 - first) return 0;
     for (int i = 0; i < n; i++) if ((rg[i].address & 0xff) || rg[i].address >> 48 || rg[i].size >= (1u << 18)) return 0;
     uint8_t *q = crec(c, OPC_UBO, (uint32_t)st | (uint32_t)first << 3 | (uint32_t)n << 7, 8 * (size_t)n);
     for (int i = 0; i < n; i++) put64(&q, rg[i].address >> 8 | (uint64_t)rg[i].size << 40);
     return 1;
 }
-NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { st = st_host(st);
-    if (!slots_bound("BindUniformBuffer", st, i, 1, 16)) return;
+static void record_uniform_buffer(NVNcommandBuffer *c, int st, int i, NVNbufferAddress a, size_t n) {
     NVNbufferRange r = {a, n}; if (rec_ubo(c, st, i, 1, &r)) return;
     if (n <= UINT32_MAX) {
         *REC(c, OP_BIND_UBO_SMALL, p_bind_ubo_small) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)i, (uint32_t)n, a}; return;
     }
     *REC(c, OP_BIND_UBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
 }
+NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { st = st_host(st);
+    if (slots_bound("BindUniformBuffer", st, i, 1, 16)) record_uniform_buffer(c, st, i, a, n);
+}
 // Several uniform or storage buffer bindings in one compact record (OPC_BUFS), when each fits its canonical record's compact form
 static int rec_bufs(NVNcommandBuffer *c, uint32_t op, int st, int first, int n, const NVNbufferRange *rg, int slots) {
-    if (!g_rec_compact || n < 1 || n > 63 || (unsigned)st >= 8 || first < 0 || first + n > slots || first > 0xff) return 0;
+    if (!g_rec_compact || n < 1 || n > 63 || (unsigned)st >= NVN_RESOURCE_STAGES || first < 0 || first > 0xff || first >= slots || n > slots - first) return 0;
     for (int i = 0; i < n; i++) if (rg[i].size > UINT32_MAX) return 0;
     uint8_t *q = crec(c, OPC_BUFS, op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 12 * (size_t)n);
     for (int i = 0; i < n; i++) { put64(&q, rg[i].address); put32(&q, (uint32_t)rg[i].size); }
@@ -1541,7 +1548,7 @@ static int rec_bufs(NVNcommandBuffer *c, uint32_t op, int st, int first, int n, 
 NVN(nvnCommandBufferBindUniformBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) { st = st_host(st);
     n = slots_bound("BindUniformBuffers", st, first, n, 16);
     if (n >= 2 && (rec_ubo(c, st, first, n, rg) || rec_bufs(c, OP_BIND_UBO_SMALL, st, first, n, rg, 16))) return;
-    for (int i = 0; i < n; i++) h_nvnCommandBufferBindUniformBuffer(c, st, first + i, rg[i].address, rg[i].size);
+    for (int i = 0; i < n; i++) record_uniform_buffer(c, st, first + i, rg[i].address, rg[i].size);
 }
 NVN(nvnCommandBufferBindStorageBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { st = st_host(st);
     if (!slots_bound("BindStorageBuffer", st, i, 1, 16)) return;   // the replay keeps 16 storage buffer slots a stage (NVN's limit)
@@ -1561,7 +1568,7 @@ static p_bind_handles *bind_handles_ex(NVNcommandBuffer *c, int op, int st, int 
                     op == OP_BIND_SAMP ? DMSH_C2_SEP_SLOTS : op == OP_BIND_IMG ? 32 : NVN_SEPTEX_SLOT0 + DMSH_C2_SEP_SLOTS);
     if (!n) return NULL;
     p_bind_handles tmp, *r;
-    if (compact && g_rec_compact && (unsigned)st < 8 && first >= 0 && first <= 0xff && n >= 1) r = &tmp;
+    if (compact && g_rec_compact && (unsigned)st < NVN_RESOURCE_STAGES && first >= 0 && first <= 0xff && n >= 1) r = &tmp;
     else r = RECN(c, op, p_bind_handles, h, n);
     r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0;
     // The driver writes each handle into the c2 table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half of the 64-bit handle.
@@ -1626,6 +1633,29 @@ NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, in
 // Indirect: the three group counts at ind are read by the GPU when the dispatch runs (nvn_mtl.m dispatch)
 NVN(nvnCommandBufferDispatchComputeIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) {
     *REC(c, OP_DISPATCH, p_dispatch) = (p_dispatch){0, 0, 0, (uint64_t)__builtin_return_address(0), ind};
+}
+// NVN2 ray dispatch: unlike AS build arrays, the SDK snapshots these three CPU
+// descriptions while recording. Table bytes themselves remain GPU-time inputs.
+static unsigned rt_ceil_log2(uint32_t n) { return n > 1 ? 32u - (unsigned)__builtin_clz(n - 1) : 0; }
+static void rt_dispatch_dimensions(uint32_t w, uint32_t h, uint32_t d) {
+    if (!w || !h || !d) return; // The recorded zero dispatch becomes a replay no-op.
+    const uint64_t limit = UINT64_C(0x40000000);
+    uint64_t xy = (uint64_t)w * h;
+    if (w > limit || h > limit || d > limit || xy > limit || xy * d > limit ||
+        rt_ceil_log2(w) + rt_ceil_log2(h) + rt_ceil_log2(d) > 32)
+        die("[RED] unsupported RT dispatch dimensions %u x %u x %u", w, h, d);
+}
+NVN(nvnCommandBufferDispatchRays, void, NVNcommandBuffer *c, uint64_t raygen,
+    const nvn_rt_table *miss, const nvn_rt_table *hit, const nvn_rt_table *callable, uint32_t w, uint32_t h, uint32_t d) {
+    rt_dispatch_dimensions(w,h,d);
+    if (!miss || !hit || !callable) die("[RED] RT dispatch requires three CPU table descriptions");
+    p_rt_dispatch *p=REC(c,OP_RT_DISPATCH,p_rt_dispatch);
+    *p=(p_rt_dispatch){raygen,*miss,*hit,*callable,w,h,d,0};
+}
+NVN(nvnCommandBufferDispatchRaysIndirect, void, NVNcommandBuffer *c, uint64_t raygen,
+    const nvn_rt_table *miss, const nvn_rt_table *hit, const nvn_rt_table *callable, uint64_t indirect) {
+    (void)c;(void)raygen;(void)miss;(void)hit;(void)callable;(void)indirect;
+    die("[RED] RT indirect-dispatch GPU command payload is not implemented");
 }
 NVN(nvnCommandBufferBarrier, void, NVNcommandBuffer *c, int bits) {
     if (g_rec_compact && (unsigned)bits < (1u << 24)) { crec(c, OPC_BARRIER, (uint32_t)bits, 0); return; }
@@ -3206,13 +3236,16 @@ NVN(nvnCommandBufferDrawTransformFeedback, void, NVNcommandBuffer *c, NVNdrawPri
 NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, int samp) { (void)d; return (NVNtextureHandle)((uint64_t)(uint32_t)tex | (uint64_t)(uint32_t)samp << 20); }
 // Handle for texel fetches only (Monster Hunter Rise): a fetch reads the texture descriptor and no sampler, so the handle is the texture ID with sampler ID 0
 NVN(nvnDeviceGetTexelFetchHandle, NVNtextureHandle, const NVNdevice *d, int tex) { (void)d; return (NVNtextureHandle)(uint64_t)(uint32_t)tex; }
-// Convert the raw 614.4 MHz report to ns on the same guest clock as GetCurrentTimestampInNanoseconds.
+// Convert the raw report (614.4 MHz ticks, nanoseconds on NVN2: nvn_timestamp.h) to ns on the same guest clock as GetCurrentTimestampInNanoseconds.
 NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return nvn_timestamp_to_ns(c->timestamp); }
 // Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return guest_ns(); }
 NVN(nvnDeviceRegisterFastClearColor, NVNboolean, NVNdevice *d, const float *c, NVNformat f) { (void)d; (void)c; (void)f; return 1; }
 // Same as the color one: a fast clear value is only a hint to the Tegra hardware (Tears of the Kingdom registers its depth clear at startup)
 NVN(nvnDeviceRegisterFastClearDepth, NVNboolean, NVNdevice *d, float v) { (void)d; (void)v; return 1; }
+// SDK 20.5.29's sdk+0x5d9db0 registers the low 8 bits in the device's six-entry fast-clear cache and returns whether a slot was available. As for color/depth,
+// this is a hardware compression hint: Metal manages its clear representation, and the stencil contents come from the recorded clear commands, so every value is accepted.
+NVN(nvnDeviceRegisterFastClearStencil, NVNboolean, NVNdevice *d, int v) { (void)d; (void)v; return 1; }
 // The size of the driver's cache for shaders it compiles from intermediate code (The Great Ace Attorney Chronicles sets 10 at startup); the host compiles nothing at run time
 NVN(nvnDeviceSetIntermediateShaderCache, void, NVNdevice *d, int n) { (void)d; (void)n; }
 
@@ -3263,16 +3296,72 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
     return h_nvnProgramSetShaders(p, n, plain);
 }
 
-// NVN2 (Switch 2) creates programs from a builder: SetDefaults, SetDevice, SetShaders(count, NVNshaderData[]) and then nvnProgramInitializeFromBuilder (Donkey Kong Bananza). The stages are
-// 16-byte {data, control} pairs as in NVN, so initializing from the builder is nvnProgramInitialize + nvnProgramSetShaders. The builder only keeps the caller's array, which the game keeps
-// until it initializes the program (its stack frame), as other NVN builders keep their pointers
-typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n; } prog_builder_t;
-NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); }
-NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->dev = d; }
-NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
-NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
+// NVN2 program builders retain the caller's arrays until initialization. Keep
+// raster state in prog_t unchanged; the backend owns RT catalogs by real serial.
+typedef struct {
+    NVNdevice *dev;
+    const NVNshaderData *sd, *rt;
+    int n, nrt;
+    uint32_t trace_depth, callable_depth, flags;
+} prog_builder_t;
+_Static_assert(sizeof(prog_builder_t)<=0x48,"program builder exceeds verified caller storage");
+NVN(nvnProgramBuilderSetDefaults, void, void *b) {
+    prog_builder_t *o=b;NVNdevice *dev=o->dev;memset(o,0,sizeof *o);o->dev=dev;
+    o->trace_depth=2;o->callable_depth=2; // SDK defaults; the depth-one backend must validate its supported subset.
+}
+NVN(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->dev=d; }
+NVN(nvnProgramBuilderGetDevice, NVNdevice *, const void *b) { return ((const prog_builder_t *)b)->dev; }
+NVN(nvnProgramBuilderSetShaders, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->n=n;((prog_builder_t *)b)->sd=sd; }
+NVN(nvnProgramBuilderGetShaderCount, int, const void *b) { return ((const prog_builder_t *)b)->n; }
+NVN(nvnProgramBuilderGetShaders, const NVNshaderData *, const void *b) { return ((const prog_builder_t *)b)->sd; }
+NVN(nvnProgramBuilderSetRayTracingModules, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->nrt=n;((prog_builder_t *)b)->rt=sd; }
+NVN(nvnProgramBuilderGetRayTracingModuleCount, int, const void *b) { return ((const prog_builder_t *)b)->nrt; }
+NVN(nvnProgramBuilderGetRayTracingModuleData, const NVNshaderData *, const void *b) { return ((const prog_builder_t *)b)->rt; }
+NVN(nvnProgramBuilderSetMaxTraceRecursionDepth, void, void *b, uint32_t depth) { ((prog_builder_t *)b)->trace_depth=depth; }
+NVN(nvnProgramBuilderGetMaxTraceRecursionDepth, uint32_t, const void *b) { return ((const prog_builder_t *)b)->trace_depth; }
+NVN(nvnProgramBuilderSetMaxCallableRecursionDepth, void, void *b, uint32_t depth) { ((prog_builder_t *)b)->callable_depth=depth; }
+NVN(nvnProgramBuilderGetMaxCallableRecursionDepth, uint32_t, const void *b) { return ((const prog_builder_t *)b)->callable_depth; }
+NVN(nvnProgramBuilderSetProgramRayTracingFlags, void, void *b, uint32_t flags) { ((prog_builder_t *)b)->flags=flags; }
+NVN(nvnProgramBuilderGetProgramRayTracingFlags, uint32_t, const void *b) { return ((const prog_builder_t *)b)->flags; }
+NVN(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
     const prog_builder_t *o = (const prog_builder_t *)b;
-    return h_nvnProgramInitialize(p, o->dev) && (!o->n || h_nvnProgramSetShaders(p, o->n, o->sd));
+    if (!h_nvnProgramInitialize(p,o->dev)) return 0;
+    if (o->n<0 || o->n>6 || o->nrt<0 || (o->n && !o->sd) || (o->nrt && !o->rt) || (o->n && o->nrt)) {
+        LOG("[RED] invalid or mixed raster/RT program builder: shaders=%d modules=%d",o->n,o->nrt);return 0;
+    }
+    if (!o->nrt) return !o->n || h_nvnProgramSetShaders(p,o->n,o->sd);
+    pthread_mutex_lock(&g_sub_mu);
+    int ok=mtl_rt_program_set((prog_t *)p,o->nrt,o->rt,o->trace_depth,o->callable_depth,o->flags);
+    if (ok && !((prog_t *)p)->serial) { LOG("[RED] RT backend initialized a program without a real serial");ok=0; }
+    pthread_mutex_unlock(&g_sub_mu);
+    return ok!=0;
+}
+NVN(nvnProgramGetShaderGroupHandle, void, const NVNprogram *p, nvn_rt_group group, void *out16) {
+    pthread_mutex_lock(&g_sub_mu);
+    mtl_rt_group_handle((const prog_t *)p,group.indices,out16);
+    pthread_mutex_unlock(&g_sub_mu);
+}
+// NVN2: sizing writes all requested results. CPU build/geometry descriptions are
+// deliberately retained as pointers here and snapshotted at QueueSubmitCommands,
+// matching the SDK control-record interpreter (not at recording or worker replay).
+NVN_NOPROTO(nvnDeviceCalculateAccelerationStructureMemoryRequirements, void, const NVNdevice *d, const nvn_as_build *b, uint64_t *storage, uint64_t *scratch, uint64_t *update) {
+    (void)d; mtl_as_sizes(b,storage,scratch,update);
+}
+NVN_NOPROTO(nvnCommandBufferBuildAccelerationStructures, void, NVNcommandBuffer *c, uint64_t count, const nvn_as_build *b, uint64_t npost, const nvn_as_post *post) {
+    p_as_build *p=REC(c,OP_AS_BUILD,p_as_build);*p=(p_as_build){count,b,npost,post};
+}
+NVN_NOPROTO(nvnCommandBufferCopyAccelerationStructure, void, NVNcommandBuffer *c, uint64_t source, uint64_t destination) {
+    p_as_copy *p=REC(c,OP_AS_COPY,p_as_copy);*p=(p_as_copy){source,destination,0,0};
+}
+NVN_NOPROTO(nvnCommandBufferCompactAccelerationStructure, void, NVNcommandBuffer *c, uint64_t source, uint64_t destination) {
+    p_as_copy *p=REC(c,OP_AS_COPY,p_as_copy);*p=(p_as_copy){source,destination,1,0};
+}
+NVN_NOPROTO(nvnCommandBufferBindAccelerationStructure, void, NVNcommandBuffer *c, int stage, int slot, uint64_t address) {
+    p_bind_as *p=REC(c,OP_BIND_AS,p_bind_as);*p=(p_bind_as){(uint32_t)stage,(uint32_t)slot,address};
+}
+NVN_NOPROTO(nvnCommandBufferBindAccelerationStructures, void, NVNcommandBuffer *c, int stage, int first, int count, const uint64_t *addresses) {
+    if(stage<0 || stage>=9 || first<0 || count<0 || first>32 || count>32-first || (count && !addresses))die("[RED] invalid acceleration-structure binding array");
+    for(int i=0;i<count;i++)h_nvnCommandBufferBindAccelerationStructure(c,stage,first+i,addresses[i]);
 }
 // A queue NVN2 ties to a primary queue (Donkey Kong Bananza's second queue): the host executes every queue's submits in order on its one Metal queue, so the tie needs no work
 NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *primary) { (void)b; (void)primary; }
@@ -3406,9 +3495,9 @@ NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_
 // through its own bank: PRAGMATA pushes its vertex stage's entries into block 1, its mesh stage's into block 2 and its pixel stage's into block 5. Blocks 2 to 5 were dropped,
 // and the objects of its visibility buffer drew black
 static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t off, uint64_t n, const void *data) {
-    const uint64_t blocks = compute ? 2 : DMSH_PUSH_BLOCKS;   // compute: its constants and its one stage's entries
+    const uint64_t blocks = DMSH_PUSH_BLOCKS;
     if (w >= blocks) { static int once; if (!once++) LOG("[RED] %s push constants into block %llu (%#llx + %#llx): the host keeps %llu, dropped", compute ? "compute" : "graphics", (unsigned long long)w, (unsigned long long)off, (unsigned long long)n, (unsigned long long)blocks); return; }
-    if (off + n > DMSH_PUSH_SIZE || !data) { static int k; if (k++ < 8) LOG("[RED] push constants at %#llx + %#llx: beyond the host's %#x-byte block, dropped", (unsigned long long)off, (unsigned long long)n, DMSH_PUSH_SIZE); return; }
+    if (off > DMSH_PUSH_SIZE || n > DMSH_PUSH_SIZE - off || !data) { static int k; if (k++ < 8) LOG("[RED] push constants at %#llx + %#llx: beyond the host's %#x-byte block, dropped", (unsigned long long)off, (unsigned long long)n, DMSH_PUSH_SIZE); return; }
     p_push_const *r = RECN(c, OP_PUSH_CONST, p_push_const, data, n); r->compute = (uint16_t)compute; r->offset = (uint16_t)(w * DMSH_PUSH_SIZE + off); r->size = (uint32_t)n; memcpy(r->data, data, n);
 }
 NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 0, w, off, n, data); }
@@ -3450,6 +3539,7 @@ NVN_NOPROTO(nvnProgramSetSampleShading, NVNboolean, NVNprogram *p, int mode) { (
 // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
 // One combined handle: recorded as the hardware lays the command out, the handle 16 bytes in, where Luigi's Mansion 3 patches it after recording (nvn_obj.h p_bind_tex1)
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { st = st_host(st);
+    if (!slots_bound("BindTexture", st, i, 1, NVN_SEPTEX_SLOT0 + DMSH_C2_SEP_SLOTS)) return;
     p_bind_tex1 *r = REC(c, OP_BIND_TEX1, p_bind_tex1); r->stage = st; r->slot = i; r->h = (uint64_t)h;
 }
 _Static_assert(offsetof(p_bind_tex1, h) == 8, "a single texture bind keeps its handle 16 bytes into the record (8 of header)");

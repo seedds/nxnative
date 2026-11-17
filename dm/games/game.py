@@ -101,8 +101,13 @@ def header(g):
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
-    ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
-    if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
+    ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on = a ring of 2, or 2 / 3 / 4 = the ring's depth (SNAP_MAX in nvn_mtl.m), off
+    if ps not in ('on', 'off', '2', '3', '4'): sys.exit(f'{g.id}: present_snap must be on, off, 2, 3 or 4: {ps}')
+    psd = int(ps) if ps.isdigit() else 2 if ps == 'on' else 0   # the ring's depth; 0 = off
+    pu = g.get('present_upscale', 'off')   # the present's upscaler (nvn_mtl.m fx_mode; DM_PRESENT_UPSCALE overrides): metalfx = MetalFX's spatial scaler where the picture is shown larger than the game renders it, off = bilinear
+    if pu not in ('off', 'metalfx'): sys.exit(f'{g.id}: present_upscale must be off or metalfx: {pu}')
+    fs = g.get('fullscreen', 'off')   # the Mac window starts fullscreen (front_mac.m; DM_FULLSCREEN overrides): on / off
+    if fs not in ('on', 'off'): sys.exit(f'{g.id}: fullscreen must be on or off: {fs}')
     p4 = g.get('pso_mtl4', 'off')   # render pipelines through MTL4Compiler on iOS by default, with the pipeline archive and hybrid pipelines (on by default on the Mac; DM_PSO_MTL4 overrides): on / off
     if p4 not in ('on', 'off'): sys.exit(f'{g.id}: pso_mtl4 must be on or off: {p4}')
     et = g.get('enc_thread', 'off')   # Metal encoding on its own thread on the Mac by default (nvn_rec.h rec_on; on iOS it is on for every game; DM_NVN_ENC_THREAD overrides): on / off
@@ -132,6 +137,8 @@ def header(g):
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
+    urp = g.get('ui_republish', '0')   # the guest's UI staging array is copied over the pool block its draws name, after the frame produced it (nvn_mtl.m uip_draw; LEGO HP 5-7): 0 / 1 / 2 / 3 (the mode numbers are DM_NVN_UI_REPUBLISH's)
+    if urp not in ('0', '1', '2', '3'): sys.exit(f'{g.id}: ui_republish must be 0, 1, 2 or 3: {urp}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
@@ -171,7 +178,10 @@ def header(g):
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
-         f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
+         f'#define DM_GAME_PRESENT_SNAP {int(psd > 0)}',
+         f'#define DM_GAME_PRESENT_SNAP_DEPTH {psd}',   # the snapshot ring's depth (SNAP_MAX in nvn_mtl.m; 0 = off)
+         f'#define DM_GAME_PRESENT_UPSCALE {q(pu)}',   # the present's upscaler (nvn_mtl.m fx_mode)
+         f'#define DM_GAME_FULLSCREEN {int(fs == "on")}',   # the Mac window starts fullscreen (front_mac.m)
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
@@ -186,6 +196,7 @@ def header(g):
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         f'#define DM_GAME_UI_REPUBLISH {int(urp)}',   # the UI staging array republished over the pool block its draws name (nvn_mtl.m uip_draw; LEGO HP 5-7: 0, the ON arm is not shipped)
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)

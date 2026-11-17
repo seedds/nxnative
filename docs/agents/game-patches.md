@@ -748,8 +748,11 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | Key and value | Games |
 |---|---|
 | `enc_thread on` | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) |
+| `fullscreen on` | [LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md) |
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) |
+| `present_snap 4` | [LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md) |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) |
+| `present_upscale metalfx` | [LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md) |
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) |
 | `shader_key_skip 0x770+0x78` | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) |
 | `shader_key_skip 0x7d0+0x18` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) |

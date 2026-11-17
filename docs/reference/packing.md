@@ -643,6 +643,16 @@
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md#found-on-this-game) 13.0.5 (`v2031616`), a Mac app built at 7249ee9f ([PR #1545](https://github.com/seedds/nxnative/pull/1545)): its `html0` held 1,157 of 2,798 files. Read again with the current nx_extract: 2,798 files, none damaged, the 1,157 the app had byte-identical. With the 1,641 added to the app, the page loads with no red line, takes buttons and ends (`web: the page ended: exit reason 3`), and the game goes on to its stage selection.
 - **Check:** `dm/tools/tests/test_nsp_extraction_key.py`.
 
+## Build ID lookup
+
+### An unreadable unused base stops discovery after a readable update
+
+- **Symptom:** for a title ID with no profile, the newest update extracts successfully during `build ID lookup`, but the subsequent base-only probe fails its ExeFS hash check and stops the survey, even though the update supplies the code.
+- **Cause:** `same_build` tries the newest update's main build ID, then the base game's as a second guess. Both used the same fatal extraction call, making the optional base-only probe a required input. This lookup error is independent of why that base cannot be read; the reported base hash failure has not been diagnosed as damage or a sparse NCA.
+- **Fix:** `scripts/build_ipa_from_nsp.py` `same_build` catches `BuildError` only on the base-only probe after the newest update's extraction succeeded. It logs `[RED] the base game alone could not be read for the build ID lookup; the update supplies the code, so the survey goes on`, deletes the partial output and continues without an alias match. A failed update extraction, a failed base-only extraction when there is no update, and other exceptions still propagate. The extractor requires a matching update Program NCA and reads its complete ExeFS with integrity checks; its accepted sparse-base exit code 4 cannot occur with an update Program NCA. The survey and build's actual extractions remain strict. This is a general lookup rule, separate from [recognizing a sparse base](#the-surveys-build-id-lookup-stops-on-the-base-game-alone-with-a-hash-error); it does not disable integrity checks or repair the unreadable base.
+- **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md#files-and-shaders) ([PR #2701](https://github.com/seedds/nxnative/pull/2701)).
+- **Check:** `dm/tools/tests/test_nsp_alias.py` covers continuation after an unreadable optional base and preservation of the required base-only failure.
+
 ## Sparse base games
 
 ### The survey's build ID lookup stops on the base game alone with a hash error

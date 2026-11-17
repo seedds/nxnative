@@ -94,6 +94,18 @@ static const uint8_t vp9[] = {
     0xff,0xff,0xff,0xf2,0x2a,0xc0,0x00,
 };
 
+// Whether VideoToolbox decodes AV1 here: the chip reporting a hardware decoder is not enough, as VideoToolbox can still refuse
+// the session (a macOS VM such as a CI runner: -12906) and dav1d then takes the stream. The tests of VideoToolbox's own AV1
+// sessions run only where one is made (DM_AV1_DAV1D=1 also skips them)
+static int vt_av1(void) {
+    static int v = -1;
+    if (v < 0) {
+        v = 0;
+        if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) { mav1 *a = mav1_new(NULL); mav1_picture pic; mav1_decode(a, av1, sizeof av1, 0, &pic); v = a->vs && !a->soft; mav1_free(a); }
+        if (!v) puts("VideoToolbox makes no AV1 session here: its AV1 cases are skipped");
+    }
+    return v;
+}
 // Real VideoToolbox sessions invalidated between packets, as can happen while
 // iOS takes the app out of focus. The decoder must still return every picture.
 static void vt_session_lifecycle(void) {
@@ -105,14 +117,14 @@ static void vt_session_lifecycle(void) {
         while (mavc_take(c, 1, nv12, 64, 64, &pts)) avc_pictures++;
     }
     mavc_free(c);
-    if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
+    if (vt_av1()) {
         mav1 *a = mav1_new(NULL); mav1_picture pic; av1_pictures = 0;
         for (int i = 0; i < 3; i++) {
             if (i == 1) { assert(a->vs && !a->soft); VTDecompressionSessionInvalidate(a->vs); }
             if (mav1_decode(a, av1, sizeof av1, i * 1000, &pic) == 1) av1_pictures++;
         }
         mav1_free(a);
-    } else puts("VideoToolbox lifecycle: hardware AV1 unavailable; AV1 case skipped");
+    } else puts("VideoToolbox lifecycle: no VideoToolbox AV1 session; AV1 case skipped");
     printf("invalidated VideoToolbox sessions: H.264 %d/3 pictures, AV1 %d/3 pictures\n", avc_pictures, av1_pictures);
     fflush(stdout);
     assert(avc_pictures == 3 && av1_pictures == 3);
@@ -150,7 +162,7 @@ static void vt_reference_recovery(void) {
             got++;
         }
         assert(got == 36); mavc_drop(c); assert(!c->history.count); mavc_free(c);
-        if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (!vt_av1()) continue;
         mav1 *a = mav1_new(NULL); mav1_picture pic; got = 0;
         for (int loop = 0; loop < 3; loop++) for (int i = 0; i < 12; i++) {
             if ((loss < 12 ? loss : 7) == i && a->vs) {
@@ -180,7 +192,7 @@ static void vt_av1_random_access(void) {
 }
 static void vt_worker_lifecycle(void) {
     for (int codec = CV_H264; codec <= CV_AV1; codec++) {
-        if (codec == CV_AV1 && !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (codec == CV_AV1 && !vt_av1()) continue;
         for (int action = 0; action < 4; action++) {
             _Alignas(16) uint8_t dec[0x400] = {0}; uint64_t id;
             const uint8_t *packet = codec == CV_H264 ? h264 : av1;

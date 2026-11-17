@@ -49,6 +49,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | kept: one shader in one game, already handled; a general lowering is a chain change (every game's shaders rebuilt) for no measured gain: revisit when a vertex shader with subgroup operations fails in another game | checked: the shader-build logs of the 51 game builds on the game drive: no shader failed to translate or compile, none mentions a subgroup operation (2026-11-09) | — | [Program.cs:266](../../dm/gfx/tools/dmsh_xlate/Program.cs#L266) | a general lowering of subgroup ballots in vertex shaders (subgroups of one invocation: ballots, votes, lane ids and counts, refusing shuffles that exchange data between lanes) would cover any shader that counts that way |
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | kept: 1.0.1 (2019) is the last update; a function match would serve no other build of this game | checked: nso_fnmap of its 112 sites into those four mains (2026-11-09) | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | kept: 44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears | checked: nso_fnmap of its 44 sites into those 13 mains (2026-11-09) | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur) |
+| `build` → `game` | dynamic resolution pinned to full size | rendering | kept: a function-matched rule would cover other builds (the update and the store's function are distinct), but only one build is registered and no second build exists to check its fingerprint against | judgement | 1 | [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md) | Bezel Engine 2.9's own controller (bex::gfx::RendererModule's scale and its per-frame update), found through the engine's dynamic symbols in this main; the code is the engine's, but the offsets are this build's |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
 
 ## Summary
@@ -76,6 +77,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Super Mario Party Jamboree](#super-mario-party-jamboree) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
@@ -469,6 +471,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.1.4 `main`** `b21e3733…` ([patches.py:7](../../dm/games/010049900F546002/patches.py#L7))
   - cut `+0x151214`: coroutine stack region size: orr w2,wzr,#0x40000000 → mov w2,#0x4000000 (1 GB → 64 MB)
   - cut `+0x151398`: coroutine stack region size, the other start path: 1 GB → 64 MB
+
+### Super Mario Party Jamboree
+
+[Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md), `0100965017338000`, [patches.py](../../dm/games/0100965017338000/patches.py).
+
+- **`build` → `game`**, rendering, kept: a function-matched rule would cover other builds (the update and the store's function are distinct), but only one build is registered and no second build exists to check its fingerprint against, judgement: dynamic resolution pinned to full size. Bezel Engine 2.9's own controller (bex::gfx::RendererModule's scale and its per-frame update), found through the engine's dynamic symbols in this main; the code is the engine's, but the offsets are this build's
+
+- **2.3.0 `main`** `d70ce172…` ([patches.py:40](../../dm/games/0100965017338000/patches.py#L40))
+  - frame step `+0x79758`: render size pinned: the dynamic-resolution controller's scale is 1.0 (main+0x79758), unless DM_DYNAMIC_RESOLUTION asks for the game's own
+  - launcher capabilities: DYNAMIC_RESOLUTION
 
 ### Super Smash Bros. Ultimate
 

@@ -325,20 +325,36 @@ void dm_fps_lock_tick(void) {
         }
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
-        // Resident Evil: inspect the pointed-to MT object around the documented limit fields.
-        // Log raw words and addresses so a stale/wrong object cannot masquerade as tiny floats.
+        // Resident Evil: scan the pointed-to object for plausible float frame limits.
+        // The previously documented +0x48/+0x4c currently read as 1/2, so verify the
+        // object layout instead of assuming those offsets still identify the timing fields.
         if (re_row) {
             static int baseline_samples, movie_samples;
-            uint32_t v[8] = {0};
-            if ((baseline_samples < 8 || (movie_hz && movie_samples < 12)) && rd(obj + 0x40, v, sizeof v)) {
-                float cap0, cap1;
-                memcpy(&cap0, &v[2], 4); memcpy(&cap1, &v[3], 4);
+            if (baseline_samples < 4 || (movie_hz && movie_samples < 8)) {
+                uint32_t slot_words[4] = {0}, mem[64] = {0};
+                int have_slot = rd((uint64_t)(uintptr_t)(base + L->ptr_off), slot_words, sizeof slot_words);
+                int have_mem = rd(obj, mem, sizeof mem);
                 FILE *pf = fopen("/tmp/re_movie_clock_probe.log", "a");
                 if (pf) {
-                    fprintf(pf, "[RE MT raw] slot=%p object=%p movie_hz=%d target=%d row_target=%d +40..5c=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x floats48/4c=%g/%g\\n",
+                    fprintf(pf, "[RE MT scan] slot=%p object=%p movie_hz=%d target=%d row_target=%d slot_raw=%08x,%08x,%08x,%08x object_raw=%s",
                         (void *)(uintptr_t)(base + L->ptr_off), (void *)(uintptr_t)obj,
                         movie_hz, target, row_target,
-                        v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], cap0, cap1);
+                        slot_words[0], slot_words[1], slot_words[2], slot_words[3],
+                        have_mem ? "" : "(unreadable)");
+                    if (have_mem) {
+                        for (int i = 0; i < 8; i++) fprintf(pf, "%s%08x", i ? "," : "", mem[i]);
+                        fprintf(pf, " float_candidates=");
+                        int found = 0;
+                        for (int i = 0; i < 64; i++) {
+                            float x; memcpy(&x, &mem[i], sizeof x);
+                            if (x >= 10.0f && x <= 120.0f) {
+                                fprintf(pf, "%s+%03x:%g", found ? "," : "", i * 4, x);
+                                found++;
+                            }
+                        }
+                        if (!found) fprintf(pf, "none");
+                    }
+                    fprintf(pf, "\\n");
                     fclose(pf);
                 }
                 if (movie_hz) movie_samples++; else baseline_samples++;

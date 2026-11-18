@@ -11218,6 +11218,8 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
     NSMutableArray<WarmTask *> *tasks = [NSMutableArray array]; NSMutableDictionary<NSString *, WarmTask *> *pairs = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0;
     NSMutableSet<NSData *> *seen_k = [NSMutableSet set];   // rows recorded before pso_key_norm that are one pipeline now
+    NSMutableSet<NSString *> *seen_shader = [NSMutableSet set];
+    NSMutableSet<NSArray *> *seen_mesh = [NSMutableSet set];
     for (NSString *path in paths) {
         NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
@@ -11230,7 +11232,11 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             WarmTask *t = nil;
             if (([c[0] isEqualToString:@"S"] && c.count >= 3) || ([c[0] isEqualToString:@"C"] && c.count >= 2)) {
                 if (!c[1].length || warm_stale(c[1], stale)) continue;
-                t = [WarmTask new]; t->kind = [c[0] isEqualToString:@"S"] ? 0 : 2; t->key = c[1]; t->stage = t->kind ? 5 : c[2].intValue; [tasks addObject:t];
+                int shader = [c[0] isEqualToString:@"S"];
+                int stage = stage_of(warm_map_stage(c[1]));   // Same stage as the live loader: NVN2 task/mesh 6/7 occupy host slots 3/4. Warm loads share one object per name.
+                if (stage < 0 || (!shader && stage != 5) || (shader && [seen_shader containsObject:c[1]])) continue;
+                if (shader) [seen_shader addObject:c[1]];
+                t = [WarmTask new]; t->kind = shader ? 0 : 2; t->key = c[1]; t->stage = stage; [tasks addObject:t];
             } else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
                 pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
                 NSData *kd = [NSData dataWithBytes:&sk length:sizeof sk]; if ([seen_k containsObject:kd]) continue;
@@ -11251,8 +11257,12 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 if (![warm_map_stage(vkey) isEqualToString:@"mesh"] ||
                     (fkey.length && ![warm_map_stage(fkey) isEqualToString:@"pixel"]) ||
                     (tkey && ![warm_map_stage(tkey) isEqualToString:@"task"])) continue;
+                NSData *kd = [NSData dataWithBytes:&sk length:sizeof sk];
+                NSArray *identity = @[c[1], kd];   // The same mesh state with a different task shader is a different pipeline.
+                if ([seen_mesh containsObject:identity]) continue;
+                [seen_mesh addObject:identity];
                 t = [WarmTask new]; t->kind = 3; t->vkey = vkey; t->fkey = fkey; t->tkey = tkey;
-                t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]];
+                t->rs = [NSMutableArray arrayWithObject:kd];
                 [tasks addObject:t];
             } else continue;
             n++;

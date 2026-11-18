@@ -630,6 +630,12 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Note:** with the encode thread (`DM_NVN_ENC_THREAD`) a segment's commit record is handed to it at once (`rec_publish` in `sub_cut`), not when its block of records fills. Breath of the Wild on an M2 Max (encode thread and snapshots, `DM_FPS_TARGET=120`): the frame's wait on its newest fence 12.5 ms with `DM_NVN_CUT=0`, 5.6 ms with 64, 5.35 ms with 16.
 - **Note:** MacNativeGames moved its cut to 30 draws for the first segment and 40 after (`2fa27d7`; uncapped Tears of the Kingdom in a shrine, 10.77 → 10.60 ms a frame). At this repository's 60 fps cap the size changes nothing where the GPU finishes inside the frame: Breath of the Wild outdoors on an M4 Pro (2026-10-26, the outdoor seed of the [BotW Mac routes](../../dm/games/01007EF00011E000/README.md#mac-routes), frames 3,001–5,700, cut 64) waited on its fence 0.02 ms a frame on average (`@sync_ms`), with GPU span 10.8 ms. The default stays 64; a GPU-bound device (an iPhone) is where a smaller cut could show, through `DM_NVN_CUT`.
 
+### A submission copied whole before its first commands could start
+
+- **Symptom:** The GPU finishes the previous frame and waits while the game thread copies the first submission of the next frame.
+- **Cause:** Replay had to wait for the entire submission, even when a wait or fence already ended a group of commands.
+- **Fix:** Queue the job first and publish complete nodes in order. An open job with no ready nodes keeps its position in its queue. Each job owns its command bytes and pins its texture and program snapshots until replay finishes. The worker resolves streamed programs by serial. `DM_NVN_SUB_STREAM=0` and frame capture retain whole-submission copying.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#frame-rate), where event waits divide the first race submission into several nodes.
 
 ### A long render pass split while the GPU has nothing
 

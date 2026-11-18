@@ -372,6 +372,8 @@ void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a 
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 void mtl_prog_unpin(prog_t *p); // submit lock held: release a queued descriptor or saved binding
+int mtl_sub_stream_on(void);
+void mtl_prog_snapshot_pin(prog_t *copy, const prog_t *source); // retain the serial without resolving the program on the submit thread
 void mtl_prog_snapshot(prog_t *copy, const prog_t *source); // submit lock held: retain compiled shaders behind owned metadata
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings

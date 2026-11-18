@@ -302,8 +302,35 @@ class IoStore(unittest.TestCase):
         self.assertFalse(uepak.inline_shaders(pak))   # one without export bundles
 
     def test_a_pak_with_an_archive_or_only_configs_is_not_inline(self):
-        self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))
-        self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))
+        self.assertIs(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))), False)
+        self.assertIsNone(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))   # no shaders of either kind
+
+    def test_a_pak_of_audio_and_fonts_holds_no_shaders(self):
+        """Persona 3 Reload's pakchunk1, 2 and 4: taken as paks with shader code archives, the NSP script's decode step found none in them and stopped"""
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), b'b')], version=3)
+        inline = self.inline_pak(); pak11(self.romfs / 'Audio.pak', ['Sound/a.awb', 'Movie/b.usm', 'Font/c.ufont'])
+        self.assertIsNone(uepak.inline_shaders(str(self.romfs / 'Audio.pak')))
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [])
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True), [inline])
+
+    def lslg(self, tag=b'SC', code=b'\x11' * 0x40):   # UE 4.27's SF_GLSL_SAGE record (Persona 3 Reload): LSLG, a header, then the code and an NVN2 control section
+        ctl = uepak.CTL_NVN2 + bytes(0x3c) + struct.pack('<I', len(code)) + bytes(0x98)
+        return b'LSLG' + tag + bytes(0x40) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(24), ctl, code
+
+    def test_an_lslg_record_with_an_nvn2_control_section(self):
+        rec, ctl, code = self.lslg()
+        self.assertEqual(uepak.lslg(rec), ('SC', ctl, code))
+        self.assertIsNone(uepak.lslg(rec.replace(struct.pack('<I', len(code)) + code, struct.pack('<I', len(code) + 4) + code, 1)))
+
+    def test_a_ray_tracing_record_is_left_out_and_the_file_read_on(self):
+        """Persona 3 Reload's global shader cache holds closest-hit shaders (FDefaultMainCHS, stage tag S1): the first one made the whole file unreadable, every global shader with it"""
+        rt, _, _ = self.lslg(b'S1', b'\x22' * 0x40)
+        rt = rt[:rt.index(uepak.CTL_NVN2) + 0x44] + struct.pack('<I', 0x200) + rt[rt.index(uepak.CTL_NVN2) + 0x48:]   # its code length is not where a stage's is
+        cs, ctl, code = self.lslg()
+        d = struct.pack('<I', len(rt)) + rt + struct.pack('<I', len(cs)) + cs
+        out = []
+        with patch.object(ss, 'check', return_value=None): ss.ue_inline_shaders(d, 'G', out)
+        self.assertEqual(out, [(f'G#UE{4 + len(rt) + 4:x}', 'cs', ctl, code)])
 
     KEY = bytes(range(40, 72))
 

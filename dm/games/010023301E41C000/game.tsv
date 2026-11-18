@@ -1,0 +1,41 @@
+# Game profile of Fate/stay night REMASTERED (Switch, update 1.4.1 = v589824).
+# Format: see dm/games/README.md
+# Type-Moon's own visual-novel engine on SDK 16.2.6. It renders with NVIDIA's desktop OpenGL 3.1 through EGL: main imports the EGL functions and names glShaderSource, and every
+# shader it draws with is GLSL it compiles at run time, so no game file holds one. The host's GL layer implements the context on Metal (dm/gfx/gl/hle_gl.m); the NSP script
+# captures the shaders on the Mac (gl_capture.tsv) and dm/gfx/tools/gl_shaders.py translates them into the library the host looks each one up by.
+# subsdk0 (NVIDIA's OpenGL driver), subsdk1 (GLSLC) and subsdk2 (NVIDIA's Vulkan driver) are never loaded: the GL layer answers main's EGL imports, and the game compiles no
+# GLSL through GLSLC (subsdk1). subsdk3 is Nintendo's movie module, which main calls.
+
+# ---- Identity ----
+title_id	010023301E41C000
+program_id	010023301E41C000
+
+# ---- App ----
+name	Fate/stay night REMASTERED
+ipa	FateStayNightRemastered.ipa
+app_category	public.app-category.adventure
+
+# ---- Versions ----
+build	v589824	1.4.1	main=6c3d2b4235e83adb04ac584f2541541c	subsdk3=220d36873cbb6d5dc39a9a37127ea80d	sdk=a5cb2175cad2ca2afdd4c13577dbd079
+package	v589824
+shader_versions	v589824
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk
+modules	main subsdk3 sdk
+romfs_marker	obb/pack/saber.dat
+zip_store	.bin:.dat:.txt:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource, so the game has no virtual address memory: nninitStartup gives its malloc a heap of the pool − used memory, which it maps as it touches
+# it. A heap check on the Mac asked for 3.14 GB of the 3.25 GB region the 4 GB block leaves, so the provisional split stands unmeasured past this (the memory line of a long
+# run says whether it grows)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py writes the GL library and its table, not the profile)
+shader_note	Fate/stay night REMASTERED has no NVN shaders (its GLSL shaders go through the GL layer)

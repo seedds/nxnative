@@ -1490,6 +1490,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **See also:** [Metal's archiver store filled by one flush period](#metals-archiver-store-filled-by-one-flush-period).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an M4 (16 GB, macOS 27.2 26B123); #1747 on an M4 Pro.
 
+### SIGTERM during the first Metal initialization
+
+- **Symptom:** SIGTERM during startup logs `received SIGTERM: graceful exit`, then `CRASH sig=5` in `_os_object_release` from `mtl_init`. The caller can be the graphics drain or the guest's first NVN memory pool registration.
+- **Cause:** the shutdown worker calls `mtl_drain` while pool registration can call `mtl_init` on the guest thread. Both callers can see a null `g_dev` and enter initialization. Replacing `g_feedback_q` releases the queue the other initializer published, and the trap occurs at that release. A non-null device also became visible before the queues and residency sets were ready.
+- **Fix:** guard the complete shared Metal initialization with `dispatch_once`. Every caller of `mtl_init` waits for the initialized state before proceeding.
+- **Check:** `t_mtl_init` pauses the first device request while the real graphics suspend path runs. It checks for a single device request and waits for both callers to finish with the graphics state ready. The fixture also runs two device requests with the classic fallback forced.
+- **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md).
+
 ### A run that ends in its prewarm loses what it compiled
 
 - **Symptom:** a run without a window (headless, or `DM_PSO_PREPARE=0`) compiles the same few dozen to few hundred bases again at every start, and area loads stall on them (a draw waits in `pso_get` → `arch_capture` → `MTLCompiler`), although each run compiled them before. The run's last lines say `pipeline archive at exit: 425 pipelines not written yet, not all written in time: those left are built again at the next start (968 ms)`, or `[RED] graceful exit not done in 1.5 seconds, exiting at once` with no archive line at all.

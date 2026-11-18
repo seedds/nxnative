@@ -134,6 +134,7 @@ The default-role run and its paired foreground run measured frame p95 of 17.11 a
 
 ## Found on this game
 
+- **Resolved:** [SIGTERM during the first Metal initialization](../../../docs/reference/rendering.md#sigterm-during-the-first-metal-initialization). On an M4 Pro with macOS 27.2.1 and Xcode 27.2, early SIGTERM trapped in 16 of 24 windowless NieR 1.0.3 launches on `efd1bddd`, the parent of PR #2876. The fix exited cleanly in all 24 matched trials. A 100-second opening-flight run reached frame 5,977 and then shut down cleanly on SIGTERM.
 - [Underruns in a run without a window](../../../docs/reference/audio.md#underruns-in-a-run-without-a-window): [Mac audio comparison](#windowless-mac-audio).
 - [A pipeline a hybrid draw stood in for listed only once built](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built): controlled [preparation-cost measurement](#preparation-cost-of-a-recorded-backlog); the unfinished gameplay backlog was not reproduced on this Mac.
 - [Per-frame arena blocks made for every submission in flight](../../../docs/reference/memory.md#per-frame-arena-blocks-made-for-every-submission-in-flight).

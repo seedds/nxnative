@@ -48,8 +48,7 @@ KNOWN = {
     'dadd': 'DADD (0x229) is not implemented', 'dmul': 'DMUL (0x228) is not implemented',
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
-    'imma_16832_s8': 'IMMA is not implemented', 'dp4a_u32': 'IDP.4A is not implemented', 'dp4a_s32': '(as dp4a_u32)', 'dp4a_su': '(as dp4a_u32)',
-    'dp2a_lo': 'IDP.2A is not implemented', 'dp2a_hi': '(as dp2a_lo)', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
+    'imma_16832_s8': 'IMMA is not implemented', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
     'isad': 'VABSDIFF is not implemented', 'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
     'prmt': 'PRMT modes other than the index form (.F4E .B4E .RC8 .ECL .ECR .RC16) are not implemented',
     'mufu_tanh': 'MUFU.TANH is not implemented', 'mufu_tanh_f16x2': '(as mufu_tanh)',
@@ -95,6 +94,7 @@ def load_fixture():
     doc['ops'].extend(directed_rounding_boundaries(doc['ops']))
     doc['ops'].extend(i2f64_boundaries(doc['ops']))
     doc['ops'].extend(f2fp_boundaries(doc['ops']))
+    doc['ops'].extend(idp_constant_buffer_cases(doc['ops']))
     return doc
 
 
@@ -414,6 +414,45 @@ def f2fp_boundaries(ops):
     ])
 
 
+def idp_constant_buffer_cases(ops):
+    """Bind a nonzero word at c[3][5] and exercise its use in either operand slot."""
+    by_name = {op['name']: op for op in ops}
+    bank, offset = 3, 20
+    rows = [[0x80017fff, 0x807f0201, 0xfffffff0],
+            [0xfffffffe, 0xff7f8001, 0x7fffffff],
+            [0x00010002, 0x807ffe01, 0x80000000],
+            [0x80808080, 0x00000000, 0xabcdef02]]
+
+    def expected(row, width, signed_a, signed_b, first_byte):
+        a, b, c = row
+        parts_a = struct.unpack({(1, False): '<4B', (1, True): '<4b', (2, False): '<2H', (2, True): '<2h'}[width, signed_a],
+                                a.to_bytes(4, 'little'))
+        parts_b = struct.unpack('<4b' if signed_b else '<4B', b.to_bytes(4, 'little'))
+        return (c + sum(x * y for x, y in zip(parts_a, parts_b[first_byte:]))) & 0xffffffff
+
+    for name, source, value, width, signed_a, signed_b, first_byte in (
+        ('dp4a_su', 'b', 0x807f02fe, 1, True, False, 0),
+        ('dp4a_s32', 'c', 0x7ffffffe, 1, True, True, 0),
+        ('dp2a_hi', 'b', 0xf18102fe, 2, False, False, 2),
+        ('dp2a_lo', 'c', 0xfffffff0, 2, True, True, 0),
+    ):
+        template = by_name[name]
+        program = bytearray(template['program'])
+        (position, lo, hi), = [(i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', program))
+                               if lo & 0x1ff == 0x026]
+        form = 5 if source == 'b' else 3
+        if source == 'c':
+            hi = (hi & ~0xff) | ((lo >> 32) & 0xff)  # B moves into the register field formerly used by C.
+        lo = (lo & 0xffffffff & ~(7 << 9)) | (form << 9) | (bank << 54) | (offset << 38)
+        struct.pack_into('<QQ', program, position, lo, hi)
+        resolved = [row.copy() for row in rows]
+        for row in resolved:
+            row[1 if source == 'b' else 2] = value
+        yield dict(template, name=f'{name}_cbuf_{source}', program=bytes(program), cases=len(rows), rows_in=rows,
+                   rows_gpu=[[expected(row, width, signed_a, signed_b, first_byte)] for row in resolved],
+                   cbuf=(bank, offset, value), exact_bits=True, derived_from=name, oracle='synthetic IDP constant-buffer contract')
+
+
 def chain_rewrites():
     """the MSL rewrites dmsh_build.py's finish() makes of every shader, in its order: each `src = f(src)` at its top level or in a try there (the ones under a
     stage's `if` are another stage's). The rewrites live in importable modules;
@@ -482,7 +521,7 @@ def harness(msl, w):
 
 RUNNER = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-// run <metallib> <io> <groups>: main0 over <groups> groups of 32 threads, io at buffer 30 (the other slots a zero buffer), written back over io
+// run <metallib> <io> <groups> [cbuf]: main0 over groups of 32 threads, io at buffer 30 and optional constants at argument buffer 0, id 0.
 int main(int argc, char **argv) { @autoreleasepool {
   id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
   if (!d) { fprintf(stderr, "no Metal device\n"); return 1; }
@@ -497,6 +536,18 @@ int main(int argc, char **argv) { @autoreleasepool {
   [ce setComputePipelineState:ps];
   for (int i = 0; i < 30; i++) [ce setBuffer:zero offset:0 atIndex:i];
   [ce setBuffer:b offset:0 atIndex:30];
+  if (argc == 5) {
+    NSData *data = [NSData dataWithContentsOfFile:@(argv[4])];
+    id<MTLArgumentEncoder> args = [f newArgumentEncoderWithBufferIndex:0];
+    if (!data || !args) { fprintf(stderr, "constant buffer layout\n"); return 1; }
+    id<MTLBuffer> constants = [d newBufferWithBytes:data.bytes length:data.length options:MTLResourceStorageModeShared];
+    id<MTLBuffer> table = [d newBufferWithLength:args.encodedLength options:MTLResourceStorageModeShared];
+    if (!constants || !table) { fprintf(stderr, "constant buffer allocation\n"); return 1; }
+    [args setArgumentBuffer:table offset:0];
+    [args setBuffer:constants offset:0 atIndex:0];
+    [ce useResource:constants usage:MTLResourceUsageRead];
+    [ce setBuffer:table offset:0 atIndex:0];
+  }
   [ce dispatchThreadgroups:MTLSizeMake(atoi(argv[3]), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
   if (cb.error) { fprintf(stderr, "gpu: %s\n", cb.error.description.UTF8String); return 1; }
@@ -542,7 +593,17 @@ def run_op(o, work, runner, steps, xc, env):
     for c, row in enumerate(o['rows_in']):
         io[c * w:c * w + len(row)] = array.array('I', row)
     (d / 'io.bin').write_bytes(io.tobytes())
-    r = subprocess.run([str(runner), str(d / 'k.metallib'), str(d / 'io.bin'), str(groups)], capture_output=True, text=True, timeout=120)
+    args = [str(runner), str(d / 'k.metallib'), str(d / 'io.bin'), str(groups)]
+    if 'cbuf' in o:
+        bank, offset, value = o['cbuf']
+        cbufs = json.loads((d / 'k.res.json').read_text())['cbufs']
+        if [(c['slot'], c.get('fixed')) for c in cbufs] != [(bank, offset + 4)]:
+            return 'reflection', f'expected c[{bank}] through byte {offset + 4}, got {cbufs}'
+        data = bytearray(65536)
+        struct.pack_into('<I', data, offset, value)
+        (d / 'cbuf.bin').write_bytes(data)
+        args.append(str(d / 'cbuf.bin'))
+    r = subprocess.run(args, capture_output=True, text=True, timeout=120)
     if r.returncode:
         return 'Metal run', r.stderr.strip()[-300:]
     out = array.array('I')

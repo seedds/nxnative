@@ -1728,6 +1728,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. Recorded differences fall from 1,880 to zero for BF16 and from 913 to zero for F16 `.RELU`, each across 2,048 halves. Plain F16 `.RN` has the same 44 NaN-bit differences (Orin `0x7fff`, Metal `0x7e00`). Six synthetic forms cover BF16 ties, combined BF16 `.RELU` and F16 truncation. All 64 exact boundary halves pass with default and relaxed Mac math, and a separate sweep of 2,072,574 halves also matches its exact reference. Eight shaders compile offline for iOS. Plain F16 `.RN` and both plain Pokopia `.MERGE_C` examples emit identical MSL on main and the fix.
 - **Found on:** the Jetson Orin sm_87 probes from [PR #2046](https://github.com/seedds/nxnative/pull/2046). The new combinations and `.RZ` are checked against synthetic references. No game or iOS device ran.
 
+### IDP integer dot products
+
+- **Symptom:** an Ampere shader using `dp4a` or `dp2a` fails translation with `Ampere instruction 226 ... is not implemented` for the register form.
+- **Cause:** the Ampere decoder had no IDP entry for opcode `0x026` in the low nine bits.
+- **Fix:** register `InstName.Idp` and use the shared ALU operand reader. `AIdp` extracts the four bytes of each source for DP4A or extracts two halfwords of A and B's low or high pair of bytes for DP2A. Signedness is independent for each source. Integer multiplies and adds accumulate the products into C with 32-bit wraparound. Before optimization the lowering emits 16 IR operations for DP4A and eight for DP2A.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. All five recorded register programs were refused on main and now match all 5,120 Orin lanes. Four synthetic shaders cover the B and C constant-buffer slots for DP4A and DP2A, with all 16 lanes matching using a nonzero Metal argument-buffer word at `c[3][5]`. Another 144 synthetic lanes cover independent signedness, DP2A low and high pairs, wraparound, immediate and uniform-register inputs. All 27 IDP shaders validate as SPIR-V and compile offline for iOS.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2052](https://github.com/seedds/nxnative/pull/2052). Only register forms have recorded Orin outputs in this fixture. No affected game is documented. No games or iOS device ran.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

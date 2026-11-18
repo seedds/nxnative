@@ -35,7 +35,7 @@ class Image:
                 raise ValueError(f'invalid RomFS image header: {path}')
             f.seek(off); self.index = f.read(size)
         if len(self.index) != size: raise ValueError(f'incomplete RomFS image: {path}')
-        self.count, self.pool = count, count * ENT.size
+        self.count, self.pool, self.fd = count, count * ENT.size, None
         next_child = 1
         for k in range(count):
             a, b, no, nl, t, flags = self.entry(k)
@@ -54,6 +54,17 @@ class Image:
             a, b, _, _, t, _ = self.entry(k)
             if not t and any(self.name(j - 1) >= self.name(j) for j in range(a + 1, a + b)):
                 raise ValueError(f'unsorted or duplicate RomFS image names: {path}')
+
+    def descriptor(self):
+        """A descriptor of the image for one opened file: a duplicate of the one this process keeps for the image, which it opens at the first file. Opening the image
+        by its path for every file is what the processes of a parallel scan wait on one another for (the shader split of Tears of the Kingdom, 304,243 files each opened
+        twice, 18 processes: 133 us an open, 28 us in one process alone). Reads are by offset, so the duplicates share nothing that moves"""
+        if self.fd is None: self.fd = _os.open(self.path, _os.O_RDONLY)
+        return _os.dup(self.fd)
+    def __del__(self):
+        try:
+            if self.fd is not None: _os.close(self.fd)
+        except (AttributeError, OSError, TypeError): pass   # an image that did not load, or the interpreter is shutting down
 
     def entry(self, k): return ENT.unpack_from(self.index, k * ENT.size)
     def name(self, k):
@@ -115,7 +126,7 @@ _fd_ranges = {}
 
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        self.fd = image.descriptor()
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)

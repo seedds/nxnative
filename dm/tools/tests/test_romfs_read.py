@@ -46,6 +46,14 @@ class ReadImage(unittest.TestCase):
         with romfs.open(self.root / 'output', 'wb') as f: f.write(b'normal output')
         self.assertEqual((self.root / 'output').read_bytes(), b'normal output')
 
+    def test_the_files_of_an_image_share_the_one_descriptor_it_opens(self):   # a duplicate each, not an open of the image by its path per file
+        with patch.object(romfs._os, 'open', wraps=romfs._os.open) as opened:
+            with romfs.open(self.image / 'a', 'rb') as a, romfs.open(self.image / 'data/archive', 'rb') as b:
+                self.assertNotEqual(a.fileno(), b.fileno())
+                self.assertEqual((b.read(), a.read()), (self.data, b'prefix!'))
+            with romfs.open(self.image / 'a', 'rb') as a: self.assertEqual(a.read(), b'prefix!')   # after the others were closed
+        self.assertEqual(opened.call_count, 1)
+
     def test_scan_entries_answer_from_the_index_the_scan_found(self):
         for parent in (self.image, self.image / 'data'):
             with romfs.scandir(parent) as entries:

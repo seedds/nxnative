@@ -85,6 +85,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
 
+- [Processes that scan one RomFS image in parallel wait on its opens](../../../docs/reference/packing.md#processes-that-scan-one-romfs-image-in-parallel-wait-on-its-opens) (2026-11-18): 78 s of the 635 s its shader split's 18 workers spent; the split takes 47.7 s instead of 60.0 s (resolved).
 - [AltServer cannot install a file of 2 GiB or more](../../../docs/reference/packing.md#altserver-cannot-install-a-file-of-2-gib-or-more) (2026-11-08, #1688): 1.4.3's shader library is 2.10 GiB; `--shader-files` packs it as separate files.
 - [The Mac's alias region is the Switch's 64 GB](../../../docs/reference/memory.md#the-macs-alias-region-is-the-switchs-64-gb) (2026-11-05, #639): the long-session Blood Moon reached +2.25 of the iPhone-sized 2.38 GB. Whether this ends it is open until a long session runs on the larger region.
 - [A work folder holds millions of small files](../../../docs/reference/packing.md#a-work-folder-holds-millions-of-small-files): 8,893,028 files and 509 GB here.

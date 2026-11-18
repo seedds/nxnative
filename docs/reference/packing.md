@@ -411,6 +411,16 @@
 - **Fix:** `ARTIFACTS` in `dm/tools/romfs_image.py`, the dump-tool files that are not game files (`.listing`), is left out of the image, out of a NUP's RomFS (`scripts/pack_nup.py`) and out of the survey's file list (`dm/games/profile_guess.py`). Other dot files stay game files. Test: `test_romfs_image.py` (`test_dump_tool_listings_are_left_out`).
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md#found-on-this-game) (v65536, from a dump folder).
 
+### Processes that scan one RomFS image in parallel wait on its opens
+
+- **Symptom:** a tool that reads the files of a RomFS image from several processes spends much of its time opening them. In the shader split of Tears of the Kingdom (304,243 files, each opened twice, 18 processes) an open took 133 µs, 78 s of the workers' 635 s, where one process alone opens a file of the image in 28 µs; 300 s of the split's 528 s of CPU was system time.
+- **Cause:** `romfs.py`'s `_File` opened the image by its path for every file opened inside it. Each of those is a path lookup and an open of the same 17 GB file, and the processes wait on one another in the kernel there.
+- **Fix:** `Image.descriptor` opens the image once per process, at its first file, and gives each file a duplicate of that descriptor (`os.dup`). A file's reads are `pread` at its own range, and the mmap wrapper still finds that range by the file's own descriptor, so the duplicates share nothing that moves.
+- **Measurement:** M5 Pro (18 cores), Python 3.13, Tears of the Kingdom 1.4.3, a cold split into a scratch folder with `J=18`, best of three: 60.0 to 47.7 s wall, 528 to 471 s of CPU (system 300 to 248 s). The package and the four tables are byte-identical.
+- **Open:** not run on Linux, where the pool's processes are forked and inherit the image's descriptor, which `pread` and `dup` allow. A RomFS kept as a folder is not affected. Reading a file in one `pread` instead of `RawIOBase.readall`'s 8 KB pieces was tried and changed nothing (25.8 against 26.1 s).
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), in a profile of its shader split.
+- **Check:** `dm/tools/tests/test_romfs_read.py` `test_the_files_of_an_image_share_the_one_descriptor_it_opens`.
+
 ## Add-on content
 
 ### DLC in Documents is ignored or removed DLC remains installed

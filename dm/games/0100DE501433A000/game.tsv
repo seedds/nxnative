@@ -1,0 +1,41 @@
+# Game profile of Tetris Effect: Connected (Switch, 2.0.2.2 = v1310720). Single player playable on the Mac; multiplayer screen input is open
+# Format: see dm/games/README.md
+# Unreal Engine 4.26 / 4.27 (FMallocBinned3) with Wwise, SDK 13.3.2; subsdk0 is NintendoSDK_movie.
+# main imports EOS_* functions (from nro/EOSSDK-Switch-Shipping.nro, refused by the host). A stub in patches.py guards main+0xb64b8c against null from IOnlineSubsystem::Get("RedpointEOS").
+
+# ---- Identity ----
+title_id	0100DE501433A000
+program_id	0100DE501433A000
+
+# ---- App ----
+name	Tetris Effect: Connected
+ipa	TetrisEffectConnected.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1310720	2.0.2.2	main=8838095f4f659f63cb45a00e62dfb887	subsdk0=a8cb97803f7f442a3b6cce1c7cd4ee4a	sdk=357efc198e728cb5d55265aff304f03c
+package	v1310720
+shader_versions	v1310720
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	TetrisEffect/Content/Paks/TetrisEffect-Switch.pak
+zip_store	.mp4:.nro:.pak:.ucas:.metallib
+
+# ---- Memory ----
+# the NPDM declares 80 MB of system resource (virtual address memory) and main's nn::os::AllocateAddressRegion at main+0xd0b81c takes 62.00 GB
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x5000000
+
+# ---- Graphics ----
+# nvnDeviceSetDepthMode selects near = 0; prebuilt pipeline bases must use the same vertex entry as the game
+depth_mode	zero
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Tetris® Effect: Connected shaders

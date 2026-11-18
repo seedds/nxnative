@@ -249,6 +249,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Taiko Risshiden V DX](0100346017304000/README.md) | `0100346017304000` | 1.1.1 | 12.3.3 | Koei Tecmo's KTGL | NVN | [60 fps in menus and town](0100346017304000/README.md#frame-rate) |
 | [Team Sonic Racing](010092B0091D0000/README.md) | `010092B0091D0000` | 1.0.3 | 5.6.0 | Sumo Digital's engine, Wwise | NVN | — |
 | [Teenage Mutant Ninja Turtles: Shredder's Revenge](0100FE701475A000/README.md) | `0100FE701475A000` | 1.0.9 | 13.3.2 | Tribute Games' ParisEngine / MonoGame | NVN | Offline |
+| [Tetris Effect: Connected](0100DE501433A000/README.md) | `0100DE501433A000` | 2.0.2.2 | 13.3.2 | Unreal Engine 4.26 / 4.27, Wwise | NVN | — |
 | [The Great Ace Attorney Chronicles](010036E00FB20000/README.md) | `010036E00FB20000` | 1.0.0 (base) | 10.4.1 | Capcom's MT Framework | NVN | — |
 | [The Legend of Heroes: Trails into Reverie](01008CB0156BC000/README.md) | `01008CB0156BC000` | 1.0.4 | 14.3.0 | PhyreEngine (PH3 Switch port) | NVN | [60 fps target](01008CB0156BC000/README.md#frame-rate) |
 | [The Legend of Zelda: Breath of the Wild](01007EF00011E000/README.md) | `01007EF00011E000` | 1.9.0 | 20.5.22 | Nintendo EPD (sead / agl / gsys / ksys, Havok) | NVN | 60 fps target |

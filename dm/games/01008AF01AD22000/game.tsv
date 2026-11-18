@@ -1,0 +1,44 @@
+# Game profile of The Patrick Star Game (Switch, update 1.0.1 = v1). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2022.3 (IL2CPP) with FMOD, SDK 16.2.4; subsdk0 is NintendoSDK_movie (H.264 / AAC intro cinematics).
+
+# ---- Identity ----
+title_id	01008AF01AD22000
+program_id	01008AF01AD22000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	The Patrick Star Game
+ipa	SpongeBobSquarePantsThePatrickStarGame.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	1.0.1	main=8f3e77e1322e9f6f0000000000000000	subsdk0=220d36873cbb6d5dc39a9a37127ea80d	sdk=a5cb2175cad2ca2afdd4c13577dbd079
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets
+zip_store	.assets:.bank:.dat:.png:.resource:.ress:.vrc:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory). Unity's nninitStartup (main+0x111fc00) queries TotalMemorySize − UsedMemorySize and passes it to
+# nn::mem::StandardAllocator::Initialize as virtual address memory; with the 3.2 GB hardware pool (0xcd500000) that takes 3.14 GB of the 4.375 GB alias region, leaving too little
+# address space for Unity's own AllocateAddressRegion calls (main+0x10fe9a0 SIGSEGV on NULL at frame 15). stdalloc_cap caps StandardAllocator's region at 960 MB (0x3c000000),
+# matching the 1 GB-pool Unity 2022.3 profiles while preserving the 3.2 GB application pool
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xcd500000
+sys_resource	0x1000000
+stdalloc_cap	0x3c000000
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+shader_groups	/Data/=data
+shader_note	The Patrick Star Game shaders
+
+# ---- Heap check on the Mac ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

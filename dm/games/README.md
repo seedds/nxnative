@@ -215,6 +215,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [The Legend of Zelda: Ocarina of Time](0400486024DEC000/README.md) | `0400486024DEC000` | v131072 (Switch 2) | 22.2.8 (Ounce) | Nintendo EPD's sead, agl, gsys, Havok, CRIWARE | NVN2 |
 | [The Legend of Zelda: Skyward Sword HD](01002DA013484000/README.md) | `01002DA013484000` | 1.0.1 | 11.4.0 | Nintendo's Wii-era engine, ported by Tantalus | NVN |
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN |
+| [The Patrick Star Game](01008AF01AD22000/README.md) | `01008AF01AD22000` | 1.0.1 | 16.2.4 | Unity 2022.3 IL2CPP, FMOD | NVN |
 | [The Rogue Prince of Persia](01008D9022462000/README.md) | `01008D9022462000` | 1.1.0 | 20.5.29 | Unity 6000.0.64f1 IL2CPP, FMOD | NVN |
 | [Trails in the Sky 2nd Chapter](01007A2027548000/README.md) | `01007A2027548000` | 1.0.4 | 21.4.4 | Nihon Falcom's engine | NVN |
 | [TRIANGLE STRATEGY](0100CC80140F8000/README.md) | `0100CC80140F8000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |

@@ -65,6 +65,8 @@ def build(gid, patched, control):
     g = game.load(gid)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header_one(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
+    sdk = Path(patched) / 'sdk.patched.bin'
+    ounce = sdk.is_file() and b'spec: Ounce' in sdk.read_bytes()   # built for the Switch 2, as the host decides (loader.c dm_sdk_ounce)
     have = nacp.languages(control)
     langs = [(c, n) for c, n in nacp.LANGUAGES if not have or c in have]   # no list (a dump or a NUP has no control data, none of its packages may): any language may be the game's, as DM_LANG and the NSP script's check take it
 
@@ -75,6 +77,7 @@ def build(gid, patched, control):
     def shown(cond, n):
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
+        if cond == 'ounce': return ounce
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]

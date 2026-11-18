@@ -10,20 +10,26 @@
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 // test_renderer_blocks: the renderer each appended block came from; the output holds what it is given and plays none of it
-static int blocks_on; static aout_buf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
+static int blocks_on, pace_on; static aout_buf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
 static void blocks_exec(void *obj, void *state);
 // test_update_lock: the module's functions by name
 static struct { const char *name; void *p; } lock_syms[4];
 void *guest_sym(const char *name) {
     for (size_t i = 0; i < sizeof lock_syms / sizeof *lock_syms; i++) if (lock_syms[i].name && !strcmp(lock_syms[i].name, name)) return lock_syms[i].p;
-    return blocks_on && strstr(name, "ExecuteAudioRendererRendering") ? (void *)blocks_exec : NULL;
+    return (blocks_on || pace_on) && strstr(name, "ExecuteAudioRendererRendering") ? (void *)blocks_exec : NULL;
 }
 void *objmap_get(const void *key) { (void)key; return NULL; }
 void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) { (void)fn; (void)arg; (void)prio; (void)stack; return NULL; }
 void dm_guest_thread_join(void *tt) { (void)tt; }
-uint64_t now_ns(void) { return 0; }
+static uint64_t pace_times[NBUF + 3]; static int pace_n;
+static aout_buf *pace_rel[2]; static int pace_rel_n;
+static uint64_t real_now_ns(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+uint64_t now_ns(void) { return pace_on ? real_now_ns() : 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open_sink(void) { return NULL; }
 int dm_audio_output_channels(void) { return 2; }   // the stereo route; the six-channel resampler is checked directly below
@@ -32,12 +38,17 @@ void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) {
     (void)k;
+    if (pace_on) {
+        if (pace_n == NBUF && !pace_rel_n) { pace_rel[0] = &g_ar[0].bufs[0]; pace_rel[1] = &g_ar[0].bufs[1]; pace_rel_n = 2; }
+        if (pace_n >= NBUF + 2) atomic_store(&t_ar->open, 0);
+        return 1;
+    }
     if (!blocks_on) return 0;
     int r = ar_index(t_ar); blocks[r][blocks_n[r]++] = b;
     if (blocks_n[r] == NBUF) atomic_store(&t_ar->open, 0);
     return 1;
 }
-void *dm_pcmout_released(void *k) { (void)k; return NULL; }
+void *dm_pcmout_released(void *k) { (void)k; return pace_on && pace_rel_n ? pace_rel[--pace_rel_n] : NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
@@ -268,6 +279,7 @@ static void test_stereo_unchanged(void) {
 // Renderer 0 queues all its blocks and none plays; renderer 1 then renders (blocks_exec marks each frame with its renderer) and renderer 0's blocks must still hold its samples
 static void blocks_exec(void *obj, void *state) {
     (void)obj; (void)state;
+    if (pace_on && pace_n < NBUF + 3) pace_times[pace_n++] = now_ns();
     for (int i = 0; i < SAMPLES * DM_AUDIO_SINK_CHANNELS; i++) t_ar->frame[i] = (int16_t)(ar_index(t_ar) + 1);
     t_ar->frame_n = SAMPLES;
 }
@@ -337,6 +349,16 @@ int main(int argc, char **argv) {
     test_update_lock();
     test_two_renderers();
     test_renderer_blocks();
+    // Burst of 2 released blocks after prefill must space exec() by at least 4.5 ms
+    pace_on = 1; pace_n = 0; pace_rel_n = 0;
+    memset(&g_ar[0], 0, sizeof g_ar[0]);
+    pthread_mutex_init(&g_ar[0].cq_mu, NULL); pthread_cond_init(&g_ar[0].cq_cv, NULL);
+    atomic_store(&g_ar[0].open, 1);
+    render_main(&g_ar[0]);
+    pace_on = 0;
+    assert(pace_n == NBUF + 2);
+    assert(pace_times[NBUF] - pace_times[NBUF - 1] >= 4500000ULL);
+    assert(pace_times[NBUF + 1] - pace_times[NBUF] >= 4500000ULL);
     if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--malformed")) { test_malformed(16, 0); return 0; }
     test_headers();

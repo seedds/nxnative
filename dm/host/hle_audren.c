@@ -141,6 +141,7 @@ static void render_main(void *arg) {
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (aout_buf){.ptr = a->pcm[i], .cap = sizeof a->pcm[i], .size = 0}; free_list[i] = &a->bufs[i]; }
     dm_pcmout_start(out);
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
+    uint64_t last_exec = 0; int prefill = NBUF;
     while (atomic_load(&a->open)) {
         while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             aout_buf *b = dm_pcmout_released(out);
@@ -152,7 +153,26 @@ static void render_main(void *arg) {
         const int16_t *src; int got;
         uint32_t h = atomic_load(&a->cq_head);
         if (h != atomic_load(&a->cq_tail)) { src = a->cq[h % CQ]; got = a->cq_n[h % CQ]; atomic_store(&a->cq_head, h + 1); cq_popped(a); }   // play queued catch-up output first
-        else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        else {
+            // CoreAudio callbacks arrive in 256/512-frame bursts (~5.8/10.7 ms) and release 2+ blocks at once; spacing exec() by at least 4.5 ms
+            // keeps the game's audio thread from coalescing two renderer events or waking back-to-back into a catch-up render.
+            if (prefill > 0) prefill--;
+            else if (last_exec) {
+                uint64_t wait_until = last_exec + 4500000ULL, now = now_ns();
+                if (now < wait_until) {
+                    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+                    uint64_t rem = wait_until - now;
+                    dl.tv_sec += rem / 1000000000ULL; dl.tv_nsec += rem % 1000000000ULL;
+                    if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+                    pthread_mutex_lock(&a->cq_mu);
+                    while (atomic_load(&a->open) && now_ns() < wait_until && !pthread_cond_timedwait(&a->cq_cv, &a->cq_mu, &dl)) {}
+                    pthread_mutex_unlock(&a->cq_mu);
+                    if (!atomic_load(&a->open)) break;
+                }
+            }
+            last_exec = now_ns();
+            a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n;   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        }
         int n = got ? got : 240;
         aout_buf *b = free_list[--nfree];
         size_t bytes = (size_t)n * DM_AUDIO_SINK_CHANNELS * sizeof(int16_t);
@@ -265,7 +285,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
     // A fixed 20 ms sleep used to stand in for this, and a renderer reopened inside that window ran a second thread over the first one's blocks
     ar_t *a = NULL;
     for (int i = 0; i < AR_MAX && !a; i++) if (g_ar[i].handle[0] == obj) a = &g_ar[i];
-    if (a && a->render_tt) { atomic_store(&a->open, 0); dm_guest_thread_join(a->render_tt); a->render_tt = NULL; }
+    if (a && a->render_tt) { atomic_store(&a->open, 0); cq_popped(a); dm_guest_thread_join(a->render_tt); a->render_tt = NULL; }
     void *owned = objmap_del(obj), *sev = rev_find(obj);
     orig(obj, state);
     free(owned);

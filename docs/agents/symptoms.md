@@ -597,6 +597,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `CRASH sig=11 addr=0` in `h_codec_HwOpusFini`, the first time the game finalizes a decoder. → [One key for the two forms of the Opus decoder](../reference/audio.md#one-key-for-the-two-forms-of-the-opus-decoder)
 - the light limiter crashed on a null state pointer (`ApplyLightLimiterEffect`, `sdk+0x228494`). → [At least one rendered frame between two updates](../reference/audio.md#at-least-one-rendered-frame-between-two-updates)
 - the sound runs about 50 times faster than the output; the loop runs 11,000 updates a second on one core. → [A sound driver that never waits on the renderer event](../reference/audio.md#a-sound-driver-that-never-waits-on-the-renderer-event)
+- villager dialogue ("Animalese") crackles while music and sound effects play cleanly; `audren`'s `catch-up renders so far` climbs steadily (about 277 per 2,000 frames on a 44.1 kHz / 256-frame output) despite fast render times, and `DM_AUDREN_TRACE=1` shows `2 frames rendered since the last update` or two updates 0.02 ms apart followed by an 11.6 ms gap. → [Burst renders when a device callback releases multiple blocks](../reference/audio.md#burst-renders-when-a-device-callback-releases-multiple-blocks)
 
 ## Frame rate
 

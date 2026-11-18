@@ -1,0 +1,110 @@
+/**
+ * Copyright (c) 2020-2021 Paul-Louis Ageneau
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#include "track.hpp"
+
+#include "impl/internals.hpp"
+#include "impl/track.hpp"
+
+#include <cstring>
+
+namespace rtc {
+
+Track::Track(impl_ptr<impl::Track> impl)
+    : CheshireCat<impl::Track>(impl), Channel(std::dynamic_pointer_cast<impl::Channel>(impl)) {}
+
+Track::~Track() {}
+
+string Track::mid() const { return impl()->mid(); }
+
+Description::Direction Track::direction() const { return impl()->direction(); }
+
+Description::Media Track::description() const { return impl()->description(); }
+
+void Track::setDescription(Description::Media description) {
+	impl()->setDescription(std::move(description));
+}
+
+void Track::close() { impl()->close(); }
+
+bool Track::send(message_variant data) { return impl()->outgoing(make_message(std::move(data))); }
+
+bool Track::send(const byte *data, size_t size) { return send(binary(data, data + size)); }
+
+bool Track::isOpen() const { return impl()->isOpen(); }
+
+bool Track::isClosed() const { return impl()->isClosed(); }
+
+size_t Track::maxMessageSize() const { return impl()->maxMessageSize(); }
+
+void Track::sendFrame(binary data, FrameInfo info) {
+	impl()->outgoing(make_message(std::move(data), std::make_shared<FrameInfo>(std::move(info))));
+}
+
+void Track::sendFrame(const byte *data, size_t size, FrameInfo info) {
+	sendFrame(binary(data, data + size), std::move(info));
+}
+
+void Track::onFrame(std::function<void(binary data, FrameInfo frame)> callback) {
+	impl()->frameCallback = callback;
+	impl()->flushPendingMessages();
+}
+
+void Track::setMediaHandler(shared_ptr<MediaHandler> handler) {
+	impl()->setMediaHandler(std::move(handler));
+}
+
+void Track::chainMediaHandler(shared_ptr<MediaHandler> handler) {
+	if (auto first = impl()->getMediaHandler()) {
+		first->addToChain(handler);
+		handler->mediaChain(description());
+	} else {
+		impl()->setMediaHandler(std::move(handler));
+	}
+}
+
+bool Track::requestKeyframe(const std::vector<SSRC>& targetSSRCs, bool retransmit) {
+	// only request key frames for video
+	if (description().type() == "video")
+		if (auto handler = impl()->getMediaHandler())
+			return handler->requestKeyframe(targetSSRCs, retransmit, [this](message_ptr m) { impl()->transportSend(m); });
+
+	return false;
+}
+
+bool Track::requestKeyframe(SSRC ssrc, bool retransmit) {
+	return requestKeyframe(std::vector<SSRC>(1, ssrc), retransmit);
+}
+
+bool Track::requestBitrate(unsigned int bitrate) {
+	if (auto handler = impl()->getMediaHandler())
+		return handler->requestBitrate(bitrate,
+		                               [this](message_ptr m) { impl()->transportSend(m); });
+
+	return false;
+}
+
+bool Track::sendRtcpApp(uint32_t ssrc, const RtcpAppName &name, uint8_t subtype,
+                        const binary &data) {
+	// RTCP APP packets carry an explicit SSRC, so no handler context is needed: build and send
+	// the packet directly.
+	size_t packetSize = RtcpApp::SizeWithData(data.size());
+	auto message = make_message(packetSize, Message::Control);
+
+	auto app = reinterpret_cast<RtcpApp *>(message->data());
+	app->preparePacket(ssrc, name, subtype, data.size());
+
+	if (!data.empty())
+		std::memcpy(app->_data, data.data(), data.size());
+
+	return impl()->transportSend(std::move(message));
+}
+
+shared_ptr<MediaHandler> Track::getMediaHandler() { return impl()->getMediaHandler(); }
+
+} // namespace rtc

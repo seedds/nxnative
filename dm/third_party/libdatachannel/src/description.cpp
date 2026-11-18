@@ -1,0 +1,1785 @@
+/**
+ * Copyright (c) 2019-2020 Paul-Louis Ageneau
+ * Copyright (c) 2020 Staz Modrzynski
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#include "description.hpp"
+
+#include "impl/internals.hpp"
+#include "impl/utils.hpp"
+
+#include <algorithm>
+#include <numeric>
+#include <array>
+#include <cctype>
+#include <chrono>
+#include <iostream>
+#include <random>
+#include <sstream>
+#include <unordered_map>
+
+using std::chrono::system_clock;
+
+namespace {
+
+using std::string;
+using std::string_view;
+
+inline bool match_prefix(string_view str, string_view prefix) {
+	return str.size() >= prefix.size() &&
+	       std::mismatch(prefix.begin(), prefix.end(), str.begin()).first == prefix.end();
+}
+
+inline void trim_end(string &str) {
+	str.erase(
+	    std::find_if(str.rbegin(), str.rend(), [](char c) { return !std::isspace(c); }).base(),
+	    str.end());
+}
+
+inline string get_first_line(const string &str) {
+	string line;
+	std::istringstream ss(str);
+	std::getline(ss, line);
+	return line;
+}
+
+inline std::pair<string_view, string_view> parse_pair(string_view attr) {
+	string_view key, value;
+	if (size_t separator = attr.find(':'); separator != string::npos) {
+		key = attr.substr(0, separator);
+		value = attr.substr(separator + 1);
+	} else {
+		key = attr;
+	}
+	return std::make_pair(std::move(key), std::move(value));
+}
+
+inline std::vector<std::pair<string, string>> parse_attr_list(const string& attr_list) {
+	std::vector<std::pair<string, string>> attrs;
+
+	size_t pos = 0;
+	size_t end = attr_list.size();
+	while (pos < end) {
+		auto i = attr_list.find(';', pos);
+		if (i == string_view::npos) {
+			i = end;
+		}
+
+		const auto key_value = attr_list.substr(pos, i - pos);
+		const auto j = key_value.find('=');
+		if (j != string_view::npos) {
+			const auto key = key_value.substr(0, j);
+			const auto value = key_value.substr(j + 1);
+			if (!key.empty() && !value.empty()) {
+				attrs.emplace_back(key, value);
+			}
+		}
+
+		pos = i + 1;
+	}
+
+	return attrs;
+}
+
+template <typename T> T to_integer(string_view s) {
+	const string str(s);
+	try {
+		return std::is_signed<T>::value ? T(std::stol(str)) : T(std::stoul(str));
+	} catch (...) {
+		throw std::invalid_argument("Invalid integer \"" + str + "\" in description");
+	}
+}
+
+} // namespace
+
+namespace rtc {
+
+namespace utils = impl::utils;
+
+Description::Description(const string &sdp, Type type, Role role)
+    : mType(Type::Unspec), mRole(role) {
+	hintType(type);
+
+	int index = -1;
+	shared_ptr<Entry> current;
+	std::istringstream ss(sdp);
+	while (ss) {
+		string line;
+		std::getline(ss, line);
+		trim_end(line);
+		if (line.empty())
+			continue;
+
+		if (match_prefix(line, "m=")) { // Media description line (aka m-line)
+			current = createEntry(line.substr(2), std::to_string(++index), Direction::Unknown);
+
+		} else if (match_prefix(line, "o=")) { // Origin line
+			std::istringstream origin(line.substr(2));
+			origin >> mUsername >> mSessionId;
+
+		} else if (match_prefix(line, "a=")) { // Attribute line
+			string attr = line.substr(2);
+			auto [key, value] = parse_pair(attr);
+
+			if (key == "setup") {
+				if (value == "active")
+					mRole = Role::Active;
+				else if (value == "passive")
+					mRole = Role::Passive;
+				else
+					mRole = Role::ActPass;
+
+			} else if (key == "fingerprint") {
+				// RFC 8122: The fingerprint attribute may be either a session-level or a
+				// media-level SDP attribute. If it is a session-level attribute, it applies to all
+				// TLS sessions for which no media-level fingerprint attribute is defined.
+				if (!mFingerprint || index == 0) { // first media overrides session-level
+					auto fingerprintExploded = utils::explode(string(value), ' ');
+					if (fingerprintExploded.size() != 2) {
+						PLOG_WARNING << "Unknown SDP fingerprint format: " << value;
+						continue;
+					}
+
+					auto first = fingerprintExploded.at(0);
+					std::transform(first.begin(), first.end(), first.begin(),
+					               [](char c) { return char(std::tolower(c)); });
+
+					std::optional<CertificateFingerprint::Algorithm> fingerprintAlgorithm;
+
+					for (auto a : std::array<CertificateFingerprint::Algorithm, 5>{
+					         CertificateFingerprint::Algorithm::Sha1,
+					         CertificateFingerprint::Algorithm::Sha224,
+					         CertificateFingerprint::Algorithm::Sha256,
+					         CertificateFingerprint::Algorithm::Sha384,
+					         CertificateFingerprint::Algorithm::Sha512}) {
+						if (first == CertificateFingerprint::AlgorithmIdentifier(a)) {
+							fingerprintAlgorithm = a;
+							break;
+						}
+					}
+
+					if (fingerprintAlgorithm.has_value()) {
+						setFingerprint(CertificateFingerprint{
+						    fingerprintAlgorithm.value(), std::move(fingerprintExploded.at(1))});
+					} else {
+						PLOG_WARNING << "Unknown certificate fingerprint algorithm: " << first;
+					}
+				}
+			} else if (key == "ice-ufrag") {
+				// RFC 8839: The "ice-pwd" and "ice-ufrag" attributes can appear at either the
+				// session-level or media-level. When present in both, the value in the media-level
+				// takes precedence.
+				if (!mIceUfrag || index == 0) // media-level for first media overrides session-level
+					mIceUfrag = value;
+			} else if (key == "ice-pwd") {
+				// RFC 8839: The "ice-pwd" and "ice-ufrag" attributes can appear at either the
+				// session-level or media-level. When present in both, the value in the media-level
+				// takes precedence.
+				if (!mIcePwd || index == 0) // media-level for first media overrides session-level
+					mIcePwd = value;
+			} else if (key == "ice-options") {
+				// RFC 8839: The "ice-options" attribute is a session-level and media-level
+				// attribute.
+				if (mIceOptions.empty())
+					mIceOptions = utils::explode(string(value), ' ');
+			} else if (key == "candidate") {
+				addCandidate(Candidate(attr, bundleMid()));
+			} else if (key == "end-of-candidates") {
+				mEnded = true;
+			} else if (key == "group") {
+				// Ignore, it will be generated automatically
+			} else if (current) {
+				current->parseSdpLine(std::move(line));
+			} else {
+				mAttributes.emplace_back(attr);
+			}
+
+		} else if (current) {
+			current->parseSdpLine(std::move(line));
+		}
+	}
+
+	if (mUsername.empty())
+		mUsername = "rtc";
+
+	if (mSessionId.empty()) {
+		auto uniform = std::bind(std::uniform_int_distribution<uint32_t>(), utils::random_engine());
+		mSessionId = std::to_string(uniform());
+	}
+}
+
+Description::Description(const string &sdp, string typeString)
+    : Description(sdp, !typeString.empty() ? stringToType(typeString) : Type::Unspec,
+                  Role::ActPass) {}
+
+Description::Type Description::type() const { return mType; }
+
+string Description::typeString() const { return typeToString(mType); }
+
+Description::Role Description::role() const { return mRole; }
+
+string Description::bundleMid() const {
+	// Get the mid of the first non-removed media
+	for (const auto &entry : mEntries)
+		if (!entry->isRemoved())
+			return entry->mid();
+
+	return "0";
+}
+
+optional<string> Description::iceUfrag() const { return mIceUfrag; }
+
+std::vector<string> Description::iceOptions() const { return mIceOptions; }
+
+optional<string> Description::icePwd() const { return mIcePwd; }
+
+optional<CertificateFingerprint> Description::fingerprint() const { return mFingerprint; }
+
+bool Description::ended() const { return mEnded; }
+
+void Description::hintType(Type type) {
+	if (mType == Type::Unspec)
+		mType = type;
+}
+
+void Description::addIceOption(string option) {
+	if (std::find(mIceOptions.begin(), mIceOptions.end(), option) == mIceOptions.end())
+		mIceOptions.emplace_back(std::move(option));
+}
+
+void Description::removeIceOption(const string &option) {
+	mIceOptions.erase(std::remove(mIceOptions.begin(), mIceOptions.end(), option),
+	                  mIceOptions.end());
+}
+
+void Description::setIceAttribute(string ufrag, string pwd) {
+	mIceUfrag = std::move(ufrag);
+	mIcePwd = std::move(pwd);
+}
+
+void Description::setFingerprint(CertificateFingerprint f) {
+	if (!f.isValid())
+		throw std::invalid_argument("Invalid " +
+		                            CertificateFingerprint::AlgorithmIdentifier(f.algorithm) +
+		                            " fingerprint \"" + f.value + "\"");
+
+	std::transform(f.value.begin(), f.value.end(), f.value.begin(),
+	               [](char c) { return char(std::toupper(c)); });
+	mFingerprint = std::move(f);
+}
+
+std::vector<string> Description::Entry::attributes() const { return mAttributes; }
+
+void Description::Entry::addAttribute(string attr) {
+	if (std::find(mAttributes.begin(), mAttributes.end(), attr) == mAttributes.end())
+		mAttributes.emplace_back(std::move(attr));
+}
+
+void Description::Entry::removeAttribute(const string &attr) {
+	mAttributes.erase(
+	    std::remove_if(mAttributes.begin(), mAttributes.end(),
+	                   [&](const auto &a) { return a == attr || parse_pair(a).first == attr; }),
+	    mAttributes.end());
+}
+
+std::vector<Candidate> Description::candidates() const { return mCandidates; }
+
+std::vector<Candidate> Description::extractCandidates() {
+	std::vector<Candidate> result;
+	std::swap(mCandidates, result);
+	mEnded = false;
+	return result;
+}
+
+bool Description::hasCandidate(const Candidate &candidate) const {
+	return std::find(mCandidates.begin(), mCandidates.end(), candidate) != mCandidates.end();
+}
+
+void Description::addCandidate(Candidate candidate) {
+	candidate.hintMid(bundleMid());
+
+	if (!hasCandidate(candidate))
+		mCandidates.emplace_back(std::move(candidate));
+}
+
+void Description::addCandidates(std::vector<Candidate> candidates) {
+	for (Candidate candidate : candidates)
+		addCandidate(std::move(candidate));
+}
+
+void Description::endCandidates() { mEnded = true; }
+
+Description::operator string() const { return generateSdp("\r\n"); }
+
+string Description::generateSdp(string_view eol) const {
+	std::ostringstream sdp;
+	sdp.imbue(std::locale::classic());
+
+	// Header
+	sdp << "v=0" << eol;
+	sdp << "o=" << mUsername << " " << mSessionId << " 0 IN IP4 127.0.0.1" << eol;
+	sdp << "s=-" << eol;
+	sdp << "t=0 0" << eol;
+
+	// BUNDLE (RFC 8843 Negotiating Media Multiplexing Using the Session Description Protocol)
+	// https://www.rfc-editor.org/rfc/rfc8843.html
+	std::ostringstream bundleGroup;
+	bundleGroup.imbue(std::locale::classic());
+	for (const auto &entry : mEntries)
+		if (!entry->isRemoved())
+			bundleGroup << ' ' << entry->mid();
+
+	if (!bundleGroup.str().empty())
+		sdp << "a=group:BUNDLE" << bundleGroup.str() << eol;
+
+	// Lip-sync
+	std::ostringstream lsGroup;
+	lsGroup.imbue(std::locale::classic());
+	for (const auto &entry : mEntries)
+		if (!entry->isRemoved() && entry != mApplication)
+			lsGroup << ' ' << entry->mid();
+
+	if (!lsGroup.str().empty())
+		sdp << "a=group:LS" << lsGroup.str() << eol;
+
+	// Session-level attributes
+	sdp << "a=msid-semantic:WMS *" << eol;
+	if (!mIceOptions.empty())
+		sdp << "a=ice-options:" << utils::implode(mIceOptions, ' ') << eol;
+	if (mFingerprint)
+		sdp << "a=fingerprint:"
+		    << CertificateFingerprint::AlgorithmIdentifier(mFingerprint->algorithm) << " "
+		    << mFingerprint->value << eol;
+
+	for (const auto &attr : mAttributes)
+		sdp << "a=" << attr << eol;
+
+	auto cand = defaultCandidate();
+	const string addr = cand && cand->isResolved()
+	                        ? (string(cand->family() == Candidate::Family::Ipv6 ? "IP6" : "IP4") +
+	                           " " + *cand->address())
+	                        : "IP4 0.0.0.0";
+	const uint16_t port =
+	    cand && cand->isResolved() ? *cand->port() : 9; // Port 9 is the discard protocol
+
+	// Entries
+	bool first = true;
+	for (const auto &entry : mEntries) {
+		sdp << entry->generateSdp(eol, addr, port);
+
+		// RFC 8829: Attributes that SDP permits to be at either the session level or the media level
+		// SHOULD generally be at the media level even if they are identical.
+		sdp << "a=setup:" << mRole << eol;
+		if (mIceUfrag)
+			sdp << "a=ice-ufrag:" << *mIceUfrag << eol;
+		if (mIcePwd)
+			sdp << "a=ice-pwd:" << *mIcePwd << eol;
+
+		if (!entry->isRemoved() && std::exchange(first, false)) {
+			// Candidates
+			for (const auto &candidate : mCandidates)
+				sdp << string(candidate) << eol;
+
+			if (mEnded)
+				sdp << "a=end-of-candidates" << eol;
+		}
+	}
+
+	return sdp.str();
+}
+
+string Description::generateApplicationSdp(string_view eol) const {
+	std::ostringstream sdp;
+	sdp.imbue(std::locale::classic());
+
+	// Header
+	sdp << "v=0" << eol;
+	sdp << "o=" << mUsername << " " << mSessionId << " 0 IN IP4 127.0.0.1" << eol;
+	sdp << "s=-" << eol;
+	sdp << "t=0 0" << eol;
+
+	auto cand = defaultCandidate();
+	const string addr = cand && cand->isResolved()
+	                        ? (string(cand->family() == Candidate::Family::Ipv6 ? "IP6" : "IP4") +
+	                           " " + *cand->address())
+	                        : "IP4 0.0.0.0";
+	const uint16_t port =
+	    cand && cand->isResolved() ? *cand->port() : 9; // Port 9 is the discard protocol
+
+	// Session-level attributes
+	sdp << "a=msid-semantic:WMS *" << eol;
+	if (!mIceOptions.empty())
+		sdp << "a=ice-options:" << utils::implode(mIceOptions, ' ') << eol;
+
+	for (const auto &attr : mAttributes)
+		sdp << "a=" << attr << eol;
+
+	// Application
+	auto app = mApplication ? mApplication : std::make_shared<Application>();
+	sdp << app->generateSdp(eol, addr, port);
+
+	// Media-level attributes
+	sdp << "a=setup:" << mRole << eol;
+	if (mIceUfrag)
+		sdp << "a=ice-ufrag:" << *mIceUfrag << eol;
+	if (mIcePwd)
+		sdp << "a=ice-pwd:" << *mIcePwd << eol;
+	if (mFingerprint)
+		sdp << "a=fingerprint:"
+		    << CertificateFingerprint::AlgorithmIdentifier(mFingerprint->algorithm) << " "
+		    << mFingerprint->value << eol;
+
+	// Candidates
+	for (const auto &candidate : mCandidates)
+		sdp << string(candidate) << eol;
+
+	if (mEnded)
+		sdp << "a=end-of-candidates" << eol;
+
+	return sdp.str();
+}
+
+optional<Candidate> Description::defaultCandidate() const {
+	// Return the first host candidate with highest priority, favoring IPv4
+	optional<Candidate> result;
+	for (const auto &c : mCandidates) {
+		if (c.type() == Candidate::Type::Host) {
+			if (!result ||
+			    (result->family() == Candidate::Family::Ipv6 &&
+			     c.family() == Candidate::Family::Ipv4) ||
+			    (result->family() == c.family() && result->priority() < c.priority()))
+				result.emplace(c);
+		}
+	}
+	return result;
+}
+
+shared_ptr<Description::Entry> Description::createEntry(string mline, string mid, Direction dir) {
+	string type = mline.substr(0, mline.find(' '));
+	if (type == "application") {
+		removeApplication();
+		mApplication = std::make_shared<Application>(mline, std::move(mid));
+		mEntries.emplace_back(mApplication);
+		return mApplication;
+	} else {
+		auto media = std::make_shared<Media>(std::move(mline), std::move(mid), dir);
+		mEntries.emplace_back(media);
+		return media;
+	}
+}
+
+void Description::removeApplication() {
+	if (!mApplication)
+		return;
+
+	auto it = std::find(mEntries.begin(), mEntries.end(), mApplication);
+	if (it != mEntries.end())
+		mEntries.erase(it);
+
+	mApplication.reset();
+}
+
+static std::vector<int> availablePayloadTypes(const Description::Media *media) {
+	std::vector<int> allPt(32);
+	std::iota(allPt.begin(), allPt.end(), 96);
+	auto usedPt = media->payloadTypes();
+	std::sort(usedPt.begin(), usedPt.end());
+	std::vector<int> availablePt;
+	std::set_difference(allPt.begin(), allPt.end(), usedPt.begin(), usedPt.end(),
+	                    std::back_inserter(availablePt));
+	return availablePt;
+}
+
+void Description::addRtx(optional<unsigned int> clockRate, bool audio) {
+	for (int i = 0; i < mediaCount(); ++i) {
+		if (!std::holds_alternative<Media *>(media(i)))
+		    continue;
+
+		Media *med = std::get<Media*>(media(i));
+
+		// Apply to video always. Apply to audio only if requested
+		string mediaType = med->type();
+		if (mediaType == "audio" && !audio)
+			continue;
+		if (mediaType != "audio" && mediaType != "video")
+			continue;
+
+		// Collect non-RTX codecs that don't already have an RTX entry
+		std::vector<int> codecsNeedingRtx;
+		for (int pt : med->payloadTypes()) {
+			auto *rtp = med->rtpMap(pt);
+			if (rtp->format == "RTX" || rtp->format == "rtx")
+				continue;
+			if (med->getRtxPayloadType(pt).has_value())
+				continue;
+			codecsNeedingRtx.push_back(pt);
+		}
+
+		// Find available dynamic payload types via set difference
+		auto availablePt = availablePayloadTypes(med);
+		std::reverse(availablePt.begin(), availablePt.end());
+
+		for (int origPt : codecsNeedingRtx) {
+			if (availablePt.empty())
+				break;
+
+			int rtxPt = availablePt.back();
+			availablePt.pop_back();
+
+			auto *rtp = med->rtpMap(origPt);
+			unsigned int rate = clockRate.value_or(rtp->clockRate);
+			med->addRtxCodec(rtxPt, origPt, rate);
+		}
+	}
+}
+
+bool Description::hasApplication() const { return mApplication && !mApplication->isRemoved(); }
+
+bool Description::hasAudioOrVideo() const {
+	for (auto entry : mEntries)
+		if (entry != mApplication && !entry->isRemoved())
+			return true;
+
+	return false;
+}
+
+bool Description::hasMid(string_view mid) const {
+	for (const auto &entry : mEntries)
+		if (entry->mid() == mid)
+			return true;
+
+	return false;
+}
+
+int Description::addMedia(Media media) {
+	mEntries.emplace_back(std::make_shared<Media>(std::move(media)));
+	return int(mEntries.size()) - 1;
+}
+
+int Description::addMedia(Application application) {
+	removeApplication();
+	mApplication = std::make_shared<Application>(std::move(application));
+	mEntries.emplace_back(mApplication);
+	return int(mEntries.size()) - 1;
+}
+
+int Description::addApplication(string mid) { return addMedia(Application(std::move(mid))); }
+
+const Description::Application *Description::application() const { return mApplication.get(); }
+
+Description::Application *Description::application() { return mApplication.get(); }
+
+int Description::addVideo(string mid, Direction dir) {
+	return addMedia(Video(std::move(mid), dir));
+}
+
+int Description::addAudio(string mid, Direction dir) {
+	return addMedia(Audio(std::move(mid), dir));
+}
+
+void Description::clearMedia() {
+	mEntries.clear();
+	mApplication.reset();
+}
+
+variant<Description::Media *, Description::Application *> Description::media(int index) {
+	if (index < 0 || index >= int(mEntries.size()))
+		throw std::out_of_range("Media index out of range");
+
+	const auto &entry = mEntries[index];
+	if (entry == mApplication) {
+		auto result = dynamic_cast<Application *>(entry.get());
+		if (!result)
+			throw std::logic_error("Bad type of application in description");
+
+		return result;
+
+	} else {
+		auto result = dynamic_cast<Media *>(entry.get());
+		if (!result)
+			throw std::logic_error("Bad type of media in description");
+
+		return result;
+	}
+}
+
+variant<const Description::Media *, const Description::Application *> Description::media(int index) const {
+	if (index < 0 || index >= int(mEntries.size()))
+		throw std::out_of_range("Media index out of range");
+
+	const auto &entry = mEntries[index];
+	if (entry == mApplication) {
+		auto result = dynamic_cast<Application *>(entry.get());
+		if (!result)
+			throw std::logic_error("Bad type of application in description");
+
+		return result;
+
+	} else {
+		auto result = dynamic_cast<Media *>(entry.get());
+		if (!result)
+			throw std::logic_error("Bad type of media in description");
+
+		return result;
+	}
+}
+
+int Description::mediaCount() const { return int(mEntries.size()); }
+
+string Description::sessionId() const { return mSessionId; }
+
+Description::RidAttribute::RidAttribute(string name, string value) : mName(std::move(name)), mValue(std::move(value)) {}
+
+const string &Description::RidAttribute::name() const {
+	return mName;
+}
+
+const string &Description::RidAttribute::value() const {
+	return mValue;
+}
+
+void Description::RidAttribute::value(string value) {
+	mValue = std::move(value);
+}
+
+Description::Rid::Rid(string rid) : mRid(std::move(rid)) {}
+
+Description::Rid::Rid(string rid, std::vector<RidAttribute> attributes) : mRid(std::move(rid)), mAttributes(std::move(attributes)) {}
+
+const string &Description::Rid::rid() const { return mRid; }
+
+const std::vector<Description::RidAttribute> &Description::Rid::attributes() const { return mAttributes; }
+
+Description::RidBuilder::RidBuilder(string rid) : mRid(std::move(rid)) {}
+
+Description::RidBuilder& Description::RidBuilder::max_width(uint32_t value) {
+	return saveAttribute("max-width", std::to_string(value));
+}
+
+Description::RidBuilder& Description::RidBuilder::max_height(uint32_t value) {
+	return saveAttribute("max-height", std::to_string(value));
+}
+
+Description::RidBuilder& Description::RidBuilder::max_fps(uint32_t value) {
+	return saveAttribute("max-fps", std::to_string(value));
+}
+
+Description::RidBuilder& Description::RidBuilder::max_br(uint32_t value) {
+	return saveAttribute("max-br", std::to_string(value));
+}
+
+Description::RidBuilder& Description::RidBuilder::custom(string key, string value) {
+	return saveAttribute(std::move(key), std::move(value));
+}
+
+Description::Rid Description::RidBuilder::build() {
+	return {std::move(mRid), std::move(mAttributes)};
+}
+
+Description::RidBuilder& Description::RidBuilder::saveAttribute(string key, string value) {
+	const auto iter = std::find_if(mAttributes.begin(), mAttributes.end(),
+		[&key](const RidAttribute &attr) { return attr.name() == key; }
+	);
+	if (iter != mAttributes.end()) {
+		iter->value(std::move(value));
+	} else {
+		mAttributes.emplace_back(std::move(key), std::move(value));
+	}
+	return *this;
+}
+
+Description::Entry::Entry(const string &mline, string mid, Direction dir)
+    : mMid(std::move(mid)), mDirection(dir) {
+
+	uint16_t port = 0;
+	std::istringstream ss(match_prefix(mline, "m=") ? mline.substr(2) : mline);
+	ss >> mType;
+	ss >> port;
+	ss >> mProtocol;
+	ss >> std::ws;
+	std::getline(ss, mDescription);
+
+	if (mType.empty() || mProtocol.empty())
+		throw std::invalid_argument("Invalid media description line");
+
+	// RFC 3264: Existing media streams are removed by creating a new SDP with the port number for
+	// that stream set to zero.
+	// RFC 8843: If the offerer assigns a zero port value to a bundled "m=" section, but does not
+	// include an SDP 'bundle-only' attribute in the "m=" section, it is an indication that the
+	// offerer wants to disable the "m=" section.
+	mIsRemoved = (port == 0);
+}
+
+string Description::Entry::type() const { return mType; }
+
+string Description::Entry::protocol() const { return mProtocol; }
+
+string Description::Entry::description() const { return mDescription; }
+
+string Description::Entry::mid() const { return mMid; }
+
+Description::Direction Description::Entry::direction() const { return mDirection; }
+
+void Description::Entry::setDirection(Direction dir) { mDirection = dir; }
+
+bool Description::Entry::isRemoved() const { return mIsRemoved; }
+
+void Description::Entry::markRemoved() { mIsRemoved = true; }
+
+std::vector<string> Description::attributes() const { return mAttributes; }
+
+void Description::addAttribute(string attr) {
+	if (std::find(mAttributes.begin(), mAttributes.end(), attr) == mAttributes.end())
+		mAttributes.emplace_back(std::move(attr));
+}
+
+void Description::Entry::addRid(string rid) {
+	mRids.emplace_back(std::move(rid));
+}
+
+void Description::Entry::addRid(Rid rid) {
+	mRids.emplace_back(std::move(rid));
+}
+
+std::vector<Description::Rid> Description::Entry::rids() const {
+	return mRids;
+}
+
+void Description::removeAttribute(const string &attr) {
+	mAttributes.erase(
+	    std::remove_if(mAttributes.begin(), mAttributes.end(),
+	                   [&](const auto &a) { return a == attr || parse_pair(a).first == attr; }),
+	    mAttributes.end());
+}
+
+std::vector<int> Description::Entry::extIds() const {
+	std::vector<int> result;
+	for (auto it = mExtMaps.begin(); it != mExtMaps.end(); ++it)
+		result.push_back(it->first);
+
+	return result;
+}
+
+Description::Entry::ExtMap *Description::Entry::extMap(int id) {
+	auto it = mExtMaps.find(id);
+	if (it == mExtMaps.end())
+		throw std::invalid_argument("extmap not found");
+
+	return &it->second;
+}
+
+const Description::Entry::ExtMap *Description::Entry::extMap(int id) const {
+	auto it = mExtMaps.find(id);
+	if (it == mExtMaps.end())
+		throw std::invalid_argument("extmap not found");
+
+	return &it->second;
+}
+
+void Description::Entry::addExtMap(ExtMap map) {
+	auto id = map.id;
+	mExtMaps.emplace(id, std::move(map));
+}
+
+void Description::Entry::removeExtMap(int id) { mExtMaps.erase(id); }
+
+Description::Entry::operator string() const { return generateSdp("\r\n", "IP4 0.0.0.0", 9); }
+
+string Description::Entry::generateSdp(string_view eol, string_view addr, uint16_t port) const {
+	std::ostringstream sdp;
+	sdp.imbue(std::locale::classic());
+	// RFC 3264: Existing media streams are removed by creating a new SDP with the port number for
+	// that stream set to zero. [...] A stream that is offered with a port of zero MUST be marked
+	// with port zero in the answer.
+	sdp << "m=" << type() << ' ' << (mIsRemoved ? 0 : port) << ' ' << protocol() << ' '
+	    << description() << eol;
+	sdp << "c=IN " << addr << eol;
+	sdp << generateSdpLines(eol);
+
+	return sdp.str();
+}
+
+string Description::Entry::generateSdpLines(string_view eol) const {
+	std::ostringstream sdp;
+	sdp.imbue(std::locale::classic());
+	sdp << "a=mid:" << mMid << eol;
+
+	for (auto it = mExtMaps.begin(); it != mExtMaps.end(); ++it) {
+		auto &map = it->second;
+
+		sdp << "a=extmap:" << map.id;
+		if (map.direction != Direction::Unknown)
+			sdp << '/' << map.direction;
+
+		sdp << ' ' << map.uri;
+		if (!map.attributes.empty())
+			sdp << ' ' << map.attributes;
+
+		sdp << eol;
+	}
+
+	if (mDirection != Direction::Unknown)
+		sdp << "a=" << mDirection << eol;
+
+	// Do not reciprocate unknown transport attributes
+	const std::array ignoredPrefixes{"ice-", "dtls-", "sctp-"};
+
+	for (const auto &attr : mAttributes) {
+		if (std::any_of(ignoredPrefixes.begin(), ignoredPrefixes.end(),
+		                [&](string_view prefix) { return match_prefix(attr, prefix); })) {
+			continue;
+		}
+
+		if (mRids.size() != 0 && match_prefix(attr, "ssrc:")) {
+			continue;
+		}
+
+		sdp << "a=" << attr << eol;
+	}
+
+	for (const auto &rid : mRids) {
+		sdp << "a=rid:" << rid.rid() << " send";
+
+		const auto &attributes = rid.attributes();
+		if (!attributes.empty()) {
+			sdp << " ";
+
+			bool first = true;
+			for (const auto &attr : attributes) {
+				if (first) {
+					first = false;
+				} else {
+					sdp << ";";
+				}
+				sdp << attr.name() << "=" << attr.value();
+			}
+		}
+
+		sdp << eol;
+	}
+
+	if (!mRids.empty()) {
+		sdp << "a=simulcast:send ";
+
+		bool first = true;
+		for (const auto &rid : mRids) {
+			if (first) {
+				first = false;
+			} else {
+				sdp << ";";
+			}
+
+			sdp << rid.rid();
+		}
+
+		sdp << eol;
+	}
+
+	return sdp.str();
+}
+
+void Description::Entry::parseSdpLine(string_view line) {
+	if (match_prefix(line, "a=")) {
+		string_view attr = line.substr(2);
+		auto [key, value] = parse_pair(attr);
+
+		if (key == "mid") {
+			mMid = value;
+		} else if (key == "extmap") {
+			auto id = Description::Media::ExtMap::parseId(value);
+			auto it = mExtMaps.find(id);
+			if (it == mExtMaps.end())
+				it = mExtMaps.insert(std::make_pair(id, Description::Media::ExtMap(value))).first;
+			else
+				it->second.setDescription(value);
+
+		} else if (attr == "sendonly")
+			mDirection = Direction::SendOnly;
+		else if (attr == "recvonly")
+			mDirection = Direction::RecvOnly;
+		else if (key == "sendrecv")
+			mDirection = Direction::SendRecv;
+		else if (key == "inactive")
+			mDirection = Direction::Inactive;
+		else if (key == "bundle-only") {
+			// RFC 8843: When an offerer generates a subsequent offer, in which it wants to disable
+			// a bundled "m=" section from a BUNDLE group, the offerer [...] MUST NOT assign an SDP
+			// 'bundle-only' attribute to the "m=" section.
+			mIsRemoved = false;
+		} else if (key == "rid") {
+			// "a:rid=foo send" or optionally "a:rid=foo send abc=def;x=y;m=n"
+			const auto list = utils::explode(string(value), ' ');
+			if (list.size() < 2) {
+				throw std::invalid_argument("Invalid rid line \"" + string(line) + "\" in description");
+			}
+
+			const auto& rid = list[0];
+			const auto& direction = list[1];
+
+			auto builder = RidBuilder(rid);
+
+			if (list.size() >= 3) {
+				const auto attr_list_parsed = parse_attr_list(list[2]);
+				for (const auto& [attr_key, attr_value] : attr_list_parsed) {
+					if (attr_key == "max-width") {
+						builder.max_width(to_integer<uint32_t>(attr_value));
+					} else if (attr_key == "max-height") {
+						builder.max_height(to_integer<uint32_t>(attr_value));
+					} else if (attr_key == "max-br") {
+						builder.max_br(to_integer<uint32_t>(attr_value));
+					} else if (attr_key == "max-fps") {
+						builder.max_fps(to_integer<uint32_t>(attr_value));
+					} else {
+						builder.custom(attr_key, attr_value);
+					}
+				}
+			}
+
+			// TODO - we don't store direction anywhere for now
+			(void) direction;
+
+			addRid(builder.build());
+		} else {
+			mAttributes.emplace_back(attr);
+		}
+	}
+}
+
+int Description::Entry::ExtMap::parseId(string_view description) {
+	size_t p = description.find(' ');
+	return to_integer<int>(description.substr(0, p));
+}
+
+Description::Entry::ExtMap::ExtMap(int id, string uri, Direction direction) {
+	this->id = id;
+	this->uri = std::move(uri);
+	this->direction = direction;
+}
+
+Description::Entry::ExtMap::ExtMap(string_view description) { setDescription(description); }
+
+void Description::Entry::ExtMap::setDescription(string_view description) {
+	const size_t uriStart = description.find(' ');
+	if (uriStart == string::npos)
+		throw std::invalid_argument("Invalid description for extmap");
+
+	const string_view idAndDirection = description.substr(0, uriStart);
+	const size_t idSplit = idAndDirection.find('/');
+	if (idSplit == string::npos) {
+		this->id = to_integer<int>(idAndDirection);
+	} else {
+		this->id = to_integer<int>(idAndDirection.substr(0, idSplit));
+
+		const string_view directionStr = idAndDirection.substr(idSplit + 1);
+		if (directionStr == "sendonly")
+			this->direction = Direction::SendOnly;
+		else if (directionStr == "recvonly")
+			this->direction = Direction::RecvOnly;
+		else if (directionStr == "sendrecv")
+			this->direction = Direction::SendRecv;
+		else if (directionStr == "inactive")
+			this->direction = Direction::Inactive;
+		else
+			throw std::invalid_argument("Invalid direction for extmap");
+	}
+
+	const string_view uriAndAttributes = description.substr(uriStart + 1);
+	const size_t attributeSplit = uriAndAttributes.find(' ');
+
+	if (attributeSplit == string::npos)
+		this->uri = uriAndAttributes;
+	else {
+		this->uri = uriAndAttributes.substr(0, attributeSplit);
+		this->attributes = uriAndAttributes.substr(attributeSplit + 1);
+	}
+}
+
+void Description::Media::addSSRC(uint32_t ssrc, optional<string> name, optional<string> msid,
+                                 optional<string> trackId) {
+	if (name) {
+		mAttributes.emplace_back("ssrc:" + std::to_string(ssrc) + " cname:" + *name);
+		mCNameMap.emplace(ssrc, *name);
+	} else {
+		mAttributes.emplace_back("ssrc:" + std::to_string(ssrc));
+	}
+
+	if (msid) {
+		mAttributes.emplace_back("ssrc:" + std::to_string(ssrc) + " msid:" + *msid + " " +
+		                         trackId.value_or(*msid));
+		mAttributes.emplace_back("msid:" + *msid + " " + trackId.value_or(*msid));
+	}
+
+	mSsrcs.emplace_back(ssrc);
+}
+
+void Description::Media::removeSSRC(uint32_t ssrc) {
+	string prefix = "ssrc:" + std::to_string(ssrc);
+	mAttributes.erase(std::remove_if(mAttributes.begin(), mAttributes.end(),
+	                                 [&](const auto &a) { return match_prefix(a, prefix); }),
+	                  mAttributes.end());
+
+	mSsrcs.erase(std::remove(mSsrcs.begin(), mSsrcs.end(), ssrc), mSsrcs.end());
+}
+
+void Description::Media::replaceSSRC(uint32_t old, uint32_t ssrc, optional<string> name,
+                                     optional<string> msid, optional<string> trackID) {
+	removeSSRC(old);
+	addSSRC(ssrc, std::move(name), std::move(msid), std::move(trackID));
+}
+
+bool Description::Media::hasSSRC(uint32_t ssrc) const {
+	return std::find(mSsrcs.begin(), mSsrcs.end(), ssrc) != mSsrcs.end();
+}
+
+void Description::Media::clearSSRCs() {
+	auto it = mAttributes.begin();
+	while (it != mAttributes.end()) {
+		if (match_prefix(*it, "ssrc:"))
+			it = mAttributes.erase(it);
+		else
+			++it;
+	}
+
+	mSsrcs.clear();
+	mCNameMap.clear();
+	mSsrcToRtxSsrc.clear();
+}
+
+std::vector<uint32_t> Description::Media::getSSRCs() const { return mSsrcs; }
+
+optional<string> Description::Media::getCNameForSsrc(uint32_t ssrc) const {
+	auto it = mCNameMap.find(ssrc);
+	if (it != mCNameMap.end()) {
+		return it->second;
+	}
+	return nullopt;
+}
+
+void Description::Media::addRtxSSRC(SSRC primarySsrc, SSRC rtxSsrc, optional<string> cname) {
+	mSsrcToRtxSsrc[primarySsrc] = rtxSsrc;
+
+	// Add the RTX SSRC to mSsrcs if not already present
+	if (!hasSSRC(rtxSsrc)) {
+		if (cname) {
+			std::ostringstream attr;
+			attr.imbue(std::locale::classic());
+			attr << "ssrc:" << rtxSsrc << " cname:" << *cname;
+			mAttributes.emplace_back(attr.str());
+			mCNameMap.emplace(rtxSsrc, *cname);
+		} else {
+			std::ostringstream attr;
+			attr.imbue(std::locale::classic());
+			attr << "ssrc:" << rtxSsrc;
+			mAttributes.emplace_back(attr.str());
+		}
+		mSsrcs.emplace_back(rtxSsrc);
+	}
+}
+
+void Description::Media::removeRtxSSRC(SSRC primarySsrc) {
+	auto it = mSsrcToRtxSsrc.find(primarySsrc);
+	if (it != mSsrcToRtxSsrc.end()) {
+		SSRC rtxSsrc = it->second;
+		removeSSRC(rtxSsrc);
+		mSsrcToRtxSsrc.erase(it);
+	}
+}
+
+optional<SSRC> Description::Media::getRtxSsrcForSsrc(SSRC primarySsrc) const {
+	auto it = mSsrcToRtxSsrc.find(primarySsrc);
+	if (it != mSsrcToRtxSsrc.end()) {
+		return it->second;
+	}
+	return nullopt;
+}
+
+optional<SSRC> Description::Media::getSsrcForRtxSsrc(SSRC rtxSsrc) const {
+	for (const auto &[primary, rtx] : mSsrcToRtxSsrc) {
+		if (rtx == rtxSsrc) {
+			return primary;
+		}
+	}
+	return nullopt;
+}
+
+Description::Application::Application(string mid)
+    : Entry("application 9 UDP/DTLS/SCTP webrtc-datachannel", std::move(mid), Direction::SendRecv) {
+}
+
+Description::Application::Application(const string &mline, string mid)
+    : Entry(mline, std::move(mid), Direction::SendRecv) {}
+
+Description::Application Description::Application::reciprocate() const {
+	Application reciprocated(*this);
+
+	reciprocated.mMaxMessageSize.reset();
+
+	return reciprocated;
+}
+
+void Description::Application::setSctpPort(uint16_t port) { mSctpPort = port; }
+
+void Description::Application::hintSctpPort(uint16_t port) { mSctpPort = mSctpPort.value_or(port); }
+
+void Description::Application::setMaxMessageSize(size_t size) { mMaxMessageSize = size; }
+
+optional<uint16_t> Description::Application::sctpPort() const { return mSctpPort; }
+
+optional<size_t> Description::Application::maxMessageSize() const { return mMaxMessageSize; }
+
+string Description::Application::generateSdpLines(string_view eol) const {
+	std::ostringstream sdp;
+	sdp.imbue(std::locale::classic());
+	sdp << Entry::generateSdpLines(eol);
+
+	if (mSctpPort)
+		sdp << "a=sctp-port:" << *mSctpPort << eol;
+
+	if (mMaxMessageSize)
+		sdp << "a=max-message-size:" << *mMaxMessageSize << eol;
+
+	return sdp.str();
+}
+
+void Description::Application::parseSdpLine(string_view line) {
+	if (match_prefix(line, "a=")) {
+		string_view attr = line.substr(2);
+		auto [key, value] = parse_pair(attr);
+
+		if (key == "sctp-port") {
+			mSctpPort = to_integer<uint16_t>(value);
+		} else if (key == "max-message-size") {
+			mMaxMessageSize = to_integer<size_t>(value);
+		} else {
+			Entry::parseSdpLine(line);
+		}
+	} else {
+		Entry::parseSdpLine(line);
+	}
+}
+
+Description::Media::Media(const string &mline, string mid, Direction dir)
+    : Entry(mline, std::move(mid), dir) {
+	std::istringstream ss(Entry::description());
+	int payloadType;
+	while (ss >> payloadType)
+		mOrderedPayloadTypes.push_back(payloadType);
+}
+
+Description::Media::Media(const string &sdp) : Media(get_first_line(sdp), "", Direction::Unknown) {
+	string line;
+	std::istringstream ss(sdp);
+	std::getline(ss, line); // discard first line
+	while (ss) {
+		std::getline(ss, line);
+		trim_end(line);
+		if (line.empty())
+			continue;
+
+		parseSdpLine(line);
+	}
+
+	if (mid().empty())
+		throw std::invalid_argument("Missing mid in media description");
+}
+
+string Description::Media::description() const {
+	std::ostringstream ss;
+	ss.imbue(std::locale::classic());
+	for (auto it = mOrderedPayloadTypes.begin(); it != mOrderedPayloadTypes.end(); ++it) {
+		if (it != mOrderedPayloadTypes.begin())
+			ss << ' ';
+
+		ss << *it;
+	}
+
+	return ss.str();
+}
+
+Description::Media Description::Media::reciprocate() const {
+	Media reciprocated(*this);
+
+	// Invert direction
+	switch (reciprocated.direction()) {
+	case Direction::RecvOnly:
+		reciprocated.setDirection(Direction::SendOnly);
+		break;
+	case Direction::SendOnly:
+		reciprocated.setDirection(Direction::RecvOnly);
+		break;
+	default:
+		// We are good
+		break;
+	}
+
+	// Invert directions of extmap
+	auto &extMaps = reciprocated.mExtMaps;
+	for (auto it = extMaps.begin(); it != extMaps.end(); ++it) {
+		auto &map = it->second;
+		switch (map.direction) {
+		case Direction::RecvOnly:
+			map.direction = Direction::SendOnly;
+			break;
+		case Direction::SendOnly:
+			map.direction = Direction::RecvOnly;
+			break;
+		default:
+			// We are good
+			break;
+		}
+	}
+
+	// Clear sent SSRCs
+	reciprocated.clearSSRCs();
+
+	// Remove rtcp-rsize attribute as Reduced-Size RTCP is not supported (see RFC 5506)
+	reciprocated.removeAttribute("rtcp-rsize");
+
+	return reciprocated;
+}
+
+int Description::Media::bitrate() const { return mBas; }
+
+void Description::Media::setBitrate(int bitrate) { mBas = bitrate; }
+
+bool Description::Media::hasPayloadType(int payloadType) const {
+	return mRtpMaps.find(payloadType) != mRtpMaps.end();
+}
+
+std::vector<int> Description::Media::payloadTypes() const { return mOrderedPayloadTypes; }
+
+Description::Media::RtpMap *Description::Media::rtpMap(int payloadType) {
+	auto it = mRtpMaps.find(payloadType);
+	if (it == mRtpMaps.end())
+		throw std::invalid_argument("rtpmap not found");
+
+	return &it->second;
+}
+
+const Description::Media::RtpMap *Description::Media::rtpMap(int payloadType) const {
+	auto it = mRtpMaps.find(payloadType);
+	if (it == mRtpMaps.end())
+		throw std::invalid_argument("rtpmap not found");
+
+	return &it->second;
+}
+
+void Description::Media::addRtpMap(RtpMap map) {
+	int payloadType = map.payloadType;
+	if (std::find(mOrderedPayloadTypes.begin(), mOrderedPayloadTypes.end(), payloadType) ==
+	    mOrderedPayloadTypes.end())
+		mOrderedPayloadTypes.push_back(payloadType);
+
+	mRtpMaps.emplace(payloadType, std::move(map));
+}
+
+void Description::Media::removeRtpMap(int payloadType) {
+	// Remove the actual format
+	mOrderedPayloadTypes.erase(
+	    std::remove(mOrderedPayloadTypes.begin(), mOrderedPayloadTypes.end(), payloadType),
+	    mOrderedPayloadTypes.end());
+	mRtpMaps.erase(payloadType);
+
+	// Remove any other rtpmaps that depend on the format we just removed
+	auto it = mRtpMaps.begin();
+	while (it != mRtpMaps.end()) {
+		const auto &fmtps = it->second.fmtps;
+		if (std::find(fmtps.begin(), fmtps.end(), "apt=" + std::to_string(payloadType)) !=
+		    fmtps.end()) {
+			mOrderedPayloadTypes.erase(
+			    std::remove(mOrderedPayloadTypes.begin(), mOrderedPayloadTypes.end(), it->first),
+			    mOrderedPayloadTypes.end());
+			it = mRtpMaps.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+void Description::Media::removeFormat(const string &format) {
+	std::vector<int> payloadTypes;
+	for (const auto &it : mRtpMaps) {
+		if (it.second.format == format)
+			payloadTypes.push_back(it.first);
+	}
+	for (int pt : payloadTypes)
+		removeRtpMap(pt);
+}
+
+void Description::Media::addFeedback(string fb) {
+	if (std::find(mRtcpFbs.begin(), mRtcpFbs.end(), fb) == mRtcpFbs.end())
+		mRtcpFbs.emplace_back(std::move(fb));
+}
+
+void Description::Media::removeFeedback(const string &str) {
+	auto it = mRtcpFbs.begin();
+	while (it != mRtcpFbs.end()) {
+		if (it->find(str) != string::npos)
+			it = mRtcpFbs.erase(it);
+		else
+			it++;
+	}
+}
+
+bool Description::Media::hasFeedback(const string &str) const {
+	for (const auto &fb : mRtcpFbs)
+		if (fb.find(str) != string::npos)
+			return true;
+
+	return false;
+}
+
+void Description::Media::addRtxCodec(int payloadType, int origPayloadType, unsigned int clockRate) {
+	RtpMap rtp(std::to_string(payloadType) + " rtx/" + std::to_string(clockRate));
+	rtp.fmtps.emplace_back("apt=" + std::to_string(origPayloadType));
+	addRtpMap(rtp);
+}
+
+optional<int> Description::Media::getRtxPayloadType(int primaryPayloadType) const {
+	string aptValue = "apt=" + std::to_string(primaryPayloadType);
+	for (const auto &[pt, map] : mRtpMaps) {
+		for (const auto &fmtp : map.fmtps) {
+			if (fmtp == aptValue)
+				return pt;
+		}
+	}
+	return nullopt;
+}
+
+bool Description::Media::isRtxEnabled() const {
+	for (const auto &[pt, map] : mRtpMaps) {
+		if (map.format == "RTX" || map.format == "rtx")
+			return true;
+	}
+	return false;
+}
+
+void Description::Media::disableRtx() {
+	removeFormat("RTX");
+	removeFormat("rtx");
+	auto mSsrcToRtxSsrcCopy = mSsrcToRtxSsrc;
+	for (const auto &[primarySsrc, _] : mSsrcToRtxSsrcCopy)
+		removeRtxSSRC(primarySsrc);
+	mSsrcToRtxSsrc.clear();
+}
+
+string Description::Media::generateSdpLines(string_view eol) const {
+	std::ostringstream sdp;
+	sdp.imbue(std::locale::classic());
+	if (mBas >= 0)
+		sdp << "b=AS:" << mBas << eol;
+
+	sdp << Entry::generateSdpLines(eol);
+	sdp << "a=rtcp-mux" << eol;
+
+	for (const auto &fb : mRtcpFbs)
+		sdp << "a=rtcp-fb:* " << fb << eol;
+
+	for (auto it = mRtpMaps.begin(); it != mRtpMaps.end(); ++it) {
+		auto &map = it->second;
+
+		// Create the a=rtpmap
+		sdp << "a=rtpmap:" << map.payloadType << ' ' << map.format << '/' << map.clockRate;
+		if (!map.encParams.empty())
+			sdp << '/' << map.encParams;
+
+		sdp << eol;
+
+		for (const auto &val : map.rtcpFbs)
+			sdp << "a=rtcp-fb:" << map.payloadType << ' ' << val << eol;
+
+		for (const auto &val : map.fmtps)
+			sdp << "a=fmtp:" << map.payloadType << ' ' << val << eol;
+	}
+
+	// Output ssrc-group:FID for RTX SSRC associations
+	for (const auto &[primarySsrc, rtxSsrc] : mSsrcToRtxSsrc) {
+		sdp << "a=ssrc-group:FID " << primarySsrc << ' ' << rtxSsrc << eol;
+	}
+
+	return sdp.str();
+}
+
+void Description::Media::parseSdpLine(string_view line) {
+	if (match_prefix(line, "a=")) {
+		string_view attr = line.substr(2);
+		auto [key, value] = parse_pair(attr);
+
+		if (key == "rtpmap") {
+			auto pt = Description::Media::RtpMap::parsePayloadType(value);
+			auto it = mRtpMaps.find(pt);
+			if (it == mRtpMaps.end())
+				it = mRtpMaps.insert(std::make_pair(pt, Description::Media::RtpMap(value))).first;
+			else
+				it->second.setDescription(value);
+
+		} else if (key == "rtcp-fb") {
+			size_t p = value.find(' ');
+			auto ptStr = value.substr(0, p);
+			auto fbValue = string(value.substr(p + 1));
+
+			if (ptStr == "*") {
+				addFeedback(std::move(fbValue));
+			} else {
+				int pt = to_integer<int>(ptStr);
+				auto it = mRtpMaps.find(pt);
+				if (it == mRtpMaps.end())
+					it = mRtpMaps.insert(std::make_pair(pt, Description::Media::RtpMap(pt))).first;
+
+				it->second.rtcpFbs.emplace_back(std::move(fbValue));
+			}
+
+		} else if (key == "fmtp") {
+			size_t p = value.find(' ');
+			int pt = to_integer<int>(value.substr(0, p));
+			auto it = mRtpMaps.find(pt);
+			if (it == mRtpMaps.end())
+				it = mRtpMaps.insert(std::make_pair(pt, Description::Media::RtpMap(pt))).first;
+
+			it->second.fmtps.emplace_back(value.substr(p + 1));
+
+		} else if (key == "rtcp-mux") {
+			// always added
+
+		} else if (key == "ssrc") {
+			auto ssrc = to_integer<uint32_t>(value);
+			if (!hasSSRC(ssrc))
+				mSsrcs.emplace_back(ssrc);
+
+			auto cnamePos = value.find("cname:");
+			if (cnamePos != string::npos) {
+				auto cname = value.substr(cnamePos + 6);
+				mCNameMap.emplace(ssrc, cname);
+			}
+			mAttributes.emplace_back(attr);
+
+		} else if (key == "ssrc-group") {
+			// Parse ssrc-group:FID <primary> <rtx>
+			if (match_prefix(value, "FID ")) {
+				string_view ssrcs = value.substr(4);
+				size_t space = ssrcs.find(' ');
+				if (space != string_view::npos) {
+					auto primarySsrc = to_integer<SSRC>(ssrcs.substr(0, space));
+					auto rtxSsrc = to_integer<SSRC>(ssrcs.substr(space + 1));
+					mSsrcToRtxSsrc[primarySsrc] = rtxSsrc;
+				}
+			}
+
+		} else {
+			Entry::parseSdpLine(line);
+		}
+
+	} else if (match_prefix(line, "b=AS")) {
+		mBas = to_integer<int>(line.substr(line.find(':') + 1));
+	} else {
+		Entry::parseSdpLine(line);
+	}
+}
+
+Description::Media::RtpMap::RtpMap(int payloadType) {
+	this->payloadType = payloadType;
+	this->clockRate = 0;
+}
+
+int Description::Media::RtpMap::parsePayloadType(string_view mline) {
+	size_t p = mline.find(' ');
+	return to_integer<int>(mline.substr(0, p));
+}
+
+Description::Media::RtpMap::RtpMap(string_view description) { setDescription(description); }
+
+void Description::Media::RtpMap::setDescription(string_view description) {
+	size_t p = description.find(' ');
+	if (p == string::npos)
+		throw std::invalid_argument("Invalid format description for rtpmap");
+
+	this->payloadType = to_integer<int>(description.substr(0, p));
+
+	string_view line = description.substr(p + 1);
+	size_t spl = line.find('/');
+	if (spl == string::npos)
+		throw std::invalid_argument("Invalid format description for rtpmap");
+
+	this->format = line.substr(0, spl);
+
+	line = line.substr(spl + 1);
+	spl = line.find('/');
+	if (spl == string::npos) {
+		spl = line.find(' ');
+	}
+	if (spl == string::npos)
+		this->clockRate = to_integer<int>(line);
+	else {
+		this->clockRate = to_integer<int>(line.substr(0, spl));
+		this->encParams = line.substr(spl + 1);
+	}
+}
+
+void Description::Media::RtpMap::addFeedback(string fb) {
+	if (std::find(rtcpFbs.begin(), rtcpFbs.end(), fb) == rtcpFbs.end())
+		rtcpFbs.emplace_back(std::move(fb));
+}
+
+void Description::Media::RtpMap::removeFeedback(const string &str) {
+	auto it = rtcpFbs.begin();
+	while (it != rtcpFbs.end()) {
+		if (it->find(str) != string::npos)
+			it = rtcpFbs.erase(it);
+		else
+			it++;
+	}
+}
+
+bool Description::Media::RtpMap::hasFeedback(const string &str) const {
+	auto it = rtcpFbs.begin();
+	while (it != rtcpFbs.end()) {
+		if (it->find(str) != string::npos)
+			return true;
+		else
+			it++;
+	}
+	return false;
+}
+
+void Description::Media::RtpMap::addParameter(string p) {
+	if (std::find(fmtps.begin(), fmtps.end(), p) == fmtps.end())
+		fmtps.emplace_back(std::move(p));
+}
+
+void Description::Media::RtpMap::removeParameter(const string &str) {
+	fmtps.erase(std::remove_if(fmtps.begin(), fmtps.end(),
+	                           [&](const auto &p) { return p.find(str) != string::npos; }),
+	            fmtps.end());
+}
+
+Description::Audio::Audio(string mid, Direction dir)
+    : Media("audio 9 UDP/TLS/RTP/SAVPF", std::move(mid), dir) {}
+
+void Description::Audio::addAudioCodec(int payloadType, string codec, optional<string> profile) {
+	if (codec.find('/') == string::npos) {
+		if (codec == "PCMA" || codec == "PCMU" || codec == "G722")
+			codec += "/8000/1";
+		else
+			codec += "/48000/2";
+	}
+
+	RtpMap map(std::to_string(payloadType) + ' ' + codec);
+
+	if (profile)
+		map.fmtps.emplace_back(*profile);
+
+	addRtpMap(map);
+}
+
+void Description::Audio::addOpusCodec(int payloadType, optional<string> profile) {
+	addAudioCodec(payloadType, "opus", profile);
+}
+
+void Description::Audio::addPCMACodec(int payloadType, optional<string> profile) {
+	addAudioCodec(payloadType, "PCMA", profile);
+}
+
+void Description::Audio::addPCMUCodec(int payloadType, optional<string> profile) {
+	addAudioCodec(payloadType, "PCMU", profile);
+}
+
+void Description::Audio::addG722Codec(int payloadType, optional<string> profile) {
+	addAudioCodec(payloadType, "G722", profile);
+}
+
+void Description::Audio::addAACCodec(int payloadType, optional<string> profile) {
+	if (profile) {
+		addAudioCodec(payloadType, "MP4A-LATM", profile);
+	} else {
+		addAudioCodec(payloadType, "MP4A-LATM", "cpresent=1");
+	}
+}
+
+Description::Video::Video(string mid, Direction dir)
+    : Media("video 9 UDP/TLS/RTP/SAVPF", std::move(mid), dir) {}
+
+void Description::Video::addVideoCodec(int payloadType, string codec, optional<string> profile) {
+	if (codec.find('/') == string::npos)
+		codec += "/90000";
+
+	RtpMap map(std::to_string(payloadType) + ' ' + codec);
+
+	map.addFeedback("nack");
+	map.addFeedback("nack pli");
+	map.addFeedback("ccm fir");
+	map.addFeedback("goog-remb");
+
+	if (profile)
+		map.fmtps.emplace_back(*profile);
+
+	addRtpMap(map);
+
+	/* TODO
+	 *  TIL that Firefox does not properly support the negotiation of RTX! It works, but doesn't
+	 * negotiate the SSRC so we have no idea what SSRC is RTX going to be. Three solutions: One) we
+	 * don't negotitate it and (maybe) break RTX support with Edge. Two) we do negotiate it and
+	 * rebuild the original packet before we send it distribute it to each track. Three) we complain
+	 * to mozilla. This one probably won't do much.
+	 */
+	// RTX Packets
+	// Format rtx(std::to_string(payloadType+1) + " rtx/90000");
+	// // TODO rtx-time is how long can a request be stashed for before needing to resend it.
+	// Needs to be parameterized rtx.addAttribute("apt=" + std::to_string(payloadType) +
+	// ";rtx-time=3000"); addFormat(rtx);
+}
+
+void Description::Video::addH264Codec(int payloadType, optional<string> profile) {
+	addVideoCodec(payloadType, "H264", profile);
+}
+
+void Description::Video::addH265Codec(int payloadType, optional<string> profile) {
+	addVideoCodec(payloadType, "H265", profile);
+}
+
+void Description::Video::addVP8Codec(int payloadType, optional<string> profile) {
+	addVideoCodec(payloadType, "VP8", profile);
+}
+
+void Description::Video::addVP9Codec(int payloadType, optional<string> profile) {
+	addVideoCodec(payloadType, "VP9", profile);
+}
+
+void Description::Video::addAV1Codec(int payloadType, optional<string> profile) {
+	addVideoCodec(payloadType, "AV1", profile);
+}
+
+Description::Type Description::stringToType(const string &typeString) {
+	using TypeMap_t = std::unordered_map<string, Type>;
+	static const TypeMap_t TypeMap = {{"unspec", Type::Unspec},
+	                                  {"offer", Type::Offer},
+	                                  {"answer", Type::Answer},
+	                                  {"pranswer", Type::Pranswer},
+	                                  {"rollback", Type::Rollback}};
+	auto it = TypeMap.find(typeString);
+	return it != TypeMap.end() ? it->second : Type::Unspec;
+}
+
+string Description::typeToString(Type type) {
+	switch (type) {
+	case Type::Unspec:
+		return "unspec";
+	case Type::Offer:
+		return "offer";
+	case Type::Answer:
+		return "answer";
+	case Type::Pranswer:
+		return "pranswer";
+	case Type::Rollback:
+		return "rollback";
+	default:
+		return "unknown";
+	}
+}
+
+size_t
+CertificateFingerprint::AlgorithmSize(CertificateFingerprint::Algorithm fingerprintAlgorithm) {
+	switch (fingerprintAlgorithm) {
+	case CertificateFingerprint::Algorithm::Sha1:
+		return 20;
+	case CertificateFingerprint::Algorithm::Sha224:
+		return 28;
+	case CertificateFingerprint::Algorithm::Sha256:
+		return 32;
+	case CertificateFingerprint::Algorithm::Sha384:
+		return 48;
+	case CertificateFingerprint::Algorithm::Sha512:
+		return 64;
+	default:
+		return 0;
+	}
+}
+
+std::string CertificateFingerprint::AlgorithmIdentifier(
+    CertificateFingerprint::Algorithm fingerprintAlgorithm) {
+	switch (fingerprintAlgorithm) {
+	case CertificateFingerprint::Algorithm::Sha1:
+		return "sha-1";
+	case CertificateFingerprint::Algorithm::Sha224:
+		return "sha-224";
+	case CertificateFingerprint::Algorithm::Sha256:
+		return "sha-256";
+	case CertificateFingerprint::Algorithm::Sha384:
+		return "sha-384";
+	case CertificateFingerprint::Algorithm::Sha512:
+		return "sha-512";
+	default:
+		return "unknown";
+	}
+}
+
+bool CertificateFingerprint::isValid() const {
+	size_t expectedSize = AlgorithmSize(this->algorithm);
+	if (expectedSize == 0 || this->value.size() != expectedSize * 3 - 1) {
+		return false;
+	}
+
+	for (size_t i = 0; i < this->value.size(); ++i) {
+		if (i % 3 == 2) {
+			if (this->value[i] != ':')
+				return false;
+		} else {
+			if (!std::isxdigit(this->value[i]))
+				return false;
+		}
+	}
+	return true;
+}
+
+std::ostream &operator<<(std::ostream &out, const Description &description) {
+	return out << string(description);
+}
+
+std::ostream &operator<<(std::ostream &out, Description::Type type) {
+	return out << Description::typeToString(type);
+}
+
+std::ostream &operator<<(std::ostream &out, Description::Role role) {
+	using Role = Description::Role;
+	// Used for SDP generation, do not change
+	switch (role) {
+	case Role::Active:
+		out << "active";
+		break;
+	case Role::Passive:
+		out << "passive";
+		break;
+	default:
+		out << "actpass";
+		break;
+	}
+	return out;
+}
+
+std::ostream &operator<<(std::ostream &out, const Description::Direction &direction) {
+	// Used for SDP generation, do not change
+	switch (direction) {
+	case Description::Direction::RecvOnly:
+		out << "recvonly";
+		break;
+	case Description::Direction::SendOnly:
+		out << "sendonly";
+		break;
+	case Description::Direction::SendRecv:
+		out << "sendrecv";
+		break;
+	case Description::Direction::Inactive:
+		out << "inactive";
+		break;
+	case Description::Direction::Unknown:
+	default:
+		out << "unknown";
+		break;
+	}
+	return out;
+}
+
+} // namespace rtc

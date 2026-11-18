@@ -1,0 +1,72 @@
+/**
+ * Copyright (c) 2020 Paul-Louis Ageneau
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#include "hash.h"
+
+#if USE_NETTLE
+#include <nettle/md5.h>
+#include <nettle/sha1.h>
+#include <nettle/sha2.h>
+#include <nettle/version.h>
+#else
+#include "picohash.h"
+#endif
+
+void juice_hash_md5(const void *message, size_t size, void *digest) {
+#if USE_NETTLE
+	struct md5_ctx ctx;
+	md5_init(&ctx);
+	md5_update(&ctx, size, message);
+#if NETTLE_VERSION_MAJOR >= 4
+	md5_digest(&ctx, digest);
+#else
+	md5_digest(&ctx, HASH_MD5_SIZE, digest);
+#endif
+#else
+	picohash_ctx_t ctx;
+	picohash_init_md5(&ctx);
+	picohash_update(&ctx, message, size);
+	picohash_final(&ctx, digest);
+#endif
+}
+
+void juice_hash_sha1(const void *message, size_t size, void *digest) {
+#if USE_NETTLE
+	struct sha1_ctx ctx;
+	sha1_init(&ctx);
+	sha1_update(&ctx, size, message);
+#if NETTLE_VERSION_MAJOR >= 4
+	sha1_digest(&ctx, digest);
+#else
+	sha1_digest(&ctx, HASH_SHA1_SIZE, digest);
+#endif
+#else
+	picohash_ctx_t ctx;
+	picohash_init_sha1(&ctx);
+	picohash_update(&ctx, message, size);
+	picohash_final(&ctx, digest);
+#endif
+}
+
+void juice_hash_sha256(const void *message, size_t size, void *digest) {
+#if USE_NETTLE
+	struct sha256_ctx ctx;
+	sha256_init(&ctx);
+	sha256_update(&ctx, size, message);
+#if NETTLE_VERSION_MAJOR >= 4
+	sha256_digest(&ctx, digest);
+#else
+	sha256_digest(&ctx, HASH_SHA256_SIZE, digest);
+#endif
+#else
+	picohash_ctx_t ctx;
+	picohash_init_sha256(&ctx);
+	picohash_update(&ctx, message, size);
+	picohash_final(&ctx, digest);
+#endif
+}

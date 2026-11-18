@@ -1,0 +1,147 @@
+name: Meson CI
+
+on:
+  push:
+    branches: [ 2_x_dev ]
+  pull_request:
+    branches: [ 2_x_dev ]
+  schedule:
+    - cron: '20 4 * * 1'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        crypto: [internal, openssl, openssl3, nss, mbedtls, mbedtls4]
+        exclude:
+          - os: windows-latest
+            crypto: openssl
+          - os: windows-latest
+            crypto: openssl3
+          - os: windows-latest
+            crypto: nss
+          - os: windows-latest
+            crypto: mbedtls
+          - os: windows-latest
+            crypto: mbedtls4
+          - os: ubuntu-latest
+            crypto: openssl3
+        include:
+          - crypto: internal
+            meson-crypto-enable: ""
+          - crypto: openssl
+            meson-crypto-enable: "-Dcrypto-library=openssl"
+          - crypto: openssl3
+            meson-crypto-enable: "-Dcrypto-library=openssl"
+          - crypto: nss
+            meson-crypto-enable: "-Dcrypto-library=nss"
+          - crypto: mbedtls
+            meson-crypto-enable: "-Dcrypto-library=mbedtls"
+          - crypto: mbedtls4
+            meson-crypto-enable: "-Dcrypto-library=mbedtls"
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      CTEST_OUTPUT_ON_FAILURE: 1
+
+    steps:
+    - name: Setup Ubuntu Meson
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install meson
+
+    - name: Setup macOS Meson
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install meson
+
+    - name: Setup Windows Meson & Ninja
+      if: matrix.os == 'windows-latest'
+      run: |
+        choco install ninja
+        pip3 install meson
+
+    - name: Setup Ubuntu NSS
+      if: matrix.os == 'ubuntu-latest' && matrix.crypto == 'nss'
+      run: |
+        sudo apt-get update
+        sudo apt-get install libnss3-dev
+
+    - name: Setup Ubuntu MbedTLS
+      if:  matrix.os == 'ubuntu-latest' && matrix.crypto == 'mbedtls'
+      run: sudo apt-get install libmbedtls-dev
+
+    - name: Setup Ubuntu MbedTLS 4
+      if:  matrix.os == 'ubuntu-latest' && matrix.crypto == 'mbedtls4'
+      run: |
+        python3 -m pip install --break-system-packages --upgrade jsonschema jinja2
+        git clone https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls4-src
+        cd /tmp/mbedtls4-src
+        git checkout mbedtls-4.1.0
+        git submodule update --init --recursive
+        # PIC: static libtfpsacrypto must be linkable into libsrtp2.so.
+        cmake -S . -B build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        cmake --build build -j
+        sudo cmake --install build
+
+    - name: Setup macOS OpenSSL
+      if: matrix.os == 'macos-latest' && matrix.crypto == 'openssl'
+      run: echo "PKG_CONFIG_PATH=$(brew --prefix openssl@1.1)/lib/pkgconfig" >> $GITHUB_ENV
+
+    - name: Setup macOS OpenSSL3
+      if: matrix.os == 'macos-latest' && matrix.crypto == 'openssl3'
+      run: |
+        brew install openssl@3
+        echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> $GITHUB_ENV
+
+    - name: Setup macOS NSS
+      if:  matrix.os == 'macos-latest' && matrix.crypto == 'nss'
+      run: brew install nss
+
+    - name: Setup macOS MbedTLS
+      if:  matrix.os == 'macos-latest' && matrix.crypto == 'mbedtls'
+      run: |
+        brew install mbedtls@3
+        echo "PKG_CONFIG_PATH=$(brew --prefix mbedtls@3)/lib/pkgconfig" >> $GITHUB_ENV
+
+    - name: Setup macOS MbedTLS 4
+      if:  matrix.os == 'macos-latest' && matrix.crypto == 'mbedtls4'
+      run: |
+        # Install outside $GITHUB_WORKSPACE so the install survives the
+        # actions/checkout@v2 step that wipes the workspace later in the job.
+        python3 -m pip install --break-system-packages --upgrade jsonschema jinja2
+        git clone https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls4-src
+        cd /tmp/mbedtls4-src
+        git checkout mbedtls-4.1.0
+        git submodule update --init --recursive
+        cmake -S . -B build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+              -DCMAKE_INSTALL_PREFIX=/tmp/mbedtls4-prefix
+        cmake --build build -j
+        cmake --install build
+        echo "PKG_CONFIG_PATH=/tmp/mbedtls4-prefix/lib/pkgconfig" >> $GITHUB_ENV
+
+    - uses: actions/checkout@v2
+
+    - name: Create Build Environment
+      run: meson setup ${{github.workspace}}/build
+
+    - name: Configure Meson
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: ${{ env.pkgconfig-crypto-dir }} meson configure ${{ matrix.meson-crypto-enable }}
+
+    - name: Build
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: ninja
+
+    - name: Test
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: meson test

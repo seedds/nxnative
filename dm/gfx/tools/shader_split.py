@@ -3134,11 +3134,10 @@ def unzs_dict(d, did, where):
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
 def unzs(path):
-    """A zstd file decompressed: frames without a dictionary through the zstd command as before (fed the bytes: inside a RomFS image the path is not a file the command can open),
-    frames that name one with that dictionary from ZDICTS"""
+    """A zstd file decompressed in this process (every frame of it, as the zstd command does): frames without a dictionary as they are, frames that name one with that dictionary from ZDICTS"""
     d = open(path, 'rb').read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
+    if not did: return zstd_mod().decompress(d)
     return unzs_dict(d, did, path)
 
 def frame_size(f):
@@ -3734,6 +3733,12 @@ def uniq_keys(found):
         uniq.setdefault(key, (where, st, ctl, code))
     return uniq
 
+def file_magics(paths):   # the first 4 bytes of each file, in a pool worker
+    out = []
+    for p in paths:
+        with open(p, 'rb') as f: out.append(f.read(4))
+    return out
+
 def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueError) on a damaged file
     import nso
     with open(path, 'rb') as f: return bytes(nso.load(f.read(), path).image)
@@ -3803,6 +3808,12 @@ def main():
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
+    # Four of the job finders below know their archives by the magic, not the name (CRA, zip, PDAT, RPF6), and each opened every file to read it, in this process, before the pool
+    # had anything to do. The pool, started here, reads every file's magic once, and each of the four is given only the files that start with its own (it still checks them itself)
+    ex = cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts))
+    paths = [p for p, _ in files]
+    magics = dict(zip(paths, (m for ms in ex.map(file_magics, [paths[i:i + 2048] for i in range(0, len(paths), 2048)]) for m in ms)))
+    def starting(*magic): return [(p, r) for p, r in files if magics[p] in magic]
     big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
@@ -3813,17 +3824,17 @@ def main():
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
     d3_jobs, d3s = d3cpk_jobs(files)   # Diablo III's packages (zlib streams, d3cpk.py)
     ca_jobs, cascs = casc_jobs(files)   # Diablo II: Resurrected's CASC archives (casc.py)
-    cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
-    zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
+    cr_jobs, cras = cra_jobs(starting(CRA))   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
+    zp_jobs, zips = zip_jobs(starting(ZIP, VZIP))   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARH2 indexes and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
-    rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
+    pd_jobs, pdats = pdat_jobs(starting(PDAT))   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
+    rp_jobs, rpfs = rpf_jobs(starting(RPF6), main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
     ls_jobs, lsps = lspk_jobs(files)   # Larian's packages: indexed BSHD programs, without reading unrelated assets
     kt_jobs, kits = kit_jobs(files)   # Unravel TWO's KIT shards: chained LZ4 resources and Phyre effects
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs + kt_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps and p not in kits]
-    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
+    with ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []

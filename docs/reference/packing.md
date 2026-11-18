@@ -208,6 +208,34 @@
 - **Fix:** `dm/tools/vol_space.py` `free_bytes` returns macOS's `kCFURLVolumeAvailableCapacityForImportantUsageKey` for the path's volume (the capacity for writes a user asked for, queried through CoreFoundation), never less than `statvfs`'s figure, and `statvfs` alone where macOS gives none. It asks the nearest existing folder of a path not made yet. The NSP script's `free_gb`, `pack_app.py`'s copy check and `pso_offline.py`'s checks before `metal-tt` and before the merge use it. Two reads keep `statvfs`: `tree_tar.pack_quiet`, housekeeping nobody asked for, which should make macOS purge nothing, and `pso_offline.py`'s diagnosis of a failed `metal-tt`, which reports what was really left. Tests: `dm/tools/tests/test_vol_space.py`.
 - **Found on:** a user's APFS volume with a local Time Machine snapshot holding over 50 GB of deleted files ([PR #2257](https://github.com/seedds/nxnative/pull/2257)): `statvfs` showed 18.84 GiB free and the capacity for important usage 68.02 GiB. With the capacity, an [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072 `--platform mac-app` build wrote 57 GB of work and a 35.2 GB app there, with 24 GiB still unallocated at the end. Applies to every game built on a Mac.
 
+### The shader split takes a minute on a RomFS of 300,000 files
+
+- **Symptom:** the NSP script's `shader split` step takes 60 to 77 s for Tears of the Kingdom on an M5 Pro (304,243 RomFS files, 28,669 shaders). `shader_split.py` prints nothing for its first 26 s, and its `progress: n/304243` count slows after the first half.
+- **Cause:** the time goes to files that hold no shader. The count is of jobs, here one per RomFS file, and 1,683 of the files hold a shader container; parsing, hashing and de-duplicating the shaders is under 1% of the workers' time.
+  - Before the pool had anything to do, the four job finders that know their archives by the magic (`cra_jobs`, `zip_jobs`, `pdat_jobs`, `rpf_jobs`) each opened every file in the main process: 1.2 million opens, 22.9 s of the 26.4 s before the scan, for a game with none of those archives.
+  - `unzs` ran the `zstd` command for each zstd file that names no dictionary: 32,176 processes, 8.5 ms each with its pipes, 39% of the workers' time. The path order puts those files in the second half, after 137,685 small files that name a dictionary and are decompressed in the process.
+  - The workers opened the image by its path for every file ([Processes that scan one RomFS image in parallel wait on its opens](#processes-that-scan-one-romfs-image-in-parallel-wait-on-its-opens)).
+- **Fix:** in `shader_split.py`.
+  - The pool starts before the jobs are planned and reads every file's first four bytes once (`file_magics`). Each of the four finders is given the files that start with its magic and checks them itself as before.
+  - `unzs` decompresses a file without a dictionary in the process, every frame of it, as it did a file with one. It starts no command, so [The zstd command given a path inside the image](#the-zstd-command-given-a-path-inside-the-image) cannot come back.
+  - `shader_split.py` is one of the chain's files (`dmsh_chain.py` `FILES`), so the chain version changed with it and every shader library is built again once.
+- **Measurement:** M5 Pro (18 cores), Python 3.13, a cold split into a scratch folder with `J=18`, as the NSP script runs it, best of three.
+
+  | Split, wall (CPU) | Before | With the one descriptor per image | With this as well |
+  |---|---|---|---|
+  | Tears of the Kingdom 1.4.3, 304,243 files | 60.0 s (528 s) | 47.7 s (471 s) | 17.5 s (215 s) |
+  | Breath of the Wild 1.9.0 with its DLC, 48,157 files | 70.1 s (932 s) | | 67.1 s (935 s) |
+  | Pokémon Scarlet 1.0.0, 85 jobs | 10.4 s (64 s) | | 10.4 s (62 s) |
+
+  Inside a cold pack stopped when the split ends, Tears of the Kingdom's split took 70.6 s before and 21.9 s after, one run each. The package and the four tables of the three games are byte-identical before and after (17, 15 and 12 files).
+- **Open:**
+  - Breath of the Wild's split is Yaz0 decoding in Python: 911 s of its workers' 1,051 s. That is work the split needs, and only a native decoder would shorten it (not tried).
+  - What is left for Tears of the Kingdom is reading 17 GB and searching it: seven `bytes` searches over every decompressed file for the container magics, 114 s of the workers' 260 s. One pass for all seven was not tried.
+  - The packs of 2026-11-16 on the same Mac ran this step for 186 s (Tears of the Kingdom) and 155 s (Scarlet), by the times of `shader_split.log`, with the same `shader_split.py` and the same files. That was not reproduced, alone or in a cold pack, and why is not known; Breath of the Wild's 75 s of 2026-11-15 does match.
+  - Not run: a whole pack to its end, Linux, a RomFS kept as a folder, a zstd file with legacy frames or a damaged one (the command and the module both refuse a damaged file, which is left out with a red line as before, though the line reads differently), any other game.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), in a profile of its shader split; Breath of the Wild and Pokémon Scarlet for the comparison.
+- **Check:** `dm/tools/tests/test_split_magics.py`: the whole split of a zip archive under another name and a zstd file of two frames, with no `zstd` command to find; `file_magics`.
+
 ## Diagnostic reports
 
 ### A large log can retain key material after redaction
@@ -394,7 +422,7 @@
 
 - **Symptom:** the NSP script stops at the shader split of a registered profile with `[RED] 13744 file(s) could not be read, their shaders are left out (first: AI/FileEntry/FileEntry.Product.100.byml.zs: CalledProcessError: Command ['zstd', '-d', '-c', '-q', '…/extract/v0/RomFS.img/AI/…'] returned non-zero exit status 1.)`.
 - **Cause:** `shader_split.py`'s `unzs` read a `.zs` file through `romfs.open`, which reads inside the image, but then handed its path to the `zstd` command, which can only open real files (`Not a directory`).
-- **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
+- **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`. Since [The shader split takes a minute on a RomFS of 300,000 files](#the-shader-split-takes-a-minute-on-a-romfs-of-300000-files), `unzs` starts no command at all.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
 ### Under `--work-dir` the programs of one game overwrote each other's RomFS

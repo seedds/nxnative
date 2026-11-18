@@ -225,6 +225,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- [Repeated Metal texture conformance checks](../../../docs/reference/nvn-objects.md#repeated-metal-texture-conformance-checks) (resolved in the host).
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the registered 1.9.0 map's duplicate representatives, resolved above.
 - [An argument block points into another arena after a nested allocation](../../../docs/reference/rendering.md#an-argument-block-points-into-another-arena-after-a-nested-allocation): two host bugs reproduced by synthetic GPU tests; the [Zora cutscene retest](#zoras-domain-cutscene-gpu-faults-original-device-retest-pending) passed on baseline and fixed hosts, so the connection to the reported game faults remains unconfirmed.
 - [Two captures of one shader function crash in Metal's binary cache](../../../docs/reference/rendering.md#two-captures-of-one-shader-function-crash-in-metals-binary-cache): resolved in the host; 1.9.0's prebuild crashed once in a `regress.py` run (M4 Pro, macOS 27.2.1).

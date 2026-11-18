@@ -287,6 +287,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_notes`: with the note of the twin's first resolution taken, a texture of another description over the storage leaves the twin's parent shared, held and resident and the table's entry unchanged, with no table built; once the twin is finalized the next such texture evicts the parent. The same case fails three checks on the host before the fix. Not checked: a game (none is known to keep a twin live past its parent's object); the check after the entry, which needs a second thread.
 - **Found on:** no game: reported from the code and the fixture in [issue #2125](https://github.com/seedds/nxnative/issues/2125).
 
+### Repeated Metal texture conformance checks
+
+- **Symptom:** in Breath of the Wild, Metal texture classification accounted for 44 of 130 samples in `tex_mtl_` at about 3,000 checks per frame, an estimated 1.5% of submit-thread CPU. [PR #1467](https://github.com/seedds/nxnative/pull/1467)
+- **Cause:** the stale sRGB / linear view check asked `conformsToProtocol:` on each resolved object before reading its `parentTexture`. The same few classes repeatedly walked their protocol lists.
+- **Fix:** `obj_is_tex` caches eight class and conformance pairs per thread. Texture resolution can run on other threads as well as the submit thread. The cache holds class identities and results, and callers still use the serial owner's lifetime rules when they look up and inspect an object. A miss uses the original protocol query.
+- **Check:** on an Apple M6, a microbenchmark alternating a Metal texture, its sRGB view and a non-texture object took a median of 74 ns per direct query and 3.2 ns per warm-cache lookup. A separate pass matched the direct query in 800,000 comparisons across eight workers, including nil lookups and class eviction. The Breath of the Wild 1.9.0 quick route passed against `083c5e4f` with pipeline archives disabled on both hosts after the baseline stalled in Metal's archive serializer.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md).
+
 ### Pool tables that held only their own texture type
 
 - **Symptom:** surfaces that read textures by handle through a texture pool come out black or unlit. PRAGMATA: Cabin's monitor in the Shelter stays black (the console shows a cyan animated face), and every cube map read through the pool samples zero (environment reflections and light). No `[RED]` line.

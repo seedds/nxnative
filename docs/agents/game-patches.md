@@ -21,7 +21,7 @@ A patch's binding is what its correctness is anchored to, from the loosest. A pa
 
 ## Gaps
 
-Every patch bound tighter than it could be: the open gaps, then the blocked, kept and unreviewed ones; in each, those reaching the most games first (the games whose profiles register the builds it touches), then those farthest from their goal. 1 patch has no reviewed goal yet.
+Every patch bound tighter than it could be: the open gaps, then the blocked, kept and unreviewed ones; in each, those reaching the most games first (the games whose profiles register the builds it touches), then those farthest from their goal. 2 patches have no reviewed goal yet.
 
 | Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |
 |---|---|---|---|---|---|---|---|
@@ -60,7 +60,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | kept: 1.0.1 (2019) is the last update; a function match would serve no other build of this game | checked: nso_fnmap of its 112 sites into those four mains (2026-11-09) | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | kept: 44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears | checked: nso_fnmap of its 44 sites into those 13 mains (2026-11-09) | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur) |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
-| `build` → unreviewed | RedpointEOS null check at main+0xb64b8c | runtime | unreviewed | checked: verified on 2.0.2.2 (v1310720) Mac app: boots past the spinning logo and single player is playable; multiplayer screen input remains open | 1 | [Tetris Effect: Connected](../../dm/games/0100DE501433A000/README.md) | the game's own BeginPlay dereferences IOnlineSubsystem::Get("RedpointEOS") without a null check when EOSSDK-Switch-Shipping.nro is refused and RedpointEOS is not registered |
+| `build` → unreviewed | ATPOnlineManagerEOS::IsEOSLoggedIn() returns 1 | runtime | unreviewed | checked: verified on 2.0.2.2 (v1310720) Mac app: unblocks the Multiplayer screen dialogs (Cross-Platform Play, Welcome Guardian) and allows backing out with B | 1 | [Tetris Effect: Connected](../../dm/games/0100DE501433A000/README.md) | the Multiplayer screen Blueprint polls main+0xb64e18 every frame and blocks controller input while it returns 0 |
+| `build` → unreviewed | RedpointEOS null check at main+0xb64b8c | runtime | unreviewed | checked: verified on 2.0.2.2 (v1310720) Mac app: boots past the spinning logo and single player is playable | 1 | [Tetris Effect: Connected](../../dm/games/0100DE501433A000/README.md) | the game's own BeginPlay dereferences IOnlineSubsystem::Get("RedpointEOS") without a null check when EOSSDK-Switch-Shipping.nro is refused and RedpointEOS is not registered |
 
 ## Summary
 
@@ -97,7 +98,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [Teenage Mutant Ninja Turtles: Shredder's Revenge](#teenage-mutant-ninja-turtles-shredders-revenge) | 0 | 0 | 0 | 1 | 0 | `game` |
-| [Tetris Effect: Connected](#tetris-effect-connected) | 0 | 0 | 1 | 0 | 0 | `build` → unreviewed |
+| [Tetris Effect: Connected](#tetris-effect-connected) | 1 | 0 | 1 | 0 | 0 | `build` → unreviewed ×2 |
 | [The Legend of Heroes: Trails into Reverie](#the-legend-of-heroes-trails-into-reverie) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -590,9 +591,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Tetris Effect: Connected](../../dm/games/0100DE501433A000/README.md), `0100DE501433A000`, [patches.py](../../dm/games/0100DE501433A000/patches.py).
 
-- **`build` → unreviewed**, runtime, unreviewed, checked: verified on 2.0.2.2 (v1310720) Mac app: boots past the spinning logo and single player is playable; multiplayer screen input remains open: RedpointEOS null check at main+0xb64b8c. The game's own BeginPlay dereferences IOnlineSubsystem::Get("RedpointEOS") without a null check when EOSSDK-Switch-Shipping.nro is refused and RedpointEOS is not registered
+- **`build` → unreviewed**, runtime, unreviewed, checked: verified on 2.0.2.2 (v1310720) Mac app: boots past the spinning logo and single player is playable: RedpointEOS null check at main+0xb64b8c. The game's own BeginPlay dereferences IOnlineSubsystem::Get("RedpointEOS") without a null check when EOSSDK-Switch-Shipping.nro is refused and RedpointEOS is not registered
+- **`build` → unreviewed**, runtime, unreviewed, checked: verified on 2.0.2.2 (v1310720) Mac app: unblocks the Multiplayer screen dialogs (Cross-Platform Play, Welcome Guardian) and allows backing out with B: ATPOnlineManagerEOS::IsEOSLoggedIn() returns 1. The Multiplayer screen Blueprint polls main+0xb64e18 every frame and blocks controller input while it returns 0
 
-- **2.0.2.2 `main`** `8838095f…` ([patches.py:21](../../dm/games/0100DE501433A000/patches.py#L21))
+- **2.0.2.2 `main`** `8838095f…` ([patches.py:23](../../dm/games/0100DE501433A000/patches.py#L23))
+  - cut `+0xb64e18`: ATPOnlineManagerEOS::IsEOSLoggedIn() -> 1 so the Multiplayer screen does not block input
   - stub `+0xb64b8c`: RedpointEOS null check at main+0xb64b8c
 
 ### The Legend of Heroes: Trails into Reverie

@@ -335,6 +335,7 @@ void mtl_link_mode_set(int mode);   // the display link's pacing mode (DM_PRESEN
 double mtl_presented_time(uint64_t n);
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
+uint64_t mtl_link_events(void);   // display-link stalls, recoveries, rescues and pacing mode changes so far: the frames around one waited for the screen
 int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapshots (DM_PRESENT_SNAP): on, and acquire's wait for ring capacity (returns ns spent pacing)
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped
 // Texture release (at Finalize)

@@ -210,6 +210,10 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Masked color targets store back during depth-only draws](../../../docs/reference/rendering.md#masked-color-targets-store-back-during-depth-only-draws). The depth prepass loaded a 1440×810 RG11B10F color target in eight passes per frame with all channels masked off. The author reported 35.5 MB/frame less attachment-store volume in the first A/B and 29.5 MB/frame less in the follow-up on an M2 MacBook Air. GPU and frame-time results were inconclusive. [PR #2771](https://github.com/seedds/nxnative/pull/2771)
+
+  On an Apple M6 with macOS 27.2, the extracted fix saved 55.4 MiB of attachment stores at frame 3600 against `a3e5ec1e`, standing on the Kokiri Forest deck in docked mode. Seven 1920×1080 passes each dropped an 8,100 KiB color store. Both captures had 128 render passes and the same total attachment load bytes. Screenshots at frames 3000 and 3600 showed the same scene with moving leaves and fairies in different positions.
+
 - Device loads from read-only storage buffers cost GPU time in several of its hottest fragment shaders. The PR's three benchmark shaders still promote their buffers and compile after the rebase. The in-game measurement comes from the author's earlier cut9p test build. [Device loads from read-only storage buffers](../../../docs/reference/shaders.md#device-loads-from-read-only-storage-buffers)
 
 - [Raw global memory through a pointer read when the draw is bound](../../../docs/reference/shaders.md#raw-global-memory-through-a-pointer-read-when-the-draw-is-bound): the reported isolated culling-loop hang from an omitted pointer target; discovery now populates the existing raw table. On an Apple M6 (macOS 27.2, 2026-11-17), `f75708d176bb6591`, `47f9b38490dcf9a2` and `99280b7b8aae78df` compile with source `[0, 0]` (task storage slot 0, byte 0); their MSL is byte-identical to main `2925d7af`. These are partial three-shader builds, not stamped full libraries or a gameplay retest. The separate whole-mesh GPU hang is not established as fixed by this change.

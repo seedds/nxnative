@@ -2390,6 +2390,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_unwritten_store` performs real GPU readback against a store-all control and literal color/depth/stencil values, with lookahead disabled. It covers read-only depth/stencil, depth writes, stencil writes, pending clears, and writable images (including native image atomics) and both storage-buffer binding forms. `t_unwritten_store --bench` runs a synthetic 32-pass 1080p workload with balanced on/off order; it is not a game FPS measurement.
 - **Found on:** [NieR:Automata US 1.0.3](../../dm/games/010056B015FE8000/README.md#factory-combat-capture-and-9s-texture-follow-up), during iPhone factory-combat performance investigation. The change passes the GPU proof and rendering regressions on Mac; iPhone gameplay benefit remains to be measured.
 
+### Masked color targets store back during depth-only draws
+
+- **Symptom:** a depth prepass keeps a color target loaded with its channel mask set to zero. The attachment store ledger in `DM_NVN_GPUPROF` still includes the color target.
+- **Cause:** `udc_note_draw` counted a shader output or an enabled channel mask as a write. A raster write needs both.
+- **Fix:** use the draw's physical attachment write mask for the existing [unwritten-store rule](#unwritten-attachment-stores-without-lookahead). `draw_color_writes` maps each physical attachment to its logical shader slot before the draw clears the pipeline's mapping. Unknown or specialized shader outputs are treated conservatively. `DM_NVN_UNWRITTEN_DC=0` provides the store-all control.
+- **Check:** `check_t_unwritten_store` reads back color, depth and stencil from production draw replay. It checks store bytes and pixels for a masked output, a shader with no color output and a remapped color export.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+
 ### iOS layouts: portrait, a half-folded Duo, iPad windows
 
 - **Symptom:** portrait gameplay overlaps the touch controls, touch coordinates land outside the game picture, or a TV's picture renders at 4K again after a layout pass.

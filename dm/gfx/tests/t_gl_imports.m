@@ -554,6 +554,17 @@ static void test_program_validation(void) {
     h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
 }
 
+// The fixed-function caps a GL 1.x-era renderer turns off before its first draw: they belong to the fixed pipeline, so enabling or disabling one changes none of the
+// state a shader draw reads (and a cap the layer keeps still sets its state)
+static void test_fixed_function_caps(void) {
+    const uint8_t blend = S.blend, depth = S.depth, cull = S.cull, scissor = S.scissor, stencil = S.stencil, poffset = S.poffset, poffset_line = S.poffset_line;
+    static const GLenum fixed[] = {0x4000 /* LIGHT0 */, 0x4007 /* LIGHT7 */, 0x0b50 /* LIGHTING */, 0x0bc0 /* ALPHA_TEST */, 0x0b60 /* FOG */,
+                                   0x0c60 /* TEXTURE_GEN_S */, 0x0c61, 0x0c62, 0x0c63 /* TEXTURE_GEN_Q */, 0x0b57 /* COLOR_MATERIAL */, 0x0ba1 /* NORMALIZE */};
+    for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) { h_glEnable(fixed[i]); h_glDisable(fixed[i]); }
+    assert(S.blend == blend && S.depth == depth && S.cull == cull && S.scissor == scissor && S.stencil == stencil && S.poffset == poffset && S.poffset_line == poffset_line);
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glEnable(GL_BLEND); assert(S.blend); h_glDisable(GL_BLEND); assert(!S.blend);   // a cap the layer keeps still sets its state
+}
 static void test_fate_calls(void) {
     assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
     assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
@@ -814,6 +825,7 @@ int main(int argc, char **argv) {
     test_extension_names_and_egl();
     test_program_validation();
     test_fate_calls();
+    test_fixed_function_caps();
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;
@@ -834,7 +846,7 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, program validation, line width and texture clears, the fixed-function caps a GL 1.x renderer turns off, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     printf("GL rendering (stride 0, texture LOD bias, sampler objects): %s\n", cpu ? "not run (--cpu)" : "OK");
     return 0;
 }

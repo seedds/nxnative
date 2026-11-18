@@ -2192,6 +2192,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - `glIsSync` (a sync the layer made and has not deleted), `glShadeModel` (`GL_SMOOTH`; GLSL programs interpolate by their own qualifiers, `GL_FLAT` is a red line), `glClientActiveTexture` (unit 0; no fixed-pipeline arrays), `glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)` (Metal's triangle fill mode, with `GL_POLYGON_OFFSET_LINE` as its offset enable; a masked clear always fills), `GL_MAX_TEXTURE_COORDS` (8), `GL_MAX_UNIFORM_BLOCK_SIZE` (65,536). `GL_TEXTURE_LOD_BIAS` is the texture's sampler's `lodBias` (Metal 4, macOS and iOS 26, the host's minimum), clamped to ±15 as `GL_MAX_TEXTURE_LOD_BIAS` says: the layer used to drop it with a red line, from before Metal had it; `t_gl_imports` draws a two-level texture 1:1 and reads level 1 with a bias of 1.
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): it asks for these while it puts its GL state in order and sets a level's sync objects.
 
+### Fixed-function caps a GL 1.x renderer turns off
+
+- **Symptom:** seven `[RED] glDisable(…) not implemented` lines once each before the first draw — `0x4000` (LIGHT0), `0xb50` (LIGHTING), `0xbc0` (ALPHA_TEST) and `0xc60`–`0xc63` (TEXTURE_GEN_S / T / R / Q) — while the picture itself is right.
+- **Cause:** a renderer written for GL 1.x puts the fixed-function pipeline's state in order before its shader draws; `cap_set` keeps only the caps a draw reads and reported every other one, so it named the lights, the lighting model, the alpha test and the texture-coordinate generators as unimplemented.
+- **Fix:** `cap_set` accepts the caps that only a fixed-function draw reads (`GL_LIGHTING`, `GL_LIGHT0`–`7`, `GL_ALPHA_TEST`, `GL_FOG`, `GL_TEXTURE_GEN_S/T/R/Q`, `GL_COLOR_MATERIAL`, `GL_NORMALIZE`): with a program bound the shader decides the lighting, whether a fragment is discarded and where its texture coordinates come from, so none of them can change a draw.
+- **Check:** `t_gl_imports` (`test_fixed_function_caps`): enabling and disabling each leaves the state a draw reads as it was, and a cap the layer keeps still sets it.
+- **Found on:** Fate/stay night REMASTERED, which turns all of them off once while it puts its state in order.
+
 ### GLSL prefixes in main are no shaders
 
 - **Symptom:** the NSP script translates `main#0` and `main#1` and stops at `[RED] main#0 (…) does not translate: … 'discard' : not supported in this stage: vertex | … Missing entry point`; the game gets no run-time shader capture.

@@ -1327,6 +1327,10 @@ static void cap_set(GLenum cap, int on) {
     if (cap == GL_TEXTURE_2D || cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
         || cap == 0x864f /* DEPTH_CLAMP: Metal clamps to the depth range already */
         || cap == 0x92e0 /* DEBUG_OUTPUT */ || cap == 0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */) return;
+    // Fixed-function pipeline state, which only a fixed-function draw reads: with a program bound the shader decides the lighting, whether fragments are discarded and where
+    // the texture coordinates come from, so none of it can change a draw. A GL 1.x-era renderer whose draws are all GLSL turns all of them off before its first draw.
+    if (cap == 0x0b50 /* LIGHTING */ || (cap >= 0x4000 && cap <= 0x4007) /* LIGHT0..7 */ || cap == 0x0bc0 /* ALPHA_TEST */ || cap == 0x0b60 /* FOG */
+        || (cap >= 0x0c60 && cap <= 0x0c63) /* TEXTURE_GEN_S / T / R / Q */ || cap == 0x0b57 /* COLOR_MATERIAL */ || cap == 0x0ba1 /* NORMALIZE */) return;
     static GLenum seen[32]; static int n;
     for (int i = 0; i < n; i++) if (seen[i] == cap) return;
     if (n < 32) { seen[n++] = cap; GLOG("[RED] gl%s(%#x) not implemented", on ? "Enable" : "Disable", cap); }

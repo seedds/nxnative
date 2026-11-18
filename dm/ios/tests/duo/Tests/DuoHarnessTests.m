@@ -47,6 +47,13 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
 @end
 
+@interface DuoFakeTouchEvent : UIEvent
+@end
+
+@implementation DuoFakeTouchEvent
+- (UIEventType)type { return UIEventTypeTouches; }
+@end
+
 #if DUO_HARNESS_HAS_NATIVE_POSE_API
 @interface DuoFakeHinge : NSObject
 @property (nonatomic) NSInteger status;
@@ -102,6 +109,35 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 }
 
 #endif
+
+@interface UIView (DuoHarnessGamepadMenu)
+- (void)setMenuOpen:(BOOL)open;
+- (BOOL)webTouchActive;
+- (BOOL)voiceOverRunning;
+- (BOOL)reduceMotionEnabled;
+- (BOOL)duo_harness_webTouchActive;
+- (BOOL)duo_harness_voiceOverRunning;
+- (BOOL)duo_harness_reduceMotionEnabled;
+@end
+
+static BOOL gDuoHarnessWebTouchActive;
+static BOOL gDuoHarnessVoiceOverRunning;
+static BOOL gDuoHarnessReduceMotionEnabled;
+
+@implementation UIView (DuoHarnessGamepadMenu)
+- (BOOL)duo_harness_webTouchActive {
+    if (gDuoHarnessWebTouchActive) return YES;
+    return [self duo_harness_webTouchActive];
+}
+- (BOOL)duo_harness_voiceOverRunning {
+    if (gDuoHarnessVoiceOverRunning) return YES;
+    return [self duo_harness_voiceOverRunning];
+}
+- (BOOL)duo_harness_reduceMotionEnabled {
+    if (gDuoHarnessReduceMotionEnabled) return YES;
+    return [self duo_harness_reduceMotionEnabled];
+}
+@end
 
 @interface DuoHarnessTests : XCTestCase
 @property (nonatomic, strong) id savedLayout;
@@ -1244,6 +1280,106 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(input.buttons, 0);
     XCTAssertEqual(input.touch_count, 0);
     [self endTouches:@[video, button] onPad:pad cancelled:NO];
+}
+
+- (void)testMenuButtonFollowsTheGameViewAndTheController {
+    UIViewController *root = [self harnessRootViewController];
+    UIView *game = [root valueForKey:@"game"], *pad = [root valueForKey:@"pad"];
+    UIButton *menu = [self menuButtonInPad:pad];
+    UIView *tv = [[UIView alloc] initWithFrame:root.view.bounds];
+    GCController *controller = [GCController controllerWithExtendedGamepad];
+    @try {
+        // The TV scene moves the same game view into its own view hierarchy.
+        [tv addSubview:game]; [root.view setNeedsLayout]; [root.view layoutIfNeeded]; [pad layoutIfNeeded];
+        [self waitForView:menu hidden:NO];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"A touch-only player still has the menu on TV");
+        [self setHarnessControllers:@[controller] notification:GCControllerDidConnectNotification];
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu);
+        [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:1];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A);
+
+        [root.view insertSubview:game atIndex:0]; [root.view setNeedsLayout]; [root.view layoutIfNeeded]; [pad layoutIfNeeded];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"The gear returns even with the controller still connected");
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A);
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu, @"The gear fades out after idle seconds with a controller connected");
+        DuoFakeTouch *wake = [self touchAt:CGPointMake(CGRectGetMidX(pad.bounds), CGRectGetMidY(pad.bounds)) time:1];
+        [self beginTouches:@[wake] onPad:pad];
+        XCTAssertEqual(duo_harness_input().touch_count, 1, @"The touch that wakes the gear also reaches the game");
+        [self endTouches:@[wake] onPad:pad cancelled:NO];
+        XCTAssertEqual(duo_harness_input().touch_count, 0, @"Ending the wake touch releases the game touch");
+        XCTAssertFalse(menu.hidden, @"Touching the screen wakes the gear while a controller is connected");
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+        UIContextMenuInteraction *menuInteraction = menu.contextMenuInteraction;
+        XCTAssertNotNil(menuInteraction);
+        UIContextMenuConfiguration *menuConfig = [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:nil];
+        [menu contextMenuInteraction:menuInteraction willDisplayMenuForConfiguration:menuConfig animator:nil];
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:3.5]];
+        XCTAssertFalse(menu.hidden, @"The gear stays visible while the in-game menu is open");
+        XCTAssertEqualWithAccuracy(menu.alpha, 1.0, 0.01);
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+        [menu contextMenuInteraction:menuInteraction willEndForConfiguration:menuConfig animator:nil];
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu, @"Closing the in-game menu restarts the idle fade timer");
+
+        Method origWeb = class_getInstanceMethod(pad.class, @selector(webTouchActive));
+        Method swizWeb = class_getInstanceMethod(UIView.class, @selector(duo_harness_webTouchActive));
+        Method origVO = class_getInstanceMethod(pad.class, @selector(voiceOverRunning));
+        Method swizVO = class_getInstanceMethod(UIView.class, @selector(duo_harness_voiceOverRunning));
+        Method origRM = class_getInstanceMethod(pad.class, @selector(reduceMotionEnabled));
+        Method swizRM = class_getInstanceMethod(UIView.class, @selector(duo_harness_reduceMotionEnabled));
+        method_exchangeImplementations(origWeb, swizWeb);
+        method_exchangeImplementations(origVO, swizVO);
+        method_exchangeImplementations(origRM, swizRM);
+        @try {
+            gDuoHarnessWebTouchActive = YES;
+            CGPoint mid = CGPointMake(CGRectGetMidX(pad.bounds), CGRectGetMidY(pad.bounds));
+            XCTAssertNil([pad hitTest:mid withEvent:nil]);
+            XCTAssertTrue(menu.hidden, @"A programmatic nil-event hitTest while web touch is active must not wake the hidden gear");
+            XCTAssertNil([pad hitTest:mid withEvent:[DuoFakeTouchEvent new]]);
+            XCTAssertFalse(menu.hidden, @"A touch-event hitTest passed through to the web view wakes the gear");
+            gDuoHarnessWebTouchActive = NO;
+            [self waitForView:menu hidden:YES];
+
+            gDuoHarnessVoiceOverRunning = YES;
+            [NSNotificationCenter.defaultCenter postNotificationName:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
+            XCTAssertFalse(menu.hidden, @"Enabling VoiceOver wakes the gear immediately");
+            [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:3.5]];
+            XCTAssertFalse(menu.hidden, @"The gear never auto-hides while VoiceOver is running");
+            XCTAssertEqualWithAccuracy(menu.alpha, 1.0, 0.01);
+            gDuoHarnessVoiceOverRunning = NO;
+            [NSNotificationCenter.defaultCenter postNotificationName:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
+            [self waitForView:menu hidden:YES];
+
+            gDuoHarnessReduceMotionEnabled = YES;
+            DuoFakeTouch *wakeRM = [self touchAt:mid time:2];
+            [self beginTouches:@[wakeRM] onPad:pad];
+            [self endTouches:@[wakeRM] onPad:pad cancelled:NO];
+            XCTAssertFalse(menu.hidden);
+            [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:3.08]];
+            XCTAssertEqual(menu.layer.animationKeys.count, 0u, @"Reduce Motion skips the 0.3s fade animation");
+            XCTAssertTrue(menu.hidden, @"With Reduce Motion enabled, the gear hides immediately at the 3s timeout");
+            XCTAssertEqualWithAccuracy(menu.alpha, 0.0, 0.01);
+            gDuoHarnessReduceMotionEnabled = NO;
+        } @finally {
+            gDuoHarnessWebTouchActive = NO;
+            gDuoHarnessVoiceOverRunning = NO;
+            gDuoHarnessReduceMotionEnabled = NO;
+            method_exchangeImplementations(origWeb, swizWeb);
+            method_exchangeImplementations(origVO, swizVO);
+            method_exchangeImplementations(origRM, swizRM);
+        }
+
+        [tv addSubview:game]; [root.view setNeedsLayout]; [root.view layoutIfNeeded]; [pad layoutIfNeeded];
+        XCTAssertTrue(menu.hidden, @"The TV can also connect after the controller");
+        [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+        [self waitForView:menu hidden:NO];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+    } @finally {
+        [root.view insertSubview:game atIndex:0]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+        [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+    }
 }
 
 - (void)testConnectedVirtualControllerKeepsVideoTouchAndMapsPhysicalButtons {

@@ -255,6 +255,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Check:** [PR #262](https://github.com/seedds/nxnative/pull/262) reports Unicorn Overlord at 240 frames: 0 underruns in 10,000 callbacks; 13 Sentinels stays at 0. A silent Core Audio probe on a Mac mini reproduced the disposal error and the stale buffer after a rate change, then verified the fixes: default output switched between USB at 48 kHz and speakers at 44.1 kHz with callbacks continuing, and the same speakers at 44.1 / 96 / 48 kHz used 221 / 480 / 240 frames. The original default output and device rates were restored. `make -C dm/host/tests GAME=<id> audio-device` checks setup, device and rate notifications, scope filtering, buffer limits, synchronous notifications, the diagnostic override, absent devices, close and failed-open listener cleanup without audio hardware.
 - **Open:** the listed HDMI output was not retained as the system default during the probe, so switching to it remains unvalidated. The probe verifies silent host playback; gameplay listening after these listener changes has not been repeated.
 
+### Underruns in a run without a window
+
+- **Symptom:** a windowless Mac run logs intermittent audio underruns. A long frame can occur around the same time.
+- **Cause:** macOS normally starts a shell-launched host with an unspecified task role. XNU caps interactive QoS at the legacy level for that role, even when the host requests interactive QoS for guest threads. Under CPU contention the thread that feeds AudioOut can miss the time it has to refill the game's queue. [XNU task policy](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task_policy.c#L770-L821).
+- **Fix:** when `DM_WINDOW` is unset, the Mac front end requests `TASK_DEFAULT_APPLICATION` to lift the QoS ceiling. Set `DM_WINDOWLESS_ROLE=0` to keep the existing role for an A/B run. If macOS refuses the request, the host logs the Mach error and starts the guest.
+- **Check:** `t_front_role` checks the opt-out, the installed role, and the interactive priority. The [NieR comparison](../../dm/games/010056B015FE8000/README.md#windowless-mac-audio) records the gameplay measurements for the default and foreground roles.
+- **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md).
+
 ### The ring / silent switch muted the game on iOS
 
 - **Symptom:** a game is silent on an iPhone whose ring / silent switch is set to silent, though the volume is up; a game or video app plays through the switch.

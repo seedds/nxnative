@@ -17,18 +17,29 @@ static struct { int down, pend; float x, y; } g_gf[16];   // the gesture recogni
 static pthread_mutex_t g_tl = PTHREAD_MUTEX_INITIALIZER;
 static int64_t g_tsamp; static uint64_t g_tlast_ns;
 
+// On a picture wider than 16:9 whose UI keeps a centered 16:9 projection (state +0x58 > 16/9), map normalized touch X onto that centered band
+// so controls are hit where they are drawn; 16:9 and taller pictures keep X unchanged.
+__attribute__((weak)) uint8_t *dm_fps_state;
+static float ui_x(float x) {
+    if (!dm_fps_state) return x;
+    float r; memcpy(&r, dm_fps_state + 0x58, 4);
+    if (!(r > 16.0f / 9.0f)) return x;
+    float v = 0.5f + (x - 0.5f) / ((16.0f / 9.0f) / r);
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
 static void touch_apply(const dm_touch *t, int n) {
     pthread_mutex_lock(&g_tl);
     int seen[16] = {0};
     for (int i = 0; i < n; i++) {
         uint32_t id = t[i].id; if (id >= 16) continue;
+        float tx = ui_x(t[i].x), ty = t[i].y;
         seen[id] = 1;
         if (!g_gf[id].down) g_gf[id].pend = 1;
-        g_gf[id].down = 1; g_gf[id].x = t[i].x; g_gf[id].y = t[i].y;
-        if (g_f[id].st == F_LIFTED && g_f[id].reported) { g_f[id].again = 1; g_f[id].ax = t[i].x; g_f[id].ay = t[i].y; continue; }
+        g_gf[id].down = 1; g_gf[id].x = tx; g_gf[id].y = ty;
+        if (g_f[id].st == F_LIFTED && g_f[id].reported) { g_f[id].again = 1; g_f[id].ax = tx; g_f[id].ay = ty; continue; }
         if (g_f[id].st == F_EMPTY) { g_f[id].st = F_DOWN; g_f[id].reported = 0; }
         else if (g_f[id].st == F_LIFTED) g_f[id].st = F_DOWN;              // Pressed again before the lift was reported: treat it as held down all along
-        g_f[id].x = t[i].x; g_f[id].y = t[i].y;
+        g_f[id].x = tx; g_f[id].y = ty;
     }
     for (int id = 0; id < 16; id++) {
         if (!seen[id]) g_gf[id].down = 0;

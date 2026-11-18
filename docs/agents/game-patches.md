@@ -43,6 +43,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
+| `build` → `game` | screen shape wider than 16:9: Hor+ camera projections, render-view aspect, centered 16:9 2D layouts and letterboxed movies (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) | the output aspect is the host's, but the projection, render-view and layout sites are v131072 main's fixed offsets |
+| `build` → `game` | screen shape wider than 16:9: the render sizes, the swap chain, the renderer's 1920.0 constants, the cameras' ratio and the gameplay HUD at the edges (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | the output size is the host's, but where KTGL takes its sizes and its cameras' ratio is this build's code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -75,13 +77,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Ori and the Will of the Wisps](#ori-and-the-will-of-the-wisps) | 0 | 0 | 10 | 0 | 0 | `build` → `engine` |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 0 | 57 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 3 | 0 | `game` ×5 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 12 | 3 | 0 | `game` ×5, `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 1 | 1 | 0 | `game` ×2 |
@@ -94,10 +97,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT). The output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code
 
-- **3.0.3 `main`** `ff1d1c05…` ([patches.py:228](../../dm/games/01006F8002326000/patches.py#L228))
+- **3.0.3 `main`** `ff1d1c05…` ([patches.py:248](../../dm/games/01006F8002326000/patches.py#L248))
   <details><summary>14 frame-step sites</summary>
 
-  - frame step `+0x265140`: nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)
+  - frame step `+0x265140`: nn::ui2d::DrawInfo::SetProjectionMtx: y row divided on taller screens, x row scaled on wider screens (bit 6)
   - frame step `+0x27d570`: nn::ui2d::Pane::Calculate after the global matrix: duo_calc (the HUD at the taller screen's edges, full-screen backgrounds stretched)
   - frame step `+0x5c9b80`: graphics create arg +0x60: the display size in the screen's shape (bit 0)
   - frame step `+0x5c9b94`: graphics create arg +0x20: 1280 x the layout height (bit 1)
@@ -114,6 +117,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   </details>
 
+  - launcher capabilities: HEIGHT_WIDE_ASPECT
 
 ### ASTRAL CHAIN
 
@@ -461,6 +465,77 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
 
+### Pokemon Pokopia
+
+[Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), `0400A3A01EE4C000`, [patches.py](../../dm/games/0400A3A01EE4C000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape wider than 16:9: the render sizes, the swap chain, the renderer's 1920.0 constants, the cameras' ratio and the gameplay HUD at the edges (DM_SCREEN_ASPECT). The output size is the host's, but where KTGL takes its sizes and its cameras' ratio is this build's code
+
+- **v327680 `main`** `816c5358…` ([patches.py:248](../../dm/games/0400A3A01EE4C000/patches.py#L248))
+  <details><summary>57 frame-step sites</summary>
+
+  - frame step `+0xd3aac`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x86bf88`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9bc69c`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9bc8d0`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9bced4`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c0ee0`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c1630`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c1658`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c29c4`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c29ec`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c3344`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c44e0`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c4500`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c4b08`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9c4b30`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9f3ff4`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9f4050`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9f407c`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9f4190`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9f41bc`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0x9f41e4`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xdbf458`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xdda9e4`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xddab50`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xde5064`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xdea66c`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xdea6ac`: screen shape: a full-canvas screen rect spans the screen's width (the door wipe's black) (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0xdea6bc`: screen shape: a screen rect's centre is placed in the canvas in the middle of the screen (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0xe0c3e4`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8d438`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8d62c`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8e7a8`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8ef98`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8f320`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8fab0`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe8fd20`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xe902b0`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xeb5ce0`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xf0f45c`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xf10074`: screen shape: the UI's text and map scale takes the 16:9 canvas's width, min(width, height x 16 / 9) (DM_SCREEN_ASPECT)
+  - frame step `+0xfff1c4`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0xfff450`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x100c6b4`: screen shape: a point in the world lands where the wider camera draws it, in the canvas's coordinates (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x100dec4`: screen shape: the album's photo textures keep their size (state +0xac set) (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x100e478`: screen shape: the album's photo textures keep their size (state +0xac cleared) (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x100edd4`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x1018bac`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x1018c08`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x103a1c4`: screen shape: render width (1920) takes the screen's width (DM_SCREEN_ASPECT, state +0xa0)
+  - frame step `+0x103a1ec`: screen shape: render width of a dynamic resolution level (the table) takes the screen's width (DM_SCREEN_ASPECT, state +0xa0)
+  - frame step `+0x103a1f4`: screen shape: render width of a level out of range (1920) takes the screen's width (DM_SCREEN_ASPECT, state +0xa0)
+  - frame step `+0x104f364`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x104f61c`: screen shape: the renderer's 1920.0 becomes the output width (DM_SCREEN_ASPECT, state +0xa8)
+  - frame step `+0x105c0e0`: screen shape: texture descriptor (the swap chain): a 16:9 size takes the screen's width (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x16ae7a8`: screen shape: render target descriptor: a 16:9 size takes the screen's width (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x1e225ec`: screen shape: camera projection: a 16:9 camera takes the screen's ratio (Hor+) (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+  - frame step `+0x1e82690`: screen shape: full-screen pictures stretch to the screen's width; the gameplay HUD's listed panes move out by the extra half-width (DM_SCREEN_ASPECT, state +0xa0 / +0xa4)
+
+  </details>
+
+  - launcher capabilities: WIDE_ASPECT
+
 ### Pokémon Legends: Arceus
 
 [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), `01001F5010DFA000`, [patches.py](../../dm/games/01001F5010DFA000/patches.py).
@@ -593,7 +668,20 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with each fingerprint, each with one caller, the event update that reads the frame (vtable +0x78), the timeline and sound syncs and the player's +0xc read by disassembly; the opening timed with frames forced to two vsyncs (2026-11-16): movie frame: the pictures the player has taken. The game's own movie draw functions, found by their functions' fingerprints on any build that keeps them; it is the counter the same game's player keeps, so it goes with the player's two-picture cut and has no wider binding
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
 - **`game`**, rendering, at goal, checked: v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09): dynamic resolution: full size, or a climb on the load measured at each level. The game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape wider than 16:9: Hor+ camera projections, render-view aspect, centered 16:9 2D layouts and letterboxed movies (DM_SCREEN_ASPECT). The output aspect is the host's, but the projection, render-view and layout sites are v131072 main's fixed offsets
 
+- **v131072 `main`** `e0f3ccfa…` ([patches.py:228](../../dm/games/0400486024DEC000/patches.py#L228))
+  - frame step `+0x4f1e8`: camera projection: use drawable aspect for 16:9 views, restore stock ratio when disabled
+  - frame step `+0x20c2b0`: speech bubble anchor: keep the bubble over the speaker when the HUD is centred
+  - frame step `+0x23b9a8`: camera projection: use drawable aspect for 16:9 views, restore stock ratio when disabled
+  - frame step `+0x25d76c`: render-view aspect: match the widened camera on the output view
+  - frame step `+0x33b82c`: camera projection: use drawable aspect for 16:9 views, restore stock ratio when disabled
+  - frame step `+0x6e6cc4`: frame ratio: the host's step × base rate / 60 instead of base rate / the game's frame rate (state page target fps; 0 = the game's ratio)
+  - frame step `+0x774368`: full-screen 2D layout: keep the HUD at 16:9 when the picture fills a wider drawable
+  - frame step `+0x8065e0`: dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level
+  - frame step `+0x3485cc0`: camera projection: use drawable aspect for 16:9 views, restore stock ratio when disabled
+  - frame step `+0x3b5c758`: movie viewport: letterbox pre-rendered movies within the centred 16:9 HUD
+  - launcher capabilities: ANAMORPHIC_ASPECT, DYNAMIC_RESOLUTION
 - **function-matched** (`main` of builds without CUTS): movie pictures a frame: up to 2, the constructor's value for an argument of 2 or more, whatever its caller passes (1): 1 function, 1 cut
 - **function-matched** (`main` of builds without CUTS): movie update cap: 3 pictures a frame, the frame step's largest hold, in place of the limit (2), which also sizes the decoder pipeline: 1 function, 1 cut
 - **function-matched** (`main` of builds without CUTS): movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn: 2 functions, 2 cuts

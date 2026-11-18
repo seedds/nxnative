@@ -116,6 +116,7 @@ def build(gid, patched, control):
         if kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('?', 1)[0].split('=', 1) for v in values.split(',') if offered(v, n)]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
+            if len(opts) < 2 and values != 'languages': continue   # one option left on this platform: nothing to choose
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
             if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES

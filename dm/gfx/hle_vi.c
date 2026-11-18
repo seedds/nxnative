@@ -29,10 +29,12 @@ HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", "create layer; t
 // The present shows the picture in the layer's shape (nvn_mtl.m present_shape)
 void mtl_present_layer(uint32_t w, uint32_t h);
 static _Atomic uint32_t g_layer_wh;   // w | h << 16 of the last sized CreateLayer, 0 = none
+static _Atomic int g_layer_override;  // 1 when loader.c fixed an anamorphic widescreen present shape
+void dm_vi_override_layer(uint32_t w, uint32_t h) { g_layer_override = w > 0 && h > 0; mtl_present_layer(w, h); }
 void dm_vi_layer_size(int *w, int *h) { uint32_t v = g_layer_wh; *w = (int)(v & 0xffff); *h = (int)(v >> 16); }
 HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayEii", "create layer of a given size; the host returns a static object", Result, h_vi_CreateLayerWH, void **out, void *disp, int w, int h) {
     (void)disp; LOG("vi::CreateLayer %dx%d", w, h); *out = &g_layer;
-    if (w > 0 && h > 0 && w < 0x10000 && h < 0x10000) { g_layer_wh = (uint32_t)w | (uint32_t)h << 16; mtl_present_layer((uint32_t)w, (uint32_t)h); }
+    if (w > 0 && h > 0 && w < 0x10000 && h < 0x10000) { g_layer_wh = (uint32_t)w | (uint32_t)h << 16; if (!g_layer_override) mtl_present_layer((uint32_t)w, (uint32_t)h); }
     return RES_OK;
 }
 // SDK 22's overload with a LayerCreationSettings, which its constructor LayerCreationSettings(int w, int h) fills as {w, h, 2} (sdk+0x4526a0 in EA SPORTS FC 27; the SDK's own

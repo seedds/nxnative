@@ -46,3 +46,5 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# patches.py (v131072 main): DM_SCREEN_ASPECT wider than 16:9 widens 16:9 cameras (Hor+) and keeps 2D layouts and movies centered at 16:9
+screen_aspect	wide

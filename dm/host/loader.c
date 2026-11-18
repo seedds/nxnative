@@ -279,6 +279,9 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+        else if (!strcmp(key, "WIDE_ASPECT")) m->aspect_wide = v != 0;
+        else if (!strcmp(key, "ANAMORPHIC_ASPECT")) m->aspect_anamorphic = v != 0;
+        else if (!strcmp(key, "HEIGHT_WIDE_ASPECT")) m->aspect_height_wide = v != 0;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -323,10 +326,13 @@ uint8_t *dm_fps_state;
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+static int g_aspect_wide, g_aspect_anamorphic, g_aspect_height_wide;
+__attribute__((weak)) void dm_vi_override_layer(uint32_t w, uint32_t h) { (void)w; (void)h; }   // dm/gfx/hle_vi.c; host unit tests have no vi layer
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+    g_aspect_wide = m->aspect_wide; g_aspect_anamorphic = m->aspect_anamorphic; g_aspect_height_wide = m->aspect_height_wide;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
@@ -346,35 +352,43 @@ void dm_fps_state_apply(void) {
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
     if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
     memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
-    // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
-    // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
-    // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
+    // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77 (taller) or 1.8 and 4.0 (wider), makes builds with screen-shape stubs render that shape.
+    // Taller builds (Breath of the Wild 1.9.0, Animal Crossing: New Horizons 3.0.3) keep width 1920 and adjust height (+0x48..+0x98); wider swapchain/anamorphic builds (Pokemon
+    // Pokopia, Ocarina of Time) keep height 1080 and adjust width (+0xa0 u32 output width, +0xa4 float ratio, +0xa8 float output width); Animal Crossing's HEIGHT_WIDE_ASPECT
+    // keeps width 1920 and 720-tall centered layouts on wider screens too
     const char *as = getenv("DM_SCREEN_ASPECT");
-    if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
+    if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS and Mac front ends resolve it to the screen's shape
         char *end; float a = strtof(as, &end);
-        if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
-        else {
-            uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3; float lf = (float)lh;
+        if (end == as || *end || !((a >= 1.3f && a < 1.77f) || (a >= 1.8f && a <= 4.0f))) {
+            LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77 (taller) or 1.8 to 4 (wider); keeping 16:9", as);
+        } else if (a >= 1.8f && (g_aspect_wide || g_aspect_anamorphic)) {
+            uint32_t ow = (uint32_t)(1080.0f * a / 8.0f + 0.5f) * 8; float r = (float)ow / 1080.0f, owf = (float)ow;
+            memcpy(dm_fps_state + 0xa0, &ow, 4); memcpy(dm_fps_state + 0xa4, &r, 4); memcpy(dm_fps_state + 0xa8, &owf, 4);
+            if (g_aspect_anamorphic) dm_vi_override_layer(ow, 1080);
+            else { extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(ow, 1080); }
+            LOG("%s: screen shape %.3f: output %ux1080, cameras %.4f:1 (DM_SCREEN_ASPECT)", g_fps_mod, a, ow, r);
+        } else if (a >= 1.8f && !g_aspect_height_wide) {
+            LOG("%s: screen shape %.3f: build has no wider screen-shape stubs, keeping 16:9", g_fps_mod, a);
+        } else if (a < 1.77f && (g_aspect_wide || g_aspect_anamorphic) && !g_aspect_height_wide) {
+            LOG("%s: screen shape %.3f: build has only wider screen-shape stubs, keeping 16:9", g_fps_mod, a);
+        } else {
+            uint32_t oh = a >= 1.8f ? (uint32_t)(1920.0f / a / 8.0f + 0.5f) * 8 : (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48;
+            uint32_t lh = oh >= 1080 ? oh * 2 / 3 : 720;
+            float lf = (float)lh;
             memcpy(dm_fps_state + 0x48, &oh, 4); memcpy(dm_fps_state + 0x4c, &lh, 4); memcpy(dm_fps_state + 0x50, &lf, 4);
             extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(1920, oh);   // the picture's shape for a texture that follows it (nvn_mtl.m present_shape)
             const char *ms = getenv("DM_SCREEN_ASPECT_SITES"); uint32_t mask = ms ? (uint32_t)strtoul(ms, NULL, 0) : 0xffffffffu;   // the stubs of the game's own conversions, one bit each (+0x54)
             memcpy(dm_fps_state + 0x54, &mask, 4);
             if (ms) LOG("%s: screen shape: conversion sites %#x (DM_SCREEN_ASPECT_SITES)", g_fps_mod, mask);
-            // The field of view: views of the screen's ratio (the scene, the HUD's camera) keep 16:9's sides and show more above and below (patches.py's sead::PerspectiveProjection stubs)
             float r = 1920.0f / (float)oh, k = (16.0f / 9.0f) / r, tol = 0.01f;
+            if (k < 1.0f) k = 1.0f;   // a wider screen keeps the vertical angle and widens horizontally via aspect r
             const char *fo = getenv("DM_SCREEN_FOV"); if (fo && !strcmp(fo, "off")) tol = -1.0f;   // trials: the scene keeps the game's vertical angle (no view matches); the HUD camera still widens
             memcpy(dm_fps_state + 0x58, &r, 4); memcpy(dm_fps_state + 0x5c, &k, 4); memcpy(dm_fps_state + 0x60, &tol, 4);
             float wide = 16.0f / 9.0f, wtol = 0.001f, far = 10000.0f;   // the HUD camera's projection: 16:9, near 1, far 10000 (+0x74 / +0x78 / +0x7c)
             memcpy(dm_fps_state + 0x74, &wide, 4); memcpy(dm_fps_state + 0x78, &wtol, 4); memcpy(dm_fps_state + 0x7c, &far, 4);
-            // The HUD at the taller edges (patches.py duo_anchor.c, +0x80..+0x98): the shift (half the layout height over 360), the stretch of full-screen panes, the edge rule's
-            // distance, the listed corner widgets' distance, a full-screen pane's width and height in the 1280x720 space, and the tallest one still stretched (a menu's
-            // background is about 720 tall, the weapon wheel's gradient 1280; the map's tiles are left alone anyway)
-            // (Mac, a Master Mode save: an edge distance of 280 takes the menus' title bars (286 to 320), the map's frame pieces (284 to 360) and the bottom guides (-318) along
-            // as whole rows; 330 left the title bars and the rupee count in the middle while the hearts moved. Text moves with its widget since the rule runs where global
-            // matrices are computed. Only panes as wide and as tall as the screen are stretched: a width of 0 stretched the inventory's half-width side panel past its top
-            // and bottom bars). DM_SCREEN_HUD=<edge>,<listed>,<full-screen width>,<full-screen height>[,<tallest>]
-            // overrides them for trials
             float anc[7] = {(float)lh / 2 - 360.0f, (float)lh / 720.0f, 280.0f, 100.0f, 1270.0f, 710.0f, 1300.0f};
+            if (anc[0] < 0.0f) anc[0] = 0.0f;
+            if (anc[1] < 1.0f) anc[1] = 1.0f;
             const char *hv = getenv("DM_SCREEN_HUD");
             if (hv && sscanf(hv, "%f,%f,%f,%f,%f", &anc[2], &anc[3], &anc[4], &anc[5], &anc[6]) < 4) LOG("[RED] DM_SCREEN_HUD=%s: <edge>,<listed>,<full width>,<full height>[,<tallest>]; keeping the rest", hv);
             memcpy(dm_fps_state + 0x80, anc, sizeof anc);

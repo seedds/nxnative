@@ -38,6 +38,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+__attribute__((weak)) void dm_fps_state_apply(void) {}   // loader.c; standalone front-end tests have no loader
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
@@ -1605,6 +1606,15 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
+        {   // Picture shape "auto" (Match screen): the target screen's shape when taller (1.3..1.77, e.g. MacBook 16:10) or wider (1.8..4.0, e.g. 21:9 / 32:9) than 16:9
+            const char *as = getenv("DM_SCREEN_ASPECT");
+            if (as && !strcmp(as, "auto")) {
+                NSSize sz = (win.screen ?: NSScreen.mainScreen).frame.size; double sr = sz.height > 0 ? sz.width / sz.height : 0;
+                char sv[16]; if ((sr >= 1.3 && sr < 1.77) || (sr >= 1.8 && sr <= 4.0)) snprintf(sv, sizeof sv, "%.3f", sr); else strcpy(sv, "0");
+                setenv("DM_SCREEN_ASPECT", sv, 1); LOG("front end: picture shape auto: screen %.0fx%.0f points (%.3f:1) -> DM_SCREEN_ASPECT=%s", sz.width, sz.height, sr, sv);
+                if (strcmp(sv, "0")) dm_fps_state_apply();
+            }
+        }
         g_win = win;
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind

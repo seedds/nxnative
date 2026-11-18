@@ -137,8 +137,8 @@ class Tables(Base):
         self.assertFalse(self.tables(None, None))
         self.assertEqual(self.ran, [])
 
-    def test_not_profile_inputs(self):   # the steps' reuse keys leave out what the iOS shader step makes, and the rewriter's patches (the rewrite step's own key)
-        for n in ('game.tsv', 'shader_map.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'patches.py'): (self.tmp / n).write_text('')
+    def test_not_profile_inputs(self):   # the steps' reuse keys leave out what the iOS shader step makes, the rewriter's patches (the rewrite step's own key), the note and the regression route
+        for n in ('game.tsv', 'shader_map.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'c1_full_vk.tsv', 'cb_extent_vk.tsv', 'patches.py', 'README.md', 'smoke.tsv'): (self.tmp / n).write_text('')
         self.assertEqual([p.name for p in nsp.profile_files(types.SimpleNamespace(dir=self.tmp))], ['game.tsv', 'shader_map.tsv'])
 
 

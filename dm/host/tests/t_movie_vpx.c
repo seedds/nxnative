@@ -41,4 +41,28 @@ int main(void) {
         decode(2, format, vp8, sizeof vp8);
     }
     puts("VP8 and VP9 key frames: NV12 and RGBA pixels match");
+#if !defined(__APPLE__) && !defined(_WIN32)
+    // The AAC stopgap (Linux, no decoder; md_aac_silence, which Windows takes too where Media Foundation has no decoder): each packet gives one frame of silence, 1024
+    // samples a channel (2048 with SBR), PCM16 interleaved, the size GetOutputBufferSize reports; an empty packet gives nothing; the channels from the configuration
+    // when the MediaData gave none
+    {
+        static uint8_t lc[] = {0x11, 0x90}, sbr[] = {0x29, 0x90}, six[] = {0x11, 0xb0}, pkt[16] = {0xde, 0xad};   // AudioSpecificConfig: AAC-LC, 48 kHz, 2 channels; SBR; 6 channels
+        mdec_t d = { .type = MD_TYPE_AAC, .ch = 2, .rate = 48000 };
+        d.vhdr[0] = lc; d.vhdr_n[0] = sizeof lc;
+        assert(md_aac(&d, pkt, sizeof pkt, 0) == 1 && d.out[0].bytes == 1024 * 2 * 2);
+        d.out[0].frm[0] = 1; d.out[0].frm[4095] = 1;   // the slot is used again: all of the frame is written each time
+        assert(md_aac(&d, pkt, sizeof pkt, 0) == 1);
+        for (size_t i = 0; i < d.out[0].bytes; i++) assert(d.out[0].frm[i] == 0);
+        assert(md_aac(&d, pkt, 0, 1) == 0 && d.out[1].frm == NULL);
+        d.vhdr[0] = sbr;
+        assert(md_aac(&d, pkt, sizeof pkt, 1) == 1 && d.out[1].bytes == 2048 * 2 * 2);
+        mdec_t e = { .type = MD_TYPE_AAC };
+        e.vhdr[0] = six; e.vhdr_n[0] = sizeof six;
+        assert(md_aac(&e, pkt, sizeof pkt, 0) == 1 && e.ch == 6 && e.out[0].bytes == 1024 * 2 * 6);
+        mdec_t f = { .type = MD_TYPE_AAC };
+        assert(md_aac(&f, pkt, sizeof pkt, 0) == 1 && f.ch == 2 && f.out[0].bytes == 1024 * 2 * 2);
+        free(d.out[0].frm); free(d.out[1].frm); free(e.out[0].frm); free(f.out[0].frm);
+        puts("AAC without a decoder: one frame of silence per packet");
+    }
+#endif
 }

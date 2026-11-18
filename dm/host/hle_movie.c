@@ -34,7 +34,7 @@
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 #else
-// No AAC decoder on Linux yet: a declared stopgap until Phase 1 brings one; md_aac reports it once with a red line and the decoder outputs no samples. On Windows the AAC goes
+// No AAC decoder on Linux yet: a declared stopgap until Phase 1 brings one; md_aac reports it once with a red line and gives each packet's frame as silence. On Windows the AAC goes
 // through Media Foundation (hle_movie_aac.h, hle_movie_win32.c); the AudioToolbox names below only keep the shared code compiling
 typedef void *AudioConverterRef; typedef uint32_t UInt32; typedef struct { int64_t mStartOffset; uint32_t mVariableFramesInPacket, mDataByteSize; } AudioStreamPacketDescription;
 static int AudioConverterDispose(AudioConverterRef c) { (void)c; return 0; }   // never reached: no converter is made
@@ -388,6 +388,26 @@ static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
 // ---------- AAC ----------
 // The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic cookie built
 // here as FFmpeg's AudioToolbox decoder builds it); without csd-0 an AAC-LC configuration is made from the sample rate and channel count
+// An AAC frame's samples per channel: 1024, 2048 with SBR (object type 5 or 29 in the AudioSpecificConfig, csd-0)
+static int aac_frame_samples(const mdec_t *d) {
+    int sbr = d->vhdr_n[0] > 0 && ((d->vhdr[0][0] >> 3) == 5 || (d->vhdr[0][0] >> 3) == 29);
+    return sbr ? 2048 : 1024;
+}
+#if !defined(__APPLE__)
+// Without a decoder (Linux until Phase 1 brings one; Windows where Media Foundation has none, an N edition without the Media Feature Pack): each packet gives the silence of
+// its frame, as the H.264 stopgap gives a black picture per access unit. A player sizes its AudioOut buffers by the frame, appends each output whole and advances its audio
+// clock by it (h_movie_OutSize): with no output at all, the movie's own AudioOut got no buffer for the length of the movie (every callback of it an underrun) and that clock
+// stood still; with silence it is fed at the stream's pace, as a decoder feeds it
+static int md_aac_silence(mdec_t *d, int n, int slot) {
+    if (n <= 0) return 0;
+    if (d->ch <= 0) { int cc = d->vhdr_n[0] >= 2 ? d->vhdr[0][1] >> 3 & 15 : 0; d->ch = cc == 7 ? 8 : cc && cc < 7 ? cc : 2; }   // the configuration's channels, as md_aac_open reads them
+    if (d->out[slot].cap < MD_PCM_CAP) { free(d->out[slot].frm); d->out[slot].frm = malloc(MD_PCM_CAP); d->out[slot].cap = MD_PCM_CAP; }
+    size_t bytes = (size_t)aac_frame_samples(d) * 2 * (size_t)d->ch;
+    memset(d->out[slot].frm, 0, bytes); d->out[slot].bytes = bytes;
+    return 1;
+}
+#endif
+
 #if defined(__APPLE__)
 static uint8_t *esds_descr(uint8_t *p, int tag, unsigned n) { *p++ = (uint8_t)tag; for (int i = 3; i > 0; i--) *p++ = (uint8_t)(n >> (7 * i) | 0x80); *p++ = (uint8_t)(n & 0x7f); return p; }
 static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, AudioStreamPacketDescription **pd, void *ud) {
@@ -440,17 +460,18 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
 // channels and rate; where it cannot be made (an N edition without the Media Feature Pack), silence, as on Linux
 static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
     if (!d->maac && !d->maac_none) { int ch = d->ch, rate = d->rate; if ((d->maac = maac_new(d->vhdr[0], d->vhdr_n[0], &ch, &rate))) { d->ch = ch; d->rate = rate; } else d->maac_none = 1; }
-    if (!d->maac || n <= 0) return 0;
+    if (!d->maac) return md_aac_silence(d, n, slot);
+    if (n <= 0) return 0;
     if (d->out[slot].cap < MD_PCM_CAP) { free(d->out[slot].frm); d->out[slot].frm = malloc(MD_PCM_CAP); d->out[slot].cap = MD_PCM_CAP; }
     int fr = maac_decode(d->maac, p, n, (int16_t *)d->out[slot].frm, (int)(MD_PCM_CAP / (2 * d->ch)));
     d->out[slot].bytes = fr > 0 ? (size_t)fr * 2 * d->ch : 0;
     return fr > 0;
 }
 #else
-static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {   // the stopgap of the top of the file: the movie plays without its AAC sound
-    (void)p; (void)n; (void)slot;
+static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {   // the stopgap of the top of the file: the movie plays with silence for its AAC sound
+    (void)p;
     if (!d->red_vb++) LOG("[RED] movie: no AAC decoder on this platform yet (Phase 1), outputting silence");
-    return 0;
+    return md_aac_silence(d, n, slot);
 }
 #endif
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
@@ -790,8 +811,7 @@ HLE_FORCE("_ZN5movie7Decoder19GetOutputBufferSizeEPiS1_", "movie decoder: output
     // of a Vorbis bound every 4 KB AAC frame was played as 0.68 s, the clock crawled, the player stopped taking audio and the opening movie froze on its first second.
     // Vorbis packets vary in length (a long block gives far more than a short one), so its outputs stay at the bound
     if (MD_AUDIO(d)) {
-        int sbr = d->vhdr_n[0] > 0 && ((d->vhdr[0][0] >> 3) == 5 || (d->vhdr[0][0] >> 3) == 29);
-        *size = d->type == MD_TYPE_AAC && d->ch > 0 ? 1024 * (sbr ? 2 : 1) * d->ch * 2 : MD_PCM_CAP; *mode = d->mode;
+        *size = d->type == MD_TYPE_AAC && d->ch > 0 ? aac_frame_samples(d) * d->ch * 2 : MD_PCM_CAP; *mode = d->mode;
         MD_TRACE(d, 11, "GetOutputBufferSize → %d (PCM)", *size); return 0;
     }
     int w, h, stride, slice; md_dims(d, &w, &h, &stride, &slice);

@@ -951,6 +951,7 @@ def package_key(pkg):   # the shader package's content (file names and bytes): w
 
 def profile_files(g):   # every file of the game profile (game.tsv and its tables) but the c1 / uniform extent tables, which the iOS shader step makes (chain_tables): no step reads them,
     out = {name for name, _, _ in CHAIN_TABLES} | set(CHAIN_TABLES_VK) | {'patches.py'}   # and the rewriter's patches, which only the rewrite step reads (patch_files); the Vulkan build's tables likewise
+    out |= {'README.md', 'smoke.tsv'}   # the game's note and its regression route (scripts/regress.py): no packing step reads them, and a bundle whose note was edited made every shader stage of a repack run again
     return sorted(p for p in g.dir.iterdir() if p.is_file() and p.name not in out)
 
 

@@ -338,7 +338,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [A texture in a sparse pool came out CPU-written at its first use](../../../docs/reference/memory.md#a-texture-in-a-sparse-pool-came-out-cpu-written-at-its-first-use): found by the unit test, on this profile's `tex_dirty_upload`.
 - [Textures made for GPU use kept from their CPU rewrites](../../../docs/reference/nvn-objects.md#textures-made-for-gpu-use-kept-from-their-cpu-rewrites): the terrain tiles' height, blend and hole maps rewritten as tile slots are reused; flat blue holes in the ground after an hour of play.
 - [`EventFd` needs no network](../../../docs/reference/services.md#eventfd-needs-no-network)
-- [No virtual audio input devices (SDK 22)](../../../docs/reference/audio.md#no-virtual-audio-input-devices-sdk-22)
+- [Virtual audio input streams](../../../docs/reference/audio.md#virtual-audio-input-streams-sdk-2122): enable Microphone in the Mac launcher and use the game’s Ocarina Mic Input setting for humming or playing an instrument.
 - [`nn::ndve`'s movie enhancement file](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)
 - [Task and mesh shaders in BNSH, and indirect mesh draws](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws)
 - [Indirect task / mesh draws on the encode thread](../../../docs/reference/rendering.md#indirect-task--mesh-draws-on-the-encode-thread): the iOS app aborted when a save loaded.

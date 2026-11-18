@@ -14,6 +14,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,18 @@ spec = importlib.util.spec_from_file_location('pack_app', REPO / 'dm/mac/pack_ap
 pack_app = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack_app)
 TID = '01008CF01BAAC000'
 TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
+
+def module_with_import(name, defined=False):
+    """Minimal rewritten module with one dynamic symbol for packer capability checks."""
+    image = bytearray(256)
+    struct.pack_into('<I', image, 4, 16)
+    struct.pack_into('<4si', image, 16, b'MOD0', 16)
+    struct.pack_into('<qQqQqQ', image, 32, 6, 80, 5, 128, 0, 0)
+    struct.pack_into('<IBBHQQ', image, 104, 1, 0x10, 0, int(defined), 0, 0)
+    name = name.encode() + b'\0'
+    image[129:129 + len(name)] = name
+    return image
+
 
 HOST_C = r'''#include <signal.h>
 #include <stdio.h>
@@ -122,7 +135,7 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'pso/gpu-prewarm-00.mtl4a': b'bases', 'pso/gpu-prewarm-00.keys': b'DMPSOIX1', 'pso/prewarm.tsv': b'stamp',   # --prebake's files and their index
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -208,7 +221,7 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'pso/gpu-prewarm-00.mtl4a', 'pso/gpu-prewarm-00.keys', 'pso/prewarm.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
-                 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
+                 'tools/nso_syms.py', 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
@@ -419,6 +432,20 @@ class PackReuse(unittest.TestCase):
         key = json.loads(self.key.read_text()); del key['sources']; self.key.write_text(json.dumps(key))   # no digests in the record: an input is as packed only with its times as recorded,
         out = self.pack(); self.assertEqual(out.count('(reused, signed)'), 2)   # which the two images, whose change times moved above, no longer have
         self.assertEqual(signed() & {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle'}, {'GameData.bundle', 'ShaderLibraries.bundle'})
+
+    def test_microphone_metadata_matches_the_supported_import(self):
+        module = self.tmp / 'patched/main.patched.bin'
+        cases = (
+            ('_ZN2nn5audio12ListAudioInsEPNS0_11AudioInInfoEi', False, False),
+            (pack_app.nso_syms._INPUT_STREAM_OPEN, True, False),
+            (pack_app.nso_syms._INPUT_STREAM_OPEN, False, True),
+        )
+        for name, defined, supported in cases:
+            with self.subTest(name=name, defined=defined):
+                module.write_bytes(module_with_import(name, defined))
+                self.pack()
+                info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
+                self.assertEqual('NSMicrophoneUsageDescription' in info, supported)
 
     def test_a_pack_that_stops_leaves_the_bundles_of_the_app_in_place_reusable(self):
         # the usual moment a pack is stopped is while it signs: the app is the old one, and its record went with the attempt, so the next pack signed every bundle again (Ocarina of

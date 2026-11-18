@@ -241,7 +241,7 @@ int64_t unix_now();
 // Play records by default: nxhost-run gets DM_AOT_PROFILE=<the profile folder> (compose's record) unless the player turned "Record a profile while playing" off (record.<title ID>=0
 // in launcher.txt) or the environment sets it. At exit the host writes <module>.tsv (the functions it sampled this session), <module>.misses.tsv (the addresses its JIT fallback
 // ran) and <module>.targets.tsv (what the inline caches of its indirect calls were bound to: dm/host/aot_targets.c), the last two merged over the sessions of one image, there. The
-// launcher reads those three by their names (a module's name has no '.': the game's NSO names, nro<N> for an NRO); any other .tsv there is ignored, named once in the log, never
+// launcher reads those three by their names (a module's name has no '.': the game's NSO names, nro<N> for an NRO); <module>.bind.tsv, the loader's bindings the host writes there for the packer, is left alone; any other .tsv there is ignored, named once in the log, never
 // read as a profile. The list says "Profile recorded: a better pack is possible", and "Repack with profile" runs the packer in the background,
 // when the folder holds what a pack made now would take and the packs did not: profile_state compares the files, as the packer would take them (of a module of the mode's packs,
 // recorded on its image: the manifest's or nro.tsv's SHA-256), with the launch file's made rows. A pack made now differs when, for a module:

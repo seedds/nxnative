@@ -1091,10 +1091,12 @@ ProfileState profile_state(const Game &g, const std::string &mode, const std::st
             if (stem.size() > k && !stem.compare(stem.size() - k, k, kind)) { stem.resize(stem.size() - k); break; }
         }
         if (!stem.empty() && stem.find('.') == std::string::npos) { s.files++; continue; }
+        // <module>.bind.tsv, the loader's bindings (dm/host/aot_profile.c): the host's too, the packer's to read (a first pack's --bind), nothing a pack is compared by
+        if (stem.size() > 5 && !stem.compare(stem.size() - 5, 5, ".bind") && stem.find('.') == stem.size() - 5) continue;
         s.ignored.push_back(n);
         if (said.insert(S(e.path())).second)
-            std::fprintf(stderr, "nxlauncher: %s: ignored: the profile folder holds the host's <module>.tsv, <module>.misses.tsv and <module>.targets.tsv, and this is none of them\n",
-                         S(e.path()).c_str());
+            std::fprintf(stderr, "nxlauncher: %s: ignored: the profile folder holds the host's <module>.tsv, <module>.misses.tsv, <module>.targets.tsv and <module>.bind.tsv, "
+                                 "and this is none of them\n", S(e.path()).c_str());
     }
     std::sort(s.ignored.begin(), s.ignored.end());
     const std::string suffix = kPackSuffix;

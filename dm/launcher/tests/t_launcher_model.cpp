@@ -474,6 +474,7 @@ static void second_pack(const fake::Folder &f) {
     misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 2}, {0x208, "indirect", 1}});
     targets_file(prof, "main", main_sha, kTargetRows);
     fake::write(prof / "main.weights.tsv", "0x100 0x200 1\n");   // no file the host writes: ignored, never read as a profile
+    fake::write(prof / "main.bind.tsv", "0x10 0x20 memcpy\n");    // the loader's bindings, which the host writes there too: not a profile file, and not named as ignored
     s = state(main_same);
     CHECK(s.files == 2 && s.ignored == std::vector<std::string>{"main.weights.tsv"} && s.samples.empty() && s.targets.empty() && !s.better(),
           "a targets file alone is not a profile, and without the profile beside it nxaot reads none: nothing; another .tsv ignored: " + s.reason());

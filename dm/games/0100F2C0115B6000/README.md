@@ -83,6 +83,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [A cold build spends half a minute on the c1 and uniform extent tables](../../../docs/reference/packing.md#a-cold-build-spends-half-a-minute-on-the-c1-and-uniform-extent-tables) (2026-11-17): 33 s of its 507 s cold Mac shader build, 10.5 s now (resolved).
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
 
 - [AltServer cannot install a file of 2 GiB or more](../../../docs/reference/packing.md#altserver-cannot-install-a-file-of-2-gib-or-more) (2026-11-08, #1688): 1.4.3's shader library is 2.10 GiB; `--shader-files` packs it as separate files.

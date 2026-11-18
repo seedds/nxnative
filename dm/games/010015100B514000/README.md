@@ -101,6 +101,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [Display-link rescue during startup can leave the present queue without a consumer](../../../docs/reference/frame-rate.md#display-link-rescue-during-startup-can-leave-the-present-queue-without-a-consumer).
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - **Its Switch 2 Edition's program:** [A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"](../../../docs/reference/packing.md#a-switch-2-edition-nup-stops-at-2-base-packages-or-is-not-a-base-title-id): the Switch 2 program (`040015100B514001`, no profile) mounts this program's RomFS by program index and the upgrade add-on itself; the NUP packer packs this RomFS beside it.
 - **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): choosing two players splits a Joy-Con 2 pair through the controller applet, one sideways Joy-Con each.

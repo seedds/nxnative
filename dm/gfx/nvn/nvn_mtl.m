@@ -18812,6 +18812,8 @@ static struct timespec link_deadline(uint64_t ns);
     (void)link;
     double cb = CACurrentMediaTime();
     pthread_mutex_lock(&g_pq_mu);
+    // A callback that cannot take a present must not reset the watchdog or count a pacing tick. The next enqueue that hands off the layer may be waiting for a texture.
+    if (!g_dm_present_link || g_rescue_mode) { pthread_mutex_unlock(&g_pq_mu); return; }
     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
         MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
     pthread_mutex_unlock(&g_pq_mu);
@@ -18836,6 +18838,7 @@ static struct timespec link_deadline(uint64_t ns);
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
+    // Checked again: the queue lock was released to publish the tick, and rescue or a mode change can take the queue away from this callback in that interval.
     if (!g_dm_present_link || g_rescue_mode) { pthread_mutex_unlock(&g_pq_mu); return; }
     // Keep a multi-tick frame on screen until its hold ends, even if the next frame is already queued.
     const int hold = g_link_hold_until > 0 && tick_time < g_link_hold_until - 0.002;
@@ -18993,7 +18996,8 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (lk && hz != hz_was) { hz_was = hz; if (want && want == applied) { lk.preferredFrameRateRange = link_range(want); MLOG("display link: the screen runs at %d Hz now, range set again (frame %llu)", hz, (unsigned long long)atomic_load(&g_cur_frame)); } }
     int lat = link_latency();   // fullscreen, screen or refresh mode changed: a link created since took the current policy
     if (lk && lk.preferredFrameLatency != lat) { lk.preferredFrameLatency = lat; MLOG("display link: frame latency %d (%s; frame %llu)", lat, link_latency_why(), (unsigned long long)atomic_load(&g_cur_frame)); }
-    if (want == applied) return;
+    // Rescue can ask for mode 0 after link_main has attached the layer but before an enqueue has applied the link's first mode, so applied is still 0 while a link owns the layer. Mode 0 with a link present still has to invalidate it, or the layer is never handed back.
+    if (want == applied && (want || !lk)) return;
     g_link_mode = want;
     if (!g_link_started) {
         if (!want) { applied = 0; return; }
@@ -19004,7 +19008,8 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     CAMetalDisplayLink *link = g_link; if (!link) return;
     if (want) link.preferredFrameRateRange = link_range(want);
     else { CFRunLoopRef rl = g_link_rl; g_link = nil; CFRunLoopPerformBlock(rl, kCFRunLoopDefaultMode, ^{ [link invalidate]; pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); CFRunLoopStop(rl); }); CFRunLoopWakeUp(rl); }
-    MLOG("present pacing mode %d → %d (frame %llu)", applied, want, (unsigned long long)atomic_load(&g_cur_frame));
+    if (want == applied) MLOG("display link: returning the layer to the present thread during startup (frame %llu)", (unsigned long long)atomic_load(&g_cur_frame));
+    else MLOG("present pacing mode %d → %d (frame %llu)", applied, want, (unsigned long long)atomic_load(&g_cur_frame));
     applied = want;
     pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
 }

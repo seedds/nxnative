@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>nxnative Remote Play</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- Top Bar Header -->
+    <header id="header-bar">
+      <div class="brand">
+        <span class="brand-bolt">⚡</span>
+        <span class="brand-name">nxnative Remote Play</span>
+      </div>
+      <div class="header-badges">
+        <span id="conn-status" class="badge badge-disconnected">Disconnected</span>
+        <span id="player-badge" class="badge badge-player">P1</span>
+        <button id="mode-toggle-btn" class="header-btn" title="Toggle Stream / Controller Only">📺 Stream</button>
+        <button id="gyro-header-btn" class="header-btn" title="Toggle Gyro Steering">🔄 Gyro: Off</button>
+        <button id="kbd-toggle-btn" class="header-btn" title="Toggle Keyboard Overlay" style="display:none;">⌨ Controls</button>
+        <button id="unmute-btn" class="header-btn">🔊</button>
+        <button id="fullscreen-btn" class="header-btn">⛶</button>
+      </div>
+    </header>
+
+    <!-- Top Area: Video Stream (16:9 widescreen) -->
+    <div id="video-section">
+      <div id="video-container">
+        <video id="game-video" autoplay playsinline muted></video>
+        <audio id="game-audio" autoplay playsinline></audio>
+        <div id="video-placeholder">
+          <div class="placeholder-spinner"></div>
+          <div class="placeholder-label">Connecting Stream...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Stats Bar -->
+    <div id="stats-bar">
+      <span id="stat-rtt">RTT: -- ms</span>
+      <span class="stat-sep">•</span>
+      <span id="stat-fps">FPS: --</span>
+      <span class="stat-sep">•</span>
+      <button id="gyro-toggle-btn" class="stat-btn">🔄 Gyro: Off</button>
+      <button id="gyro-calib-btn" class="stat-btn" style="display:none;">🎯 Zero</button>
+    </div>
+
+    <!-- Main Gamepad Area (Fills remaining height) -->
+    <main id="gamepad-area">
+      <!-- Left Pad: Shoulder + Steering Stick + Minus/Select -->
+      <section class="pad-column pad-left">
+        <!-- Shoulder L / ZL -->
+        <div class="triggers-group triggers-left">
+          <button class="touch-btn trigger-btn btn-l" data-btn="64">L</button>
+          <button class="touch-btn trigger-btn btn-zl" data-btn="256">ZL (Item)</button>
+        </div>
+
+        <!-- Left Analog Stick with Navigation Area -->
+        <div id="touch-joystick-zone">
+          <div id="touch-joystick-deadzone"></div>
+          <div id="touch-joystick-knob"></div>
+          <div class="stick-label">STEER</div>
+        </div>
+
+        <!-- Minus / Select Button (Left) -->
+        <div class="utility-btn-wrap utility-left">
+          <button class="touch-btn center-btn btn-select" data-btn="2048" title="Minus">− SELECT</button>
+        </div>
+      </section>
+
+      <!-- Right Pad: Triggers + Face Buttons (A, B, X, Y) + Plus/Start -->
+      <section class="pad-column pad-right">
+        <!-- Shoulder R / ZR (Includes L & ZL in portrait mode above ABXY) -->
+        <div class="triggers-group triggers-right">
+          <button class="touch-btn trigger-btn btn-l portrait-trigger-l" data-btn="64">L</button>
+          <button class="touch-btn trigger-btn btn-r" data-btn="128">R</button>
+          <button class="touch-btn trigger-btn btn-zl portrait-trigger-zl" data-btn="256">ZL (Item)</button>
+          <button class="touch-btn trigger-btn btn-zr" data-btn="512">ZR (Drift)</button>
+        </div>
+
+        <!-- Nintendo Diamond Face Buttons -->
+        <div class="face-diamond-wrapper">
+          <button class="touch-btn face-btn btn-x" data-btn="4">
+            <span class="btn-name">X</span>
+          </button>
+          <div class="face-horizontal">
+            <button class="touch-btn face-btn btn-y" data-btn="8">
+              <span class="btn-name">Y</span>
+            </button>
+            <button class="touch-btn face-btn btn-a" data-btn="1">
+              <span class="btn-name">A</span>
+              <span class="btn-sub">GAS</span>
+            </button>
+          </div>
+          <button class="touch-btn face-btn btn-b" data-btn="2">
+            <span class="btn-name">B</span>
+            <span class="btn-sub">BRAKE</span>
+          </button>
+        </div>
+
+        <!-- Plus / Start Button (Right) -->
+        <div class="utility-btn-wrap utility-right">
+          <button class="touch-btn center-btn btn-start" data-btn="1024" title="Plus">+ START</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- Connect / Setup Modal Overlay -->
+    <div id="setup-panel">
+      <div class="panel-content">
+        <div class="panel-header">
+          <h3>🎮 Connect Remote Gamepad</h3>
+          <p class="panel-sub">Ultra Low Latency Local WebRTC</p>
+        </div>
+        
+        <div class="form-row">
+          <label>Operating Mode:</label>
+          <div class="mode-select-btns">
+            <button class="mode-btn active" data-mode="full-stream">📺 Full Stream (Video + Pad)</button>
+            <button class="mode-btn" data-mode="controller-only">🎮 Controller Only</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label>Player Slot:</label>
+          <div class="player-select-btns">
+            <button class="player-btn active" data-player="0">P1</button>
+            <button class="player-btn" data-player="1">P2</button>
+            <button class="player-btn" data-player="2">P3</button>
+            <button class="player-btn" data-player="3">P4</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <button id="connect-btn" class="btn btn-connect">Connect & Play</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Desktop Keyboard Controls HUD -->
+    <div id="desktop-keyboard-bar">
+      <div class="kbd-title"><span class="kbd-icon">⌨</span> Controls:</div>
+      <div class="kbd-grid">
+        <div class="kbd-chip" data-k="KeyA KeyD ArrowLeft ArrowRight"><span class="kbd-key">A / D · ◄ ►</span><span class="kbd-sub">Steer</span></div>
+        <div class="kbd-chip" data-k="KeyW KeyS ArrowUp ArrowDown"><span class="kbd-key">W / S · ▲ ▼</span><span class="kbd-sub">Menu / Glider</span></div>
+        <div class="kbd-chip" data-k="KeyJ Space"><span class="kbd-key">J / Space</span><span class="kbd-sub">Gas (A)</span></div>
+        <div class="kbd-chip" data-k="KeyK KeyZ"><span class="kbd-key">K</span><span class="kbd-sub">Brake (B)</span></div>
+        <div class="kbd-chip" data-k="ShiftLeft ShiftRight KeyC"><span class="kbd-key">Shift / C</span><span class="kbd-sub">Drift (ZR)</span></div>
+        <div class="kbd-chip" data-k="KeyE KeyQ"><span class="kbd-key">E / Q</span><span class="kbd-sub">Item (ZL)</span></div>
+        <div class="kbd-chip" data-k="KeyU KeyX"><span class="kbd-key">U</span><span class="kbd-sub">Rear (X)</span></div>
+        <div class="kbd-chip" data-k="Enter"><span class="kbd-key">Enter</span><span class="kbd-sub">Pause (+)</span></div>
+        <div class="kbd-chip" data-k="Tab Backspace KeyM"><span class="kbd-key">Tab / M</span><span class="kbd-sub">Map (−)</span></div>
+      </div>
+      <button id="kbd-close-btn" class="kbd-close" title="Hide Keyboard Bar">✕</button>
+    </div>
+  </div>
+
+  <script src="controller.js"></script>
+</body>
+</html>

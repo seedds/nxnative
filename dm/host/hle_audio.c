@@ -172,6 +172,16 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
         if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
+#if DM_HAS_WEBRTC
+        {
+            extern int webrtc_streamer_wants_audio(void);
+            extern void webrtc_streamer_send_pcm_int16(const int16_t *samples, size_t frames, int channels);
+            if (webrtc_streamer_wants_audio()) {
+                size_t frames_count = bl->mBuffers[0].mDataByteSize / 4; // 16-bit stereo = 4 bytes per frame
+                webrtc_streamer_send_pcm_int16((const int16_t *)bl->mBuffers[0].mData, frames_count, 2);
+            }
+        }
+#endif
     }
     return noErr;
 }

@@ -178,6 +178,18 @@ int main(int argc, char **argv) {
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
+#if DM_HAS_WEBRTC
+    {
+        extern int webrtc_streamer_init(int port, const char *web_dir);
+        extern void webrtc_streamer_stop(void);
+        if (getenv("DM_WEBRTC") && atoi(getenv("DM_WEBRTC"))) {
+            int port = 8888;
+            if (getenv("DM_WEBRTC_PORT")) port = atoi(getenv("DM_WEBRTC_PORT"));
+            webrtc_streamer_init(port, getenv("DM_WEBRTC_WEB"));
+            atexit(webrtc_streamer_stop);
+        }
+    }
+#endif
     front_run(guest_main);
     return 0;
 }

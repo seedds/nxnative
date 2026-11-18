@@ -479,6 +479,25 @@ class Bundle(unittest.TestCase):
                 self.assertEqual(rc, 1, err); self.assertIn(f'licenses/{n} is missing: a licence of what llvm-mingw links into the bundle\'s .exe programs', err)
                 self.write(win / 'licenses' / n, f'{n} of llvm-mingw\n')
 
+    @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
+    def test_check_windows_nxaot_link_time(self):   # nxaot.exe's bytes are in every unit's cache key: the check refuses one that holds its link time
+        win, aot = self.tmp / 'build/win64', self.tmp / 'build/aot-win64'
+        self.fake_tree(win, '.exe'); self.write(aot / 'licenses/LLVM.txt', 'LLVM licence\n'); self.aot = aot
+        (aot / 'nxaot.exe').write_bytes(PE + b'\0nxaot-unit 15\0')
+        self.assertEqual(pp.pe_timestamp(aot / 'nxaot.exe'), 0)
+        said = []
+        rc, err, _ = self.package('--check', platform='windows', build=win, said=said)
+        self.assertEqual((rc, err), (0, '')); self.assertTrue(any('bin/nxaot.exe holds no link time' in m for m in said), said)
+        (aot / 'nxaot.exe').write_bytes(PE[:0x48] + (0x691c2f5d).to_bytes(4, 'little') + PE[0x4c:])   # as lld writes it without --no-insert-timestamp
+        self.assertEqual(pp.pe_timestamp(aot / 'nxaot.exe'), 0x691c2f5d)
+        rc, err, _ = self.package('--check', platform='windows', build=win)
+        self.assertEqual(rc, 1); self.assertRegex(err, r'bin/nxaot\.exe holds its link time \(0x691c2f5d\): .*unit cache.*--no-insert-timestamp')
+        for data in (b'MZ nxaot', b'', PE[:0x44]):   # no PE header, or one cut before the field
+            (aot / 'nxaot.exe').write_bytes(data)
+            self.assertIsNone(pp.pe_timestamp(aot / 'nxaot.exe'), data)
+        rc, err, _ = self.package('--check', platform='windows', build=win)
+        self.assertEqual(rc, 1); self.assertIn('bin/nxaot.exe is not a PE program', err)
+
     def test_elf_dynamic(self):   # the run path check reads an ELF's dynamic section: a real program of this system (when it is ELF)
         exe = Path(os.path.realpath(sys.executable))
         dyn = pp.elf_dynamic(exe)

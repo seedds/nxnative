@@ -174,9 +174,12 @@ target_compile_options(nxaot PRIVATE ${NXAOT_WARNINGS})
 # reserved for the main thread and every thread created without a size (the compile workers, the analysis's pool): what Linux gives them (its 8 MiB stack
 # limit, glibc's default thread stack), where Windows' default is 1 MiB, so LLVM's recursive passes have the same room on both. With the host's application
 # manifest (dm/host/plat/win32_utf8.rc: the process code page UTF-8), so that the paths nxaot takes on its command line, the C++ streams it opens them with and
-# LLVM's own file calls (UTF-8 on Windows) name the same files when a folder's name is not ASCII
+# LLVM's own file calls (UTF-8 on Windows) name the same files when a folder's name is not ASCII. Without the link time in its headers
+# (--no-insert-timestamp; the linker writes the time of the link there otherwise): a unit's cache key holds this executable's SHA-256 (pack.cpp, ToolIdentity),
+# so an nxaot.exe that differed at every build made every new bundle compile a player's whole game again although the recompiler's sources had not changed;
+# the Linux nxaot has no such field and is the same file from build to build (scripts/package_port.py --check holds the Windows one to it)
 if (WIN32)
-    target_link_options(nxaot PRIVATE -static -Wl,--stack,8388608)
+    target_link_options(nxaot PRIVATE -static -Wl,--stack,8388608 -Wl,--no-insert-timestamp)
     enable_language(RC)
     target_sources(nxaot PRIVATE "${NXAOT_REPO}/dm/host/plat/win32_utf8.rc")
     set_source_files_properties("${NXAOT_REPO}/dm/host/plat/win32_utf8.rc" PROPERTIES OBJECT_DEPENDS "${NXAOT_REPO}/dm/host/plat/win32_utf8.manifest")

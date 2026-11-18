@@ -516,6 +516,12 @@ def check(platform, out, inputs):
                 fails.append(f'licenses/{n} is missing: a licence of what llvm-mingw links into the bundle\'s .exe programs (sh dm/tools/mingw_licences.sh <tree>, in the '
                              'llvm-mingw image after the build, copies it into the Windows build trees\' licenses/)')
         if all(f'licenses/{n}' in held for n in MINGW_LICENCES): say(f'check: the licences of llvm-mingw\'s static runtime: {", ".join(MINGW_LICENCES)}')
+        if 'bin/nxaot.exe' in held:   # the recompiler's bytes are in every unit's cache key (dm/tools/aot/src/build/pack.cpp ToolIdentity): the same sources must give the same file
+            stamp = pe_timestamp(out / 'bin/nxaot.exe')
+            if stamp is None: fails.append('bin/nxaot.exe is not a PE program')
+            elif stamp: fails.append(f'bin/nxaot.exe holds its link time ({stamp:#x}): it would differ at every build of the same sources, and a player\'s unit cache, whose keys '
+                                     'hold the executable\'s SHA-256, would give a new bundle nothing (dm/tools/aot/CMakeLists.txt links it with -Wl,--no-insert-timestamp)')
+            else: say('check: bin/nxaot.exe holds no link time: the same sources give the same recompiler, and a game\'s unit cache outlives a new bundle of it')
 
     def run(argv, want, cwd=None, env=None, codes=(0,)):
         try: r = subprocess.run([str(a) for a in argv], capture_output=True, text=True, errors='replace', timeout=120, cwd=cwd, env=env)
@@ -575,6 +581,14 @@ assert [i.mnemonic for i in md.disasm(bytes.fromhex("1f2003d5c0035fd6"), 0)] == 
 print(f"python {sys.version.split()[0]}, lz4 {lz4.__version__}, capstone {capstone.__version__}, fontTools {fontTools.version}, zstd {compression.zstd.zstd_version}")
 for p in sys.path: print("path", p)
 '''
+
+
+def pe_timestamp(path):
+    """The link time in a PE file's COFF header (TimeDateStamp; 0 when the linker was told to leave it out), None for a file that is no PE"""
+    with open(path, 'rb') as f: head = f.read(4096)
+    pe = struct.unpack_from('<I', head, 0x3c)[0] if len(head) >= 0x40 else 0
+    if head[:2] != b'MZ' or len(head) < pe + 12 or head[pe:pe + 4] != b'PE\0\0': return None
+    return struct.unpack_from('<I', head, pe + 8)[0]
 
 
 def recompiler_unit(nxaot):

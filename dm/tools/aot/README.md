@@ -2739,7 +2739,10 @@ say) misses the functions that read them, as it must.
 
 Nothing removed an entry, and every key holds the tool that made it (`ToolIdentity`: nxaot.lock's LLVM and dynarmic, LLVM's version, this
 executable's SHA-256), so the packs of a new nxaot reach none of the entries of the one before: about 600 MB a bundle for a game of 250 MB of packs
-(Mario vs. Donkey Kong's cache was 1.8 GB after three). Two records make the old ones removable ([src/cache/cache.h](src/cache/cache.h)):
+(Mario vs. Donkey Kong's cache was 1.8 GB after three). The executable must then be the same file whenever its sources are: the Linux nxaot is
+(two builds in the image give the same bytes), and nxaot.exe is linked without its link time for it (`-Wl,--no-insert-timestamp` in
+[CMakeLists.txt](CMakeLists.txt); the linker's time stamp made every Windows bundle's recompiler another tool, and a player's cache gave a new bundle
+nothing). Two records make the old ones removable ([src/cache/cache.h](src/cache/cache.h)):
 
 - a pack marks the cache with its tool once, `<dir>/tools/<16 hex of the tool's identity>` (`MarkTool`): the file's time is the tool's first use of
   this cache, and every entry the tool can reach is younger;

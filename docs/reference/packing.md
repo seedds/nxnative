@@ -79,6 +79,14 @@
 - **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), on Linux, when the disk of the development machine ran full.
 - **Check:** nxaot's CTest `cache` (`dm/tools/aot/tests/test_cache.py`, the `cache-prune` rows) and `test_nsp_x86.py` `test_unit_cache_pruned_after_the_packs`. [dm/tools/aot/README.md](../../dm/tools/aot/README.md#the-caches-size).
 
+### A new Windows bundle compiles the whole game again although the recompiler did not change
+
+- **Symptom:** on Windows, the first pack of a game after unpacking a newer bundle compiles every unit again (`0 hits` in each module's cache line; the whole AOT stage, minutes, and the cache grows by the packs' size once more), although the bundle's notes name no change of the recompiler and its `VERSION` has the same `recompiler` row.
+- **Cause:** a unit's cache key holds the recompiler's executable by its SHA-256 (`dm/tools/aot/src/build/pack.cpp` `ToolIdentity`), which is right: any change of the recompiler may change the code it makes. But the Windows `nxaot.exe` differed at every build of the same sources: the linker writes the time of the link into the PE headers (the COFF header's `TimeDateStamp` and the debug directory's copy; four bytes differed between two builds of one commit, measured). The Linux `nxaot` has no such field: two builds of the same sources in the bundle's image are the same file (measured: the bundle's and a rebuild two docs-only commits later).
+- **Fix:** `nxaot.exe` is linked without its link time (`-Wl,--no-insert-timestamp`, `dm/tools/aot/CMakeLists.txt`): two links at different times give the same bytes. The bundle's check refuses an `nxaot.exe` that holds one (`scripts/package_port.py` `pe_timestamp`). A bundle with a changed recompiler still compiles everything once, by design (round 4's Linux pack: 0 hits of 11,069 units and 7:41, because a commit between the two bundles had touched `pack.cpp`); the one-day pruning removes the earlier recompiler's units ([The unit cache in the work folder grows with every bundle](#the-unit-cache-in-the-work-folder-grows-with-every-bundle)).
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), after its fourth gameplay round packed with a new Linux bundle and reached none of the earlier bundle's units: the lead rebuilt both recompilers from the bundle's sources and compared them with the bundle's. Not run on a Windows PC: the Windows result is the two files' bytes, not a pack.
+- **Check:** `test_package_port.py` `test_check_windows_nxaot_link_time`; `package_port.py --check` on every Windows bundle.
+
 ## A newer bundle
 
 ### A game keeps a defect that the newer bundle fixed

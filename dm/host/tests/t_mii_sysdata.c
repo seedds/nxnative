@@ -1,6 +1,7 @@
 // The Mii model system data stand-in (hle_mii.c dm_mii_standin, mounted by hle_fs.c MountSystemData): the Switch's MiiModel (0100000000000802) and the Switch 2's MiiResource
 // (0400000000000849) both mount, with every texture and shape file the games name, in the layout their Mii code reads. Nintendo Switch Sports Resort mounts the Switch 2 archive as
 // MiiResource: and, refused, crashed later reading a texture file's part sizes through a null pointer. Expectations are written from the games' readers, not from this code
+const char *dm_module_dir(void) { return ""; }   // no module folder here (loader.c); this test links no t_fs_stub.c
 #include "../hle_fs.c"
 #include "../hle_mii.c"
 #include <sys/stat.h>

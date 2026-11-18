@@ -19,6 +19,7 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 static int fake_clonefile(const char *src, const char *dst, uint32_t flags);
 #define pwrite fake_pwrite
 #define clonefile fake_clonefile
+extern char t_moddir[1100];   // the folder romfs_patch.tsv is read from (dm_module_dir is t_fs_stub.c's)
 #include "../hle_fs.c"
 #undef pwrite
 #undef clonefile
@@ -239,6 +240,18 @@ int main(void) {
         CHECK(h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 3 && !strcmp(de[0].name, "a") && de[0].size == 5 && de[1].type == ENT_DIR && !strcmp(de[2].name, "c"), "lists a, b, c"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "the file filter hides directories"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/data/b", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0, "an empty directory"); h_fs_CloseDirectory(h);
+        {   // RomFS patches (DM_ROMFS_PATCH, romfs_patch.tsv in the module folder): the variant's rows replace bytes in reads, a row whose old bytes the file lacks is left out, no variable changes nothing
+            char pd[1100], pf[1200]; snprintf(pd, sizeof pd, "%s/rp", root); mkdir(pd, 0755); snprintf(t_moddir, sizeof t_moddir, "%s", pd); snprintf(pf, sizeof pf, "%s/romfs_patch.tsv", pd);
+            put(pf, "# variant\tpath\toffset\told\tnew\nt1\t/data/a\t1\t656c\t4142\nt1\t/data/c\t0\t7879\t5859\nt2\t/data/a\t1\t7a7a\t4142\n");
+            setenv("DM_ROMFS_PATCH", "t1", 1); g_rp_once = (pthread_once_t)PTHREAD_ONCE_INIT; g_nrp = 0;
+            CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hABlo") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "XY") && g_nrp == 2, "a variant's rows change the bytes read (%d rows)", g_nrp);
+            CHECK(h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 2, b, 2) == RES_OK && n == 2 && !memcmp(b, "Bl", 2), "a read that starts inside a row gets its tail"); h_fs_CloseFile(h);
+            CHECK(h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 0, b, 2) == RES_OK && n == 2 && !memcmp(b, "hA", 2), "a read that ends inside a row gets its head"); h_fs_CloseFile(h);
+            setenv("DM_ROMFS_PATCH", "t2", 1); g_rp_once = (pthread_once_t)PTHREAD_ONCE_INIT; g_nrp = 0;
+            CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello") && g_nrp == 0, "a row whose old bytes the file lacks is left out");
+            unsetenv("DM_ROMFS_PATCH"); g_rp_once = (pthread_once_t)PTHREAD_ONCE_INIT; g_nrp = 0;
+            CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello"), "without the variable the file reads as it is");
+        }
         g_nmnt = 0;
         char ov[1100], ovd[1200]; snprintf(ov, sizeof ov, "%s/imgov", root); snprintf(ovd, sizeof ovd, "%s/data", ov); mkdir(ov, 0755); mkdir(ovd, 0755);
         snprintf(fn, sizeof fn, "%s/a", ovd); put(fn, "mod"); snprintf(fn, sizeof fn, "%s/new", ovd); put(fn, "added");

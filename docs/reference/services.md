@@ -222,6 +222,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Monster Train 2](../../dm/games/010051701FB46000/README.md) at 60 fps: two runs in three as the route map loads, never at 30 fps.
 - **Check:** four runs at 60 fps: one retry, no failed read.
 
+### A setting the game keeps in a pack of its own
+- **Symptom:** a game draws smaller than the screen can show and no switch or profile key moves it (Star Fox: a 960x540 scene on a Mac that has room for 1920x1080).
+- **Cause:** the value is a file inside one of the game's own packs (Star Fox: `render.resolution_scale_console`, 0.5 for a Switch 2, in a member of `data.zip`), read through the RomFS. A loose file in `DM_ROMFS_OVERLAY` does not replace it, and an overlay of the pack is a copy of gigabytes.
+- **Fix:** a profile's `romfs_patch.tsv` (variant, path in the RomFS, offset in the file, old bytes, new bytes, in hex, of one length) and `DM_ROMFS_PATCH=<variant>`: `h_fs_ReadFile` puts the new bytes into the reads that cover the rows of that variant. Each row is checked once against the image, so a build of the file with other bytes there is left as it is (`[RED] fs RomFS patch …`); the log says `fs RomFS patch <variant>: N of M rows applied` and, per row, the first read it was in. The bytes of a variant come from a copy of the pack changed by hand: a replacement of the same size (the compressed block padded to its length) and its CRC changed in the local header, the data descriptor and the central directory; the rows are the difference to the original. The settings row is `DM_ROMFS_PATCH` in `dm/games/settings.tsv`, shown by the condition `table:romfs_patch.tsv`, and `pack_app.py` copies the table into the app.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md#the-picture).
+- **Check:** `DM_ROMFS_PATCH=1.0` on the Mac: 6 of 6 rows applied, four of them read by the game at once; gameplay at 100 % without a drop in frame rate.
+
 ### File-not-found noise from optional paths
 
 - **Symptom:** `fs … not found` lines with `DM_FS=1`.

@@ -44,6 +44,8 @@ To the race:
 
 ## Frame rate
 
+The host handles [cube face splitting and pass merging](../../../docs/reference/rendering.md#a-draw-into-the-six-faces-of-a-cube-level-at-once-ran-short-of-threads) and [guest compute dispatch ordering](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other). The shader chain [compares bounded uniform reads by row where it can prove the component is in range](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size). The performance measurements are recorded with those mechanisms.
+
 The first race on the 16 GB M6, in order of the fixes:
 
 | Host | Frame p50 | Frame p95 | Submit |

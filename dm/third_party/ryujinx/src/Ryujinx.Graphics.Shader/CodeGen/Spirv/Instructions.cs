@@ -95,6 +95,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.FindMSBU32,               GenerateFindMSBU32);
             Add(Instruction.Floor,                    GenerateFloor);
             Add(Instruction.FusedMultiplyAdd,         GenerateFusedMultiplyAdd);
+            Add(Instruction.HalfFusedMultiplyAdd,     GenerateHalfFusedMultiplyAdd);
             Add(Instruction.GroupMemoryBarrier,       GenerateGroupMemoryBarrier);
             Add(Instruction.ImageAtomic,              GenerateImageAtomic);
             Add(Instruction.ImageLoad,                GenerateImageLoad);
@@ -593,6 +594,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         private static OperationResult GenerateFusedMultiplyAdd(CodeGenContext context, AstOperation operation)
         {
             return GenerateTernary(context, operation, context.Delegates.GlslFma, null);
+        }
+
+        private static OperationResult GenerateHalfFusedMultiplyAdd(CodeGenContext context, AstOperation operation)
+        {
+            context.AddCapability(Capability.Float16);
+            SpvInstruction half = context.TypeFloat(16);
+            SpvInstruction a = context.FConvert(half, context.GetFP32(operation.GetSource(0)));
+            SpvInstruction b = context.FConvert(half, context.GetFP32(operation.GetSource(1)));
+            SpvInstruction c = context.FConvert(half, context.GetFP32(operation.GetSource(2)));
+            SpvInstruction result = context.GlslFma(half, a, b, c);
+
+            // Widen the already rounded result exactly for the existing half-pair modifiers and packing.
+            return new OperationResult(AggregateType.FP32, context.FConvert(context.TypeFP32(), result));
         }
 
         private static OperationResult GenerateGroupMemoryBarrier(CodeGenContext context, AstOperation operation)

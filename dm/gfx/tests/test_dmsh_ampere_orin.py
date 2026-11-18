@@ -10,8 +10,8 @@ differ, each with its reason and where it is tracked; APPROX the ones that run M
 fails when an op outside those lists differs, and when a KNOWN op matches, so that its entry is taken out with the fix.
 
 Needs DMSH_TEST_XLATE (the translator) like the other translator tests, and an Apple-silicon Mac. AMPERE_ORIN_ONLY=<ops or families> runs some;
-AMPERE_ORIN_REPORT=<file> writes every op's causes and differing NaN patterns as JSON. Derived ordinary-HFMA2 programs retain the recorded oracle;
-the small min/max FTZ, F32-result and HMUL2.RELU checks are synthetic contracts, labelled separately from hardware recordings."""
+AMPERE_ORIN_REPORT=<file> writes every op's causes and differing NaN patterns as JSON. Derived ordinary-HFMA2 programs retain the recorded oracle.
+Small synthetic contracts are labelled separately from hardware recordings."""
 import ast
 import collections
 import concurrent.futures
@@ -94,21 +94,23 @@ def load_fixture():
         doc['ops'].append(dict(o, name=name, program=program, derived_from=o['name']))
     doc['ops'].extend(half_ftz_boundaries(doc['ops']))
     doc['ops'].append(half_relu_boundary(doc['ops']))
+    doc['ops'].extend(hfma_rounding_cases(doc['ops']))
     return doc
 
 
-def half_variant(op, opcode, *, clear_opcode=0, modifiers=0):
-    """Change one half instruction, retaining its registers, guards and schedule.
-    Modifiers are bits of the instruction's high word; assert the template shape."""
+def half_variant(op, opcode, *, clear_opcode=0, modifiers=0, after=b''):
+    """Change one instruction or insert its consumer, retaining the template's registers and guards."""
     program = bytearray(op['program'])
-    changed = 0
+    offsets = []
     for i in range(0, len(program), 16):
         lo, hi = struct.unpack_from('<QQ', program, i)
         if lo & 0x1ff == opcode:
             struct.pack_into('<QQ', program, i, lo & ~clear_opcode, hi | modifiers)
-            changed += 1
-    if changed != 1:
-        raise ValueError(f"{op['name']}: expected one half operation, got {changed}")
+            offsets.append(i + 16)
+    if len(offsets) != 1:
+        raise ValueError(f"{op['name']}: expected one opcode {opcode:#x}, got {len(offsets)}")
+    end = offsets[0]
+    program[end:end] = after
     return bytes(program)
 
 
@@ -156,6 +158,50 @@ def half_relu_boundary(ops):
     return dict(op, name='hmul2_relu_boundary', program=half_variant(op, 0x032, modifiers=1 << (79 - 64)), cases=32,
                 rows_in=[r for r, _ in cases], rows_gpu=[[v] for _, v in cases],
                 oracle='synthetic RELU boundary contract', derived_from=op['name'])
+
+
+def hfma_rounding_cases(ops):
+    by_name = {o['name']: o for o in ops}
+    base = by_name['hfma2']
+    # PR #1902's Orin PTX fma.rn.f16x2 recording: u32 count followed by the
+    # three input columns and one result column, each containing packed half pairs.
+    capture = (FIXTURE / 'hfma_orin_fixture.u32').read_bytes()
+    count, = struct.unpack_from('<I', capture)
+    columns = struct.unpack(f'<{4 * count}I', capture[4:])
+    a, b, c, result = (columns[i:i + count] for i in range(0, len(columns), count))
+    yield dict(base, name='hfma2_single_round', cases=count, rows_in=list(zip(a, b, c)),
+               rows_gpu=[(word,) for word in result], derived_from='PR #1902 Orin recording')
+
+    def case(template, suffix, rows, *, bits=0, after=b'', outs=None):
+        op = by_name[template]
+        opcode = 0x023 if template == 'ffma_rn' else 0x031 if '_alu' in template else 0x035
+        return dict(op, name=template + suffix, cases=len(rows), outs=outs or op['outs'],
+                    program=half_variant(op, opcode, modifiers=bits, after=after),
+                    rows_in=[inputs for inputs, _ in rows], rows_gpu=[(word,) for _, word in rows],
+                    oracle='synthetic rounding contract', derived_from=template)
+
+    midpoint = [0xea20ea20, 0xc810c810, 0x08160816]
+    relu_rows = [(midpoint, 0x76397639), ([0, 0x7c007c00, 0], 0x7fff7fff),
+                 ([0x80018001, 0x38003800, 0], 0)]
+    ftz_rows = [(midpoint, 0x76397639),
+                ([0x84000400, 0x3bff3bff, 0], 0x84000400),   # the midpoint below the smallest normal rounds up
+                ([0x84000400, 0x38003800, 0], 0x80000000),   # a rounded subnormal flushes with sign
+                ([0x80010001, 0x7c007c00, 0], 0x7fff7fff)]  # input flush gives 0 * inf
+    for stem in ('hfma2', 'hfma2_alu'):
+        yield case(stem + '_ftz', '_round', ftz_rows)
+        yield case(stem + '_relu', '_round', relu_rows)
+        yield case(stem + '_relu', '_ftz_round', [relu_rows[0], relu_rows[1], ([0x84000400, 0x38003800, 0], 0)],
+                   bits=1 << (80 - 64))
+
+    # All templates write R7 to shared memory. The inserted consumers also write R7.
+    pack = struct.pack('<QQ', 0x000000070707723e, 0x000fe20000000000)    # F2FP.PACK_AB R7, R7, R7
+    unpack = struct.pack('<QQ', 0x0000000700077304, 0x003fe20000101000)  # F2F.F32.F16 R7, R7
+    yield case('hfma2_alu', '_unpack', [(midpoint, 0x46c72000)], after=unpack, outs='f')
+    yield case('hfma2_alu', '_f32', [(midpoint, 0x46c71000)], bits=1 << (78 - 64), outs='f')
+    yield case('hfma2_alu', '_f32_pack', [(midpoint, 0x76387638)], bits=1 << (78 - 64), after=pack)
+    # .F32 source A: 1 + 2^-12 multiplied by 1, plus 2^-11. Narrowing A first would give 0x3c00.
+    yield case('hfma2_alu', '_f32_source', [([0x3f800800, 0x3c003c00, 0x10001000], 0x3c013c01)], bits=1 << (74 - 64))
+    yield case('ffma_rn', '_pack', [([0xc5440000, 0xc1020000, 0x3902c000], 0x76387638)], after=pack, outs='h')
 
 
 def chain_rewrites():
@@ -278,11 +324,12 @@ def run_op(o, work, runner, steps, xc, env):
     if r.returncode:
         return 'Metal compile', r.stderr.strip()[-300:]
     subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'k.air'), '-o', str(d / 'k.metallib')], check=True, capture_output=True)
-    io = array.array('I', [0xcdcdcdcd]) * (len(o['rows_in']) * w)
+    groups = (len(o['rows_in']) + 31) // 32
+    io = array.array('I', [0xcdcdcdcd]) * (groups * 32 * w)
     for c, row in enumerate(o['rows_in']):
         io[c * w:c * w + len(row)] = array.array('I', row)
     (d / 'io.bin').write_bytes(io.tobytes())
-    r = subprocess.run([str(runner), str(d / 'k.metallib'), str(d / 'io.bin'), str(len(o['rows_in']) // 32)], capture_output=True, text=True, timeout=120)
+    r = subprocess.run([str(runner), str(d / 'k.metallib'), str(d / 'io.bin'), str(groups)], capture_output=True, text=True, timeout=120)
     if r.returncode:
         return 'Metal run', r.stderr.strip()[-300:]
     out = array.array('I')

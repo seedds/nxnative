@@ -595,7 +595,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // The swizzle fields: A 74..76, B (in the 32 slot) 60..62, C (in the 64 slot) 81..83. Half-pair ops keep A's abs / neg at 73 / 72, C's at 83 / 84.
-        private static (Operand[] A, Operand[] B, Operand[] C) AHalfSrcs(EmitterContext context, AmpereOp x)
+        private static (Operand[] A, Operand[] B, Operand[] C, bool AllHalf) AHalfSrcs(EmitterContext context, AmpereOp x)
         {
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, abs: false, neg: false);
 
@@ -607,18 +607,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             slot32 = slot32.Kind == AKind.Imm ? slot32 : slot32.WithMods(x.Bit(63), x.Bit(62));
             slot64 = slot64.WithMods(x.Bit(84), x.Bit(83));
 
-            Operand[] ha = AHalfLanes(context, a, x.Bits(74, 76));
-            Operand[] h32 = AHalfLanes(context, slot32, x.Bits(60, 62));
-            Operand[] h64 = AHalfLanes(context, slot64, x.Bits(81, 83));
+            int swizzleA = x.Bits(74, 76);
+            int swizzle32 = x.Bits(60, 62);
+            int swizzle64 = x.Bits(81, 83);
+            Operand[] ha = AHalfLanes(context, a, swizzleA);
+            Operand[] h32 = AHalfLanes(context, slot32, swizzle32);
+            Operand[] h64 = AHalfLanes(context, slot64, swizzle64);
+            bool allHalf = swizzleA != 1 && (slot32.Kind == AKind.Imm || swizzle32 != 1) && swizzle64 != 1;
 
-            return bIn32 ? (ha, h32, h64) : (ha, h64, h32);
+            return bIn32 ? (ha, h32, h64, allHalf) : (ha, h64, h32, allHalf);
         }
 
         // The sources of a two-source half-pair operation, as ASecond: the second is B in forms 1, 4, 5, 6 and C in forms 2, 3, 7, where B would be the unused register field at 64.
         // Pokemon Pokopia's bilateral blur steps its loop with HADD2 Rd, Rd, imm: reading that field instead stepped by the bits of whatever R0 held, and hung the GPU
         private static (Operand[] A, Operand[] B) AHalfSecond(EmitterContext context, AmpereOp x)
         {
-            (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b, Operand[] c, _) = AHalfSrcs(context, x);
 
             return (a, x.Form is 1 or 4 or 5 or 6 ? b : c);
         }
@@ -710,7 +714,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHfma2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b, Operand[] c, bool allHalf) = AHalfSrcs(context, x);
 
             if (x.Bit(80))
             {
@@ -724,7 +728,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 b = [context.FPNegate(b[1]), b[0]];
             }
 
-            AHalfResult(context, x, context.FPFusedMultiplyAdd(a[0], b[0], c[0]), context.FPFusedMultiplyAdd(a[1], b[1], c[1]));
+            // For packed half operands and results, round the exact FMA straight to half.
+            // A .F32 operand or destination goes through the full-width path.
+            bool roundToHalf = allHalf && !x.Bit(78);
+            Operand Fma(int lane) => roundToHalf
+                ? context.Add(Instruction.HalfFusedMultiplyAdd, Local(), a[lane], b[lane], c[lane])
+                : context.FPFusedMultiplyAdd(a[lane], b[lane], c[lane]);
+
+            AHalfResult(context, x, Fma(0), Fma(1));
         }
 
         // ---- moves ----

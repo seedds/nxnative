@@ -42,7 +42,6 @@ KNOWN = {
     'i2f_s32_rz': 'I2FP.F32.S32.RZ rounds to nearest (PR #1800 has the fix)',
     'fmax_nan': 'FMNMX.NAN: a NaN operand gives the other operand, not NaN (PR #1800 has the fix)', 'fmin_nan': '(as fmax_nan)',
     'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
-    'i2f_s64': 'I2F.S64 rounds twice (the high and low words apart)',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
     # the translator refuses these
     'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path calls the CUDA driver',
@@ -93,6 +92,7 @@ def load_fixture():
     doc['ops'].extend(hfma_rounding_cases(doc['ops']))
     doc['ops'].extend(minmax_boundaries(doc['ops']))
     doc['ops'].extend(directed_rounding_boundaries(doc['ops']))
+    doc['ops'].extend(i2f64_boundaries(doc['ops']))
     return doc
 
 
@@ -314,6 +314,53 @@ def directed_rounding_boundaries(ops):
     ):
         offset, lo, hi = instruction(name, opcode)
         yield case(name, 'ftz', rows, instruction=(offset, lo, hi | 1 << 16))
+
+
+def i2f64_boundaries(ops):
+    """Exact binary32 outputs for zero, rounding ties, word carries and integer limits."""
+    template = next(op for op in ops if op['name'] == 'i2f_s64')
+    ((offset, lo, hi),) = [
+        (i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', template['program']))
+        if lo & 0xfff == 0x312
+    ]
+    # Each row is the input followed by the expected RN, RM, RP and RZ bits.
+    common = [
+        (0,                 0,          0,          0,          0),
+        (1,                 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000),
+        (0x01000001,        0x4b800000, 0x4b800000, 0x4b800001, 0x4b800000),
+        (0x01000003,        0x4b800002, 0x4b800001, 0x4b800002, 0x4b800001),
+        (0xffffffff,        0x4f800000, 0x4f7fffff, 0x4f800000, 0x4f7fffff),
+        (0x1_00000000,      0x4f800000, 0x4f800000, 0x4f800000, 0x4f800000),
+        (0x1_00000001,      0x4f800000, 0x4f800000, 0x4f800001, 0x4f800000),
+        # Set just the low word's sticky bit to move from a tie to above the midpoint.
+        (0x800000_80000000, 0x5b000000, 0x5b000000, 0x5b000001, 0x5b000000),
+        (0x800000_80000001, 0x5b000001, 0x5b000000, 0x5b000001, 0x5b000000),
+    ]
+    signed_cases = [
+        (-1,         0xbf800000, 0xbf800000, 0xbf800000, 0xbf800000),
+        (-2,         0xc0000000, 0xc0000000, 0xc0000000, 0xc0000000),
+        (-0x1000001, 0xcb800000, 0xcb800001, 0xcb800000, 0xcb800000),
+        (-(1 << 31), 0xcf000000, 0xcf000000, 0xcf000000, 0xcf000000),
+        (-(1 << 32), 0xcf800000, 0xcf800000, 0xcf800000, 0xcf800000),
+        (-(1 << 63), 0xdf000000, 0xdf000000, 0xdf000000, 0xdf000000),
+        ((1 << 63) - 1, 0x5f000000, 0x5effffff, 0x5f000000, 0x5effffff),
+    ]
+    unsigned_cases = [
+        (1 << 63,       0x5f000000, 0x5f000000, 0x5f000000, 0x5f000000),
+        ((1 << 63) + 1, 0x5f000000, 0x5f000000, 0x5f000001, 0x5f000000),
+        ((1 << 64) - 1, 0x5f800000, 0x5f7fffff, 0x5f800000, 0x5f7fffff),
+    ]
+    for signed, extra in ((True, signed_cases), (False, unsigned_cases)):
+        rows = common + extra
+        kind = 's64' if signed else 'u64'
+        inputs = [[row[0] & 0xffffffff, (row[0] >> 32) & 0xffffffff] for row in rows]
+        for mode, suffix in enumerate(('rn', 'rm', 'rp', 'rz')):
+            program = bytearray(template['program'])
+            modifiers = (hi & ~((3 << 14) | (1 << 10))) | (mode << 14) | (signed << 10)
+            struct.pack_into('<QQ', program, offset, lo, modifiers)
+            yield dict(template, name=f'i2f_{kind}_boundary_{suffix}', program=bytes(program), cases=len(rows),
+                       rows_in=inputs, rows_gpu=[[row[mode + 1]] for row in rows], exact_bits=True,
+                       oracle='synthetic integer-to-binary32 contract', derived_from=template['name'])
 
 
 def chain_rewrites():

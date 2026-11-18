@@ -1712,6 +1712,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`DirectedRounding`: two fail on `main`). A GPU cross-check against an exact reference (one rounding, IEEE directed modes; NAK's hardware test for F2F.F16.F32.RZ's overflow): I2F 45 mismatches in 300, none with the fix; F2F 25-31 in 300, 6 left, all with results at or below 0x050d (half subnormals and the smallest normals, where the GPU's own conversion differs). Also left: FRND / F2I of a 32-bit subnormal (FLOOR of a tiny negative is -1 on NVIDIA; the GPU flushes it to zero).
 - **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
 
+### I2F from a 64-bit integer rounds once
+
+- **Symptom:** `I2F` from a signed or unsigned 64-bit register pair to f32 can give the wrong float. A negative integer close to zero can lose its entire value during cancellation.
+- **Cause:** `AI2f64` rounded the high and low words separately as floats before adding them, and discarded the rounding mode. The division sequence that introduced the emitter used a zero high word, where the old nearest-rounding calculation is exact.
+- **Fix:** form the magnitude as two integer words, normalize to recover the 24 retained bits and the round and sticky bits, and round once in the encoded mode. Set the low bit of the leading-bit search operand to keep the shift counts valid for zero. Return positive zero for a zero input. This applies to the Ampere register-pair form with an f32 destination.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. Signed nearest-even changes from 16 differences to zero across 1,024 recorded Jetson Orin lanes. All 112 synthetic boundary lanes and a separate 36,244-lane exact-reference comparison match on the Mac for signed and unsigned inputs in RN, RM, RP and RZ. All eight synthetic shaders validate as SPIR-V and compile offline for iOS. The directed modes and unsigned conversion are covered by synthetic references. No games or iOS device ran.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2045](https://github.com/seedds/nxnative/pull/2045). The opcode appears in the [Fire Emblem Fortune's Weave lighting path](#texture-handles-of-sdk-22s-ampere-code).
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

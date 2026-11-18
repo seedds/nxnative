@@ -520,6 +520,28 @@ class DlcOnlyShaders(Base):
                 self.assertEqual(nsp.dlc_only_shader_change(game.Game(self.src), tables), want)
 
 
+class UnregisteredFiles(Base):
+    def test_only_files_without_a_registered_source_are_left_out(self):
+        romfs = self.tmp / 'romfs'
+        for f in ('Shader/new.bfsha', 'Shader/old.bfsha', 'UI/old.blarc', 'UI/mixed.blarc', 'other.bin'):
+            romfs.joinpath(f).parent.mkdir(parents=True, exist_ok=True); romfs.joinpath(f).write_bytes(b'x')
+        self.src.joinpath('shader_map.tsv').write_text(
+            'vs.bin\t0\tvertex\ta\t/Shader/new.bfsha#BNSH@0x0#var0\n'
+            'vs.bin\t1\tvertex\tb\t/UI/mixed.blarc/bgsh/kept.bnsh\n')
+        tables = self.tmp / 'split'; tables.mkdir()
+        tables.joinpath('shader_map.tsv').write_text(
+            'vs.bin\t0\tvertex\ta\t/Shader/new.bfsha#BNSH@0x0#var0\n'
+            'vs.bin\t1\tvertex\tc\t/Shader/old.bfsha#BNSH@0x0#var1\n'   # a base file the update drops: left out
+            'vs.bin\t2\tvertex\td\t/UI/old.blarc/bgsh/x.bnsh\n'         # an archive member: its archive is left out
+            'vs.bin\t3\tvertex\tb\t/UI/mixed.blarc/bgsh/kept.bnsh\n'
+            'vs.bin\t4\tvertex\te\t/UI/mixed.blarc/bgsh/new.bnsh\n'    # an archive with a registered source is always read
+            'vs.bin\t5\tvertex\tf\t/aoc/1/Shader/dlc.bfsha#BNSH@0x0#var0\n'   # DLC: never left out
+            'vs.bin\t6\tvertex\tg\tmain#0x10\n')
+        self.assertEqual(nsp.unregistered_files(game.Game(self.src), tables, romfs), ['/Shader/old.bfsha', '/UI/old.blarc'])
+        tables.joinpath('shader_map.tsv').write_text(self.src.joinpath('shader_map.tsv').read_text())
+        self.assertEqual(nsp.unregistered_files(game.Game(self.src), tables, romfs), [])
+
+
 class ComputeReaderAdditions(Base):
     V, P, C = 'a' * 16, 'b' * 16, 'c' * 16
     SOURCE = '/payload#Skinning#run.0'

@@ -3080,6 +3080,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): from Castti's opening flashback and the battlefield of Hikari's opening on.
 - **Check:** found by bisecting with four runs started at once on copies of one save: `DM_NVN_PREDICT=0` fixed it, a look-ahead that compiled nothing did not, and of its parts only the state ops brought it back; four runs green before the fix, four right after it.
 
+### Pipeline look-ahead must leave future attachments unresolved
+
+- **Symptom:** a crash in `-[AGXG16XFamilyRenderContext_mtlnext setRenderPipelineState:]` from `draw_` with direct Metal encoding. The pass dump shows a pipeline miss and an end in `gpu_read_wait` before the draw reaches its pipeline bind.
+- **Cause:** `pso_predict_rest_` resolved the attachments of future `SetRenderTargets` records to get their formats and sample counts. Resolving a sparse texture can read GPU-written storage for a CPU upload. Its wait ends and commits the open pass, so the demanding draw retains an encoder that has ended. Deferred encoding can hide the fault because its replay clears the real encoder when processing the end record.
+- **Fix:** use `tex_made` for format and sample-count lookups. Skip predictions for a pass with an unresolved attachment and resume when the scan reaches known targets. Actual replay resolves textures at their first use. This also keeps speculative uploads and GPU waits out of pipeline prediction.
+- **Check:** `t_pso_pending` sends the look-ahead through an unresolved target and then an existing one. On the old code it attempts a texture allocation and queues a pipeline for the wrong attachment set. With the fix it queues only the pipeline for the existing target.
+- **Found on:** [Mario Kart World 1.8.0](../../dm/games/0400C3F00006E000/README.md#metal-startup-crash).
+
 ### The look-ahead hands every later draw's pipeline to the background
 
 - **Symptom:** on entering a new area or opening a menu for the first time, with no archive or prewarm list covering it, frames of 0.2–2 s whose `[longframe]` line is nearly all pipeline work, and `draws that waited: pulling base not made yet` in the `pipelines up to frame` lines.

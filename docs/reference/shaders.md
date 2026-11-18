@@ -2033,6 +2033,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### FMNMX and HMNMX2 signed-zero ordering
+
+- **Symptom:** minimum or maximum returns the wrong sign for a zero result. On the recorded Orin inputs, `max(+0, -0)` returns +0 while the translation can return -0. A subsequent reciprocal or sign test can distinguish the results.
+- **Cause:** NVIDIA orders -0 below +0 for min/max in either operand order. Metal's min/max can choose either zero, including after the chain's rewrite to precise functions.
+- **Fix:** the shared `FPMinMax` instruction helper checks for two zeros using their integer bits. For that case it selects the operands' bitwise OR for minimum and AND for maximum. Ampere FMNMX and HMNMX2 and Maxwell FMNMX use the helper after operand modifiers and half-input FTZ. The usual constant predicate adds four integer operations for minimum and five for maximum, per lane. Double min/max uses its existing path.
+- **Check:** `test_dmsh_ampere_orin.py` runs recorded Orin cases and separate synthetic contracts. On an M4 Pro, macOS 27.2.1, Metal 32023.922, recorded fmax changes from one zero-sign error and one f32 denormal difference to only the denormal difference. Recorded hmin2 and hmax2 have 8 and 7 NaN-bit differences in 2,048 lanes each (Orin `0x7fff`, Metal `0x7e00`). Synthetic zero, numeric and NaN cases cover both directions, half FTZ, and Maxwell constant/register predicates. All pass in default and relaxed Mac math modes, and their nine shaders compile with the iOS Metal target. Maxwell results are synthetic contracts against the [documented NVIDIA semantics](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#floating-point-instructions-min). No Maxwell hardware or iOS device was used.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2047](https://github.com/seedds/nxnative/pull/2047). [Fast Fusion's validation](../../dm/games/040041E0212AE000/README.md#validation) records the shader build and Mac menu-route comparison.
+
 ### Half-pair .FTZ flushes f16 subnormals
 
 - **Symptom:** HADD2.FTZ, HMUL2.FTZ and HFMA2.FTZ keep half subnormals instead of flushing them. A subnormal times infinity consequently gives infinity instead of NaN.

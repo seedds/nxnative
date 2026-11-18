@@ -46,7 +46,6 @@ KNOWN = {
     'fmax_nan': 'FMNMX.NAN: a NaN operand gives the other operand, not NaN (PR #1800 has the fix)', 'fmin_nan': '(as fmax_nan)',
     'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
     'i2f_s64': 'I2F.S64 rounds twice (the high and low words apart)',
-    'fmax': 'FMNMX: Ampere orders -0 below +0 (max(+0, -0) is +0); Metal returns either', 'hmax2': '(as fmax, HMNMX2)',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
     # the translator refuses these
     'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path calls the CUDA driver',
@@ -95,6 +94,7 @@ def load_fixture():
     doc['ops'].extend(half_ftz_boundaries(doc['ops']))
     doc['ops'].append(half_relu_boundary(doc['ops']))
     doc['ops'].extend(hfma_rounding_cases(doc['ops']))
+    doc['ops'].extend(minmax_boundaries(doc['ops']))
     return doc
 
 
@@ -204,6 +204,58 @@ def hfma_rounding_cases(ops):
     yield case('ffma_rn', '_pack', [([0xc5440000, 0xc1020000, 0x3902c000], 0x76387638)], after=pack, outs='h')
 
 
+def minmax_boundaries(ops):
+    """Synthetic contracts for signed zeros, numeric/NaN selection, half FTZ,
+    and Maxwell's constant and register predicates. No additional GPU recordings."""
+    by_name = {o['name']: o for o in ops}
+    for template in ('fmin', 'fmax', 'hmin2', 'hmax2'):
+        op = by_name[template]
+        half = template.startswith('h')
+        sign, one, nan = (0x8000, 0x3c00, 0x7e00) if half else (0x80000000, 0x3f800000, 0x7fc00000)
+        rows = [(0, 0, 0, 0), (0, sign, sign, 0), (sign, 0, sign, 0), (sign, sign, sign, sign),
+                (one, one | sign, one | sign, one), (one | sign, one, one | sign, one),
+                (nan, one, one, one), (one, nan, one, one), (nan, nan, nan, nan)]
+        pack = (lambda v: v * 0x10001) if half else (lambda v: v)
+        is_min = template in ('fmin', 'hmin2')
+        for ftz in ((False, True) if half else (False,)):
+            cases = rows + ([(1, 0x8001, sign, 0), (0x8001, 1, sign, 0),
+                             (0x8001, 0x8001, sign, sign), (1, 1, 0, 0)] if ftz else [])
+            yield dict(op, name=template + ('_ftz' if ftz else '') + '_zero_boundary', cases=len(cases),
+                       program=half_variant(op, 0x040, modifiers=1 << 16) if ftz else op['program'],
+                       rows_in=[[pack(a), pack(b)] for a, b, _, _ in cases],
+                       rows_gpu=[[pack(lo if is_min else hi)] for _, _, lo, hi in cases],
+                       oracle='synthetic min/max contract', derived_from=template)
+        if half:
+            continue
+        for predicate in (('constant', 'register') if is_min else ('constant',)):
+            cases = [(a, b, take_min, lo if take_min else hi)
+                     for a, b, lo, hi in rows for take_min in ((is_min,) if predicate == 'constant' else (False, True))]
+            yield dict(op, name='maxwell_' + template + '_' + predicate, arch='sm50', ins='fff',
+                       program=maxwell_minmax(is_min, predicate == 'register'), cases=len(cases),
+                       rows_in=[[a, b, 0x3f800000 if take_min else 0] for a, b, take_min, _ in cases],
+                       rows_gpu=[[expected] for _, _, _, expected in cases],
+                       oracle='synthetic Maxwell min/max contract', derived_from=template)
+
+
+def maxwell_minmax(is_min, register_predicate):
+    """FMNMX R3, R1, R2, P0 or [!]PT; R1/R2/P0 come from shared input.
+    R8 is the lane's four-word row, with R3 stored in its last word."""
+    fmnmx = 0x5c60000000070000 | 3 | 1 << 8 | 2 << 20
+    if not register_predicate:
+        fmnmx |= 7 << 39 | (0 if is_min else 1 << 42)
+    body = [0xf0c8000002170009,                                     # S2R R9, SR_TID.X
+            0x3848000000070000 | 8 | 9 << 8 | 4 << 20,             # SHL R8, R9, 4
+            0xef4c000000070001 | 8 << 8,                            # LDS R1, [R8]
+            0xef4c000000070002 | 8 << 8 | 4 << 20,                 # LDS R2, [R8 + 4]
+            0xef4c000000070004 | 8 << 8 | 8 << 20,                 # LDS R4, [R8 + 8]
+            0x5bb0000000070007 | 4 << 8 | 255 << 20 | 0xd << 48 | 7 << 39,  # FSETP.NEU.AND P0, PT, R4, RZ, PT
+            fmnmx,
+            0xef5c000000070003 | 8 << 8 | 12 << 20,                # STS [R8 + 12], R3
+            0xe30000000007000f]                                    # EXIT
+    return b''.join(struct.pack('<4Q', 0x001f8000fc0007e0, *(tuple(body[i:i + 3]) + (0x50b0000000070f00,) * 2)[:3])
+                    for i in range(0, len(body), 3))
+
+
 def chain_rewrites():
     """the MSL rewrites dmsh_build.py's finish() makes of every shader, in its order: each `src = f(src)` at its top level or in a try there (the ones under a
     stage's `if` are another stage's). The rewrites live in importable modules;
@@ -302,8 +354,11 @@ def run_op(o, work, runner, steps, xc, env):
     d.mkdir()
     (d / 'k.bin').write_bytes(o['program'])
     w = len(o['ins']) + len(o['outs'])
-    job = [dict(key='k', stage='cs', arch='sm86', code=str(d / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, reduced=True,
-                nvn2_cs=[0, 0, 3, 0x40, 0], shared=32 * w * 4)]
+    arch = o.get('arch', 'sm86')
+    job = [dict(key='k', stage='cs', arch=arch, code=str(d / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, reduced=True,
+                shared=32 * w * 4)]
+    if arch == 'sm86':
+        job[0]['nvn2_cs'] = [0, 0, 3, 0x40, 0]
     (d / 'jobs.json').write_text(json.dumps(job))
     r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(d / 'jobs.json'), str(d)], capture_output=True, text=True, env=env)
     if r.returncode or not (d / 'k.spv').exists():

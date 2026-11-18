@@ -61,6 +61,8 @@ drs_controller = (   # drs_stub.s, assembled with clang; x0 the controller, x16 
     0xb9020e1f, 0xbc2258e0, 0xb8225904, 0x34000182, 0x51000449, 0xb869590a, 0x340000ea, 0x4b0a008a,   # fits: record it; at 0 stay; the level above's record
     0x7109615f, 0x54000088, 0xbc6958e2, 0x1e212040, 0x540000aa, 0x2a0903e0, 0xd65f03c0,               # never, stale or fitting: up one
     0x2a1f03e0, 0xd65f03c0, 0x2a0203e0, 0xd65f03c0)                                                   # 0; or stay
+# shape_anchor.c built with the command in its header comment (__text words, little-endian hex)
+_shape_anchor = '484840b908280034405c40bd01103e1e0028211ee890a8520101271e0108211e2820201e0d270054203840bd0890b8520201271e0208221e0390201e4020231e03d0221e42a4231ee800005403102c1e4328231e64b8a15e84d8215e4020241ee00500540a008052080c40f9480600b4090940f9290600b42d0d40f9cd0500b4a9b893528923b072ab1540386b0500340c0080d26e3280520e20a07229010b4a297d0e1bab696c388b0000349fbd00f18c05009143ffff546b2e9d526b6cb6723f010b6ba1030054223040bd498fa8522301271e4020231ecd010054098140f93f0100eb68010054090009cb6b7491d2cb45b7f20b5dd4f26bd1e5f22b7dcb9b6bfd45d30c16805269a50c9b292000b4692e9d52696cb672080000146a00381e5f150071001f005400e4006f080c40f908faffb5090080525f0d0071e01800545f110071c1030054281300b46a2e9d526a6cb6723f010a6ba1120054088140f91f0100eb48120054080008cb697491d2c945b7f2095dd4f269d1e5f2097dc99b29fd45d30a1680522aa10a9b0a1100b53f4100f1001b00543f4501f1c01a00543f6901f1801a0054e93f88920801098b1fc102b1c30f0054cf000014aa7e94522a2dbe723f010a6b8c0200544a2e9d526a6cb6723f010a6b6c040054cafe8b520af0b2723f010a6bad0700546adc9c522a7eb3723f010a6bac0c0054eafe8b520af0b2723f010a6b8012005408d689528814b372640000142a648952eae4a6723f010a6bec030054eab688520a61a5723f010a6bad060054aad79c52ca55a6723f010a6bec0d005408b788520861a5723f01086bc00a0054c8609e5248fba57251000014aaa38752caa0ba723f010a6b2d0600540a398c522a2abc723f010a6bec0c0054caa38752caa0ba723f010a6b400e0054aaf59652eaefba726d0000146a5a9e520af9ab723f010a6bad0500544ac184524afcad723f010a6bec0b0054885a9e5208f9ab723f01086b00070054887b9752e8c6ad7233000014cad28552aa19b0723f010a6b800b005428369c52685bb0723f01086ba0050054c8179b52a8e0b27228000014c87e9452282dbe723f01086bc0040054683a9a520841bf723f01086b4004005428299d52c864a2721d0000146a2e9d526a6cb6723f010a6b400e00546af49852ead1b9723f010a6b40080054c88e805228ecb9721200001448648952e8e4a6723f01086b0002005488168352885ca8723f01086b8001005428e186526869aa72070000148adc9c522a7eb3723f010a6b00060054e8af9452a85fb6723f01086be10a0054223440bd080090524884a8720301271e4020231e2a0100540310221e080090524884b8720401271e4020241ec80000544138211e020000142128221e213400bd0390221e0850b7520101271e6000011f41000014cad79c52ca55a6723f010a6b00fdff54aaf28f52aa99a6720e0000142a398c522a2abc723f010a6b80010054ca118a52ea75bc72070000146ac184524afcad723f010a6b40fbff54eafc8e52eae6af723f010a6b810500542a398c522a2abc723f010a6b8a0280d20a11c0f24a019f9aebfe8b520bf0b2723f010b6b090480d20900f0f229018a9a680300b4490300b4088140f91f0100ebe80200540a0008cb687491d2c845b7f2085dd4f268d1e5f2487dc89b08fd45d30b1680520ba90b9b7f0100f14afd49d342094afa480100542825c89a88000036223440bd2128221e04000014880000b6223440bd4138211e213400bd0868b7520101271e0028211e203800bdc0035fd6a8e2ffb5a8ffff177f4901f1600000547f0101f1a1dfff54223440bd4238211e0974b7522301271e0328231e228c062d7f0101f140feff54692e9d52696cb6727f4901f1c0fdff54fafeff17'
 def screen_shape(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     def patch_height(site, orig_hex, state_off, kind, why):
@@ -201,6 +203,36 @@ def screen_shape(ctx):
         emit(B(here(), calc_site + 4))
         fs_put(calc_site, [B(calc_site, start)], 'Layout2 fullscreen picture panes scaled by (16/9) / aspect when screen aspect is active')
 
+    # The HUD and the menu bars at the taller screen's edges (shape_anchor.c, which says what moves). The pane global matrix function (main+0x152caa0) has the new
+    # matrix in v0-v3 at +0x3b0 (add x8,x19,#0x30, before it is stored) on both paths; the root path joins there from +0x300 (b +0x3b0). The trampoline saves v0-v3,
+    # calls shape_calc(pane, matrix, state page), reloads v0-v3 and runs the original instruction. x0-x17 are written before they are read after this point, x30 is
+    # reloaded by the epilogue; shape_calc keeps to the macOS ABI and leaves x18 alone
+    pane_fn = ctx.others.get('pane global matrix')
+    if pane_fn is not None:
+        def BL(frm, to): return 0x94000000 | (((to - frm) >> 2) & 0x3FFFFFF)
+        site = pane_fn + 0x3b0
+        fs_site(site, '68c20091')   # add x8,x19,#0x30
+        start = here(); calc = start + 10 * 4
+        for i, w in enumerate((0xd10103ff,    # sub sp,sp,#0x40
+                               0xad0007e0,    # stp q0,q1,[sp]
+                               0xad010fe2,    # stp q2,q3,[sp,#0x20]
+                               0xaa1303e0,    # mov x0,x19            the pane
+                               0x910003e1,    # mov x1,sp             its matrix (q0-q3)
+                               None,          # adrp x2,state page
+                               None,          # bl shape_calc
+                               0xad4007e0,    # ldp q0,q1,[sp]
+                               0xad410fe2,    # ldp q2,q3,[sp,#0x20]
+                               0x910103ff)):  # add sp,sp,#0x40
+            pc = here()
+            if i == 5: w = ADRP(2, pc, FS_STATE_OFF)
+            elif i == 6: w = BL(pc, calc + 8)
+            emit(w)
+        assert here() == calc
+        emit(0x9100c268)                     # add x8,x19,#0x30      (the original)
+        emit(B(here(), site + 4))
+        for k in range(0, len(_shape_anchor), 8): emit(int.from_bytes(bytes.fromhex(_shape_anchor[k:k + 8]), 'little'))
+        fs_put(site, [B(site, start)], 'Layout2 pane global matrix: HUD panes past the 16:9 edge region and the menu bars moved to the taller screen\'s edges with their subtrees (shape_anchor.c)')
+
 def dynamic_resolution(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     site = ctx.others.get('dynamic resolution')
@@ -229,7 +261,8 @@ MATCH_FRAME_STEP = {'main': [
                 'perspective proj': {'size': 0xb8, 'fingerprints': ['e36f61aa83e94dfacc860ab4dd60dd1362cdab40fa490aee9e921a7ae0f3156d']},
                 'camera update': {'size': 0x1648, 'fingerprints': ['66a50abf2237dee694c40d6a2371071d62e91379d40b643869d680f597bfab02']},
                 'device proj': {'size': 0x3b0, 'fingerprints': ['ab5c2809cdbc7f9e30b966872350ac69301aa246a9169610d038ea9480bde910']},   # main+0x3485cc0
-                'layout calc matrix': {'size': 0x208, 'fingerprints': ['0e057804c3c8c7d14ff833983335d834e0bd7505e05263e9c065472b9d206c74']}}},   # main+0x14e9980
+                'layout calc matrix': {'size': 0x208, 'fingerprints': ['0e057804c3c8c7d14ff833983335d834e0bd7505e05263e9c065472b9d206c74']},   # main+0x14e9980
+                'pane global matrix': {'size': 0x46c, 'fingerprints': ['4eba5ac4bdf9d227e40612fa426d39fbe1abaf00fc069d5d6ba382809b5c5a5c']}}},   # main+0x152caa0
 ]}
 
 # The movie player's pictures per frame. Once a frame the player's update (main+0x3b5ca60 on v131072) adds the frame's time (the time object's +0x18, the frame ratio / 60 s, times

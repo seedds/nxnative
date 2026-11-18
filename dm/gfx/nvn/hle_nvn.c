@@ -2539,7 +2539,15 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile / Resident Evil timing profile", o->interval, scr > 0 ? "window" : "no window");
 }
-static int present_itv(const win_t *o) { int movie = dm_movie_hz(), c = fps_present_cap(), k = atomic_load(&g_fs_k); const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; int re_60_movie = !strcmp(DM_GAME_ID, "010050F00BC1A000") && t == 60; if (movie && (fps_high() || re_60_movie)) return fstep_hz() / movie; return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) {
+    int movie = dm_movie_hz(), c = fps_present_cap(), k = atomic_load(&g_fs_k);
+    const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
+    int re_movie_60 = (!strcmp(DM_GAME_ID, "010050F00BC1A000") ||
+                       !strcmp(DM_GAME_ID, "010097000BC10000")) && t == 60;
+    if (movie && (fps_high() || re_movie_60)) return fstep_hz() / movie;
+    return c ? (k && fstep_on() ? k : fstep_hz() / c) :
+           g_display_mode ? 1 : o->interval > 0 ? o->interval : 1;
+}   // vsyncs per frame that presentation follows
 // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
 // vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
 // tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the

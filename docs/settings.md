@@ -25,7 +25,7 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 
 Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way.
 
-On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Luigi: Brothership) also offers **120 fps**. It needs a screen that shows 120 Hz, and uses more GPU and power. When frames do not fit, during movies, or on a slower screen, the game drops to 60 for a while, so it keeps its real speed. If you see the frame rate move between 60 and 120 and would rather it stayed still, choose 60.
+On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Luigi: Brothership) also offers **120 fps**. On iOS, the launcher offers 120 only for games whose profiles explicitly enable it: Resident Evil and Resident Evil 0. On an iPad with a ProMotion display, the host can use 120 Hz; on a 60 Hz screen, during movies, or when performance or thermal limits require it, the adaptive target falls back to 60 (and movie pacing follows the decoded video rate). 120 uses more GPU and power. Choose 30 or 60 if you prefer a fixed lower rate. The iOS limit is recorded separately in each game's profile (`fps_max_ios`), so a Mac-only 120 FPS check does not automatically enable 120 on iPad.
 
 ### Dynamic resolution
 

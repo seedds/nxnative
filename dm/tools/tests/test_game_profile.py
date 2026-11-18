@@ -121,3 +121,21 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class IOSFrameRateMaximum(unittest.TestCase):
+    def test_ios_maximum_is_validated_and_written_to_the_header(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            profile = Path(d, ID) / 'game.tsv'
+            profile.write_text(TSV + 'fps_max\t120\nfps_max_ios\t120\n')
+            output = Path(d, ID) / 'game.h'
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('#define DM_GAME_FPS_MAX_IOS 120', output.read_text())
+            profile.write_text(TSV + 'fps_max\t60\nfps_max_ios\t120\n')
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('fps_max_ios must be 60 or 120 and no higher than fps_max', r.stderr)

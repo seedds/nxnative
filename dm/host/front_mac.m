@@ -93,7 +93,7 @@ static void screen_match_restore(int on_it) {   // main thread: the screen this 
     CGDisplayModeRelease(g_match_orig); g_match_orig = NULL;
 }
 static void screen_match_apply(void) {   // main thread: on a new frame rate, on entering and leaving fullscreen and on a move to another screen
-    static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e ? !strcmp(e, "0") : !strcmp(DM_GAME_ID, "010097000BC10000"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0 or RE0 default)"); }
     NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
     if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id);

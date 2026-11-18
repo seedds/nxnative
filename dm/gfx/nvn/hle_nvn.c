@@ -2159,7 +2159,71 @@ static void power_line(uint64_t frame) {
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; mtl_bw(&pld, &pst, &pfu); pudc = mtl_udc_saved_bytes();
 }
+// DM_PCSAMPLE=<name>[,<name>...][:<µs>[:<seconds>[:<first frame>]]] (diagnostic, every platform): a host thread samples the threads whose pthread name contains one of the names
+// every <µs> (1000) for <seconds> (60) from frame <first frame> (900) on: each one found running is suspended, its pc, lr and up to 10 frame-pointer frames read, and resumed.
+// The samples go to pcsample.txt in the working folder (the app's Documents on iOS, beside log.txt), one line each, "<name index> <pc> <lr> <frames...>" in hex, after a header
+// with this image's load address, so `atos -o <the binary> -l <address>` names them on the Mac. It is how the submit thread's CPU per draw was profiled on an iPhone, where neither
+// `sample` nor a debugger may attach (OoT-30 C-1). A suspend and resume cost the sampled thread some microseconds: at 1000 µs about 1% of its time
+#include <dlfcn.h>
+static char g_pcs_names[8][48]; static int g_pcs_n;
+static void *pcs_main(void *arg) {
+    (void)arg; pthread_setname_np("dm-pcsample");
+    const char *e = getenv("DM_PCSAMPLE"); char spec[512]; snprintf(spec, sizeof spec, "%s", e);
+    long us = 1000, secs = 60, first = 900; char *c = strchr(spec, ':');
+    if (c) { *c++ = 0; us = atol(c); char *c2 = strchr(c, ':'); if (c2) { secs = atol(c2 + 1); char *c3 = strchr(c2 + 1, ':'); if (c3) first = atol(c3 + 1); } }
+    if (us < 100) us = 100;
+    for (char *t = strtok(spec, ","); t && g_pcs_n < 8; t = strtok(NULL, ",")) snprintf(g_pcs_names[g_pcs_n++], sizeof g_pcs_names[0], "%s", t);
+    while (atomic_load_explicit(&g_frame, memory_order_relaxed) < (uint64_t)first) usleep(100000);
+    FILE *f = fopen("pcsample.txt", "w"); if (!f) { LOG("[RED] DM_PCSAMPLE: cannot write pcsample.txt"); return NULL; }
+    Dl_info di = {0}; dladdr((void *)pcs_main, &di);
+    fprintf(f, "# DM_PCSAMPLE image %s load address %#llx; interval %ld us from frame %llu; names", di.dli_fname ? di.dli_fname : "?", (unsigned long long)(uintptr_t)di.dli_fbase, us, (unsigned long long)atomic_load(&g_frame));
+    for (int i = 0; i < g_pcs_n; i++) fprintf(f, " %d=%s", i, g_pcs_names[i]);
+    fputc('\n', f);
+    for (int i = 0; i < g_nmod; i++) fprintf(f, "# guest module %s %#llx %#llx\n", g_mod[i].name, (unsigned long long)(uintptr_t)g_mod[i].base, (unsigned long long)g_mod[i].text_end);   // the game's code: base and text length
+    enum { PT = 16 }; thread_act_t port[PT]; int who[PT], np = 0; uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), tl = 0, taken = 0, idle = 0;
+    mach_port_t self = mach_thread_self();
+    for (;;) {
+        uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (now - t0 > (uint64_t)secs * 1000000000ull) break;
+        if (now - tl > 1000000000ull) {   // the threads, again every second (a named thread may start late)
+            for (int i = 0; i < np; i++) mach_port_deallocate(mach_task_self(), port[i]);
+            np = 0; tl = now; thread_act_array_t ths; mach_msg_type_number_t nth = 0;
+            if (task_threads(mach_task_self(), &ths, &nth) == KERN_SUCCESS) {
+                for (mach_msg_type_number_t i = 0; i < nth; i++) {
+                    int w = -1; pthread_t pt = ths[i] != self ? pthread_from_mach_thread_np(ths[i]) : NULL; char nm[64] = "";
+                    if (pt && !pthread_getname_np(pt, nm, sizeof nm)) for (int k = 0; k < g_pcs_n && w < 0; k++) if (strstr(nm, g_pcs_names[k])) w = k;
+                    if (w >= 0 && np < PT) { port[np] = ths[i]; who[np++] = w; } else mach_port_deallocate(mach_task_self(), ths[i]);
+                }
+                vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths);
+            }
+        }
+        for (int i = 0; i < np; i++) {
+            thread_basic_info_data_t bi; mach_msg_type_number_t bc = THREAD_BASIC_INFO_COUNT;
+            if (thread_info(port[i], THREAD_BASIC_INFO, (thread_info_t)&bi, &bc) != KERN_SUCCESS || bi.run_state != TH_STATE_RUNNING) { idle++; continue; }
+            if (thread_suspend(port[i]) != KERN_SUCCESS) continue;
+            arm_thread_state64_t st; mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT; uint64_t fr[12]; int nf = 0;
+            if (thread_get_state(port[i], ARM_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS) {
+                fr[nf++] = __darwin_arm_thread_state64_get_pc(st); fr[nf++] = __darwin_arm_thread_state64_get_lr(st);
+                uint64_t fp = __darwin_arm_thread_state64_get_fp(st), w2[2]; vm_size_t g = 0;
+                while (nf < 12 && fp && !vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)w2, &g) && g == 16 && w2[0] > fp) { fr[nf++] = w2[1]; fp = w2[0]; }
+            }
+            thread_resume(port[i]);
+            if (!nf) continue;
+            fprintf(f, "%d", who[i]); for (int k = 0; k < nf; k++) fprintf(f, " %llx", (unsigned long long)fr[k]); fputc('\n', f); taken++;
+        }
+        usleep((useconds_t)us);
+    }
+    for (int i = 0; i < np; i++) mach_port_deallocate(mach_task_self(), port[i]);
+    mach_port_deallocate(mach_task_self(), self);
+    fclose(f); LOG("[nvn] DM_PCSAMPLE: %llu samples of running threads (%llu found waiting) written to pcsample.txt", (unsigned long long)taken, (unsigned long long)idle);
+    return NULL;
+}
+static void pcs_start(void) {
+    static int once; const char *e = getenv("DM_PCSAMPLE"); if (once || !e || !*e) return; once = 1;
+    pthread_t th; if (!pthread_create(&th, NULL, pcs_main, NULL)) { pthread_detach(th); LOG("[nvn] DM_PCSAMPLE=%s: sampling those threads into pcsample.txt", e); }
+}
 static void tsummary(uint64_t frame) {
+    pcs_start();
     char line[1024]; size_t o = 0;
     for (int k = 0; k < 6; k++) {
         unsigned n = g_tn[k] < TWIN ? g_tn[k] : TWIN; if (!n) continue;

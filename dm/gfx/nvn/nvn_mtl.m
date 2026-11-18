@@ -5808,7 +5808,7 @@ static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, 
     uint64_t e0n, e1s, e1n; id<MTLBuffer> eb = pkg_edges_gpu(pk, t, &e0n, &e1s, &e1n);
     struct { uint64_t src_off, dst_off, base, pitch, img, layer_stride, e0n, e1s, e1n, pt, va, pt_pg; uint32_t x0, x1, y0, rows, th, gobs_x, gob2, td, z0, blocks_y, d3, lin; } *p = (void *)((uint8_t *)qb.contents + qo);
     _Static_assert(sizeof *p <= 160, "the swz parameters fit their arena slot");
-    *p = (typeof(*p)){0, 0, g->base, pitch, img, g->layer_stride, e0n, e1s, e1n, pt, va, (va + lo) >> 12, g->xb0, g->xb1, g->by0, g->rows, g->th, g->gobs_x, (uint32_t)nvn_gob_switch2, g->td, g->z0, g->blocks_y, g->d3, g->lin};
+    *p = (typeof(*p)){0, 0, g->base, pitch, img, g->layer_stride, e0n, e1s, e1n, pt, va, (va + lo) >> 12, g->xb0, g->xb1, g->by0, g->rows, g->th, g->gobs_x, (uint32_t)nvn_gob_order(&t->d), g->td, g->z0, g->blocks_y, g->d3, g->lin};
     g_wr_epoch++; g_mdx_epoch++; sbw_note(va, t->L.size, SBW_GPU);
     id<MTL4ComputeCommandEncoder> e = dispatch_enc(); enc_c_pso(e, ps);
     enc_c_args(e, src, 0); enc_c_args(e, pg, 1); enc_c_args(e, qb.gpuAddress + qo, 2); enc_c_args(e, eb ? eb.gpuAddress : pg, 3);

@@ -135,7 +135,6 @@ NVN(nvnDeviceBuilderGetFlags, int, const NVNdeviceBuilder *b) { return (int)((co
 NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
-    nvn_gob_switch2 = dm_sdk_ounce();   // the Switch 2's order inside a GOB, for the textures the game tiled itself (nvn_deswizzle.h)
     nvn_timestamp_ns = dm_sdk_ounce();   // NVN2's counter reports record nanoseconds (nvn_timestamp.h)
     o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; mtl_set_origin_lower_left(1);   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
     mtl_set_depth_zero(0);   // NVN's default depth mode: near = -w (GL)
@@ -620,6 +619,11 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
+    // NVN2 device flag bit 16 selects X1 order in CPU copies and descriptor word 2 bit 24. Keep the owning device's order in the texture snapshot.
+    if (dm_sdk_ounce()) {
+        const dev_t_ *device = (const dev_t_ *)s->dev;
+        o->d.gob_order = !device || !(device->flags & 0x10000);
+    }
     o->has_layout = s->has_layout; memcpy(o->layout, s->layout, 8); o->set_swz = s->set_swz; o->stencil = s->stencil; o->swz = s->swz;
     nvn_tex_layout(&o->d, &o->L);
     if (s->pool) vpool_taken(s->pool);
@@ -3856,7 +3860,7 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, unsig
     for (size_t y = 0; y < hb; y++)
         for (size_t x = 0; x < wb;) {   // 16-byte runs are contiguous within a GOB
             uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
-            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, slice, lb, rows, th, td), src + y * row + x, n); x += n;
+            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, slice, lb, rows, th, td, nvn_gob_order(&t->d)), src + y * row + x, n); x += n;
         }
     return 0;
 }

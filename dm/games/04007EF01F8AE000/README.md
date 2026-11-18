@@ -60,6 +60,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 
 ## Found on this game
 
+- [The Switch 2's order inside a GOB](../../../docs/reference/nvn-objects.md#the-switch-2s-order-inside-a-gob): its native SDK 22.2.0 driver confirms the owning-device layout flag; its main initializes device flags `0x400` (offline evidence, not a gameplay retest).
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses) and [IMAD.HI adds a register pair, and IMAD.X its carry](../../../docs/reference/shaders.md#imadhi-adds-a-register-pair-and-imadx-its-carry): the dark map.
 - [Pending clears land before a compute dispatch](../../../docs/reference/rendering.md#pending-clears-land-before-a-compute-dispatch): battles and scene changes blown white.
 - [NVN2 compute reads its workgroup counts at c0 + 4](../../../docs/reference/shaders.md#nvn2-compute-reads-its-workgroup-counts-at-c0--4).

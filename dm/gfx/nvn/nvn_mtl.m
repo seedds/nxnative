@@ -201,7 +201,9 @@ static _Atomic uint64_t g_res_names, g_res_name_ns, g_res_name_max;   // namings
 static void res_name(id cb, id<MTLResidencySet> also) {   // cb: a Metal 4 or classic command buffer (both answer useResidencySet:)
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     pthread_mutex_lock(&g_res_commit_mu);
-    [cb useResidencySet:g_res]; [cb useResidencySet:g_snap_res]; if (also) [cb useResidencySet:also];
+    if (g_res) [cb useResidencySet:g_res];
+    if (g_snap_res) [cb useResidencySet:g_snap_res];
+    if (also) [cb useResidencySet:also];
     pthread_mutex_unlock(&g_res_commit_mu);
     uint64_t d = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0, m = atomic_load(&g_res_name_max);   // count, time and longest are reset apart: a naming can land in one line's time and the next line's count
     atomic_fetch_add(&g_res_name_ns, d); atomic_fetch_add(&g_res_names, 1);

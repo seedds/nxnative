@@ -1498,6 +1498,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_mtl_init` pauses the first device request while the real graphics suspend path runs. It checks for a single device request and waits for both callers to finish with the graphics state ready. The fixture also runs two device requests with the classic fallback forced.
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md).
 
+### A classic shutdown has no residency sets to attach
+
+- **Symptom:** shutdown after classic Metal initialization throws `NSInvalidArgumentException` in `useResidencySet:`. The exception reports `-[NSCountedSet addObject:]: attempt to insert nil`.
+- **Cause:** the classic fallback keeps `g_res` and `g_snap_res` nil. The graphics drain creates a valid classic command buffer through `cl_cb`, and `res_name` used to pass both absent sets to Metal's nonnull API.
+- **Fix:** `res_name` attaches each residency set only when present. The classic drain can submit and wait on a command buffer with no residency sets.
+- **Check:** `t_mtl_init` now drains after forced-classic initialization. On an M4 Pro with macOS 27.2.1, the same drain passed with the Metal 4 capability check masked and the test switch unset. Normal Metal 4 shutdown attached both shared sets.
+- **Found on:** the Mac graphics-suspend fixture. The macOS 27.2.1 paravirtual command buffer inherits the same IOGPU residency method. [Issue #112](https://github.com/seedds/nxnative/issues/112) records why virtual Macs need the classic capture path.
+
 ### A run that ends in its prewarm loses what it compiled
 
 - **Symptom:** a run without a window (headless, or `DM_PSO_PREPARE=0`) compiles the same few dozen to few hundred bases again at every start, and area loads stall on them (a draw waits in `pso_get` → `arch_capture` → `MTLCompiler`), although each run compiled them before. The run's last lines say `pipeline archive at exit: 425 pipelines not written yet, not all written in time: those left are built again at the next start (968 ms)`, or `[RED] graceful exit not done in 1.5 seconds, exiting at once` with no archive line at all.

@@ -65,6 +65,7 @@ int main(void) {
             fputs("FAIL: the callers did not finish with one fully initialized device\n", stderr);
             return 1;
         }
+        if (classic) dm_gfx_suspend(1);   // The classic fallback has no residency sets to attach during the drain.
         printf("Metal initialization passed with concurrent %s\n", classic ? "classic device requests" : "graphics suspend");
         return 0;
     }

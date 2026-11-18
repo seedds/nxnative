@@ -1744,6 +1744,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. All five recorded register programs were refused on main and now match all 5,120 Orin lanes. Four synthetic shaders cover the B and C constant-buffer slots for DP4A and DP2A, with all 16 lanes matching using a nonzero Metal argument-buffer word at `c[3][5]`. Another 144 synthetic lanes cover independent signedness, DP2A low and high pairs, wraparound, immediate and uniform-register inputs. All 27 IDP shaders validate as SPIR-V and compile offline for iOS.
 - **Found on:** the Jetson Orin sm_87 probes from [PR #2052](https://github.com/seedds/nxnative/pull/2052). Only register forms have recorded Orin outputs in this fixture. No affected game is documented. No games or iOS device ran.
 
+### VABSDIFF, the absolute difference with an add
+
+- **Symptom:** an Ampere shader using `sad.u32` fails translation with `Ampere instruction 214 ... is not implemented` for the register form.
+- **Cause:** the GPU compiler emits `VABSDIFF.U32`, and the Ampere decoder had no entry for opcode `0x014` in the low nine bits.
+- **Fix:** `AVabsdiff` uses the shared ALU operand reader and emits `max(a, b) - min(a, b) + c` with 32-bit wraparound. Bit 73 selects signed ordering. Bits 81–83 are the `Pu` predicate field. The recorded form uses `PT`, so other `Pu` values and unrecognized modifiers are rejected. The lowering emits four integer IR operations before optimization.
+- **Check:** `test_dmsh_ampere_orin.py` on M4 Pro, macOS 27.2.1, Metal 32023.922. The previously refused unsigned register program now matches all 1,024 recorded lanes, including 416 wrapping additions. All 64 synthetic lanes match, including signed extrema, immediate and uniform-register sources, and 16 lanes using nonzero constants at `c[3][5]` in slots B and C. Separate probes confirm that a non-PT `Pu` and an unrecognized modifier fail translation. Nine supported shaders validate as SPIR-V and compile and link offline for iOS.
+- **Found on:** the Jetson Orin sm_87 probes from [PR #2053](https://github.com/seedds/nxnative/pull/2053). Signed and non-register cases use synthetic references. No affected game is documented. No games or iOS device ran.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

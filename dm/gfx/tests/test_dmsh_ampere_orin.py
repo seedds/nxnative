@@ -49,7 +49,7 @@ KNOWN = {
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
     'imma_16832_s8': 'IMMA is not implemented', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
-    'isad': 'VABSDIFF is not implemented', 'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
+    'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
     'prmt': 'PRMT modes other than the index form (.F4E .B4E .RC8 .ECL .ECR .RC16) are not implemented',
     'mufu_tanh': 'MUFU.TANH is not implemented', 'mufu_tanh_f16x2': '(as mufu_tanh)',
     # the program calls a routine of the CUDA driver's own (CALL.ABS to a relocation the JIT resolves at load), which a game's shader never does
@@ -95,6 +95,7 @@ def load_fixture():
     doc['ops'].extend(i2f64_boundaries(doc['ops']))
     doc['ops'].extend(f2fp_boundaries(doc['ops']))
     doc['ops'].extend(idp_constant_buffer_cases(doc['ops']))
+    doc['ops'].extend(vabsdiff_cases(doc['ops']))
     return doc
 
 
@@ -414,6 +415,19 @@ def f2fp_boundaries(ops):
     ])
 
 
+def alu_cbuf_variant(op, opcode, source, bank, offset, *, modifiers=0):
+    """Change a register ALU instruction to read its B or C from a fixed constant-buffer offset."""
+    program = bytearray(op['program'])
+    (position, lo, hi), = [(i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', program))
+                           if lo & 0x1ff == opcode]
+    form = 5 if source == 'b' else 3
+    if source == 'c':
+        hi = (hi & ~0xff) | ((lo >> 32) & 0xff)  # B moves into the register field formerly used by C.
+    lo = (lo & 0xffffffff & ~(7 << 9)) | (form << 9) | (bank << 54) | (offset << 38)
+    struct.pack_into('<QQ', program, position, lo, hi | modifiers)
+    return bytes(program)
+
+
 def idp_constant_buffer_cases(ops):
     """Bind a nonzero word at c[3][5] and exercise its use in either operand slot."""
     by_name = {op['name']: op for op in ops}
@@ -437,20 +451,46 @@ def idp_constant_buffer_cases(ops):
         ('dp2a_lo', 'c', 0xfffffff0, 2, True, True, 0),
     ):
         template = by_name[name]
-        program = bytearray(template['program'])
-        (position, lo, hi), = [(i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', program))
-                               if lo & 0x1ff == 0x026]
-        form = 5 if source == 'b' else 3
-        if source == 'c':
-            hi = (hi & ~0xff) | ((lo >> 32) & 0xff)  # B moves into the register field formerly used by C.
-        lo = (lo & 0xffffffff & ~(7 << 9)) | (form << 9) | (bank << 54) | (offset << 38)
-        struct.pack_into('<QQ', program, position, lo, hi)
         resolved = [row.copy() for row in rows]
         for row in resolved:
             row[1 if source == 'b' else 2] = value
-        yield dict(template, name=f'{name}_cbuf_{source}', program=bytes(program), cases=len(rows), rows_in=rows,
+        yield dict(template, name=f'{name}_cbuf_{source}', program=alu_cbuf_variant(template, 0x026, source, bank, offset),
+                   cases=len(rows), rows_in=rows,
                    rows_gpu=[[expected(row, width, signed_a, signed_b, first_byte)] for row in resolved],
                    cbuf=(bank, offset, value), exact_bits=True, derived_from=name, oracle='synthetic IDP constant-buffer contract')
+
+
+def vabsdiff_cases(ops):
+    """Compare full-width signed and unsigned distances, including sums that wrap."""
+    template = next(op for op in ops if op['name'] == 'isad')
+    rows = [[0x80000000, 0x7fffffff, 1],
+            [0x7fffffff, 0x80000000, 0],
+            [0xffffffff, 0x00000000, 1],
+            [0x00000000, 0x80000000, 1],
+            [0x80000000, 0xffffffff, 0x80000003],
+            [0xffffffff, 0x7fffffff, 0x80000000],
+            [0x7fffffff, 0x00000001, 0xffffffff],
+            [0xffffffff, 0xffffffff, 0xabcdef01]]
+
+    def case(suffix, program, signed, resolved, **extra):
+        expected = []
+        for a, b, c in resolved:
+            if signed:
+                a, b = struct.unpack('<ii', struct.pack('<II', a, b))
+            expected.append([(abs(a - b) + c) & 0xffffffff])
+        return dict(template, name='isad_' + suffix, program=program, cases=len(rows), rows_in=rows,
+                    rows_gpu=expected, exact_bits=True, derived_from=template['name'], oracle='synthetic VABSDIFF contract', **extra)
+
+    signed_bit = 1 << (73 - 64)
+    yield case('u32_edges', template['program'], False, rows)
+    yield case('s32_edges', half_variant(template, 0x014, modifiers=signed_bit), True, rows)
+    bank, offset = 3, 20
+    for source, value, signed in (('b', 0x7fffffff, True), ('c', 0xffffffff, False)):
+        resolved = [row.copy() for row in rows]
+        for row in resolved:
+            row[1 if source == 'b' else 2] = value
+        program = alu_cbuf_variant(template, 0x014, source, bank, offset, modifiers=signed_bit if signed else 0)
+        yield case('cbuf_' + source, program, signed, resolved, cbuf=(bank, offset, value))
 
 
 def chain_rewrites():

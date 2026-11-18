@@ -113,6 +113,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [FINAL FANTASY X/X-2 HD Remaster](0100BC300CB48000/README.md) | `0100BC300CB48000` | 1.0.0 (base) | 5.4.0 | PhyreEngine (Virtuos) | NVN |
 | [FINAL FANTASY XII THE ZODIAC AGE](0100EB100AB42000/README.md) | `0100EB100AB42000` | 1.1.0 | 6.4.0 | PhyreEngine | NVN |
 | [Fast Fusion](040041E0212AE000/README.md) | `040041E0212AE000` | v262144 (Switch 2) | 20.5.13 (Ounce) | Shin'en's engine | NVN2 |
+| [Fate/stay night REMASTERED](010023301E41C000/README.md) | `010023301E41C000` | 1.4.1 | 16.2.6 | Type-Moon's visual-novel engine | OpenGL |
 | [FIFA 23 Legacy Edition](01001C8016B4E000/README.md) | `01001C8016B4E000` | 1.0.0, 1.0.3 | 13.3.5 | EA proprietary engine | NVN |
 | [Fire Emblem Engage](0100A6301214E000/README.md) | `0100A6301214E000` | 2.0.0 | 12.3.7 | Unity 2020.3.18f1 IL2CPP, Wwise | NVN |
 | [Fire Emblem Fortune's Weave](04007EF01F8AE000/README.md) | `04007EF01F8AE000` | v131072 (Switch 2) | 22.2.0 (Ounce) | Intelligent Systems' engine, NintendoWare | NVN2 |

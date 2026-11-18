@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from dmsh_wide import wide_loads   # noqa: E402
+from dmsh_wide import wide_loads, constant_reads   # noqa: E402
 import dmsh_abi as abi   # noqa: E402
 
 # Splatoon Raiders' Hoian_UBER (3e5a302ac52b73bf) as spirv-cross writes it, cut down: one light's words from fp_s3 at 80 * index + 16 .. 44, a written buffer,
@@ -161,12 +161,62 @@ class WideLoads(unittest.TestCase):
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'Metal compiler')
     def test_compiles(self):
         with tempfile.TemporaryDirectory() as d:
-            for name, src in (('before', LIGHT), ('after', wide_loads(LIGHT)), ('bounded', BOUNDED), ('bounded_after', wide_loads(BOUNDED))):
+            plain, bounded = wide_loads(LIGHT), wide_loads(BOUNDED)
+            promoted, bounded_promoted = constant_reads(plain, {2, 3}), constant_reads(bounded, {2, 3})
+            self.assertIn('*(constant packed_uint4*)', promoted)
+            self.assertIn('*(constant packed_uint4*)', bounded_promoted)
+            for name, src in (('before', LIGHT), ('after', plain), ('promoted', promoted),
+                              ('bounded', BOUNDED), ('bounded_after', bounded), ('bounded_promoted', bounded_promoted)):
                 m = os.path.join(d, name + '.metal'); Path(m).write_text(src)
-                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', m, '-o', os.path.join(d, name + '.air')],
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', f'-fmodules-cache-path={d}',
+                                    m, '-o', os.path.join(d, name + '.air')],
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
 
+
+class ConstantReads(unittest.TestCase):
+    """Only known read-only buffers with direct loads can change address space."""
+    SRC = """struct spvDescriptorSetBuffer0
+{
+    const device _40* fp_s0 [[id(3)]];
+    device _40* fp_s1 [[id(4)]];
+    const device _40* vp_s0 [[id(5)]];
+    const device _40* fp_s2 [[id(6)]];
+    const device _40* fp_s3 [[id(7)]];
+};
+    packed_uint3 _dmw0 = *(const device packed_uint3*)&(*spvDescriptorSet0.fp_s0)._m0[int(_9)];
+    float _5 = as_type<float>((*spvDescriptorSet0.fp_s0)._m0[int(_7)]);
+    (*spvDescriptorSet0.fp_s1)._m0[0] = 1u;
+    float _6 = as_type<float>((*spvDescriptorSet0.vp_s0)._m0[0]);
+    float _8 = f(spvDescriptorSet0.fp_s2);
+    uint _10 = (*spvDescriptorSet0.fp_s3)._m0[0];
+"""
+
+    def test_fragment_default(self):
+        out = constant_reads(self.SRC, {0, 2})
+        self.assertIn('constant _40* fp_s0 [[id(3)]];', out)
+        self.assertIn('*(constant packed_uint3*)&(*spvDescriptorSet0.fp_s0)._m0[int(_9)]', out)
+        self.assertIn('device _40* fp_s1 [[id(4)]];', out)            # written: device
+        self.assertIn('const device _40* vp_s0 [[id(5)]];', out)      # another stage
+        self.assertIn('const device _40* fp_s2 [[id(6)]];', out)      # its pointer handed to a function
+        self.assertIn('const device _40* fp_s3 [[id(7)]];', out)      # no read-only metadata for the slot
+        self.assertNotIn('const device packed_uint3', out)
+
+    def test_all_and_off(self):
+        self.assertIn('constant _40* vp_s0 [[id(5)]];', constant_reads(self.SRC, {0}, 'all'))
+        self.assertEqual(constant_reads(self.SRC, {0}, '0'), self.SRC)
+
+    def test_element_pointer_escapes(self):
+        for use in ('f(&(*spvDescriptorSet0.fp_s0)._m0[0])', 'f(&((*spvDescriptorSet0.fp_s0)._m0[0]))',
+                    '*(const device float*)&(*spvDescriptorSet0.fp_s0)._m0[0]'):
+            with self.subTest(use=use):
+                src = self.SRC + f'    float _11 = {use};\n'
+                self.assertEqual(constant_reads(src, {0}), src)
+
+    def test_element_reference_escapes(self):
+        src = 'uint ref(const device uint& word) { return word; }\n' + self.SRC
+        src += '    uint _11 = ref((*spvDescriptorSet0.fp_s0)._m0[0]);\n'
+        self.assertEqual(constant_reads(src, {0}), src)
 
 if __name__ == '__main__':
     unittest.main()

@@ -40,6 +40,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         public IReadOnlyDictionary<SetBindingPair, int> BufferImageBiases => _bufferImageBiases;
         private readonly Dictionary<SetBindingPair, int> _bufferTextureBiases = new();
         public IReadOnlyDictionary<SetBindingPair, int> BufferTextureBiases => _bufferTextureBiases;
+        public Dictionary<SetBindingPair, int> BufferRowWidths { get; } = new();
         public int BufferImageBiasBinding { get; set; } = -1;
 
         // nxnative: storage bounds (TranslationFlags.MetalStorageBounds): the binding of each bounded storage buffer, with its slot in the length table, and the binding

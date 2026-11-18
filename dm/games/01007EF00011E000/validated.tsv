@@ -1,3 +1,4 @@
 # The chain this game was last green on in scripts/regress.py check / baseline --record (one row per mode, the latest of each). Written by the harness, committed with the pull request.
 # mode <TAB> chain=<DMSH_CHAIN> commit=<short SHA>[+dirty] date=<UTC day> machine=<model> macos=<version>. No game data.
-full	chain=e65a4ebd3322 commit=4a1f683018+dirty date=2026-11-01 machine=Mac16,7 macos=27.2
+quick	chain=5ea15f2c8240 commit=3fe574dfe0+dirty date=2026-11-17 machine=Mac16,7 macos=27.2.1
+full	chain=5ea15f2c8240 commit=9bd8bb386c+dirty date=2026-11-17 machine=Mac16,7 macos=27.2.1

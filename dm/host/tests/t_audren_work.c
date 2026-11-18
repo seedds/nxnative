@@ -28,6 +28,9 @@ static int opens, starts, joins, closes, fail_open, nested;
 static int event_destroys, event_binds, attaches, event_in_handle;
 static void *sdk_event, *game_event;
 static void *sdk_work;
+static int acquire_during_destroy;
+static uint64_t notify_binding; static int notify_signals;
+static char switch_event[64]; static uint64_t switch_binding; static int switch_signals;
 static char notify_event[64];   // the output device notification's event (SDK 21+ names)
 static int notify_binds, notify_destroys;
 static void *map_key, *map_value;
@@ -56,7 +59,10 @@ static Result sdk_open_ev(void **handle, void *ev, const uint8_t *param, void *w
     return r;
 }
 static void sdk_destroy_event(void *ev) {
-    if (ev == notify_event) { notify_destroys++; return; }
+    if (ev == notify_event) {
+        if (acquire_during_destroy) assert(h_ad_Notify21(notify_event) == 0x499);
+        notify_destroys++; notify_binding = 0; return;
+    }
     assert(ev == sdk_event); event_destroys++;
 }
 static uint32_t sdk_readable(const void *ev) { assert(ev == sdk_event && event_binds); return 0x1002; }
@@ -96,14 +102,17 @@ void dm_guest_thread_join(void *tt) {
 }
 uint64_t now_ns(void) { return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
-void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
+void *dm_pcmout_open_sink(void) { return NULL; }
+int dm_audio_output_channels(void) { return 2; }   // the renderer tests here take the stereo route
+int dm_audio_route(void) { return 2; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) {
-    if (ev == notify_event) { assert(ac == 0); notify_binds++; return; }
+    if (ev == notify_event) { assert(ac == 0); notify_binds++; notify_binding = 0x7000 + (unsigned)notify_binds; return; }
+    if (ev == switch_event) { assert(ac == 0); switch_binding++; return; }
     assert(ev == sdk_event && ac == 1 && event_destroys == 2 * event_binds + 1);   // after the open destroys the SDK's local event (each earlier Close destroyed one more)
     event_binds++;
 }
@@ -196,11 +205,31 @@ int main(void) {
     assert(notify_destroys == 0);
     assert(h_ad_Notify21(notify_event) == RES_OK);
     assert(h_ad_Notify21(notify_event) == 0x499 && notify_binds == 1);   // the second acquire, before a release, is refused
+    dm_audio_device_changed(); assert(notify_signals == 1);
+    acquire_during_destroy = 1;
     h_ad_NotifyRelease21(notify_event);
+    acquire_during_destroy = 0;
+    dm_audio_device_changed(); assert(notify_signals == 1);
     assert(notify_destroys == 1);
     assert(h_ad_Notify21(notify_event) == RES_OK && notify_binds == 2);
+    dm_audio_device_changed(); assert(notify_signals == 2);
     h_ad_NotifyRelease21(notify_event);
     assert(notify_destroys == 2);
+    switch_binding = 0x8000; h_ad_Notify7(switch_event);
+    dm_audio_device_changed(); assert(switch_signals == 1);
+    // Destroy/rebind the same storage as an unrelated event: the old audio subscriber cannot signal it.
+    switch_binding++;
+    dm_audio_device_changed(); assert(switch_signals == 1 && notify_signals == 2);
+    h_ad_Notify7(switch_event);
+    dm_audio_device_changed(); assert(switch_signals == 2);
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
+    return 0;
+}
+
+uint64_t hle_system_event_binding(void *ev) { assert(ev == notify_event || ev == switch_event); return ev == notify_event ? notify_binding : switch_binding; }
+int hle_signal_system_event_binding(uint64_t binding) {
+    if (!binding) return 0;
+    if (binding == notify_binding) { notify_signals++; return 1; }
+    if (binding == switch_binding) { switch_signals++; return 1; }
     return 0;
 }

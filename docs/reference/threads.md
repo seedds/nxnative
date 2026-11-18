@@ -118,6 +118,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** `dm_yield_to_core_peers` returns at once for a caller whose mask allows another core, and such a waker is not marked for the handoff (`note_runnable`, `hle_thread.c`); the main thread's mask is 1 (core 0). A pinned waker keeps the handoff as before. `make -C dm/host/tests GAME=<id> preempt` has the case (exclusion 7: the signaller's mask is 0x5, and it returns before the woken worker's payload).
 - **Found on:** [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md): every route run froze at New Story (frame 7,800 in one, 11,700 in another); with the fix the opening cutscene plays.
 
+### A same-core handoff waits without a timer per handoff
+
+- **Symptom:** frequent same-core handoffs raise CPU wakeups and power even at a steady frame rate.
+- **Cause:** the [same-core wake handoff](#same-core-wake-handoffs) rechecked the peer in a loop of 50 µs `nanosleep` polls (`dm_yield_to_core_peers`). Even a peer that blocked a few microseconds later had to wait for the timer to wake its waker.
+- **Fix:** the waker waits on its own condition variable (`hcv`), or `g_hand_cv` under `core_preempt`. With `G` held, `hand_signal` wakes it when a peer in its active handoff blocks, exits, or is paused. The same runnable-state scan decides when the waker can continue. A 50 µs timeout rechecks changes that send no notification, including host sleeps, host GPU work, and changes to priority or affinity. The thread dump counts timed rechecks, which can occur more than once within one handoff.
+- **Check:** `make -C dm/host/tests GAME=<id> handoff-wait` uses real thread SVCs in both scheduler modes. The worker stays guest-runnable until the signaller enters its condition wait. The notification case disables the timeout and requires the worker's guest wait to release the signaller. The backstop case parks the worker in a host wait without signalling the handoff and checks that a timed recheck releases the signaller. `t_handoff_wait --storm` measures fast wakes separately from these assertions.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md), originally measured by kencalx in NX18 and ported by Oliver Ames in [PR #2872](https://github.com/seedds/nxnative/pull/2872).
+
 ### Lock-free queues published without barriers
 
 - **Symptom:** the picture stops and stays (sound goes on) at random places, about one run in two: every task worker waits on its own event, and the task a waiter waits for counts a subtask that is marked queued but is in no queue (the ring's head equals its tail).

@@ -200,7 +200,22 @@ static void *nq_worker(void *unused) {
 }
 static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
-static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { n->capacity=(n->length+length+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
+// Grow geometrically so flattening a large submission does not reallocate its command records at every page.
+static void nq_bytes(nq_node *n, const void *bytes, size_t length) {
+    if (length > SIZE_MAX - n->length) die("queue commands allocation overflow");
+    size_t want = n->length + length;
+    if (want > n->capacity) {
+        size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
+        cap = cap < want ? want : cap;
+        if (cap < 4096) cap = 4096;
+        void *grown = realloc(n->bytes, cap);
+        if (!grown) die("queue commands allocation failed");
+        n->bytes = grown;
+        n->capacity = cap;
+    }
+    memcpy(n->bytes + n->length, bytes, length);
+    n->length = want;
+}
 static void nq_signal_add(nq_node *n,nq_signal s) {
     if(!(n->signal_count&(n->signal_count-1))) { n->signals=realloc(n->signals,(n->signal_count?2*n->signal_count:1)*sizeof *n->signals); if(!n->signals) die("queue signals allocation failed"); } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
     n->signals[n->signal_count++]=s;

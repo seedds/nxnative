@@ -952,8 +952,8 @@ def tail_call_at_end(insl, j):
         return p.mnemonic == 'ldr' and bool(re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str))
     return False
 def tail_call_padded(insl, j):
-    """An unframed, straight-line pointer thunk ending in br x18 and zero trap padding."""
-    if j + 1 >= len(insl) or any(p.mnemonic != 'udf' or p.op_str != '#0' for p in insl[j + 1:]): return False
+    """An unframed, straight-line pointer thunk ending in br x18 and unreachable NOP or zero trap padding."""
+    if j + 1 >= len(insl) or any(not (p.mnemonic == 'nop' or p.mnemonic == 'udf' and p.op_str == '#0') for p in insl[j + 1:]): return False
     if any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
     for p in insl[:j]:
         if p.mnemonic not in ('mov', 'ldr', 'ldrh', 'ldp', 'add', 'str', 'stp'): return False

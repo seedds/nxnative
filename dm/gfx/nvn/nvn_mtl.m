@@ -5285,6 +5285,7 @@ static id<MTLTexture> tex_mtl_at(const tex_t *ct, int line);   // tex_mtl: a dro
 // An open replay can borrow until its submission fence. A serial or package holds the result, and retirement waits for that fence (nvn_owner.h). A dropped texture is made
 // whole here too (tex_undrop), and its package holds the whole one, so the borrow stays valid
 static void *tex_mtl_replay_at(const tex_t *ct, int line);
+static inline void *tex_mtl_replay_ref(const tex_t *ct) { return tex_mtl_replay_at(ct, 0); }   // line 0: a caller with no line of its own (tests)
 #define tex_mtl_replay(ct) ((__bridge id<MTLTexture>)tex_mtl_replay_at((ct), __LINE__))
 static inline void *tex_mtl_result(id<MTLTexture> texture, id<MTLTexture> __strong *owned) {
     if (owned) *owned = texture;

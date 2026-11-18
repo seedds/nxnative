@@ -30,7 +30,16 @@ class Game:
         return default
 
     def words(self, key, default=None): return self.get(key, default).split()
-    def int(self, key): return int(self.get(key), 0)
+    def int(self, key, default=None):
+        v = self.get(key, default)
+        if isinstance(v, int): return v
+        s = v.strip()
+        m = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)\s*([KkMmGg])?[Bb]?', s)
+        if m and m.group(2):
+            val, unit = float(m.group(1)), m.group(2).upper()
+            mult = {'K': 1024, 'M': 1024*1024, 'G': 1024*1024*1024}[unit]
+            return int(val * mult)
+        return int(s, 0)
     def table(self, name): return self.dir / name
 
     @property
@@ -46,7 +55,7 @@ class Game:
     def build_modules(self):
         """{main build ID: [modules]} for each build row with a main: the modules that build has, in the load order of modules (Mario Kart World: the base game's main subsdk0 sdk,
         1.8.0's main subsdk0 subsdk1 sdk). A row may name modules the profile does not load (Hades' subsdk0 and subsdk1): they stay unloaded"""
-        order, out = self.words('modules'), {}
+        order, out = self.words('modules', 'main sdk'), {}
         for b in self.builds().values():
             if 'main' in b: out[b['main']] = [m for m in order if m in b]
         return out
@@ -159,7 +168,7 @@ def header_multi(progs):
 def header_one(g):
     """the host's game_profile.h: the profile constants the host uses, as macros"""
     q = lambda s: '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
-    mods = g.words('modules')
+    mods = g.words('modules', 'main sdk')
     vers = ', '.join('{' + q(b['main']) + ', ' + q(b['display']) + '}' for b in g.builds().values() if 'main' in b)
     pi = g.get('present_interval', 'game')   # present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval must be game or display: {pi}')
@@ -223,16 +232,16 @@ def header_one(g):
          '#pragma once',
          f'#define DM_GAME_ID {q(g.id)}',
          f'#define DM_GAME_NAME {q(g.get("name"))}',
-         f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',
+         f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id", g.get("title_id")), 16):016X}ull',
          f'#define DM_GAME_MODULES {{{", ".join(map(q, mods))}}}',
          f'#define DM_GAME_NMOD {len(mods)}',
          # each build's own modules (main.c picks the row of main's build ID, else DM_GAME_MODULES): a version may lack a module another has
          f'#define DM_GAME_BUILD_MODULES {", ".join("{" + q(bid) + ", " + q(" ".join(ms)) + "}" for bid, ms in g.build_modules().items()) or "{0}"}',
-         f'#define DM_GAME_ROMFS_MARKER {q(g.get("romfs_marker"))}',
-         f'#define DM_GAME_MEM_RESERVE {g.int("mem_reserve"):#x}ull',
-         f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
-         f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
-         f'#define DM_GAME_APP_POOL {g.int("app_pool"):#x}ull',
+         f'#define DM_GAME_ROMFS_MARKER {q(g.get("romfs_marker", ""))}',
+         f'#define DM_GAME_MEM_RESERVE {g.int("mem_reserve", "0x100000000"):#x}ull',
+         f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias", "0x10000000"):#x}ull',
+         f'#define DM_GAME_MEM_STACK {g.int("mem_stack", "0x10000000"):#x}ull',
+         f'#define DM_GAME_APP_POOL {g.int("app_pool", "0xCD500000"):#x}ull',
          f'#define DM_GAME_MEM_USED {int(g.get("mem_used", "0x4000000"), 0):#x}ull',   # used memory reported beside the heap (hle_svc.c GetInfo UsedMemorySize)
          f'#define DM_GAME_SYS_RESOURCE {int(g.get("sys_resource", "0x2000000"), 0):#x}ull',   # the NPDM's system resource size (hle_svc.c GetInfo TotalSystemResourceSize; 0 = no virtual address memory)
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)

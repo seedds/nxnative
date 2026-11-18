@@ -47,16 +47,16 @@ static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAdd
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 
 static struct {
-    AudioDeviceID device;
-    Float64 rate;
+    _Atomic AudioDeviceID device;
+    _Atomic Float64 rate;
     AudioValueRange range;
-    UInt32 frames;
-    AudioUnitPropertyListenerProc device_listener, format_listener;
-    unsigned writes, disposals, input_formats;
-    OSStatus init_error;
-    int route_ch;                        // the device's output stream format channels (the route)
-    int format_ch;                       // channels of the unit's input format, as last set
-    AudioChannelLayoutTag layout_tag;    // the unit's input channel layout, as last set (0: none)
+    _Atomic UInt32 frames;
+    _Atomic AudioUnitPropertyListenerProc device_listener, format_listener;
+    _Atomic unsigned writes, disposals, input_formats;
+    _Atomic OSStatus init_error;
+    _Atomic int route_ch;                        // the device's output stream format channels (the route)
+    _Atomic int format_ch;                       // channels of the unit's input format, as last set
+    _Atomic AudioChannelLayoutTag layout_tag;    // the unit's input channel layout, as last set (0: none)
 } unit;
 static AudioUnit fake_au(void) { return (AudioUnit)&unit; }
 static int check_open_publication;
@@ -80,15 +80,17 @@ static OSStatus mock_new(AudioComponent c, AudioComponentInstance *au) {
 static OSStatus mock_get(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el, void *data, UInt32 *size) {
     assert(au == fake_au() && el == 0);
     if (id == kAudioOutputUnitProperty_CurrentDevice) {
-        assert(scope == kAudioUnitScope_Global && *size == sizeof unit.device); memcpy(data, &unit.device, *size);
+        AudioDeviceID dev = unit.device;
+        assert(scope == kAudioUnitScope_Global && *size == sizeof dev); memcpy(data, &dev, *size);
     } else if (id == kAudioUnitProperty_StreamFormat) {
         assert(scope == kAudioUnitScope_Output && *size == sizeof(AudioStreamBasicDescription));
         AudioStreamBasicDescription f = {.mSampleRate = unit.rate}; memcpy(data, &f, *size);
     } else if (id == kAudioDevicePropertyBufferFrameSizeRange) {
         assert(scope == kAudioUnitScope_Global && *size == sizeof unit.range); memcpy(data, &unit.range, *size);
     } else {
-        assert(id == kAudioDevicePropertyBufferFrameSize && scope == kAudioUnitScope_Global && *size == sizeof unit.frames);
-        memcpy(data, &unit.frames, *size);
+        UInt32 fr = unit.frames;
+        assert(id == kAudioDevicePropertyBufferFrameSize && scope == kAudioUnitScope_Global && *size == sizeof fr);
+        memcpy(data, &fr, *size);
     }
     return noErr;
 }

@@ -513,6 +513,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `make -C dm/gfx/tests GAME=<id> t_pace` replays the acquire and present cycle on the header: a waiting caller at 60.0 fps with two, three and four textures; 18,000 link-paced frames 12.5 ms apart, then a silent link, with the first wait within one period (75 s when the link's frames step the beat) and 16.667 ms a frame after it; and the link pacing, going silent and coming back three times, every wait within one period.
 - **Not checked:** the freeze on a variable-refresh screen here (there is none); the fix rests on the replay.
 
+### An early display-link wake logs zero lateness
+
+- **Symptom:** `DM_NVN_TSV` reports an `@late_ms` value close to 18.4 trillion ms for an acquire that woke before its texture's slot.
+- **Cause:** `nvnWindowAcquireTexture` subtracts the slot time from the wake time as unsigned nanoseconds. A display-link tick can wake the acquire before that slot.
+- **Fix:** measure the delay only when the wake is later than the slot. An early wake writes zero.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) on the Mac. [PR #1041](https://github.com/seedds/nxnative/pull/1041) identified the underflow.
+- **Check:** `t_link_ticks` drives the real acquire with synthetic display-link ticks and checks the TSV. A wake 1 ms early writes `0.000` and a wake 1.25 ms late writes `1.250`.
+
 ### Fixed-rate display-link delay remains at latency 1
 
 - **Symptom:** on a MacBook Air M2's fixed 60 Hz built-in display, the reporter measured about 50 ms from the game's present call to on-screen presentation with the display link, at both requested frame latencies 1 and 2, versus 29 ms with `DM_PRESENT_LINK=0`. After loading, all three runs held 60 fps with 0.3% of on-screen intervals outside 16.7 ± 2 ms and no frame-step changes.

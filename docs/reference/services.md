@@ -617,6 +617,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** a PowerA NANO over Bluetooth on macOS 27.2; not specific to a game. Played in [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) on the PR's `0x3F` path.
 - **Check:** `t_pad_hid` covers the simple map, raw stick scaling, descriptor capabilities and identical button mappings in both modes, including disabled buttons, Home/Capture overrides, the d-pad and stale simple state. `t_jc1` covers the shared handshake, calibrated motion and separate rumble actuators. `t_pad_hid_mac` drives fake IOKit devices through retries, handshake, full input, calibration replies (a truncated reply is rejected; factory rest emits zero gyro, and per-axis sensitivity is applied), a custom map in full mode, player lights, rumble and return to simple mode. It checks lights without full input support and without a device-info answer, no output for buttons alone, an unchanged 8BitDo path and identical genuine Pro Controllers.
 
+### A raw HID d-pad reads left as up-left
+
+- **Symptom:** on the Mac, pressing left on a raw HID controller's d-pad registers up-left, and pressing up-left registers no direction.
+- **Cause:** `b396df3a` removed `DM_BTN_LEFT` from the eight-slot hat table in `pad_hid_buttons()` (`pad_hid.h`). Value 6 then read the entry for up-left, and value 7 read the zero-initialized last slot.
+- **Fix:** restore left at index 6 and up-left at index 7 in the shared decoder. It handles 8BitDo D-input hats and Nintendo's simple report `0x3F`. GameController and Nintendo's full report `0x30` decode the d-pad independently.
+- **Found on:** synthetic raw HID hat inputs on macOS 27.2.1. A compiled probe decoded all eight directions before `b396df3a`, six after it, and all eight with the fix. [PR #2933](https://github.com/seedds/nxnative/pull/2933)
+- **Check:** `t_pad_hid` checks the button mask for all eight directions. Only values 6 and 7 fail with the broken table. `t_pad_hid_mac` checks the Mac raw HID path with virtual controllers.
+
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
 - **Symptom:** SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`.

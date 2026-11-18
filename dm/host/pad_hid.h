@@ -104,7 +104,7 @@ static uint64_t pad_hid_nin_buttons(const pad_hid *h, uint64_t buttons, uint8_t 
     return pad_hid_map_buttons(h, usages) | (buttons & (DM_BTN_LEFT | DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN));
 }
 static uint64_t pad_hid_buttons(const pad_hid *h) {
-    static const uint64_t hat[8] = {DM_BTN_UP, DM_BTN_UP | DM_BTN_RIGHT, DM_BTN_RIGHT, DM_BTN_RIGHT | DM_BTN_DOWN, DM_BTN_DOWN, DM_BTN_DOWN | DM_BTN_LEFT, DM_BTN_LEFT | DM_BTN_UP};
+    static const uint64_t hat[8] = {DM_BTN_UP, DM_BTN_UP | DM_BTN_RIGHT, DM_BTN_RIGHT, DM_BTN_RIGHT | DM_BTN_DOWN, DM_BTN_DOWN, DM_BTN_DOWN | DM_BTN_LEFT, DM_BTN_LEFT, DM_BTN_LEFT | DM_BTN_UP};
     uint64_t m = pad_hid_map_buttons(h, h->buttons);
     if (h->hat >= 0 && h->hat < 8) m |= hat[h->hat];
     if (h->has[PH_BRAKE] && h->axis[PH_BRAKE] > 0) m |= DM_BTN_ZL;

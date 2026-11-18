@@ -1,6 +1,6 @@
-# nxnative Resident Evil HD Remake
+# nxnative Resident Evil HD Remake and Resident Evil 0
 
-Resident Evil HD Remaster – Optimized nxnative Version
+Resident Evil HD Remaster - Resident Evil 0 – Optimized nxnative Version
 
 I've been working on improving Resident Evil HD Remaster support in nxnative, with optimizations specifically tailored to this game.
 

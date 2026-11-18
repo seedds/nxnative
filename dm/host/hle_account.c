@@ -116,7 +116,9 @@ HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "DM_NICK for
 }
 
 // ---------- Online accounts: cut ----------
-HLE_FORCE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "network service account, out of scope; cut: always unavailable", Result, h_acc_EnsureNsa, const UserHandle *h) { (void)h; return RES_FAIL; }
+// Ensure... opens the console's network-account applet when the account is unavailable; an offline console's player can only back out of it, so it answers
+// ResultCancelledByUser (2124-0001). Games take that as "stay offline" and retry anything else (Taiko no Tatsujin: Rhythm Festival, main+0x16ee0f8, loops on RES_FAIL)
+HLE_FORCE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "network service account, out of scope; cut: the applet is cancelled, as offline", Result, h_acc_EnsureNsa, const UserHandle *h) { (void)h; return RES_ACC_CANCELED; }
 HLE_FORCE("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", "network service account, out of scope; cut", Result, h_acc_GetNsaId, void *id, const UserHandle *h) { (void)id; (void)h; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", "network service account token, out of scope; cut", Result, h_acc_LoadTok, uint64_t *n, char *buf, uint64_t sz, const UserHandle *h) {
     (void)buf; (void)sz; (void)h; if (n) *n = 0; return RES_FAIL;

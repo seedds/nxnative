@@ -95,6 +95,8 @@ int main(int argc, char **argv) {
     assert(h_acc_ShowSel(&out, settings) == RES_OK && shown_open == 4);
     h_acc_CloseUser(&other);
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+    // The network-account applet an offline console shows can only be backed out of.
+    assert(h_acc_EnsureNsa(&h) == RES_ACC_CANCELED);
     // Creation has real cancellation and durable registration, but opens no session.
     choice = FRONT_USER_CANCEL; assert(h_acc_ShowCreator() == RES_ACC_CANCELED);
     choice = FRONT_USER_CREATE; assert(h_acc_ShowCreator() == RES_OK);

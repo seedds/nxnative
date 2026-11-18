@@ -18798,13 +18798,16 @@ static struct timespec link_deadline(uint64_t ns);
     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
         MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
     pthread_mutex_unlock(&g_pq_mu);
-    double vp = g_link_vperiod, tol = 0.002;   // tol: how early a tick may come and still end a hold (below)
+    double vp = g_link_vperiod, tick_time = update.targetPresentationTimestamp;
     if (vp > 0) {   // virtual ticks: only the refresh nearest each slot of a steady clock at the wanted rate counts (link_range)
-        static double next, vp_was; double t = update.targetPresentationTimestamp;
-        if (vp != vp_was || t > next + vp) { next = t; vp_was = vp; }   // the first callback, a new rate, or after a stall: the clock starts again here
-        if (t < next - g_link_vhalf) return;
-        next += vp; tol += 2 * g_link_vhalf;   // a tick lies up to half a refresh off its slot, so two of them up to one refresh nearer each other than the slots
+        static double next, vp_was;
+        if (vp != vp_was || tick_time > next + vp) { next = tick_time; vp_was = vp; }   // the first callback, a new rate, or after a stall: the clock starts again here
+        if (tick_time < next - g_link_vhalf) return;
+        tick_time = next;   // the hold follows counted slots even when their physical refreshes are unevenly spaced
+        next += vp;
     }
+    const int rate = mtl_link_rate();
+    const double tick_period = vp > 0 ? vp : 1.0 / rate;
     static double cb_prev, gap_max; static int nticks;   // for g_link_ring: callbacks counted as ticks since the previous present, and the longest interval between them
     if (cb_prev > 0 && cb - cb_prev > gap_max) gap_max = cb - cb_prev;
     cb_prev = cb; nticks++;
@@ -18817,16 +18820,15 @@ static struct timespec link_deadline(uint64_t ns);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
     if (!g_dm_present_link || g_rescue_mode) { pthread_mutex_unlock(&g_pq_mu); return; }
-    // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
-    //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
-    const int hold = g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol;
+    // Keep a multi-tick frame on screen until its hold ends, even if the next frame is already queued.
+    const int hold = g_link_hold_until > 0 && tick_time < g_link_hold_until - 0.002;
     // The late latch (nvn_link_latch.h): wait briefly for the woken acquire's present (g_pq_mu is released while waiting, so present_enqueue can queue it; a present that
     // finds the queue full waits for this callback, and the wait is bounded). Not with present snapshots, which run the game a frame ahead of the screen on purpose.
     // Only into an empty queue: a frame that stands (one that missed the previous tick) goes out first, in order as without the latch, until a drain (link_drain_note) lets
     // the queue run empty again. Taking the latched present over it dropped that frame: about 3 a second on a built-in ProMotion screen, where presents came late more often
-    // Only on the 60 Hz link, where it was measured. Not on the 120 Hz link: there a 60 fps acquire waits two ticks with no hold between them (the drain does not run there
+    // Only on the 60 Hz link, where it was measured. Not on the 120 Hz link: there a 60 fps acquire waits two ticks (the drain does not run there
     // either). Not on the 30 Hz power-saving link (a 30 fps target in variable-refresh fullscreen), which has not been measured with it
-    const int latch = link_latch_on() && mtl_link_rate() == 60 && !mtl_snap_on();
+    const int latch = link_latch_on() && rate == 60 && !mtl_snap_on();
     const double room = latch ? update.targetTimestamp - cb : 0;   // read only with the latch: the update's targetTimestamp is all it needs it for
     static uint64_t woken_n; if (woke) woken_n++;   // woken callbacks: the probe counts these, whatever ticks the acquire waits
     if (latch) {   // the room the latch has: the time from the callback to its targetTimestamp, logged every 300 ticks
@@ -18839,7 +18841,7 @@ static struct timespec link_deadline(uint64_t ns);
     static double wk_cb[2] = {-1, -1}, wk_room[2];
     if (woke && latch) { wk_cb[1] = wk_cb[0]; wk_room[1] = wk_room[0]; wk_cb[0] = cb; wk_room[0] = room; }
     if (woke && !hold && g_pq_read == g_pq_in && latch) {
-        double w = nvn_link_latch_wait(cb, cb + room, vp > 0 ? vp : 1.0 / mtl_link_rate(), g_link_latch_misses, woken_n, drain_end);
+        double w = nvn_link_latch_wait(cb, cb + room, tick_period, g_link_latch_misses, woken_n, drain_end);
         if (w > 0) {
             const uint64_t in0 = g_pq_in; struct timespec ts = link_deadline((uint64_t)(w * 1e9));
             while (g_pq_in == in0) if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) break;
@@ -18861,19 +18863,21 @@ static struct timespec link_deadline(uint64_t ns);
     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
+    // Hold the whole ticks of the frame's period. The acquire distributes fractional ticks (e.g. 75 fps on a 120 Hz link), and present_period truncates to whole nanoseconds.
+    const double hold_ticks = floor((it.period + 1e-9) / tick_period);
     // The drain (nvn_link_drain.h), with the latch's rule for frames of one vsync: a frame the callback holds for two ticks (present interval 2) is taken on a tick that woke
     // no acquire, so the latch cannot run there. A drain into the latch asks the next acquire to wait the ticks the queued frames have to spare: the callback shows them on the
     // ticks between, so the screen neither repeats nor drops a frame (the game loses those ticks of wall time once), the queue runs empty, and the callback that ends the drain
     // latches its own present, as do the woken callbacks after it. A frame that comes late after that stands again: the callback goes back to taking frames in order, and a
     // fallback soon after the drain backs it off (nvn_link_drain_next)
     {
-        const int k = !latch || it.period > 0.025 ? -1 : it.t_in >= wk_cb[0] ? 0 : it.t_in >= wk_cb[1] ? 1 : -1;
+        const int k = !latch || hold_ticks >= 2 ? -1 : it.t_in >= wk_cb[0] ? 0 : it.t_in >= wk_cb[1] ? 1 : -1;
         link_drain_note(cb, cb - it.t_in, ticket > first, k < 0 || wk_cb[k] < 0 ? -1 : it.t_in - wk_cb[k], k < 0 ? 0 : wk_room[k]);
     }
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
-    g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
+    g_link_hold_until = submitted && hold_ticks >= 2 ? tick_time + hold_ticks * tick_period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
         if (ticket > g_pq_done) g_pq_done = ticket;

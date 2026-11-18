@@ -465,9 +465,9 @@ static void win_make(uint32_t w, uint32_t h) {
 
 // ---------- Formats ----------
 // fmt: index into g_fmt. A swizzle only where Metal's default differs from GL's: Metal reads a channel a format lacks as 0 (alpha 1), as GL does, so only the luminance /
-// alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
+// alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_EXPAND_RG (RED/RG → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
 // indices through the glColorTable palette). bw / bh: block size of a compressed format, bytes: per texel or per block
-enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE };
+enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE, CV_EXPAND_RG };
 enum { K_COL, K_DEPTH, K_DS, K_BLOCK };
 typedef struct { MTLPixelFormat pf; uint8_t bytes, bw, bh, kind; MTLTextureSwizzleChannels swz; const char *name; } fmt_t;
 #define SWZ(r, g, b, a) {MTLTextureSwizzle##r, MTLTextureSwizzle##g, MTLTextureSwizzle##b, MTLTextureSwizzle##a}
@@ -507,16 +507,19 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
     if (type == GL_UNSIGNED_SHORT_4_4_4_4) { *cv = CV_4444; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_5_5_5_1) { *cv = CV_5551; return F_RGBA8; }
     int half = type == GL_HALF_FLOAT, fl = type == GL_FLOAT;
+    int rg = format == GL_RED || format == GL_RG;
     switch (ifmt) {
         case GL_RGBA: case GL_RGBA8: case 4:
+            if (rg && ifmt == GL_RGBA8) return F_RGBA8;
             if (fl) return F_RGBA32F;
             if (half) return F_RGBA16F;
             if (format == GL_BGRA) return F_BGRA8;
             if (format == GL_RGB) { *cv = CV_RGB8; return F_RGBA8; }
             return F_RGBA8;
         case GL_RGB: case GL_RGB8: case 3:
-            if (fl || half) { *cv = CV_NONE; return F_RGBA16F; }
-            if (format == GL_RGBA) return F_RGBA8;
+            if (rg && ifmt == GL_RGB8) return F_RGBA8;
+            if (fl || half) { if (!rg) *cv = CV_NONE; return F_RGBA16F; }
+            if (format == GL_RGBA || rg) return F_RGBA8;
             *cv = CV_RGB8; return F_RGBA8;
         case GL_BGRA: return F_BGRA8;
         case GL_RGBA4: case GL_RGB5_A1: case GL_RGB565: return F_RGBA8;   // glTexStorage2D's sized formats (no data: the uploads are converted by their type)
@@ -526,7 +529,7 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
         case GL_LUMINANCE: case 1: return F_L8;
         case GL_ALPHA: return F_A8;
         case GL_LUMINANCE_ALPHA: case 2: return F_LA8;
-        case GL_RGBA16F: if (fl) { *cv = CV_NONE; } return F_RGBA16F;
+        case GL_RGBA16F: if (fl && !rg) { *cv = CV_NONE; } return F_RGBA16F;
         case GL_RGBA32F: return F_RGBA32F;
         case GL_R16F: return F_R16F;
         case GL_RG16F: return F_RG16F;
@@ -562,6 +565,8 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
 static size_t fmt_pitch(int f, uint32_t w) { const fmt_t *m = &g_fmt[f]; return (size_t)((w + m->bw - 1) / m->bw) * m->bytes; }
 static size_t fmt_rows(int f, uint32_t h) { const fmt_t *m = &g_fmt[f]; return (h + m->bh - 1) / m->bh; }
 
+static GLenum convert_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t *out);
+
 // The given pixels (GL unpack rules: rows of unpack_row or w pixels, each row aligned to unpack_align) → the Metal texture's bytes, rows packed. NULL data → zeros
 static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum format, GLenum type, int f, int cv, size_t *pitch_out) {
     size_t dp = fmt_pitch(f, w), rows = fmt_rows(f, h);
@@ -574,21 +579,38 @@ static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum form
                 format >= GL_RED && format <= GL_LUMINANCE_ALPHA ? comps_of[format - GL_RED] : 4;
     int tbytes = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 4 : type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 2 : 1;
     if (cv == CV_565 || cv == CV_4444 || cv == CV_5551) { comps = 1; tbytes = 2; }
+    if (cv == CV_COPY && (format == GL_RED || format == GL_RG) &&
+        ((type >= GL_BYTE && type <= GL_FLOAT) || type == GL_HALF_FLOAT) &&
+        (f == F_RGBA8 || f == F_SRGBA8 || f == F_RGBA16 || f == F_RGBA16F || f == F_RGBA32F))
+        cv = CV_EXPAND_RG;
     size_t sp = (size_t)(S.unpack_row ? S.unpack_row : w) * comps * tbytes; sp = (sp + S.unpack_align - 1) / S.unpack_align * S.unpack_align;
-    const uint8_t *s = src;
+    const uint8_t *source = src;
     // GL_UNPACK_SWAP_BYTES: each 2- or 4-byte element of the source in the other byte order (DOOM 3's light images are RGB565 stored big-endian), swapped into a copy
     // of the rows as given, each row without its alignment padding
     uint8_t *swapped = NULL;
     if (S.unpack_swap && tbytes > 1 && h) {
         size_t row = (size_t)w * comps * tbytes; swapped = malloc(sp * (h - 1) + row);
-        for (uint32_t y = 0; y < h; y++) for (size_t i = 0; i < row; i += tbytes) for (int b = 0; b < tbytes; b++) swapped[y * sp + i + b] = s[y * sp + i + tbytes - 1 - b];
-        s = swapped;
+        for (uint32_t y = 0; y < h; y++) for (size_t i = 0; i < row; i += tbytes) for (int b = 0; b < tbytes; b++) swapped[y * sp + i + b] = source[y * sp + i + tbytes - 1 - b];
+        source = swapped;
     }
-    for (uint32_t y = 0; y < h; y++, s += sp) {
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *s = source + y * sp;
         uint8_t *d = dst + y * dp;
         switch (cv) {
             case CV_COPY: memcpy(d, s, umin((uint32_t)dp, (uint32_t)((size_t)w * comps * tbytes))); break;
             case CV_RGB8: for (uint32_t x = 0; x < w; x++) { d[4 * x] = s[3 * x]; d[4 * x + 1] = s[3 * x + 1]; d[4 * x + 2] = s[3 * x + 2]; d[4 * x + 3] = 255; } break;
+            case CV_EXPAND_RG:
+                if (type == GL_UNSIGNED_BYTE && (f == F_RGBA8 || f == F_SRGBA8)) {
+                    for (uint32_t x = 0; x < w; x++) {
+                        d[4 * x] = s[comps * x];
+                        if (comps == 2) d[4 * x + 1] = s[comps * x + 1];
+                        d[4 * x + 3] = 255;
+                    }
+                } else {
+                    for (uint32_t x = 0; x < w; x++)
+                        convert_pixel(f, format, type, s + (size_t)x * comps * tbytes, d + (size_t)x * g_fmt[f].bytes);
+                }
+                break;
             case CV_565: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 5 & 63) * 255 / 63; d[4 * x + 2] = (v & 31) * 255 / 31; d[4 * x + 3] = 255; } break;
             case CV_4444: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 12) * 17; d[4 * x + 1] = (v >> 8 & 15) * 17; d[4 * x + 2] = (v >> 4 & 15) * 17; d[4 * x + 3] = (v & 15) * 17; } break;
             case CV_5551: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 6 & 31) * 255 / 31; d[4 * x + 2] = (v >> 1 & 31) * 255 / 31; d[4 * x + 3] = v & 1 ? 255 : 0; } break;
@@ -1789,8 +1811,8 @@ static uint32_t pixel_ufloat(double v, int bits) {
     if (m == 2u << bits) { m >>= 1; exp++; }
     return exp >= 31 ? 31u << bits : ((uint32_t)exp << bits) | (m - (1u << bits));
 }
-// Convert one clear value into the actual texture format. Unlike an upload, this consumes no unpack state and never treats differently typed data as storage bytes.
-static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t out[16]) {
+// Convert one pixel into the actual texture format. The caller handles any unpack state and provides room for a destination texel.
+static GLenum convert_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t *out) {
     int n;
     switch (format) {
         case GL_RED: case GL_GREEN: case GL_BLUE: case GL_ALPHA: case GL_DEPTH_COMPONENT: case GL_STENCIL_INDEX: n = 1; break;
@@ -1823,7 +1845,7 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
         }
     }
     if (format == GL_DEPTH_STENCIL && type != GL_UNSIGNED_INT_24_8 && type != 0x8dad) return GL_INVALID_OPERATION;
-    memset(out, 0, 16); if (!data) return GL_NO_ERROR;
+    memset(out, 0, g_fmt[f].bytes); if (!data) return GL_NO_ERROR;
     double c[4] = {0, 0, 0, 1}; uint32_t stencil = 0;
     if (format == GL_DEPTH_STENCIL) {
         uint32_t v; memcpy(&v, data, 4);
@@ -1866,7 +1888,7 @@ GLB(glClearTexImage, void, GLuint name, GLint level, GLenum format, GLenum type,
     tex_t *t = tex_of(name);
     if (!t || level < 0 || level >= MAXLV) { gl_error(GL_INVALID_OPERATION); return; }
     if (t->fmt < 0 || g_fmt[t->fmt].kind == K_BLOCK) { gl_error(GL_INVALID_OPERATION); return; }
-    uint8_t one[16]; GLenum error = clear_pixel(t->fmt, format, type, data, one);
+    uint8_t one[16]; GLenum error = convert_pixel(t->fmt, format, type, data, one);
     if (error) { gl_error(error); return; }
     @autoreleasepool {
         if (g_pend_clear.bits) clears_flush();

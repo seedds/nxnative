@@ -658,6 +658,44 @@ static void test_argument_buffers(const char *dir) {
     puts("GL argument buffers: 17 samplers, both stages, uniforms and block ranges: OK");
 }
 
+static void test_rg_texture_uploads(void) {
+    GLuint name;
+    h_glGenTextures(1, &name);
+    h_glBindTexture(GL_TEXTURE_2D, name);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 3);
+    h_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
+    // GL_RGB storage, as in Layton. Each row has two pixels, a skipped third pixel and two alignment bytes.
+    const uint8_t rg[] = {10, 20, 30, 40, 91, 92, 93, 94, 50, 60, 70, 80};
+    const uint8_t rgba[] = {10, 20, 0, 255, 30, 40, 0, 255, 50, 60, 0, 255, 70, 80, 0, 255};
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 2, 0, GL_RG, GL_UNSIGNED_BYTE, rg);
+    const level_t *level = &tex_of(name)->pend[0][0];
+    assert(level->pitch == 8 && !memcmp(level->data, rgba, sizeof rgba));
+
+    // Replace one column with big-endian 16-bit red. Input row pitch is eight bytes, and alpha stays opaque.
+    const uint8_t red[] = {0x40, 0, 9, 10, 11, 12, 13, 14, 0x80, 0};
+    const uint8_t patched[] = {10, 20, 0, 255, 64, 0, 0, 255, 50, 60, 0, 255, 128, 0, 0, 255};
+    h_glPixelStorei(0xcf0, 1);
+    h_glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 0, 1, 2, GL_RED, GL_UNSIGNED_SHORT, red);
+    assert(!memcmp(level->data, patched, sizeof patched));
+    h_glPixelStorei(0xcf0, 0);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    h_glDeleteTextures(1, &name);
+
+    const float float_rg[] = {0.25f, 0.75f};
+    const uint8_t rgba8[] = {64, 191, 0, 255};
+    const float rgba32f[] = {0.25f, 0.75f, 0, 1};
+    h_glGenTextures(1, &name);
+    h_glBindTexture(GL_TEXTURE_2D, name);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RG, GL_FLOAT, float_rg);
+    level = &tex_of(name)->pend[0][0];
+    assert(level->pitch == 4 && !memcmp(level->data, rgba8, sizeof rgba8));
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RG, GL_FLOAT, float_rg);
+    assert(level->pitch == 16 && !memcmp(level->data, rgba32f, sizeof rgba32f));
+    h_glDeleteTextures(1, &name);
+    puts("GL texture uploads: RED/RG expansion, typed components, row length and byte swapping: OK");
+}
+
 int main(int argc, char **argv) {
     int stubs = 0, cpu = 0; const char *fixture = NULL;
     for (int i = 1; i < argc; i++) {
@@ -668,6 +706,7 @@ int main(int argc, char **argv) {
     }
     if (fixture) setenv("DM_MSL_DIR", fixture, 1);
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
+    test_rg_texture_uploads();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
     assert((void *)create == (void *)h_glCreateShader);

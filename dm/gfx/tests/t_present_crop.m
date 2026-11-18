@@ -40,6 +40,22 @@ static int check_present_resize(id<MTLTexture> src, int w, int h) {
 }
 #endif
 
+#ifndef CROP_LEGACY_HEADER
+// One present of src into a w x h canvas (m4: the Metal 4 offscreen path, else the classic encoder); the canvas's RGBA bytes, the caller frees them
+static uint8_t *present_to(id<MTLTexture> src, const int crop[4], int w, int h, int m4) {
+    MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
+    if(m4){EXPECT("Metal 4 present",1,present_offscreen_wait(src,crop,ot)!=PRESENT_FAILED);}
+    else{id<MTLCommandBuffer> cb=[g_q commandBuffer];EXPECT("classic present",1,present_encode(cb,src,ot,crop));[cb commit];[cb waitUntilCompleted];}
+    uint8_t *o=malloc(w*h*4);[ot getBytes:o bytesPerRow:w*4 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];res_remove(ot);return o;
+}
+static int black_in(const uint8_t *o, int w, int x0, int y0, int x1, int y1) {   // black pixels in [x0,x1) x [y0,y1)
+    static const uint8_t black[4]={0,0,0,255};int n=0;
+    for(int y=y0;y<y1;y++)for(int x=x0;x<x1;x++)n+=!memcmp(o+4*(y*w+x),black,4);
+    return n;
+}
+#endif
+
 static void check(id<MTLTexture> src, const char *name, const int crop[4], int w, int h, int color) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
@@ -319,6 +335,69 @@ int main(void) { @autoreleasepool {
         present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
         mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
         present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        {   // Live aspect (hle_nvn.c dm_aspect_live_set, profile aspect_live, DM_ASPECT): the camera's ratio in state +0x2a0, and the 16:9 canvas stretched to it by a shape the host
+            // owns (mtl_present_stretch), which a sized vi layer does not replace. 0 gives back what the present did before, byte for byte
+            _Alignas(8) uint8_t state[0x1000]={0};uint8_t *was=dm_fps_state;int cap=g_aspect_cap,stubs=dm_aspect_stubs;dm_aspect_stubs=1;
+            #define WORD() (*(uint32_t *)(state+0x2a0))
+            float f16=1.6f;uint32_t b16;memcpy(&b16,&f16,4);
+            uint8_t *before0[2],*before9[2];for(int m4=0;m4<2;m4++){before0[m4]=present_to(sw,NULL,64,40,m4);before9[m4]=present_to(sw,NULL,64,36,m4);}
+            EXPECT("16:9 texture on a 16:10 canvas without the live aspect: bars above and below (2 rows each)",64*4,black_in(before0[0],64,0,0,64,40));
+            g_aspect_cap=0;dm_fps_state=state;dm_aspect_live_set(1.6f);
+            EXPECT("no aspect_live in the profile: the word stays 0",0,(int)WORD());EXPECT("no aspect_live in the profile: no stretch",0,present_stretch_ratio()>0);
+            EXPECT("no aspect_live in the profile: not live",0,dm_aspect_live());
+            g_aspect_cap=1;dm_fps_state=NULL;dm_aspect_live_set(1.6f);
+            EXPECT("no state page: no stretch",0,present_stretch_ratio()>0);EXPECT("no state page: not live",0,dm_aspect_live());
+            dm_fps_state=state;dm_aspect_stubs=0;dm_aspect_live_set(1.6f);
+            EXPECT("no camera stubs in main (no ASPECT_LIVE in its fixups): the word stays 0",0,(int)WORD());EXPECT("no camera stubs: no stretch",0,present_stretch_ratio()>0);
+            dm_aspect_stubs=1;EXPECT("aspect_live, the camera stubs and a state page: live",1,dm_aspect_live());
+            dm_aspect_live_set(1.6f);
+            EXPECT("the word holds 1.6f's bits",1,WORD()==b16);EXPECT("the present stretches to 1.6",1,present_stretch_ratio()==1.6f);
+            present_shape(sw,&sa,&sb);EXPECT("stretched shape: width 1728",1728,(int)sa);EXPECT("stretched shape: height 1080",1080,(int)sb);
+            mtl_present_layer(4,3);present_shape(sw,&sa,&sb);EXPECT("vi::CreateLayer's sized layer does not replace the host's shape",1728,(int)sa);mtl_present_layer(0,0);
+            for(int m4=0;m4<2;m4++){
+                uint8_t *o=present_to(sw,NULL,64,40,m4);
+                EXPECT(m4?"Metal 4: 16:9 texture stretched into a 16:10 canvas, no black pixel":"classic: 16:9 texture stretched into a 16:10 canvas, no black pixel",0,black_in(o,64,0,0,64,40));
+                // the texture's right part (x >= 40 of 64) is green: stretched, it starts at 40/64 of the canvas too
+                int green=0;for(int y=0;y<40;y++)green+=o[4*(y*64+63)+1]==255&&o[4*(y*64+63)]==0;EXPECT("the right edge column is the texture's (green) on every row",40,green);
+                free(o);
+                o=present_to(sw,NULL,64,36,m4);   // a 16:9 window under a fixed 1.6: the 16:10 picture fitted, bars at the sides (57.6 of 64 wide)
+                EXPECT("a fixed 1.6 in a 16:9 canvas: bars at the sides, none above or below",1,black_in(o,64,0,0,3,36)==3*36&&black_in(o,64,4,0,60,36)==0&&black_in(o,64,61,0,64,36)==3*36);free(o);
+            }
+            // The screenshot of the presented frame takes the shape the player sees: as wide as the texture, 64x40
+            char dir[]="/tmp/t_present_crop_XXXXXX";if(mkdtemp(dir)){char path[256];snprintf(path,sizeof path,"%s/shot.png",dir);shot(sw,path,1,NULL);
+                CGImageSourceRef is=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:@(path)],NULL);CGImageRef im=is?CGImageSourceCreateImageAtIndex(is,0,NULL):NULL;
+                EXPECT("screenshot under the live aspect: width of the texture",64,im?(int)CGImageGetWidth(im):0);EXPECT("screenshot under the live aspect: height at 1.6",40,im?(int)CGImageGetHeight(im):0);
+                if(im)CGImageRelease(im);if(is)CFRelease(is);unlink(path);rmdir(dir);}
+            {   // the front end's layout and mouse map follow (front_picture_shape): a real present reports 1728x1080; the real present after the block reports 1920x1080 again
+                tex_t lt={.magic=MAGIC('T', 'E', 'X', 0), .serial =10003};lt.d.width=TW;lt.d.height=TH;lt.d.depth=lt.d.levels=1;lt.d.format=NVN_FORMAT_RGBA8;lt.d.target=NVN_TEXTURE_TARGET_2D;serial_put(lt.serial,sw);
+                win_t w4={.ntex=1};w4.tex[0]=(NVNtexture *)&lt;mtl_present_progress(&before,&done);
+                present(&queue,(NVNwindow *)&w4,0);display_ticket(w4.ticket[0],before);h_nvnWindowFinalize((NVNwindow *)&w4);
+                EXPECT("live aspect: the shape reported to the front end, width",1728,g_shape_w);EXPECT("live aspect: the shape reported to the front end, height",1080,g_shape_h);
+            }
+            dm_aspect_live_set(0);
+            EXPECT("0: the word is 0",0,(int)WORD());EXPECT("0: no stretch",0,present_stretch_ratio()>0);
+            present_shape(sw,&sa,&sb);EXPECT("0: the display's 16:9 again, width",1920,(int)sa);EXPECT("0: the display's 16:9 again, height",1080,(int)sb);
+            for(int m4=0;m4<2;m4++){
+                uint8_t *o=present_to(sw,NULL,64,40,m4);EXPECT("0: the 16:10 canvas byte-identical to before",0,memcmp(o,before0[m4],64*40*4));free(o);
+                o=present_to(sw,NULL,64,36,m4);EXPECT("0: the 16:9 canvas byte-identical to before",0,memcmp(o,before9[m4],64*36*4));free(o);
+                free(before0[m4]);free(before9[m4]);
+            }
+            dm_aspect_live_set(-1);EXPECT("a negative ratio is 0",0,(int)WORD());
+            dm_aspect_live_set(NAN);EXPECT("NaN is 0",0,(int)WORD());
+            // DM_ASPECT's values
+            float r;
+            EXPECT("unset: auto",1,aspect_parse(NULL,&r));EXPECT("auto",1,aspect_parse("auto",&r));
+            EXPECT("0: fixed",0,aspect_parse("0",&r));EXPECT("0: 16:9",0,r>0);
+            EXPECT("1.6: fixed",0,aspect_parse("1.6",&r));EXPECT("1.6: the ratio",1,r==1.6f);
+            EXPECT("16:10: fixed",0,aspect_parse("16:10",&r));EXPECT("16:10: 1.6",1,r==1.6f);
+            EXPECT("21:9",0,aspect_parse("21:9",&r));EXPECT("21:9: 2.333",2333,(int)lroundf(r*1000));
+            EXPECT("16:9 is 16:9 (0)",0,aspect_parse("16:9",&r));EXPECT("16:9: no ratio",0,r>0);
+            EXPECT("1.78 is within 1 % of 16:9",0,aspect_parse("1.78",&r));EXPECT("1.78: no ratio",0,r>0);
+            const char *bad[]={"Auto","1.6x","16:","16:0",":9","0.5","5","abc","-1.6"};
+            for(unsigned i=0;i<sizeof bad/sizeof *bad;i++){EXPECT(bad[i],-1,aspect_parse(bad[i],&r));EXPECT("malformed: 16:9",0,r>0);}
+            #undef WORD
+            dm_fps_state=was;g_aspect_cap=cap;dm_aspect_stubs=stubs;
+        }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);

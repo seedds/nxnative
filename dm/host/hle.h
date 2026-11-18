@@ -117,6 +117,13 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
 extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+extern int dm_aspect_stubs;   // loader.c: main's fixups table has ASPECT_LIVE (the rewriter put in the camera stubs that read state +0x2a0)
+// Live aspect (hle_nvn.c; profile aspect_live, DM_ASPECT): the width / height the game's camera takes (state +0x2a0) and the present stretches the 16:9 canvas to, 0 = 16:9.
+// No-op without aspect_live, the camera stubs (dm_aspect_stubs) or a state page. Any thread (the Mac front end: its main thread)
+void dm_aspect_live_set(float ratio);
+int dm_aspect_live(void);   // 1 when dm_aspect_live_set does something
+int dm_aspect_mode(float *fixed);   // DM_ASPECT: 1 = auto (the front end pushes the shape), 0 = fixed (*fixed: the ratio, 0 = 16:9), -1 = no live aspect
+void dm_aspect_start(void);   // loader.c dm_fps_state_apply: a fixed DM_ASPECT ratio is set when the game starts
 int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (the fastest video decoder that handed out a picture in the last half second), 0 when none: the frame step follows it
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
 void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now

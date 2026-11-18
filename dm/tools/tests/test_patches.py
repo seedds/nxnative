@@ -195,6 +195,42 @@ class Registry(unittest.TestCase):
             self.assertLess(delta + 8, fn['size'])
         self.assertTrue(any(e['what'].startswith('movie frame') for e in m.BINDING))
 
+    def test_ocarina_camera_takes_the_live_aspect(self):
+        # each of the camera's three loads of its aspect (ldr s0,[x19,#0x140] before the store into the projection's +0xb0) branches to a stub that runs the load, takes state +0x2a0
+        # in its place when the word is not 0, and goes back to the instruction after the load; x16 is the only other register it writes. All three or none: the capability says the
+        # stubs are in
+        import struct
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rule, = m.MATCH_FRAME_STEP['main']
+        labels = {'camera apply': 0xa74, 'camera init': 0x204, 'camera reset': 0x428}
+        others = {label: 0x1000000 * (i + 1) for i, label in enumerate(labels)}
+        for label, delta in labels.items(): self.assertLess(delta, rule['others'][label]['size'])
+        code, pos, puts, checked = {}, [0x8000000], [], []
+        def emit(w): code[pos[0]] = w; pos[0] += 4
+        state = 0x9000000
+        ctx = docs_patches.types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: checked.append((off, orig)), put=lambda off, words, why: puts.append((off, words, why)),
+                                                 state=state, render_scale=0, step_max=0, base=0x100000, others=others, found=None, capabilities=set(), address=lambda off, lo_off=None: 0)
+        m.camera_aspect(ctx)
+        self.assertEqual(ctx.capabilities, {'ASPECT_LIVE'})
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        self.assertEqual(sorted(checked), sorted((others[label] + delta, '604241bd') for label, delta in labels.items()))
+        self.assertEqual(len(puts), 3)
+        for off, words, why in puts:
+            (w,), = [words]
+            self.assertEqual(w & 0xfc000000, 0x14000000, why)   # b stub
+            stub = off + (((w & 0x3ffffff) ^ 0x2000000) - 0x2000000) * 4
+            body = b''.join(struct.pack('<I', code[stub + 4 * i]) for i in range(6))
+            got = [(i.mnemonic, i.op_str) for i in md.disasm(body, stub)]
+            self.assertEqual(got, [('ldr', 's0, [x19, #0x140]'), ('adrp', f'x16, #{state:#x}'), ('ldr', 'w16, [x16, #0x2a0]'),
+                                   ('cbz', f'w16, #{stub + 0x14:#x}'), ('fmov', 's0, w16'), ('b', f'#{off + 4:#x}')], why)
+        for label in labels:   # one function not found: no site, no capability
+            ctx.others = dict(others, **{label: None}); ctx.capabilities = set(); puts.clear()
+            m.camera_aspect(ctx)
+            self.assertEqual((puts, ctx.capabilities), ([], set()))
+        self.assertTrue(any(e['what'].startswith('camera aspect') for e in m.BINDING))
+        self.assertEqual(game.load('0400486024DEC000').get('aspect_live', 'off'), 'on')
+
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
         # area; 0x400000, 0x2000000 and 0x40000000, the alignments of the 4 MB, 32 MB and 1 GB classes; as movz or orr from wzr) with the reviewed one (62 MB; SDK 20's 2 MB) in the same register

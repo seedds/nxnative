@@ -89,6 +89,10 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 
 Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
 
+### Aspect ratio
+
+Games whose profile supports it (Ocarina of Time). **Auto**, the Mac's default, gives a full screen of another shape the whole screen: on a MacBook (16:10 below the notch) the game's camera takes the screen's shape and the picture fills it with no black bars. A window, and a screen of 16:9's shape such as a Studio Display, keep the game's 16:9, and entering or leaving full screen switches at once, without a restart. **16:10** takes that shape in a window too (with bars where the window has another shape). **16:9** is the Switch's picture. For now the HUD is stretched with the picture, about a tenth taller at 16:10. On iPhone and iPad there is no Auto: 16:9 by default.
+
 ### Frame-rate counter
 
 Shows the frames per second at the top left.
@@ -273,6 +277,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
+| Aspect ratio | `DM_ASPECT` | `auto` the screen's own shape in Mac full screen, 16:9 in a window or on a 16:9 screen (Mac default); `1.6` or `16:10` (any ratio from 1 to 4, or `w:h`), `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |

@@ -32,6 +32,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    camera_aspect(ctx)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority; on v131072 levels 0..9 at 0.75..0.333 of 2048x1152, 1536x864 to 683x384). Its update (main+0x805aa0) reads the frame's GPU load (about 0.2 ms a unit) into +0x8, subtracts
@@ -71,10 +72,40 @@ def dynamic_resolution(ctx):
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
+# The camera's aspect ratio, which the host sets live (Auto aspect: a full-screen window not 16:9). The main camera's aspect is no size the game measures but its parameter
+# DefaultAspect (CameraParam +0x38), copied at setup (main+0xf6bf60 on v131072) to the camera's +0xc8 and +0x140; three functions hand +0x140 to its sead::PerspectiveProjection
+# (aspect at +0xb0, the dirty byte at +8), each with ldr s0,[x19,#0x140] and then str s0,[xN,#0xb0]: the camera's apply (main+0x4c48c0, +0xa74), which writes near, far, fovy,
+# aspect and offset into the projection whenever it runs, its init (main+0x2e1b960, +0x204) and its reset (main+0x2e1c3a0, +0x428). The stub runs the load and then takes the ratio
+# at state +0x2a0 (f32, written by the host with one 32-bit store; 0 = the game's own) in its place, so the frustum takes the window's shape while the game keeps its 16:9 canvas
+# and the present stretches it: Hor-, the same vertical view and less at the sides at 16:10 (as Tears of the Kingdom's Auto). Only the projection takes the ratio: the copies that
+# persist (DefaultAspect into +0xc8 at main+0xf6c0c8, +0xc8 into +0x140 at main+0x2e1c758) are left, so with the word back at 0 the next apply writes 16:9 again (a live toggle);
+# the readers of +0x140 (culling, markers that follow the world) keep 16:9, a superset at a narrower ratio. Not patched: the layer's default projection (main+0xea5074, its
+# viewport's own w/h) and the scripted projections (main+0x3b50b44, 0x28e72a0, 0x293d80c), until play shows they are on screen. x16 is free at each site: on every path from the
+# load to the next call or return, x16 is written before it is read or not used (the apply's only x16 is a sub / csel pair well before it; init and reset use none)
+def camera_aspect(ctx):
+    here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    sites = [(label, ctx.others.get(label), delta) for label, delta in (('camera apply', 0xa74), ('camera init', 0x204), ('camera reset', 0x428))]
+    if any(fn is None for _, fn, _ in sites): return   # not all three found in this build (a red line from the locator): the game's own 16:9, and no ASPECT_LIVE
+    for label, fn, delta in sites:
+        site = fn + delta
+        fs_site(site, '604241bd')   # ldr s0,[x19,#0x140]
+        start = here(); emit(0xbd414260)   # ldr s0,[x19,#0x140]    the camera's aspect
+        emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (0xb942a210,   # ldr w16,[x16,#0x2a0]   the host's ratio (0 = the game's)
+                  0x34000050,   # cbz w16,back (+8)
+                  0x1e270200):  # fmov s0,w16
+            emit(w)
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], f'{label}: the projection\'s aspect from state +0x2a0 (the host\'s live ratio; 0 = the camera\'s own)')
+    ctx.capabilities.add('ASPECT_LIVE')
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
-                'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']}}},   # main+0x805aa0
+                'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']},   # main+0x805aa0
+                'camera apply': {'size': 0x1700, 'fingerprints': ['efc2b7111d6387f88960348730d936b4bec9e6d08a19f67bd33e75d752f61df8']},   # main+0x4c48c0
+                'camera init': {'size': 0xa40, 'fingerprints': ['876b8ff1dc66ff0cb867028d9043fc71adbfac31acc093d040644550e37ac770']},   # main+0x2e1b960
+                'camera reset': {'size': 0x638, 'fingerprints': ['755b131403f6a7d8bb991716f403bb482bbcee61ec0dbf2f04421cc74a749166']}}},   # main+0x2e1c3a0
 ]}
 
 # The movie player's pictures per frame. Once a frame the player's update (main+0x3b5ca60 on v131072) adds the frame's time (the time object's +0x18, the frame ratio / 60 s, times
@@ -133,4 +164,7 @@ BINDING = [
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},
+    {'what': 'camera aspect: the host\'s live ratio (Auto aspect)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's own camera apply, init and reset, found by their functions' fingerprints on any build that keeps all three; the ratio is the host's (state +0x2a0, 0 = the game's 16:9)",
+     'checked': 'v131072 main: one function with each fingerprint, the three loads and the stores into the projection after them read by disassembly, x16 free from each load to the next call or return on every path (2026-11-17); played on the Mac in full screen at 1.593 and 16:9 with live switching (2026-11-18), the cutscene projections not checked'},
 ]

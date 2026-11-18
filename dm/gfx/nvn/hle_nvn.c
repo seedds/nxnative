@@ -2379,6 +2379,59 @@ static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for gra
 __attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main
 __attribute__((weak)) void dm_ue_cvar_tick(void) {}   // hle_uecvar.c: Unreal's texture streaming pool (profile ue_texture_pool)
 __attribute__((weak)) int dm_movie_hz(void) { return 0; }   // hle_movie.c: the picture rate of the movie playing, 0 when none; graphics unit tests have no movie decoder
+// Live aspect (profile aspect_live: Ocarina of Time's camera stubs, patches.py): state +0x2a0 is the f32 width / height the game's camera takes, 0 = the game's own (16:9). The game
+// keeps rendering its 16:9 canvas, and the present stretches it to that ratio (nvn_mtl.m mtl_present_stretch: a fill, no bars), so the picture has the right proportions on a screen of
+// that shape. The word is one aligned 32-bit store, and each stub loads it once, so no camera apply sees half a change; the next present shows the new shape.
+// DM_ASPECT: auto (the default) = the Mac front end's full-screen drawable shape, pushed live on entering and leaving full screen (front_mac.m aspect_auto; a window, and a screen
+// within 1 % of 16:9, keep 16:9; iOS pushes nothing, 16:9); 0 = always 16:9; a ratio (1.6) or w:h (16:10) = that ratio from the start, in a window and in full screen
+#define ASPECT_LIVE_OFF 0x2a0
+__attribute__((weak)) int dm_aspect_stubs;   // loader.c: main's fixups table has ASPECT_LIVE (all three camera stubs went in); graphics unit tests have no loader
+// The profile's aspect_live, read on first use (a multi-program profile's DM_GAME_* is a call, not a constant; -1 = not read yet). A variable: graphics unit tests turn it on and off
+static int g_aspect_cap = -1;
+static int aspect_cap(void) { if (g_aspect_cap < 0) g_aspect_cap = DM_GAME_ASPECT_LIVE != 0; return g_aspect_cap; }
+// The profile asks for it, and the rewriter put the camera stubs into this main: on a build whose camera functions did not match, a stretch alone would distort the picture
+int dm_aspect_live(void) { return aspect_cap() && dm_aspect_stubs && dm_fps_state; }
+void dm_aspect_live_set(float ratio) {
+    if (!dm_aspect_live()) return;   // no camera stubs to follow it: the stretch alone would distort the picture
+    if (!(ratio > 0) || !isfinite(ratio)) ratio = 0;
+    uint32_t b; memcpy(&b, &ratio, sizeof b);
+    __atomic_store_n((uint32_t *)(dm_fps_state + ASPECT_LIVE_OFF), b, __ATOMIC_RELEASE);
+    mtl_present_stretch(ratio);
+}
+// DM_ASPECT's value: 1 = auto, 0 = a fixed ratio in *r (0 = 16:9), -1 = malformed (*r = 0). A ratio within 1 % of 16:9 is 16:9
+static int aspect_parse(const char *e, float *r) {
+    *r = 0;
+    if (!e || !*e || !strcmp(e, "auto")) return 1;
+    char *end; double a = strtod(e, &end);
+    if (end != e && *end == ':') { const char *d = end + 1; double b = strtod(d, &end); if (end == d || !(b > 0)) return -1; a /= b; }
+    if (end == e || *end) return -1;
+    if (a == 0) return 0;
+    if (!(a >= 1.0 && a <= 4.0)) return -1;
+    if (fabs(a / (16.0 / 9.0) - 1) < 0.01) return 0;
+    *r = (float)a; return 0;
+}
+// 1 = auto (the front end pushes the shape), 0 = fixed (*fixed: the ratio, 0 = 16:9), -1 = no live aspect (no aspect_live in the profile, no camera stubs or no state page)
+int dm_aspect_mode(float *fixed) {
+    static int mode = -2; static float r;
+    if (fixed) *fixed = 0;
+    if (!dm_aspect_live()) return -1;   // DM_ASPECT is not read (nor reported malformed) for a game without it
+    if (mode == -2) {
+        const char *e = getenv("DM_ASPECT"); int m = aspect_parse(e, &r);
+        if (m < 0) { LOG("[RED] [aspect] DM_ASPECT=%s: auto, 0 (16:9), a width / height from 1 to 4 (1.6) or w:h (16:10); keeping 16:9", e); m = 0; }
+        mode = m;
+    }
+    if (fixed) *fixed = r;
+    return mode;
+}
+// When the game starts (loader.c dm_fps_state_apply): a fixed ratio is set now; auto waits for the front end
+void dm_aspect_start(void) {
+    if (!aspect_cap()) return;
+    if (!dm_fps_state || !dm_aspect_stubs) { LOG("[RED] [aspect] the profile has aspect_live but this main has %s: the picture stays 16:9", !dm_fps_state ? "no state page (no matched frame step)" : "no camera stubs (no ASPECT_LIVE in its fixups table: the camera functions did not match)"); return; }
+    float r; int m = dm_aspect_mode(&r);
+    if (m == 1) LOG("[aspect] auto (DM_ASPECT): the screen's shape in full screen, 16:9 in a window");
+    else if (r > 0) { LOG("[aspect] fixed %.3f (DM_ASPECT): the camera takes it and the present stretches the 16:9 canvas to it", r); dm_aspect_live_set(r); }
+    else LOG("[aspect] 16:9 (DM_ASPECT=0)");
+}
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
 // then took 17-26 ms a frame and dropped a frame in most windows; a steady 30 instead also lets the device cool. DM_THERMAL_CAP=0 turns it off; the Mac reports no thermal state

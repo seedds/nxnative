@@ -17775,6 +17775,7 @@ static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static in
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]);
+static float present_stretch_ratio(void);
 enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX };
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int));
 static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out);
@@ -17820,7 +17821,8 @@ void dm_gfx_shot_at(long k, const char *path) {
 // of that size (with DM_PRESENT_UPSCALE=metalfx through MetalFX, on the Metal 4 queue: present_offscreen_m4); screen=0 (texture dump) is unaffected.
 // Without it, a window the game crops (nvnWindowSetCrop) is captured the same way at the window texture's own size: what is outside the crop is never presented and holds
 // whatever the texture held before (Bastion crops its 1920x1080 window textures to 1600x900; the strip outside was black in some runs and purple in others, which regress.py
-// took for a rendering change). An uncropped window is read as it is, so its shots are the texture's own pixels
+// took for a rendering change). An uncropped window is read as it is, so its shots are the texture's own pixels, except under the live aspect (mtl_present_stretch): then the
+// present pass draws it into the shape the player sees, as wide as the texture, so a shot does not show the camera's squeezed canvas
 static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
     static int out_w = -1, out_h;
     if (out_w < 0) {
@@ -17830,8 +17832,9 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     }
     id<MTLTexture> read = src;
     NSUInteger r[4]; int cropped = screen && !out_w && present_crop_rect(src, crop, r) && (r[0] || r[1] || r[2] != src.width || r[3] != src.height);
-    if ((out_w || cropped) && screen) {
-        NSUInteger ow = out_w ? (NSUInteger)out_w : src.width, oh = out_w ? (NSUInteger)out_h : src.height;
+    float stretch = screen && !out_w ? present_stretch_ratio() : 0;   // the live aspect (mtl_present_stretch): the shot in the shape the player sees, as wide as the texture (1920x1200 at 1.6)
+    if ((out_w || cropped || stretch > 0) && screen) {
+        NSUInteger ow = out_w ? (NSUInteger)out_w : src.width, oh = out_w ? (NSUInteger)out_h : stretch > 0 ? (NSUInteger)fmax(1, round(src.width / stretch)) : src.height;
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
@@ -18170,7 +18173,14 @@ static MTLViewport present_viewport(double pw, double ph, double dw, double dh) 
 static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = none
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
+// The host's live aspect (hle_nvn.c dm_aspect_live_set, DM_ASPECT): the game's camera takes this width / height while it keeps its 16:9 canvas, so the picture is shown in this shape,
+// stretched (in a drawable of the shape it fills, no bars). The host owns it: vi::CreateLayer (hle_vi.c) sets only the layer shape. f32 bits, 0 = none (the shapes below, as before)
+static _Atomic uint32_t g_stretch_shape;
+void mtl_present_stretch(float ratio) { uint32_t b = 0; if (ratio > 0 && isfinite(ratio)) memcpy(&b, &ratio, sizeof b); atomic_store(&g_stretch_shape, b); }
+static float present_stretch_ratio(void) { uint32_t b = atomic_load(&g_stretch_shape); float r; memcpy(&r, &b, sizeof r); return r; }
 static void present_shape(id<MTLTexture> src, double *w, double *h) {
+    float r = present_stretch_ratio();
+    if (r > 0) { *w = 1080.0 * r; *h = 1080; return; }   // 1728x1080 at 1.6: the front end's mouse map (front_picture_shape) takes whole numbers
     uint64_t v = atomic_load(&g_screen_shape);
     if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
     v = atomic_load(&g_layer_shape);

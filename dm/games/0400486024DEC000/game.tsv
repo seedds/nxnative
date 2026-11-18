@@ -46,3 +46,6 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# Auto aspect (patches.py): the camera's projection takes the host's live ratio (state +0x2a0; 0 = the game's 16:9) while the game keeps its 16:9 canvas and the present stretches
+# it to the window's shape, Hor- (as Tears of the Kingdom's Auto); DM_ASPECT, with a full-screen window on a screen that is not 16:9 (a MacBook's 16:10) by default
+aspect_live	on

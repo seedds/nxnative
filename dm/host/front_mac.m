@@ -704,6 +704,19 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
 - (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+// Auto aspect (DM_ASPECT=auto, profile aspect_live; hle_nvn.c dm_aspect_live_set): in full screen the game's camera takes the drawable's own width / height and the present stretches the
+// 16:9 canvas to fill it (a MacBook's 16:10 below the notch: no bars); a window, and a screen within 1 % of 16:9 (a Studio Display), keep the game's 16:9. g_aspect_full is set when
+// the window has entered full screen and cleared when it starts to leave, so the drawable's in-between sizes during either animation are never pushed. Main thread
+static int g_aspect_full;
+static void aspect_auto(void) {
+    if (dm_aspect_mode(NULL) != 1) return;
+    CGSize px = g_layer.drawableSize; double r = g_aspect_full && px.width >= 1 && px.height >= 1 ? px.width / px.height : 0;
+    if (fabs(r / (16.0 / 9.0) - 1) < 0.01) r = 0;
+    static float last = 0; if ((float)r == last) return; last = (float)r;
+    if (r > 0) LOG("[aspect] auto: %.3f, the full-screen drawable %.0fx%.0f (the camera takes it, the present stretches the 16:9 canvas to fill it)", r, px.width, px.height);
+    else LOG("[aspect] auto: 16:9 (%s)", g_aspect_full ? "a full screen within 1 % of 16:9" : "a window");
+    dm_aspect_live_set((float)r);
+}
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -711,6 +724,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     l.contentsScale = self.window.backingScaleFactor;
     NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
+    aspect_auto();
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
@@ -1599,7 +1613,7 @@ void front_run(void (*guest)(void)) {
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
-        // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
+        // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio (a profile with aspect_live: the screen's own, aspect_auto).
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
         NSView *v = win.contentView = [[DmGameView alloc] initWithFrame:r];
         v.wantsLayer = YES;
@@ -1692,8 +1706,9 @@ void front_run(void (*guest)(void)) {
         [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_aspect_full = 1; [(DmGameView *)win.contentView fitDrawable]; aspect_auto(); }];
+        [nc addObserverForName:NSWindowWillExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_aspect_full = 0; aspect_auto(); }];   // 16:9 before the window shrinks
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_aspect_full = 0; aspect_auto(); }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));

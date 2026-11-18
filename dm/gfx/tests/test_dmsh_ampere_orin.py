@@ -41,7 +41,6 @@ KNOWN = {
     # results that differ
     'i2f_s32_rz': 'I2FP.F32.S32.RZ rounds to nearest (PR #1800 has the fix)',
     'fmax_nan': 'FMNMX.NAN: a NaN operand gives the other operand, not NaN (PR #1800 has the fix)', 'fmin_nan': '(as fmax_nan)',
-    'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
     # the translator refuses these
     'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path calls the CUDA driver',
@@ -79,6 +78,8 @@ def load_fixture():
         w = len(o['ins']) + len(o['outs'])
         o['rows_in'] = [list(words[i:i + len(o['ins'])]) for i in range(0, len(words), w)]
         o['rows_gpu'] = [list(words[i + len(o['ins']):i + w]) for i in range(0, len(words), w)]
+        if o['name'] in ('f2fp_pack_bf16x2', 'f2fp_pack_f16x2_relu'):
+            o['exact_bits'] = True
     # The recorded FMA uses the tensor-pipe opcode. Exercise the ordinary ALU
     # emitter too, independently of HFMA2.MMA support, retaining the Orin oracle.
     for o in list(doc['ops']):
@@ -93,6 +94,7 @@ def load_fixture():
     doc['ops'].extend(minmax_boundaries(doc['ops']))
     doc['ops'].extend(directed_rounding_boundaries(doc['ops']))
     doc['ops'].extend(i2f64_boundaries(doc['ops']))
+    doc['ops'].extend(f2fp_boundaries(doc['ops']))
     return doc
 
 
@@ -361,6 +363,55 @@ def i2f64_boundaries(ops):
             yield dict(template, name=f'i2f_{kind}_boundary_{suffix}', program=bytes(program), cases=len(rows),
                        rows_in=inputs, rows_gpu=[[row[mode + 1]] for row in rows], exact_bits=True,
                        oracle='synthetic integer-to-binary32 contract', derived_from=template['name'])
+
+
+def f2fp_boundaries(ops):
+    """Derived PACK_AB forms use exact packed outputs from the conversion contract."""
+    by_name = {o['name']: o for o in ops}
+
+    def case(template, suffix, modifiers, rows):
+        op = by_name[template]
+        return dict(op, name=template + '_' + suffix, program=half_variant(op, 0x03e, modifiers=modifiers),
+                    cases=len(rows), rows_in=[inputs for inputs, _ in rows], rows_gpu=[[packed] for _, packed in rows],
+                    exact_bits=True, oracle='synthetic F2FP packing contract', derived_from=template)
+
+    bf16 = 'f2fp_pack_bf16x2'
+    rz = 3 << 15    # bits 79..80 of the full instruction
+    relu = 1 << 11  # bit 75
+    # Each row has its input pair, nearest-even pack and toward-zero pack.
+    bf16_rows = [
+        ([0x3f808000, 0x3f818000], 0x3f803f82, 0x3f803f81),  # midpoint with even and odd retained bit
+        ([0x3f807fff, 0x3f808001], 0x3f803f81, 0x3f803f80),  # immediately below and above a midpoint
+        ([0xbf818000, 0x00008001], 0xbf820001, 0xbf810000),
+        ([0x007f8000, 0x00008000], 0x00800000, 0x007f0000),  # subnormal rounding at both ends
+        ([0x7f7fffff, 0xff7fffff], 0x7f80ff80, 0x7f7fff7f),
+        ([0x80000000, 0xff800001], 0x80007fff, 0x80007fff),
+    ]
+    bf16_relu_rows = [
+        ([0x3f818000, 0x80000000], 0x3f820000, 0x3f810000),
+        ([0xff800001, 0xff800000], 0x7fff0000, 0x7fff0000),
+        ([0x7f800000, 0xbf800000], 0x7f800000, 0x7f800000),
+        ([0x80008001, 0x00008001], 0x00000001, 0x00000000),
+        ([0x7fc00001, 0x3f808000], 0x7fff3f80, 0x7fff3f80),
+    ]
+    for name, modifier, rows in (('ties', 0, bf16_rows), ('relu', relu, bf16_relu_rows)):
+        yield case(bf16, name + '_rn', modifier, [(values, near) for values, near, _ in rows])
+        yield case(bf16, name + '_rz', modifier | rz, [(values, trunc) for values, _, trunc in rows])
+
+    yield case('f2fp_pack_f16x2', 'boundary_rz', rz, [
+        ([0x3f803000, 0xbf803000], 0x3c01bc01),
+        ([0x33800000, 0xb37fffff], 0x00018000),
+        ([0x387fffff, 0xb8800000], 0x03ff8400),
+        ([0x7f7fffff, 0xc7800000], 0x7bfffbff),
+        ([0x7f800000, 0xff800000], 0x7c00fc00),
+        ([0x00000000, 0x80000000], 0x00008000),
+    ])
+    yield case('f2fp_pack_f16x2_relu', 'boundary_rz', rz, [
+        ([0x3f803000, 0xbf803000], 0x3c010000),
+        ([0xff800001, 0x7fc00001], 0x7fff7fff),
+        ([0x7f800000, 0xff800000], 0x7c000000),
+        ([0x33800000, 0x80000000], 0x00010000),
+    ])
 
 
 def chain_rewrites():

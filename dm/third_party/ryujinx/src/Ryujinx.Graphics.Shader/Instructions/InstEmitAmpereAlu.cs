@@ -617,7 +617,83 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
+            // Keep the original operand order for the plain half pack.
+            Operand fb = AFloat(context, b);
+            Operand fa = AFloat(context, a);
+            bool relu = x.Bit(75);
+            bool towardZero = x.Bits(79, 81) == (int)RoundMode.Rz;
+
+            if (relu)
+            {
+                fb = AF2fpRelu(context, fb);
+                fa = AF2fpRelu(context, fa);
+            }
+
+            if (x.Bit(76))
+            {
+                Operand high = context.ShiftLeft(AF2fpBf16(context, fa, towardZero), Const(16));
+
+                ASet(context, x, context.BitwiseOr(high, AF2fpBf16(context, fb, towardZero)), AUniform(context));
+                return;
+            }
+
+            Operand packed = context.PackHalf2x16(fb, fa);
+
+            if (towardZero || relu)
+            {
+                Operand low = AF2fpHalf(context, fb, context.BitwiseAnd(packed, Const(0xffff)), towardZero, relu);
+                Operand high = AF2fpHalf(context, fa, context.ShiftRightU32(packed, Const(16)), towardZero, relu);
+                packed = context.BitwiseOr(context.ShiftLeft(high, Const(16)), low);
+            }
+
+            ASet(context, x, packed, AUniform(context));
+        }
+
+        private static Operand AF2fpRelu(EmitterContext context, Operand f)
+        {
+            // Clamp -0 through -inf to +0 and leave a NaN for the packer to canonicalize.
+            Operand neg = context.ICompareGreaterOrEqualUnsigned(f, Const(unchecked((int)0x80000000)));
+            Operand notNan = context.ICompareLessOrEqualUnsigned(f, Const(unchecked((int)0xff800000)));
+
+            return context.ConditionalSelect(context.BitwiseAnd(neg, notNan), Const(0), f);
+        }
+
+        private static Operand AF2fpBf16(EmitterContext context, Operand f, bool towardZero)
+        {
+            Operand nan = context.ICompareGreaterUnsigned(context.BitwiseAnd(f, Const(0x7fffffff)), Const(0x7f800000));
+
+            if (!towardZero)
+            {
+                // The retained low bit lets a midpoint increment exactly when it is odd.
+                Operand odd = context.BitwiseAnd(context.ShiftRightU32(f, Const(16)), Const(1));
+                f = context.IAdd(f, context.IAdd(odd, Const(0x7fff)));
+            }
+
+            return context.ConditionalSelect(nan, Const(0x7fff), context.ShiftRightU32(f, Const(16)));
+        }
+
+        private static Operand AF2fpHalf(EmitterContext context, Operand f, Operand half, bool towardZero, bool relu)
+        {
+            Operand magnitude = context.BitwiseAnd(f, Const(0x7fffffff));
+
+            if (towardZero)
+            {
+                // Widen the rounded magnitude exactly and compare float bits as unsigned
+                // integers. Step back only if a finite input rounded away from zero.
+                // The mask also prevents the pack/unpack optimizer from skipping the rounding.
+                Operand nearest = context.UnpackHalf2x16Low(context.BitwiseAnd(half, Const(0x7fff)));
+                Operand away = context.BitwiseAnd(context.ICompareLessUnsigned(magnitude, Const(0x7f800000)),
+                    context.ICompareGreaterUnsigned(nearest, magnitude));
+                half = context.ConditionalSelect(away, context.IAdd(half, Const(-1)), half);
+            }
+
+            if (relu)
+            {
+                Operand nan = context.ICompareGreaterUnsigned(magnitude, Const(0x7f800000));
+                half = context.ConditionalSelect(nan, Const(0x7fff), half);
+            }
+
+            return half;
         }
 
         // F2IP.U8 Rd, a, b: a and b to saturated bytes, a in byte 1 and b in byte 0, like F2FP's halves; bits 78..79 the rounding, as F2I's. Ocarina of Time's FoliageShader writes colour with it

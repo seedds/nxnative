@@ -1450,6 +1450,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering): 4,558 of its 27,155 shaders change. On an M1 in the opening dialogue scene, the lit pass's median GPU time went from 70.2 to 15.6 ms and the frame's from 91.5 to 30.1 ms (`DM_NVN_GPUPROF=every:60`, 15 and 35 profiled frames in the scene); the 40 shaders that did not build before are the only ones that fail.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_wide.py`.
 
+### Device loads from read-only storage buffers
+
+- **Symptom:** fragment shaders spend GPU time on device loads from storage buffers whose addresses are uniform across the draw.
+- **Cause:** SPIRV-Cross emits `const device` storage pointers for shaders without writes through buffers. Metal can use constant registers for uniform addresses when the pointer has the `constant` address space.
+- **Fix:** `constant_reads` runs after `wide_loads`. It requires read-only storage metadata from the translator and accepts direct word reads and the packed loads `wide_loads` emits. A buffer or element pointer passed to another operation keeps its original address space, as does a shader with a device reference. The argument ID and the host binding are the same. Fragment stages are the default. `DMSH_SCONST=0` disables the pass for comparison and `DMSH_SCONST=all` enables the other eligible stage prefixes. The option is part of the chain and shader cache keys.
+- **Found on:** Ocarina of Time on an M2 Air. In the PR author's paired run against the same cut9p test build, GPU encoder time fell from 20.43 to 19.82 ms per frame. The hottest fragment shader was 17.1% faster in isolation with bit-identical output. [Game note](../../dm/games/0400486024DEC000/README.md#found-on-this-game), [PR #2889](https://github.com/seedds/nxnative/pull/2889)
+- **Check:** `test_dmsh_wide.py` covers write metadata, stage selection, escaped pointers and references, and Metal compilation of promoted packed loads with and without bounds checks.
+
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.

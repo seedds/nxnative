@@ -52,6 +52,7 @@ Regression level: moderate, because shared shader extraction and translation cha
 
 ## Found on this game
 
+- Two `default_shader.shdr` fragment variants (`2a5e0eefdce48f4b` and `e92d1bf7adaa6d31`) compile with their read-only storage slot in Metal's constant address space. Both appear in the shader prewarm list. The recorded render pipelines and traces of the standard menu route, the first race, the Ultra Quality menu and Fusion Shop gave no draw of either variant. Live coverage is open. [Device loads from read-only storage buffers](../../../docs/reference/shaders.md#device-loads-from-read-only-storage-buffers)
 - [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): containment validation on its race's guarded kernels, with no cap hit; see [Validation](#validation).
 - [SHN resources and embedded shader objects](../../../docs/reference/shaders.md#shn-resources-and-embedded-shader-objects).
 - [Subword task and mesh payload accesses](../../../docs/reference/shaders.md#subword-task-and-mesh-payload-accesses).

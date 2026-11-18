@@ -788,6 +788,11 @@ def finish(key, w, j, c1):
     try: src = dmsh_reflect.pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    res = json.load(open(os.path.join(w, key + '.res.json')))
+    # The MSL s<n> number indexes the buffers in binding order, as in dmsh_reflect.reflect. The raw pool table is host data.
+    read_only = {i for i, b in enumerate(sorted(res['sbufs'], key=lambda b: b['binding']))
+                 if not b['flags'] & 1 and b['cb_slot'] != abi.GMEM_MAP_CB_SLOT}   # BufferUsageFlags.Write (includes atomics)
+    src = dmsh_wide.constant_reads(src, read_only, dmsh_chain.storage_constant_mode())
     src = dmsh_rewrite.tg_fence(src)   # warp-synchronous shared memory: the translator's dmsh_tg_fence() as a simdgroup-scope fence (see tg_fence)
     src = dmsh_rewrite.border_emu(src)   # border colours Metal lacks (see border_emu)
     if j['stage'] == 'ps': src = dmsh_rewrite.frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
@@ -826,7 +831,6 @@ def finish(key, w, j, c1):
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
-    res = json.load(open(os.path.join(w, key + '.res.json')))
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = dmsh_entry.vs_depth(src)

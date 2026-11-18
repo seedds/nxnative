@@ -77,6 +77,9 @@ static std::atomic<bool> g_running{false};
 static std::string g_web_dir;
 static int g_port = 8888;
 static int g_ssl_port = 8443;
+static std::atomic<int> g_current_width{854};
+static std::atomic<int> g_current_height{480};
+static std::atomic<int> g_current_bitrate{1500};
 
 static std::atomic<uint64_t> g_video_start_pts{0};
 static std::atomic<uint32_t> g_audio_rtp_ts{0};
@@ -156,6 +159,16 @@ static void handle_webrtc_offer(const httplib::Request &req, httplib::Response &
                 }
             }
             if (player_id < 0) player_id = 0;
+        }
+
+        // Check if client requested a specific resolution (e.g. 720p or 480p)
+        if (req_json.contains("resolution")) {
+            std::string r = req_json["resolution"].is_string() ? req_json["resolution"].get<std::string>() : std::to_string(req_json["resolution"].get<int>());
+            if (r.find("720") != std::string::npos) {
+                webrtc_streamer_set_resolution(1280, 720, 3500);
+            } else if (r.find("480") != std::string::npos) {
+                webrtc_streamer_set_resolution(854, 480, 1500);
+            }
         }
 
         std::string client_id = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -406,6 +419,9 @@ static void handle_webrtc_offer(const httplib::Request &req, httplib::Response &
             resp["type"] = local_desc->typeString();
             resp["client_id"] = client_id;
             resp["player_id"] = player_id;
+            resp["resolution"] = (g_current_height.load() == 720) ? "720p" : "480p";
+            resp["width"] = g_current_width.load();
+            resp["height"] = g_current_height.load();
             res.set_content(resp.dump(), "application/json");
         } else {
             res.status = 500;
@@ -415,6 +431,26 @@ static void handle_webrtc_offer(const httplib::Request &req, httplib::Response &
         res.status = 400;
         res.set_content(std::string("{\"error\":\"") + e.what() + "\"}", "application/json");
     }
+}
+
+void webrtc_streamer_set_resolution(int width, int height, int bitrate_kbps) {
+    if (!g_vtb) return;
+    if (width == 720 || height == 720) {
+        width = 1280;
+        height = 720;
+        if (bitrate_kbps <= 0) bitrate_kbps = 3500;
+    } else {
+        width = 854;
+        height = 480;
+        if (bitrate_kbps <= 0) bitrate_kbps = 1500;
+    }
+    std::cout << "[WEBRTC] Reconfiguring resolution to " << width << "x" << height
+              << " (" << bitrate_kbps << " kbps)\n";
+    g_current_width.store(width, std::memory_order_relaxed);
+    g_current_height.store(height, std::memory_order_relaxed);
+    g_current_bitrate.store(bitrate_kbps, std::memory_order_relaxed);
+    vtb_encoder_reconfigure(g_vtb, width, height, bitrate_kbps);
+    vtb_encoder_request_keyframe(g_vtb);
 }
 
 static void setup_server_routes(httplib::Server &srv) {
@@ -433,9 +469,49 @@ static void setup_server_routes(httplib::Server &srv) {
         j["port"] = g_port;
         j["ssl_port"] = g_ssl_port;
         j["player_mask"] = g_player_mask.load();
+        j["width"] = g_current_width.load();
+        j["height"] = g_current_height.load();
+        j["resolution"] = (g_current_height.load() == 720) ? "720p" : "480p";
         std::lock_guard<std::mutex> lock(g_clients_mu);
         j["connected_clients"] = g_clients.size();
         res.set_content(j.dump(), "application/json");
+    });
+
+    srv.Get("/api/resolution", [](const httplib::Request &req, httplib::Response &res) {
+        (void)req;
+        nlohmann::json j;
+        j["width"] = g_current_width.load();
+        j["height"] = g_current_height.load();
+        j["bitrate_kbps"] = g_current_bitrate.load();
+        j["resolution"] = (g_current_height.load() == 720) ? "720p" : "480p";
+        res.set_content(j.dump(), "application/json");
+    });
+
+    srv.Post("/api/resolution", [](const httplib::Request &req, httplib::Response &res) {
+        try {
+            auto j = nlohmann::json::parse(req.body);
+            int target_res = 480;
+            if (j.contains("resolution")) {
+                std::string r = j["resolution"].is_string() ? j["resolution"].get<std::string>() : std::to_string(j["resolution"].get<int>());
+                if (r.find("720") != std::string::npos) target_res = 720;
+            } else if (j.contains("height")) {
+                if (j["height"].get<int>() == 720) target_res = 720;
+            }
+            int w = (target_res == 720) ? 1280 : 854;
+            int h = (target_res == 720) ? 720 : 480;
+            int br = (target_res == 720) ? 3500 : 1500;
+            webrtc_streamer_set_resolution(w, h, br);
+
+            nlohmann::json resp;
+            resp["success"] = true;
+            resp["width"] = w;
+            resp["height"] = h;
+            resp["resolution"] = (h == 720) ? "720p" : "480p";
+            res.set_content(resp.dump(), "application/json");
+        } catch (const std::exception &e) {
+            res.status = 400;
+            res.set_content(std::string("{\"error\":\"") + e.what() + "\"}", "application/json");
+        }
     });
 
     srv.Post("/api/offer", [](const httplib::Request &req, httplib::Response &res) {
@@ -475,8 +551,22 @@ int webrtc_streamer_init(int port, const char *web_dir) {
         }
     }
 
-    // Setup VideoToolbox H.264 Encoder (480p 60fps 1.5Mbps for ultra-smooth low-latency mobile streaming)
-    g_vtb = vtb_encoder_create(854, 480, 60, 1500, on_vtb_nalu, nullptr);
+    // Check environment variable DM_WEBRTC_RES (default 480p, or 720p)
+    int init_w = 854;
+    int init_h = 480;
+    int init_br = 1500;
+    const char *env_res = getenv("DM_WEBRTC_RES");
+    if (env_res && (strstr(env_res, "720") != nullptr)) {
+        init_w = 1280;
+        init_h = 720;
+        init_br = 3500;
+    }
+    g_current_width.store(init_w);
+    g_current_height.store(init_h);
+    g_current_bitrate.store(init_br);
+
+    // Setup VideoToolbox H.264 Encoder (480p/720p 60fps)
+    g_vtb = vtb_encoder_create(init_w, init_h, 60, init_br, on_vtb_nalu, nullptr);
     if (!g_vtb) {
         std::cerr << "[WEBRTC] Failed to create VideoToolbox encoder\n";
     }

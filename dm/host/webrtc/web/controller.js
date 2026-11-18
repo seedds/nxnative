@@ -4,6 +4,7 @@ class WebRTCController {
   constructor() {
     this.playerId = 0;
     this.operatingMode = 'full-stream'; // Default: Full Stream (Video + Pad)
+    this.streamResolution = '480'; // Default: 480p (480 or 720)
     this.peerConnection = null;
     this.dataChannel = null;
     this.isConnected = false;
@@ -35,6 +36,7 @@ class WebRTCController {
     this.playerBadge = document.getElementById('player-badge');
     this.setupPanel = document.getElementById('setup-panel');
     this.modeToggleBtn = document.getElementById('mode-toggle-btn');
+    this.resToggleBtn = document.getElementById('res-toggle-btn');
     this.statRtt = document.getElementById('stat-rtt');
     this.statFps = document.getElementById('stat-fps');
     this.statGyro = document.getElementById('stat-gyro');
@@ -85,6 +87,12 @@ class WebRTCController {
       this.setMode('full-stream');
     }
 
+    if (urlParams.get('res') === '720' || urlParams.get('res') === '720p') {
+      this.setResolution('720');
+    } else {
+      this.setResolution('480');
+    }
+
     if (urlParams.get('p')) {
       const p = parseInt(urlParams.get('p'), 10);
       if (p >= 1 && p <= 4) {
@@ -108,12 +116,29 @@ class WebRTCController {
       });
     }
 
+    // Header Resolution Toggle Button (480p <-> 720p)
+    if (this.resToggleBtn) {
+      this.resToggleBtn.addEventListener('click', () => {
+        const nextRes = (this.streamResolution === '720') ? '480' : '720';
+        this.setResolution(nextRes, true);
+      });
+    }
+
     // Modal Mode Select Buttons
     document.querySelectorAll('.mode-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
         e.target.classList.add('active');
         this.setMode(e.target.dataset.mode);
+      });
+    });
+
+    // Modal Resolution Select Buttons
+    document.querySelectorAll('.res-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        document.querySelectorAll('.res-btn').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        this.setResolution(e.target.dataset.res, true);
       });
     });
 
@@ -273,10 +298,13 @@ class WebRTCController {
 
   setMode(mode) {
     this.operatingMode = mode;
+    const resRow = document.getElementById('res-form-row');
     if (mode === 'controller-only') {
       this.appContainer.classList.add('mode-controller-only');
       this.appContainer.classList.remove('mode-full-stream');
       if (this.modeToggleBtn) this.modeToggleBtn.textContent = '🎮 Pad';
+      if (this.resToggleBtn) this.resToggleBtn.style.display = 'none';
+      if (resRow) resRow.style.display = 'none';
       document.querySelectorAll('.mode-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.mode === 'controller-only');
       });
@@ -284,9 +312,28 @@ class WebRTCController {
       this.appContainer.classList.remove('mode-controller-only');
       this.appContainer.classList.add('mode-full-stream');
       if (this.modeToggleBtn) this.modeToggleBtn.textContent = '📺 Stream';
+      if (this.resToggleBtn) this.resToggleBtn.style.display = '';
+      if (resRow) resRow.style.display = '';
       document.querySelectorAll('.mode-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.mode === 'full-stream');
       });
+    }
+  }
+
+  setResolution(res, notifyHost = false) {
+    this.streamResolution = (res === '720' || res === '720p') ? '720' : '480';
+    if (this.resToggleBtn) {
+      this.resToggleBtn.textContent = `📺 ${this.streamResolution}p`;
+    }
+    document.querySelectorAll('.res-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.res === this.streamResolution);
+    });
+    if (notifyHost) {
+      fetch('/api/resolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resolution: this.streamResolution })
+      }).catch(err => console.error('Failed to update resolution:', err));
     }
   }
 
@@ -613,7 +660,8 @@ class WebRTCController {
         body: JSON.stringify({
           sdp: this.peerConnection.localDescription.sdp,
           type: this.peerConnection.localDescription.type,
-          player: this.playerId
+          player: this.playerId,
+          resolution: this.streamResolution
         })
       });
 
@@ -623,6 +671,9 @@ class WebRTCController {
       }
 
       const answer = await resp.json();
+      if (answer.resolution) {
+        this.setResolution(answer.resolution, false);
+      }
       await this.peerConnection.setRemoteDescription(new RTCSessionDescription({
         sdp: answer.sdp,
         type: answer.type

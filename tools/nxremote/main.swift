@@ -53,6 +53,7 @@ struct ContentView: View {
     @State private var isTargeted = false
     @State private var enableWebRTC = true
     @State private var controllerOnly = false
+    @State private var streamResolution = "480"
     @State private var useHTTPS = false
     @State private var showGameSettings = false
     @State private var portString = "8888"
@@ -63,10 +64,11 @@ struct ContentView: View {
 
     var fullURL: String {
         let mode = controllerOnly ? "controller" : "stream"
+        let resParam = (streamResolution == "720") ? "&res=720" : ""
         if useHTTPS {
-            return "https://\(localIP):8443/?mode=\(mode)&auto=1"
+            return "https://\(localIP):8443/?mode=\(mode)\(resParam)&auto=1"
         }
-        return "http://\(localIP):\(portString)/?mode=\(mode)&auto=1"
+        return "http://\(localIP):\(portString)/?mode=\(mode)\(resParam)&auto=1"
     }
 
     var displayURL: String {
@@ -217,6 +219,20 @@ struct ContentView: View {
                                 }
                             }
                             .toggleStyle(.switch)
+
+                            if !controllerOnly {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Video Stream Quality:")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Picker("", selection: $streamResolution) {
+                                        Text("480p (Default - Low Latency)").tag("480")
+                                        Text("720p (HD 60 FPS)").tag("720")
+                                    }
+                                    .pickerStyle(.segmented)
+                                }
+                                .padding(.top, 2)
+                            }
 
                             HStack {
                                 Text("Server Port:")
@@ -400,6 +416,9 @@ struct ContentView: View {
             env["DM_WEBRTC_PORT"] = portString
             if controllerOnly {
                 env["DM_CONTROLLER_ONLY"] = "1"
+            }
+            if streamResolution == "720" {
+                env["DM_WEBRTC_RES"] = "720"
             }
         }
         proc.environment = env

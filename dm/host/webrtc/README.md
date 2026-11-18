@@ -41,7 +41,7 @@ Allows any smartphone (iOS / Android), tablet, or secondary PC/Mac to connect ov
 ```
 
 ### 1. Video Pipeline
-- **Zero-Copy GPU Downscaler**: The game renders natively to an Apple Metal swapchain drawable. When the frame commits (`addFeedbackHandler:`), the texture is downscaled to **854x480 (480p 16:9 widescreen)** using hardware-accelerated **Metal Performance Shaders (`MPSImageBilinearScale`)** directly into shared GPU memory (`IOSurfaceRef`). There are zero CPU-to-GPU or GPU-to-CPU copies (`0 ms memory overhead`).
+- **Zero-Copy GPU Downscaler & Multi-Resolution**: The game renders natively to an Apple Metal swapchain drawable. When the frame commits (`addFeedbackHandler:`), the texture is downscaled to **480p (854x480, default)** or **720p (1280x720, HD option)** using hardware-accelerated **Metal Performance Shaders (`MPSImageBilinearScale`)** directly into shared GPU memory (`IOSurfaceRef`). There are zero CPU-to-GPU or GPU-to-CPU copies (`0 ms memory overhead`). Dynamic resolution switching is supported on-the-fly without dropping the WebRTC session.
 - **Apple VideoToolbox Hardware Encoder (`vtb_encoder.mm`)**:
   - `EnableLowLatencyRateControl = YES`: Engages Apple Silicon's hardware real-time video encoder pipeline.
   - `AllowFrameReordering = NO`: Zero B-frames, eliminating any frame reordering latency.

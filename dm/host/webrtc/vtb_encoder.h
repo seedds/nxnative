@@ -18,6 +18,9 @@ void vtb_encoder_destroy(vtb_encoder_t *enc);
 // Request immediate IDR keyframe (e.g. on new client connect or PLI)
 void vtb_encoder_request_keyframe(vtb_encoder_t *enc);
 
+// Reconfigure stream resolution dynamically (e.g. switch 480p <-> 720p)
+bool vtb_encoder_reconfigure(vtb_encoder_t *enc, int width, int height, int bitrate_kbps);
+
 // Encode a Metal texture (draws into internal CVPixelBuffer / IOSurface)
 // mtl_tex: id<MTLTexture>
 // mtl_dev: id<MTLDevice>

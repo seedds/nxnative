@@ -225,6 +225,17 @@ void vtb_encoder_request_keyframe(vtb_encoder_t *enc) {
     if (enc) enc->force_keyframe.store(true, std::memory_order_relaxed);
 }
 
+bool vtb_encoder_reconfigure(vtb_encoder_t *enc, int width, int height, int bitrate_kbps) {
+    if (!enc || width <= 0 || height <= 0) return false;
+    std::lock_guard<std::mutex> lock(enc->session_lock);
+    if (enc->width == width && enc->height == height && (bitrate_kbps <= 0 || enc->bitrate_kbps == bitrate_kbps)) {
+        return true;
+    }
+    if (bitrate_kbps > 0) enc->bitrate_kbps = bitrate_kbps;
+    OSType fmt = enc->cv_format != 0 ? enc->cv_format : kCVPixelFormatType_32BGRA;
+    return vtb_init_session_locked(enc, width, height, fmt);
+}
+
 int vtb_encoder_encode_metal(vtb_encoder_t *enc, void *mtl_tex_ptr, void *mtl_dev_ptr, void *mtl_cmd_queue_ptr, uint64_t pts_ns) {
     if (!enc || !mtl_tex_ptr || !mtl_dev_ptr || !mtl_cmd_queue_ptr) return -1;
     id<MTLTexture> src_tex = (__bridge id<MTLTexture>)mtl_tex_ptr;

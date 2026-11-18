@@ -20,6 +20,7 @@
         <span id="conn-status" class="badge badge-disconnected">Disconnected</span>
         <span id="player-badge" class="badge badge-player">P1</span>
         <button id="mode-toggle-btn" class="header-btn" title="Toggle Stream / Controller Only">📺 Stream</button>
+        <button id="res-toggle-btn" class="header-btn" title="Toggle Stream Resolution (480p / 720p)">📺 480p</button>
         <button id="gyro-header-btn" class="header-btn" title="Toggle Gyro Steering">🔄 Gyro: Off</button>
         <button id="kbd-toggle-btn" class="header-btn" title="Toggle Keyboard Overlay" style="display:none;">⌨ Controls</button>
         <button id="unmute-btn" class="header-btn">🔊</button>
@@ -122,6 +123,14 @@
           <div class="mode-select-btns">
             <button class="mode-btn active" data-mode="full-stream">📺 Full Stream (Video + Pad)</button>
             <button class="mode-btn" data-mode="controller-only">🎮 Controller Only</button>
+          </div>
+        </div>
+
+        <div class="form-row" id="res-form-row">
+          <label>Stream Quality / Resolution:</label>
+          <div class="res-select-btns">
+            <button class="res-btn active" data-res="480">480p (Default)</button>
+            <button class="res-btn" data-res="720">720p (HD 60 FPS)</button>
           </div>
         </div>
 

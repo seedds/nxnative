@@ -15,6 +15,9 @@ int webrtc_streamer_active(void);
 int webrtc_streamer_wants_video(void);
 int webrtc_streamer_wants_audio(void);
 
+// Ubah resolusi video stream secara dinamis (misal 480p atau 720p)
+void webrtc_streamer_set_resolution(int width, int height, int bitrate_kbps);
+
 // Mengirim frame video dari Metal texture
 // mtl_texture: id<MTLTexture>
 // mtl_dev: id<MTLDevice>

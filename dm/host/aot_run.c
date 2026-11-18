@@ -256,7 +256,7 @@ static __attribute__((noinline)) void native_call(dm_aot_thread *t, const dm_aot
 
 // ---------- The JIT fallback (11) ----------
 static int aot_svc(dm_guest_state *st, uint32_t n);
-static void safepoint(dm_aot_thread *t);
+static void safepoint(dm_aot_thread *t, uint32_t where);
 
 // DM_AOT_JIT_ALL (docs/env_switches.tsv): every guest instruction in the JIT fallback, compiled code never entered (the JIT stops only at gate sites,
 // host calls and the host-return address): the packs' behaviour checked against the JIT's (t_aot_module's JIT-forced runs)
@@ -498,7 +498,7 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
     *why = jit_all() ? REASON_FORCED : 0;
     switch (dm_jit_reason(j)) {
     case DM_JIT_ENTRY: case DM_JIT_RETURN: case DM_JIT_STEPPED: return;   // st->pc = stop: the loop decides
-    case DM_JIT_HALTED: safepoint(t); return;        // a pause or a stop
+    case DM_JIT_HALTED: safepoint(t, DM_AOT_SAMPLE_JIT); return;        // a pause, a stop or a state dump's sample
     case DM_JIT_CALLBACK: dm_aot_leave(t->left != DM_AOT_LEFT_NONE ? t->left : atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);   // the svc ended the thread or the process
     case DM_JIT_NO_CODE:
         if (stop == DM_AOT_HOST_RETURN || stop == lr || dm_aot_hostfn_name(stop) || dm_aot_stub_index(stop) >= 0) return;
@@ -897,17 +897,19 @@ DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp) {
     _mm_setcsr(dm_aot_guest_mxcsr(st->fpcr));
 }
 
-// The poll byte was set: clear it first (a request made after the clear sets it again), then the stop, the pause, the stop again
-static void safepoint(dm_aot_thread *t) {
+// The poll byte was set: clear it first (a request made after the clear sets it again), then the stop, a state dump's sample (the block holds the whole register file
+// and pc here: aot.h dm_aot_sample; where says which engine stopped), the pause, the stop again
+static void safepoint(dm_aot_thread *t, uint32_t where) {
     __atomic_store_n(&t->st.poll, (uint8_t)0, __ATOMIC_SEQ_CST);
     check_stop(t);
+    dm_aot_thread_sampled(t, where);
     if (thr_safepoint()) atomic_fetch_add_explicit(&c_safepoints, 1, memory_order_relaxed);
     check_stop(t);
 }
 
 DM_AOT_EXPORT void nxaot_rt_safepoint(dm_guest_state *st) {
     mxcsr_host(st);   // the MXCSR invariant (a pause may run anything of the host's; st->fpcr may have changed meanwhile)
-    safepoint((dm_aot_thread *)st);
+    safepoint((dm_aot_thread *)st, DM_AOT_SAMPLE_POLL);
     mxcsr_guest(st);
 }
 

@@ -20,7 +20,12 @@ int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }   //
 uint64_t resolve_import(module_t *m, const char *name) { die("t_aot_host: %s imports %s, which the corpus never does", m->name, name); }
 int hle_implements(const char *name) { (void)name; return 0; }
 void gate_register(uint64_t ret_addr, const char *kind, int arg, uint64_t orig) { (void)ret_addr; (void)kind; (void)arg; (void)orig; die("t_aot_host: a rewriter gate"); }
-uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) { (void)regs; die("t_aot_host: a gate at %#llx, which the corpus has none of", (unsigned long long)ret_addr); }
+// A test's own gate rows (t_aot_host's exclspin: spin waits it gives the JIT fallback with dm_aot_gate_rows) are served by its hook; any other gate is none of the corpus's
+uint64_t (*t_aot_gate_hook)(uint64_t ret_addr, uint64_t *regs);
+uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
+    if (t_aot_gate_hook) return t_aot_gate_hook(ret_addr, regs);
+    die("t_aot_host: a gate at %#llx, which the corpus has none of", (unsigned long long)ret_addr);
+}
 uint64_t unimpl_c(unsigned idx, uint64_t *regs) { (void)regs; die("t_aot_host: unimplemented import %u, which the corpus has none of", idx); }
 void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; }     // no graphics backend: the memory SVCs' announcements go nowhere
 void be_guest_unmap(void *mem, uint64_t size) { (void)mem; (void)size; }

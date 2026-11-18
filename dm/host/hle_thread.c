@@ -654,7 +654,9 @@ int thr_find_by_name(const char *name, pthread_t *out) {
 // During a state dump, take the backtrace of other guest threads: suspend → read registers → walk the frame pointer chain (both guest code and gate blocks keep the x29 chain) → resume; only main / sdk frames are printed
 static void thr_bt(thr_t *t) {
 #if !DM_NATIVE_EXEC
-    (void)t;   // the registers of a running guest thread: the execution engine's (Phase 2)
+    // The x86-64 engine: a thread that runs (no wait, no SVC, no sleep) gives its guest registers at its next safepoint (aot.h dm_aot_thread_dump, which checks that
+    // the block is still a live thread's before it reads anything); a thread in an SVC has its lines above
+    if (!t->wkind && !t->exited && !t->sleeping && !atomic_load(&t->svc_regs) && t->st) dm_aot_thread_dump(t->st, t->handle);
 #else
     if (!t->mport || t->exited || t->mport == mach_thread_self()) return;
     if (thread_suspend(t->mport) != KERN_SUCCESS) return;

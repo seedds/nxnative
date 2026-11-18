@@ -142,7 +142,9 @@ struct dm_jit final : A64::UserCallbacks {
     }
 
     // ---- The hand-over (sections 2.5 and 11) ----
-    void LoadFrom(uint64_t pc) {
+    // keep_monitor: the run goes on with the guest's instruction stream where this instance's last run stopped without the guest taking an exception (resume_pc),
+    // so the local monitor stays as the guest left it; otherwise it is cleared, as an exception return clears it
+    void LoadFrom(uint64_t pc, bool keep_monitor = false) {
         tpidr_el0 = st->tpidr_el0;
         tpidrro_el0 = st->tpidrro_el0;
         std::array<uint64_t, 31> x;
@@ -159,7 +161,9 @@ struct dm_jit final : A64::UserCallbacks {
         const uint32_t m = _mm_getcsr();
         jit->SetFpsr(st->fpsr | FpsrFromMxcsr(m));
         _mm_setcsr(m & ~0x3Fu);
-        jit->ClearExclusiveState();  // as an exception return clears the local monitor
+        if (!keep_monitor) {
+            jit->ClearExclusiveState();  // as an exception return clears the local monitor
+        }
     }
     void SaveTo() {
         const std::array<uint64_t, 31> x = jit->GetRegisters();
@@ -232,6 +236,12 @@ struct dm_jit final : A64::UserCallbacks {
         ++counts.runs;
         stopped = false;
         reason = 0;
+        // The run continues the stream the last one stopped in at a gate site or after a step (resume_pc): the hand-over keeps the local monitor. A gate
+        // site between a load-exclusive and its store-exclusive (a spin wait whose head is the ldxr and whose back-edge comes before the stxr, as
+        // patch_nso.py finds them in nn::os's and the games' locks) stopped every pass there, and each hand-over cleared the monitor, so the
+        // store-exclusive failed every time and the loop never ended (dm/tools/aot/README.md, "The JIT fallback", the hand-over; dm/host t_aot_host's exclspin row)
+        const bool resume = pc == resume_pc;
+        resume_pc = UINT64_MAX;
         // One stop_at query per run (as before gates), under the block's FPCR and before anything is copied: a gate site is served before its
         // instruction runs, so the run returns at once with the block as the host handed it over
         const int k = past < 0 ? StopKind(pc, st->fpcr) : 0;
@@ -240,6 +250,10 @@ struct dm_jit final : A64::UserCallbacks {
             reason = DM_JIT_GATE;
             stop_pc = pc;
             st->pc = pc;
+            if (!resume) {
+                jit->ClearExclusiveState();  // a stream that begins here (nothing was copied in: the monitor of an earlier stream must not reach it)
+            }
+            resume_pc = pc;
             return pc;
         }
         if (code_gen != g_code_gen.load(std::memory_order_acquire)) {
@@ -251,7 +265,7 @@ struct dm_jit final : A64::UserCallbacks {
             code_gen = g_code_gen.load(std::memory_order_acquire);
         }
         ran = true;
-        LoadFrom(pc);
+        LoadFrom(pc, resume);
         if (past >= 0 || (k && !one_block)) {
             // A stop address the host wants run, or a gate site the host served: its instruction, then on (or back, with one)
             StepAt(pc);
@@ -284,6 +298,9 @@ struct dm_jit final : A64::UserCallbacks {
         jit->ClearHalt(kStopped);
         SaveTo();
         st->pc = stop_pc;
+        if (reason == DM_JIT_GATE || reason == DM_JIT_STEPPED) {
+            resume_pc = stop_pc;  // the host serves the gate (or decides after the step) and runs on from here: the same stream
+        }
         return stop_pc;
     }
 
@@ -461,6 +478,9 @@ struct dm_jit final : A64::UserCallbacks {
     uint64_t stop_pc = 0;
     uint64_t allow = UINT64_MAX;  // the stop address being single-stepped (MemoryReadCode hands its instruction over)
     uint64_t retry_pc = 0;        // the instruction Retry steps: its callback accesses are made, and reported at it
+    // Where the last run stopped with the guest's instruction stream going on there and no exception taken (a gate site, the instruction after a step:
+    // DM_JIT_GATE, DM_JIT_STEPPED), UINT64_MAX when it did not: the next run from there keeps the local monitor (Run, LoadFrom)
+    uint64_t resume_pc = UINT64_MAX;
     uint64_t code_gen = 0;        // g_code_gen when this instance last dropped its translations
     bool ran = false;             // it has run: blocks to drop when the code ranges change
     uint64_t tpidr_el0 = 0, tpidrro_el0 = 0;  // the guest's TPIDR_EL0 / TPIDRRO_EL0 while it runs here (dynarmic reads them through the configuration)
@@ -636,6 +656,7 @@ dm_jit* dm_jit_create_stepping(dm_guest_state* st, int one_block_per_run) {
             guard.unlock();
             j->st = st;
             j->counts = dm_jit_counts{};
+            j->resume_pc = UINT64_MAX;  // no stream of another thread goes on here
             return j;
         }
         p.stats.made_on_use++;
@@ -662,6 +683,7 @@ void dm_jit_destroy(dm_jit* j) {
             j->jit->ClearHalt(kStopped);
             j->st = nullptr;
             j->stopped = false;
+            j->resume_pc = UINT64_MAX;
             p.spare = j;
             p.stats.given_back++;
             p.cv.notify_all();

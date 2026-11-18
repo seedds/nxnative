@@ -154,6 +154,47 @@ void dm_aot_thread_poke(dm_guest_state *st) {
     pthread_mutex_unlock(&g_lock);
 }
 
+// A state dump's sample of another thread (aot.h dm_aot_thread_sample): the request and a poke under g_lock, then a wait on g_cv, which the answer and a thread's end
+// broadcast. st is compared with the live blocks before it is read, so a thread that ended since the dump read its pointer is no live thread (-1)
+static int listed(const dm_aot_thread *t) {   // g_lock held
+    for (const dm_aot_thread *u = g_threads; u; u = u->next) if (u == t) return 1;
+    return 0;
+}
+int dm_aot_thread_sample(dm_guest_state *st, unsigned ms, dm_aot_sample *out) {
+    dm_aot_thread *t = (dm_aot_thread *)st;
+    pthread_mutex_lock(&g_lock);
+    if (!st || t == t_self || !listed(t)) { pthread_mutex_unlock(&g_lock); return -1; }
+    const uint32_t seq = t->sample_seq;
+    atomic_store(&t->sample_req, 1);
+    poke(t);
+    const uint64_t deadline = plat_now_ns() + (uint64_t)ms * 1000000u;
+    int alive = 1;
+    while ((alive = listed(t)) && t->sample_seq == seq && plat_now_ns() < deadline) {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 5000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_cv, &g_lock, &ts);
+    }
+    const int ok = alive && t->sample_seq != seq;
+    if (ok) *out = t->sample;
+    else if (alive) {
+        atomic_store(&t->sample_req, 0);   // not answered: a later safepoint has nothing to answer
+        memset(out, 0, sizeof *out);
+        out->pc = t->prof_at;              // where it is instead (aot.h prof_at: a host call's or an SVC's guest address, DM_AOT_PROF_JIT, 0), read while it is listed
+    }
+    pthread_mutex_unlock(&g_lock);
+    return ok ? 1 : alive ? 0 : -1;
+}
+void dm_aot_thread_sampled(dm_aot_thread *t, uint32_t where) {
+    if (!atomic_load_explicit(&t->sample_req, memory_order_relaxed) || !atomic_exchange(&t->sample_req, 0)) return;
+    pthread_mutex_lock(&g_lock);
+    dm_aot_sample *s = &t->sample;
+    memcpy(s->x, t->st.x, sizeof s->x);
+    s->sp = t->st.sp; s->pc = t->st.pc; s->nzcv = t->st.nzcv; s->fpcr = t->st.fpcr; s->where = where;
+    t->sample_seq++;
+    pthread_cond_broadcast(&g_cv);
+    pthread_mutex_unlock(&g_lock);
+}
+
 int dm_aot_threads_poke_all(void) {
     int n = 0;
     pthread_mutex_lock(&g_lock);

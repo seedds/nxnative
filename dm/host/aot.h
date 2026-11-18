@@ -203,6 +203,12 @@ typedef struct dm_aot_jitcall {
     struct dm_aot_jitcall *outer;
 } dm_aot_jitcall;
 #define DM_AOT_FAULT_JITCALLS 8
+// A running guest thread's registers for a state dump (hle_thread.c svc_thread_dump: DM_CTL threads, the stall watchdog's dumps), taken by the thread itself at its next
+// safepoint, where the block holds its whole register file and pc (design 6.2): a poll of compiled code (a function's entry, a loop's back-edge) or a block boundary of the
+// JIT fallback (dm_jit_halt). A signal cannot give them: at an arbitrary instruction compiled code's registers have no fixed home, and the JIT keeps its pc in its own
+// state at block ends only
+enum { DM_AOT_SAMPLE_POLL = 1, DM_AOT_SAMPLE_JIT = 2 };   // dm_aot_sample.where: compiled code's poll, the JIT fallback's block boundary
+typedef struct { uint64_t x[31], sp, pc; uint32_t nzcv, fpcr, where; } dm_aot_sample;
 typedef struct dm_aot_thread {
     dm_guest_state st;                 // first: (dm_aot_thread *)st is its thread
     dm_aot_jmp_buf base;               // the innermost dm_guest_call on this thread: each level keeps the one around it and puts it back when it returns
@@ -228,6 +234,11 @@ typedef struct dm_aot_thread {
     uint64_t fault_bt[48];
     dm_aot_jitcall fault_jit[DM_AOT_FAULT_JITCALLS];
     dm_aot_jitcall *jit_calls;         // the JIT driver's calls into compiled code in progress on this thread, innermost first (NULL: none)
+    // A state dump's request for this thread's registers (dm_aot_thread_sample): set with the poke, answered at the next safepoint (dm_aot_thread_sampled) into
+    // sample, sample_seq counting the answers (both under aot_thread.c's list lock)
+    _Atomic int sample_req;
+    uint32_t sample_seq;
+    dm_aot_sample sample;
 } dm_aot_thread;
 dm_aot_thread *dm_aot_self(void);          // the calling thread's, NULL when it never ran guest code
 dm_guest_state *dm_aot_thread_begin(void); // the calling thread's state block, made at its first call (x30 the host-return address, FPCR the packs')
@@ -238,6 +249,16 @@ void dm_aot_thread_end(void);              // the calling thread runs no more gu
 // Returns the DM_AOT_LEFT_* reason; an entry that returns is a red line and a process stop (Horizon requires svcExitThread)
 int dm_aot_thread_run(uint64_t entry, uint64_t arg, uint64_t sp);
 void dm_aot_thread_poke(dm_guest_state *st);   // a pause or stop request: the poll byte set and the thread's JIT instance halted (safe on any thread)
+// Another thread's registers at its next safepoint (above dm_aot_sample): asks st's thread with a poke and waits up to ms milliseconds. 1 with *out filled; 0 when the
+// thread reached no safepoint meanwhile (it runs host code: a host call, an SVC, a host wait), out->where 0 and out->pc its prof_at then; -1 when st is no live
+// thread's block or the caller's own. st need not be alive: it is only compared with the live threads' blocks before anything is read. The thread goes on at once
+// after it answered (no pause)
+int dm_aot_thread_sample(dm_guest_state *st, unsigned ms, dm_aot_sample *out);
+void dm_aot_thread_sampled(dm_aot_thread *t, uint32_t where);   // aot_run.c, at a safepoint (the block whole): answers a request, else nothing
+// The state dump's lines for a guest thread that runs (hle_thread.c svc_thread_dump, a thread in no wait and no SVC): a few samples (dm_aot_thread_sample) with their pcs,
+// the first one's registers and its frames from x29, or where it was when it reached no safepoint. Only in a dump crash_dump_now makes (DM_CTL threads, the stall
+// watchdog), on an ordinary thread; a crash report's dump runs in a signal handler, which may not wait, and prints nothing here (aot_fault.c)
+void dm_aot_thread_dump(dm_guest_state *st, uint32_t handle);
 void dm_aot_thread_exiting(void);              // ExitThread was answered on the calling thread: it leaves when the SVC returns
 void dm_aot_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0);   // thread.c: the TLS registers' initial values, for the calling thread's block (now or when made)
 // loader.c: a module image as it is (an NRO), mapped one to one in the arena, parsed, relocated and bound as load_modules does, loaded (design 9.4)

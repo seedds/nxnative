@@ -54,6 +54,13 @@
 //   spkeep, with nxaot (it packs it): a module this test writes word by word whose function calls through a PLT stub's shape (WRITES the union, SP in it) a function
 //     that keeps SP, moves it and calls a leaf with an svc: the caller reloads SP from the block and must find its own (the right sum, no JIT run: dm/tools/aot/README.md,
 //     "A callee's SP left in the block")
+//   exclspin, with nxaot (it packs it), compiled and with the JIT built in also with every instruction in the JIT (DM_AOT_JIT_ALL): a module this test writes word by
+//     word that takes and gives back a lock 64 times in the shape of Mario vs. Donkey Kong's spin lock, each spin wait's back-edge between its load-exclusive and its
+//     store-exclusive, given to the JIT fallback as gate sites (--spin, as load_modules gives a manifest's rows): no store-exclusive may fail (rt/jit.cpp Run: the
+//     hand-over at a gate site keeps the local monitor; before, every one failed and the lock was never taken)
+//   sample, with nxaot (it packs it), compiled and with the JIT built in also in the JIT fallback alone: a module this test writes word by word whose main thread spins
+//     in a loop with no SVC; a host thread asks it for its registers (aot.h dm_aot_thread_sample) and makes the state dump DM_CTL `threads` makes: every sample and
+//     the dump's line name pcs inside the loop, at compiled code's poll or at the JIT's block boundaries (aot_fault.c dm_aot_thread_dump)
 //   guestbt, with nxaot (it packs it): a module this test writes word by word whose third function, two calls deep, aborts through a host function, through svcBreak,
 //     or faults on an address no page backs: the host's lines name the call site and the guest's frames exactly (aot.h dm_aot_guest_backtrace, hle_svc.c Break,
 //     aot_fault.c dm_aot_fault_backtrace), through compiled code and with the JIT built in through the JIT fallback alone (DM_AOT_JIT_ALL), and with frames in both
@@ -67,13 +74,15 @@
 //   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
-//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions] [--jit-ready] [--bt <mode>]      one run (the child)
+//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions] [--jit-ready] [--bt <mode>]
+//              [--spin <edge>:<head>]... [--sample <lo>:<hi>:<flag>]      one run (the child)
 //   t_aot_host --log-race N      N log lines and N guest lines from two threads (the child of the log-lines row)
 #include "../aot.h"
 #include "../aot_hostfn.h"
 #if NXHOST_JIT
 #include "rt/jit.h"   // dm_jit_access_pc: a fault inside the JIT's memory callbacks
 #endif
+#include <sched.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
@@ -197,6 +206,54 @@ void t_aot_pause_body(uint64_t arg) {
     dm_aot_svc(dm_aot_self_state(), 0x0A);   // svcExitThread: the thread leaves here
 }
 
+// The exclspin row's spin waits (--spin): gate rows the child gives the JIT fallback (dm_aot_gate_rows), whose back-off the stub's gate_dispatch hands to this hook,
+// as hle.c's gate table hands a game's to dm_spin_wait: counted, and a yield
+extern uint64_t (*t_aot_gate_hook)(uint64_t ret_addr, uint64_t *regs);   // t_aot_host_stub.c
+static _Atomic uint64_t g_spin_backoffs;
+static uint64_t spin_backoff(uint64_t ret_addr, uint64_t *regs) {
+    (void)ret_addr; (void)regs;
+    atomic_fetch_add(&g_spin_backoffs, 1);
+    sched_yield();
+    return 0;
+}
+
+// The sample row's tester (--sample): a host thread that is no guest thread asks the main guest thread, which spins in a loop with no SVC and no host call, for its
+// registers (aot.h dm_aot_thread_sample) SAMPLE_TAKES times, and makes the state dump the DM_CTL `threads` line makes (aot_fault.c crash_dump_now: its lines for a
+// running thread, dm_aot_thread_dump); then it sets the flag the loop waits for. Its line: the samples taken, how many lie in the loop, where they were taken
+enum { SAMPLE_TAKES = 8 };
+static struct { dm_guest_state *st; uint64_t lo, hi, flag; } g_smp;
+void svc_thread_dump(void);                  // hle_thread.c
+void crash_set_dump_hook(void (*fn)(void));  // aot_fault.c
+void crash_dump_now(const char *why);
+static void *sample_tester(void *p) {
+    (void)p;
+    // The loop running: a first sample inside it (the thread's first JIT use may wait for its instance, made ahead from the pack's load, before it runs the entry)
+    for (int i = 0; i < 200; i++) {
+        dm_aot_sample s;
+        if (dm_aot_thread_sample(g_smp.st, 2000, &s) == 1 && s.pc >= g_smp.lo && s.pc < g_smp.hi) break;
+        plat_sleep_ns(10000000);
+    }
+    unsigned taken = 0, in_loop = 0, poll = 0, jit = 0;
+    uint64_t first = 0, lr = 0;
+    for (int i = 0; i < SAMPLE_TAKES; i++) {
+        dm_aot_sample s;
+        if (dm_aot_thread_sample(g_smp.st, 2000, &s) != 1) continue;
+        taken++;
+        in_loop += s.pc >= g_smp.lo && s.pc < g_smp.hi;
+        poll += s.where == DM_AOT_SAMPLE_POLL; jit += s.where == DM_AOT_SAMPLE_JIT;
+        if (taken == 1) { first = s.pc; lr = s.x[30]; }
+        plat_sleep_ns(2000000);
+    }
+    crash_set_dump_hook(svc_thread_dump);
+    crash_dump_now("t_aot_host sample");
+    char at[64], la[64];
+    dm_aot_guest_name(first, at, sizeof at); dm_aot_guest_name(lr, la, sizeof la);
+    printf("t_aot_host: samples: %u of %d taken, %u in the loop, %u at a poll, %u in the JIT; first pc %s lr %s\n", taken, SAMPLE_TAKES, in_loop, poll, jit, at, la);
+    fflush(stdout);
+    __atomic_store_n((uint32_t *)(uintptr_t)g_smp.flag, 1u, __ATOMIC_SEQ_CST);   // the loop ends
+    return NULL;
+}
+
 static int dirty_hook(void *addr, int is_write, void *uc) {   // a dirty-page tracker's hook (5.4): signal context, mprotect only
     uint64_t a = (uint64_t)(uintptr_t)addr;
     if (!is_write || a < g_dirty_lo || a >= g_dirty_hi) return 0;
@@ -234,6 +291,8 @@ typedef struct {
     long hostfn;                                    // --hostfn <module offset>: the guest-visible address of t_aot_hidden written there (fpret_nro), 0: none
     long pollfn;                                    // --pollfn <module offset>: the guest-visible address of t_aot_poll_self written there (pollkeep_nro), 0: none
     long fzfn;                                      // --fzfn <module offset>: the guest-visible address of t_aot_fz_host written there (fzsec_nro), 0: none
+    int nspin; uint64_t spin_edge[4], spin_head[4];   // --spin <edge>:<head> (module offsets): spin waits given to the JIT fallback (exclspin_nro)
+    int sample; uint64_t smp_lo, smp_hi, smp_flag;    // --sample <lo>:<hi>:<flag> (module offsets): the sample row's loop and its flag (sample_nro)
 } run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
@@ -329,6 +388,20 @@ static void *guest_main(void *p) {
         if (r[0]) { printf("[RED] t_aot_host: svcCreateThread for the pause tester: %#llx\n", (unsigned long long)r[0]); return NULL; }
         uint64_t s[32] = {r[1]};
         svc_dispatch(0x09, s, 0);
+    }
+    if (a->nspin) {   // exclspin's spin waits: the JIT fallback stops at their back-edges as at a manifest's (compiled code of a pack made from no manifest calls no gate)
+        dm_aot_gate_row rows[4];
+        for (int i = 0; i < a->nspin; i++) rows[i] = (dm_aot_gate_row){a->spin_edge[i], a->spin_head[i], NXAOT_GATE_SPIN};
+        dm_aot_gate_rows(m, rows, a->nspin);
+        t_aot_gate_hook = spin_backoff;
+    }
+    if (a->sample) {   // the sample row's tester, on a host thread of its own
+        const uint64_t b = (uint64_t)(uintptr_t)m->base;
+        g_smp.st = dm_aot_thread_begin();   // this thread's block, which dm_aot_run's guest code runs on
+        g_smp.lo = b + a->smp_lo; g_smp.hi = b + a->smp_hi; g_smp.flag = b + a->smp_flag;
+        pthread_t th;
+        if (pthread_create(&th, NULL, sample_tester, NULL)) { printf("[RED] t_aot_host: no sample tester thread\n"); return NULL; }
+        pthread_detach(th);
     }
     if (lat_on() && !lat_start(m)) return NULL;   // the polls row's tester (--latency)
 #if NXHOST_JIT
@@ -456,6 +529,17 @@ static int child(int argc, char **argv) {
         else if (!strcmp(argv[i], "--hostfn") && i + 1 < argc) a.hostfn = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--pollfn") && i + 1 < argc) a.pollfn = strtol(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--fzfn") && i + 1 < argc) a.fzfn = strtol(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--spin") && i + 1 < argc && a.nspin < 4) {
+            char *e;
+            a.spin_edge[a.nspin] = strtoull(argv[++i], &e, 0);
+            a.spin_head[a.nspin++] = *e == ':' ? strtoull(e + 1, NULL, 0) : 0;
+        } else if (!strcmp(argv[i], "--sample") && i + 1 < argc) {
+            char *e;
+            a.sample = 1;
+            a.smp_lo = strtoull(argv[++i], &e, 0);
+            a.smp_hi = *e == ':' ? strtoull(e + 1, &e, 0) : 0;
+            a.smp_flag = *e == ':' ? strtoull(e + 1, NULL, 0) : 0;
+        }
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
         else if (!strcmp(argv[i], "--positions")) a.positions = 1;
         else if (!strcmp(argv[i], "--jit-ready")) a.jit_ready = 1;
@@ -492,6 +576,7 @@ static int child(int argc, char **argv) {
                (unsigned long long)s.jit_ahead, (unsigned long long)s.jit_taken, (unsigned long long)s.jit_made_on_use, (unsigned long long)s.jit_waits,
                (double)s.jit_wait_ns * 1e-6, (double)s.jit_first_use_ns * 1e-6, a.ready_ahead);
     }
+    if (a.nspin) printf("t_aot_host: spin waits: %llu back-offs (the taken back-edges)\n", (unsigned long long)atomic_load(&g_spin_backoffs));
     if (a.pause)
         printf("t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited%s%s%s\n",
                g_pt.done, g_pt.threaded, g_pt.invariant, g_pt.inconsistent, g_pt.exited, g_pt.expired ? "; the 30 s limit came first" : "",
@@ -534,6 +619,8 @@ typedef struct {
     unsigned long long ji[4]; double ji_wait_ms, ji_first_ms; int ji_ready, have_ji;   // its JIT instances line: made ahead, taken, made on first use, waits
     unsigned ndm, spliced; char splice[300];   // "[dm] " lines; lines holding a "[guest] " line after their start (the first of them)
     char pos[700], prof[900], fl[300];         // the positions' check of the child (--positions), the sampler's summary line (aot_profile.c), the child's function lines' check
+    unsigned long long backoffs; int have_backoffs;   // the child's spin waits line (--spin)
+    char smp[300], regs[700];                  // the sample tester's line (--sample) and the state dump's registers line of the main thread (aot_fault.c dm_aot_thread_dump)
 } result;
 
 static void append(char **buf, size_t *n, size_t *cap, const char *s, size_t len) {
@@ -572,6 +659,10 @@ static int run_cmd(const char *cmd, result *r) {
         const char *fll = strstr(line, "t_aot_host: function lines: ");
         if (fll && !r->fl[0]) { snprintf(r->fl, sizeof r->fl, "%s", fll); r->fl[strcspn(r->fl, "\n")] = 0; }
         if (sl && strstr(sl, " Hz of each guest thread's CPU time") && !r->prof[0]) { snprintf(r->prof, sizeof r->prof, "%s", sl); r->prof[strcspn(r->prof, "\n")] = 0; }
+        if (!strncmp(line, "t_aot_host: spin waits: ", 24)) r->have_backoffs = sscanf(line, "t_aot_host: spin waits: %llu", &r->backoffs) == 1;
+        const char *sml = strstr(line, "t_aot_host: samples: "), *rgl = strstr(line, "0x1001 guest registers");
+        if (sml && !r->smp[0]) { snprintf(r->smp, sizeof r->smp, "%s", sml); r->smp[strcspn(r->smp, "\n")] = 0; }
+        if (rgl && !r->regs[0]) { snprintf(r->regs, sizeof r->regs, "%s", rgl); r->regs[strcspn(r->regs, "\n")] = 0; }
     }
     int st = pclose(f);
 #if defined(_WIN32)
@@ -1234,6 +1325,235 @@ static void pollkeep_row(const char *self, const char *nxaot) {
              r.jit[0], r.stat[2], r.red[0] ? "; first red line: " : "", r.red);
     row("pollkeep", "poll", ok, &r, note);
     if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- A spin wait between a load-exclusive and its store-exclusive in the JIT fallback (rt/jit.cpp Run, resume_pc) ----------
+// The NRO exclspin, written here word by word in the shape of Mario vs. Donkey Kong's spin lock (main+0x470f6c): start takes and gives back a lock word EXCL_ROUNDS times.
+// Acquire: ldaxr w9 at its head, cbnz w9 back to the head (a spin wait: the rewriter's row puts its back-edge between the load and the store), stxr; release: ldxr,
+// cmp w9, #1, b.ne back (the second spin wait), stlxr wzr. Every failed store-exclusive is counted (x21) and retried; after EXCL_GIVEUP of them start prints
+// "exclspin STXR". It prints "exclspin PASS" when the rounds are all done with no failed store-exclusive (one thread: nothing else touches the word), else
+// "exclspin FAIL". The child gives both spin waits to the JIT fallback (--spin), as load_modules gives a manifest's rows
+enum { EXCL_ROUNDS = 64, EXCL_GIVEUP = 100, EXCL_LOCK = 0x2000 };
+static uint32_t a_cb(uint32_t op, unsigned rt, int64_t off) { return op | (uint32_t)((off >> 2) & 0x7FFFF) << 5 | rt; }   // cbz / cbnz: 0x34 w, 0x35 w, 0xB4 x, 0xB5 x
+static size_t exclspin_nro(uint8_t *img, size_t cap, uint64_t sites[4]) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = EXCL_LOCK, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100, STXR_AT = RO + 0x120, FAIL_AT = RO + 0x140 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[128] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n++] = 0xA9BD7BFDu;               // stp x29, x30, [sp, #-48]!
+    w[n++] = 0x910003FDu;               // mov x29, sp
+    w[n++] = 0xA90153F3u;               // stp x19, x20, [sp, #16]
+    w[n++] = 0xA9025BF5u;               // stp x21, x22, [sp, #32]
+    w[n] = a_adr(19, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x19, the lock word
+    w[n++] = a_movz(20, 0);             // x20: rounds
+    w[n++] = a_movz(21, 0);             // x21: failed store-exclusives
+    w[n++] = a_movz(22, 0);             // x22: the count the lock guards
+    const size_t loop = n;
+    w[n++] = 0x52800028u;               // mov w8, #1
+    const size_t acq = n;
+    w[n++] = 0x885FFE69u;               // ldaxr w9, [x19]           (the first spin wait's head)
+    w[n] = a_cb(0x35000000u, 9, (int64_t)(acq - n) * 4); n++;   // cbnz w9, acq    (its back-edge)
+    w[n++] = 0x880A7E68u;               // stxr w10, w8, [x19]
+    const size_t to_acquired = n++;     // cbz w10, acquired
+    w[n++] = a_addi(21, 21, 1);
+    w[n++] = 0xF10002BFu | EXCL_GIVEUP << 10;   // cmp x21, #EXCL_GIVEUP
+    w[n] = a_bcond(3, (int64_t)(acq - n) * 4); n++;   // b.lo acq
+    const size_t to_stxr1 = n++;        // b stxr
+    w[to_acquired] = a_cb(0x34000000u, 10, (int64_t)(n - to_acquired) * 4);
+    w[n++] = a_addi(22, 22, 1);         // the guarded work
+    const size_t rel = n;
+    w[n++] = 0x885F7E69u;               // ldxr w9, [x19]            (the second spin wait's head)
+    w[n++] = 0x7100053Fu;               // cmp w9, #1
+    w[n] = a_bcond(1, (int64_t)(rel - n) * 4); n++;   // b.ne rel    (its back-edge)
+    w[n++] = 0x880AFE7Fu;               // stlxr w10, wzr, [x19]
+    const size_t to_released = n++;     // cbz w10, released
+    w[n++] = a_addi(21, 21, 1);
+    w[n++] = 0xF10002BFu | EXCL_GIVEUP << 10;   // cmp x21, #EXCL_GIVEUP
+    w[n] = a_bcond(3, (int64_t)(rel - n) * 4); n++;   // b.lo rel
+    const size_t to_stxr2 = n++;        // b stxr
+    w[to_released] = a_cb(0x34000000u, 10, (int64_t)(n - to_released) * 4);
+    w[n++] = a_addi(20, 20, 1);
+    w[n++] = 0xF100029Fu | EXCL_ROUNDS << 10;   // cmp x20, #EXCL_ROUNDS
+    w[n] = a_bcond(3, (int64_t)(loop - n) * 4); n++;   // b.lo loop
+    w[n++] = 0xF10002DFu | EXCL_ROUNDS << 10;   // cmp x22, #EXCL_ROUNDS
+    const size_t to_fail1 = n++;        // b.ne fail
+    const size_t to_fail2 = n++;        // cbnz x21, fail
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "exclspin PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    const size_t to_exit1 = n++;        // b exit
+    w[to_stxr1] = a_b((int64_t)(n - to_stxr1) * 4);
+    w[to_stxr2] = a_b((int64_t)(n - to_stxr2) * 4);
+    w[n] = a_adr(0, (int64_t)STXR_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "exclspin STXR"
+    w[n++] = 0xD40004E1u;
+    const size_t to_exit2 = n++;        // b exit
+    w[to_fail1] = a_bcond(1, (int64_t)(n - to_fail1) * 4);
+    w[to_fail2] = a_cb(0xB5000000u, 21, (int64_t)(n - to_fail2) * 4);
+    w[n] = a_adr(0, (int64_t)FAIL_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 13);             // "exclspin FAIL"
+    w[n++] = 0xD40004E1u;
+    w[to_exit1] = a_b((int64_t)(n - to_exit1) * 4);
+    w[to_exit2] = a_b((int64_t)(n - to_exit2) * 4);
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    sites[0] = (acq + 1) * 4; sites[1] = acq * 4;   // the first spin wait: back-edge, head
+    sites[2] = (rel + 2) * 4; sites[3] = rel * 4;   // the second
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "exclspin PASS", 13);
+    memcpy(img + STXR_AT, "exclspin STXR", 13);
+    memcpy(img + FAIL_AT, "exclspin FAIL", 13);
+    return SIZE;
+}
+// The rows (nxaot): compiled, the lock taken and given back 64 times with no failed store-exclusive and no JIT run; with the JIT built in, every instruction in the
+// JIT (DM_AOT_JIT_ALL) with the two spin waits' back-edges as gate sites: the same, and no back-off (the lock is always free, so neither back-edge is taken). Before
+// the fix each hand-over at a gate site cleared the JIT's local monitor, between the ldaxr before the stop and the stxr after it: every store-exclusive failed,
+// "exclspin STXR" (Mario vs. Donkey Kong's start-up spun there under DM_AOT_JIT_ALL for hours)
+static void exclspin_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): exclspin is not packed here\n", "exclspin", "excl"); return; }
+    static uint8_t img[0x3000];
+    uint64_t sites[4];
+    const size_t len = exclspin_nro(img, sizeof img, sites);
+    char nro[200], pack[200], line[600] = "", note[1400], extra[200];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/exclspin", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/exclspin/exclspin.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/exclspin/exclspin%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("exclspin", "excl", 0, &r, note);
+        return;
+    }
+    run_child(self, pack, nro, "", &r);
+    int ok = r.status == 0 && !strcmp(r.guest, "exclspin PASS\n") && r.have_jit && r.jit[0] == 0;
+    snprintf(note, sizeof note, "a lock taken and given back %d times, compiled: %.*s (want PASS), %llu JIT runs (want 0)%s%s", EXCL_ROUNDS,
+             (int)strcspn(r.guest, "\n"), r.guest, r.jit[0], r.red[0] ? "; first red line: " : "", r.red);
+    row("exclspin", "excl", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+    if (!NXHOST_JIT) { printf("%-14s %-9s note: no JIT fallback (NXHOST_JIT): the JIT-forced run is not made\n", "exclspin", "jit-all"); return; }
+    snprintf(extra, sizeof extra, "--spin %#llx:%#llx --spin %#llx:%#llx", (unsigned long long)sites[0], (unsigned long long)sites[1], (unsigned long long)sites[2],
+             (unsigned long long)sites[3]);
+    set_env("DM_AOT_JIT_ALL", "1");
+    run_child(self, pack, nro, extra, &r);
+    set_env("DM_AOT_JIT_ALL", NULL);
+    ok = r.status == 0 && !strcmp(r.guest, "exclspin PASS\n") && r.have_jit && r.jit[0] > 0 && r.have_backoffs && r.backoffs == 0;
+    snprintf(note, sizeof note, "the same in the JIT fallback alone (DM_AOT_JIT_ALL), a gate site between each ldaxr / ldxr and its store-exclusive: %.*s (want PASS; STXR: "
+             "every store-exclusive failed), %llu JIT runs, %llu back-offs (want 0)%s%s", (int)strcspn(r.guest, "\n"), r.guest, r.jit[0], r.backoffs,
+             r.red[0] ? "; first red line: " : "", r.red);
+    row("exclspin", "jit-all", ok, &r, note);
+    if (r.guest != no_lines) free(r.guest);
+}
+
+// ---------- A running thread's guest registers in the state dump (aot.h dm_aot_thread_sample, dm_aot_thread_dump) ----------
+// The NRO sample, written here word by word: start counts in a loop that reads a flag word and has no SVC and no host call (ldr; cbz back), so the thread
+// runs guest code all the time; the child's tester (--sample) asks it for its registers SAMPLE_TAKES times, makes a state dump and then sets the flag; start
+// prints "sample PASS" and ends. The loop has no exit of its own: it is unbounded, so compiled code keeps its back-edge's poll at every tier (design 6.2)
+enum { SAMPLE_FLAG = 0x2000 };
+static size_t sample_nro(uint8_t *img, size_t cap, uint64_t *lo, uint64_t *hi) {
+    enum { TEXT = 0x1000, RO = 0x1000, DATA = SAMPLE_FLAG, SIZE = 0x3000, BSS = 0x1000, PASS_AT = RO + 0x100 };
+    if (cap < SIZE) return 0;
+    memset(img, 0, SIZE);
+    uint32_t w[64] = {0};
+    size_t n = 0x80 / 4;
+    const size_t start = n;
+    w[n] = a_adr(19, (int64_t)DATA - (int64_t)n * 4); n++;   // adr x19, the flag
+    w[n++] = a_movz(20, 0);
+    const size_t loop = n;
+    w[n++] = a_addi(20, 20, 1);         // add x20, x20, #1
+    w[n++] = 0xB9400269u;               // ldr w9, [x19]
+    w[n] = a_cb(0x34000000u, 9, (int64_t)(loop - n) * 4); n++;   // cbz w9, loop
+    *lo = loop * 4; *hi = n * 4;
+    w[n] = a_adr(0, (int64_t)PASS_AT - (int64_t)n * 4); n++;
+    w[n++] = a_movz(1, 11);             // "sample PASS"
+    w[n++] = 0xD40004E1u;               // svc #0x27 (OutputDebugString)
+    w[n++] = 0xD40000E1u;               // svc #0x7 (ExitProcess)
+    w[n++] = 0xD4200000u;               // brk #0
+    w[0] = a_b((int64_t)start * 4);
+    w[1] = RO;
+    memcpy(img, w, n * 4);
+    memcpy(img + 0x10, "NRO0", 4);
+    const uint32_t hdr[] = {0, SIZE, 0, 0, TEXT, RO, DATA - RO, DATA, SIZE - DATA, BSS};
+    memcpy(img + 0x14, hdr, sizeof hdr);
+    memcpy(img + RO, "MOD0", 4);
+    const int32_t mod0[] = {0x20, SIZE - RO, SIZE + BSS - RO, 0x40, 0x40, SIZE - RO};
+    memcpy(img + RO + 4, mod0, sizeof mod0);
+    memcpy(img + PASS_AT, "sample PASS", 11);
+    return SIZE;
+}
+// The dump's registers line: each pc it names (`sample+0x..`, after "pc" and before ')') inside [lo, hi): the count of those inside, -1 when the line names none
+static int regs_in_loop(const char *regs, uint64_t lo, uint64_t hi, int *named) {
+    *named = 0;
+    const char *p = strstr(regs, " pc "), *end = p ? strchr(p, ')') : NULL;
+    if (!p || !end) return -1;
+    int in = 0;
+    for (const char *q = p; (q = strstr(q, "sample+0x")) && q < end; q += 9) {
+        const uint64_t off = strtoull(q + 7, NULL, 16);
+        (*named)++;
+        in += off >= lo && off < hi;
+    }
+    return *named ? in : -1;
+}
+// The rows (nxaot): compiled, every sample at the loop's poll and inside the loop, and the state dump's line for the running main thread with its pcs in the loop;
+// with the JIT built in, the same with every instruction in the JIT (DM_AOT_JIT_ALL), the samples at the JIT's block boundaries. Before, the dump printed nothing
+// for a running thread on this engine (hle_thread.c thr_bt: "the execution engine's (Phase 2)")
+static void sample_rows(const char *self, const char *nxaot) {
+    if (!nxaot || !*nxaot) { printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): sample is not packed here\n", "sample", "poll"); return; }
+    static uint8_t img[0x3000];
+    uint64_t lo = 0, hi = 0;
+    const size_t len = sample_nro(img, sizeof img, &lo, &hi);
+    char nro[200], pack[200], line[600] = "", note[2000], extra[200];
+    mkdir("t_aot_host.tmp", 0755);
+    mkdir("t_aot_host.tmp/sample", 0755);
+    snprintf(nro, sizeof nro, "t_aot_host.tmp/sample/sample.nro");
+    snprintf(pack, sizeof pack, "t_aot_host.tmp/sample/sample%s", PACK_EXT);
+    FILE *f = fopen(nro, "wb");
+    const int wrote = len && f && fwrite(img, 1, len, f) == len;
+    if (f) fclose(f);
+    result r;
+    memset(&r, 0, sizeof r);
+    static char no_lines[1];
+    r.guest = no_lines;
+    if (!wrote || nxaot_pack(nxaot, nro, pack, line, sizeof line) != 0) {
+        snprintf(note, sizeof note, "%s: %s", wrote ? "nxaot build failed" : "cannot write the NRO", line);
+        row("sample", "poll", 0, &r, note);
+        return;
+    }
+    snprintf(extra, sizeof extra, "--sample %#llx:%#llx:%#x", (unsigned long long)lo, (unsigned long long)hi, SAMPLE_FLAG);
+    for (int jit = 0; jit < 1 + NXHOST_JIT; jit++) {
+        set_env("DM_AOT_JIT_ALL", jit ? "1" : NULL);
+        run_child(self, pack, nro, extra, &r);
+        unsigned taken = 0, in_loop = 0, poll = 0, inj = 0;
+        const int have = sscanf(r.smp, "t_aot_host: samples: %u of %*d taken, %u in the loop, %u at a poll, %u in the JIT", &taken, &in_loop, &poll, &inj) == 4;
+        int named = 0;
+        const int in_dump = regs_in_loop(r.regs, lo, hi, &named);
+        const char *where = jit ? "at a block boundary of the JIT fallback" : "at a poll of compiled code";
+        const int ok = r.status == 0 && !strcmp(r.guest, "sample PASS\n") && have && taken == SAMPLE_TAKES && in_loop == SAMPLE_TAKES &&
+                       (jit ? inj : poll) == SAMPLE_TAKES && strstr(r.regs, where) && named > 0 && in_dump == named;
+        snprintf(note, sizeof note, "%s: %s; the dump: %d of %d pcs in the loop [%#llx, %#llx), \"%.160s\"%s%s", jit ? "every instruction in the JIT (DM_AOT_JIT_ALL)" : "compiled",
+                 r.smp[0] ? r.smp + 12 : "no samples line", in_dump, named, (unsigned long long)lo, (unsigned long long)hi, r.regs[0] ? r.regs : "no registers line",
+                 r.red[0] ? "; first red line: " : "", r.red);
+        row("sample", jit ? "jit-all" : "poll", ok, &r, note);
+        if (r.guest != no_lines) free(r.guest);
+        r.guest = no_lines;
+    }
+    set_env("DM_AOT_JIT_ALL", NULL);
 }
 
 // ---------- PLT stubs bound to their own module (aot.h, "The loader's bindings"; dm/tools/aot/README.md "PLT stubs bound to their own module") ----------
@@ -3710,6 +4030,12 @@ int main(int argc, char **argv) {
     int pollkeep = !nonly;
     for (int i = 0; i < nonly; i++) pollkeep |= !strcmp(only[i], "pollkeep");
     if (pollkeep) pollkeep_row(argv[0], nxaot);   // 7e. A register a poll stored with a callee's value of the moment is stored again at its return
+    int exclspin = !nonly;
+    for (int i = 0; i < nonly; i++) exclspin |= !strcmp(only[i], "exclspin");
+    if (exclspin) exclspin_rows(argv[0], nxaot);  // 7g. A spin wait's gate site between a load-exclusive and its store-exclusive in the JIT fallback
+    int sample = !nonly;
+    for (int i = 0; i < nonly; i++) sample |= !strcmp(only[i], "sample");
+    if (sample) sample_rows(argv[0], nxaot);      // 7h. A running thread's guest registers in the state dump, at polls and in the JIT
     int bindstub = !nonly;
     for (int i = 0; i < nonly; i++) bindstub |= !strcmp(only[i], "bindstub");
     if (bindstub) bindstub_rows(argv[0], nxaot);  // 7f. PLT stubs bound to their own module: the host's bindings file, the pack built with it, a wrong one refused

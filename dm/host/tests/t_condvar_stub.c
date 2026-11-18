@@ -23,5 +23,6 @@ int dm_aot_thread_run(uint64_t entry, uint64_t arg, uint64_t sp) { (void)entry; 
 void dm_aot_thread_end(void) {}
 void dm_aot_thread_exiting(void) {}
 void dm_aot_thread_poke(dm_guest_state *st) { (void)st; }
+void dm_aot_thread_dump(dm_guest_state *st, uint32_t handle) { (void)st; (void)handle; }
 int dm_aot_stop_status(void) { return -1; }   // the process never stops here
 #endif

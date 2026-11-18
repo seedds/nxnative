@@ -51,9 +51,12 @@ void crash_watch_pregame_done(void) { atomic_store(&g_watch_pregame, 0); }
 void crash_watch_pregame_again(void) { atomic_store(&g_watch_pregame, 1); }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
+static _Thread_local int t_dump_live;   // a dump crash_dump_now makes, on an ordinary thread: it may wait for a running thread's samples (dm_aot_thread_dump)
 void crash_dump_now(const char *why) {
     fprintf(stderr, "[dm] state dump (%s): tick %u / stage %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]);
+    t_dump_live = 1;
     if (g_dump_hook) g_dump_hook();
+    t_dump_live = 0;
     if (g_wait_dump) g_wait_dump();
 }
 static void watch_alarm(void) {   // DM_WATCH's time is up
@@ -147,6 +150,42 @@ void dm_backtrace(uint64_t fp) {
     char line[1024];
     int p = snprintf(line, sizeof line, "[dm] bt:");
     bt_walk(line, &p, sizeof line, fp);
+    fprintf(stderr, "%s\n", line);
+}
+
+// A running guest thread in a state dump (aot.h dm_aot_thread_dump): DUMP_SAMPLES samples a few milliseconds apart, so that a loop shows as the pcs it goes round, the first
+// one's registers, and its frames from its x29 after its pc and lr. The first wait is long enough for a JIT block or a compiled loop of any length to reach a safepoint
+// (compiled code polls at entries and back-edges, bounded loops within about a microsecond; the JIT halts at its next block link), the later ones short
+enum { DUMP_SAMPLES = 4, DUMP_FIRST_MS = 250, DUMP_NEXT_MS = 50 };
+void dm_aot_thread_dump(dm_guest_state *st, uint32_t handle) {
+    if (!t_dump_live || !st) return;
+    dm_aot_sample s[DUMP_SAMPLES];
+    int n = 0;
+    for (; n < DUMP_SAMPLES; n++) {
+        const int r = dm_aot_thread_sample(st, n ? DUMP_NEXT_MS : DUMP_FIRST_MS, &s[n]);
+        if (r < 0) return;   // it ended meanwhile
+        if (r == 0) break;
+        plat_sleep_ns(3000000);
+    }
+    char line[1400], nm[64];
+    if (!n) {
+        const uint64_t at = s[0].pc;
+        if (at > DM_AOT_PROF_JIT) dm_aot_guest_name(at, nm, sizeof nm);
+        fprintf(stderr, "[dm]   %#x guest registers: no safepoint within %d ms (%s%s)\n", handle, DUMP_FIRST_MS,
+                at > DM_AOT_PROF_JIT ? "host code called from " : at == DM_AOT_PROF_JIT ? "in the JIT fallback" : "in compiled code or the run time", at > DM_AOT_PROF_JIT ? nm : "");
+        return;
+    }
+    int p = snprintf(line, sizeof line, "[dm]   %#x guest registers at %s (%d samples, pc", handle, s[0].where == DM_AOT_SAMPLE_JIT ? "a block boundary of the JIT fallback" : "a poll of compiled code", n);
+    for (int i = 0; i < n; i++) { dm_aot_guest_name(s[i].pc, nm, sizeof nm); p += snprintf(line + p, sizeof line - (size_t)p, " %s", nm); }
+    dm_aot_guest_name(s[0].x[30], nm, sizeof nm);
+    p += snprintf(line + p, sizeof line - (size_t)p, "): lr=%s sp=%#llx nzcv=%#x fpcr=%#x |", nm, (unsigned long long)s[0].sp, s[0].nzcv >> 28, s[0].fpcr);
+    for (int i = 0; i < 30 && p < (int)sizeof line - 32; i++) p += snprintf(line + p, sizeof line - (size_t)p, " x%d=%#llx", i, (unsigned long long)s[0].x[i]);
+    fprintf(stderr, "%s\n", line);
+    dm_aot_guest_name(s[0].pc, nm, sizeof nm);
+    p = snprintf(line, sizeof line, "[dm]   %#x bt: %s", handle, nm);
+    dm_aot_guest_name(s[0].x[30], nm, sizeof nm);
+    p += snprintf(line + p, sizeof line - (size_t)p, " (lr %s)", nm);
+    bt_walk(line, &p, sizeof line, s[0].x[29]);
     fprintf(stderr, "%s\n", line);
 }
 

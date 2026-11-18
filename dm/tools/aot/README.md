@@ -605,7 +605,11 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   later (every instance drops its translations before its next run, as a block may end where there was no code before).
 - **The hand-over** (2.5, 11): `dm_jit_run` copies x0..x30, SP, PC, v0..v31, NZCV, FPCR and FPSR (with the cumulative flags compiled code left in
   MXCSR, which it clears) into the instance, and back into the block when it stops: 102 to 109 ns both ways. The exclusive monitor is cleared both ways,
-  as an exception return clears it. At an SVC the JIT copies its state to the block, calls the host's SVC path, and takes the general registers back.
+  as an exception return clears it, except in a run that begins exactly where the instance's last run stopped at a gate site or after a step (`resume_pc`):
+  that run continues the same instruction stream, with no exception between, and keeps the monitor. Before, a spin wait whose back-edge lies between a
+  load-exclusive and its store-exclusive (a lock's `ldxr`, `cbnz` back, `stxr`, as the rewriter finds them) made the store fail at every pass, and the
+  loop never ended (Mario vs. Donkey Kong's start-up under `DM_AOT_JIT_ALL`: [docs/reference/threads.md](../../../docs/reference/threads.md#a-spin-wait-between-a-load-exclusive-and-its-store-exclusive-never-ends-in-the-jit-fallback);
+  dm/host `t_aot_host`'s `exclspin` rows). At an SVC the JIT copies its state to the block, calls the host's SVC path, and takes the general registers back.
 - **When it runs** (design 11, cases 1 to 4), and how compiled code hands over:
   1. an indirect branch to an address with no compiled entry: the dispatcher's miss path writes the target to `st->pc` and returns `jit_entry`
      (a function of the pack with the standard entries' signature) instead of a standard entry; `jit_entry` stores what it is passed and calls

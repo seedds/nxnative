@@ -85,7 +85,13 @@ class Rewrite(unittest.TestCase):
         self.assertNotIn('threadgroup_barrier', tg_fence(SCAN % 64))
 
     def test_a_shader_without_the_helper_is_left_as_it_is(self):
-        self.assertEqual(tg_fence(PLAIN), PLAIN)
+        for src in (PLAIN, PLAIN + '\nvoid dmsh_tg_fence_extra() {}\n', PLAIN + '\n// dmsh_tg_fence();\n'):
+            with self.subTest(src=src): self.assertEqual(tg_fence(src), src)
+
+    def test_a_helper_nothing_calls_is_rewritten_too(self):   # the declaration decides, as before the name was looked for first
+        src = (SCAN % 64).replace('    dmsh_tg_fence();\n', '')
+        self.assertNotIn('dmsh_tg_fence();', src)
+        self.assertEqual(helper_body(tg_fence(src)), FENCE)
 
     def test_spilled_arrays_get_device_fences(self):   # tg_spill runs after tg_fence: an array past abi.TG_MAX moves to device memory, and so must the fence's scope
         n = abi.TG_MAX // 4 + 1024

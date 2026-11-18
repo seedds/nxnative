@@ -274,6 +274,8 @@ class UniformBounds(unittest.TestCase):
         self.assertEqual(dmsh_fetch.select_guards('float _1 = _2 ? _3 : 0.0;'), 'float _1 = _2 ? _3 : 0.0;', 'no descriptor set')
         bare = 'float _1 = (*spvDescriptorSet0.fp_c5)._m0[29].y;'
         self.assertEqual(dmsh_fetch.select_guards(bare), bare, 'a read at a fixed offset is left as it is')
+        other = bare + '\nfloat _9 = _8 ? _1 : 0.0;'
+        self.assertEqual(dmsh_fetch.select_guards(other), other, 'an ordinary choice without any size comparison is left as it is')
 
     def test_select_guards_a_bounded_storage_read(self):   # TranslationFlags.MetalStorageBounds (GitHub issue #2618): the same choice, the index word 0 out of bounds
         t = '(*spvDescriptorSet0.cp_c%d)._m0[1]' % dmsh_abi.SBLEN_BANK

@@ -73,6 +73,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         FindMSBU32,
         Floor,
         FusedMultiplyAdd,
+        HalfFusedMultiplyAdd,
         GroupMemoryBarrier,
         ImageLoad,
         ImageStore,

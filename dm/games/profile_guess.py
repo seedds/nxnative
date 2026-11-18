@@ -497,12 +497,20 @@ def heap_signals(log, g):
             out['mem_reserve'] = (f'{0x10000000 + keep + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
     top = [float(x) for x in re.findall(r'\[mem\] alias region mapped up to \+([0-9.]+) GB', log)]
     alias = int(g.get('mem_alias'), 0) / 2**30
-    if not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25 and int(g.get('app_pool'), 0) > 0x40000000:
+    if (not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25
+            and int(g.get('app_pool'), 0) > HEAP_CHECK_STDALLOC and not int(g.get('stdalloc_cap', '0'), 0)):
         # no heap, and the alias region nearly full within seconds: nninitStartup handed pool − used to StandardAllocator as one address region and the game reserves regions of its own
         # beside it (Unity 2020 / 2022: Ace Attorney Investigations Collection, Brain Memory Training Academy, Patrick's Parabox, Monster Train 2, AI: THE SOMNIUM FILES - nirvanA Initiative,
-        # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool)
-        out['app_pool'] = ('0x40000000', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: a 1 GB pool, so StandardAllocator\'s region leaves the game room for its own')
+        # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool).
+        # What has to shrink is that region, not the pool: the game also reads the pool as the machine's memory (Unity's SystemInfo.systemMemorySize; Pokémon Friends saves its Low
+        # graphics at 2048 MB or less and then renders its 3D at 672x378, issue #2830). The host's allocator gate gives the region stdalloc_cap (hle_svc.c "StandardAllocator's address
+        # space"), so the pool stays the hardware's and the region about what a 1 GB pool gave it (pool − used), as Sonic Superstars' hand-set 1.5 GB does
+        out['stdalloc_cap'] = (f'{HEAP_CHECK_STDALLOC:#x}', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: 1 GB of address space for StandardAllocator, '
+                               'so its region leaves the game room for its own, while the pool the game reads as its memory stays the hardware\'s')
     return out
+
+
+HEAP_CHECK_STDALLOC = 0x40000000   # a starting point, not a measured minimum: Advance Wars 1+2: Re-Boot Camp needed a 2 GB pool
 
 
 # ---- Checking the rules against the hand-made profiles ----

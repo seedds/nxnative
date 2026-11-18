@@ -4,7 +4,8 @@
 #include <stddef.h>
 
 typedef struct mavc mavc;
-mavc *mavc_new(void);
+struct movie_vt_control;
+mavc *mavc_new(struct movie_vt_control *control);
 void mavc_free(mavc *a);
 void mavc_param_sets(mavc *a, const uint8_t *p, size_t n);   // SPS / PPS (Configure's csd-0 / csd-1) with Annex B start codes
 void mavc_avcc(mavc *a, const uint8_t *p, size_t n);         // SPS / PPS from an AVCDecoderConfigurationRecord (the MP4 avcC box)

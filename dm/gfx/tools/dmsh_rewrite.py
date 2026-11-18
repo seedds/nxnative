@@ -76,7 +76,7 @@ def bit0_mask(msl):
     return out if out != msl else msl
 
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
-TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')   # tg_fence looks for the name 'dmsh_tg_fence' before it runs this: a change of the name here is one there too
 def tg_fence(src):
     """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
     at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
@@ -85,6 +85,7 @@ def tg_fence(src):
     threadgroup-scope fence on every memory (MSL 3.2); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
     an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
     fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    if 'dmsh_tg_fence' not in src: return src   # every helper match needs its name; let the pattern check its declaration
     m = TG_FENCE_FN.search(src)
     if not m: return src
     return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
@@ -133,8 +134,12 @@ def mul_extended(msl):
 # (dm_uword), which the front end can neither merge with the next test's nor move out of its block, so no chain is folded; a uniform load per test is less than the bounds test
 # each read had then. Only words of the game's uniform slots (c3 and up) tested against a constant more than once: a single test is no chain, and the driver's banks (c0 to c2)
 # are left as written, since later rewrites look for their reads (dmsh_entry.vs_base_instance) and the host fills them. Returns the shader unchanged when there are none
-_UTEST_READ = r'as_type<(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # game slots c3 and up, not the driver's banks
-_UTEST = re.compile(r'(?<![\w.])%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= )%s' % (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
+_UTEST_READ = r'(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # after as_type<: game slots c3 and up, not the driver's banks
+# A literal start lets re skip to casts. The lookbehinds include that consumed prefix, so they still check the characters before the cast; spans and groups stay the same.
+# The prefix is written three times, at the start and in both lookbehinds: a change to one is a change to all three (test_shader_rewrites.py UniformMatchScan holds this
+# pattern to the one it replaced, match by match)
+_UTEST = re.compile(r'as_type<(?:(?<![\w.]as_type<)%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= as_type<)%s)' %
+                   (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
 _UTEST_LEFT = re.compile(r'(?<![\w.])-?\d+u? [!=]= $')
 UWORD = ('#ifndef DM_UWORD\n#define DM_UWORD\ntemplate<typename T, int N> static inline __attribute__((always_inline)) T dm_uword(const constant vec<T, N>& v, int i) '
          '{ return ((const volatile constant T*)&v)[i]; }\n#endif\n')
@@ -652,13 +657,17 @@ def gather_quad(off):
 # took 1.9 s to compile cold on an M2 Air (25 s for the route's 54 at the first start), while the GPU waited at its first draw (Native mesh pipelines compiled at their first draw).
 # Written noinline, it is one function the misses branch to. Only the search: the last entry's check and the access stay inline, since keeping the whole access helper apart
 # put the last entry and the vector words behind the call at every access (2.5 ms of a 15 ms frame on an M4 Pro)
-RAW_FIND = re.compile(r'\nstatic inline __attribute__\(\(always_inline\)\)\n(\w+ dmsh_raw_find\w*\()')
-def raw_noinline(msl):
-    return RAW_FIND.sub(lambda m: '\nstatic __attribute__((noinline))\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
+# Workaround for Apple's M1/M2 mesh compiler: some mesh programs calling this helper crash in MachineOperand::setReg. Keep the search inline in every final mesh library,
+# including one composed from vertex/geometry sources already rewritten noinline. Other stages retain one search; the compiler defect itself remains open.
+RAW_FIND = re.compile(r'\nstatic (?:inline __attribute__\(\(always_inline\)\)|__attribute__\(\(noinline\)\))\n(\w+ dmsh_raw_find\w*\()')
+def raw_noinline(msl, stage='cs'):
+    attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
+    return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 
 def gather_offsets(msl):
+    if 'spvGather' not in msl: return msl   # both gather helper names need this prefix
     if not re.search(r'\bspvGather(Compare)?ConstOffsets\(spvDesc|= spvGather(Compare)?ConstOffsets\(', msl): return msl
     arrays = {}
     for m in re.finditer(r'\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);', msl):

@@ -99,7 +99,10 @@ static void slices(id<MTLLibrary> lib) {
     tex_t t=texture(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6);
     prog_t pg={0}; NvProg *p=make_program(lib,&pg,"red");
     chain c={0}; bind(&c,&pg,3);
-    for(int sl=0;sl<6;sl++) { rt(&c,&t,sl,NULL); triangle(&c); }
+    // Between some layers the compact uniform and vertex buffer binds the recorder writes (OP_BIND_UBO_SMALL, OP_BIND_VBUF1; Mario Kart World binds them between its per-layer
+    // draws): plain state, which must not end the look-ahead (sm_scan) any more than OP_BIND_UBO or OP_BIND_VBUF do
+    for(int sl=0;sl<6;sl++) { rt(&c,&t,sl,NULL); triangle(&c);
+        if(sl&1) { p_bind_ubo_small u={1,9,0,0}; emit(&c,OP_BIND_UBO_SMALL,&u,sizeof u); p_bind_vbuf1 v={15,0,0}; emit(&c,OP_BIND_VBUF1,&v,sizeof v); } }
     // Warm the demanded amplified pipeline before checking the actual merge.
     execute(&c);
     for(int i=0;i<g_sm_amp_n;i++) {

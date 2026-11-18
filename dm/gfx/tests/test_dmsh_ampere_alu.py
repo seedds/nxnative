@@ -139,6 +139,26 @@ class HalfImmediate(Alu):
         self.assertRegex(msl, r'\b2\.0\b')
 
 
+class HalfFmaAlias(Alu):
+    """HFMA2.MMA shares decoding and result modifiers with ordinary HFMA2.
+    These are synthetic translation checks, including forms absent from the Orin recording."""
+    R2UR = (0x000fe200000e0000, 0x00000000130473c2)   # R2UR UR4, R19
+
+    def test_all_operand_forms_and_result_modifiers(self):
+        for form in range(1, 8):
+            slot32 = (21 << 32 if form == 1 else 0x3c003c00 << 32 if form in (2, 4) else
+                      (3 << 54 | 0x10 << 38) if form in (3, 5) else 4 << 32)
+            lo = 0x031 | form << 9 | 7 << 12 | 6 << 16 | 19 << 24 | slot32
+            for modifier in (0, 1 << (77 - 64), 1 << (78 - 64), 1 << (79 - 64), 1 << (80 - 64)):
+                with self.subTest(form=form, modifier=modifier):
+                    hi = 0x000fe20000000014 | modifier   # the register in the 64-bit slot is R20
+                    normal = self.kept(self.R2UR, (hi, lo), srcs=(19, 20, 21))
+                    normal_info = self.res
+                    mma = self.kept(self.R2UR, (hi, lo | 4), srcs=(19, 20, 21))
+                    self.assertEqual(mma, normal)
+                    self.assertEqual(self.res, normal_info)
+
+
 class GlobalMemory(Alu):
     """Global memory. desc[URb][Ra.64] (bit 76 of LDG / STG, bit 71 of ATOMG / RED; nvdisasm): URb is a memory descriptor, not part of the address, which is Ra.64 (plus the offset)
     alone; [Ra.64+URb] adds it. The descriptor's value was added to the address. ATOMG.CAS (0x3a9) was refused; ATOMG / RED INC and DEC had no case in EmitAtomicOp (the operation

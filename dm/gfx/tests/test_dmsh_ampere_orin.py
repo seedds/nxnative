@@ -11,7 +11,7 @@ fails when an op outside those lists differs, and when a KNOWN op matches, so th
 
 Needs DMSH_TEST_XLATE (the translator) like the other translator tests, and an Apple-silicon Mac. AMPERE_ORIN_ONLY=<ops or families> runs some;
 AMPERE_ORIN_REPORT=<file> writes every op's causes and differing NaN patterns as JSON. Derived ordinary-HFMA2 programs retain the recorded oracle;
-the small min/max FTZ and F32-result checks are synthetic contracts, labelled separately from hardware recordings."""
+the small min/max FTZ, F32-result and HMUL2.RELU checks are synthetic contracts, labelled separately from hardware recordings."""
 import ast
 import collections
 import concurrent.futures
@@ -49,10 +49,9 @@ KNOWN = {
     'fmax': 'FMNMX: Ampere orders -0 below +0 (max(+0, -0) is +0); Metal returns either', 'hmax2': '(as fmax, HMNMX2)',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
     # the translator refuses these
-    'hfma2': 'HFMA2.MMA (0x235) is not implemented', 'hfma2_ftz': '(as hfma2)', 'hfma2_sat': '(as hfma2)', 'hfma2_relu': '(as hfma2)',
-    'mufu_rcp': 'HFMA2.MMA with an immediate (0x435) is not implemented', 'f2f_tf32': '(as mufu_rcp)', 'idiv_u32': '(as mufu_rcp)',
-    'idiv_u32_by_7': '(as mufu_rcp)', 'irem_s32': '(as mufu_rcp)', 'fdiv_rn': '(as mufu_rcp)', 'f2i_s64': '(as mufu_rcp)', 'iadd64': '(as mufu_rcp)',
-    'isub64': '(as mufu_rcp)', 'imul64': '(as mufu_rcp)', 'imul24': '(as mufu_rcp)', 'dadd': '(as mufu_rcp; then DADD)', 'dmul': '(as mufu_rcp; then DMUL)',
+    'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path calls the CUDA driver',
+    'f2i_s64': 'F2I.S64 (0x311) is not implemented',
+    'dadd': 'DADD (0x229) is not implemented', 'dmul': 'DMUL (0x228) is not implemented',
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
     'imma_16832_s8': 'IMMA is not implemented', 'dp4a_u32': 'IDP.4A is not implemented', 'dp4a_s32': '(as dp4a_u32)', 'dp4a_su': '(as dp4a_u32)',
@@ -64,7 +63,7 @@ KNOWN = {
     'frcp_rn': 'not testable: CALL.ABS into the CUDA driver', 'fsqrt_rn': '(as frcp_rn)',
 }
 # Ops that run Metal's own approximation (MUFU, and the divisions built on it): compared and reported, never failed
-APPROX = {'mufu_ex2', 'mufu_ex2_ftz', 'mufu_lg2', 'mufu_lg2_ftz', 'mufu_rcp_ftz', 'mufu_rsqrt', 'mufu_rsqrt_ftz', 'mufu_sqrt', 'mufu_sqrt_ftz', 'mufu_sin',
+APPROX = {'mufu_ex2', 'mufu_ex2_ftz', 'mufu_lg2', 'mufu_lg2_ftz', 'mufu_rcp', 'mufu_rcp_ftz', 'mufu_rsqrt', 'mufu_rsqrt_ftz', 'mufu_sqrt', 'mufu_sqrt_ftz', 'mufu_sin',
           'mufu_cos', 'mufu_ex2_f16x2', 'fdiv_full', 'fdiv_approx',
           # HMMA with an f16 accumulator: one block of 8 rounded once (PR #1897) matches 99.97 %; the rest are 1-2 ULP where the sum nearly cancels
           'hmma_16816_f16', 'hmma_1688_f16'}
@@ -88,21 +87,29 @@ def load_fixture():
     # The recorded FMA uses the tensor-pipe opcode. Exercise the ordinary ALU
     # emitter too, independently of HFMA2.MMA support, retaining the Orin oracle.
     for o in list(doc['ops']):
-        if o['name'] not in ('hfma2', 'hfma2_ftz'):
+        if o['name'] not in ('hfma2', 'hfma2_ftz', 'hfma2_relu'):
             continue
-        program = bytearray(o['program'])
-        changed = 0
-        for i in range(0, len(program), 16):
-            lo, = struct.unpack_from('<Q', program, i)
-            if lo & 0x1ff == 0x035:
-                struct.pack_into('<Q', program, i, lo & ~4)
-                changed += 1
-        if changed != 1:
-            raise ValueError(f"{o['name']}: expected one HFMA2.MMA, got {changed}")
+        program = half_variant(o, 0x035, clear_opcode=4)
         name = o['name'].replace('hfma2', 'hfma2_alu')
-        doc['ops'].append(dict(o, name=name, program=bytes(program), derived_from=o['name']))
+        doc['ops'].append(dict(o, name=name, program=program, derived_from=o['name']))
     doc['ops'].extend(half_ftz_boundaries(doc['ops']))
+    doc['ops'].append(half_relu_boundary(doc['ops']))
     return doc
+
+
+def half_variant(op, opcode, *, clear_opcode=0, modifiers=0):
+    """Change one half instruction, retaining its registers, guards and schedule.
+    Modifiers are bits of the instruction's high word; assert the template shape."""
+    program = bytearray(op['program'])
+    changed = 0
+    for i in range(0, len(program), 16):
+        lo, hi = struct.unpack_from('<QQ', program, i)
+        if lo & 0x1ff == opcode:
+            struct.pack_into('<QQ', program, i, lo & ~clear_opcode, hi | modifiers)
+            changed += 1
+    if changed != 1:
+        raise ValueError(f"{op['name']}: expected one half operation, got {changed}")
+    return bytes(program)
 
 
 def half_ftz_boundaries(ops):
@@ -124,22 +131,31 @@ def half_ftz_boundaries(ops):
         if o['name'] not in cases:
             continue
         rows = cases[o['name']]
-        program = bytearray(o['program'])
         opcode = 0x032 if o['name'] == 'hmul2_ftz' else 0x040
-        changed = 0
-        for i in range(0, len(program), 16):
-            lo, hi = struct.unpack_from('<QQ', program, i)
-            if lo & 0x1ff == opcode:
-                struct.pack_into('<Q', program, i + 8, hi | 1 << (80 - 64) | (1 << (78 - 64) if opcode == 0x032 else 0))
-                changed += 1
-        if changed != 1:
-            raise ValueError(f"{o['name']}: expected one half operation, got {changed}")
+        program = half_variant(o, opcode, modifiers=1 << (80 - 64) | (1 << (78 - 64) if opcode == 0x032 else 0))
         rows = (rows * 32)[:32]
         name = o['name'] + ('_f32_result' if opcode == 0x032 else '_ftz_boundary')
         out.append(dict(o, name=name, program=bytes(program), outs='f' if opcode == 0x032 else 'h', cases=32,
                         rows_in=[r for r, _ in rows], rows_gpu=[[v] for _, v in rows],
                         oracle='synthetic FTZ boundary contract', derived_from=o['name']))
     return out
+
+
+def half_relu_boundary(ops):
+    """HMUL2.RELU semantic contract, not an additional NVIDIA recording.
+    Keep NaNs (including 0*inf), clamp negatives, retain positive subnormals."""
+    op = next(o for o in ops if o['name'] == 'hmul2')
+    cases = [([0x7e007e00, 0x3c003c00], 0x7fff7fff),
+             ([0x00000000, 0x7c007c00], 0x7fff7fff),
+             ([0x80008000, 0xfc00fc00], 0x7fff7fff),
+             ([0xbc00bc00, 0x3c003c00], 0x00000000),
+             ([0x3c003c00, 0x3c003c00], 0x3c003c00),
+             ([0x7c00fc00, 0x3c003c00], 0x7c000000),
+             ([0x03ff83ff, 0x3c003c00], 0x03ff0000),
+             ([0x3c003c00, 0x00018001], 0x00010000)] * 4
+    return dict(op, name='hmul2_relu_boundary', program=half_variant(op, 0x032, modifiers=1 << (79 - 64)), cases=32,
+                rows_in=[r for r, _ in cases], rows_gpu=[[v] for _, v in cases],
+                oracle='synthetic RELU boundary contract', derived_from=op['name'])
 
 
 def chain_rewrites():

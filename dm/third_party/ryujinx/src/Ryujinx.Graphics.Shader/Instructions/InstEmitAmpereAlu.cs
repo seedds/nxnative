@@ -39,6 +39,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x030, InstName.Hadd2, AHadd2);
             alu(0x032, InstName.Hmul2, AHmul2);
             alu(0x031, InstName.Hfma2, AHfma2);
+            // HFMA2.MMA uses HFMA2's fields on the tensor pipe (opcode bit 2 differs). ptxas also uses -RZ * RZ + imm to load constants.
+            alu(0x035, InstName.Hfma2, AHfma2);
             alu(0x002, InstName.Mov, AMov);
             alu(0x007, InstName.Sel, ASel);
             alu(0x087, InstName.Sel, ASel, uniform: true);
@@ -650,7 +652,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return x.Bit(80) ? (AHalfFlush(context, src.A), AHalfFlush(context, src.B)) : src;
         }
 
-        // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HMUL2 (sm_86): .RELU (79) clamps at zero; .BF16_V2 (85)
+        // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HFMA2.MMA / HMUL2 (sm_86): .RELU (79) clamps negatives but keeps NaN; .BF16_V2 (85)
         // is not handled. .FTZ (80) flushes a subnormal result lane to a zero of its sign after rounding to half, as the Orin does (HMUL2.FTZ of 0x3555 and 0x8608 is -0, not 0x8203);
         // the .F32 result is a float, whose subnormals Metal flushes itself
         private static void AHalfResult(EmitterContext context, AmpereOp x, Operand lo, Operand hi)
@@ -662,10 +664,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "BF16 half pair");
             }
 
-            if (x.Bit(79) && (x.Opcode & 0x1ff) is 0x031 or 0x032)
+            if (x.Bit(79) && (x.Opcode & 0x1ff) is 0x031 or 0x032 or 0x035)
             {
-                lo = context.FPMaximum(lo, ConstF(0));
-                hi = context.FPMaximum(hi, ConstF(0));
+                // RELU retains NaN, unlike SAT. Metal's plain maximum with zero would discard it.
+                lo = context.ConditionalSelect(context.IsNan(lo), lo, context.FPMaximum(lo, ConstF(0)));
+                hi = context.ConditionalSelect(context.IsNan(hi), hi, context.FPMaximum(hi, ConstF(0)));
             }
 
             if (x.Bit(78))

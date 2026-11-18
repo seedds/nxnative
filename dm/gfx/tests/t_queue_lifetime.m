@@ -163,7 +163,8 @@ int main(void) { @autoreleasepool {
     }
 
     if (mtl_sub_stream_on()) {   // The queue replay thread holds the submission lock for the whole translation of each node: the game's next streamed submit queues its job
-        // and copies its command list without waiting for it (nvn_queue.inc nvn_queue_submit, OoT-30 C-4).
+        // and copies its command list without waiting for it (nvn_queue.inc nvn_queue_submit, OoT-30 C-4). Its program is pinned by serial, never copied as a texture
+        // (check_t_queue_lifetime_asan)
         puts("CASE a submission while the replay holds the submission lock");
         NVNcommandHandle h = record(&target, &stable_red, 0, 1, 0); memset(memory + OUTPUT, 0x5a, BYTES);
         dispatch_semaphore_t s = dispatch_semaphore_create(0);

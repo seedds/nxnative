@@ -73,7 +73,7 @@ static void ndve_build(void) {
         if (!lib) { MLOG("[RED] NDVE engine: no library (%s); the game's network runs", e.localizedDescription.UTF8String); g_nd.state = -1; return; }
         for (int k = 0; k < NK_N; k++) {
             id<MTLFunction> f = [lib newFunctionWithName:@(k_ndve_kern[k])];
-            g_nd.ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+            g_nd.ps[k] = f ? dev_cps(f, &e) : nil;
             if (!g_nd.ps[k]) { MLOG("[RED] NDVE engine: no pipeline for %s; the game's network runs", k_ndve_kern[k]); g_nd.state = -1; return; }
         }
         id<MTLCommandBuffer> cb = [[g_dev newCommandQueue] commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
@@ -111,7 +111,7 @@ static int ndve_fail(NvShader *cs, const char *why) {
 static id<MTLTexture> ndve_tex_id(NvShader *cs, int kind, int reg, int *id_out) {
     for (int i = 0; i < cs->rf.nb; i++) {
         const nvn_rbind *b = &cs->rf.b[i]; if (b->kind != kind || b->reg != reg) continue;
-        int tid = kind == NVN_RB_TEX ? (int)(tex_slot_h(S.tex[5], S.img[5], b->reg) & 0xfffff) : b->reg < 32 ? (int)(S.img[5][b->reg] & 0xfffff) : 0;
+        int tid = kind == NVN_RB_TEX ? (int)(bound_tex(5, b->reg) & 0xfffff) : b->reg < 32 ? (int)(bound_img(5, b->reg) & 0xfffff) : 0;
         id<MTLTexture> t = nil; uint64_t rid = 0; int real = 0;
         os_unfair_lock_lock(&g_rmu);
         if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) { if (kind == NVN_RB_IMG) { t = img_binding(tid, b, &rid, &real); if (!real) t = nil; } else t = tex_by_id(tid); }
@@ -132,17 +132,17 @@ static void ndve_encode(id<MTLTexture> rgba, id<MTLTexture> out, uint64_t wgpu) 
         const ndve_layer *L = &k_ndve_l[i];
         if (i) [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:resource_vis()];
         [ce setComputePipelineState:g_nd.ps[L->k]];
-        [at setAddress:g_nd.args.gpuAddress + 256 * i atIndex:4];
+        at_addr(at, g_nd.args.gpuAddress + 256 * i, 4, "NDVE network table slot", 0);
         const ndve_args *a = (const ndve_args *)((uint8_t *)g_nd.args.contents + 256 * i);
         if (L->k == NK_PACK) {
-            [at setTexture:rgba.gpuResourceID atIndex:0]; [at setAddress:g_nd.t[L->out].gpuAddress atIndex:1];
+            [at setTexture:rgba.gpuResourceID atIndex:0]; at_addr(at, g_nd.t[L->out].gpuAddress, 1, "NDVE network table slot", 0);
             [ce dispatchThreadgroups:MTLSizeMake((960 + 31) / 32, (540 + 3) / 4, 1) threadsPerThreadgroup:MTLSizeMake(32, 4, 1)];
             continue;
         }
-        [at setAddress:g_nd.t[L->in].gpuAddress atIndex:0];
-        if (L->out >= 0) [at setAddress:g_nd.t[L->out].gpuAddress atIndex:1];
-        [at setAddress:wgpu + g_ndve_w[L->layer] atIndex:2]; [at setAddress:wgpu + g_ndve_b[L->layer] atIndex:3];
-        if (L->skip >= 0) [at setAddress:g_nd.t[L->skip].gpuAddress atIndex:5];
+        at_addr(at, g_nd.t[L->in].gpuAddress, 0, "NDVE network table slot", 0);
+        if (L->out >= 0) at_addr(at, g_nd.t[L->out].gpuAddress, 1, "NDVE network table slot", 0);
+        at_addr(at, wgpu + g_ndve_w[L->layer], 2, "NDVE network table slot", 0); at_addr(at, wgpu + g_ndve_b[L->layer], 3, "NDVE network table slot", 0);
+        if (L->skip >= 0) at_addr(at, g_nd.t[L->skip].gpuAddress, 5, "NDVE network table slot", 0);
         if (L->k == NK_OUT) { [at setTexture:rgba.gpuResourceID atIndex:0]; [at setTexture:out.gpuResourceID atIndex:1]; }
         const int staged = L->k == NK_C16 || L->k == NK_C32 || L->k == NK_C64;   // conv3s_*: a threadgroup = 32 x RY outputs
         uint32_t groups = staged ? (a->W + 31) / 32 * a->tiles_y : (a->tiles_x * a->tiles_y + 3) / 4;
@@ -166,11 +166,11 @@ static int ndve_resample(NvShader *cs, id<MTLTexture> into) {
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
     id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
-    [ce setComputePipelineState:g_nd.ps[NK_LUMA]]; [at setTexture:pic.gpuResourceID atIndex:0]; [at setAddress:g_nd.luma.gpuAddress atIndex:1];
+    [ce setComputePipelineState:g_nd.ps[NK_LUMA]]; [at setTexture:pic.gpuResourceID atIndex:0]; at_addr(at, g_nd.luma.gpuAddress, 1, "NDVE resampler table slot", 0);
     [ce dispatchThreadgroups:MTLSizeMake(60, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
     [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:resource_vis()];
     [ce setComputePipelineState:g_nd.ps[NK_RS]];
-    [at setAddress:g_nd.luma.gpuAddress atIndex:0]; [at setAddress:g_nd.wrs atIndex:2]; [at setAddress:cb.gpuAddress + co atIndex:3];
+    at_addr(at, g_nd.luma.gpuAddress, 0, "NDVE resampler table slot", 0); at_addr(at, g_nd.wrs, 2, "NDVE resampler table slot", 0); at_addr(at, cb.gpuAddress + co, 3, "NDVE resampler table slot", 0);
     if (into) g_nd.game_rs = out;
     [at setTexture:pic.gpuResourceID atIndex:0]; [at setTexture:dith.gpuResourceID atIndex:1]; [at setTexture:(into ? into : out).gpuResourceID atIndex:2];
     [ce dispatchThreadgroups:MTLSizeMake(80, 180, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -191,7 +191,7 @@ static void ndve_compare(id<MTLTexture> a, id<MTLTexture> b, int slot) {
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
     id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
-    [ce setComputePipelineState:g_nd.ps[NK_CMP]]; [at setTexture:a.gpuResourceID atIndex:0]; [at setTexture:b.gpuResourceID atIndex:1]; [at setAddress:g_nd.cnt.gpuAddress + 8 * slot atIndex:1];
+    [ce setComputePipelineState:g_nd.ps[NK_CMP]]; [at setTexture:a.gpuResourceID atIndex:0]; [at setTexture:b.gpuResourceID atIndex:1]; at_addr(at, g_nd.cnt.gpuAddress + 8 * slot, 1, "NDVE compare table slot", 0);
     [ce dispatchThreadgroups:MTLSizeMake((a.width + 15) / 16, (a.height + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
     enc_c_end(ce);

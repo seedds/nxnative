@@ -41,6 +41,27 @@ class Vbf(unittest.TestCase):
             with path.open('rb') as f:
                 with self.assertRaises(ValueError): vbf.read(f, entries[0])
 
+    def test_lz4_blocks(self):
+        """FFXII TZA compresses its blocks as raw LZ4; FFX/X-2's zlib blocks still read the same"""
+        import lz4.block
+        payload = b'Language=cn\r\n' * 6000 + bytes(range(256)) * 40
+        first, rest = payload[:65536], payload[65536:]
+        c1, c2 = lz4.block.compress(first, store_size=False), lz4.block.compress(rest, store_size=False)
+        names = b'gamedata/nxgamesetting.ini\0'
+        hlen = 16 + 64 + 4 + len(names) + 4
+        header = bytearray(struct.pack('<4sIQ', b'SRYK', hlen, 1) + bytes(32))
+        header += struct.pack('<IIQQQ', 0, 0, len(payload), hlen, 0)
+        header += struct.pack('<I', len(names) + 4) + names + struct.pack('<2H', len(c1), len(c2))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'lz4.vbf'; path.write_bytes(header + c1 + c2)
+            entries = vbf.entries(path)
+            with path.open('rb') as f: self.assertEqual(vbf.read(f, entries[0]), payload)
+            path.write_bytes(header + c1 + b'\x00' + c2[1:])   # a match before any output: no LZ4 block
+            with path.open('rb') as f:
+                with self.assertRaises(ValueError): vbf.read(f, entries[0])
+        self.assertEqual(vbf.block(zlib.compress(first), 65536, 'z'), first)
+        with self.assertRaises(ValueError): vbf.block(b'\x00' * 10, 100, 'bad')
+
     def test_effect_and_loose_programs_use_same_key(self):
         vs, ps = program('vs'), program('ps')
         effect = b'RYHP' + bytes(9) + vs + bytes(7) + ps
@@ -51,6 +72,37 @@ class Vbf(unittest.TestCase):
         bad = bytearray(effect); struct.pack_into('<I', bad, 13 + 0x100 + 0x704, 0x104)
         self.assertEqual([x[1] for x in split.phyre_shaders(bad, 'bad')], ['ps'])
         self.assertEqual(split.phyre_shaders(b'RYHP' + split.CTL_MAGIC, 'short'), [])
+        literal = bytearray(vs); literal[0x80:0x84] = split.CTL_MAGIC
+        self.assertEqual([x[1] for x in split.phyre_shaders(b'RYHP' + literal, 'literal')], ['vs'])
 
+    def test_headerless_compute_is_bounded_by_the_effect(self):
+        cs = bytearray(program('vs')); cs[:0x100] = bytes(0x100)
+        struct.pack_into('<3I', cs, 0x100 + 0x748, 8, 4, 1)
+        effect = b'RYHP' + bytes(9) + cs + program('ps')
+        out = []; split.scan_blob(effect, 'effect', out)
+        self.assertEqual([x[1] for x in out], ['cs', 'ps'])
+        self.assertIsNone(split.check('effect', *out[0][1:]))
+        self.assertEqual(split.phyre_shaders(cs, 'unframed'), [])
+        for at, value in ((0x748, 0), (0x704, 0x100000), (0x20, 0x100000)):
+            bad = bytearray(effect); struct.pack_into('<I', bad, 13 + 0x100 + at, value)
+            self.assertEqual([x[1] for x in split.phyre_shaders(bad, 'bad')], ['ps'])
+        bad = bytearray(effect); bad[13 + 4:13 + 8] = split.CTL_MAGIC
+        self.assertEqual([x[1] for x in split.phyre_shaders(bad, 'overlap')], ['ps'])
+
+    def test_effect_keeps_the_parent_archive_budget(self):
+        effect = b'RYHP' + bytes(9) + program('ps')
+        with self.assertRaisesRegex(SystemExit, 'archive members add up to more than'):
+            split.scan_blob(effect, '/member', [], left=[1, 1])
+
+    def test_phyre_programs_in_main(self):
+        """FFXII TZA: Phyre code area + control section pairs in main, unaligned, outside any RYHP container and referenced by nothing: raw_shaders takes the code area that ends at each"""
+        vs, ps = program('vs'), program('ps')
+        main = bytes(0x13) + vs + bytes(9) + ps + bytes(5)
+        found = split.raw_shaders(main, 'main')
+        self.assertEqual([(x[0], x[1]) for x in found], [('main#PHYRE@0x13', 'vs'), (f'main#PHYRE@{0x13 + len(vs) + 9:#x}', 'ps')])
+        self.assertEqual(split.raw_shaders(main, 'main', {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found}), [])   # taken by another reader: left out
+        bad = bytearray(main); bad[0x13:0x17] = bytes(4)   # no header where the vertex shader's code area starts: unaligned, so not looked at
+        self.assertEqual([x[1] for x in split.raw_shaders(bytes(bad), 'main')], ['ps'])
+        self.assertEqual(split.raw_shaders(vs[0x10:] + bytes(4), 'short'), [])   # an aligned control section whose code area would start before main: none taken, a red line
 
 if __name__ == '__main__': unittest.main()

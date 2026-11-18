@@ -184,17 +184,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 // back this way and swap two of its indices by the sign of their determinant (a mirrored instance's winding). Ocarina of Time's task shader 5d3a096025e375a1
                 // reads its payload back with 0xb8 in a later thread. From uncraftablexd's PRAGMATA bring-up (PR #1407)
                 int mode = x.Bits(72, 80);
+                int area = mode & ~0x0c;
+                int width = mode & 0x0c;
 
-                if (mode != 0x78 && mode != 0x38 && mode != 0xf8 && mode != 0xb8)
+                if (mode != 0x78 && (width == 0x0c || (area != 0x30 && area != 0xb0 && area != 0xf0)))
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                int baseOffset = mode switch { 0x38 => stage[1], 0xf8 or 0xb8 => stage[2], _ => 0 };
+                // Bits 74..75 select U8/U16/B32 (Mesa NAK sm70_encode.rs OpIsberd/OpIsbewr). Fast Fusion's task/mesh pair reads U16 payload entries (mode 0x34).
+                LsSize2 size = width switch { 0 => LsSize2.U8, 4 => LsSize2.U16, _ => LsSize2.B32 };
+                int baseOffset = area == 0x30 ? stage[1] : stage[2];
                 Operand addr = mode == 0x78 ? Const(stage[0])
-                    : mode == 0xb8 && stage.Length >= 7 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage))
+                    : area == 0xb0 && stage.Length >= 7 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage, size != LsSize2.B32))
                     : context.IAdd(AGpr(x.Ra), Const(baseOffset + (int)x.SignedField(40, 64)));
-                EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
+                EmitLoad(context, StorageKind.SharedMemory, size, addr, x.Rd, 0);
                 return;
             }
 
@@ -214,8 +218,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
             int mode = x.Bits(72, 80);
+            int area = mode & ~0x0c;
+            int width = mode & 0x0c;
 
-            if (stage == null || (mode != 0xb8 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
+            if (stage == null || (mode != 0x88 && mode != 0x80 && (width == 0x0c || (area != 0xb0 && area != 0xf0))))
             {
                 throw AFail(context, $"stage output store mode {mode:x2} outside a task or mesh shader");
             }
@@ -225,11 +231,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            bool word = mode == 0xb8 || mode == 0xf8;
-            Operand addr = mode == 0xb8 && stage.Length >= 7
-                ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage))
-                : context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
-            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
+            bool attr = area == 0xb0 || area == 0xf0;
+            LsSize2 size = attr ? width switch { 0 => LsSize2.U8, 4 => LsSize2.U16, _ => LsSize2.B32 } : LsSize2.U8;
+            Operand addr = area == 0xb0 && stage.Length >= 7
+                ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage, size != LsSize2.B32))
+                : context.IAdd(AGpr(x.Ra), Const((attr ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
+            EmitStore(context, StorageKind.SharedMemory, size, addr, x.Rb, 0);
         }
 
         // A mesh shader's attribute word by its non-skew address (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8 in a mesh shader; in a task shader it is the payload). Besides the
@@ -240,7 +247,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // stage[5] = n, stage[6] = the records' size (max vertices * 4n), from dmsh_meshstage.memory(); other addresses stay as they are. v = w / n as
         // w * ceil(2^18 / n) >> 18 where that is exact for every word of the records (AosVertex checks it: it is for n up to 42, not for every n above, e.g. 51
         // components and 160 vertices give vertex 109 for word 5609), else as an integer division
-        private static Operand AosToSoa(EmitterContext context, Operand off, int[] stage)
+        private static Operand AosToSoa(EmitterContext context, Operand off, int[] stage, bool subword = false)
         {
             int n = Math.Max(stage[5], 1);
             Operand rel = context.ISubtract(off, Const(stage[4]));
@@ -249,6 +256,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand v = AosVertex(context, w, n, (uint)Math.Max(stage[6], 0) / 4);
             Operand c = context.ISubtract(w, context.IMultiply(v, Const(n)));
             Operand soa = context.IAdd(context.IAdd(context.IMultiply(context.ShiftRightU32(v, Const(5)), Const(n * 0x80)), context.ShiftLeft(context.BitwiseAnd(v, Const(31)), Const(2))), context.ShiftLeft(c, Const(7)));
+            if (subword)
+            {
+                soa = context.IAdd(soa, context.BitwiseAnd(rel, Const(3)));
+            }
             return context.ConditionalSelect(inside, soa, off);
         }
 
@@ -301,10 +312,60 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (!x.Bit(77) && x.Ra != RegisterConsts.RegisterZeroIndex)
             {
+                if (x.Bit(76))
+                {
+                    // AST.P addresses the patch map, including the six tessellation factors at 0..0x17. Welcome Tour's Bezel hull shader writes
+                    // its outer factor at InvocationId * 4 (Ra), then its inner factor at 0x10. The ordinary attribute path only takes a fixed offset.
+                    Operand address = GetSrcReg(context, x.Ra);
+
+                    for (int i = 0; i <= x.Bits(74, 76) && x.Rb + i <= RegisterConsts.RegisterZeroIndex; i++)
+                    {
+                        AStorePatchIndexed(context, context.IAdd(address, Const(x.Bits(40, 50) + i * 4)), GetSrcReg(context, x.Rb + i));
+                    }
+
+                    return;
+                }
+
                 throw AFail(context, "AST with an offset register and an address");
             }
 
             EmitAst(context, x.Ra, x.Rb, x.Bits(40, 50), x.Bits(74, 76), x.Bit(76), x.Bit(77));
+        }
+
+        private static void AStorePatchIndexed(EmitterContext context, Operand address, Operand value)
+        {
+            Operand end = Label();
+            Operand inner = Label();
+            Operand user = Label();
+            Operand word = context.ShiftRightU32(address, Const(2));
+
+            context.BranchIfFalse(inner, context.ICompareLessUnsigned(word, Const(4)));
+            context.Store(StorageKind.OutputPerPatch, IoVariable.TessellationLevelOuter, null, word, value);
+            context.Branch(end);
+            context.MarkLabel(inner);
+
+            context.BranchIfFalse(user, context.ICompareLessUnsigned(word, Const(6)));
+            context.Store(StorageKind.OutputPerPatch, IoVariable.TessellationLevelInner, null, context.ISubtract(word, Const(4)), value);
+            context.Branch(end);
+            context.MarkLabel(user);
+
+            // A location must be constant in the SPIR-V interface, while its vector component may be indexed. Dispatch by location, with the
+            // final half-vector bounded by the patch map's end (0x200). Addresses outside the map have no output, as for an invalid fixed offset.
+            context.BranchIfTrue(end, context.ICompareGreaterOrEqualUnsigned(address, Const(AttributeConsts.UserAttributePerPatchEnd)));
+            Operand relative = context.ISubtract(address, Const(AttributeConsts.UserAttributePerPatchBase));
+            Operand location = context.ShiftRightU32(relative, Const(4));
+            Operand component = context.BitwiseAnd(context.ShiftRightU32(relative, Const(2)), Const(3));
+
+            for (int i = 0; i < (AttributeConsts.UserAttributePerPatchEnd - AttributeConsts.UserAttributePerPatchBase + 15) / 16; i++)
+            {
+                Operand next = Label();
+                context.BranchIfFalse(next, context.ICompareEqual(location, Const(i)));
+                context.Store(StorageKind.OutputPerPatch, IoVariable.UserDefined, null, Const(i), component, value);
+                context.Branch(end);
+                context.MarkLabel(next);
+            }
+
+            context.MarkLabel(end);
         }
 
         // ---- global memory ----
@@ -1056,6 +1117,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                             Operand fetchX = sources[^1];
                             sources[^1] = context.BitwiseAnd(fetchX, Const(0x3FFF));
                             sources.Add(context.ShiftRightU32(fetchX, Const(14)));
+                            flags |= TextureFlags.RowWrap;
                             context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle);
                         }
                         else

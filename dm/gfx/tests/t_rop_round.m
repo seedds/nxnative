@@ -2,7 +2,8 @@
 // differ, then the edges; dmsh_rewrite.py blend_zero's guard in it, from test_dmsh_blend_zero.py --fixture-rop) drawn into RGBA8, RGBA16 and RGB10A2 normalized targets with blending
 // off, with MAX, and with an ADD of ONE and ZERO (a blended sum: rounded after the blend, out of the shader's reach), and the targets read back. Where the stored value is the
 // colour's conversion, it is NVIDIA's: the float32 product rounded to nearest even. The ADD row, and every row with DM_NVN_ROP_ROUND=0, show Apple's conversion as it is: the
-// exact product rounded to nearest (Sonic Frontiers' flags 66.5 / 255: 66 against 67). rop_word's cases are checked on the state alone.
+// exact product rounded to nearest (Sonic Frontiers' flags 66.5 / 255: 66 against 67). rop_word's cases are checked on the state alone. A merged pass's draw (output 0 drawn to
+// attachment 1) is drawn and read back too, with the words bz_bind bound.
 // make GAME=<id> check_t_rop_round (./t_rop_round <dir>)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -30,6 +31,50 @@ static void stored(int f, const uint8_t *px, unsigned out[4], unsigned sc[4]) {
     else { uint32_t v; memcpy(&v, px, 4); for (int c = 0; c < 3; c++) { out[c] = v >> (10 * c) & 1023; sc[c] = 1023; } out[3] = v >> 30; sc[3] = 3; }
 }
 static blend_st state(int r) { blend_st b = {.target = 0, .src_rgb = O, .dst_rgb = Z, .src_a = O, .dst_a = Z, .eq_rgb = (uint64_t)rows[r].eq, .eq_a = (uint64_t)rows[r].eq}; return b; }
+// A merged pass's draw (g_pso_lmap and g_pso_fsfn as draw has them for a pass that reads its targets from the tile): the words it binds are the state's under the map, as its pipeline's
+// are. The shader's output 0 (blending off, Sonic Frontiers' flags 66.5 / 255) goes to physical attachment 1, an RGBA8 target, beside an RGBA16F one at attachment 0 that no output
+// reaches. Read without the map, the word is 0 (attachment 0 is no normalized target) and Apple's conversion stores 67
+static void merged_case(NSString *source, prog_t *program, int on) {
+    NSString *merged = [source stringByAppendingString:@"\nstruct dm_merged_out { float4 m_1 [[color(1)]]; };\n"
+        "fragment dm_merged_out main_m(constant dm_blend_state& dm_blend [[buffer(28)]])\n"
+        "{\n    main0_out out = {};\n    out.m_0 = float4(as_type<float>(0x3e858586u));\n    dm_blend0(out, dm_blend);\n    dm_merged_out r = {};\n    r.m_1 = out.m_0;\n    return r;\n}\n"];
+    NSError *error = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:merged options:nil error:&error];
+    CHECK(lib != nil); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
+    id<MTLFunction> fn = fn4_note([lib newFunctionWithName:@"main_m"], lib, @"main_m", nil);
+    CHECK(fn != nil); if (!fn) return;
+    static tex_t unused = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98310}, target = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98311};
+    unused.d = (nvn_texdesc){.width = 8, .height = 1, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA16F};
+    target.d = (nvn_texdesc){.width = 8, .height = 1, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8};
+    uint8_t *cmds; if (posix_memalign((void **)&cmds, getpagesize(), 65536)) abort(); memset(cmds, 0, 65536); mtl_pool_add(cmds, 65536);
+    size_t used = 0;
+    #define EMIT_M(OP, X) do { size_t z = (8 + sizeof(X) + 7) & ~7ull; op_hdr h = {OP, (uint32_t)z}; memcpy(cmds + used, &h, 8); memcpy(cmds + used + 8, &(X), sizeof(X)); used += z; } while (0)
+    p_set_rt rt = {.n = 2}; rt.color[0] = &unused; rt.color[1] = &target; EMIT_M(OP_SET_RT, rt);
+    p_viewports vp = {.n = 1}; vp.v[0][2] = 8; vp.v[0][3] = 1; EMIT_M(OP_VIEWPORTS, vp);
+    p_bind_program bp = {program, 3}; EMIT_M(OP_BIND_PROGRAM, bp);
+    p_bind_state bs = {.kind = 1}; color_st cs = {0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; memcpy(bs.bytes, &cs, sizeof cs); EMIT_M(OP_BIND_STATE, bs);
+    p_bind_state bb = {.kind = 0}; blend_st b = state(0); memcpy(bb.bytes, &b, sizeof b); EMIT_M(OP_BIND_STATE, bb);
+    p_scissor sc = {0, 0, 8, 1}; EMIT_M(OP_SCISSOR, sc); p_draw dr = {.prim = 4, .count = 3, .instances = 1}; EMIT_M(OP_DRAW, dr);
+    op_hdr end = {OP_END, 8}; memcpy(cmds + used, &end, 8);
+    #undef EMIT_M
+    state_reset(); memset(&R, 0, sizeof R);
+    static const uint8_t lmap[8] = {0xff, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    g_pso_lmap = lmap; g_pso_fsfn = fn; memset(g_bz_last, 0xee, sizeof g_bz_last);   // as draw has them for a merged pass; it clears them once it has the pipeline
+    mtl_sub_begin(); mtl_exec(cmds);
+    CHECK(g_bz_last[0] == 0); CHECK(g_bz_last[1] == (on ? (uint32_t)DMSH_ROUND_8 : 0u));   // the words the draw bound: output 0 rounded for its RGBA8 attachment under the map
+    CHECK(!g_pso_lmap);   // the map is the draw's alone
+    id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    CHECK(pixels != nil); if (!pixels) { mtl_sub_commit(); mtl_pool_del(cmds); free(cmds); return; }
+    [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 1, 1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:32];
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
+    const uint8_t *px = pixels.contents;
+    for (int i = 0; i < 32; i++) {
+        unsigned want = on ? 66u : 67u;
+        if (px[i] != want) fprintf(stderr, "merged pass, x %d channel %d: got %u, want %u\n", i / 4, i % 4, px[i], want);
+        CHECK(px[i] == want);
+    }
+    mtl_pool_del(cmds); mtl_drain(); free(cmds);
+    memset(&S.color, 0, sizeof S.color);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
@@ -48,6 +93,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "prop_b");
     CHECK(ps->fn != nil);
     static prog_t program; program.serial = 98300; serial_put(program.serial, pr);
+    merged_case(source, &program, on);
     static tex_t target[NFMT];
     for (int f = 0; f < NFMT; f++) {
         target[f] = (tex_t){.magic = MAGIC('T', 'E', 'X', 0), .serial = 98301 + f};
@@ -71,7 +117,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     op_hdr end = {OP_END, 8}; memcpy(commands + used, &end, 8);
     #undef EMIT
     state_reset();
-    memset(&R, 0, sizeof R); mtl_sub_begin(); uint64_t handle = (uint64_t)commands; mtl_sub_index(&handle, 1); mtl_exec(commands);
+    memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(commands);
     id<MTLBuffer> pixels[NFMT];
     for (int f = 0; f < NFMT; f++) {
         pixels[f] = [g_dev newBufferWithLength:W * 8 * NROWS options:MTLResourceStorageModeShared];
@@ -95,7 +141,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         if (f == 0) CHECK(flags_seen);
     }
     // the word on the state alone: by target format, blend state, logic operation and a merged pass's mapping
-    memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pso_lmap = NULL; memset(&S.color, 0, sizeof S.color); S.color.logic_op = NVN_LOGIC_OP_COPY;
+    memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); memset(&S.color, 0, sizeof S.color); S.color.logic_op = NVN_LOGIC_OP_COPY;
     for (int i = 0; i < 8; i++) S.blend[i] = state(0);
     static const struct { MTLPixelFormat f; uint32_t cls; } cases[] = {
         {MTLPixelFormatRGBA8Unorm, DMSH_ROUND_8}, {MTLPixelFormatBGRA8Unorm, DMSH_ROUND_8}, {MTLPixelFormatR8Unorm, DMSH_ROUND_8}, {MTLPixelFormatRG8Unorm, DMSH_ROUND_8},
@@ -104,17 +150,16 @@ int main(int argc, char **argv) { @autoreleasepool {
     };
     for (size_t k = 0; k < sizeof cases / sizeof *cases; k++) {
         g_pass.cfmt[0] = cases[k].f; g_pass.cfmt[3] = cases[k].f;
-        CHECK(rop_word() == (on ? cases[k].cls | cases[k].cls << (3 * DMSH_BLEND_ROUND_BITS) : 0));
+        CHECK(rop_word(NULL) == (on ? cases[k].cls | cases[k].cls << (3 * DMSH_BLEND_ROUND_BITS) : 0));
     }
     g_pass.cfmt[3] = 0; g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm;
-    S.color.blend_en = 1; S.blend[0] = state(2); CHECK(rop_word() == 0);   // a blended sum
-    S.blend[0].eq_rgb = MIN; S.blend[0].eq_a = MAX; CHECK(rop_word() == (on ? DMSH_ROUND_8 : 0u));   // MIN / MAX on both
-    S.blend[0].eq_a = ADD; CHECK(rop_word() == 0);   // the alpha blended
-    S.color.logic_op = NVN_LOGIC_OP_XOR; CHECK(rop_word() == (on ? DMSH_ROUND_8 : 0u));   // a logic operation takes the place of blending
+    S.color.blend_en = 1; S.blend[0] = state(2); CHECK(rop_word(NULL) == 0);   // a blended sum
+    S.blend[0].eq_rgb = MIN; S.blend[0].eq_a = MAX; CHECK(rop_word(NULL) == (on ? DMSH_ROUND_8 : 0u));   // MIN / MAX on both
+    S.blend[0].eq_a = ADD; CHECK(rop_word(NULL) == 0);   // the alpha blended
+    S.color.logic_op = NVN_LOGIC_OP_XOR; CHECK(rop_word(NULL) == (on ? DMSH_ROUND_8 : 0u));   // a logic operation takes the place of blending
     S.color.logic_op = NVN_LOGIC_OP_COPY; S.color.blend_en = 0;
-    static const uint8_t lmap[8] = {0xff, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}; g_pso_lmap = lmap;   // physical target 1 is output 2
-    g_pass.cfmt[0] = 0; g_pass.cfmt[1] = MTLPixelFormatRGBA16Unorm; CHECK(rop_word() == (on ? (uint32_t)DMSH_ROUND_16 << (2 * DMSH_BLEND_ROUND_BITS) : 0u));
-    g_pso_lmap = NULL;
+    static const uint8_t lmap[8] = {0xff, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};   // physical target 1 is output 2
+    g_pass.cfmt[0] = 0; g_pass.cfmt[1] = MTLPixelFormatRGBA16Unorm; CHECK(rop_word(lmap) == (on ? (uint32_t)DMSH_ROUND_16 << (2 * DMSH_BLEND_ROUND_BITS) : 0u));
     mtl_pool_del(commands); mtl_drain(); free(commands);
     printf("normalized colour rounding replay (%s): %d checks, %d failed\n", on ? "NVIDIA's rule" : "DM_NVN_ROP_ROUND=0, Apple's conversion", checks, failed);
     return failed != 0;

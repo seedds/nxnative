@@ -58,6 +58,7 @@ Brought up on the Mac: the ATLUS logo, the title, the puzzle type choice, the Go
 
 - From a fresh save, `DM_KEYS="5:A*25/2,60:Plus*14/4,61:Y*14/4,62:A*14/4"` skips the intro scenes into the first Nightmare stage (about frame 3,300); `120:LUp~0.4*40/1.5` then climbs.
 - `smoke.tsv` uses only `DM_KEYS="5:A*25/2"`, then waits through the entire anime intro. Golden Playhouse is visible by frame 3,600; a host that flags the last picture stays black.
+- [PR #2872](https://github.com/seedds/nxnative/pull/2872) ran that fresh-save route on 1.0.1a with an M6 Mac mini, macOS 27.2 and Xcode 27.2. Main `f15d6585`, CV only, and CV with a 20 µs spin used the same modules, shaders and prebuilt pipelines. Across frames 4800–6000 the mean per waited handoff was 60.5, 56.3, and 8.2 µs respectively. The two busier intervals ending at frames 5700 and 6000 recorded 4,302–4,432, 2,760–2,856, and 2,416–2,559 wakeups/s, with CPU power of 0.47–0.48, 0.43–0.44, and 0.47–0.48 W. All three held 30 fps with a frame-time p99 of about 33.4 ms. The spin improved latency but took CPU power back to main's range, so the host uses CV only. The local build accounted for a different capture address for the same shader and flagged one corrupt movie (`mov429.usm`). None of the runs opened it.
 
 ## Found on this game
 
@@ -69,6 +70,7 @@ General host changes first needed here; each applies to every game:
 - **`nv12-uv-stride` in the movie decoder's output format** (`md_format` in `hle_movie.c`): [Output format keys (`md_format`)](../../../docs/reference/movies.md#output-format-keys-md_format).
 - **The end-of-stream flag on an output without a picture, and no reorder queue for H.264 POC type 2** (`md_pump` in `hle_movie.c`, `hle_movie_avc.c`): [No picture carries the end-of-stream flag](../../../docs/reference/movies.md#no-picture-carries-the-end-of-stream-flag).
 - **`nn::settings::GetAvailableLanguageCodeCount`** (`hle_sdk16.c`): same section.
+- **A same-core handoff waits without a timer per handoff** ([host scheduler](../../../docs/reference/threads.md#a-same-core-handoff-waits-without-a-timer-per-handoff)). NX18 found that `main thread` and `job_update_0` (both pinned to core 0) trade a lock 5,000–6,200 times a second in some scenes. On its iPhone 18 Pro Max, CPU power rose from 0.03–0.05 to 0.47 W at 30 fps when the storm occurred. On its Mac (frames 5100–6000), the change reduced wakeups from about 5,670 to 600/s. These are measurements of the fork.
 
 ## Open
 

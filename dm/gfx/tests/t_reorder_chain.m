@@ -250,7 +250,7 @@ static void inherited_target_case(void) {
 }
 int main(int argc,char **argv) { @autoreleasepool {
     setvbuf(stdout,NULL,_IONBF,0);
-    all_independent=argc>1&&!strcmp(argv[1],"--all-independent"); setenv("DM_NVN_TBDR","0",1); mtl_init();
+    all_independent=argc>1&&!strcmp(argv[1],"--all-independent"); mtl_init();
     NSError *err=nil; id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
       "vertex float4 v(uint n [[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],0,1);}\n"
       "fragment float4 red(){return float4(1,0,0,1);} fragment float4 blue(){return float4(0,0,1,1);} fragment float4 green(){return float4(0,1,0,1);}\n"

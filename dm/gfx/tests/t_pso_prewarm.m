@@ -164,7 +164,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (NSUInteger i = 0; i < files.count; i++) {   // each period is also a pipelines script, for metal-tt and the other GPUs
         NSData *js = [NSData dataWithContentsOfFile:[bundle stringByAppendingFormat:@"/prewarm-%02lu.mtl4-json", (unsigned long)i]];
         id j = js ? [NSJSONSerialization JSONObjectWithData:js options:0 error:nil] : nil;
-        EXPECT("tool: each file has its pipelines script, with its libraries", 1, [j isKindOfClass:NSDictionary.class] && [j[@"libraries"] count] > 0);
+        NSArray *libraries = [j isKindOfClass:NSDictionary.class] ? j[@"libraries"] : nil;
+        EXPECT("tool: each file has its pipelines script, with its libraries", 1, libraries.count > 0);
     }
     // the tool again on the same work folder: the bases are in its files, nothing is compiled, the output is the same
     EXPECT("tool again: exit 0", 0, run_self(@[@"--tool", root], tool, [root stringByAppendingPathComponent:@"tool1b.log"]));

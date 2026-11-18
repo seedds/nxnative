@@ -358,7 +358,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             if (s == 1) mtl_stats(&pass0, &draw0);
             mtl_set_frame(frame_no);
             mtl_set_queue_origin_lower_left(qll);
-            mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(hs, (int)nh);
+            mtl_sub_begin(); nvn_ft_poll();
             for (uint32_t i = 0; i < nh; i++) { mtl_exec_rest(hs + i + 1, (int)(nh - i - 1)); mtl_exec((const uint8_t *)(uintptr_t)hs[i]); }
             mtl_exec_rest(NULL, 0); mtl_sub_commit();
             exec_ns += now_ns() - t1;

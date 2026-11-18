@@ -157,13 +157,45 @@ int main(void) {
     s2_cal c; n = unhex("2ff87c97944c9d9446ffff", b);
     CHECK(!s2_cal_blank(b, n) && s2_cal_parse(b, n, &c) && c.cx == 2095 && c.cy == 1999 && c.maxx == 1175 && c.maxy == 1225 && c.minx == 1181 && c.miny == 1129);
     float x, y;
-    s2_cal_apply(&c, 3270, 1999, 40, &x, &y); CHECK(x == 1.f && y == 0.f);
-    s2_cal_apply(&c, 2095 + 20, 1999 - 20, 40, &x, &y); CHECK(x == 0.f && y == 0.f);       // inside the dead zone
-    s2_cal_apply(&c, 2095 - 1181, 1999 + 2000, 40, &x, &y); CHECK(x == -1.f && y == 1.f);   // past the travel clamps
-    s2_cal_apply(NULL, 2048, 2048, 40, &x, &y); CHECK(x == 0.f && y == 0.f);
+    s2_cal_apply(&c, 3270, 1999, &x, &y); CHECK(x == 1.f && y == 0.f);
+    s2_cal_apply(&c, 2095 + 20, 1999 - 20, &x, &y); CHECK(x == 0.f && y == 0.f);       // inside the dead zone
+    s2_cal_apply(&c, 2095 - 1181, 1999 + 2000, &x, &y); CHECK(x == -1.f && y == 1.f);   // past the travel clamps
+    s2_cal_apply(NULL, 2048, 2048, &x, &y); CHECK(x == 0.f && y == 0.f);
     s2_cal blank; n = unhex("ffffffffffffffffffffff", b); s2_cal_default(&blank);
     CHECK(s2_cal_blank(b, n) && !s2_cal_parse(b, n, &blank) && !blank.valid);
-    s2_cal_apply(&blank, 2048 + 1200, 2048, 40, &x, &y); CHECK(x == 1.f);   // an uncalibrated stick uses the typical travel
+    s2_cal_apply(&blank, 2048 + 1200, 2048, &x, &y); CHECK(x == 1.f);   // an uncalibrated stick uses the typical travel
+
+    // The dead zone (issue #2245). A stick of 1200 counts each way with no dead zone of its own takes S2_DEAD_SHARE, 120 counts. With 40 counts per axis and no scale (before),
+    // 41 counts read 41 / 1200 = 3.4 % and a Pro Controller 2's right stick at rest 60 counts off its centre read 5 %; now both read 0, and the output grows from 0 past the edge
+    { s2_cal r = {2048, 2048, 1200, 1200, 1200, 1200, 1, 0};
+      s2_cal_apply(&r, 2048 + 41, 2048, &x, &y); CHECK(x == 0.f && y == 0.f);
+      s2_cal_apply(&r, 2048 + 60, 2048 - 60, &x, &y); CHECK(x == 0.f && y == 0.f);   // 85 counts from the centre, inside the round dead zone
+      s2_cal_apply(&r, 2048 + 121, 2048, &x, &y); CHECK(x > 0.f && x < 0.002f && y == 0.f);
+      s2_cal_apply(&r, 2048 + 600, 2048, &x, &y); CHECK(fabsf(x - 0.4f / 0.9f) < 1e-5f);
+      s2_cal_apply(&r, 2048 + 200, 2048 + 60, &x, &y); CHECK(x > 0.f && y > 0.f && fabsf(y / x - 0.3f) < 1e-4f);   // round: the small y stays, in proportion (a dead zone per axis zeroed it)
+      s2_cal_apply(&r, 2048 - 1200, 2048 + 1200, &x, &y); CHECK(x == -1.f && y == 1.f); }   // a corner still reaches full x and y
+
+    // Stick parameters: a Pro Controller 2's first factory block (ndeadly/switch2_controller_research, memory_layout.md 0x13080 and its calibration at 0x130A8): dead zone 160 counts,
+    // 10.3 % of its travel of 1510 to 1594, its own
+    n = unhex("01add99a555665a0000aa0000ae2200ee2200e9aadd99aadd90aa5500aa5502ff6622ff6620affff" "b36783" "2e665e" "3a065f", b);
+    CHECK(n == S2_STICK_BLOCK && s2_params_dead(b, n) == 160.f);
+    CHECK(s2_cal_from_flash(b, n, NULL, 0, &c) == 1 && c.cx == 1971 && c.cy == 2102 && c.maxx == 1582 && c.maxy == 1510 && c.minx == 1594 && c.miny == 1520 && c.dead == 160.f);
+    CHECK(fabsf(s2_cal_dead_own(&c) - 160.f / 1551.5f) < 1e-5f && s2_cal_dead_share(&c) == s2_cal_dead_own(&c));
+    s2_cal_apply(&c, 1971 + 150, 2102, &x, &y); CHECK(x == 0.f);   // 150 counts: inside its 160
+    s2_cal_apply(&c, 1971 + 170, 2102, &x, &y); CHECK(x > 0.f);
+    // A user calibration (magic skipped) replaces the centre and travel and keeps the dead zone; a blank one leaves the factory's
+    { uint8_t u[16]; size_t un = unhex("2ff87c97944c9d9446ffff", u);
+      CHECK(s2_cal_from_flash(b, n, u, un, &c) == 2 && c.cx == 2095 && c.maxx == 1175 && c.dead == 160.f);
+      un = unhex("ffffffffffffffffffffff", u);
+      CHECK(s2_cal_from_flash(b, n, u, un, &c) == 1 && c.cx == 1971 && c.dead == 160.f); }
+    // A Joy-Con 2's (GP2040-CE, Switch2ProDescriptors.h, the left Joy-Con's 0x13080): 147 counts, 12.2 % of its travel
+    n = unhex("02accaaa533555933009933009d2200dd2200dccacd9ccacd9d4422dd4422d8ff4488ff4480fffff" "fd2785" "a6444a" "ba644c", b);
+    CHECK(n == S2_STICK_BLOCK && s2_cal_from_flash(b, n, NULL, 0, &c) == 1 && c.dead == 147.f && s2_cal_dead_own(&c) > 0.12f && s2_cal_dead_own(&c) < 0.125f);
+    // No block, a blank one, or a value no dead zone could be: the default share
+    CHECK(s2_cal_from_flash(NULL, 0, NULL, 0, &c) == 0 && c.dead == 0 && !c.valid && s2_cal_dead_share(&c) == S2_DEAD_SHARE);
+    memset(b, 0xFF, S2_STICK_BLOCK); CHECK(s2_params_dead(b, S2_STICK_BLOCK) == 0.f && s2_cal_from_flash(b, S2_STICK_BLOCK, NULL, 0, &c) == 0);
+    { s2_cal r = {2048, 2048, 1200, 1200, 1200, 1200, 1, 20}; CHECK(s2_cal_dead_own(&r) == 0 && s2_cal_dead_share(&r) == S2_DEAD_SHARE);   // 1.7 %
+      r.dead = 600; CHECK(s2_cal_dead_own(&r) == 0 && s2_cal_dead_share(&r) == S2_DEAD_SHARE); }                                      // 50 %
 
     // Pads
     s2_pad_state pad; uint64_t m; int32_t st[4];
@@ -171,7 +203,7 @@ int main(void) {
     // A Pro Controller 2: its own buttons, both sticks
     pad.pro.have = 1; pad.pro.pid = S2_PID_PRO; s2_cal_default(&pad.pro.cal[0]); s2_cal_default(&pad.pro.cal[1]);
     pad.pro.r.buttons = S2_A | S2_ZL | S2_SL_L; pad.pro.r.lx = 2048 + 1200; pad.pro.r.ly = 2048; pad.pro.r.rx = 2048; pad.pro.r.ry = 2048 - 600;
-    CHECK(s2_pad_input(&pad, &m, st) && m == (DM_BTN_A | DM_BTN_ZL) && st[0] == DM_STICK_MAX && st[1] == 0 && st[2] == 0 && st[3] == -(int32_t)lrintf(600.f / 1200.f * DM_STICK_MAX));
+    CHECK(s2_pad_input(&pad, &m, st) && m == (DM_BTN_A | DM_BTN_ZL) && st[0] == DM_STICK_MAX && st[1] == 0 && st[2] == 0 && abs(st[3] + (int32_t)lrintf(0.4f / 0.9f * DM_STICK_MAX)) <= 1);
     CHECK(s2_pad_motion_dev(&pad, 1) == &pad.pro && s2_pad_motion_dev(&pad, 0) == &pad.pro);
     // Two Joy-Cons: the left's d-pad and stick, the right's face buttons and stick
     memset(&pad, 0, sizeof pad);
@@ -202,6 +234,12 @@ int main(void) {
     pad.left.have = 1; CHECK(s2_pad_map(&pad, &pad.right) == s2_map_pair && s2_pad_map(&pad, &pad.left) == s2_map_pair);
     pad.right.have = 0; CHECK(s2_pad_map(&pad, &pad.left) == s2_map_left_alone);
     pad.pro.have = 1; CHECK(s2_pad_map(&pad, &pad.pro) == s2_map_pro);
+    // A Pro Controller 2's recorded samples (issue #2245): flat and still, gravity straight down; held with its top tipped up toward the screen, gravity toward the player (-y)
+    // and down, with no roll (the Pro Controller 1's map made that about 50 degrees of roll)
+    { int16_t pf[6] = {-164, -584, 4193, 0, 0, 0}, ph[6] = {-73, 3227, 2597, 0, 0, 0};
+      s2_motion(pf, s2_map_pro, NULL, S2_GYRO_RAD, acc, rot); CHECK(fabsf(acc[2] + 1.02f) < 0.02f && fabsf(acc[0]) < 0.05f && fabsf(acc[1]) < 0.15f);
+      s2_motion(ph, s2_map_pro, NULL, S2_GYRO_RAD, acc, rot); CHECK(acc[1] < -0.7f && acc[2] < -0.5f && fabsf(acc[0]) < 0.05f);
+      s2_motion(ph, s2_map_right_alone, NULL, S2_GYRO_RAD, acc, rot); CHECK(fabsf(acc[0]) > 0.7f); }   // the old map: sideways
     // Rest offset: a second of nearly constant samples is learned, motion resets, a large offset is not rest
     s2_rest rs; memset(&rs, 0, sizeof rs); int16_t q[6] = {0, 0, 4096, 18, -20, -4};
     for (int i = 0; i < S2_REST_N - 1; i++) { q[3] = 18 + (i & 1); s2_rest_update(&rs, q); }

@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_geometry, dmsh_mesh
+import dmsh_chain, dmsh_geometry, dmsh_mesh
 
 RASTER_CHECK = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -200,6 +200,50 @@ class GeometryOutputLayout(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class PassthroughCompiler(unittest.TestCase):
+    def test_viewport_index_survives_geometry_compute_conversion(self):
+        root = Path(__file__).resolve().parents[3]
+        table = (root / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstTable.cs').read_text()
+        def instruction(name):
+            pattern = re.search(r'Add\("([01x]{64})",\s*InstName\.' + name + r'\s*,', table)[1]
+            return int(pattern.replace('x', '0'), 2) | (7 << 16)
+        # Dynamic viewport index from PrimitiveID. The value must travel through
+        # the emitted vertex record and its raster reader, never a kernel output.
+        ops = [instruction('Ald') | (255 << 8) | (255 << 39) | (0x60 << 20),
+               instruction('Ast') | (255 << 8) | (0x68 << 20), instruction('Exit') | 15]
+        with tempfile.TemporaryDirectory(prefix='geometry_viewport_') as directory:
+            work = Path(directory); header = bytearray(0x50)
+            struct.pack_into('<5I', header, 0, (1 << 24) | (4 << 10) | (3 << 5) | 1, 0, 1 << 24, 7 << 24, 1)
+            code = work / 'viewport.bin'; code.write_bytes(header + struct.pack('<4Q', 0, *ops))
+            jobs = [dict(key=f'viewport{t}', stage='gs', code=str(code), geometry_topology=t,
+                         tex={}, img={}, attr={}, fout={}, debug=True, reduced=True) for t in range(5)]
+            (work / 'jobs.json').write_text(json.dumps(jobs))
+            result = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), directory], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            cross = str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross')
+            for t in range(5):
+                with self.subTest(topology=t):
+                    meta = json.loads((work / f'viewport{t}.res.json').read_text())
+                    self.assertEqual(meta['geometry_stride'], 134)
+                    for suffix in ('', '.reader'):
+                        spv = work / f'viewport{t}{suffix}.spv'; dmsh_geometry.flatten_sets(spv)
+                        result = subprocess.run([cross, '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers',
+                                                 '--msl-texture-buffer-native', str(spv)], capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        src = result.stdout
+                        if suffix:
+                            self.assertIn('[[viewport_array_index]]', src)
+                            value = re.search(r'out\.gl_ViewportIndex\s*=\s*uint\(as_type<int>\((\w+)\)\);', src)
+                            self.assertIsNotNone(value, 'viewport index must retain its buffer-loaded value')
+                            self.assertTrue(re.search(r'float ' + value[1] + r'\s*=.*vb_input', src), 'viewport index value must come from the emitted vertex record')
+                        else:
+                            self.assertTrue('kernel void main0(' in src, 'geometry compute entry must return void')
+                            self.assertFalse('out.gl_ViewportIndex' in src, 'viewport index must go through the emitted vertex record')
+                        metal = work / f'viewport{t}{suffix}.metal'; metal.write_text(src)
+                        for sdk in ('macosx', 'iphoneos'):
+                            result = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-fmodules-cache-path=' + directory + '/modules',
+                                                     '-c', str(metal), '-o', str(metal) + '.' + sdk + '.air'], capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_passthrough_emits_positions_and_generic_attributes(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent))   # a sibling module: the CI runs each test file from the repository root
         from test_dmsh_reflect import REFLECT
@@ -222,7 +266,7 @@ class PassthroughCompiler(unittest.TestCase):
             for t, job in enumerate(jobs):
                 with self.subTest(topology=t):
                     spv = work / f'pass{t}.spv'; dmsh_geometry.flatten_sets(spv)
-                    r = subprocess.run([str(Path(__file__).resolve().parents[1] / 'tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers',
+                    r = subprocess.run([str(Path(__file__).resolve().parents[1] / 'tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers',
                                         '--msl-texture-buffer-native', str(spv)], capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, r.stderr)
                     src = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(r.stdout))
@@ -467,7 +511,7 @@ class MeshPassthrough(unittest.TestCase):
             (work / 'jobs.json').write_text(json.dumps([job]))
             subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), directory], check=True, capture_output=True)
             spv = work / 'pid.spv'; dmsh_geometry.flatten_sets(spv)
-            r = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300',
+            r = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION,
                                 '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
             full = dmsh_geometry.topology_pointer(r.stdout)
             metadata = json.loads((work / 'pid.res.json').read_text())
@@ -524,7 +568,7 @@ class ComputeSplitPrimitiveId(unittest.TestCase):
             sources = []
             for job in jobs:
                 key = job['key']; spv = work / (key + '.spv'); dmsh_geometry.flatten_sets(spv)
-                result = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
+                result = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
                 source = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(result.stdout))
                 # ABI check also runs on CI hosts without a Metal device and
                 # catches a stale translator DLL that omits the primitive base.
@@ -573,7 +617,8 @@ MESH_RUN_VS = MESH_VS.replace('out.gl_Position = in.m_0 * spvDescriptorSet0.c[0]
 
 def mesh_fixture(out):
     lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
-    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n', 'lean': MESH_HEAD + '\n' + lean,
+    keep = '\nfragment void depth_keep(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])\n{\n    if (spvDescriptorSet0.c[0].x > 0.5) discard_fragment();\n}\n'   # a fragment shader with a resource: its uniform discards
+    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n' + keep, 'lean': MESH_HEAD + '\n' + lean,
              '7e57000000000a00_7e57000000000b00_m3': dmsh_mesh.compose(MESH_RUN_VS, MESH_HEAD + '\n' + lean, reads)}
     for name, src in files.items():
         path = Path(out, name + '.metal'); path.write_text(src)

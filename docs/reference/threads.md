@@ -118,6 +118,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** `dm_yield_to_core_peers` returns at once for a caller whose mask allows another core, and such a waker is not marked for the handoff (`note_runnable`, `hle_thread.c`); the main thread's mask is 1 (core 0). A pinned waker keeps the handoff as before. `make -C dm/host/tests GAME=<id> preempt` has the case (exclusion 7: the signaller's mask is 0x5, and it returns before the woken worker's payload).
 - **Found on:** [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md): every route run froze at New Story (frame 7,800 in one, 11,700 in another); with the fix the opening cutscene plays.
 
+### A same-core handoff waits without a timer per handoff
+
+- **Symptom:** frequent same-core handoffs raise CPU wakeups and power even at a steady frame rate.
+- **Cause:** the [same-core wake handoff](#same-core-wake-handoffs) rechecked the peer in a loop of 50 µs `nanosleep` polls (`dm_yield_to_core_peers`). Even a peer that blocked a few microseconds later had to wait for the timer to wake its waker.
+- **Fix:** the waker waits on its own condition variable (`hcv`), or `g_hand_cv` under `core_preempt`. With `G` held, `hand_signal` wakes it when a peer in its active handoff blocks, exits, or is paused. The same runnable-state scan decides when the waker can continue. A 50 µs timeout rechecks changes that send no notification, including host sleeps, host GPU work, and changes to priority or affinity. The thread dump counts timed rechecks, which can occur more than once within one handoff.
+- **Check:** `make -C dm/host/tests GAME=<id> handoff-wait` uses real thread SVCs in both scheduler modes. The worker stays guest-runnable until the signaller enters its condition wait. The notification case disables the timeout and requires the worker's guest wait to release the signaller. The backstop case parks the worker in a host wait without signalling the handoff and checks that a timed recheck releases the signaller. `t_handoff_wait --storm` measures fast wakes separately from these assertions.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md), originally measured by kencalx in NX18 and ported by Oliver Ames in [PR #2872](https://github.com/seedds/nxnative/pull/2872).
+
 ### Lock-free queues published without barriers
 
 - **Symptom:** the picture stops and stays (sound goes on) at random places, about one run in two: every task worker waits on its own event, and the task a waiter waits for counts a subtask that is marked queued but is in no queue (the ring's head equals its tail).
@@ -149,6 +157,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Found on:** the [static-analysis audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671), reproduced with synthetic paths; no game-specific failure is claimed.
 
 ## Synchronization and address arbitration
+
+### Wakes signalled after the scheduler lock is let go
+
+- **Symptom:** a busy guest thread spends 5–7% of its time in `_pthread_mutex_firstfit_lock_slow` under `pthread_cond_wait` (Breath of the Wild's main thread in a `sample` of the Mac host); guest CPU and power above what the work needs.
+- **Cause:** `wake()` signalled the woken thread's condition while the waker still held `G`, the scheduler lock every thread SVC takes. Darwin's condition variables do not move a woken waiter onto the mutex's queue, so the woken thread ran, found `G` held and slept again on it until the waker let go.
+- **Fix:** `G` is taken, let go and waited on only through `g_lock`, `g_unlock` and `g_cond_wait` (`hle_thread.c`). `wake()` (and `StartThread`) queue the thread on the waker's short list (8; past that it signals at once); `g_unlock` signals the list after the unlock; `g_cond_wait`, whose wait can only let `G` go inside it, first lets `G` go to signal the list and returns as a spurious wakeup, which every wait loop rechecks. `thr_free` waits out a signal still in flight to the thread it frees (`sig_pend`). `g_lock` stops the host when a hold left wakes queued, so a `G` let go any other way fails the unit tests instead of delaying a wake. `DM_WAKE_UNLOCKED=0` signals under `G`, as before.
+- **Check:** the host unit tests and `tsan-threads` (the thread tests use the wrappers too; with `DM_WAKE_UNLOCKED=0` as well). Breath of the Wild 1.9.0, M4 Max, three alternating A/B pairs ([PR #1466](https://github.com/seedds/nxnative/pull/1466)): lock-slow samples in the main thread 51–70 → 18, guest threads 503–512 → 494–498 ms/s, CPU energy 1.21 → 1.18 W, 59.8 fps on both. Octopath Traveler II (Unreal, route `battle`, M4 Pro, two runs each of main, this, and this with `DM_WAKE_UNLOCKED=0`): no change beyond run-to-run noise; process CPU 500–552 → 503–542 ms/s (300–440 s), CPU energy 1.45–1.50 → 1.46 W, 59.75 fps and frame p99 18.3 → 18.2 ms, screenshots alike.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
 
 ### `SignalToAddress` type 2 with count ≤ 0
 

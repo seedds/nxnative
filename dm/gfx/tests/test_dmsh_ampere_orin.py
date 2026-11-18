@@ -39,9 +39,6 @@ import dmsh_chain  # noqa: E402
 # Ops that still differ from the GPU beyond PLATFORM: name -> why. A fix takes its ops out of here.
 KNOWN = {
     # results that differ
-    'fadd_rz': 'FADD .RZ / .RM / .RP: the rounding mode is dropped, Metal rounds to nearest', 'fadd_rm': '(as fadd_rz)', 'fadd_rp': '(as fadd_rz)',
-    'fmul_rz': 'FMUL .RZ / .RM / .RP: the rounding mode is dropped', 'fmul_rm': '(as fmul_rz)', 'fmul_rp': '(as fmul_rz)',
-    'ffma_rz': 'FFMA .RZ / .RM / .RP: the rounding mode is dropped', 'ffma_rm': '(as ffma_rz)', 'ffma_rp': '(as ffma_rz)',
     'i2f_s32_rz': 'I2FP.F32.S32.RZ rounds to nearest (PR #1800 has the fix)',
     'fmax_nan': 'FMNMX.NAN: a NaN operand gives the other operand, not NaN (PR #1800 has the fix)', 'fmin_nan': '(as fmax_nan)',
     'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
@@ -95,6 +92,7 @@ def load_fixture():
     doc['ops'].append(half_relu_boundary(doc['ops']))
     doc['ops'].extend(hfma_rounding_cases(doc['ops']))
     doc['ops'].extend(minmax_boundaries(doc['ops']))
+    doc['ops'].extend(directed_rounding_boundaries(doc['ops']))
     return doc
 
 
@@ -254,6 +252,68 @@ def maxwell_minmax(is_min, register_predicate):
             0xe30000000007000f]                                    # EXIT
     return b''.join(struct.pack('<4Q', 0x001f8000fc0007e0, *(tuple(body[i:i + 3]) + (0x50b0000000070f00,) * 2)[:3])
                     for i in range(0, len(body), 3))
+
+
+def directed_rounding_boundaries(ops):
+    """Exact synthetic binary32 boundaries, separate from the Orin recording."""
+    by_name = {o['name']: o for o in ops}
+
+    def case(template, suffix, rows, *, instruction=None):
+        op = by_name[template]
+        if instruction is not None:
+            offset, lo, hi = instruction
+            program = bytearray(op['program'])
+            struct.pack_into('<QQ', program, offset, lo, hi)
+            op = dict(op, program=bytes(program))
+        return dict(op, name=template + '_boundary_' + suffix, cases=len(rows), exact_bits=True,
+                    rows_in=[a for a, _ in rows], rows_gpu=[[r] for _, r in rows],
+                    oracle='synthetic directed rounding contract', derived_from=template)
+
+    def instruction(template, opcode):
+        matches = [(i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', by_name[template]['program']))
+                   if lo & 0x1ff == opcode]
+        ins, = matches
+        return ins
+
+    for mode, code in (('rm', 1), ('rp', 2), ('rz', 3)):
+        add, mul, fma = (name + '_' + mode for name in ('fadd', 'fmul', 'ffma'))
+        # Near FLT_MAX, rounded sum minus the smaller addend overflows in unscaled TwoSum.
+        pos = 0x7f7ffffe if mode == 'rp' else 0x7f7ffffd
+        neg = 0xff7ffffe if mode == 'rm' else 0xff7ffffd
+        yield case(add, 'finite_sum', [([0xf3c00000, 0x7f7fffff], pos), ([0x7f7fffff, 0xf3c00000], pos),
+                                      ([0x73c00000, 0xff7fffff], neg), ([0xff7fffff, 0x73c00000], neg)])
+
+        offset, lo, hi = instruction(mul, 0x020)
+        # D2 rescues an overflowing unscaled product and M8 rescues an underflowing one.
+        d2_pos = 0x3f000003 if mode == 'rp' else 0x3f000002
+        d2_neg = 0xbf000003 if mode == 'rm' else 0xbf000002
+        yield case(mul, 'd2', [([0x7f000000, 0x40000000], 0x7f000000), ([0xff000000, 0x40000000], 0xff000000),
+                               ([0x3f800001, 0x3f800001], d2_pos), ([0xbf800001, 0x3f800001], d2_neg)],
+                   instruction=(offset, lo, hi & ~(7 << 20) | 3 << 20))
+        yield case(mul, 'm8', [([0x00800000, 0x3e000000], 0x00800000), ([0x80800000, 0x3e000000], 0x80800000)],
+                   instruction=(offset, lo, hi & ~(7 << 20) | 7 << 20))
+
+        # Use the trig literal as an ordinary multiply. The next instruction stores it.
+        offset, lo, hi = instruction('fmul_by_imm', 0x020)
+        imm_rows = {'rm': ([0xc0400000], 0xbef47645), 'rp': ([0x3fc00000], 0x3e747645), 'rz': ([0x3fa00000], 0x3e4bb7e3)}
+        yield case('fmul_by_imm', mode, [imm_rows[mode]],
+                   instruction=(offset, lo & 0xffffffff | 0x3e22f983 << 32, hi & ~(3 << 14) | code << 14))
+
+        # a*b overflows separately, but a*b+c is 2^127 + 2^104 - 2^81.
+        # Also check exact cancellation and a fused result one tiny step above it.
+        yield case(fma, 'cancellation', [
+            ([0x7f7fffff, 0x3f800001, 0xff000000], 0x7f000001 if mode == 'rp' else 0x7f000000),
+            ([0x3f800000, 0x3f800000, 0xbf800000], 0x80000000 if mode == 'rm' else 0),
+            ([0x3f800001, 0x3f800001, 0xbf800002], 0x28800000),
+        ])
+
+    for name, opcode, rows in (
+        ('fadd_rm', 0x021, [([1, 0], 0), ([0x80000001, 0], 0x80000000)]),
+        ('fmul_rm', 0x020, [([0x80000001, 0x3f800000], 0x80000000), ([0x80800000, 0x3f000000], 0x80000000)]),
+        ('ffma_rm', 0x023, [([0, 0x3f800000, 1], 0), ([0, 0x3f800000, 0x80000001], 0x80000000)]),
+    ):
+        offset, lo, hi = instruction(name, opcode)
+        yield case(name, 'ftz', rows, instruction=(offset, lo, hi | 1 << 16))
 
 
 def chain_rewrites():
@@ -459,6 +519,8 @@ class AgainstAmpere(unittest.TestCase):
             n, r = o['name'], self.results[o['name']]
             with self.subTest(op=n):
                 beyond = {k: v for k, v in r.get('causes', {}).items() if k not in compare.PLATFORM}
+                if o.get('exact_bits'):
+                    beyond = r.get('causes', {})
                 if n in APPROX:
                     self.assertEqual(r['stage'], 'ok', r.get('message'))
                 elif n in KNOWN:

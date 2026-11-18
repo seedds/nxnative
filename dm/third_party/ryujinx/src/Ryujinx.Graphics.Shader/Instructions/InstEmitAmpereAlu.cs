@@ -111,7 +111,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b) = ASecond(context, x);
 
-            Operand res = context.FPAdd(AFloat(context, a), AFloat(context, b));
+            RoundMode mode = ARound(x);
+            bool ftz = mode != RoundMode.Rn && x.Bit(80);
+            Operand fa = FPFlushSigned(context, AFloat(context, a), ftz);
+            Operand fb = FPFlushSigned(context, AFloat(context, b), ftz);
+            Operand res = FPFlushSigned(context, FPAddRounded(context, mode, fa, fb), ftz);
 
             ASet(context, x, context.FPSaturate(res, x.Bit(77)));
         }
@@ -122,7 +126,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             (ASrc a, ASrc b) = ASecond(context, x);
 
             Operand fa = AFloat(context, a), fb = AFloat(context, b);
-            Operand res = AFmz(context, x, fa, fb, context.FPMultiply(fa, fb), ConstF(0));
+            RoundMode mode = ARound(x);
 
             // Bits 84..86: the product times 2^(v - 4) (4: no scale)
             int scale = x.Bits(84, 87);
@@ -132,9 +136,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "FMUL scale 0");
             }
 
-            if (scale != 4)
+            Operand scaleF = scale == 4 ? null : ConstF(scale > 4 ? (float)(1 << (scale - 4)) : 1f / (1 << (4 - scale)));
+            Operand res;
+            if (mode == RoundMode.Rn)
             {
-                res = context.FPMultiply(res, ConstF(scale > 4 ? (float)(1 << (scale - 4)) : 1f / (1 << (4 - scale))));
+                res = AFmz(context, x, fa, fb, context.FPMultiply(fa, fb), ConstF(0));
+                if (scaleF != null)
+                {
+                    res = context.FPMultiply(res, scaleF);
+                }
+            }
+            else
+            {
+                bool ftz = x.Bit(80);
+                fa = FPFlushSigned(context, fa, ftz);
+                fb = FPFlushSigned(context, fb, ftz);
+                res = AFmz(context, x, fa, fb, FPMultiplyRounded(context, mode, fa, fb, scaleF), ConstF(0));
+                res = FPFlushSigned(context, res, ftz);
             }
 
             ASet(context, x, context.FPSaturate(res, x.Bit(77)));
@@ -145,11 +163,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x);
 
-            Operand fa = AFloat(context, a), fb = AFloat(context, b), fc = AFloat(context, c);
-            Operand res = AFmz(context, x, fa, fb, context.FPFusedMultiplyAdd(fa, fb, fc), fc);
+            RoundMode mode = ARound(x);
+            bool ftz = mode != RoundMode.Rn && x.Bit(80);
+            Operand fa = FPFlushSigned(context, AFloat(context, a), ftz);
+            Operand fb = FPFlushSigned(context, AFloat(context, b), ftz);
+            Operand fc = FPFlushSigned(context, AFloat(context, c), ftz);
+            Operand res = AFmz(context, x, fa, fb, FPFusedMultiplyAddRounded(context, mode, fa, fb, fc), fc);
+            res = FPFlushSigned(context, res, ftz);
 
             ASet(context, x, context.FPSaturate(res, x.Bit(77)));
         }
+
+        // The rounding mode of FADD, FMUL and FFMA (bits 78..79: RN, RM, RP, RZ)
+        private static RoundMode ARound(AmpereOp x) => (RoundMode)x.Bits(78, 80);
 
         // .FMZ (bit 76 of FMUL and FFMA, NAK's dnz): a product with a zero factor is zero, whatever the other factor (Direct3D 9's rule; Inf or NaN times 0 is 0, not NaN)
         private static Operand AFmz(EmitterContext context, AmpereOp x, Operand a, Operand b, Operand res, Operand zeroProduct)

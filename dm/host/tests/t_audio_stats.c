@@ -76,8 +76,74 @@ static int render(void *out, int count, int with_pcm) {
     return 1;
 }
 static void *drain_stats(void *unused) { (void)unused; stats_drain(); return NULL; }
+// A two-block, 256-frame queue reproduces the timing seen in Need for Speed.
+// A 44.1 kHz route requesting 256 device frames pulls 278 or 279 at 48 kHz.
+static int16_t replay_sample(uint64_t frame) { return (int16_t)(1 + frame % 30000); }
+static void replay_block(aout_buf *buffer, uint64_t start) {
+    int16_t *pcm = buffer->ptr;
+    for (int i = 0; i < 256; i++) {
+        pcm[i * 6] = replay_sample(start + i);
+        pcm[i * 6 + 1] = -pcm[i * 6];
+    }
+}
+static void replay_device_callbacks(int bluetooth) {
+    uint32_t out[16] = {0};
+    uint8_t prm[8] = {0};
+    prm[4] = 6;
+    CHECK(!h_au_OpenDef0(out, prm), "open six-channel guest audio");
+    aout *a = ao(out);
+    a->dev_ch = 2;  // The mocked stereo route is normally set by au_create.
+    CHECK(a->ch == 6, "use the same guest format as the game");
+    atomic_store(&a->state, STATE_STARTED);
+    int16_t pcm[2][256 * 6] = {{0}};
+    aout_buf buffers[2] = {
+        {.ptr = pcm[0], .cap = sizeof pcm[0], .size = sizeof pcm[0]},
+        {.ptr = pcm[1], .cap = sizeof pcm[1], .size = sizeof pcm[1]},
+    };
+    for (int i = 0; i < 2; i++) {
+        replay_block(&buffers[i], i * 256);
+        CHECK(h_au_Append(out, &buffers[i]), "queue both game buffers");
+    }
+    uint64_t submitted = 512, consumed = 0, mismatches = 0;
+    for (unsigned i = 0; i < 8000; i++) {
+        unsigned frames = bluetooth ? ((i + 1) * 40960 / 147 - i * 40960 / 147) : 240;
+        int16_t played[279 * 2];
+        AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, frames * 4, played}}};
+        au_render(a, NULL, NULL, 0, frames, &bl);
+        atomic_store(&a->st_pending, 0);
+        for (unsigned j = 0; j < frames; j++) {
+            int16_t expected = replay_sample(consumed + j);
+            mismatches += played[2 * j] != expected || played[2 * j + 1] != -expected;
+        }
+        consumed += frames;
+        aout_buf *released;
+        while ((released = h_au_Released(out))) {
+            replay_block(released, submitted);
+            submitted += 256;
+            if (!h_au_Append(out, released)) { CHECK(0, "requeue a returned game buffer"); break; }
+        }
+    }
+    uint64_t underruns = atomic_load(&a->under_n);
+    printf("%s: 8,000 callbacks, %llu underruns\n", bluetooth ? "Bluetooth" : "Speaker", (unsigned long long)underruns);
+    CHECK(!underruns, "callback requests fit without zero padding");
+    CHECK(!mismatches, "all samples are played exactly once and in order");
+    if (bluetooth) {
+        h_au_Stop(out);
+        CHECK(h_au_Released(out) && h_au_Released(out) && !h_au_Released(out), "stop returns the newly queued guest buffers");
+        replay_block(&buffers[0], 42);
+        CHECK(h_au_Append(out, &buffers[0]), "queue fresh audio before restarting");
+        atomic_store(&a->state, STATE_STARTED);
+        int16_t played[240 * 2];
+        AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof played, played}}};
+        au_render(a, NULL, NULL, 0, 240, &bl);
+        CHECK(played[0] == replay_sample(42), "restart begins with fresh PCM");
+    }
+    h_au_Close(out);
+}
 int main(void) {
     setenv("DM_AUDIO", "0", 1); setenv("DM_AUDIO_MUTE", "0", 1);
+    replay_device_callbacks(0);
+    replay_device_callbacks(1);
     report_entered = dispatch_semaphore_create(0); report_allow = dispatch_semaphore_create(0);
     report_done = dispatch_semaphore_create(0); released_event = dispatch_semaphore_create(0);
     uint32_t out[16] = {0}; uint8_t prm[8] = {0}, ev[64] = {0};

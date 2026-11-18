@@ -1086,6 +1086,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_friends`.
 - **Found on:** Twelve Minutes (`0100CD701434C000`, Unity 2019.4.31f1 IL2CPP, SDK 12.3.7; seedds/nxnative#217). Its profile and game note are pending in [PR #2904](https://github.com/seedds/nxnative/pull/2904).
 
+### The network account check is cancelled offline
+
+- **Symptom:** a "Transmitting" loading screen with a hint stays for ever before the main menu while the game keeps drawing at 60 fps and its music plays (Taiko no Tatsujin: Rhythm Festival). No red line, no crash; `DM_SF_TRACE=1` shows nothing after `nsd:u`. `DM_HLECOUNT` shows `account::EnsureNetworkServiceAccountAvailable` called thousands of times (4,647 in under three minutes, about once per frame).
+- **Cause:** the host's `EnsureNetworkServiceAccountAvailable` returned `RES_FAIL`. The SDK opens the account applet for account errors that require user interaction. Cancelling it returns `ResultCancelledByUser` (2124-0001, `0x27c`), as confirmed by replaying the SDK 13.3.0 path with a cancelled applet exit. Taiko takes that result as "continue offline" (`main+0x16ee0f4`: `and x8, x0, #0x3fffff; cmp x8, #0x27c`) and retries on anything else.
+- **Fix:** the call returns `RES_ACC_CANCELED`, the result the user selector already gives on cancel (`hle_account.c`). The other network-account calls (`GetNetworkServiceAccountId`, `LoadNetworkServiceAccountIdTokenCache`) still fail.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_account`.
+- **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, update 6.2.0, Unity 2020.3.26f1 IL2CPP, SDK 13.3.2; no profile in the repository yet). Before the fix, a cheat that rewrote main's import stub for the call (`main+0x1845440`, build `7150D78C454E7C55`) to return `0x27c` got it to the main hub.
+
 ### Creating an ssl context needs no network
 
 - **Symptom:** the game ends right after `nnMain`, with a crash in its own cleanup on an object it had not created yet (DRAGON QUEST BUILDERS 2: `CRASH sig=11 addr=0x60db0` at `main+0x2676c8`, x0 = 0, the callers `main+0x85210` and `main+0x7fabf8`). No red line.

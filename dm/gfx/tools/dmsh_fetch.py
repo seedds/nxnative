@@ -81,7 +81,9 @@ def select_guards(msl):
         return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
     if bools: msl = _GROW.sub(lambda m: select(m, bools), msl)
     if sbools: msl = _SROW.sub(lambda m: select(m, sbools), msl)
-    left = _GLEFT.search(msl) or next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in bools | sbools), None)
+    left = _GLEFT.search(msl)
+    conds = bools | sbools   # no condition names: no choice can be left over from one, so only the scan below is skipped (the size test above always runs)
+    if not left and conds: left = next((m for m in re.finditer(r'(?<!\[)\b(_\d+) \?', msl) if m.group(1) in conds), None)
     if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
     return msl
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)

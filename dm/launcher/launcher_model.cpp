@@ -1191,7 +1191,9 @@ Command repack_command(const Game &g, const std::string &mode, const std::string
     if (!nxaot.path.empty()) { c.argv.push_back("--nxaot"); c.argv.push_back(nxaot.path); }
     c.cwd = l.package_dir;
     c.log = S(P(l.log.empty() ? S(P(l.cwd) / "log.txt") : l.log).parent_path() / "repack.txt");
-    c.set = {{"PYTHONUNBUFFERED", "1"}};   // its lines reach repack.txt as they are said, for the log pane
+    // PYTHONUNBUFFERED: its lines reach repack.txt as they are said, for the log pane. PYTHONUTF8: repack.txt is a file, and a Python on Windows outside its UTF-8 mode
+    // writes a file in the ANSI code page, which has no check mark: the packer's first finished stage ended the repack with UnicodeEncodeError (pack.cmd sets it too)
+    c.set = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
     return c;
 }
 

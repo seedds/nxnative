@@ -323,6 +323,20 @@ def in_ipython():   # Spyder (and Jupyter) run this file inside IPython: input w
     return hasattr(builtins, '__IPYTHON__')
 
 
+def utf8_restart(os_name=None, utf8_mode=None, ipython=None):
+    """The command that runs this script again in Python's UTF-8 mode, or None when this process goes on (not Windows, already in the mode, or inside Spyder).
+    A Python on Windows outside that mode (the default before 3.15) encodes an output that is not a console, and every text file opened without an encoding, in the ANSI
+    code page; this script and the tools it starts print and read UTF-8, as they do on macOS and Linux. With its output in a file or a pipe (pack.cmd ... > log.txt, the
+    launcher's repack.txt) the first finished stage's check mark ended the pack with UnicodeEncodeError; on a console Python writes Unicode and it went on. pack.cmd and the
+    launcher's repack set PYTHONUTF8=1 (scripts/package_port.py, dm/launcher/launcher_model.cpp), so this is for a start by hand. Spyder's console is UTF-8 and its process
+    is not this script's to replace: there cli sets PYTHONUTF8 for the tools alone. The arguments stand in for this process's state in the tests."""
+    os_name = os.name if os_name is None else os_name
+    utf8_mode = sys.flags.utf8_mode if utf8_mode is None else utf8_mode
+    ipython = in_ipython() if ipython is None else ipython
+    if os_name != 'nt' or utf8_mode or ipython: return None
+    return [sys.executable, '-X', 'utf8', *sys.orig_argv[1:]]
+
+
 LANG_NEAR = {'en-US': 'en-GB', 'en-GB': 'en-US', 'fr': 'fr-CA', 'fr-CA': 'fr', 'es': 'es-419', 'es-419': 'es', 'pt': 'pt-BR', 'pt-BR': 'pt'}   # the same language for another region
 
 
@@ -3451,6 +3465,7 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
     # main points DM_GAMES_DIR (and DM_GAMES_FIRST) at this run's provisional or derived profile for its tools. Spyder runs the next F5 in the same process, where the game lookup
     # (game.py by_title) then found that profile and took it for a registered one: ASTRAL CHAIN's second run skipped every provisional step and stopped with no dmsh_chain.h
     environ = dict(os.environ)
+    if os.name == 'nt': os.environ['PYTHONUTF8'] = '1'   # every Python tool this run starts reads and writes UTF-8, as this process does (utf8_restart)
     try:
         main(parse_args(argv))
     except BuildError as e:
@@ -3469,5 +3484,10 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
 
 
 if __name__ == '__main__':
+    again = utf8_restart()
+    if again:   # Windows outside Python's UTF-8 mode: the same command line in it, and its exit code
+        os.environ['PYTHONUTF8'] = '1'
+        try: sys.exit(subprocess.call(again))
+        except KeyboardInterrupt: sys.exit(130)   # Ctrl+C reaches both; the second run has said so
     code = cli(sys.argv[1:])
     if not in_ipython(): sys.exit(code)   # give an exit code in a terminal; do not exit in Spyder (keeps the console clean)

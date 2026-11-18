@@ -1005,5 +1005,30 @@ class ProfileDirs(unittest.TestCase):   # DM_GAMES_DIR as the script joins it (o
             self.assertEqual(game.find_dir(ID), tmp / 'two' / ID)
 
 
+class Utf8Mode(unittest.TestCase):   # the packer on Windows runs in Python's UTF-8 mode: a start outside it runs the script again in it (utf8_restart)
+    def test_restart_only_on_windows_outside_the_mode(self):
+        cmd = nsp.utf8_restart(os_name='nt', utf8_mode=0, ipython=False)
+        self.assertEqual(cmd, [sys.executable, '-X', 'utf8', *sys.orig_argv[1:]], 'the same command line, in the mode')
+        self.assertIsNone(nsp.utf8_restart(os_name='nt', utf8_mode=1, ipython=False), 'pack.cmd and the launcher set PYTHONUTF8=1: no second process')
+        self.assertIsNone(nsp.utf8_restart(os_name='posix', utf8_mode=0, ipython=False), 'macOS and Linux: the locale is the encoding')
+        self.assertIsNone(nsp.utf8_restart(os_name='nt', utf8_mode=0, ipython=True), 'Spyder: its process is not replaced')
+
+    def test_a_stage_line_into_a_pipe(self):
+        # What ended the pack: the check mark of a finished stage, written to an output that is not a console, which a Windows Python outside UTF-8 mode encodes in the
+        # ANSI code page (cp1252 here, through PYTHONIOENCODING). In the mode (-X utf8, PYTHONUTF8=1: what pack.cmd and the launcher set) the same line is UTF-8
+        line = 'import sys; print("[00:00:00] \\u2713 [1/6] build nx_extract (0:00)")'
+        env = {k: v for k, v in os.environ.items() if k not in ('PYTHONUTF8', 'PYTHONIOENCODING')}
+        bad = subprocess.run([sys.executable, '-c', line], capture_output=True, env=dict(env, PYTHONIOENCODING='cp1252'))
+        self.assertNotEqual(bad.returncode, 0); self.assertIn(b"UnicodeEncodeError: 'charmap' codec can't encode character '\\u2713'", bad.stderr)
+        good = subprocess.run([sys.executable, '-X', 'utf8', '-c', line], capture_output=True, env=dict(env, PYTHONUTF8='1'))
+        self.assertEqual((good.returncode, good.stdout.rstrip(b'\r\n')), (0, '[00:00:00] ✓ [1/6] build nx_extract (0:00)'.encode()), good.stderr)
+
+    def test_pack_cmd_and_the_repack_set_the_mode(self):   # the two ways a player starts the packer on Windows, as text (neither runs here)
+        ps = importlib.util.spec_from_file_location('package_port', REPO / 'scripts/package_port.py'); package_port = importlib.util.module_from_spec(ps); ps.loader.exec_module(package_port)
+        for text in (package_port.PACK_CMD, package_port.PACK_CMD_NXAOT, package_port.PACK_CMD_PYTHON):
+            self.assertIn('set "PYTHONUTF8=1"\n%PYTHON% "%~dp0scripts\\build_ipa_from_nsp.py" --platform windows %*\n', text)
+        self.assertIn('{"PYTHONUTF8", "1"}', (REPO / 'dm/launcher/launcher_model.cpp').read_text(encoding='utf-8'))
+
+
 if __name__ == '__main__':
     unittest.main()

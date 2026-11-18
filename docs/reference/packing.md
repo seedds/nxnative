@@ -89,6 +89,16 @@
 - **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), reading the launcher's rules after a recompiler fix that its packs needed a repack for; not seen by a player.
 - **Check:** `t_launcher_model` (`moved_bundle`: another bundle's rows, the recompiler's reason and headline), `test_nsp_x86.py` `test_the_recompiler_of_the_packs_in_the_launch_file`, `test_package_port.py` `test_recompiler_row`.
 
+## The packer on Windows
+
+### The Windows packer ends at its first check mark when its output is not a console
+
+- **Symptom:** on Windows, the bundle's `pack.cmd "<NSP folder>" -k <prod.keys>` with its output in a file or a pipe (`> pack.log`, `| more`), and the launcher's **Repack with profile** (`nxlauncher --repack`), whose packer writes `repack.txt`, end a few seconds after the start, after the line `[1/6] build nx_extract`, with a Python traceback from `PROG.end` and `encodings\cp1252.py`: `UnicodeEncodeError: 'charmap' codec can't encode character '✓' in position 11: character maps to <undefined>`; status 1, nothing packed. Typed in a console window the same command gets further and ends in the shader split of an NVN game, after its last file: `shader_split.py` ... `f.write(f'# kind: evidence ...` ... `UnicodeEncodeError: 'charmap' codec can't encode character '→' in position 78`, then `[RED] shader_split.py exit code 1`. Either way the bundle's `pack.cmd` packed no NVN game.
+- **Cause:** a Python on Windows outside its UTF-8 mode (the default before Python 3.15; the bundle carries 3.14) writes a console as Unicode but encodes an output that is a file or a pipe, and every text file opened without an encoding, in the ANSI code page (cp1252 on a Western Windows). The packer and the tools it starts print and read UTF-8, as they do on macOS and Linux, where the locale's encoding is UTF-8: a finished stage's line begins with a check mark, and the shader split's tables have an arrow in their header lines, neither of which cp1252 has. The same default decodes a tool's UTF-8 output and a profile's UTF-8 text files as cp1252.
+- **Fix:** the packer runs in Python's UTF-8 mode on Windows, whichever way it is started: `pack.cmd` sets `PYTHONUTF8=1` (`scripts/package_port.py`, its three templates), the launcher's repack sets it beside `PYTHONUNBUFFERED` (`dm/launcher/launcher_model.cpp` `repack_command`), and a packer started outside the mode (by hand, with another Python) runs its own command line again in it and returns that run's status (`scripts/build_ipa_from_nsp.py` `utf8_restart`; inside Spyder, whose console is UTF-8, it sets the variable for the tools it starts instead). The variable is inherited, so every Python tool of the pack is in the mode too.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), packed with the Windows bundle of `6be6c797` under Wine 11 (not Windows), whose ANSI code page is cp1252 as a Western Windows': with the packer's output in a pipe, and on a pseudo-terminal, which Wine gives the programs as a console. Not run on Windows.
+- **Check:** `test_nsp_x86.py` `Utf8Mode` (the restart's rule; the stage line into a pipe as cp1252 and in the mode; `pack.cmd` and the repack set the variable), `t_launcher_model` (the repack's environment).
+
 ## Cartridge dumps
 
 ### A cartridge dump with its update on it extracts the update as the base game

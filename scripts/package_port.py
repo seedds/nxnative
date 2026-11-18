@@ -258,11 +258,16 @@ here=$(cd "$(dirname "$0")" && pwd) || exit 1
 exec "${PYTHON:-python3}" "$here/scripts/build_ipa_from_nsp.py" --platform linux "$@"
 '''
 
+# Every pack.cmd sets PYTHONUTF8=1: a Python on Windows outside its UTF-8 mode (the default before 3.15) writes a redirected output, and reads and writes every text file
+# opened without an encoding, in the ANSI code page, where the packer and its tools print and read UTF-8 as on macOS and Linux: the first check mark of a stage line that
+# went to a file or a pipe ended the pack (docs/reference/packing.md, "The Windows packer ends at its first check mark when its output is not a console";
+# build_ipa_from_nsp.py utf8_restart covers a start without pack.cmd)
 PACK_CMD = '''@echo off
 rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform windows with the bundle's host (bin\\nxhost-run.exe), which the packer finds beside itself. nxaot is
 rem a Linux program: give --nxaot a script that runs it (README.txt). PYTHON names another Python 3.12 or later. Usage: pack.cmd "<NSP folder>" -k "<prod.keys>" [options]
 setlocal
 if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=python")
+set "PYTHONUTF8=1"
 %PYTHON% "%~dp0scripts\\build_ipa_from_nsp.py" --platform windows %*
 exit /b %errorlevel%
 '''
@@ -273,6 +278,7 @@ rem Packs a game for this bundle: scripts\\build_ipa_from_nsp.py --platform wind
 rem packer finds beside itself. PYTHON names another Python 3.12 or later. Usage: pack.cmd "<NSP folder>" -k "<prod.keys>" [options of build_ipa_from_nsp.py]
 setlocal
 if not defined PYTHON (where py > nul 2>&1 && set "PYTHON=py -3" || set "PYTHON=python")
+set "PYTHONUTF8=1"
 %PYTHON% "%~dp0scripts\\build_ipa_from_nsp.py" --platform windows %*
 exit /b %errorlevel%
 '''
@@ -302,6 +308,7 @@ set "PYTHONPATH="
 set "PYTHONNOUSERSITE=1"
 set PYTHON="%~dp0@PROGRAM@"
 :nxpack_run
+set "PYTHONUTF8=1"
 %PYTHON% "%~dp0scripts\\build_ipa_from_nsp.py" --platform windows %*
 exit /b %errorlevel%
 '''

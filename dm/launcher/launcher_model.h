@@ -286,7 +286,7 @@ struct ProfileState {
 };
 ProfileState profile_state(const Game &g, const std::string &mode, const std::string &bundle = bundle_dir());
 // The repack ("Repack with profile", nxlauncher --repack): <python> <packer> <package_dir> --platform <this system> --pack-mode <mode> [-k <keys>] [--nxaot <nxaot>], in the NSP
-// folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes); error when the launch file names no package, packer or python
+// folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes; PYTHONUTF8=1: the packer writes that file as UTF-8 on Windows too); error when the launch file names no package, packer or python
 // (a pack made before those rows: pack the game once more by hand, which writes them). The Python, the packer and nxaot as find_python, find_packer and find_nxaot find them in bundle
 Command repack_command(const Game &g, const std::string &mode, const std::string &bundle = bundle_dir());
 

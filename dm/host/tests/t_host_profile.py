@@ -58,6 +58,9 @@ def main():
     dc = game.constants(default)
     env = {k: v for k, v in os.environ.items() if k not in ('DM_GAME_PROFILE', 'DM_WINDOW', 'DM_FPS_TARGET', 'DM_ALIAS_SIZE', 'DM_PROGRAM_ID', 'DM_GAMES_DIR', 'DM_GAMES_FIRST')}
     env.update(SDL_VIDEO_DRIVER='dummy', SDL_AUDIO_DRIVER='dummy', DM_VK_HEADLESS='1', DM_DBG='1', DM_AOT_RAW='1')
+    # Wine does not hand a Unix SDL_VIDEO_DRIVER or SDL_AUDIO_DRIVER to a Windows program (Wine 11.0 dlls/ntdll/unix/env.c is_ignored_env_var): the host ran on SDL's
+    # Windows drivers there, a window on the runner's Xvfb. The same names after WINE are imported with the prefix taken off (docker/README.md, "SDL's driver variables")
+    if wine: env.update(WINESDL_VIDEO_DRIVER='dummy', WINESDL_AUDIO_DRIVER='dummy')
 
     def run(args, extra=None):
         r = subprocess.run(([wine] if wine else []) + [str(exe)] + args, env=dict(env, **(extra or {})), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240)

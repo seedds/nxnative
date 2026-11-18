@@ -540,8 +540,8 @@ static void second_pack(const fake::Folder &f) {
     CHECK_EQ(r.argv, (std::vector<std::string>{a.launch.host, fake::str(f.games.parent_path() / "scripts" / "build_ipa_from_nsp.py"), fake::str(f.games), "--platform", kPlatform,
                                                 "--pack-mode", "max", "-k", fake::str(f.games.parent_path() / "keys" / "prod.keys"), "--nxaot", fake::str(f.games.parent_path() / "nxaot")}),
              "python, packer, the NSP folder, --platform, --pack-mode, -k, --nxaot");
-    CHECK(r.cwd == fake::str(f.games) && r.log == fake::str(f.a_run / "repack.txt") && value(r.set, "PYTHONUNBUFFERED") == "1",
-          "in the NSP folder, its output in repack.txt beside the game's log, unbuffered");
+    CHECK(r.cwd == fake::str(f.games) && r.log == fake::str(f.a_run / "repack.txt") && value(r.set, "PYTHONUNBUFFERED") == "1" && value(r.set, "PYTHONUTF8") == "1",
+          "in the NSP folder, its output in repack.txt beside the game's log, unbuffered and in Python's UTF-8 mode (a file is not a console)");
     CHECK(repack_command(b, "balanced").error.find("pack it once more") != std::string::npos, "a launch file without the repack's rows: said");
     r.set.push_back({"NXL_FAKE_HOST", "1"});
     Child ch; std::string err;

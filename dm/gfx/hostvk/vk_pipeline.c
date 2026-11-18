@@ -461,6 +461,7 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
                         float f4[4] = {0}; if (u && u->addr) nvn_ubo_read(st, (int)rt->reg, 0, sizeof f4, f4);
                         hvk_dump_line("B %d st%d set%u b%u ubo%u addr=%#llx size %llu%s: %g %g %g %g", hvk_dump_pass_no(), st, d->set, d->binding, rt->reg, (unsigned long long)(u ? u->addr : 0),
                                       (unsigned long long)(u ? u->size : 0), buf == g_zero ? " (zero bank)" : "", f4[0], f4[1], f4[2], f4[3]);
+                        if (u && u->addr && buf != g_zero) { char what[32]; snprintf(what, sizeof what, "st%d_cb%u", st, rt->reg); hvk_dump_blob(what, u->addr, u->size ? u->size : 16); }   // DM_NVN_CBDUMP
                     }
                 } else if (rt && (rt->kind == NVN_RB_DRV0 || rt->kind == NVN_RB_DRV2)) {   // a driver bank the layout holds as a plain uniform buffer (past the dynamic budget): written per draw
                     hvk_alloc a; if (!bank_alloc(st, rt->kind == NVN_RB_DRV2 ? 2 : 0, sh[st], base_instance, dispatch, &a)) return 0;
@@ -491,7 +492,12 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
                 if (x->type != VK_DESCRIPTOR_TYPE_SAMPLER) ii.imageView = tex_view_of(st, rt ? tex_id(st, rt) : 0, d, rt, x->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &cls, d->rw);
                 if (x->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || x->type == VK_DESCRIPTOR_TYPE_SAMPLER) {
                     int sid = rs ? samp_id(st, rs) : 0;
-                    pthread_mutex_lock(&hvk.tex_mu); ii.sampler = hvk_reg_sampler(sid, cls); pthread_mutex_unlock(&hvk.tex_mu);
+                    pthread_mutex_lock(&hvk.tex_mu); ii.sampler = hvk_reg_sampler(sid, cls);
+                    if (hvk_dump_passes()) {   // the sampler as the game made it
+                        char sd[300]; hvk_reg_sampler_desc(sid, sd, sizeof sd);
+                        hvk_dump_line("B %d st%d set%u b%u %s%s", hvk_dump_pass_no(), st, d->set, d->binding, sd, cls & HVK_CLS_NO_LINEAR ? " (filtered nearest: the format has no linear filter)" : "");
+                    }
+                    pthread_mutex_unlock(&hvk.tex_mu);
                 }
                 if (!ii.imageView && x->type != VK_DESCRIPTOR_TYPE_SAMPLER) { HVK_RED_ONCE("set %u binding %u: no view and no dummy (type %d): the draw is skipped", d->set, d->binding, rt ? rt->dtt : -1); return 0; }
                 if (!w_image(b, d->binding, x->type, &ii, 1)) return 0;

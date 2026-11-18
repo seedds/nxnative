@@ -624,8 +624,10 @@ endif()
 # GPU tests above, skipped without a Vulkan device: t_vk_gpl_identity (the same draws through fast-linked, optimized, level-B, level-C and level-D pipelines, bit for bit),
 # t_vk_pipeline_cache (the cache file written, read back at a second start, invalidated, a corrupt file ignored) and t_vk_prewarm (a manifest of about 200 rows prewarmed in the
 # background and with the prebuild, cold and warm). The last two run themselves again as child processes for each start (t_vk_harness.h hv_spawn). t_vk_predict: the look-ahead
-# over the rest of a submission (vk_predict.c) on levels A, B, C and D, on and off, through called lists and later handles, its budget, and the same pictures either way
-foreach(t IN ITEMS gpl_identity pipeline_cache prewarm predict)
+# over the rest of a submission (vk_predict.c) on levels A, B, C and D, on and off, through called lists and later handles, its budget, and the same pictures either way.
+# t_vk_noperspective: an input read without perspective over quads larger than the window, through plain Vulkan on the backend's device and through these pipelines alike
+# (lavapipe's clipper gets the clipped ones whose w differ wrong: recorded there; docs/reference/rendering.md, "A NoPerspective input reads wrong values on lavapipe")
+foreach(t IN ITEMS gpl_identity pipeline_cache prewarm predict noperspective)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()

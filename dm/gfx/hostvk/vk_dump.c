@@ -63,6 +63,36 @@ void hvk_dump_line(const char *fmt, ...) {
 int hvk_dump_pass_no(void) { frame_note(); return g_pass_no; }
 int hvk_dump_pass_next(void) { frame_note(); return ++g_pass_no; }
 
+// ---------- The bytes behind a draw ----------
+// DM_NVN_CBDUMP=<folder> with a pass dump (the Metal backend's switch, nvn_mtl.m): each uniform block a draw or dispatch binds, whole, as guest memory holds it when the command is
+// replayed: F<frame>_p<pass>_d<draw>_st<stage>_cb<slot>_<address>.bin (d: the command's number in the frame, the "#" of its D or C line). DM_NVN_CBDUMP_KEY=<key prefix>[,...] keeps
+// only the commands one of whose shader keys begins with one of them, and for those draws also writes the vertex streams (_vb<stream>_<address>.bin: the bound range, at most 16 MiB) and
+// the index buffer (_ib<bytes per index>_<address>.bin: the draw's indices). Both switches are read when used, so DM_CTL "env" sets them for one dump.
+static uint64_t g_draw_frame = ~0ull; static int g_draw_no, g_draw_blobs, g_draw_streams; static char g_draw_dir[900];
+int hvk_dump_draw_next(const char *const keys[], int nkeys) {   // a draw or dispatch begins: its number in the frame; whether its blocks and its streams are written
+    if (hvk.frame != g_draw_frame) { g_draw_frame = hvk.frame; g_draw_no = 0; }
+    g_draw_no++; g_draw_blobs = g_draw_streams = 0;
+    const char *dir = getenv("DM_NVN_CBDUMP"), *key = getenv("DM_NVN_CBDUMP_KEY");
+    if (!hvk_dump_passes() || !dir || !*dir) return g_draw_no;
+    snprintf(g_draw_dir, sizeof g_draw_dir, "%s", dir);
+    if (!key || !*key) { g_draw_blobs = 1; return g_draw_no; }
+    for (const char *q = key; *q; q += strcspn(q, ","), q += *q == ',') {   // a list of prefixes
+        size_t l = strcspn(q, ",");
+        for (int i = 0; l && i < nkeys; i++) if (keys[i] && !strncmp(keys[i], q, l)) g_draw_blobs = g_draw_streams = 1;
+    }
+    return g_draw_no;
+}
+int hvk_dump_draw_no(void) { return g_draw_no; }
+int hvk_dump_streams(void) { return g_draw_streams; }
+void hvk_dump_blob(const char *what, uint64_t addr, uint64_t size) {   // guest memory [addr, addr + size) of the current draw; the caller knows the range is in a memory pool
+    if (!g_draw_blobs || !addr || !size) return;
+    if (size > 16u << 20) size = 16u << 20;
+    char path[1100]; snprintf(path, sizeof path, "%s/F%llu_p%d_d%d_%s_%llx.bin", g_draw_dir, (unsigned long long)hvk.frame, hvk_dump_pass_no(), g_draw_no, what, (unsigned long long)addr);
+    FILE *f = fopen(path, "wb");
+    if (!f) { static _Atomic int said; if (!atomic_exchange(&said, 1)) hostvk_log("[RED] [hostvk] DM_NVN_CBDUMP: cannot write %s", path); return; }
+    fwrite((const void *)(uintptr_t)addr, 1, (size_t)size, f); fclose(f);
+}
+
 // ---------- Texels ----------
 static float half_f(uint16_t h) {
     uint32_t s = (uint32_t)(h >> 15) << 31, e = h >> 10 & 31, m = h & 1023, u;

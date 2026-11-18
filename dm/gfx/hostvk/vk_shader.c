@@ -141,7 +141,8 @@ static int caps_missing(const uint32_t *w, size_t nw, char *why, size_t n) {
 
 // What the backend reads from a module's own declarations (step P8), up to its first function: the Xfb execution mode (OpExecutionMode, opcode 16, mode 11: its draws capture
 // while transform feedback is on), the XfbBuffer and XfbStride decorations (OpDecorate 71 / OpMemberDecorate 72, decorations 36 and 37) that give each capture buffer's vertex
-// stride (DrawTransformFeedback's vertex size), and a tessellation control shader's OutputVertices (mode 26: the patch size its draws are made with)
+// stride (DrawTransformFeedback's vertex size), a tessellation control shader's OutputVertices (mode 26: the patch size its draws are made with), and whether a fragment
+// shader has an input decorated NoPerspective (decoration 13)
 static void module_scan(const uint32_t *w, size_t nw, hvk_shader *sh) {
     struct { uint32_t id, member, buf, stride; } x[64]; int nx = 0;
     for (size_t i = 5; i < nw;) {
@@ -149,6 +150,7 @@ static void module_scan(const uint32_t *w, size_t nw, hvk_shader *sh) {
         if (!len || i + len > nw) break;
         if (op == 16 && len >= 3 && w[i + 2] == 11) sh->xfb = 1;
         if (op == 16 && len >= 4 && w[i + 2] == 26 && sh->stage == 3) sh->tcs_vertices = (uint8_t)(w[i + 3] < 255 ? w[i + 3] : 255);
+        if (op == 71 && len >= 3 && w[i + 2] == 13 && sh->stage == 1) sh->noperspective = 1;   // OpDecorate ... NoPerspective, on a fragment shader's input
         if ((op == 71 && len >= 4) || (op == 72 && len >= 5)) {
             uint32_t id = w[i + 1], member = op == 72 ? w[i + 2] : UINT32_MAX, dec = w[i + (op == 72 ? 3 : 2)], val = w[i + (op == 72 ? 4 : 3)];
             if (dec == 36 || dec == 37) {

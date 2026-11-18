@@ -29,6 +29,7 @@
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/astc_decode.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -985,6 +986,15 @@ VkSampler hvk_reg_sampler(int sid, uint8_t cls) {
     VkSampler *box = malloc(sizeof *box); if (!box) return s;
     *box = s; nvn_hm_put(&g_samp, &k, box);
     return s;
+}
+// A sampler as the game made it, for the pass dump (vk_dump.c): NVN's enum values (wrap modes: 0 CLAMP, 1 REPEAT, 2 MIRROR_CLAMP, 3 MIRROR_CLAMP_TO_EDGE,
+// 4 MIRROR_CLAMP_TO_BORDER, 5 CLAMP_TO_BORDER, 6 MIRRORED_REPEAT, 7 CLAMP_TO_EDGE). The caller holds hvk.tex_mu
+void hvk_reg_sampler_desc(int sid, char *out, size_t n) {
+    if (sid <= 0 || sid >= g_nsreg || !g_sreg[sid].ok) { snprintf(out, n, "sampler %d: not registered, the default (nearest, clamp to edge)", sid); return; }
+    const samp_par *p = &g_sreg[sid].p;
+    snprintf(out, n, "sampler %d wrap %u,%u,%u min %u mag %u lod %g..%g bias %g aniso %g compare %u,%u reduction %u border %g,%g,%g,%g", sid, (unsigned)p->ws, (unsigned)p->wt, (unsigned)p->wr,
+             (unsigned)p->minf, (unsigned)p->magf, (double)p->lod_min, (double)p->lod_max, (double)p->lod_bias, (double)p->aniso, (unsigned)p->cmp_mode, (unsigned)p->cmp_func, (unsigned)p->reduction,
+             (double)p->border[0], (double)p->border[1], (double)p->border[2], (double)p->border[3]);
 }
 
 // ---------- Dummies ----------

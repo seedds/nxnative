@@ -89,6 +89,7 @@ const tex_t *hvk_tex_desc(hvk_tex *t);
 // The registry (be_reg_tex / be_reg_image / be_reg_samp): what a texture ID and a sampler ID name. Caller holds hvk.tex_mu
 int hvk_reg_texture(int tid, tex_t *t, view_t *v, int *has_view);   // 1 when tid names a live registration (*t, *v its snapshot)
 VkSampler hvk_reg_sampler(int sid, uint8_t cls);           // the sampler for a texture of numeric class cls (integer borders for integer classes); the default sampler for an unregistered ID
+void hvk_reg_sampler_desc(int sid, char *out, size_t n);   // the sampler as the game made it (NVN's enum values), for the pass dump
 // cls | HVK_CLS_NO_LINEAR: the view's format cannot be filtered linearly (integer formats, and float formats without SAMPLED_IMAGE_FILTER_LINEAR on the device): the sampler
 // filters it nearest, as the hardware reads an integer texture through a linear sampler (Vulkan forbids the linear sampler there, VUID-vkCmdDraw-magFilter-04553)
 enum { HVK_CLS_NO_LINEAR = 0x80 };
@@ -141,6 +142,7 @@ typedef struct hvk_shader {
     // Step P8: from the module itself (vk_shader.c module_scan)
     uint16_t xfb_stride[4];    // the XfbStride of each transform feedback buffer its outputs are captured into (0: none): DrawTransformFeedback's vertex size (vk_commands.c)
     uint8_t tcs_vertices;      // a tessellation control shader's OutputVertices: the patch size a draw is made with (nvnCommandBufferSetPatchSize is not recorded)
+    uint8_t noperspective;     // a fragment shader with an input decorated NoPerspective (interpolated linearly in the window): what lavapipe's clipper gets wrong (vk_commands.c hvk_draw)
     uint8_t dispatched;        // a compute shader that has been dispatched (vk_commands.c: its first dispatch is logged; submit thread)
 } hvk_shader;
 typedef struct hvk_prog { hvk_shader *sh[6]; uint64_t serial; } hvk_prog;
@@ -238,6 +240,10 @@ int hvk_dump_snaps(void);             // this frame's attachments and storage wr
 void hvk_dump_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // a "[pass]" line when hvk_dump_passes()
 int hvk_dump_pass_no(void);           // the number of the frame's current pass (the last one begun), and of the next one
 int hvk_dump_pass_next(void);
+int hvk_dump_draw_next(const char *const keys[], int nkeys);   // a draw or dispatch begins: its number in the frame (the "#" of its D or C line); DM_NVN_CBDUMP's filter is applied
+int hvk_dump_draw_no(void);
+int hvk_dump_streams(void);           // DM_NVN_CBDUMP_KEY names this draw: its vertex streams and index buffer are written too
+void hvk_dump_blob(const char *what, uint64_t addr, uint64_t size);   // DM_NVN_CBDUMP: guest memory the current draw reads, as F<frame>_p<pass>_d<draw>_<what>_<address>.bin
 int hvk_dump_split_pass(void);        // texdump ... draws <pass>: the pass whose draws each end their pass (and the passes into its targets after it), -1 for none
 int hvk_dump_split_slot(void);        // and the one attachment slot snapshotted then (8 depth), -1 for every slot
 // Copy view v's subresource (its level and first layer; a depth-stencil view's depth) into a readback buffer at this point of cb, outside any pass; written as a PNG with a

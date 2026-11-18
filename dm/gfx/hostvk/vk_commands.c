@@ -1129,12 +1129,39 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
 // A draw in the pass dump (vk_dump.c): its shaders, what it draws and the state that decides whether a fragment lands (depth, stencil, culling, the channel mask, blending,
 // the viewport and scissor)
 static void dump_draw(hvk_shader *const sh[6], const p_draw *dw, const p_draw_idx *di, int prim, int count, uint32_t inst, uint64_t ind, int ixconv, const hvk_ix_out *xo) {
-    hvk_dump_line("D %d vs=%s fs=%s%s%s%s%s prim %d count %d inst %u%s%s%s depth t%u w%u f%u stencil %u cull %u front %u mask %#x blend %#x vp %g,%g %gx%g z %g..%g sc %s%d,%d %dx%d%s",
+    hvk_dump_line("D %d vs=%s fs=%s%s%s%s%s prim %d count %d inst %u%s%s%s depth t%u w%u f%u stencil %u cull %u front %u mask %#x blend %#x vp %g,%g %gx%g z %g..%g sc %s%d,%d %dx%d%s #%d",
                   P.no, sh[0] ? sh[0]->key : "-", sh[1] ? sh[1]->key : "-", sh[2] ? " gs=" : "", sh[2] ? sh[2]->key : "", sh[4] ? " tes=" : "", sh[4] ? sh[4]->key : "", prim, count, inst,
                   di ? (di->itype == 0 ? " u8" : di->itype == 1 ? " u16" : " u32") : "", ind ? " indirect" : "", ixconv ? (xo->buf ? " converted" : " converted-empty") : "",
                   (unsigned)S.ds.dt, (unsigned)S.ds.dw, (unsigned)S.ds.df, (unsigned)S.ds.st, (unsigned)S.poly.cull, (unsigned)S.poly.front, S.chmask.mask, (unsigned)S.color.blend_en,
-                  S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1], R.has_sc ? "" : "none ", R.sc.x, R.sc.y, R.sc.w, R.sc.h, S.rast_discard ? " rasterizer-discard" : "");
-    (void)dw;
+                  S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1], R.has_sc ? "" : "none ", R.sc.x, R.sc.y, R.sc.w, R.sc.h, S.rast_discard ? " rasterizer-discard" : "", hvk_dump_draw_no());
+    // S: what decides the value a fragment leaves, as the game set it (NVN's enum values): per attached colour target its VkFormat and, where blending is on, the source and
+    // destination factors and the equation for colour, then for alpha, and the advanced mode; the blend colour, the alpha test's function, the logic op, the polygon mode
+    char b[1200]; size_t o = 0; b[0] = 0;
+    for (int i = 0; i < P.nc && o < sizeof b - 120; i++) {
+        if (!P.ca[i].imageView) continue;
+        const blend_st *q = &S.blend[i];
+        o += (size_t)snprintf(b + o, sizeof b - o, " c%d fmt%u", i, (unsigned)P.cfmt[i]);
+        if (S.color.blend_en >> i & 1) o += (size_t)snprintf(b + o, sizeof b - o, " blend rgb %u,%u eq %u a %u,%u eq %u adv %u.%u.%u", (unsigned)q->src_rgb, (unsigned)q->dst_rgb, (unsigned)q->eq_rgb,
+                                                              (unsigned)q->src_a, (unsigned)q->dst_a, (unsigned)q->eq_a, (unsigned)q->adv, (unsigned)q->adv_npm, (unsigned)q->adv_ovl);
+    }
+    hvk_dump_line("S %d #%d%s; blend colour %g,%g,%g,%g alpha func %u logic op %u polygon mode %u offset %u", P.no, hvk_dump_draw_no(), b, S.blend_color[0], S.blend_color[1], S.blend_color[2],
+                  S.blend_color[3], (unsigned)S.color.alpha_func, (unsigned)S.color.logic_op, (unsigned)S.poly.mode, (unsigned)S.poly.offset_en);
+    // V: where the vertices come from: first vertex or base vertex and the index buffer; each attribute the vertex shader reads (location: NVN format, offset, stream); each bound
+    // stream one of them names (address, size, stride, divisor)
+    o = 0; b[0] = 0; uint32_t used = 0;
+    for (uint32_t loc = 0; loc < 16 && o < sizeof b - 60; loc++) {
+        if (!sh[0] || !sh[0]->vin_types[loc]) continue;
+        o += (size_t)snprintf(b + o, sizeof b - o, " a%u fmt%u +%u s%u", loc, (unsigned)S.attr[loc].fmt, (unsigned)S.attr[loc].offset, (unsigned)S.attr[loc].stream);
+        used |= 1u << S.attr[loc].stream;
+    }
+    for (uint32_t s = 0; s < 16 && o < sizeof b - 90; s++) if ((used >> s & 1) && S.vbuf[s].address)
+        o += (size_t)snprintf(b + o, sizeof b - o, "; s%u %#llx size %llu stride %u div %u", s, (unsigned long long)S.vbuf[s].address, (unsigned long long)S.vbuf[s].size, S.stream[s].stride, S.stream[s].divisor);
+    if (di) hvk_dump_line("V %d #%d base vertex %d base instance %d indices %#llx%s", P.no, hvk_dump_draw_no(), di->base_vertex, di->base_instance, (unsigned long long)di->ibuf, b);
+    else hvk_dump_line("V %d #%d first %d base instance %d%s", P.no, hvk_dump_draw_no(), dw->first, dw->base_instance, b);
+    if (hvk_dump_streams()) {   // DM_NVN_CBDUMP_KEY: the streams and the indices of this draw (vk_dump.c)
+        for (uint32_t s = 0; s < 16; s++) if ((used >> s & 1) && S.vbuf[s].address) { char what[24]; snprintf(what, sizeof what, "vb%u", s); hvk_dump_blob(what, S.vbuf[s].address, S.vbuf[s].size); }
+        if (di && !ind && di->ibuf && count > 0) { char what[24]; int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4; snprintf(what, sizeof what, "ib%d", isz); hvk_dump_blob(what, di->ibuf, (uint64_t)count * (uint64_t)isz); }
+    }
 }
 // A draw that is not drawn, in the pass dump (vk_dump.c): its reason (the red lines say each reason once; the dump says it for every draw)
 #define DQ(why) do { if (hvk_dump_passes()) hvk_dump_line("Q %d draw skipped: %s", hvk_dump_pass_no(), why); } while (0)
@@ -1156,6 +1183,15 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     // The alpha test: the colour state's function is recorded but its reference value is not (nvnCommandBufferSetAlphaRef is only logged by the frontend, whose record format the
     // Metal backend shares), and the translator is told the test is off; a compare and discard in the fragment shader (design 6) needs both: declared
     if (S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) HVK_RED_ONCE("alpha test function %u: not applied (the reference is not recorded and the translator has the test off)", (unsigned)S.color.alpha_func);
+    // A driver's defect, said where it can change the picture (docs/reference/rendering.md, "A NoPerspective input reads wrong values on lavapipe"; t_vk_noperspective):
+    // lavapipe's clipper gives a fragment input interpolated without perspective a wrong value, or none (not a number), over a triangle it clips whose vertices' w differ.
+    // Mesa's draw module (draw_pipe_clip.c interp, Mesa 9.1 to 26.1 at least) picks the axis of a new vertex's no-perspective factor where the edge's clip coordinates differ
+    // and divides window coordinates along it: 0/0 on an edge with one window x and two w. No state the backend sets avoids it (llvmpipe clips x and y with no guard band;
+    // depth clamp and the depth mode move only the z planes), and what the backend hands the driver is valid: the test draws the same through plain Vulkan. A stopgap of
+    // the kind AGENTS.md allows: the picture is left as the driver makes it (a GPU does not run this code; not yet checked on one) and said once here
+    if (sh[1] && sh[1]->noperspective && hvk.dev.driver_id == VK_DRIVER_ID_MESA_LLVMPIPE)
+        HVK_RED_ONCE("a fragment shader reads an input without perspective (NoPerspective; first case %s) on lavapipe, whose clipper gives such an input a wrong value over a clipped "
+                     "triangle whose vertices' w differ (Mesa's draw_pipe_clip.c interp): pictures made from it (a screen position: wipes, full-screen backgrounds) can be wrong on this driver", sh[1]->key);
     int prim = dw ? dw->prim : di->prim, klass;
     VkPrimitiveTopology topo = topology(prim, &klass);
     uint32_t inst = (uint32_t)(dw ? (dw->instances > 0 ? dw->instances : 1) : (di->instances > 0 ? di->instances : 1));
@@ -1208,6 +1244,7 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     // A draw that reads an attachment of the open pass (a feedback draw, design 5.5) after a command of the pass wrote it begins a new pass: the full barrier between the two passes
     // makes those writes visible to its reads (no barrier can run inside a dynamic-rendering pass on Vulkan 1.3). The draw's own reads of what it writes are the GPU's, as on Maxwell
     if (g_split && P.active && P.ndraws && hvk_dump_snaps()) pass_end_only();   // texdump ... draws: one draw per pass, each snapshotted as its pass ends
+    if (hvk_dump_passes()) { const char *const dk[5] = {sh[0]->key, sh[1] ? sh[1]->key : NULL, sh[2] ? sh[2]->key : NULL, sh[3] ? sh[3]->key : NULL, sh[4] ? sh[4]->key : NULL}; hvk_dump_draw_next(dk, 5); }   // its number in the frame, for its lines and DM_NVN_CBDUMP
     for (int attempt = 0; attempt < 2; attempt++) {
         if (!pass_begin(cb)) { DQ("pass"); return; }
         key_src(&src, &v);
@@ -1290,7 +1327,7 @@ void hvk_dispatch(const p_dispatch *dp) {
     hvk_layout *l = hvk_layout_for(sh); if (!l) { CQ("pipeline layout"); return; }
     VkPipeline pipe = hvk_cs_pipeline(pr->sh[5], l); if (!pipe) { CQ("no pipeline"); return; }
     VkCommandBuffer cb = outside();
-    if (hvk_dump_passes()) hvk_dump_line("C %d cs=%s groups %d,%d,%d%s", hvk_dump_pass_no(), pr->sh[5]->key, dp->x, dp->y, dp->z, dp->ind ? " indirect" : "");
+    if (hvk_dump_passes()) { const char *const dk[1] = {pr->sh[5]->key}; int no = hvk_dump_draw_next(dk, 1); hvk_dump_line("C %d cs=%s groups %d,%d,%d%s #%d", hvk_dump_pass_no(), pr->sh[5]->key, dp->x, dp->y, dp->z, dp->ind ? " indirect" : "", no); }
     uint32_t dim[3] = {(uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z};
     if (dp->ind && pr->sh[5]->rf.drv_read[0]) HVK_RED_ONCE("an indirect dispatch whose shader reads its workgroup counts from c0: they read 0 (the GPU copy of the counts is phase P4)");
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe); g_bound.valid = 0;

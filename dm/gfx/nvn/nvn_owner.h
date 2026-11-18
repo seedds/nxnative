@@ -11,7 +11,7 @@
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost; and the live serials of each memory pool
 //               (the pool recorded at initialization), whose entries the pool's Finalize ends (own_pool_finalize_locked)
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
-//   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
+//   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under their own lock, g_pin_mu, taken before g_smu)
 //   sharing     alias_key (pool, offset, description) → the texture that holds those bytes (own_alias_*): NVN textures over the same storage with the same description are one
 //               texture. Kept resident by the table; an entry goes when its pool is finalized (own_pool_finalize_locked), a new texture takes its bytes over (own_alias_publish)
 //               or another texture drew over them and it has not been used since (own_alias_dead_locked). The first and the last take the serial entries that name the

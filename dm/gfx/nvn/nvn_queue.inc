@@ -29,9 +29,11 @@ static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payloa
     if(!o) {
         size_t bytes=kind==CAP_K_PROG?sizeof(prog_t):sizeof(tex_t); o=calloc(1,sizeof *o+bytes); if(!o) die("queue descriptor allocation failed");
         o->kind=kind; o->next=j->owned; j->owned=o;
-        if(kind==CAP_K_PROG && !mtl_prog_snapshot_live((prog_t *)o->data,(const prog_t *)(uintptr_t)*field)) {   // not resolved yet: resolved under the submission lock (prog_get is the replay's)
-            dm_host_mutex_lock(&g_sub_mu); mtl_prog_snapshot((prog_t *)o->data,(const prog_t *)(uintptr_t)*field); pthread_mutex_unlock(&g_sub_mu); }
-        else { memcpy(o->data,(const void *)(uintptr_t)*field,bytes); mtl_tex_pin(((tex_t *)o->data)->serial); }
+        // The object's kind is chosen first: a program pinned without the lock must not fall through to the texture copy, which read a tex_t's serial out of a prog_t's bytes
+        if(kind==CAP_K_PROG) {
+            if(!mtl_prog_snapshot_live((prog_t *)o->data,(const prog_t *)(uintptr_t)*field)) {   // not resolved yet: resolved under the submission lock (prog_get is the replay's)
+                dm_host_mutex_lock(&g_sub_mu); mtl_prog_snapshot((prog_t *)o->data,(const prog_t *)(uintptr_t)*field); pthread_mutex_unlock(&g_sub_mu); }
+        } else { memcpy(o->data,(const void *)(uintptr_t)*field,bytes); mtl_tex_pin(((tex_t *)o->data)->serial); }
         nvn_hm_put(&j->objects,key,o);
     }
     *field=(uintptr_t)o->data;return 1;

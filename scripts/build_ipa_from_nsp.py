@@ -33,7 +33,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, filecmp, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -767,8 +767,14 @@ def same_build(nsp_dir, app, fam, keys, repo, env, skip=()):
         tmp = work / 'exefs.partial'; rmtree(tmp)
         if files: code_modules(fam, upd or fam['base'], tmp / 'ExeFS')
         else:
-            run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), logs / 'exefs.log',
-                ok=(4,))   # 4: a sparse base game (Minecraft Dungeons II), readable only with its update: no main of its own
+            try:
+                run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), logs / 'exefs.log',
+                    ok=(4,))   # 4: a sparse base game (Minecraft Dungeons II), readable only with its update: no main of its own
+            except BuildError:
+                # The base game alone is only a second guess: a base ExeFS that fails its hash check (Pokémon Violet Rev 4) is not used when an update supplies the code
+                if upd is not None or not ups: raise
+                say('[RED] the base game alone could not be read for the build ID lookup; the update supplies the code, so the survey goes on')
+                rmtree(tmp); continue
         main = tmp / 'ExeFS/main'
         bid = build_id(main) if main.exists() else None
         g = gamemod.by_build(bid, skip) if bid else None
@@ -1592,7 +1598,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_syms.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
@@ -3009,61 +3015,17 @@ def mac_prebake(py, repo, work, msl, g, host, pso, env, logs):
             shutil.rmtree(stage, ignore_errors=True)   # the work folder is kept only while a run is unfinished
         if other_gpu_prewarm(repo, out, arch, others, logs, lib if lib.is_dir() else lib.with_name(lib.name + '.img'), env):
             keyf.write_text(f'{key} {",".join(others) or "-"}\n')   # a period left out for a GPU: no key, so the next build tries those GPUs again (this Mac's files are kept)
-    # A file pso already holds as this build's (the same file by its link, or on a volume without links a copy of the same bytes) is left as it is: taking a link away and making it
-    # again moves the file's change time, which the app's packer keys the folder's files by, so a build that changed nothing packed the app again and signed its pipeline archive
-    # (5.2 GB for Ocarina of Time: 39 s of a 105 s build)
-    made = {f.name: f for f in out.iterdir() if f.suffix in ('.mtl4a', '.keys', '.tsv')}   # the pipelines scripts and their libraries stay in the work folder
-    for old in [*pso.glob('*-prewarm-*'), pso / 'prewarm.tsv']:   # the files and their indexes (.keys)
-        f = made.get(old.name)
-        if f and old.is_file() and (os.path.samefile(f, old) or (f.stat().st_size == old.stat().st_size and filecmp.cmp(f, old, shallow=False))): del made[old.name]
-        else: old.unlink(missing_ok=True)
-    for name, f in made.items():
-        try: os.link(f, pso / name)
-        except OSError: shutil.copyfile(f, pso / name)
+    sys.path.insert(0, str(repo / 'dm/gfx/tools')); import pso_offline as po
+    po.publish_prewarm(pso, {f.name: f for f in out.iterdir() if f.suffix in ('.mtl4a', '.keys', '.tsv')})   # the scripts and their libraries stay in the work folder
     PROG.end(f'{len(list(out.glob("*.mtl4a")))} files, {amount(sum(f.stat().st_size for f in out.glob("*.mtl4a")), "B")}')
     return pso
 
 
 def prewarm_script_libraries(out, scripts, lib_dir, po):
-    """The libraries the prewarm pipelines scripts name, as files for metal-tt. The host loads its libraries from memory, so a script names each by the SHA-256 of its bytes (label) with a path Metal
-    marks _Path_not_available_for_lib_from_data_with_UUID_...; the libraries of the shader folder (a folder, or one image file) are hashed until every one the scripts name is found, written to
-    out/libraries, and the scripts' paths pointed at them. po: the pso_offline module. Returns that folder, or raises BuildError naming a library not found"""
-    want, data = set(), {}
-    for js in scripts:
-        data[js] = json.loads(js.read_text())
-        want |= {lib['label'].upper() for lib in data[js].get('libraries', []) if not Path(lib.get('path', '')).is_file()}
-    real = out / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir()
-    found = {}
-    for root, _, files in rfs.walk(str(lib_dir)):
-        for f in files:
-            if not f.endswith('.metallib') or len(found) == len(want): continue
-            with rfs.open(os.path.join(root, f), 'rb') as fh: b = fh.read()
-            h = hashlib.sha256(b).hexdigest().upper()
-            if h in want and h not in found: (real / f'{h}.metallib').write_bytes(b); found[h] = real / f'{h}.metallib'
-    missing = want - set(found)
-    if missing: raise BuildError(f'{len(missing)} of the libraries the prewarm scripts name are not in {lib_dir} (one is {sorted(missing)[0]})')
-    cuts = {}
-    for js, d in data.items():
-        for lib in d.get('libraries', []):
-            if lib['label'].upper() in found: lib['path'] = str(found[lib['label'].upper()])
-        fds = d.get('function_descriptors', {})
-        spec = {s['function_descriptor'].removeprefix('fnd:') for s in fds.get('specialized_function_descriptors', [])}
-        for fn in fds.get('library_function_descriptors', []):
-            h = fn.get('library', '').upper()
-            # metal-tt specializes only a library's first function ("cannot find private metadata at offset '8'" for a later one, as main0_z behind main0 of a depth_mode zero game's
-            # <key>_bp): such a function is specialized from a library of its own, cut from its library as pso_offline.py does (needs_cut; reference: Specialized second functions in
-            # the offline pipeline archive)
-            if fn['label'] not in spec or h not in found: continue
-            if h not in cuts:
-                try: cuts[h] = po.constants(found[h])
-                except (OSError, ValueError): cuts[h] = {}
-            if not po.needs_cut(cuts[h], fn['name']): continue
-            cut = po.cut_name(h, fn['name']); path = real / f'{cut}.metallib'
-            if not path.exists(): path.write_bytes(po.dmsh_side.cut(found[h].read_bytes(), {fn['name']})[1])
-            if not any(lib['label'] == cut for lib in d['libraries']): d['libraries'].append({'label': cut, 'path': str(path)})
-            fn['library'] = cut
-        js.write_text(json.dumps(d, indent=1))
-    return real
+    """The libraries the prewarm pipelines scripts name, as files for metal-tt, in out/libraries, and the scripts' paths pointed at them (po.script_libraries, which the IPA's prewarm files
+    share: pso_offline.py --prewarm-host). po: the pso_offline module. Returns that folder, or raises BuildError naming a library not found"""
+    try: return po.script_libraries(scripts, lib_dir, out / 'libraries')
+    except LookupError as e: raise BuildError(str(e)) from e
 
 
 def other_gpu_prewarm(repo, out, arch, others, logs, lib_dir, env):
@@ -3114,7 +3076,8 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     PROG.stage('Mac app', step='starting')
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
-    run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
+    run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings,
+         *(r['patched'] for r in (programs or {}).values())], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)

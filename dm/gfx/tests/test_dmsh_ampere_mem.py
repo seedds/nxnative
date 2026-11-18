@@ -637,13 +637,13 @@ class Pokopia(Translated):
         msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_NH1)
         negated = re.search(rf'float (_\d+) = -{b_hi};', msl)
         self.assertTrue(negated, msl)
-        self.assertIn(f'fma({a_lo}, {negated.group(1)}, 0.0)', msl)   # low lane: A.lo * -B.hi
-        self.assertIn(f'fma({a_hi}, {b_lo}, 0.0)', msl)               # high lane: A.hi * B.lo
+        self.assertIn(f'fma(half({a_lo}), half({negated.group(1)}), half(0.0))', msl)   # low lane: A.lo * -B.hi
+        self.assertIn(f'fma(half({a_hi}), half({b_lo}), half(0.0))', msl)               # high lane: A.hi * B.lo
 
     def test_hfma2_without_nh1_keeps_the_lanes(self):
         msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_PLAIN)
-        self.assertIn(f'fma({a_lo}, {b_lo}, 0.0)', msl)
-        self.assertIn(f'fma({a_hi}, {b_hi}, 0.0)', msl)
+        self.assertIn(f'fma(half({a_lo}), half({b_lo}), half(0.0))', msl)
+        self.assertIn(f'fma(half({a_hi}), half({b_hi}), half(0.0))', msl)
 
     # FSEL keeps each operand's modifiers (161,748 of the game's register forms negate B): "x or -x" from one register is how its character and prop lighting picks a sign
     FSEL_NEG_B = (0x000fe40000000000, 0x8000000c0c0c7208)   # FSEL R12, P0, R12, -R12

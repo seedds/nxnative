@@ -96,8 +96,8 @@ static MTLAttributeFormat as_format(unsigned f, unsigned *bytes) {
 static id<MTLComputePipelineState> as_kernel(int instances) {
     static id<MTLComputePipelineState> ps[2];
     int k=!!instances;
-    if (!ps[k]) { NSError *e=nil; id<MTLLibrary> lib=host_msl_lib(g_dev,g_comp4,"accel",&e); id<MTLFunction> f=[lib newFunctionWithName:k?@"instances":@"indices8"];
-        ps[k]=f?[g_dev newComputePipelineStateWithFunction:f error:&e]:nil;
+    if (!ps[k]) { NSError *e=nil; id<MTLLibrary> lib=host_lib_from(g_comp4,"accel",&e); id<MTLFunction> f=[lib newFunctionWithName:k?@"instances":@"indices8"];
+        ps[k]=f?dev_cps(f, &e):nil;
         if(!ps[k]) MDIE("[RED] acceleration-structure conversion pipeline: %s", e.localizedDescription.UTF8String);
     }
     return ps[k];

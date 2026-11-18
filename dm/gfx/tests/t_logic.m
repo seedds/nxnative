@@ -15,16 +15,15 @@ static uint32_t op(int f, uint32_t s, uint32_t d) {
         case 9: return ~(s ^ d); case 10: return ~d; case 11: return s | ~d; case 12: return ~s; case 13: return ~s | d; case 14: return ~(s & d); case 15: return ~0u; default: return s; }
 }
 static NvProg *prog(NSString *dir, prog_t *program, NvShader **out) {
-    NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[dir stringByAppendingString:@"/base.metal"] encoding:NSUTF8StringEncoding error:&error];
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
+    NSError *error = nil; NSString *key = @"1111111111111111_b";
+    id<MTLLibrary> lib = lib_from_file([dir stringByAppendingPathComponent:[key stringByAppendingString:@".metallib"]], &error);
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
     NvProg *pr = [NvProg new];
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vl_b");
-    NvShader *ps = [NvShader new]; pr->sh[1] = ps; *out = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->u_name = @"main0_u"; ps->u_side = 1; ps->u_logic = 1; ps->u_alpha = 1;   // main0_u from the side library, as the build cuts it, with its logic operation and alpha test
-    ps->stage = 1; ps->has_logic = 1; ps->rf.color_known = 1; ps->rf.color_mask = 1;
-    memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
-    ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0};
+    NvShader *ps = shader_load(key, 1, 0); pr->sh[1] = ps; *out = ps;
+    if (!ps) abort();
+    CHECK(ps->u_logic && ps->u_side && !ps->has_logic);   // actual generated reflection: main0_u holds the operation, with no legacy main0_l dictionary
+    CHECK(ps->rf.nb == 1 && ps->rf.b[0].kind == NVN_RB_CBUF && ps->rf.b[0].reg == 0);
     program->serial = 97000; serial_put(program->serial, pr);
     return pr;
 }
@@ -93,7 +92,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     k.cfmt[0] = MTLPixelFormatRGBA16Uint; CHECK(pso_cls(&k, ps, &cls) && cls == 3u);
     k.cfmt[0] = MTLPixelFormatRGBA16Float; k.cfmt[1] = MTLPixelFormatRGBA8Unorm; CHECK(!pso_cls(&k, ps, &cls) && cls == 0u);   // main0 as it is
     k.cfmt[1] = MTLPixelFormatR8Sint; CHECK(pso_cls(&k, ps, &cls) && cls == 0x200u);
-    ps->rf.color_mask = 1; k.cfmt[1] = MTLPixelFormatR32Uint; CHECK(!pso_cls(&k, ps, &cls) && cls == 0u);   // an output the shader does not write: no constant for it
+    ps->rf.color_mask = ps->rf.fcols = 1; k.cfmt[1] = MTLPixelFormatR32Uint; CHECK(!pso_cls(&k, ps, &cls) && cls == 0u);   // an output the shader does not write: no constant for it
     ps->rf.fcols_known = 1; ps->rf.fcols = 1; ps->rf.ucols = 2; k.cfmt[1] = MTLPixelFormatRGBA8Unorm; CHECK(pso_cls(&k, ps, &cls) && cls == 0u);   // main0 declares output 1 unsigned (a fout fact): a float target takes the typed one too
     k.cfmt[1] = MTLPixelFormatR32Uint; CHECK(!pso_cls(&k, ps, &cls) && cls == 2u);   // and an unsigned target main0 itself
     ps->rf.fcols_known = 0; ps->rf.color_mask = 3;

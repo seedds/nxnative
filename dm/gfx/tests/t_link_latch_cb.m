@@ -3,7 +3,7 @@
 // The test paces its callbacks a 60 Hz period apart, as the drain counts ticks from a frame's wake to its take (nvn_link_latch_spare).
 // Cases: a woken present is latched; a standing frame goes out first and nothing is dropped; a drain into the latch empties the queue after 2 s of early frames; a plain
 // drain does not enter the latch, and the frame that stood again backs the drain into the latch off; the latch gives up after LINK_LATCH_GIVE_UP timeouts and probes again,
-// counted in woken callbacks, with an acquire of two ticks
+// counted in woken callbacks, with an acquire of two ticks. Queued frames also exercise the callback's hold at different link and present rates.
 #include "../nvn/nvn_mtl.m"
 @interface FakeLinkUpdate : NSObject
 @property id<CAMetalDrawable> drawable;
@@ -28,16 +28,17 @@ static NSMutableArray *g_layers;
 static NvMetalDisplayLinkDelegate *g_delegate;
 static const double ROOM = 0.0165;   // a built-in ProMotion screen in its fixed 60 Hz mode: 16.5 ms from the callback to targetTimestamp
 static double g_gap = 1. / 60;   // seconds between the test's callbacks
-static double tick(void) {   // one display-link callback, g_gap after the previous one; returns how long it took (seconds)
+static double tick_at(double target) {   // one display-link callback, g_gap after the previous one; returns how long it took (seconds)
     static double last; while (CACurrentMediaTime() < last + g_gap) usleep(200);
     last = CACurrentMediaTime();
     static unsigned n; if (g_layers.count < 8) { CAMetalLayer *nl = offscreen_layer(); [g_q4 addResidencySet:nl.residencySet]; [g_layers addObject:nl]; }   // the queue takes at most 32 residency sets
     CAMetalLayer *l = g_layers[n++ % g_layers.count];
     FakeLinkUpdate *u = [FakeLinkUpdate new]; double t0 = CACurrentMediaTime();
-    u.drawable = [l nextDrawable]; u.targetTimestamp = t0 + ROOM; u.targetPresentationTimestamp = t0 + 0.050;
+    u.drawable = [l nextDrawable]; u.targetTimestamp = t0 + ROOM; u.targetPresentationTimestamp = target > 0 ? target : t0 + 0.050;
     [g_delegate metalDisplayLink:(CAMetalDisplayLink *)(id)u needsUpdate:(CAMetalDisplayLinkUpdate *)u];
     return CACurrentMediaTime() - t0;
 }
+static double tick(void) { return tick_at(0); }
 // The game thread: each frame waits `ticks` link ticks, then presents `delay_us` later
 static int g_ticks, g_delay_us; static dispatch_semaphore_t t_go, t_done;
 static void *game(void *arg) {
@@ -61,11 +62,37 @@ static int next_wakes(void) { pthread_mutex_lock(&g_link_mu); int r = g_link_wai
 static void frame_start(int ticks, int delay_us) { g_ticks = ticks; g_delay_us = delay_us; dispatch_semaphore_signal(t_go); }
 static int frame_done(void) { return dispatch_semaphore_wait(t_done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0; }
 static uint64_t queued(void) { pthread_mutex_lock(&g_pq_mu); uint64_t n = g_pq_in - g_pq_read; pthread_mutex_unlock(&g_pq_mu); return n; }
+static void hold_case(int mode, int screen_hz, int fps, int callbacks, const char *name) {
+    g_link_mode = mode;
+    g_link_hold_until = 0;
+    double step = 1. / screen_hz, target = CACurrentMediaTime() + 0.050;
+    const int rate = mtl_link_rate();
+    g_link_vperiod = screen_hz == rate ? 0 : 1. / rate;
+    g_link_vhalf = g_link_vperiod > 0 ? step / 2 : 0;
+    if (g_link_vperiod > 0) {
+        // On a 144 Hz screen, the virtual 120 Hz slot at 16.67 ms comes at 13.89 ms and the next at 27.78 ms.
+        tick_at(target);
+        tick_at(target + step);
+        target += 2 * step;
+    }
+    double period = (1000000000ull / (uint64_t)fps) / 1e9;   // the same whole-nanosecond period as the guest presents
+    uint64_t first = present_enqueue(&g_tex, period, NULL, 0, NULL);
+    uint64_t second = present_enqueue(&g_tex, period, NULL, 0, NULL);
+    tick_at(target);
+    int waited = first && second == first + 1 && g_pq_read == first && queued() == 1;
+    for (int i = 1; i < callbacks; i++) {
+        tick_at(target + i * step);
+        waited &= g_pq_read == first && queued() == 1;
+    }
+    tick_at(target + callbacks * step);
+    CHECK(name, waited && g_pq_read == second && queued() == 0 && g_link_dropped == 0);
+}
 // One frame of a 1-tick acquire: the game blocks, the callback wakes it, the game presents delay_us later. Returns 0 when the game never blocked
 static int frame1(int delay_us) { frame_start(1, delay_us); int w = waiting(0); tick(); return frame_done() && w; }
 int main(void) { @autoreleasepool {
-    alarm(120); setbuf(stdout, NULL);
+    alarm(120); if (setvbuf(stdout, NULL, _IONBF, 0)) return 2;
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_LATCH", "1", 1); setenv("DM_PRESENT_DRAIN", "1", 1); setenv("DM_RT", "0", 1);
+    setenv("DM_PRESENT_SNAP", "0", 1);   // a profile with present_snap on (Breath of the Wild) would turn the latch and the drain off (mtl_snap_on)
     mtl_init();
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     mtl_present_layer(8, 8);
@@ -109,14 +136,17 @@ int main(void) { @autoreleasepool {
     int ok = 1; for (int i = 0; i < 5; i++) ok &= frame1(500) && queued() == 0;
     CHECK("from then on every woken present is latched", ok && g_link_latched == latched0 + 6 && g_link_dropped == 0);
 
-    // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter
+    // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter. The drain must have run (g_link_drained): a game thread that entered its acquire
+    // after the tick would return at once and drop the request, and there would be no waiter with or without one
     frame_start(1, 0); waiting(0); present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL); tick(); frame_done();   // a late frame: one stands again
-    latched0 = g_link_latched;
+    latched0 = g_link_latched; uint64_t drained0 = atomic_load(&g_link_drained);
     atomic_store(&g_link_drain_req, 1);
-    frame_start(1, 500); usleep(3000); tick(); usleep(3000);
+    frame_start(1, 500);
+    for (int i = 0; i < 1000 && atomic_load(&g_link_drain_req); i++) usleep(1000);   // the acquire took the request
+    usleep(3000); tick(); usleep(3000);
     pthread_mutex_lock(&g_link_mu); int gw = g_link_waiter_end, wt = g_link_waiter; pthread_mutex_unlock(&g_link_mu);
     tick(); done = frame_done();
-    CHECK("a plain drain sets no latch waiter", done && !gw && !wt && g_link_latched == latched0 && g_link_dropped == 0);
+    CHECK("a plain drain sets no latch waiter", done && atomic_load(&g_link_drained) == drained0 + 1 && !gw && !wt && g_link_latched == latched0 && g_link_dropped == 0);
     CHECK("the late frame 6 latched frames after the drain into the latch backed it off", g_link_drain.back == 1 && !g_link_drain.in);
 
     // 5. Give-up and probe with a 2-tick acquire: the tick in between takes the standing frame, the woken one finds the queue empty and its present comes after the wait
@@ -142,5 +172,12 @@ int main(void) { @autoreleasepool {
     }
     snprintf(name, sizeof name, "a 2-tick acquire probes within %d woken callbacks (took %d), no waits in between (%d)", LINK_LATCH_PROBE, n, waited_early);
     CHECK(name, g_link_latched == latched0 + 1 && n <= LINK_LATCH_PROBE && waited_early == 0 && g_link_latch_misses == 0 && g_link_dropped == 0);
+
+    hold_case(2, 120, 60, 2, "60 fps on a 120 Hz link takes the queued frame on the second tick");
+    hold_case(2, 144, 60, 3, "60 fps on a virtual 120 Hz link holds through an uneven first tick");
+    hold_case(2, 120, 120, 1, "120 fps on a 120 Hz link can take a frame on the next tick");
+    hold_case(2, 120, 75, 1, "75 fps on a 120 Hz link can take a frame on the next tick");
+    hold_case(1, 60, 30, 2, "30 fps on a 60 Hz link takes the queued frame on the second tick");
+    hold_case(3, 30, 30, 1, "30 fps on a 30 Hz link can take a frame on the next tick");
     printf("t_link_latch_cb: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

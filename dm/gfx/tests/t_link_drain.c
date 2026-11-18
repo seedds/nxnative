@@ -88,6 +88,11 @@ int main(void) {
     CHECK(nvn_link_latch_spare(T60 - 0.006, 0.006, R, T60) == -1, "a present past half the room: the latch would not have taken it");
     CHECK(nvn_link_latch_spare(A, -1, R, T60) == -1 && nvn_link_latch_spare(A, L, 0, T60) == -1, "no wake before it, or no latch: -1");
     CHECK(nvn_link_latch_spare(T60 - 0.004, 0.004, 0.0165, T60) == 1, "4 ms of 16.5 ms room counts as early");
+    CHECK(nvn_link_latch_spare(T60 - 0.0080, 0.0080, 0.0165, T60) == 1, "8 ms of 16.5 ms room (a built-in ProMotion screen in its fixed 60 Hz mode) counts as early: half the room is inside the wait (14.4 ms)");
+    CHECK(nvn_link_latch_spare(T60 - 0.0120, 0.0120, 0.033, T60) == 1, "12 ms of 33 ms room (a window on that screen) counts as early: an eighth of a tick inside the wait (14.6 ms)");
+    CHECK(nvn_link_latch_spare(T60 - 0.0130, 0.0130, 0.033, T60) == -1, "but 13 ms does not, though inside the wait: a later frame 1.6 ms later would miss it");
+    CHECK(nvn_link_latch_spare(2 * T60 - 0.0155, 0.0155, 0.033, T60) == -1, "nor 15.5 ms, though under half the room: the wait ends 14.6 ms after the wake and the latch would not have taken it");
+    CHECK(nvn_link_latch_spare(T60 - 0.0041, 0.0041, 0.0083, T60) == 1 && nvn_link_latch_spare(T60 - 0.0082, 0.0082, 0.0165, T60) == 1, "the measured limits stay (4.13 ms at 8.3 ms of room, 8.25 ms at 16.5 ms)");
     d = (nvn_link_drain){0};
     CHECK(feed(&d, &now, 600, T60, A, T60, B, 1, NULL) == 0, "without the latch that frame waited under a tick: no drain");
     d = (nvn_link_drain){0};

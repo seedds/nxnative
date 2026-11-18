@@ -20,6 +20,7 @@ TOOLS = HERE.parent / 'tools'
 sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(HERE))
 import dmsh_abi as abi
+import dmsh_ampere
 import dmsh_rt_compile as rt
 from dmsh_rt import InvalidModule
 from dmsh_rt_build import make_job
@@ -69,6 +70,34 @@ def lift(*names, **environment):
 class RtCompile(unittest.TestCase):
     def setUp(self):
         self.plan = make_job([record()[0]])
+
+    def test_ordinary_nvn2_graphics_job_accepts_short_control_sections(self):
+        code = bytes(0x100) + b'constant data'
+        env = lift('job_for', dmsh_ampere=dmsh_ampere, abi=abi, struct=struct, os=os,
+                   FACTS={}, NVN2_STAGE_INDEX={'vs': 0})
+        with tempfile.TemporaryDirectory() as work:
+            for size in (0x48, 0x50, 0x56, 0x57, 0xe0):
+                with self.subTest(control_size=size):
+                    control = bytearray(size)
+                    struct.pack_into('<II', control, 0, 0x98761234, 0xc9)
+                    struct.pack_into('<I', control, 0x38, 0x80)
+                    struct.pack_into('<II', control, 0x40, 0x100, len(code))
+                    raw = bytes(0x38) + code + control
+                    job, c1 = env['job_for']('short-control', 'vs_other.bin', raw, work)
+                    self.assertEqual((job['stage'], job['arch'], job['stage_bank']), ('vs', 'sm86', abi.NVN2_STAGE_BANK))
+                    self.assertEqual(Path(job['code']).read_bytes(), code[:0x80])
+                    self.assertEqual(c1, b'constant data')
+
+    def test_ordinary_job_still_rejects_nvn2_rt_stage_when_present(self):
+        env = lift('job_for', dmsh_ampere=dmsh_ampere)
+        for size in (0x57, 0xe0):
+            with self.subTest(control_size=size):
+                control = bytearray(size)
+                struct.pack_into('<II', control, 0, 0x98761234, 0xc9)
+                control[0x56] = 8
+                raw = bytes(0x38) + bytes(0x80) + control
+                with self.assertRaisesRegex(ValueError, 'stage8 RT record reached the ordinary shader path'):
+                    env['job_for']('rt-control', 'vs_other.bin', raw, 'unused')
 
     def test_rewrites_keep_native_msl4_fences_and_execution_barriers(self):
         fence = ('atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, '

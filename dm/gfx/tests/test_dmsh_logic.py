@@ -1,15 +1,18 @@
 """The logic operation (dmsh_logic.py, dmsh_side.py, dmsh_entry.fs_uint): main0's entry point, or main0_u under its constant, reads each colour output's attachment and combines it with what the body returned,
 integer outputs bit for bit and float outputs through their normalized target's bits, the output stays a library that compiles for the Mac and the iPhone, and shaders without colour
-outputs get none. With --fixture <dir>, writes the replay test's shaders (t_logic.m): the base source and its side library, compiled"""
-import pathlib, shutil, subprocess, sys, tempfile, unittest
+outputs get none. With --fixture <dir>, writes the replay test's shaders (t_logic.m): the base and side libraries and their generated reflection"""
+import ast, collections, json, os, pathlib, re, shutil, struct, subprocess, sys, tempfile, threading, types, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_abi, dmsh_entry, dmsh_logic, dmsh_side
+import dmsh_abi, dmsh_atomic, dmsh_chain, dmsh_entry, dmsh_fetch, dmsh_logic, dmsh_reflect, dmsh_rewrite, dmsh_side, dmsh_wide
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # its sibling test module, also when the file runs alone (python -m unittest <file>, as CI does)
 from test_dmsh_alpha import compile_lib   # noqa: E402
 
 MAIN = '''#include <metal_stdlib>
 using namespace metal;
-struct spvDescriptorSetBuffer0 { constant uint4* value [[id(0)]]; };
+struct spvDescriptorSetBuffer0
+{
+    constant uint4* fp_c3 [[id(0)]];
+};
 
 static inline float4 helper(float4 v) { return v; }
 
@@ -22,7 +25,7 @@ struct main0_out
 fragment main0_out main0(float4 gl_FragCoord [[position]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
 {
     main0_out out = {};
-    out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.value));
+    out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.fp_c3));
     out.m_1 = float4(0.5);
     return out;
 }
@@ -77,18 +80,18 @@ class LogicVariant(unittest.TestCase):
         self.assertLess(v.index('constant bool dm_lfb1'), v.index('fragment main0_out_u main0_u('))
 
     def test_narrow_integer_outputs(self):
-        narrow = MAIN.replace('float4 m_0 [[color(0)]];\n    float4 m_1', 'float m_0 [[color(0)]];\n    float2 m_1').replace('out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.value));', 'out.m_0 = as_type<float>((*spvDescriptorSet0.value).x);').replace('out.m_1 = float4(0.5);', 'out.m_1 = float2(0.5);')
+        narrow = MAIN.replace('float4 m_0 [[color(0)]];\n    float4 m_1', 'float m_0 [[color(0)]];\n    float2 m_1').replace('out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.fp_c3));', 'out.m_0 = as_type<float>((*spvDescriptorSet0.fp_c3).x);').replace('out.m_1 = float4(0.5);', 'out.m_1 = float2(0.5);')
         v = dmsh_entry.fs_uint(narrow)
         self.assertIn('if (dm_lfb0_dm_ui0) r.m_0_ui = uint(dm_logic(uint4(r.m_0_ui, 0u, 0u, 0u), dm_fb0_dm_ui0, dm_lop, 0u).x);', v)
         self.assertIn('if (dm_lfb1_dm_ui1) r.m_1_ui = uint2(dm_logic(uint4(r.m_1_ui, 0u, 0u), dm_fb1_dm_ui1, dm_lop, 1u).xy);', v)
 
     def test_narrow_float_outputs(self):
-        v, _ = variant(MAIN.replace('float4 m_0 [[color(0)]];\n    float4 m_1', 'float m_0 [[color(0)]];\n    float2 m_1').replace('out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.value));', 'out.m_0 = 0.5;').replace('out.m_1 = float4(0.5);', 'out.m_1 = float2(0.5);'))
+        v, _ = variant(MAIN.replace('float4 m_0 [[color(0)]];\n    float4 m_1', 'float m_0 [[color(0)]];\n    float2 m_1').replace('out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.fp_c3));', 'out.m_0 = 0.5;').replace('out.m_1 = float4(0.5);', 'out.m_1 = float2(0.5);'))
         self.assertIn('if (dm_lfb0) dm_r.m_0 = float(dm_logic_norm(float4(dm_r.m_0, 0.0f, 0.0f, 0.0f), dm_fb0, dm_lop, 0u).x);', v)
         self.assertIn('if (dm_lfb1) dm_r.m_1 = float2(dm_logic_norm(float4(dm_r.m_1, 0.0f, 0.0f), dm_fb1, dm_lop, 1u).xy);', v)
 
     def test_no_colour_output_no_entry_point(self):
-        depth_only = MAIN.replace('float4 m_0 [[color(0)]];\n    float4 m_1 [[color(1)]];', 'float gl_FragDepth [[depth(any)]];').replace('    out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.value));\n    out.m_1 = float4(0.5);\n', '    out.gl_FragDepth = 0.5;\n')
+        depth_only = MAIN.replace('float4 m_0 [[color(0)]];\n    float4 m_1 [[color(1)]];', 'float gl_FragDepth [[depth(any)]];').replace('    out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.fp_c3));\n    out.m_1 = float4(0.5);\n', '    out.gl_FragDepth = 0.5;\n')
         self.assertIsNone(variant(depth_only)[0])
 
     def test_taken_buffer_or_fetch_no_entry_point(self):
@@ -104,12 +107,31 @@ class LogicVariant(unittest.TestCase):
                     except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
-def fixture(out):   # t_logic.m's shaders: base.metal (the base, compiled by the test) and <key>_bx.metallib (the side library the host loads, with main0_u as the build cuts it), for key 1…1
+def fixture(out):   # Actual build reflection and libraries, starting at the synthetic MSL boundary (no translator/profile CLI initialization)
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
-    base = dmsh_side.shared_body(MAIN) + dmsh_entry.fs_uint(MAIN)   # as the build writes it: main0's body shared, which the base compiles alone
-    (out / 'base.metal').write_text(base + VERTEX)
-    u, info = dmsh_side.unit(base)
-    (out / ('1' * 16 + '_bx.metallib')).write_bytes(dmsh_side.cut(compile_lib(u + VERTEX, out, 'l').read_bytes(), set(info['alpha'] + info['logic']) | {'main0_u'})[1])
+    key = '1' * 16; work = out / 'work'; work.mkdir()
+    (work / (key + '.metal')).write_text(MAIN)
+    (work / (key + '.res.json')).write_text(json.dumps({'cbufs': [{'slot': 3, 'fixed': 16}], 'sbufs': [], 'textures': [], 'images': [], 'notes': []}))
+    code = work / 'code'; code.write_bytes(b'')
+
+    def compile_msl(target, source, dest):
+        pathlib.Path(dest).write_bytes(compile_lib(pathlib.Path(source).read_text() + VERTEX, work, 'fixture').read_bytes())
+
+    def compile_split(target, source, dests, split):
+        for dest, data in zip(dests, split(compile_lib(pathlib.Path(source).read_text() + VERTEX, work, 'fixture').read_bytes())):
+            pathlib.Path(dest).write_bytes(data)
+
+    ns = dict(globals(), loc={key: ('synthetic', 0)}, pc_of={key: []}, out=str(out), w=str(work), CHAIN=dmsh_chain.version(),
+              IOSOUT=None, TARGETS={'mac'}, BF_WANT=set(), DUAL_WANT=set(), SIDE_STATS=collections.Counter(), BF_STATS=collections.Counter(),
+              SPIRV_CROSS='synthetic-msl', XC=[], clone=shutil.copyfile,
+              subprocess=types.SimpleNamespace(run=lambda *a, **kw: subprocess.CompletedProcess(a, 0), CalledProcessError=subprocess.CalledProcessError),
+              MTL=types.SimpleNamespace(compile=compile_msl, compile_split=compile_split, with_compiler=lambda target, refl: refl))
+    tree = ast.parse((pathlib.Path(dmsh_entry.__file__).parent / 'dmsh_build.py').read_text())
+    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {'finish', 'ps_libraries', 'ps_omap', 'write_refl', 'atomic_json'}]
+    exec(compile(tree, 'dmsh_build.py', 'exec'), ns)
+    status, reason, refl = ns['finish'](key, str(work), {'stage': 'ps', 'code': str(code)}, b'')
+    if status != 'ok': raise AssertionError((status, reason))
+    assert refl['entry_u_logic'] and refl['entry_u_side'] and 'logic' not in refl   # the typed entry replaces main0_l: has_logic stays false
 
 
 if __name__ == '__main__':

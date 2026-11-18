@@ -307,13 +307,13 @@ To enroll a cut for any game's own module:
 - **Found on:** [Sonic Frontiers Definitive Edition](../../dm/games/0400921025B32000/README.md) `main+0x19ce5c4`, in a 128-bit compare and swap loop: the only one of the 18,315 `x18` sites in `main` that `subst` cannot rename.
 - **Check:** `test_x18_casp.py` checks that no block names `x18` and keeps one `casp`, and runs the blocks with unicorn (optional): a swap that succeeds and one that fails with the compare pair at `x18`, a new-value pair at `x18`, and a 32-bit pair, whose writes clear the upper halves. A module without such an instruction takes no new path: the rewriter stopped on every one before.
 
-### Unframed pointer tail calls followed by zero trap padding
+### Unframed pointer tail calls followed by compiler padding
 
-- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315.
-- **Cause:** the function loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction.
-- **Fix:** for a tail followed by zero trap padding, accept a plain paired pointer load as well as a single load, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches, calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. The terminal-tail rule and other nonterminal-tail checks are unchanged.
-- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. This is a rewrite-stage finding, not gameplay validation or a game profile.
-- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic paired loads, zero padding, argument stores and rejection of control flow, frame changes, pointer clobbers and missing instructions.
+- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315, or `jump table 478a7b4` on Hello Kitty Island Adventure 2.17.2 (`4a521d4` in 3.0.0).
+- **Cause:** Moving Out 2 loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction. Hello Kitty Island Adventure has the same unframed thunk shape with `ldr x18,[x0,#0x18]` and two trailing `nop` words; the padded-tail rule initially accepted only `udf #0`.
+- **Fix:** accept a plain paired pointer load as well as a single load when every decoded instruction after the tail is `nop` or `udf #0`, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches (including those entering the padding), calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. NOPs and traps differ when executed; this proof leaves the suffix unreachable from the straight-line body after its unconditional tail branch. The terminal-tail rule and other nonterminal-tail checks are unchanged. The binding is the general rewriter's instruction shape, with no engine, game or build gate.
+- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. Hello Kitty Island Adventure (`010027901C89C000`) 2.17.2 and 3.0.0, reported with disassembly and rewrite results in [issue #2923](https://github.com/seedds/nxnative/issues/2923). These are rewrite-stage findings, not local gameplay validation or game profiles.
+- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic single and paired loads, zero, NOP and mixed padding, argument stores and rejection of branches into the padding, frame changes, pointer clobbers and missing instructions. A NOP followed by live code or a nonzero trap is rejected; the whole suffix must be padding.
 
 ### Loaded method-pointer tail call before an error block
 
@@ -477,6 +477,14 @@ To enroll a cut for any game's own module:
 - **Check:** `test_nro_header.py` runs the real rewriter on synthetic NROs whose build IDs decode as an `x18` load or `br x18`, checks the header byte-for-byte, and checks that an actual `x18` instruction immediately after it is rewritten. Code before the first unwind entry is covered too: per-function analysis must not reenter the header even when the linear scans exclude it.
 
 ## Stack and system registers
+
+### An x18 scratch spill overwrites a live stack temporary
+
+- **Symptom:** crackle in Super Mario Sunshine's 3D file-select menu and gameplay, with both stereo and six-channel output. The crackle is already in the PCM Hagi submits to AudioOut.
+- **Cause:** Hagi's pitch resampler restores `sp` while the tail of its 80-entry phase table is still live below it. The plain x18 stub for `csel x11,x11,x18,gt` saves two registers at `[sp-16, sp)` and overwrites entries 72–79 before Hagi reads them.
+- **Fix:** a conditional select with one x18 source can branch on the original flags. The x18 arm loads `K18` using the destination and one temporary without spilling to the guest stack. The rewriter uses this form only when every path in the unwind function overwrites the temporary before reading it or returns normally. It keeps the existing lowering when it cannot prove that a temporary is dead.
+- **Check:** on Sunshine 1.1.4, 24 of 30 synthetic resampler cases differed from the original with the old rewrite. All 30 match the original PCM and final state with the new rewrite, and all returns restore `sp`. `test_x18_select.py` checks both source positions and widths with an unmapped guest stack, and checks that live registers are rejected.
+- **Found on:** [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) ([issue #2623](https://github.com/seedds/nxnative/issues/2623#issuecomment-6949393946)).
 
 ### Stack pointer writes through x18
 

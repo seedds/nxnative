@@ -63,6 +63,21 @@ class Alias(unittest.TestCase):
             self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
         self.assertEqual([c for c, _ in seen], [fam['updates'][0][1], '-'])
 
+    def test_same_build_goes_on_past_an_unreadable_base_when_an_update_supplies_the_code(self):
+        seen = []
+        def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):   # nx_extract: the update's main is another build; the base game alone fails its hash check
+            seen.append(cmd[3])
+            if cmd[3] != '-': nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID)
+            else: raise nsp.BuildError('nx_extract exit code 1')
+        fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
+        with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
+            self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
+        self.assertEqual(seen, [fam['updates'][0][1], '-'])
+        base_only = {'base': self.tmp / 'base.nsp', 'updates': [], 'dlc': []}   # no update: the base game is the code, so its failure still stops the lookup
+        with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
+            with self.assertRaises(nsp.BuildError):
+                nsp.same_build(self.tmp, OTHER, base_only, self.tmp / 'prod.keys', REPO, {})
+
     def test_derived_profile_takes_the_title_and_program_ids(self):
         d = self.tmp / 'extract/v0'; nso(d / 'ExeFS/main', BID)
         (d / 'ExeFS/main.npdm').write_bytes(b'META' + bytes(0x7c) + b'ACI0' + bytes(0xc) + struct.pack('<Q', PROGRAM) + bytes(0x20))

@@ -359,6 +359,65 @@ def site_plain(ins):
     emit(LDP(S, T, 31, save - dlt)); emit(BX(here(), ins.address + 4))
     return start
 
+def select_x18(ins):
+    """A CSEL with one guest x18 source and a normal register destination."""
+    word = struct.unpack('<I', ins.bytes)[0]
+    rd, rn, rm, cond = word & 31, (word >> 5) & 31, (word >> 16) & 31, (word >> 12) & 15
+    if word & 0x7FE00C00 != 0x1A800000 or rd in (18, 31) or (rn == 18) == (rm == 18) or cond >= 14: return None
+    return rd, (rm if rn == 18 else rn), (cond ^ (rn == 18)), bool(word >> 31)
+
+
+# Only these instructions can carry a proof of a dead register across them. The first operand of a writer is a full xN/wN definition unless the instruction
+# also reads it (including as an address register). A wN definition zeros the high half of xN. Stores, compares and NOP can never end a register's lifetime.
+SELECT_WRITES = set('adr adrp add adds and ands asr bic csel eor ldr ldrb ldrh ldrsb ldrsh ldrsw ldur lsl lsr mov movn movz mul orn orr sbfx sub subs ubfx'.split())
+SELECT_READS = {'cmp', 'cmn', 'tst', 'nop', 'str', 'strb', 'strh', 'stur', 'sturb', 'sturh'}
+
+
+def select_scratch(at, by_address, function_end, rd):
+    """One dead AAPCS64 temporary for a select, or None. The old value must be overwritten before a read on every path, or reach a normal return
+    inside the same unwind function. Keep x0–x8, callee-saved registers and LR out of the search. Calls, unknown instructions, outgoing branches and
+    an exhausted search budget give no proof."""
+    budget = 64
+
+    def dead_after(pc, pending):
+        nonlocal budget
+        if not pending or budget == 0 or pc >= function_end or (ins := by_address.get(pc)) is None: return set()
+        budget -= 1
+        m = ins.mnemonic
+        if m == 'ret' and not ins.op_str: return pending
+        if m == 'b': return dead_after(ins.operands[-1].imm, pending)
+        if m.startswith('b.') or m in ('cbz', 'cbnz', 'tbz', 'tbnz'):
+            pending = pending - regs_in(ins)
+            return dead_after(pc + 4, pending) & dead_after(ins.operands[-1].imm, pending)
+        if m not in SELECT_WRITES and m not in SELECT_READS: return set()
+        dead = set()
+        if m in SELECT_WRITES and not ins.writeback:
+            dst, _, sources = ins.op_str.partition(',')
+            dst_n = num(dst)
+            if dst_n in pending:
+                reads, _ = regset(ins)
+                if not any(num(name) == dst_n for name in reads | set(re.findall(r'\b[xw]\d+\b', sources))):
+                    dead.add(dst_n)
+        return dead | dead_after(pc + 4, pending - regs_in(ins))
+
+    return min(dead_after(at + 4, set(range(9, 18)) - {rd}), default=None)
+
+
+def site_select(ins, args, temp):
+    """Split CSEL on its original flags. Only the arm selecting x18 needs the key page. In that arm the destination's old value is dead,
+    so the destination and one dead temporary can load K18 without touching the guest stack."""
+    rd, other, other_cond, wide = args
+    start, skip = here(), len(patch)
+    emit(NOP)  # filled with the conditional branch once the other arm's address is known
+    emit(MRS_TPIDRRO(temp)); emit_slot_addr(temp, rd, 'K18')
+    emit(LDRX(rd, temp) if wide else 0xB9400000 | (temp << 5) | rd)  # ldr wD,[xT] zero-extends the result
+    emit(BX(here(), ins.address + 4))
+    struct.pack_into('<I', patch, skip, BEQ(start, here()) | other_cond)
+    if not wide or rd != other: emit(MOVX(rd, other) if wide else MOVX(rd, other) & 0x7FFFFFFF)
+    emit(BX(here(), ins.address + 4))
+    return start
+
+
 def site_sp(ins):
     """Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
     copy the old sp into T first, and after the instruction restore S / T relative to T (without writeback, ldp may use the base register as a destination). x18 is not written, so the slot is not written back"""
@@ -1182,13 +1241,21 @@ def half_pads(fa, fb, insl, at, base):
     tgt, _ = table_at(fa, fb, insl, at)
     if not tgt or any(t < base or (t - base) % 4 for t in tgt): return None
     return max(t - base for t in tgt) // 4 + 1
+selects = {}
+function_ends = dict(nso_code.fde_ranges(IMG))
 for fa, fb in funcs:
     insl = disasm_fn(fa, fb)
+    by_address = None
     ws = find_windows(insl)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
         if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
     for j, ins in enumerate(insl):
+        if ins.mnemonic == 'csel' and fa in function_ends and ins.address < function_ends[fa] <= fb and ins.address not in done:
+            if args := select_x18(ins):
+                if by_address is None: by_address = {p.address: p for p in insl}
+                temp = select_scratch(ins.address, by_address, function_ends[fa], args[0])
+                if temp is not None: selects[ins.address] = args, temp
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
             # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
@@ -1297,6 +1364,7 @@ for a in sorted(kinds):
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
         elif casp_pair18(ins): st = site_casp(ins); stat('casp')
+        elif a in selects: st = site_select(ins, *selects[a]); stat('select')
         elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)

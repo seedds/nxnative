@@ -44,6 +44,8 @@ To the race:
 
 ## Frame rate
 
+The host handles [cube face splitting and pass merging](../../../docs/reference/rendering.md#a-draw-into-the-six-faces-of-a-cube-level-at-once-ran-short-of-threads) and [guest compute dispatch ordering](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other). The shader chain [compares bounded uniform reads by row where it can prove the component is in range](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size). The performance measurements are recorded with those mechanisms.
+
 The first race on the 16 GB M6, in order of the fixes:
 
 | Host | Frame p50 | Frame p95 | Submit |
@@ -103,8 +105,13 @@ Frame step (current): the framework's interval function is `main+0x69cbb0` on 1.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
 
+## Audio route regression check
+
+- 2026-11-17, MacBook Pro M4 Pro, macOS 27.2.1, local v917504 build: full `regress.py check` of the [shared audio output-route rework](../../../docs/reference/audio.md#stereo-only-on-a-51-system) against main `2925d7af` found the same Metal `setRenderPipelineState:` crash at frame 113 in both revisions. The SDK 21 six-input DeviceSink starts before the crash; the candidate queues its eight-value representation. The harness reports PASS for unchanged failures (one shader fails in both), but the race route did not run and this is not successful gameplay or surround validation. Kirby's Dream Buffet covers the full renderer route instead. We should leave this independent graphics failure out of the audio change.
+
 ## Found on this game
 
+- [Cached dirty-range lookups with overlapping pools](../../../docs/reference/nvn-objects.md#cached-dirty-range-lookups-with-overlapping-pools): sparse-texture lookup locality motivated the cache; overlapping-pool missed writes are reproduced by CPU fixtures, not attributed to a particular gameplay image.
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution never stepped down with one time per submission; with the GPU's idle gaps counted it swung and distant detail flickered
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the interval chosen from CPU time.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)

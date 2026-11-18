@@ -17,6 +17,7 @@ import dmsh_atomic  # noqa: E402
 import dmsh_entry  # noqa: E402
 import dmsh_fetch  # noqa: E402
 import dmsh_reflect  # noqa: E402
+import dmsh_rewrite  # noqa: E402
 import dmsh_side  # noqa: E402
 
 ns: dict[str, Any] = {**vars(dmsh_reflect), **vars(dmsh_entry)}
@@ -25,6 +26,37 @@ attributes, has_word, fs_uint = ns['attributes'], ns['has_word'], ns['fs_uint']
 
 def noise(rng, parts, n=40):
     return ''.join(rng.choice(parts) for _ in range(n))
+
+
+class UniformMatchScan(unittest.TestCase):
+    # The original assertion-first expression: keep an independent oracle for match order, spans and every capture.
+    READ = r'as_type<(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'
+    OLD = re.compile(r'(?<![\w.])%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= )%s' %
+                     (READ, READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
+
+    def compare(self, src):
+        old = [(m.span(), m.groups(), m.groupdict()) for m in self.OLD.finditer(src)]
+        new = [(m.span(), m.groups(), m.groupdict()) for m in dmsh_rewrite._UTEST.finditer(src)]
+        self.assertEqual(new, old, src)
+        return len(old)
+
+    def test_boundaries_and_both_comparison_orders(self):
+        word = 'as_type<int>((*spvDescriptorSet0.fp_c5)._m0[16].w)'
+        for prefix in ('', 'x', '_', '.', '\u00e9', '\u0301', '\x00', '1 == ', '-2u != ', ' = ', '<= ', '>= '):   # the last three: an = that is no [!=]=
+            for suffix in ('', ' != 1', ' == -2u', ' == 2ux', ' >= 3', ' == _4'):
+                self.compare(prefix + word + suffix)
+        self.assertEqual(self.compare(word + ' != 1'), 1)
+        self.assertEqual(self.compare('1 == ' + word + ' != 2'), 1)
+        self.assertEqual(self.compare('1 == ' + word + '; ' + word + ' != 2'), 2)
+
+    def test_as_the_original_pattern_on_random_text(self):
+        rng = random.Random(1932)
+        word = 'as_type<int>((*spvDescriptorSet0.fp_c5)._m0[16].w)'
+        parts = [word, word.replace('<int>', '<uint>'), word.replace('c5', 'c0'), word.replace('c5', 'c123'), word.replace('16', '\u0661'),
+                 ' != 1', ' == -2u', ' == _4', ' >= 3', '1 == ', '-2u != ', '12345678901234567890 == ', ' = ', '<= ', '>= ', 'x', '_', '.', '\u00e9', '\u0301', '\x00',
+                 'as_type<', 'as_type<as_type<', ';\n', ' ', '1 == ' + word + ' != 2']
+        matches = sum(self.compare(noise(rng, parts, rng.randrange(25))) for _ in range(10000))
+        self.assertGreater(matches, 1000)   # the corpus must exercise matching paths, not only no-ops
 
 
 class AssignedOnce(unittest.TestCase):

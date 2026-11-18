@@ -554,6 +554,13 @@ void front_save_failed(int err) {
 // the category is Playback, as a game's or media app's: the ring / silent switch does not mute it (the default SoloAmbient follows the switch, which silenced the game whenever the phone was on silent) and it still interrupts other apps' audio.
 // Set once at boot and again on return to the foreground (the system may reset it after an interruption)
 static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
+// Six channels when the route takes them (HDMI, a multichannel interface or dock): the session's maximum is the route's, and it stays 2 on headphones, AirPods included.
+// Asked at activation and again on each route change (front_ios_audio_watch), since a preference does not carry from one route to the next
+static void front_ios_audio_channels(AVAudioSession *s) {
+    NSError *e = nil; NSInteger most = s.maximumOutputNumberOfChannels, want = most >= 6 ? 6 : 2;
+    if (want > 2 && ![s setPreferredOutputNumberOfChannels:want error:&e]) LOG("[RED] audio session: %ld output channels could not be set: %s", (long)want, e.localizedDescription.UTF8String);
+    LOG("audio session: route %s, output channels %ld (route maximum %ld)", s.currentRoute.outputs.firstObject.portType.UTF8String ?: "(none)", (long)s.outputNumberOfChannels, (long)most);
+}
 void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
     if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
@@ -562,7 +569,10 @@ void front_ios_audio_session(void) {
     g_session_off = ![s setActive:YES error:&e];
     if (g_session_off) LOG("[RED] audio session activation failed: %s", e.localizedDescription.UTF8String);
     LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms)", s.sampleRate, s.IOBufferDuration * 1000);
+    front_ios_audio_channels(s);
 }
+// The channels the route takes now (hle_audio.c decides the output from it: six only when the session has six)
+int dm_ios_output_channels(void) { return (int)AVAudioSession.sharedInstance.outputNumberOfChannels; }
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
 // Without the interruption observer the AudioUnits stayed "started" while iOS no longer called them, and a game waiting for its buffers back lost its sound until restart.
@@ -579,6 +589,13 @@ static void front_ios_audio_watch(void) {
             if (!g_audio_bg) front_ios_audio_session();
         }
         front_ios_audio_apply();
+    }];
+    // A new output (an HDMI adapter, AirPods, a dock) or one gone: ask for the channels the new route takes, then the host gives each output a unit at that count (dm_audio_route_changed)
+    [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        NSUInteger reason = [n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+        if (reason == AVAudioSessionRouteChangeReasonCategoryChange) return;   // our own setCategory at activation; the route is the same
+        LOG("audio session: route changed (reason %lu)", (unsigned long)reason);
+        front_ios_audio_channels(AVAudioSession.sharedInstance); dm_audio_route_changed();
     }];
     [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         (void)n; LOG("audio session: the media services were reset; setting the session and the outputs up again");
@@ -603,13 +620,13 @@ static void save_sync_background(void) {
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
-        case 0: dm_gamepad_reset(); dm_focus_set(2); break;
+        case 0: dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); break;
         case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;
             if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
             if (g_session_off) front_ios_audio_session();
-            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); break;
+            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_movie_active(1); break;
     }
 }

@@ -14,6 +14,9 @@ pad_layout	full
 
 # ---- Versions ----
 # v655360 is the update's title version; a dump has no control data to name a display version
+# v327680: a user's dump (base + update in one NUP; the display column is the title version, as for v655360); its main has the screen shape stubs of patches.py. Packed from a derived profile
+# (its shaders are not in shader_versions)
+build	v327680	v327680	main=816c5358e8178d802fcec4a7ce5a741a	subsdk0=9646a69cb1024ba919fddaa4265e6bc5	sdk=cc7da00d672399efe7958790d17fae39
 build	v655360	v655360	main=76a489f3bd3642fa5e18bd83d32c98ba	subsdk0=9646a69cb1024ba919fddaa4265e6bc5	sdk=cc7da00d672399efe7958790d17fae39
 package	v655360
 shader_versions	v655360
@@ -33,6 +36,11 @@ app_pool	0x240000000
 sys_resource	0x0
 # nninitStartup asks for pool - used memory and does not check the answer; the rewritten modules take 82 MB, more than the default 64 MB SetHeapSize checks the request against
 mem_used	0x5600000
+
+# ---- Screen shape ----
+# patches.py (v327680 main): DM_SCREEN_ASPECT wider than 16:9 renders the screen's shape, 1080 tall (2560x1080 at 2.37): the render sizes, the swap chain and the cameras' ratio follow
+# it (more at the sides), the HUD stays in the middle 16:9 area; the launchers offer it
+screen_aspect	wide
 
 # ---- Pipelines ----
 # the game sets near = 0 (the log's depth mode line): the pipeline bases made before it runs are made for that mode

@@ -210,6 +210,10 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
+    // Button icon sets (dm/textures/<set>, dm/tools/button_icons.py: Pokopia's): a controller's, pad_label when pads map by label (DM_PAD_MAP=label, pad_apple.h: Xbox labels) and pad_position
+    // otherwise (the game's own), and the keyboard's, which the host swaps in while the keyboard is the input last used (nvn_mtl.m tex_rep_swap)
+    { const char *pm = getenv("DM_PAD_MAP"); snprintf(p, sizeof p, "%s/textures/%s", dm, pm && !strcmp(pm, "label") ? "pad_label" : "pad_position"); if (!stat(p, &st)) setenv("DM_TEX_REPLACE", p, 0);
+      snprintf(p, sizeof p, "%s/textures/keyboard", dm); if (!stat(p, &st)) setenv("DM_TEX_REPLACE_KBD", p, 0); }
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
     snprintf(p, sizeof p, "%s/aoc", res); if (!stat(p, &st)) setenv("DM_AOC_DIR", p, 0);
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none

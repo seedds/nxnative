@@ -338,6 +338,9 @@ void dm_fps_state_apply(void) {
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
     // Hades II's 3.0). Independent of the frame step: written at target 0 too
+    // Button prompts in an Xbox controller's layout (state +0xb0 u32 1): pads mapped by label (DM_PAD_MAP=label, pad_apple.h, with an Xbox controller's icons; the keyboard's set follows
+    // the same layout, nvn_mtl.m DM_TEX_REPLACE_KBD). Pokémon Pokopia's patches.py then puts the in-world button diamond in an Xbox controller's layout
+    { const char *pm = getenv("DM_PAD_MAP"); uint32_t other = pm && !strcmp(pm, "label"); memcpy(dm_fps_state + 0xb0, &other, 4); }
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
@@ -349,11 +352,18 @@ void dm_fps_state_apply(void) {
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
+    // A screen wider than 16:9 (1.8 to 4, Pokémon Pokopia's patches.py): the output keeps its height (1080) and takes the width of the ratio, a multiple of 8 (2.37 → 2560, 64:27);
+    // state +0xa0 u32 output width, +0xa4 float its ratio (width / 1080, the cameras' ratio), +0xa8 float the output width (the renderer's 1920.0 constants); 0 = 16:9
     const char *as = getenv("DM_SCREEN_ASPECT");
     if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
         char *end; float a = strtof(as, &end);
-        if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
-        else {
+        if (end == as || *end || !((a >= 1.3f && a < 1.77f) || (a >= 1.8f && a <= 4.0f))) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77 (taller) or 1.8 to 4 (wider); keeping 16:9", as);
+        else if (a >= 1.8f) {
+            uint32_t ow = (uint32_t)(1080.0f * a / 8.0f + 0.5f) * 8; float r = (float)ow / 1080.0f, owf = (float)ow;
+            memcpy(dm_fps_state + 0xa0, &ow, 4); memcpy(dm_fps_state + 0xa4, &r, 4); memcpy(dm_fps_state + 0xa8, &owf, 4);
+            extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(ow, 1080);   // the picture's shape for a texture that follows it (nvn_mtl.m present_shape)
+            LOG("%s: screen shape %.3f: output %ux1080, cameras %.4f:1 (DM_SCREEN_ASPECT; only builds with wide screen-shape stubs follow it)", g_fps_mod, a, ow, r);
+        } else {
             uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3; float lf = (float)lh;
             memcpy(dm_fps_state + 0x48, &oh, 4); memcpy(dm_fps_state + 0x4c, &lh, 4); memcpy(dm_fps_state + 0x50, &lf, 4);
             extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(1920, oh);   // the picture's shape for a texture that follows it (nvn_mtl.m present_shape)

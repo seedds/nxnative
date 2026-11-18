@@ -347,7 +347,7 @@ t_compute_loops: t_compute_loops.m $(MTL_T_DEP)
 check_t_dispatch_barrier: t_dispatch_barrier
 	@set -e; for mode in full game; do for enc in 0 1; do \
 	    DM_NVN_DISPATCH_BARRIER=$$mode DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_barrier; \
-	done; done
+	done; done; for r in 0 1; do DM_NVN_DISPATCH_RANGELESS=$$r MTL_DEBUG_LAYER=1 ./t_dispatch_barrier; done
 t_args_gen: t_args_gen.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_args_gen.m $(MTL_T_SRC) $(FW)
 check_t_args_gen: RUN_ENV = MTL_DEBUG_LAYER=1

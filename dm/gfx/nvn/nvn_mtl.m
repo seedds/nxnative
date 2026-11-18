@@ -16070,13 +16070,31 @@ static geo_access cs_access_of(NvShader *sh, uint64_t ind) {   // the guest memo
     }
     return a;
 }
-static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free;
+// NVN barriers order guest dispatches. Without known ranges, treat the
+// dispatch as reading and writing all memory for the host's copies, in both
+// directions. The diagnostic override restores the former full ordering.
+static int dbar_unknown_game(void) {
+    static int mode = -1;
+    if (mode < 0) mode = sw_mode("DM_NVN_DISPATCH_RANGELESS", 1);
+    return sw_on(mode);
+}
+static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free, g_dbar_ufree;
 void mtl_dispatch_barrier_stats(uint64_t *game, uint64_t *copy, uint64_t *unknown, uint64_t *none) {   // the periodic [nvn] line (hle_nvn.c)
-    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *none = g_dbar_free; }
+    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *none = g_dbar_free + g_dbar_ufree; }
 static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind) {
     if (!dbar_game()) { g_dsp_game_bar = 0; return dispatch_enc(); }
     geo_access a = cs_access_of(cs, ind);
-    if (a.unknown) { g_dbar_unknown++; g_dsp_game_bar = 0; return dispatch_enc(); }
+    if (a.unknown && !dbar_unknown_game()) { g_dbar_unknown++; g_dsp_game_bar = 0; return dispatch_enc(); }
+    if (a.unknown) {
+        id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
+        if (g_blit_ops && (g_dsp_game_bar || g_bw_n || g_br_n)) { g_dbar_unknown++; blit_barrier(); } else g_dbar_ufree++;   // after the game's barrier or a copy: as before
+        g_dsp_game_bar = 0;
+        g_dw_lo[0] = 0; g_dw_hi[0] = ~0ull; g_dw_n = 1; g_dr_lo[0] = 0; g_dr_hi[0] = ~0ull; g_dr_n = 1;   // read and written everything, for the copies after it (blit_buf, blit)
+        g_blit_ops++;
+        if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
+        args_dirty_all();
+        return e;
+    }
     id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
     int copy = g_dr_n + a.n > DW_MAX || g_dw_n + a.n > DW_MAX;
     for (int i = 0; i < a.n && !copy; i++) copy = bw_hit(a.r[i].lo, a.r[i].hi) || (a.r[i].write && br_hit(a.r[i].lo, a.r[i].hi));

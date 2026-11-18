@@ -23,7 +23,8 @@ static int hid_usleep(useconds_t usec) { (void)usec; if (script_hold) script_hol
 int dm_opmode(void) { return g_mode; }
 uint64_t guest_ns(void) { return 1000000000ull; }
 uint64_t now_ns(void) { return motion_now; }
-uint64_t dm_guest_frame(void) { return 0; }
+static uint64_t g_test_frame;   // the presented frame count the scripted holds read
+uint64_t dm_guest_frame(void) { return g_test_frame; }
 void dm_touch_set(const dm_touch *t, int n) { (void)t; (void)n; }
 int touch_fill_n(void *out, int max, uint64_t now) { (void)out; (void)max; (void)now; return 0; }
 int gesture_fill(void *out, int n, uint64_t now) { (void)out; (void)n; (void)now; return 0; }
@@ -296,6 +297,30 @@ static void t_script(void) {
     g_nsteps = 0;
 }
 
+// A hold counted in presented frames ("~f<n>", DM_KEYS and DM_CTL): the button stays down until that many more frames have been presented, however long they take
+static int hold_polls, hold_down;
+static void t_frame_hold_poll(void) { hold_polls++; hold_down += buttons_of(0, STYLE_FULLKEY) == DM_BTN_A; if (hold_polls % 3 == 0) g_test_frame++; }   // a frame every third poll
+static void t_frame_hold(void) {
+    g_mode = 1; dm_pad_players(1); dm_pad_set(0, 0, 0, 0, 0); dm_input_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
+    key_step st = {0, 0.15, 0};
+    parse_hold("f12", &st); CHECK(st.hold_frames == 12 && st.hold == 0, "~f12 is a hold of 12 frames");
+    parse_hold("F3", &st); CHECK(st.hold_frames == 3, "~F3 too");
+    parse_hold("f0", &st); CHECK(st.hold_frames == 1, "a frame hold is at least one frame");
+    parse_hold("0.5", &st); CHECK(st.hold_frames == 0 && st.hold == 0.5, "~0.5 stays a hold in seconds");
+    char hb[64]; CHECK(!strcmp(hold_text(&st, hb, sizeof hb), "0.50 s"), "a hold in seconds is logged in seconds");
+    g_test_frame = 700; st.hold_frames = 4; CHECK(!strcmp(hold_text(&st, hb, sizeof hb), "4 frames from frame 700"), "a frame hold is logged with the frame it starts at");
+    g_nsteps = 1; g_steps[0] = (key_step){.btn = DM_BTN_A, .hold_frames = 4, .frame = 1, .at = 700};
+    hold_polls = hold_down = 0; script_hold = t_frame_hold_poll; keys_main(NULL); script_hold = NULL;
+    CHECK(g_test_frame == 704, "the hold ends when four more frames have been presented");
+    CHECK(hold_polls == 12 && hold_down == 12, "the button is down at every poll of the hold");
+    buttons_of(0, STYLE_FULLKEY); CHECK(buttons_of(0, STYLE_FULLKEY) == 0, "and released after it");
+    g_steps[0] = (key_step){.btn = DM_BTN_A, .hold = 0.15, .frame = 1, .at = 700};
+    hold_polls = 0; script_hold = t_frame_hold_poll; keys_main(NULL); script_hold = NULL;
+    CHECK(hold_polls == 1, "a hold in seconds is one sleep and reads no frame count");
+    buttons_of(0, STYLE_FULLKEY); buttons_of(0, STYLE_FULLKEY);
+    g_nsteps = 0; g_test_frame = 0;
+}
+
 // Live controller motion (dm_motion_set): player 1's six-axis sensor reports the controller's tilt and rotation instead of lying flat, and goes back to flat when cleared
 static _Atomic int motion_ready, motion_go;
 static void *motion_sender(void *arg) {
@@ -414,6 +439,7 @@ int main(void) {
     t_disconnect();
 #endif
     t_script();
+    t_frame_hold();
     t_vibration();
     t_rumble_log();
     t_motion_threads();

@@ -66,17 +66,33 @@ uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 //   L<x>/<y> and R<x>/<y> = a stick tilted part way (each -1 to 1, y up: a cursor that a full tilt sweeps past its target), T<x>x<y> = a touch at normalized picture coordinates (origin top left) for the hold time, and Shake = the controller shaken for the hold time (at least one whole shake);
 //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through player 1's scripted path (script_set), ORed with keyboard / touch and player 1's controller, none overrides another. Times are counted from host start.
 //   An f before the time means a presented frame number ("f7600:A", and the repeat interval counts frames too): when the machine is busy seconds drift from the game's progress, frame numbers do not (used for the Zelda BotW opening route)
-typedef struct { double at, hold; uint64_t btn; int32_t lx, ly, rx, ry; int frame, tap; float tx, ty; } key_step;   // tap: a touch at (tx, ty), normalized
+//   An f after the ~ counts the hold in presented frames too ("f7600:LRight~f12", and "LRight~f12" as a DM_CTL line): where the frame time moves by a factor between runs or
+//   scenes (a software rasteriser: a level frame from 85 ms to 2 s) a hold in seconds covers a different number of the game's steps each time, and a walk ends somewhere else
+typedef struct { double at, hold; uint64_t btn; int32_t lx, ly, rx, ry; int frame, tap; float tx, ty; long hold_frames; } key_step;   // tap: a touch at (tx, ty), normalized; hold_frames: the hold in presented frames (0: hold seconds)
 #define KEY_STEPS 1024
 static key_step g_steps[KEY_STEPS]; static int g_nsteps;
+// The hold of a step, the text after its ~: seconds, or f<frames>
+static void parse_hold(const char *s, key_step *st) {
+    if (*s == 'f' || *s == 'F') { st->hold_frames = atol(s + 1); if (st->hold_frames < 1) st->hold_frames = 1; st->hold = 0; }
+    else { st->hold = atof(s); st->hold_frames = 0; }
+}
+static const char *hold_text(const key_step *st, char *buf, size_t n) {
+    if (st->hold_frames) snprintf(buf, n, "%ld frames from frame %llu", st->hold_frames, (unsigned long long)dm_guest_frame()); else snprintf(buf, n, "%.2f s", st->hold);
+    return buf;
+}
+// Waits out a step's hold: its seconds, or until that many more frames have been presented
+static void step_hold(const key_step *st) {
+    if (!st->hold_frames) { usleep((useconds_t)(st->hold * 1e6)); return; }
+    for (uint64_t until = dm_guest_frame() + (uint64_t)st->hold_frames; dm_guest_frame() < until;) usleep(1000);
+}
 static void *keys_main(void *arg) {
     (void)arg; struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < g_nsteps; i++) {
         for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
                    if (g_steps[i].frame ? (double)dm_guest_frame() >= g_steps[i].at : el >= g_steps[i].at) break; usleep(5000); }
-        LOG("DM_KEYS: %s%.2f press %#llx (hold %.2f s)", g_steps[i].frame ? "frame " : "", g_steps[i].at, (unsigned long long)g_steps[i].btn, g_steps[i].hold);
+        char hb[64]; LOG("DM_KEYS: %s%.2f press %#llx (hold %s)", g_steps[i].frame ? "frame " : "", g_steps[i].at, (unsigned long long)g_steps[i].btn, hold_text(&g_steps[i], hb, sizeof hb));
         if (g_steps[i].tap) { dm_touch t = {0, g_steps[i].tx, g_steps[i].ty}; dm_touch_set(&t, 1); }
-        script_set(g_steps[i].btn, g_steps[i].lx, g_steps[i].ly, g_steps[i].rx, g_steps[i].ry); usleep((useconds_t)(g_steps[i].hold * 1e6)); script_set(0, 0, 0, 0, 0);
+        script_set(g_steps[i].btn, g_steps[i].lx, g_steps[i].ly, g_steps[i].rx, g_steps[i].ry); step_hold(&g_steps[i]); script_set(0, 0, 0, 0, 0);
         if (g_steps[i].tap) dm_touch_set(NULL, 0);
     }
     return NULL;
@@ -114,7 +130,7 @@ void hid_keys_init(void) {
         *c = 0; int fr = (tok[0] == 'f' || tok[0] == 'F'); key_step st = {atof(tok + fr), 0.15, 0}; st.frame = fr;
         int rep = 1; double every = 0;
         char *r = strchr(c + 1, '*'); if (r) { *r = 0; rep = atoi(r + 1); char *sl = strchr(r + 1, '/'); every = sl ? atof(sl + 1) : 1; if (rep < 1) rep = 1; }
-        char *h = strchr(c + 1, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+        char *h = strchr(c + 1, '~'); if (h) { *h = 0; parse_hold(h + 1, &st); }
         parse_keys(c + 1, &st);
         for (int i = 0; i < rep && g_nsteps < KEY_STEPS; i++) { g_steps[g_nsteps] = st; g_steps[g_nsteps++].at = st.at + i * every; }
     }
@@ -177,11 +193,11 @@ static void *ctl_main(void *arg) {
                     for (int i = 0; i <= n; i++) { dm_touch t = {0, x0 + (x1 - x0) * (float)i / (float)n, y0 + (y1 - y0) * (float)i / (float)n}; dm_touch_set(&t, 1); usleep((useconds_t)(s * 1e6f / (float)n)); }
                     dm_touch_set(NULL, 0); continue;
                 }
-                key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
-                parse_keys(line, &st);
-                LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
+                key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; parse_hold(h + 1, &st); }
+                parse_keys(line, &st);   // no key ("~f2") is a wait of that hold: lines run one after another, so it spaces the lines around it by frames
+                char hb[64]; LOG("DM_CTL: press %#llx (hold %s)", (unsigned long long)st.btn, hold_text(&st, hb, sizeof hb));
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_set(&t, 1); }
-                script_set(st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); script_set(0, 0, 0, 0, 0);
+                script_set(st.btn, st.lx, st.ly, st.rx, st.ry); step_hold(&st); script_set(0, 0, 0, 0, 0);
                 if (st.tap) dm_touch_set(NULL, 0);
             }
         }

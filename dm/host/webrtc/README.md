@@ -169,3 +169,11 @@ You can customize the WebRTC server behavior via environment variables:
    - Modern browsers block autoplay audio until the user interacts with the page. Tap anywhere on the screen or tap the **🔊** button in the header bar to unmute.
 4. **Android Chrome Gyroscope Permission**:
    - If sensor events are blocked on Chrome Android under HTTP, either use the HTTPS URL (`https://<IP>:8443`) or enable `#enable-generic-sensor-extra-classes` in `chrome://flags`.
+
+---
+
+## Validation & Testing Status
+
+- **Tested Title**: **Mario Kart World (`0400C3F00006E000`)** on Apple Silicon macOS. Fully verified with gameplay across video streaming (480p 60 FPS), audio delivery, multi-player slot selection (P1/P2), motion gyroscope steering, and desktop keyboard controls.
+- **Other Titles**: The WebRTC hooks are implemented at the generic host level (`nvn_mtl.m` display commit, `hle_audio.c` PCM pull, and `hle_hid.c` controller input) so they are theoretically game-agnostic, but have not yet been systematically regression-tested on other titles in the games table.
+

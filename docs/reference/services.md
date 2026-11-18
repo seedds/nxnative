@@ -764,6 +764,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_hid.c` (`t_script`) runs the scripted publisher with a controller update during the hold: buttons survive repeated reads after the latch is consumed, the scripted stick wins over drift, shake continues, and release preserves physical input. Short presses are latched once, all four axes reach the handheld npad, and player 2 stays separate.
 - **Found on:** Batman: Arkham Knight (`0100ACD0163D0000`), reported in [PR #326](https://github.com/seedds/nxnative/pull/326) while driving the opening route with `DM_KEYS` and a DualShock 4. Reproduced independently in the host HID test without game files; its game profile is not in this checkout.
 
+### Relative swipe camera input on iOS
+
+- **Symptom:** in the 3D touch layout the camera keeps turning while a finger rests away from where it landed, and short drags barely turn it, unlike a mobile swipe camera.
+- **Cause:** the undrawn right stick is a floating stick: its tilt is the finger's distance from the touch-down point, so it sets a turn speed, not a turn amount.
+- **Fix:** an optional mode, `DM_TOUCH_SWIPE=1`, turns finger velocity into right-stick tilt (`DmSwipeLook.h`, `DmGamepad.m`). A display link holds the last velocity across frames and drops it 40 ms after the last sample, since UIKit sends none while a finger rests. `DM_TOUCH_SWIPE_GAIN` scales it after the clamp, so 25 % stays weaker than 400 %. It is still stick input: the game's own camera speed limit applies.
+- **Check:** `dm/ios/tests/t_touch_controls.c` (mixed 30 / 60 / 120 Hz sampling, expiry, reversal, gain, settings), the Duo harness's `testSwipeCameraTurnsWhileTheFingerMovesAndStopsOnRelease`, and `launcher_storage_check.swift` (storage, Reset, env file).
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on an iPhone Duo.
+
 ### Touch gestures recognized from the touch points
 
 - **Symptom:** taps in handheld mode do nothing, though the game reads the touch screen (the title's PRESS ANY BUTTON, the menus' cards).

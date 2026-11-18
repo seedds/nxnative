@@ -95,6 +95,26 @@ Shows the frames per second at the top left.
 
 ## Controls
 
+### Swipe camera
+
+Off by default. In the **3D** layout, a touch in the camera touch area turns the camera by how fast the finger moves instead of acting as a floating right stick. It is still stick input, so the game's own camera speed limit applies.
+
+### Swipe sensitivity
+
+25 to 400 %, default 100 %. Only used with **Swipe camera**. Below 100 % even a fast swipe turns more slowly.
+
+### Camera touch area
+
+Where a camera touch can start in the **3D** layout: **Right third** (default) or **Right half**. Buttons and the left stick keep priority.
+
+### Left-stick dead zone
+
+0 to 40 % of the on-screen stick's radius, default 10 %. Raise it if the character moves when you only meant to rest your thumb on the stick.
+
+### Floating left stick
+
+Off by default. When on, the left stick centres where your thumb lands near it and follows the thumb past its ring, so turning back responds at once. It returns home when you lift.
+
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
@@ -274,6 +294,11 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
+| Swipe camera | `DM_TOUCH_SWIPE` | `1` on, `0` off (default) |
+| Swipe sensitivity | `DM_TOUCH_SWIPE_GAIN` | `0.25` to `4`, default `1` |
+| Camera touch area | `DM_TOUCH_RIGHT_AREA` | `third` (default), `half` |
+| Left-stick dead zone | `DM_TOUCH_LEFT_DEADZONE` | `0` to `0.4`, default `0.1` |
+| Floating left stick | `DM_TOUCH_LEFT_FLOAT` | `1` on, `0` off (default) |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |

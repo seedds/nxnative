@@ -175,11 +175,15 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
         }
         return;
     }
-    uint64_t frames = bytes / (sizeof(int16_t) * (unsigned)a->dev_ch);
-    int stage_tail = a->allow_early_release && frames > RATE / 200;
-    if (a->ch != 6 || a->dev_ch == 6) { pull_pcm(a, dst, bytes, stage_tail); return; }
+    if (a->ch != 6 || a->dev_ch == 6) {
+        int stage_tail = a->allow_early_release && bytes > (RATE / 200) * sizeof(int16_t) * (unsigned)a->ch;
+        pull_pcm(a, dst, bytes, stage_tail);
+        return;
+    }
     enum { BLOCK = 128, CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
     int16_t scratch[BLOCK * 6], *out = (int16_t *)dst;
+    uint64_t frames = bytes / (2 * sizeof *out);
+    int stage_tail = a->allow_early_release && frames > RATE / 200;
     while (frames) {
         uint64_t n = frames < BLOCK ? frames : BLOCK;
         pull_pcm(a, (uint8_t *)scratch, n * 6 * sizeof *scratch, stage_tail && n == frames);

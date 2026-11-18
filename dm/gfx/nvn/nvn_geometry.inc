@@ -293,14 +293,14 @@ static int geo_color_omit(void) {
 static int geo_color_omit_(void) {
     // Removing an inactive color must not change raster bounds, sample count or
     // layer selection. Keep the general case on the original attachment path.
-    id<MTLTexture> d = tex_mtl(R.rt.depth);
+    id<MTLTexture> d = tex_mtl_replay(R.rt.depth);
     if (!d || d.textureType != MTLTextureType2D || !mtl_fmt_depth(d.pixelFormat) || d.pixelFormat == MTLPixelFormatStencil8) return 0;
     NSUInteger dl = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0;
     NSUInteger w = mip_extent(d.width, dl), h = mip_extent(d.height, dl);
     int n = 0;
     for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) {
         if (R.clear_c[i] || ((S.chmask.mask >> (4 * i)) & 15)) return 0;
-        id<MTLTexture> c = tex_mtl(R.rt.color[i]);
+        id<MTLTexture> c = tex_mtl_replay(R.rt.color[i]);
         NSUInteger l = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0;
         if (!c || c.textureType != MTLTextureType2D || c.sampleCount != d.sampleCount || mip_extent(c.width, l) != w || mip_extent(c.height, l) != h) return 0;
         n++;

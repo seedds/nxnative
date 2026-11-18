@@ -24,6 +24,23 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 - **Current:** from the title through the beach and the plateau, resident up to 2.26 GB and 1.27 GB of GPU memory, flat over a 4-minute run. The alias region held up to 3.02 GB mapped of 4.38 GB (the iPhone's size).
 - Later areas are not measured; 1.36 GB of the alias region is left.
 
+**Allocator integration check, 2026-11-17 (PR #2843):** an isolated copy of the provisional profile was restored to the original Switch's `app_pool 0xCD500000` (3285 MiB), without an allocator cap. The real heap check on main `2925d7af` plus the PR reached alias +4.26 GB of 4.38 GB and set `stdalloc_cap 0x40000000`, preserving the hardware pool. The real address-region check kept that cap: StandardAllocator took 1 GB at alias +64 MB, with 0.34 GB mapped; all regions reached +2.24 GB in the first 15 s of `nnMain`. This exercises the same heap-check rule that originally reduced this game's pool.
+
+A paired `scripts/bench.py` invocation then compared the old 1 GB pool with the hardware pool plus the cap. Both hosts were built from the same source, on Apple M6, macOS 27.2, Xcode 27.2, shader chain `5ea15f2c8240`. Both used `DM_ALIAS_SIZE=0x118000000`, `DM_FPS_TARGET=60`, visible windows with the Metal HUD, copied saves, `40:A` to load the starting beach, and a 90–110 s standing measurement window; screenshots followed the measurement. The registered profile is unchanged.
+
+| Setting or measurement | Old 1 GB pool, no cap | Hardware pool, 1 GB cap |
+|---|---|---|
+| StandardAllocator region / mapped at the final snapshot | 960 / 415.25 MiB | 1024 / 415.50 MiB |
+| All regions mapped / highest live region end | 1.505 / +3.244 GiB | 1.529 / +3.131 GiB |
+| Frame time p50 / p95 / p99 | 16.67 / 16.74 / 17.02 ms | 16.67 / 16.72 / 16.76 ms |
+| GPU p50 | 4.68 ms | 4.70 ms |
+| Frames in 20 s / longest frame | 1124 / 446.96 ms | 1200 / 17.08 ms |
+| Peak logged resident / GPU allocated | 2205 / 1285 MiB | 2174 / 1301 MiB |
+
+Both reached the same beach scene with equivalent screenshots apart from animation, no red line, crash, window-cover event or address-region allocation failure. The cap run's log confirms `StandardAllocator::Initialize(nullptr, 3.14 GB)` was given 1 GB. The old run had eight frames over 25 ms; their cause is not isolated, so this single pair establishes compatibility rather than a speedup. The game-specific graphics-quality effect reported for Pokémon Friends is not checked by this game, and no iPhone run was made.
+
+`scripts/regress.py check --games 0100DA801624E000` also passed against `2925d7af`, with the isolated hardware-pool-plus-cap profile and the iPhone alias limit on both revisions: all 35,753 shaders built, no changed MSL or pipeline-interface failure, both 120 s boots reached the beach, and no red line or window-cover event. Screenshots at 111 s differed by 1 dHash bit and 0.09 RGB; frame p50/p99 were 16.67/16.77 ms on both. The final route uses empty saves and `40:A`: the earlier resume-save comparison reached different scenes despite using the same host binary. Report: `<NSP folder>/0100DA801624E000-work/pr2843/regression-fresh/report.json`. One game was selected because it reproduces the exact heap-check trigger and exercises Unity's own regions beside StandardAllocator; this is a moderate-risk change to provisional profiles, with no host or shader-chain change.
+
 ## Files and shaders
 
 - The RomFS has 10,553 files, 2.75 GB: 87 Unity serialized files (`.assets` and their `.resS` / `.ress`), 135 FMOD banks (0.71 GB), and under `Data/GI` 10,042 small files (`.neo`, `.caw`, `.ecm`, `.rgb`, `.vis`, `.pos`; 0.59 GB). No bundles, no DLC.
@@ -59,4 +76,5 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 
 ## Found on this game
 
+- [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics): Unity allocator integration checked with the hardware pool and the host's cap under the iPhone's alias limit ([Memory](#memory)); no TUNIC graphics-quality defect was observed.
 - [The callback took the frame queued after the previous tick](../../../docs/reference/frame-rate.md#the-callback-took-the-frame-queued-after-the-previous-tick): the queue wait fixed by the late latch, the backoff of its drain found here (PR [#2757](https://github.com/seedds/nxnative/pull/2757)). On the beach at 60 fps in a window on an M6 with a 120 Hz screen, present to screen p50 40.6 → 24.0 ms with no more frames shown 33 ms; with four 19 ms frames every 5 s (a test switch), the latch without the backoff cost one frame shown 33 ms more per hitch and kept none of the gain, which the backoff ended (8-9 frames against 12 without the latch). At a 30 fps cap: unchanged.

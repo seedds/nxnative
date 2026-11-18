@@ -1,4 +1,4 @@
-// Host service sessions (hle_sf.c) without a guest: a CMIF request on a served service (olsc:u; notif:a as a domain, as the SDK's alarm calls send it) succeeds with zeroed output and no special header; the camera context of the Switch 2
+// Host service sessions (hle_sf.c) without a guest: a CMIF request on a served service (olsc:u; mnpp:app with its PID / Uid and input buffer; notif:a as a domain) succeeds with zeroed output and no special header; the camera context of the Switch 2
 // (nn::camera::sdk::CreateCameraContext) is a host session with no camera: Initialize's command 3 and Finalize's 4 succeed, 21 copies an event's read end to the client in the special header,
 // and the device commands (QueryDeviceConnection's 29, any other) fail with 0x7c4, "no camera device" (Star Fox's camera module and its game code read it so; the earlier 0xdc4 read as "no camera support")
 #include "../hle.h"
@@ -37,6 +37,38 @@ int main(void) {
     CHECK(request(h, m, 0) == RES_OK, "olsc:u request");
     CHECK(!(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "olsc:u: success, no special header, SFCO at +0x10");
     CHECK(h_sf_Connect(&h, "chat:u") == 0xe15u, "a service the host does not serve is not registered");
+
+    uint32_t mn = 0, unserved = 0;
+    CHECK(h_sf_Connect(&mn, "mnpp:app") == RES_OK && mn && mn != h, "mnpp:app is served");
+    CHECK(h_sf_Connect(&unserved, "mnpp:sys") == 0xe15u && h_sf_Connect(&unserved, "mnpp:web") == 0xe15u, "other mnpp service names remain unserved");
+    if (mn) {
+        uint8_t empty[sizeof m - 0x20] = {0};
+        // Initialize: PID in a special header, reserved u64 after SFCI; 3 alignment words + 4 CMIF words + 2 input words.
+        memset(m, 0xcc, sizeof m);
+        m[0] = 4; m[1] = 9 | 1u << 31;
+        m[2] = 1; m[3] = 0x1234; m[4] = 0;   // PID descriptor, no copied or moved handles
+        m[8] = 0x49434653; m[9] = 0; m[10] = 0; m[11] = 0;
+        m[12] = m[13] = 0;
+        CHECK(h_sf_Send(mn, m, sizeof m) == RES_OK, "mnpp:app Initialize with a PID and reserved u64");
+        CHECK(m[0] == 0 && !(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "Initialize: success, no descriptors or handles");
+        CHECK(!memcmp(m + 8, empty, sizeof empty), "Initialize returns no output data");
+
+        // SubmitEvent: Uid after SFCI and a type-0x5 input buffer (one A descriptor); no output or retained event.
+        uint8_t event[32], before[sizeof event];
+        memset(event, 0xa5, sizeof event); memcpy(before, event, sizeof event);
+        memset(m, 0xcc, sizeof m);
+        uint64_t address = (uint64_t)(uintptr_t)event;
+        m[0] = 4 | 1u << 20; m[1] = 11;   // 3 alignment words + 4 CMIF words + 4 Uid words
+        m[2] = sizeof event; m[3] = (uint32_t)address;
+        m[4] = (uint32_t)(address >> 32 & 0xf) << 28 | (uint32_t)(address >> 36 & 0x3fffff) << 2;
+        m[8] = 0x49434653; m[9] = 0; m[10] = 1; m[11] = 0;
+        m[12] = 1; m[13] = 2; m[14] = 3; m[15] = 4;
+        CHECK(h_sf_Send(mn, m, sizeof m) == RES_OK, "mnpp:app SubmitEvent with a Uid and input buffer");
+        CHECK(m[0] == 0 && !(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "SubmitEvent: success, no descriptors or handles");
+        CHECK(!memcmp(m + 8, empty, sizeof empty), "SubmitEvent returns no output data");
+        CHECK(!memcmp(event, before, sizeof event), "SubmitEvent leaves the input buffer untouched");
+        h_sf_Close(mn);
+    }
 
     // notif:a as nn::notification::ListAlarmSettings reaches it: connect, a domain, Initialize with the process ID, then List into the caller's array, which stays untouched
     uint32_t notif = 0, obj = 0; uint8_t alarms[8 * 0x40], before[sizeof alarms];

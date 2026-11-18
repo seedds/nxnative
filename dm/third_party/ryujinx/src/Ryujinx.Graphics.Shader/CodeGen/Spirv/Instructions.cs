@@ -4,6 +4,7 @@ using Ryujinx.Graphics.Shader.Translation;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Numerics;
 using static Spv.Specification;
 
@@ -94,6 +95,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.FindMSBU32,               GenerateFindMSBU32);
             Add(Instruction.Floor,                    GenerateFloor);
             Add(Instruction.FusedMultiplyAdd,         GenerateFusedMultiplyAdd);
+            Add(Instruction.HalfFusedMultiplyAdd,     GenerateHalfFusedMultiplyAdd);
             Add(Instruction.GroupMemoryBarrier,       GenerateGroupMemoryBarrier);
             Add(Instruction.ImageAtomic,              GenerateImageAtomic);
             Add(Instruction.ImageLoad,                GenerateImageLoad);
@@ -592,6 +594,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         private static OperationResult GenerateFusedMultiplyAdd(CodeGenContext context, AstOperation operation)
         {
             return GenerateTernary(context, operation, context.Delegates.GlslFma, null);
+        }
+
+        private static OperationResult GenerateHalfFusedMultiplyAdd(CodeGenContext context, AstOperation operation)
+        {
+            context.AddCapability(Capability.Float16);
+            SpvInstruction half = context.TypeFloat(16);
+            SpvInstruction a = context.FConvert(half, context.GetFP32(operation.GetSource(0)));
+            SpvInstruction b = context.FConvert(half, context.GetFP32(operation.GetSource(1)));
+            SpvInstruction c = context.FConvert(half, context.GetFP32(operation.GetSource(2)));
+            SpvInstruction result = context.GlslFma(half, a, b, c);
+
+            // Widen the already rounded result exactly for the existing half-pair modifiers and packing.
+            return new OperationResult(AggregateType.FP32, context.FConvert(context.TypeFP32(), result));
         }
 
         private static OperationResult GenerateGroupMemoryBarrier(CodeGenContext context, AstOperation operation)
@@ -2151,12 +2166,26 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 context.Constant(s32, 0),
                 context.Constant(s32, sizeIndex >> 2),
                 context.Constant(s32, sizeIndex & 3));
-            SpvInstruction sizeWords = context.ShiftRightLogical(u32, context.Load(u32, sizePointer), context.Constant(u32, 2u));
-
+            SpvInstruction size = context.Load(u32, sizePointer);
             SpvInstruction vec = context.Get(AggregateType.S32, vecNode);
             SpvInstruction elem = context.Get(AggregateType.S32, elemNode);
-            SpvInstruction word = context.BitwiseOr(u32, context.ShiftLeftLogical(u32, context.Bitcast(u32, vec), context.Constant(u32, 2u)), context.Bitcast(u32, elem));
-            SpvInstruction inBounds = context.ULessThan(context.TypeBool(), word, sizeWords);
+            SpvInstruction row = context.Bitcast(u32, vec);
+            SpvInstruction inBounds;
+
+            if (UniformElementInRow(elemNode))
+            {
+                // The host's size table is rounded to 256 bytes, so every
+                // row is entirely in or out of bounds. The direct comparison
+                // also prevents the word calculation from wrapping.
+                SpvInstruction sizeRows = context.ShiftRightLogical(u32, size, context.Constant(u32, 4u));
+                inBounds = context.ULessThan(context.TypeBool(), row, sizeRows);
+            }
+            else
+            {
+                SpvInstruction sizeWords = context.ShiftRightLogical(u32, size, context.Constant(u32, 2u));
+                SpvInstruction word = context.BitwiseOr(u32, context.ShiftLeftLogical(u32, row, context.Constant(u32, 2u)), context.Bitcast(u32, elem));
+                inBounds = context.ULessThan(context.TypeBool(), word, sizeWords);
+            }
 
             SpvInstruction pointer = context.AccessChain(
                 context.TypePointer(StorageClass.Uniform, type),
@@ -2174,6 +2203,24 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             result = new OperationResult(varType, context.Select(type, inBounds, context.Load(type, pointer), zero));
             return true;
+        }
+
+        private static bool UniformElementInRow(IAstNode elem)
+        {
+            if (elem is AstOperand { Type: OperandType.Constant } constant)
+            {
+                return (uint)constant.Value < 4;
+            }
+
+            if (elem is AstOperand { Type: OperandType.LocalVariable, AddressTaken: false } local &&
+                local.Defs.Count == 1 && local.Defs.First() is AstAssignment assignment)
+            {
+                elem = assignment.Source;
+            }
+
+            return elem is AstOperation { Inst: Instruction.BitwiseAnd, SourcesCount: 2 } mask &&
+                (mask.GetSource(0) is AstOperand { Type: OperandType.Constant, Value: >= 0 and <= 3 } ||
+                 mask.GetSource(1) is AstOperand { Type: OperandType.Constant, Value: >= 0 and <= 3 });
         }
 
         private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)

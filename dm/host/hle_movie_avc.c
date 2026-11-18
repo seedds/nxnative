@@ -10,6 +10,7 @@
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
 #include "hle_movie_avc.h"
+#include "hle_movie_vt.h"
 
 #define QMAX 32   // up to 16 DPB pictures, plus an incoming picture and the previous sequence's drain
 typedef struct {
@@ -26,6 +27,7 @@ struct mavc {
     int ordered, prev_frame, prev_lsb; int64_t prev_msb; uint64_t refs;
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
+    movie_vt_history history;
 };
 
 int mavc_bt709(const mavc *a, int h) {
@@ -33,12 +35,12 @@ int mavc_bt709(const mavc *a, int h) {
     if (m && CFGetTypeID(m) == CFStringGetTypeID()) return CFEqual(m, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2);
     return h >= 720;
 }
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+mavc *mavc_new(movie_vt_control *control) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->history.control = control; return a; }
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
-void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; a->ordered = 0; a->refs = 0; }
+void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; a->ordered = 0; a->refs = 0; movie_vt_clear(&a->history); }
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 int mavc_ready(const mavc *a) { return a->nq && (a->q[0].ready || a->q[0].order.sequence != a->sequence || (!a->ordered && a->nq > a->depth)); }
@@ -306,7 +308,8 @@ static void avc_bump(mavc *a) {
 
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
     (void)fl; (void)dur; mavc *a = ref;
-    if (st || !img) { avc_order_stop(a); if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
+    if (st) { a->history.status = st; return; }
+    if (a->history.replaying || !img) return;
     if (a->nq == QMAX) { if (!a->red++) LOG("[RED] movie: AVC reorder queue full, dropping the oldest frame"); CVPixelBufferRelease(a->q[0].pb); memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]); }
     int64_t t = pts.timescale ? pts.value * 1000000 / pts.timescale : 0;
     avc_frame order = src ? *(const avc_frame *)src : (avc_frame){.sequence = a->sequence};
@@ -328,7 +331,8 @@ static int open_session(mavc *a) {
     const void *k[] = {kCVPixelBufferPixelFormatTypeKey}, *v[] = {n};
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, k, v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks); CFRelease(n);
     VTDecompressionOutputCallbackRecord cb = {on_frame, a};
-    st = VTDecompressionSessionCreate(NULL, a->fd, NULL, attrs, &cb, &a->vs); CFRelease(attrs);
+    st = movie_vt_create(&a->history, a->fd, attrs, &cb, &a->vs); CFRelease(attrs);
+    if (st == MOVIE_VT_CANCELLED) return -1;
     if (st) { if (!a->red++) LOG("[RED] movie: VideoToolbox cannot create an AVC decode session (%d), outputting black frames", (int)st); a->vs = NULL; return 0; }
     CMVideoDimensions dm = CMVideoFormatDescriptionGetDimensions(a->fd);
     LOG("[movie] AVC: VideoToolbox decoding %d×%d, profile %d, reorder depth %d", dm.width, dm.height, a->nsps > 1 ? a->sps[1] : 0, a->depth);
@@ -364,7 +368,8 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     au_ctx c = {a, 0};
     if (n > 0 && !each_nal(p, (size_t)n, au_add, &c)) { if (!a->red++) LOG("[RED] movie: AVC packet without an Annex B start code (%d bytes), not decoded", n); return -1; }
     if (!c.len) return 0;
-    if ((a->dirty || !a->vs) && !open_session(a)) return -1;
+    if (a->dirty || c.idr) { movie_vt_clear(&a->history); a->history.key = c.idr; }
+    if (a->dirty || !a->vs) { int opened = open_session(a); if (opened <= 0) return opened < 0 ? 0 : -1; }
     if (c.picture) avc_picture_sequence(a, c.idr);
     avc_frame order = c.picture ? avc_order_picture(a, &c.slice) : (avc_frame){.sequence = a->sequence};
     CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
@@ -372,8 +377,20 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     if (!st) st = CMBlockBufferReplaceDataBytes(a->au, bb, 0, c.len);
     CMSampleTimingInfo ti = {kCMTimeInvalid, CMTimeMake(pts_us, 1000000), kCMTimeInvalid}; size_t ssz = c.len;
     if (!st) st = CMSampleBufferCreateReady(NULL, bb, a->fd, 1, 1, &ti, 1, &ssz, &sb);
-    if (!st) st = VTDecompressionSessionDecodeFrame(a->vs, sb, 0, &order, NULL);   // flags 0: synchronous, so this stack refcon lives through the callback
+    if (!st) {
+        st = movie_vt_submit(&a->history, a->vs, sb, &order);
+        while (st == kVTInvalidSessionErr && a->history.key) {
+            int opened = open_session(a);
+            if (opened < 0) st = MOVIE_VT_CANCELLED;
+            else if (opened) {
+                st = movie_vt_replay(&a->history, a->vs);
+                if (!st) st = movie_vt_submit(&a->history, a->vs, sb, &order);
+            } else break;
+        }
+        if (!st) movie_vt_remember(&a->history, sb);
+    }
     if (sb) CFRelease(sb); if (bb) CFRelease(bb);
+    if (st == MOVIE_VT_CANCELLED) return 0;
     if (st) { avc_order_stop(a); if (!a->red++) LOG("[RED] movie: AVC decode submission failed (%d, first case)", (int)st); return -1; }
     return 0;
 }

@@ -155,6 +155,20 @@ class PoolTable(unittest.TestCase):
         got = self.reflect(['Global memory operation "Load" traced to no storage buffer: it goes through the memory pool table.'])
         self.assertEqual((got[1]['kind'], got[1]['rw']), ('gmem_map', False))
 
+    def test_pointer_sources_use_the_existing_table(self):
+        got = self.reflect(['translator: gptr site 1: c0[68] +0', 'translator: gptr site 0: c0[68] +8', 'translator: gptr site 2: c3[14] +16'])
+        self.assertEqual([b['kind'] for b in got], ['sbuf', 'gmem_map'])
+        self.assertEqual(got[1]['pointers'], [[0, 8], [0, 0]])
+        self.assertFalse(got[1]['rw'])
+
+    def test_pointer_sources_follow_each_stage_table(self):
+        for stage, base in dmsh_reflect.SSBO.items():
+            with self.subTest(stage=stage):
+                got = dmsh_reflect.gptr_sites(stage, {'notes': [f'translator: gptr site 0: c0[{(base + dmsh_abi.C0_ROW) // 4}] +32']})
+                self.assertEqual(got, [[1, 32]])
+        with self.assertRaises(ValueError):
+            dmsh_reflect.gptr_sites('vs', {'notes': ['translator: gptr site 1: c0[68] +0']})
+
     def test_write_log(self):   # the stores also log their pages in a host buffer reserved at offset 1 of the sentinel slot
         source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* vp_s0 [[id(0)]];\n    device uint* vp_s1 [[id(1)]];\n};\n'
         res = {'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': 0, 'flags': 0},

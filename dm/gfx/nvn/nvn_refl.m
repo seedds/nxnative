@@ -106,7 +106,18 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_SBUF_PUSH]) { r->kind = NVN_RB_SBUFQ; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GEOMETRY]) { if (reg < 0 || reg > 4) FAIL("invalid geometry helper slot"); r->kind = NVN_RB_GEOMETRY; }
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
-            else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) { r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue]; }
+            else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) {
+                r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue];
+                _Static_assert(DMSH_GPTR_MAX == sizeof o->gptr / sizeof o->gptr[0], "nvn_refl.gptr must hold DMSH_GPTR_MAX sources");
+                id sources = b[@"pointers"];
+                if (sources && (![sources isKindOfClass:[NSArray class]] || [sources count] > DMSH_GPTR_MAX || o->ngptr)) FAIL("B binding %s: invalid or duplicate raw pointer sources", nm.UTF8String);
+                for (id e in sources) {
+                    if (![e isKindOfClass:[NSArray class]] || [e count] != 2 || ![e[0] isKindOfClass:[NSNumber class]] || ![e[1] isKindOfClass:[NSNumber class]]) FAIL("B binding %s: a raw pointer source is not [slot, byte]", nm.UTF8String);
+                    int sreg = [e[0] intValue], soff = [e[1] intValue];
+                    if (sreg < 0 || sreg >= 16 || soff < 0 || soff > 0xfff8) FAIL("B binding %s: raw pointer slot %d byte %d out of range", nm.UTF8String, sreg, soff);
+                    o->gptr[o->ngptr].reg = (uint8_t)sreg; o->gptr[o->ngptr].off = (uint16_t)soff; o->ngptr++;
+                }
+            }
             else if ([k isEqualToString:@DMSH_KIND_RT_SCENE]) r->kind = NVN_RB_RT_SCENE;
             else if ([k isEqualToString:@DMSH_KIND_RT_PARAMETERS]) r->kind = NVN_RB_RT_PARAMETERS;
             else if ([k isEqualToString:@DMSH_KIND_RT_ERRORS]) r->kind = NVN_RB_RT_ERRORS;

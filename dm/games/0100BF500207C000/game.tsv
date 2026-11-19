@@ -1,5 +1,6 @@
-# Bloodstained: Ritual of the Night (Switch, update 1.60 = v851968), tested on Mac.
-# Format: see dm/games/README.md. Unreal Engine, Nintendo SDK 7.6.0, NVN 53.
+# Bloodstained: Ritual of the Night, 1.60 (v851968), SDK 7.6.0
+# Unreal Engine on NVN, with CRIWARE audio and NintendoSDK_movie
+# Format: see dm/games/README.md
 
 # ---- Identity ----
 title_id	0100BF500207C000
@@ -16,32 +17,27 @@ package	v851968
 shader_versions	v851968
 
 # ---- Files ----
-# every module main imports from
+# subsdk0 supplies NintendoSDK_movie imports
 modules	main subsdk0 sdk
 romfs_marker	BloodstainedRotN/Content/Paks/pakchunk0-Switch_0_P.pak
 zip_store	.avi:.mp4:.pak:.png:.ttf:.webm:.metallib
 
 # ---- Memory ----
-# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone takes a smaller guest block, as Octopath Traveler 0's profile (docs/reference/memory.md)
-mem_reserve	0x1028000000
-mem_alias	0x1000000000
+# The NPDM declares 70 MiB of system resource. Main maps memory in the alias region without setting a heap.
+# On the Mac the host reserves 64 GiB of alias space. The game reaches beyond 40 GiB during startup.
+mem_reserve	0x140000000
+mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0xCD500000
-# the NPDM declares 70 MB of system resource
 sys_resource	0x4600000
 
+# ---- Frame rate ----
+# Unreal's rhi.SyncInterval is found by its registered name. One vsync per frame yields 60 fps.
+fps_target	60
+
 # ---- Shader split ----
-# the decoded shader code archives: the engine's global shaders and the game's material shaders
+# Two shared v1 shader archives supply the engine's global shaders and the game's material shaders.
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	Bloodstained: Ritual of the Night shaders
-
-# ---- Address region check ----
-# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+# The startup run calls nvnDeviceSetDepthMode with a near plane of zero.
 depth_mode	zero
-
-# address regions: 2026-11-15, in its first 15 s in nnMain the game's regions reach alias +40.23 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite 066b846e9966)
-
-# ---- Texture uploads ----
-# Streamed ASTC textures in CPU-visible pools need upload tracking after the first draw.
-tex_flush_upload	on
-tex_dirty_upload	on

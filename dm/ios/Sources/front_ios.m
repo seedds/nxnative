@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdatomic.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
@@ -64,6 +65,74 @@ static UILabel *front_ios_fps_label(void);
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
 @end
+// HDR output (DM_HDR=1, Switch 2 games; the in-game menu turns it on and off while the game runs), as on the Mac (front_mac.m): the game view's layer is the SDR one DmGameView makes
+// (BGRA8Unorm, no color space, no EDR) until hle_vi.c's dm_hdr_layer_tick asks for the HDR layer, once a Switch 2 game asks for its status with HDR on and the game view's screen can
+// show EDR, and back once HDR is off or the screen cannot show it (a TV, tv_attach) and the game has presented its SDR window. The HDR layer is RGB10A2 in BT.2100 PQ, without HDR10
+// metadata unless DM_HDR_META=1 (hle_vi.c dm_hdr_meta): the automatic peak keeps the game within the screen's current headroom (front_hdr_headroom). The tick runs on the main thread
+// four times a second (UIScreen posts nothing when the headroom changes) and when the menu changes the mode
+static UIScreen *g_edr_screen;   // the screen the layer was made for: the fallback while the layer is not on a window
+static CAMetalLayer *g_edr_layer;
+// The game view's screen's current EDR headroom (currentEDRHeadroom, read at each tick): hle_vi.c's automatic peak is 100 nits times it, and the roll-off's target follows it. It falls
+// as the screen gets brighter. 1.0 until the layer is the HDR one, as on the Mac (front_mac.m front_hdr_headroom)
+static _Atomic float g_hdr_headroom = 1.0f;
+float front_hdr_headroom(void) { return atomic_load(&g_hdr_headroom); }
+// The layer's HDR10 metadata (CAEDRMetadata), as on the Mac (front_mac.m front_hdr_metadata): the range is the one the game declares; opticalOutputScale is passed the paper white, which Core Animation does not use for the RGB10A2 layer (front_mac.m)
+int dm_hdr_meta(void); void dm_hdr_layer_meta_set(int on);   // hle_vi.c
+int dm_hdr_layer_tick(int can, float headroom, int layer_pq, int64_t now_ms);   // hle_vi.c: the layer the game view should have
+static int g_hdr_layer_on;   // the layer is the HDR one (main thread)
+static _Atomic uint32_t g_hdr_range = 1000u << 16;   // the declared range: low nits in bits 0-15, high in 16-31
+static void front_ios_hdr_metadata(void) {   // main thread
+    if (!g_hdr_layer_on) return;
+    if (!CAEDRMetadata.available) { dm_hdr_layer_meta_set(0); return; }   // the layer has none, whatever DM_HDR_META says
+    dm_hdr_layer_meta_set(dm_hdr_meta());
+    if (!dm_hdr_meta()) { g_edr_layer.EDRMetadata = nil; return; }   // DM_HDR_META=0 (hle_vi.c): PQ shown as it is
+    uint32_t r = atomic_load(&g_hdr_range);
+    g_edr_layer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:(float)(r & 0xffff) maxLuminance:(float)(r >> 16) opticalOutputScale:dm_hdr_paper_white()];
+}
+void front_hdr_content_range(unsigned lo, unsigned hi) {   // kept while the layer is SDR too, for the metadata once it is HDR
+    if (hi <= lo || hi > 65535) return;
+    uint32_t r = lo | hi << 16;
+    if (atomic_exchange(&g_hdr_range, r) == r) return;
+    if (dm_hdr_meta()) LOG("front end: HDR10 metadata: the game's range %u..%u nits", lo, hi);   // the layer carries it only with DM_HDR_META=1
+    dispatch_async(dispatch_get_main_queue(), ^{ front_ios_hdr_metadata(); });
+}
+// The SDR layer's color space, as on the Mac (front.h front_sdr_colorspace_create): sRGB, or the curve DM_SDR_COLORSPACE picks for comparisons
+static CGColorSpaceRef front_ios_sdr_colorspace(void) { return front_sdr_colorspace_create(); }
+// The game view's layer, HDR or SDR (main thread). A drawable already taken keeps its format; the present draws each frame by its drawable's format (nvn_mtl.m present_mode)
+static void front_ios_hdr_layer_set(int on) {
+    CAMetalLayer *l = g_edr_layer; if (!l || on == g_hdr_layer_on) return;
+    g_hdr_layer_on = on;
+    if (!on) {
+        CGColorSpaceRef cs = front_ios_sdr_colorspace();
+        l.EDRMetadata = nil; l.wantsExtendedDynamicRangeContent = NO; l.colorspace = cs; if (cs) CGColorSpaceRelease(cs); l.pixelFormat = MTLPixelFormatBGRA8Unorm; dm_hdr_layer_meta_set(0);
+        atomic_store(&g_hdr_headroom, 1.0f);
+        LOG("front end: the layer is the SDR one (BGRA8Unorm)"); return;
+    }
+    l.pixelFormat = MTLPixelFormatRGB10A2Unorm;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+    l.colorspace = cs; CGColorSpaceRelease(cs);
+    l.wantsExtendedDynamicRangeContent = YES;
+    if (CAEDRMetadata.available) front_ios_hdr_metadata();
+    else { dm_hdr_layer_meta_set(0); LOG("[RED] front end: no EDR metadata on this device (CAEDRMetadata): values above the screen's headroom clip"); }
+    LOG("front end: the layer is the HDR one: RGB10A2 in BT.2100 PQ%s", CAEDRMetadata.available && dm_hdr_meta() ? ", with HDR10 metadata" : "");
+}
+static void front_ios_hdr_tick(void) {   // main thread
+    if (!g_edr_layer || (!dm_hdr_mode() && !g_hdr_layer_on)) return;   // HDR output off, and the layer the SDR one: nothing to follow
+    UIScreen *s = ((UIView *)g_edr_layer.delegate).window.windowScene.screen ?: g_edr_screen;   // the game view's own screen (a TV after tv_attach)
+    if (!s) return;   // no screen yet: unknown
+    double pot = s.potentialEDRHeadroom, cur = s.currentEDRHeadroom;
+    float h = isfinite(cur) && cur > 0 ? (float)cur : 1.0f;
+    if (g_hdr_layer_on) atomic_store(&g_hdr_headroom, h);
+    static double last_pot = -1; if (pot != last_pot) { last_pot = pot; LOG("front end: the game's screen: potential EDR headroom %.2f", pot); }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    front_ios_hdr_layer_set(dm_hdr_layer_tick(pot > 1.0, h, g_hdr_layer_on, (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000));
+}
+static void front_ios_hdr_layer(CAMetalLayer *l, UIScreen *screen) {   // at start: the SDR layer; the tick makes the HDR one when a Switch 2 game asks (dm_sdk_ounce is not known yet here)
+    g_edr_screen = screen; g_edr_layer = l;
+    dm_hdr_layer_meta_set(0);   // the SDR layer has no HDR10 metadata
+    { CGColorSpaceRef cs = front_ios_sdr_colorspace(); l.colorspace = cs; CGColorSpaceRelease(cs); }
+    [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_ios_hdr_tick(); }] forMode:NSRunLoopCommonModes];
+}
 static void tv_attach(void);
 
 @interface DmRootView : UIView
@@ -170,6 +239,7 @@ static void launcher_done(void) { [g_root startGame]; }
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
+    front_ios_hdr_layer((CAMetalLayer *)self.game.layer, self.view.window.windowScene.screen);   // the layer's format before the game's first drawable (DM_HDR)
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
     else if (front_ios_hud_enabled_from_saved_choice()) g_layer.developerHUDProperties = @{@"mode": @"disabled"};   // the launcher switched off a HUD enabled by the saved choice
@@ -290,6 +360,7 @@ bool dm_setting_live(const char *env, const char *value) {
         dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
         return true;
     }
+    if (!strcmp(env, "DM_HDR")) { if (!dm_sdk_ounce()) return false; if (value) { dm_hdr_set_mode(atoi(value) != 0); front_ios_hdr_tick(); } return true; }   // Switch 2 games: the status query and the layer follow (front_ios_hdr_tick)
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }

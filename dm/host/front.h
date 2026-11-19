@@ -1,6 +1,7 @@
 // Host front end (Mac: front_mac.m; iOS: dm/ios separately implements the same-named interface).
 #pragma once
 #include <stdlib.h>
+#include <stdint.h>
 // Metal reads HUD switches when the first device is made. Called before host preload and again after the launcher applies its settings; explicit environment values win.
 static inline void front_hud_env(void) {
     const char *e = getenv("DM_METAL_HUD");
@@ -20,6 +21,33 @@ int front_screen_max_fps(void);
 int front_display_pixels(int *w, int *h);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread
 int front_screen_variable_refresh(void);
+// HDR output (DM_HDR=1; front_mac.m, front_ios.m): the front end owns the window's layer and asks hle_vi.c's dm_hdr_layer_tick, on its main thread four times a second and on
+// screen changes, which one to have (SDR, or RGB10A2 in BT.2100 PQ once a Switch 2 game asks for its status on a screen that can show EDR); its screen's current EDR headroom
+// (front_hdr_headroom) and the game's declared extended luminance range in nits, for the layer's HDR10 metadata. hle_vi.c has weak defaults for runs without a front end
+float front_hdr_headroom(void);
+void front_hdr_content_range(unsigned lo, unsigned hi);
+int dm_hdr_layer_tick(int can, float headroom, int layer_pq, int64_t now_ms);   // hle_vi.c: can = the screen's potential headroom is above 1; returns 1 for the HDR layer
+float dm_hdr_paper_white(void);   // hle_vi.c: the paper white in nits told to the game (100), the luminance its SDR white has
+int dm_hdr_mode(void);            // hle_vi.c: the HDR mode, 0 off, 1 by the screen (DM_HDR at start)
+void dm_hdr_set_mode(int m);      // hle_vi.c: change it while the game runs (the iOS in-game menu); the game switches its window on its next status query
+#ifdef __OBJC__
+#include <CoreGraphics/CoreGraphics.h>
+#include <string.h>
+// The color space of the window's SDR layer (BGRA8Unorm), set by the front ends when they make it and whenever it comes back from the HDR layer: sRGB, what the game's SDR
+// picture is. On macOS 27.2 setting the pixel format alone gives a fresh layer kCGColorSpaceSRGB, but a layer coming back from the HDR one kept the PQ color space, or none
+// once set to NULL ("If nil, no colormatching occurs", CAMetalLayer.h: the bytes shown in the screen's own primaries, more saturated on a P3 screen), and an earlier macOS may not
+// give the default. DM_SDR_COLORSPACE=g22 or g24, for comparisons with an SDR picture in the HDR layer, which nvn_mtl.m (present_sdr_gamma) decodes with the same curve: BT.709
+// primaries, D65, a pure power curve of 2.2 (the Switch's own LCD, sRGB's reference display) or 2.4 (BT.1886, a TV in a dark room); kCGColorSpaceITUR_709 decodes as 2.4 too, but its
+// embedded curve says otherwise, so the space is built here. Unset or srgb: kCGColorSpaceSRGB. Returns a +1 reference
+static inline CGColorSpaceRef front_sdr_colorspace_create(void) {
+    const char *e = getenv("DM_SDR_COLORSPACE");
+    CGFloat g = e && !strcmp(e, "g24") ? 2.4 : e && !strcmp(e, "g22") ? 2.2 : 0;
+    if (!g) return CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    const CGFloat white[3] = {0.95047, 1.0, 1.08883}, gamma[3] = {g, g, g};
+    const CGFloat m[9] = {0.4124, 0.2126, 0.0193, 0.3576, 0.7152, 0.1192, 0.1805, 0.0722, 0.9505};   // BT.709 to XYZ, a column per primary
+    return CGColorSpaceCreateCalibratedRGB(white, NULL, gamma, m);
+}
+#endif
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
 void front_screen_match(int fps);

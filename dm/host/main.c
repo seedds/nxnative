@@ -141,6 +141,7 @@ static void host_preload(int argc, char **argv) {
     load_modules(argv[1], names, n);
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
+    dm_hdr_boot();    // HDR output (DM_HDR) for a Switch 2 game: the front end makes the HDR layer now, so it is ready for the game's first status query (hle_vi.c)
     uint64_t ta = now_ns();
     probe_install();   // DM_PROBE probes (for diagnostics)
     hid_keys_init();   // DM_KEYS scripted input

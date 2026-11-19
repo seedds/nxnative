@@ -70,6 +70,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Blasphemous 2](010040801A4C8000/README.md) | `010040801A4C8000` | 1.0.8 | 15.3.2 | Unity 2021.3.20f1 IL2CPP, FMOD | NVN |
 | [Bloodstained: Curse of the Moon](01004B800AF5A000/README.md) | `01004B800AF5A000` | 1.1.1 | 4.5.0 | Inti Creates' engine | NVN |
 | [Bloodstained: Curse of the Moon 2](01004680124E6000/README.md) | `01004680124E6000` | 1.3.2 | 10.6.0 | Inti Creates' engine | NVN |
+| [Bloodstained: Ritual of the Night](0100BF500207C000/README.md) | `0100BF500207C000` | 1.60 | 7.6.0 | Unreal Engine 4, CRIWARE | NVN |
 | [Borderlands: Game of the Year Edition](010064800F66A000/README.md) | `010064800F66A000` | 1.0.2 | 9.3.0 | Unreal Engine 3 (package version 595), FMOD | NVN |
 | [Brain Memory Training Academy](0100F5D01DA3A000/README.md) | `0100F5D01DA3A000` | 1.0.0 (base) | 16.2.4 | Unity 2022.3.5f1 IL2CPP | NVN |
 | [Burnout Paradise Remastered](0100DBF01000A000/README.md) | `0100DBF01000A000` | 1.0.0 (base) | 9.3.0 | Criterion's engine | NVN |

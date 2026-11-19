@@ -52,6 +52,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0a4, InstName.Imad, AImad, uniform: true);
             alu(0x025, InstName.Imad, AImadWide);
             alu(0x027, InstName.Imad, AImadHi);
+            alu(0x026, InstName.Idp, AIdp);
             alu(0x0a5, InstName.Imad, AImadWide, uniform: true);
             alu(0x012, InstName.Lop3, ALop3);
             alu(0x092, InstName.Lop3, ALop3, uniform: true);
@@ -73,6 +74,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
             alu(0x01b, InstName.Bfe, ABmsk);
+            alu(0x014, InstName.Vabsdiff, AVabsdiff);
 
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
@@ -174,7 +176,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, context.FPSaturate(res, x.Bit(77)));
         }
 
-        // The rounding mode of FADD, FMUL and FFMA (bits 78..79: RN, RM, RP, RZ)
+        // FADD, FMUL, FFMA and 64-bit I2F use bits 78..79 for RN, RM, RP and RZ.
         private static RoundMode ARound(AmpereOp x) => (RoundMode)x.Bits(78, 80);
 
         // .FMZ (bit 76 of FMUL and FFMA, NAK's dnz): a product with a zero factor is zero, whatever the other factor (Direct3D 9's rule; Inf or NaN times 0 is 0, not NaN)
@@ -428,11 +430,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // I2F.F32 Rd, b:b+1 (source size 3, a 64-bit register pair, low word first): the other half of that division. Signed at 74, as I2F. The two words are converted and added, which can round
-        // twice where the hardware rounds once; the sequence's correction steps take that, and a high word of zero, the case seen, is exact
+        // I2F.F32 Rd, b:b+1 takes a 64-bit register pair, low word first. Bit 74 selects a signed source.
+        // Normalize its magnitude using 32-bit integer operations, then round once using the 24 retained
+        // bits, the round bit and the sticky bits. Converting each word to float loses information before
+        // the sum, especially when the words nearly cancel for a negative source.
         public static void AI2f64(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            RoundMode mode = ARound(x);
 
             if (x.Bits(84, 86) != 3 || x.Bits(75, 77) != 2 || x.Opcode != 0x312)
             {
@@ -441,9 +446,67 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand lo = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
             Operand hi = x.Rb + 1 >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb + 1, RegisterType.Gpr);
-            Operand fh = x.Bit(74) ? context.IConvertS32ToFP32(hi) : context.IConvertU32ToFP32(hi);
+            Operand neg = null;
 
-            ASet(context, x, context.FPAdd(context.FPMultiply(fh, ConstF(4294967296.0f)), context.IConvertU32ToFP32(lo)));
+            if (x.Bit(74))
+            {
+                // The magnitude of a negative value: the 64-bit two's complement, with the carry out of the low word when it is zero. -2^63 stays 2^63 read unsigned
+                neg = context.ICompareLess(hi, Const(0));
+                Operand nhi = context.ConditionalSelect(context.ICompareEqual(lo, Const(0)), context.INegate(hi), context.BitwiseNot(hi));
+                hi = context.ConditionalSelect(neg, nhi, hi);
+                lo = context.ConditionalSelect(neg, context.INegate(lo), lo);
+            }
+
+            Operand highIsZero = context.ICompareEqual(hi, Const(0));
+            Operand top = context.ConditionalSelect(highIsZero, lo, hi);
+            Operand bottom = context.ConditionalSelect(highIsZero, Const(0), lo);
+
+            // Setting bit 0 keeps both shift counts in [0, 31] even for zero and leaves
+            // the leading bit of nonzero values in place. Split the cross-word shift into
+            // two parts so a shift of 32 at the word boundary is also avoided.
+            Operand leadingBit = context.FindMSBU32(context.BitwiseOr(top, Const(1)));
+            Operand shift = context.ISubtract(Const(31), leadingBit);
+            Operand normalizedHigh = context.BitwiseOr(
+                context.ShiftLeft(top, shift), context.ShiftRightU32(context.ShiftRightU32(bottom, Const(1)), leadingBit));
+            Operand normalizedLow = context.ShiftLeft(bottom, shift);
+
+            // The retained leading one adds one to the exponent field, so start the
+            // bias at 126. A carry from rounding increments the exponent as well.
+            Operand exponent = context.IAdd(leadingBit, context.ConditionalSelect(highIsZero, Const(126), Const(126 + 32)));
+            Operand bits = context.IAdd(context.ShiftLeft(exponent, Const(23)), context.ShiftRightU32(normalizedHigh, Const(8)));
+            Operand lowIsNonzero = context.ICompareNotEqual(normalizedLow, Const(0));
+            Operand increment = null;
+
+            if (mode == RoundMode.Rn)
+            {
+                // Round up when bit 7 is set and either a sticky bit is set or bit 8 is odd.
+                Operand roundBit = context.ICompareNotEqual(context.BitwiseAnd(normalizedHigh, Const(0x80)), Const(0));
+                Operand rest = context.BitwiseOr(
+                    context.ICompareNotEqual(context.BitwiseAnd(normalizedHigh, Const(0x17f)), Const(0)), lowIsNonzero);
+                increment = context.BitwiseAnd(roundBit, rest);
+            }
+            else if (mode != RoundMode.Rz)
+            {
+                // RM rounds the magnitude up for a negative value, RP for a positive one.
+                Operand inexact = context.BitwiseOr(
+                    context.ICompareNotEqual(context.BitwiseAnd(normalizedHigh, Const(0xff)), Const(0)), lowIsNonzero);
+                increment = mode == RoundMode.Rm
+                    ? (neg == null ? null : context.BitwiseAnd(inexact, neg))
+                    : (neg == null ? inexact : context.BitwiseAnd(inexact, context.BitwiseNot(neg)));
+            }
+
+            if (increment != null)
+            {
+                bits = context.ConditionalSelect(increment, context.IAdd(bits, Const(1)), bits);
+            }
+
+            if (neg != null)
+            {
+                bits = context.BitwiseOr(bits, context.ConditionalSelect(neg, Const(unchecked((int)0x80000000)), Const(0)));
+            }
+
+            // Zero has no leading one and must bypass the assembled exponent.
+            ASet(context, x, context.ConditionalSelect(context.ICompareEqual(top, Const(0)), Const(0), bits));
         }
 
         // I2FP.F32.S32 / .U32: signed at 74
@@ -556,7 +619,83 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
+            // Keep the original operand order for the plain half pack.
+            Operand fb = AFloat(context, b);
+            Operand fa = AFloat(context, a);
+            bool relu = x.Bit(75);
+            bool towardZero = x.Bits(79, 81) == (int)RoundMode.Rz;
+
+            if (relu)
+            {
+                fb = AF2fpRelu(context, fb);
+                fa = AF2fpRelu(context, fa);
+            }
+
+            if (x.Bit(76))
+            {
+                Operand high = context.ShiftLeft(AF2fpBf16(context, fa, towardZero), Const(16));
+
+                ASet(context, x, context.BitwiseOr(high, AF2fpBf16(context, fb, towardZero)), AUniform(context));
+                return;
+            }
+
+            Operand packed = context.PackHalf2x16(fb, fa);
+
+            if (towardZero || relu)
+            {
+                Operand low = AF2fpHalf(context, fb, context.BitwiseAnd(packed, Const(0xffff)), towardZero, relu);
+                Operand high = AF2fpHalf(context, fa, context.ShiftRightU32(packed, Const(16)), towardZero, relu);
+                packed = context.BitwiseOr(context.ShiftLeft(high, Const(16)), low);
+            }
+
+            ASet(context, x, packed, AUniform(context));
+        }
+
+        private static Operand AF2fpRelu(EmitterContext context, Operand f)
+        {
+            // Clamp -0 through -inf to +0 and leave a NaN for the packer to canonicalize.
+            Operand neg = context.ICompareGreaterOrEqualUnsigned(f, Const(unchecked((int)0x80000000)));
+            Operand notNan = context.ICompareLessOrEqualUnsigned(f, Const(unchecked((int)0xff800000)));
+
+            return context.ConditionalSelect(context.BitwiseAnd(neg, notNan), Const(0), f);
+        }
+
+        private static Operand AF2fpBf16(EmitterContext context, Operand f, bool towardZero)
+        {
+            Operand nan = context.ICompareGreaterUnsigned(context.BitwiseAnd(f, Const(0x7fffffff)), Const(0x7f800000));
+
+            if (!towardZero)
+            {
+                // The retained low bit lets a midpoint increment exactly when it is odd.
+                Operand odd = context.BitwiseAnd(context.ShiftRightU32(f, Const(16)), Const(1));
+                f = context.IAdd(f, context.IAdd(odd, Const(0x7fff)));
+            }
+
+            return context.ConditionalSelect(nan, Const(0x7fff), context.ShiftRightU32(f, Const(16)));
+        }
+
+        private static Operand AF2fpHalf(EmitterContext context, Operand f, Operand half, bool towardZero, bool relu)
+        {
+            Operand magnitude = context.BitwiseAnd(f, Const(0x7fffffff));
+
+            if (towardZero)
+            {
+                // Widen the rounded magnitude exactly and compare float bits as unsigned
+                // integers. Step back only if a finite input rounded away from zero.
+                // The mask also prevents the pack/unpack optimizer from skipping the rounding.
+                Operand nearest = context.UnpackHalf2x16Low(context.BitwiseAnd(half, Const(0x7fff)));
+                Operand away = context.BitwiseAnd(context.ICompareLessUnsigned(magnitude, Const(0x7f800000)),
+                    context.ICompareGreaterUnsigned(nearest, magnitude));
+                half = context.ConditionalSelect(away, context.IAdd(half, Const(-1)), half);
+            }
+
+            if (relu)
+            {
+                Operand nan = context.ICompareGreaterUnsigned(magnitude, Const(0x7f800000));
+                half = context.ConditionalSelect(nan, Const(0x7fff), half);
+            }
+
+            return half;
         }
 
         // F2IP.U8 Rd, a, b: a and b to saturated bytes, a in byte 1 and b in byte 0, like F2FP's halves; bits 78..79 the rounding, as F2I's. Ocarina of Time's FoliageShader writes colour with it
@@ -1235,6 +1374,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res, u);
         }
 
+        // IDP Rd, a, b, c (PTX dp4a / dp2a): c plus a dot product, the low 32 bits. Bit 73: a's parts signed, 74: b's bytes signed, 76: .2A, 77: .2A.HI.
+        // .4A sums the four products of a's bytes and b's bytes; .2A sums a's two 16-bit halves times b's bytes 0 and 1 (.LO) or 2 and 3 (.HI).
+        public static void AIdp(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bit(72) || x.Bit(75) || x.Bits(78, 81) != 0 || (!x.Bit(76) && x.Bit(77)))
+            {
+                throw AFail(context, "IDP modifiers");
+            }
+
+            bool signedA = x.Bit(73), signedB = x.Bit(74), two = x.Bit(76);
+            int aBits = two ? 16 : 8, bFirst = x.Bit(77) ? 2 : 0;
+            Operand va = AGet(context, a), vb = AGet(context, b);
+            Operand res = AGet(context, c);
+
+            Operand Part(Operand v, int pos, int width, bool signed)
+            {
+                return signed ? context.BitfieldExtractS32(v, Const(pos), Const(width)) : context.BitfieldExtractU32(v, Const(pos), Const(width));
+            }
+
+            for (int i = 0; i < (two ? 2 : 4); i++)
+            {
+                Operand pa = Part(va, i * aBits, aBits, signedA);
+                Operand pb = Part(vb, (bFirst + i) * 8, 8, signedB);
+
+                res = context.IAdd(res, context.IMultiply(pa, pb));
+            }
+
+            ASet(context, x, res);
+        }
+
         // IMAD.WIDE Rd, a, b, c: the 64-bit a * b (signed 73) + the pair {c + 1:c}, to the pair {Rd + 1:Rd}
         public static void AImadWide(EmitterContext context)
         {
@@ -1518,6 +1690,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
 
             ASet(context, x, context.ConditionalSelect(APred(context, x, 87, 90, u), min, max), u);
+        }
+
+        // VABSDIFF Rd, a, b, c (PTX sad) computes |a - b| + c with 32-bit wraparound.
+        // Bit 73 selects signed comparison. The recorded encoding uses PT in the
+        // Pu predicate field (bits 81..83). Other predicate values and modifiers are unverified.
+        public static void AVabsdiff(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex || x.Bit(72) || x.Bits(74, 81) != 0 || x.Bits(84, 91) != 0)
+            {
+                throw AFail(context, "VABSDIFF predicate field or modifiers");
+            }
+
+            Operand srcA = AGet(context, a);
+            Operand srcB = AGet(context, b);
+            bool signed = x.Bit(73);
+
+            Operand min = signed ? context.IMinimumS32(srcA, srcB) : context.IMinimumU32(srcA, srcB);
+            Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
+
+            ASet(context, x, context.IAdd(context.ISubtract(max, min), AGet(context, c)));
         }
 
         public static void AIabs(EmitterContext context)

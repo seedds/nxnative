@@ -16,7 +16,7 @@ import unityfs
 if _had is None: del os.environ['DM_GAME']
 else: os.environ['DM_GAME'] = _had
 
-GLSLC_MAGIC = bytes.fromhex('91688619')   # the magic glslc_shaders scans for (a literal in shader_split, not a named constant)
+GLSLC_MAGIC = bytes.fromhex('91688619')
 
 
 def glslc_output():

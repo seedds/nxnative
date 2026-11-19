@@ -88,7 +88,7 @@ enum {
     GL_CLAMP_TO_BORDER = 0x812d, GL_CLAMP_TO_EDGE = 0x812f, GL_TEXTURE_MIN_LOD = 0x813a, GL_TEXTURE_MAX_LOD, GL_TEXTURE_MAX_LEVEL = 0x813d,
     GL_DEPTH_COMPONENT16 = 0x81a5, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT32,
     GL_MAJOR_VERSION = 0x821b, GL_MINOR_VERSION, GL_NUM_EXTENSIONS, GL_RG = 0x8227, GL_R8 = 0x8229, GL_RG8 = 0x822b, GL_R16F = 0x822d, GL_R32F, GL_RG16F, GL_RG32F,
-    GL_UNSIGNED_SHORT_5_6_5 = 0x8363, GL_MIRRORED_REPEAT = 0x8370,
+    GL_UNSIGNED_SHORT_5_6_5 = 0x8363, GL_UNSIGNED_INT_2_10_10_10_REV = 0x8368, GL_MIRRORED_REPEAT = 0x8370,
     GL_COMPRESSED_RGB_S3TC_DXT1 = 0x83f0, GL_COMPRESSED_RGBA_S3TC_DXT1, GL_COMPRESSED_RGBA_S3TC_DXT3, GL_COMPRESSED_RGBA_S3TC_DXT5,
     GL_TEXTURE0 = 0x84c0, GL_MAX_RENDERBUFFER_SIZE = 0x84e8, GL_DEPTH_STENCIL = 0x84f9, GL_UNSIGNED_INT_24_8 = 0x84fa, GL_MAX_TEXTURE_LOD_BIAS = 0x84fd,
     GL_TEXTURE_MAX_ANISOTROPY = 0x84fe, GL_MAX_TEXTURE_MAX_ANISOTROPY, GL_TEXTURE_LOD_BIAS = 0x8501,
@@ -99,7 +99,8 @@ enum {
     GL_FRAGMENT_SHADER = 0x8b30, GL_VERTEX_SHADER, GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8b4d, GL_SHADER_TYPE = 0x8b4f, GL_DELETE_STATUS = 0x8b80, GL_COMPILE_STATUS,
     GL_LINK_STATUS, GL_VALIDATE_STATUS, GL_INFO_LOG_LENGTH, GL_ATTACHED_SHADERS, GL_ACTIVE_UNIFORMS, GL_ACTIVE_UNIFORM_MAX_LENGTH, GL_SHADER_SOURCE_LENGTH,
     GL_ACTIVE_ATTRIBUTES, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, GL_SHADING_LANGUAGE_VERSION = 0x8b8c, GL_CURRENT_PROGRAM,
-    GL_R11F_G11F_B10F = 0x8c3a, GL_SRGB8_ALPHA8 = 0x8c43, GL_COMPRESSED_SRGB_S3TC_DXT1 = 0x8c4c, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3,
+    GL_R11F_G11F_B10F = 0x8c3a, GL_UNSIGNED_INT_10F_11F_11F_REV = 0x8c3b, GL_SRGB8_ALPHA8 = 0x8c43,
+    GL_COMPRESSED_SRGB_S3TC_DXT1 = 0x8c4c, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3,
     GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5, GL_DEPTH_COMPONENT32F = 0x8cac, GL_DEPTH32F_STENCIL8,
     GL_FRAMEBUFFER_BINDING = 0x8ca6, GL_RENDERBUFFER_BINDING, GL_COLOR_ATTACHMENT0 = 0x8ce0, GL_DEPTH_ATTACHMENT = 0x8d00, GL_STENCIL_ATTACHMENT = 0x8d20,
     GL_FRAMEBUFFER = 0x8d40, GL_RENDERBUFFER, GL_STENCIL_INDEX8 = 0x8d48, GL_RGB565 = 0x8d62, GL_MAX_SAMPLES = 0x8d57,
@@ -332,6 +333,7 @@ typedef struct {
     level_t pend[6][MAXLV]; int defined;   // defined: bit per level whose face(s) were given
     __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp;   // smp: the Metal sampler of its own parameters, made again when smp_dirty
     samp_p sp; GLint maxlv, swz[4]; int smp_dirty;
+    GLint ifmt;   // GL base image format, including RGB images expanded to RGBA in Metal
 } tex_t;
 NAMES(tex_t, g_texs, g_ntexs, g_captexs)
 static tex_t *tex_of(GLuint n) { return n && n < g_ntexs ? g_texs[n] : NULL; }
@@ -465,9 +467,9 @@ static void win_make(uint32_t w, uint32_t h) {
 
 // ---------- Formats ----------
 // fmt: index into g_fmt. A swizzle only where Metal's default differs from GL's: Metal reads a channel a format lacks as 0 (alpha 1), as GL does, so only the luminance /
-// alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
+// alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_EXPAND_RG (RED/RG → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
 // indices through the glColorTable palette). bw / bh: block size of a compressed format, bytes: per texel or per block
-enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE };
+enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE, CV_EXPAND_RG };
 enum { K_COL, K_DEPTH, K_DS, K_BLOCK };
 typedef struct { MTLPixelFormat pf; uint8_t bytes, bw, bh, kind; MTLTextureSwizzleChannels swz; const char *name; } fmt_t;
 #define SWZ(r, g, b, a) {MTLTextureSwizzle##r, MTLTextureSwizzle##g, MTLTextureSwizzle##b, MTLTextureSwizzle##a}
@@ -507,16 +509,19 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
     if (type == GL_UNSIGNED_SHORT_4_4_4_4) { *cv = CV_4444; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_5_5_5_1) { *cv = CV_5551; return F_RGBA8; }
     int half = type == GL_HALF_FLOAT, fl = type == GL_FLOAT;
+    int rg = format == GL_RED || format == GL_RG;
     switch (ifmt) {
         case GL_RGBA: case GL_RGBA8: case 4:
+            if (rg && ifmt == GL_RGBA8) return F_RGBA8;
             if (fl) return F_RGBA32F;
             if (half) return F_RGBA16F;
             if (format == GL_BGRA) return F_BGRA8;
             if (format == GL_RGB) { *cv = CV_RGB8; return F_RGBA8; }
             return F_RGBA8;
         case GL_RGB: case GL_RGB8: case 3:
-            if (fl || half) { *cv = CV_NONE; return F_RGBA16F; }
-            if (format == GL_RGBA) return F_RGBA8;
+            if (rg && ifmt == GL_RGB8) return F_RGBA8;
+            if (fl || half) { if (!rg) *cv = CV_NONE; return F_RGBA16F; }
+            if (format == GL_RGBA || rg) return F_RGBA8;
             *cv = CV_RGB8; return F_RGBA8;
         case GL_BGRA: return F_BGRA8;
         case GL_RGBA4: case GL_RGB5_A1: case GL_RGB565: return F_RGBA8;   // glTexStorage2D's sized formats (no data: the uploads are converted by their type)
@@ -526,13 +531,13 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
         case GL_LUMINANCE: case 1: return F_L8;
         case GL_ALPHA: return F_A8;
         case GL_LUMINANCE_ALPHA: case 2: return F_LA8;
-        case GL_RGBA16F: if (fl) { *cv = CV_NONE; } return F_RGBA16F;
+        case GL_RGBA16F: if (fl && !rg) { *cv = CV_NONE; } return F_RGBA16F;
         case GL_RGBA32F: return F_RGBA32F;
         case GL_R16F: return F_R16F;
         case GL_RG16F: return F_RG16F;
         case GL_R32F: return F_R32F;
         case GL_RG32F: return F_RG32F;
-        case GL_R11F_G11F_B10F: if (type != 0x8c3b) *cv = CV_NONE; return F_RG11B10F;
+        case GL_R11F_G11F_B10F: if (type != GL_UNSIGNED_INT_10F_11F_11F_REV) *cv = CV_NONE; return F_RG11B10F;
         case GL_RGB10_A2: return F_RGB10A2;
         case GL_RGBA16: return F_RGBA16;
         case GL_DEPTH_COMPONENT16: return F_D16;
@@ -562,6 +567,8 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
 static size_t fmt_pitch(int f, uint32_t w) { const fmt_t *m = &g_fmt[f]; return (size_t)((w + m->bw - 1) / m->bw) * m->bytes; }
 static size_t fmt_rows(int f, uint32_t h) { const fmt_t *m = &g_fmt[f]; return (h + m->bh - 1) / m->bh; }
 
+static GLenum convert_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t *out);
+
 // The given pixels (GL unpack rules: rows of unpack_row or w pixels, each row aligned to unpack_align) → the Metal texture's bytes, rows packed. NULL data → zeros
 static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum format, GLenum type, int f, int cv, size_t *pitch_out) {
     size_t dp = fmt_pitch(f, w), rows = fmt_rows(f, h);
@@ -574,21 +581,39 @@ static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum form
                 format >= GL_RED && format <= GL_LUMINANCE_ALPHA ? comps_of[format - GL_RED] : 4;
     int tbytes = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 4 : type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 2 : 1;
     if (cv == CV_565 || cv == CV_4444 || cv == CV_5551) { comps = 1; tbytes = 2; }
+    else if (type == GL_UNSIGNED_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_10F_11F_11F_REV) { comps = 1; tbytes = 4; }
+    if (cv == CV_COPY && (format == GL_RED || format == GL_RG) &&
+        ((type >= GL_BYTE && type <= GL_FLOAT) || type == GL_HALF_FLOAT) &&
+        (f == F_RGBA8 || f == F_SRGBA8 || f == F_RGBA16 || f == F_RGBA16F || f == F_RGBA32F))
+        cv = CV_EXPAND_RG;
     size_t sp = (size_t)(S.unpack_row ? S.unpack_row : w) * comps * tbytes; sp = (sp + S.unpack_align - 1) / S.unpack_align * S.unpack_align;
-    const uint8_t *s = src;
+    const uint8_t *source = src;
     // GL_UNPACK_SWAP_BYTES: each 2- or 4-byte element of the source in the other byte order (DOOM 3's light images are RGB565 stored big-endian), swapped into a copy
     // of the rows as given, each row without its alignment padding
     uint8_t *swapped = NULL;
     if (S.unpack_swap && tbytes > 1 && h) {
         size_t row = (size_t)w * comps * tbytes; swapped = malloc(sp * (h - 1) + row);
-        for (uint32_t y = 0; y < h; y++) for (size_t i = 0; i < row; i += tbytes) for (int b = 0; b < tbytes; b++) swapped[y * sp + i + b] = s[y * sp + i + tbytes - 1 - b];
-        s = swapped;
+        for (uint32_t y = 0; y < h; y++) for (size_t i = 0; i < row; i += tbytes) for (int b = 0; b < tbytes; b++) swapped[y * sp + i + b] = source[y * sp + i + tbytes - 1 - b];
+        source = swapped;
     }
-    for (uint32_t y = 0; y < h; y++, s += sp) {
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *s = source + y * sp;
         uint8_t *d = dst + y * dp;
         switch (cv) {
             case CV_COPY: memcpy(d, s, umin((uint32_t)dp, (uint32_t)((size_t)w * comps * tbytes))); break;
             case CV_RGB8: for (uint32_t x = 0; x < w; x++) { d[4 * x] = s[3 * x]; d[4 * x + 1] = s[3 * x + 1]; d[4 * x + 2] = s[3 * x + 2]; d[4 * x + 3] = 255; } break;
+            case CV_EXPAND_RG:
+                if (type == GL_UNSIGNED_BYTE && (f == F_RGBA8 || f == F_SRGBA8)) {
+                    for (uint32_t x = 0; x < w; x++) {
+                        d[4 * x] = s[comps * x];
+                        if (comps == 2) d[4 * x + 1] = s[comps * x + 1];
+                        d[4 * x + 3] = 255;
+                    }
+                } else {
+                    for (uint32_t x = 0; x < w; x++)
+                        convert_pixel(f, format, type, s + (size_t)x * comps * tbytes, d + (size_t)x * g_fmt[f].bytes);
+                }
+                break;
             case CV_565: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 5 & 63) * 255 / 63; d[4 * x + 2] = (v & 31) * 255 / 31; d[4 * x + 3] = 255; } break;
             case CV_4444: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 12) * 17; d[4 * x + 1] = (v >> 8 & 15) * 17; d[4 * x + 2] = (v >> 4 & 15) * 17; d[4 * x + 3] = (v & 15) * 17; } break;
             case CV_5551: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 6 & 31) * 255 / 31; d[4 * x + 2] = (v >> 1 & 31) * 255 / 31; d[4 * x + 3] = v & 1 ? 255 : 0; } break;
@@ -726,7 +751,7 @@ static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32
     if (cb != g_cb) { dm_gfx_enter(); cb_commit_one(cb); dm_gfx_leave(); }   // no GPU work goes out while the app is in the background (dm_gfx_suspend)
 }
 // glTexImage2D / glCompressedTexImage2D: the level's bytes, converted
-static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uint32_t h, uint32_t depth, void *conv, size_t pitch) {
+static void tex_image(GLenum target, GLint level, GLint ifmt, int f, int cv, uint32_t w, uint32_t h, uint32_t depth, void *conv, size_t pitch) {
     tex_t *t = target == GL_TEXTURE_2D || target == GL_TEXTURE_2D_ARRAY || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
     int face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
     if (!t || level < 0 || level >= MAXLV) { RED1("glTexImage2D target %#x level %d with no texture bound", target, level); free(conv); return; }
@@ -735,6 +760,7 @@ static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uin
     if (level == 0 && (t->fmt != f || t->w != w || t->h != h || t->d != depth) && (t->made || t->defined)) tex_drop(t);   // level 0 respecified: a new texture
     if (!t->made && !t->defined) { t->fmt = f; t->w = level ? umax(w0, 1) : w; t->h = level ? umax(h0, 1) : h; t->d = depth; }
     if (t->fmt != f) { RED1("texture level %d in format %s, its level 0 in %s", level, g_fmt[f].name, g_fmt[t->fmt].name); free(conv); return; }
+    if (!level) t->ifmt = ifmt;
     if (t->made && level < t->levels && t->tex) {
         if (conv) for (uint32_t k = 0; k < depth; k++)
             tex_write(t, target == GL_TEXTURE_2D_ARRAY ? k : face, level, 0, 0, 0, w, h, (uint8_t *)conv + k * pitch * fmt_rows(f, h), pitch);
@@ -744,7 +770,7 @@ static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uin
     level_t *l = &t->pend[face][level]; lv_free(l);
     *l = (level_t){conv, pitch, pitch * fmt_rows(f, h) * depth, w, h};
     int faces = t->target == GL_TEXTURE_CUBE_MAP ? 6 : 1, all = 1;
-    for (int k = 0; k < faces; k++) all &= target == GL_TEXTURE_2D_ARRAY || t->pend[k][level].data != NULL || (level == 0 && !conv);
+    for (int k = 0; k < faces; k++) all &= faces == 1 || t->pend[k][level].data != NULL || (level == 0 && !conv);
     if (all) t->defined |= 1 << level;
 }
 
@@ -960,6 +986,110 @@ static id<MTLDepthStencilState> dss_get(void) {
     return st;
 }
 
+// ---------- Fixed function ----------
+// OpenGL 1.x draws with no program current. UnMetal (Unepic Games' engine, SDK 14.3) does nothing else: its loader asks eglGetProcAddress for 26 GL names, and its code calls
+// glVertexPointer / glColorPointer / glTexCoordPointer on client arrays, glMatrixMode / glLoadIdentity / glRotatef, glTexEnvi / glTexEnvf and glDrawArrays, and never
+// glCreateShader (dm/tools/loader_census.py). The arrays are attributes of the vertex array at NVIDIA's aliased numbers (0 the vertex, 2 the normal, 3 the colour, 8 + n texture
+// unit n's coordinates), as its compatibility driver keeps them, so a draw reads them as it reads any attribute (client memory copied per draw, a buffer bound as it is), and a
+// disabled one reads its current value (glColor*: white at start; texture coordinates (0, 0, 0, 1)). The program is the layer's own (dm/gfx/msl/gl_ff.metal), its two uniform
+// blocks written before each draw from the matrix stacks, the texture environment and the alpha test. Implemented: texture unit 0, no lighting, no fog, no texture coordinate
+// generation; a game that turns one of those on gets a red line
+enum { GL_MODELVIEW = 0x1700, GL_PROJECTION, GL_TEXTURE, GL_VERTEX_ARRAY = 0x8074, GL_NORMAL_ARRAY, GL_COLOR_ARRAY, GL_INDEX_ARRAY, GL_TEXTURE_COORD_ARRAY,
+       GL_ALPHA_TEST = 0xbc0, GL_LIGHTING = 0xb50, GL_FOG = 0xb60, GL_TEXTURE_ENV = 0x2300, GL_TEXTURE_ENV_MODE = 0x2200, GL_TEXTURE_ENV_COLOR = 0x2201,
+       GL_MODULATE = 0x2100, GL_DECAL = 0x2101, GL_ADD = 0x104, GL_DOUBLE = 0x140a };
+enum { FF_DEPTH = 32, FF_UNITS = 8 };   // stack depth (GL's minimum for modelview), texture units with an environment and coordinates
+typedef struct { float m[FF_DEPTH][16]; int top; } ff_stack;
+static struct {
+    ff_stack modelview, projection, texture[FF_UNITS]; GLenum mode;
+    float color[4];                               // the current colour (glColor*)
+    int client_unit;                              // glClientActiveTexture
+    uint32_t tex2d;                               // GL_TEXTURE_2D, a bit per texture unit
+    GLenum env[FF_UNITS]; float envc[FF_UNITS][4];
+    uint8_t atest; GLenum afunc; float aref;      // GL_ALPHA_TEST, glAlphaFunc
+} F;
+static void m_ident(float *m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1; }
+static void ff_init(void) {
+    memset(&F, 0, sizeof F);
+    F.mode = GL_MODELVIEW; F.afunc = GL_NEVER + 7;
+    for (int k = 0; k < 4; k++) F.color[k] = 1;
+    m_ident(F.modelview.m[0]); m_ident(F.projection.m[0]);
+    for (int u = 0; u < FF_UNITS; u++) { m_ident(F.texture[u].m[0]); F.env[u] = GL_MODULATE; }
+}
+static ff_stack *ff_matrix(void) {
+    if (F.mode == GL_MODELVIEW) return &F.modelview;
+    if (F.mode == GL_PROJECTION) return &F.projection;
+    if (S.unit < FF_UNITS) return &F.texture[S.unit];
+    RED1("fixed-function texture matrix on unsupported unit %d", S.unit);
+    return NULL;
+}
+static void m_mul(float *o, const float *a, const float *b) {   // o = a × b (column-major; o may be a or b)
+    float r[16];
+    for (int c = 0; c < 4; c++) for (int k = 0; k < 4; k++) r[c * 4 + k] = a[k] * b[c * 4] + a[4 + k] * b[c * 4 + 1] + a[8 + k] * b[c * 4 + 2] + a[12 + k] * b[c * 4 + 3];
+    memcpy(o, r, sizeof r);
+}
+static void m_apply(const float *b) { ff_stack *s = ff_matrix(); if (s) m_mul(s->m[s->top], s->m[s->top], b); }
+// The layer's program: two uniform blocks (gl_ff.metal ff_vu / ff_fu) and one sampler, texture unit 0's GL_TEXTURE_2D
+typedef struct { float mvp[16], tm[16], point_size, pad[3]; } ff_vu;
+typedef struct { int32_t tex, env, has_c, has_a, atest, afunc; float aref, pad; float envc[4]; } ff_fu;
+static prog_t g_ffp; static shinfo g_ffsi[2];
+static shattr g_ffa[3] = {{"gl_Vertex", 0, T_VEC4}, {"gl_Color", 3, T_VEC4}, {"gl_MultiTexCoord0", 8, T_VEC4}};
+static int g_ctx_fixed, g_ctx_profile = 1;
+static const float g_ff_va0[4] = {0, 0, 0, 1};
+static const float *ff_current(int attr) { return attr == 3 ? F.color : g_ff_va0; }   // what a disabled array reads
+static int ff_texture_complete(const tex_t *t, GLint minf) {
+    if (!t || t->fmt < 0 || !t->w || !t->h || (!(t->defined & 1) && !t->slevels)) return 0;
+    if (minf == GL_LINEAR || minf == GL_NEAREST) return 1;
+    unsigned needed = 1;
+    for (uint32_t size = umax(t->w, t->h); size > 1 && needed < (unsigned)t->maxlv + 1 && needed < MAXLV; size >>= 1) needed++;
+    unsigned mask = (1u << needed) - 1;
+    return t->made ? t->levels >= (int)needed : t->slevels ? t->slevels >= (int)needed : (t->defined & mask) == mask;
+}
+static void ff_bind(void) {
+    id<MTLRenderCommandEncoder> e = g_enc;
+    ff_vu v = {.point_size = S.psize};
+    m_mul(v.mvp, F.projection.m[F.projection.top], F.modelview.m[F.modelview.top]);
+    memcpy(v.tm, F.texture[0].m[F.texture[0].top], sizeof v.tm);
+    ff_fu f = {0};
+    id<MTLTexture> texture = g_tex0;
+    id<MTLSamplerState> sampler = g_samp0;
+    tex_t *t = tex_of(S.units[0].t2d);
+    so_t *so = so_of(S.units[0].samp);
+    if ((F.tex2d & 1) && t && ff_texture_complete(t, so ? so->sp.minf : t->sp.minf) && t->tex) {
+        GLenum mode = F.env[0];
+        f.tex = 1; f.env = mode == GL_REPLACE ? 1 : mode == GL_DECAL ? 2 : mode == GL_BLEND ? 3 : mode == GL_ADD ? 4 : 0;
+        f.has_c = t->fmt != F_A8;
+        f.has_a = t->fmt != F_L8 && t->fmt != F_BC1_RGB && t->ifmt != GL_RGB && t->ifmt != GL_RGB8 && t->ifmt != GL_RGB565 && t->ifmt != 3;
+        memcpy(f.envc, F.envc[0], sizeof f.envc);
+        texture = t->tex; sampler = tex_sampler(t, S.units[0].samp); t->use = g_serial;
+    }
+    if (F.tex2d & ~1u) RED1("GL_TEXTURE_2D enabled on texture unit %d: the fixed pipeline textures from unit 0 only", __builtin_ctz(F.tex2d & ~1u));
+    if (F.atest) { f.atest = 1; f.afunc = (int32_t)(F.afunc - GL_NEVER); f.aref = F.aref; }
+    [e setVertexBytes:&v length:sizeof v atIndex:0];
+    [e setFragmentBytes:&f length:sizeof f atIndex:0];
+    [e setFragmentTexture:texture atIndex:0];
+    [e setFragmentSamplerState:sampler atIndex:0];
+}
+static prog_t *ff_prog(void) {
+    if (!g_ffp.linked) {
+        static int failed; if (failed) return NULL;
+        NSError *err = nil;
+        id<MTLLibrary> lib = host_msl_lib(g_dev, nil, "gl_ff", &err);
+        id<MTLFunction> vs = [lib newFunctionWithName:@"ff_vs"], fs = [lib newFunctionWithName:@"ff_fs"];
+        if (!vs || !fs) { failed = 1; GLOG("[RED] the fixed pipeline's shaders (gl_ff) do not load: %s", err.localizedDescription.UTF8String); return NULL; }
+        for (int st = 0; st < 2; st++) { strlcpy(g_ffsi[st].key, "fixed-function", sizeof g_ffsi[st].key); g_ffsi[st].frag = st; g_ffsi[st].ub_slot = 0; }
+        g_ffsi[0].na = 3; g_ffsi[0].a = g_ffa;
+        g_ffp.si[0] = &g_ffsi[0]; g_ffp.si[1] = &g_ffsi[1]; g_ffp.fn[0] = vs; g_ffp.fn[1] = fs;
+        for (int i = 0; i < 16; i++) g_ffp.amap[i] = (int8_t)i;
+        g_ffp.serial = 0xffffffffu;   // programs count up from 1 (glLinkProgram)
+        g_ffp.linked = 1;
+        GLOG("fixed pipeline: the first draw with no program current");
+    }
+    tex_t *t = tex_of(S.units[0].t2d);
+    so_t *so = so_of(S.units[0].samp);
+    if ((F.tex2d & 1) && t && ff_texture_complete(t, so ? so->sp.minf : t->sp.minf) && !t->made) tex_make(t, 0);
+    return &g_ffp;
+}
+
 // ---------- Drawing ----------
 static void enc_state(void) {
     id<MTLRenderCommandEncoder> e = g_enc;
@@ -1074,7 +1204,7 @@ static void draw_span(void) {
 // Everything a draw needs; 0 = skip it
 static id<MTLTexture> fb_color(GLuint fb, int *level, int *slice);
 static int draw_setup(void) {
-    prog_t *p = prog_of(S.prog);
+    prog_t *p = S.prog ? prog_of(S.prog) : g_ctx_fixed ? ff_prog() : NULL;   // no program current: OpenGL 1.x's fixed pipeline (Fixed function), where the context has it
     if (!p || !p->linked) { g_sk_prog++; RED1("draw with no usable program (%u)", S.prog); return 0; }
     if (!pass_ensure()) { g_sk_pass++; return 0; }
     pkey_t k; memset(&k, 0, sizeof k);
@@ -1084,6 +1214,8 @@ static int draw_setup(void) {
         int s = vs->a[i].slot; vattr_t *a = &v->a[p->amap[s]]; const vbind_t *vb = vb_of(v, p->amap[s]);
         if (!a->on) continue;
         vkey_set(&k, s, a, vb);
+        if (p == &g_ffp && vb->client && vb->stride > 0 && vb->stride <= UINT16_MAX - 3)
+            k.stride[s] = (uint16_t)((vb->stride + 3) & ~3);
         if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, vb->stride); return 0; }
         buf_t *b = buf_of(vb->buf);
         if (b && b->mb) continue;   // a vertex buffer: bound as it is
@@ -1099,7 +1231,10 @@ static int draw_setup(void) {
             size_t len = lo < 0 ? 0 : (size_t)lo * stride + (size_t)(hi - lo - 1) * stride + esz;
             if (!esz || lo < 0 || len > (128u << 20)) { g_sk_attr++; RED1("vertex attribute %d: client array vertices %lld..%lld (%zu bytes) out of range", p->amap[s], (long long)lo, (long long)hi, len); return 0; }
             size_t off; id<MTLBuffer> mb = arena_alloc(len, &off);
-            memcpy((uint8_t *)mb.contents + off + (size_t)lo * stride, (const uint8_t *)(uintptr_t)(vb->off + a->rel) + (size_t)lo * stride, len - (size_t)lo * stride);
+            uint8_t *dst = (uint8_t *)mb.contents + off;
+            const uint8_t *src = (const uint8_t *)(uintptr_t)(vb->off + a->rel);
+            if (stride == (size_t)vb->stride) memcpy(dst + (size_t)lo * stride, src + (size_t)lo * stride, len - (size_t)lo * stride);
+            else for (size_t i = (size_t)lo; i < (size_t)hi; i++) memcpy(dst + i * stride, src + i * (size_t)vb->stride, esz);
             cbuf[s] = mb; coff[s] = off;   // bound below
         }
     }
@@ -1114,9 +1249,9 @@ static int draw_setup(void) {
         int s = vs->a[i].slot, gi = p->amap[s]; vattr_t *a = &v->a[gi];
         if (a->on && cbuf[s]) [e setVertexBuffer:cbuf[s] offset:coff[s] atIndex:30 - s];
         else if (a->on) { const vbind_t *vb = vb_of(v, gi); buf_t *b = buf_of(vb->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:vb->off + a->rel atIndex:30 - s]; }
-        else [e setVertexBytes:S.va[gi] length:16 atIndex:30 - s];
+        else [e setVertexBytes:p == &g_ffp ? ff_current(gi) : S.va[gi] length:16 atIndex:30 - s];
     }
-    bind_uniforms_textures(p);
+    if (p == &g_ffp) ff_bind(); else bind_uniforms_textures(p);
     g_n_draw++;
     // DM_GL_DRAWLOG=<n>[:<seconds>]: the first n draws after <seconds> of run time (default 0) with their target, viewport, scissor box and program
     // (a port's first question is where its draws go: a picture that stays black while the game keeps drawing is usually a target or a viewport, not a shader)
@@ -1301,8 +1436,12 @@ static void cap_set(GLenum cap, int on) {
     uint8_t *c = cap_of(cap);
     if (c) { *c = on; return; }
     if (cap == GL_COLOR_TABLE) { S.color_table = on; return; }
+    // the fixed pipeline's (Fixed function): texturing per texture unit, the alpha test; lighting and fog are not implemented
+    if (cap == GL_TEXTURE_2D) { if (S.unit < 32) F.tex2d = on ? F.tex2d | 1u << S.unit : F.tex2d & ~(1u << S.unit); return; }
+    if (cap == GL_ALPHA_TEST) { F.atest = (uint8_t)on; return; }
+    if ((cap == GL_LIGHTING || cap == GL_FOG) && !on) return;
     if (cap == GL_FRAMEBUFFER_SRGB) { if (on && !S.srgb) RED1("GL_FRAMEBUFFER_SRGB: writes into sRGB attachments are not converted"); S.srgb = on; return; }
-    if (cap == GL_TEXTURE_2D || cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
+    if (cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
         || cap == 0x864f /* DEPTH_CLAMP: Metal clamps to the depth range already */
         || cap == 0x92e0 /* DEBUG_OUTPUT */ || cap == 0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */) return;
     static GLenum seen[32]; static int n;
@@ -1363,7 +1502,7 @@ GL(glPixelStorei, void, GLenum p, GLint v) {
     else RED1("glPixelStorei(%#x, %d) not implemented", p, v);
 }
 // Colour-index images through a palette (GL's compatibility pixel transfer: glColorTable, GL_INDEX_SHIFT / GL_INDEX_OFFSET); the game's texture loader sets a palette for its
-// paletted images. glTexEnvi is fixed-function texturing, which programs replace
+// paletted images
 GL(glPixelTransferi, void, GLenum p, GLint v) { if (p == GL_INDEX_SHIFT) S.index_shift = v; else if (p == GL_INDEX_OFFSET) S.index_offset = v; else RED1("glPixelTransferi(%#x) not implemented", p); }
 GL(glColorTable, void, GLenum target, GLenum ifmt, GLsizei w, GLenum format, GLenum type, const void *table) {
     if (target != GL_COLOR_TABLE || type != GL_UNSIGNED_BYTE || (format != GL_RGBA && format != GL_RGB) || w <= 0 || !table) { RED1("glColorTable(%#x, %#x, %d, %#x, %#x) not implemented", target, ifmt, w, format, type); return; }
@@ -1371,7 +1510,6 @@ GL(glColorTable, void, GLenum target, GLenum ifmt, GLsizei w, GLenum format, GLe
     for (int i = 0; i < S.npalette; i++) S.palette[i] = format == GL_RGBA ? (uint32_t)s[4 * i] | s[4 * i + 1] << 8 | s[4 * i + 2] << 16 | (uint32_t)s[4 * i + 3] << 24 : (uint32_t)s[3 * i] | s[3 * i + 1] << 8 | s[3 * i + 2] << 16 | 0xff000000u;
     RED1("paletted texture (glColorTable, %d entries): palette lookup at upload, the index shift is %d", w, S.index_shift);
 }
-GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { (void)t; (void)p; (void)v; }
 GL(glGetError, GLenum, void) { GLenum e = g_gl_error; g_gl_error = GL_NO_ERROR; return e; }   // the flag above, read and cleared
 // Everything recorded so far runs to its end (LÖVE when the window changes)
 // glFlush: hand the commands encoded so far to the GPU without waiting. The layer commits at the frame's end, so a game that flushes in the middle of a frame
@@ -1416,7 +1554,7 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_NUM_EXTENSIONS: *v = NEXTS; return;
         case GL_MAJOR_VERSION: *v = 4; return;
         case GL_MINOR_VERSION: *v = 5; return;
-        case GL_CONTEXT_PROFILE_MASK: *v = 1; return;   // CONTEXT_CORE_PROFILE_BIT: what the games asked for (Digimon a 4.5 core context); LÖVE takes its core paths (the file header)
+        case GL_CONTEXT_PROFILE_MASK: *v = g_ctx_profile; return;
         case GL_CONTEXT_FLAGS: *v = 0; return;
         case GL_MAX_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: *v = 16384; return;
         case GL_MAX_3D_TEXTURE_SIZE: case GL_MAX_ARRAY_TEXTURE_LAYERS: *v = 2048; return;
@@ -1609,6 +1747,101 @@ GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
 GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if (i < 16) { S.va[i][0] = x; S.va[i][1] = y; S.va[i][2] = z; S.va[i][3] = w; } }
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
+// ---------- Fixed function: arrays, the current colour, matrices, the texture environment ----------
+// An array of the fixed pipeline: the vertex array's attribute at its aliased number (Fixed function), set as glVertexAttribPointer sets one; norm: integer colours and normals
+// are normalized, vertices and texture coordinates are not
+static void ff_pointer(int i, GLint size, GLenum type, GLsizei stride, const void *ptr, int norm, const char *fn) {
+    if (stride < 0 || size < 1 || (size > 4 && size != 0x80e1)) { gl_error_at(GL_INVALID_VALUE, fn); return; }
+    if (size == 0x80e1) RED1("%s with GL_BGRA components: read as RGBA", fn);
+    if (type == GL_DOUBLE) RED1("%s of doubles: Metal reads no double vertex attribute", fn);
+    vao_t *v = cur_vao(); vattr_t *a = &v->a[i]; vbind_t *b = &v->b[i];
+    va_format(a, size, type, (uint32_t)norm, 0); a->bind = 0;
+    b->buf = S.array_buf; b->client = !S.array_buf; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
+}
+GL(glVertexPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(0, size, type, stride, ptr, 0, __func__); }
+GL(glColorPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(3, size, type, stride, ptr, type != GL_FLOAT && type != GL_HALF_FLOAT && type != GL_DOUBLE, __func__); }
+GL(glNormalPointer, void, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(2, 3, type, stride, ptr, type != GL_FLOAT && type != GL_HALF_FLOAT && type != GL_DOUBLE, __func__); }
+GL(glTexCoordPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    if (F.client_unit >= FF_UNITS) { RED1("glTexCoordPointer for texture unit %d", F.client_unit); return; }
+    ff_pointer(8 + F.client_unit, size, type, stride, ptr, 0, __func__);
+}
+GL(glClientActiveTexture, void, GLenum u) { if (u >= GL_TEXTURE0 && u < GL_TEXTURE0 + FF_UNITS) F.client_unit = (int)(u - GL_TEXTURE0); else gl_error(GL_INVALID_ENUM); }
+static void client_state(GLenum a, int on) {
+    int i = a == GL_VERTEX_ARRAY ? 0 : a == GL_NORMAL_ARRAY ? 2 : a == GL_COLOR_ARRAY ? 3 : a == GL_TEXTURE_COORD_ARRAY ? 8 + F.client_unit : -1;
+    if (i < 0 || i >= 16) { RED1("gl%sClientState(%#x) not implemented", on ? "Enable" : "Disable", a); return; }
+    cur_vao()->a[i].on = (uint8_t)on;
+}
+GL(glEnableClientState, void, GLenum a) { client_state(a, 1); }
+GL(glDisableClientState, void, GLenum a) { client_state(a, 0); }
+GL(glColor4f, void, GLfloat r, GLfloat g, GLfloat b, GLfloat a) { F.color[0] = r; F.color[1] = g; F.color[2] = b; F.color[3] = a; }
+GL(glColor3f, void, GLfloat r, GLfloat g, GLfloat b) { F.color[0] = r; F.color[1] = g; F.color[2] = b; F.color[3] = 1; }
+GL(glColor4fv, void, const GLfloat *v) { memcpy(F.color, v, sizeof F.color); }
+GL(glColor4ub, void, uint32_t r, uint32_t g, uint32_t b, uint32_t a) { F.color[0] = (r & 0xff) / 255.f; F.color[1] = (g & 0xff) / 255.f; F.color[2] = (b & 0xff) / 255.f; F.color[3] = (a & 0xff) / 255.f; }
+GL(glMatrixMode, void, GLenum m) { if (m >= GL_MODELVIEW && m <= GL_TEXTURE) F.mode = m; else gl_error(GL_INVALID_ENUM); }
+GL(glLoadIdentity, void, void) { ff_stack *s = ff_matrix(); if (s) m_ident(s->m[s->top]); }
+GL(glLoadMatrixf, void, const GLfloat *m) { ff_stack *s = ff_matrix(); if (s) memcpy(s->m[s->top], m, sizeof s->m[0]); }
+GL(glMultMatrixf, void, const GLfloat *m) { m_apply(m); }
+GL(glPushMatrix, void, void) {
+    ff_stack *s = ff_matrix();
+    if (!s) return;
+    if (s->top + 1 >= FF_DEPTH) { gl_error(0x503); return; }   // STACK_OVERFLOW
+    memcpy(s->m[s->top + 1], s->m[s->top], sizeof s->m[0]); s->top++;
+}
+GL(glPopMatrix, void, void) { ff_stack *s = ff_matrix(); if (s) { if (s->top) s->top--; else gl_error(0x504); } }   // STACK_UNDERFLOW
+static void m_rotate(float deg, float x, float y, float z) {   // glRotate: deg degrees about (x, y, z), counter-clockwise looking down the axis
+    float l = sqrtf(x * x + y * y + z * z); if (l == 0) return;
+    x /= l; y /= l; z /= l;
+    float c = cosf(deg * (float)M_PI / 180), s = sinf(deg * (float)M_PI / 180), k = 1 - c;
+    float r[16] = {x * x * k + c, y * x * k + z * s, x * z * k - y * s, 0,   x * y * k - z * s, y * y * k + c, y * z * k + x * s, 0,
+                   x * z * k + y * s, y * z * k - x * s, z * z * k + c, 0,   0, 0, 0, 1};
+    m_apply(r);
+}
+GL(glRotatef, void, GLfloat a, GLfloat x, GLfloat y, GLfloat z) { m_rotate(a, x, y, z); }
+GL(glTranslatef, void, GLfloat x, GLfloat y, GLfloat z) { float t[16]; m_ident(t); t[12] = x; t[13] = y; t[14] = z; m_apply(t); }
+GL(glScalef, void, GLfloat x, GLfloat y, GLfloat z) { float t[16]; m_ident(t); t[0] = x; t[5] = y; t[10] = z; m_apply(t); }
+static void m_ortho(double l, double r, double b, double t, double n, double f) {
+    if (l == r || b == t || n == f) { gl_error(GL_INVALID_VALUE); return; }
+    float o[16]; m_ident(o);
+    o[0] = (float)(2 / (r - l)); o[5] = (float)(2 / (t - b)); o[10] = (float)(-2 / (f - n));
+    o[12] = (float)(-(r + l) / (r - l)); o[13] = (float)(-(t + b) / (t - b)); o[14] = (float)(-(f + n) / (f - n));
+    m_apply(o);
+}
+GL(glOrtho, void, GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) { m_ortho(l, r, b, t, n, f); }
+GL(glOrthof, void, GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f) { m_ortho(l, r, b, t, n, f); }
+GL(glFrustum, void, GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f) {
+    if (n <= 0 || f <= 0 || l == r || b == t || n == f) { gl_error(GL_INVALID_VALUE); return; }
+    float o[16]; memset(o, 0, sizeof o);
+    o[0] = (float)(2 * n / (r - l)); o[5] = (float)(2 * n / (t - b)); o[8] = (float)((r + l) / (r - l)); o[9] = (float)((t + b) / (t - b));
+    o[10] = (float)(-(f + n) / (f - n)); o[11] = -1; o[14] = (float)(-2 * f * n / (f - n));
+    m_apply(o);
+}
+// glTexEnv: the active texture unit's GL_TEXTURE_ENV_MODE and GL_TEXTURE_ENV_COLOR (GL_COMBINE and point sprites are not implemented)
+static int tex_env_params(GLenum target, GLenum pname, int vector) {
+    if (target != GL_TEXTURE_ENV || (pname != GL_TEXTURE_ENV_MODE && (!vector || pname != GL_TEXTURE_ENV_COLOR))) {
+        gl_error(GL_INVALID_ENUM); return 0;
+    }
+    if (S.unit >= FF_UNITS) { RED1("glTexEnv on texture unit %d", S.unit); return 0; }
+    return 1;
+}
+static void tex_env_mode(double mode) {
+    if (mode == 0x8570) { RED1("GL_COMBINE is not implemented"); return; }
+    if (mode != GL_MODULATE && mode != GL_REPLACE && mode != GL_DECAL && mode != GL_BLEND && mode != GL_ADD) { gl_error(GL_INVALID_ENUM); return; }
+    F.env[S.unit] = (GLenum)mode;
+}
+GL(glTexEnvf, void, GLenum t, GLenum p, GLfloat v) { if (tex_env_params(t, p, 0)) tex_env_mode(v); }
+GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { if (tex_env_params(t, p, 0)) tex_env_mode(v); }
+GL(glTexEnvfv, void, GLenum t, GLenum p, const GLfloat *v) {
+    if (!tex_env_params(t, p, 1)) return;
+    if (p == GL_TEXTURE_ENV_MODE) tex_env_mode(v[0]);
+    else for (int k = 0; k < 4; k++) F.envc[S.unit][k] = fminf(1, fmaxf(0, v[k]));
+}
+GL(glTexEnviv, void, GLenum t, GLenum p, const GLint *v) {
+    if (!tex_env_params(t, p, 1)) return;
+    if (p == GL_TEXTURE_ENV_MODE) tex_env_mode(v[0]);
+    else for (int k = 0; k < 4; k++) F.envc[S.unit][k] = (float)fmax(0, (2.0 * v[k] + 1) / UINT32_MAX);
+}
+GL(glAlphaFunc, void, GLenum f, GLfloat ref) { if (f >= GL_NEVER && f <= GL_NEVER + 7) { F.afunc = f; F.aref = ref < 0 ? 0 : ref > 1 ? 1 : ref; } else gl_error(GL_INVALID_ENUM); }
+
 // ---------- Textures ----------
 GL(glGenTextures, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_texs, &g_ntexs, &g_captexs, sizeof(tex_t)); }
 GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
@@ -1622,8 +1855,6 @@ GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
     }
 }
 GL(glActiveTexture, void, GLenum u) { if (u >= GL_TEXTURE0 && u < GL_TEXTURE0 + NUNITS) S.unit = u - GL_TEXTURE0; }
-// The unit the compatibility profile's texture coordinate array (glTexCoordPointer) goes to: no fixed-pipeline arrays here, so nothing reads it (DOOM 3 sets unit 0 at start)
-GL(glClientActiveTexture, void, GLenum u) { if (u != GL_TEXTURE0) RED1("glClientActiveTexture(%#x): fixed-pipeline texture coordinate arrays are not implemented", u); }
 GL(glBindTexture, void, GLenum target, GLuint t) {
     GLuint *slot = target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ? unit_slot(S.unit, target) : NULL;
     if (!slot) { RED1("texture target %#x not implemented", target); return; }
@@ -1742,7 +1973,7 @@ static void teximg_impl(const teximg_args *a) {
             if (g_fmt[f].kind != K_BLOCK || (size_t)a->size < need) { RED1("glCompressedTexImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }
             conv = pixels_convert(a->pixels, a->w, a->h, 0, 0, f, CV_COPY, &pitch);
         } else conv = pixels_convert(cv == CV_NONE ? NULL : a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
-        tex_image(a->target, a->level, f, cv, a->w, a->h, 1, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
+        tex_image(a->target, a->level, a->ifmt, f, cv, a->w, a->h, 1, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
     }
 }
 GL(glTexImage2D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
@@ -1761,7 +1992,7 @@ static void tex_storage(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, G
     int cv, f = fmt_pick((GLint)ifmt, 0, 0, &cv);
     if (!t || f < 0 || levels <= 0 || w <= 0 || h <= 0 || d <= 0) { RED1("glTexStorage(%#x, %d levels, %#x, %dx%dx%d) not implemented", target, levels, ifmt, w, h, d); return; }
     if (t->made || t->defined) tex_drop(t);
-    t->fmt = f; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
+    t->fmt = f; t->ifmt = ifmt; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
 }
 // One scalar of pixel-transfer data. Integer colour/depth components are normalized; stencil indices are integers. memcpy permits unaligned guest data.
 static double pixel_scalar(const uint8_t *p, GLenum type, int normalized) {
@@ -1789,8 +2020,8 @@ static uint32_t pixel_ufloat(double v, int bits) {
     if (m == 2u << bits) { m >>= 1; exp++; }
     return exp >= 31 ? 31u << bits : ((uint32_t)exp << bits) | (m - (1u << bits));
 }
-// Convert one clear value into the actual texture format. Unlike an upload, this consumes no unpack state and never treats differently typed data as storage bytes.
-static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t out[16]) {
+// Convert one pixel into the actual texture format. The caller handles any unpack state and provides room for a destination texel.
+static GLenum convert_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t *out) {
     int n;
     switch (format) {
         case GL_RED: case GL_GREEN: case GL_BLUE: case GL_ALPHA: case GL_DEPTH_COMPONENT: case GL_STENCIL_INDEX: n = 1; break;
@@ -1807,7 +2038,7 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
         {GL_UNSIGNED_SHORT_4_4_4_4, 4, 2, {4, 4, 4, 4}, 0}, {0x8365, 4, 2, {4, 4, 4, 4}, 1},
         {GL_UNSIGNED_SHORT_5_5_5_1, 4, 2, {5, 5, 5, 1}, 0}, {0x8366, 4, 2, {5, 5, 5, 1}, 1},
         {0x8035, 4, 4, {8, 8, 8, 8}, 0}, {0x8367, 4, 4, {8, 8, 8, 8}, 1},
-        {0x8036, 4, 4, {10, 10, 10, 2}, 0}, {0x8368, 4, 4, {10, 10, 10, 2}, 1},
+        {0x8036, 4, 4, {10, 10, 10, 2}, 0}, {GL_UNSIGNED_INT_2_10_10_10_REV, 4, 4, {10, 10, 10, 2}, 1},
     };
     int pk = -1, bytes = 0;
     for (unsigned i = 0; i < sizeof packed / sizeof *packed; i++) if (packed[i].type == type) pk = (int)i;
@@ -1818,12 +2049,12 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
             case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: bytes = 2; break;
             case GL_INT: case GL_UNSIGNED_INT: case GL_FLOAT: bytes = 4; break;
             case GL_UNSIGNED_INT_24_8: case 0x8dad /* FLOAT_32_UNSIGNED_INT_24_8_REV */: if (format != GL_DEPTH_STENCIL) return GL_INVALID_OPERATION; break;
-            case 0x8c3b /* UNSIGNED_INT_10F_11F_11F_REV */: case 0x8c3e /* UNSIGNED_INT_5_9_9_9_REV */: if (n != 3) return GL_INVALID_OPERATION; break;
+            case GL_UNSIGNED_INT_10F_11F_11F_REV: case 0x8c3e /* UNSIGNED_INT_5_9_9_9_REV */: if (n != 3) return GL_INVALID_OPERATION; break;
             default: return GL_INVALID_ENUM;
         }
     }
     if (format == GL_DEPTH_STENCIL && type != GL_UNSIGNED_INT_24_8 && type != 0x8dad) return GL_INVALID_OPERATION;
-    memset(out, 0, 16); if (!data) return GL_NO_ERROR;
+    memset(out, 0, g_fmt[f].bytes); if (!data) return GL_NO_ERROR;
     double c[4] = {0, 0, 0, 1}; uint32_t stencil = 0;
     if (format == GL_DEPTH_STENCIL) {
         uint32_t v; memcpy(&v, data, 4);
@@ -1832,7 +2063,7 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
     } else if (pk >= 0) {
         uint32_t v = 0; memcpy(&v, data, packed[pk].bytes); int off = packed[pk].rev ? 0 : packed[pk].bytes * 8;
         for (int i = 0; i < n; i++) { int b = packed[pk].bits[i]; if (!packed[pk].rev) off -= b; c[i] = (double)(v >> off & ((1u << b) - 1)) / ((1u << b) - 1); if (packed[pk].rev) off += b; }
-    } else if (type == 0x8c3b || type == 0x8c3e) {
+    } else if (type == GL_UNSIGNED_INT_10F_11F_11F_REV || type == 0x8c3e) {
         uint32_t v; memcpy(&v, data, 4);
         if (type == 0x8c3e) for (int i = 0; i < 3; i++) c[i] = ldexp(v >> (i * 9) & 511, (int)(v >> 27) - 24);
         else for (int i = 0; i < 3; i++) { int b = i == 2 ? 10 : 11; uint16_t h = (uint16_t)((v >> (i * 11) & ((1u << b) - 1)) << (15 - b)); _Float16 a; memcpy(&a, &h, 2); c[i] = (double)a; }
@@ -1866,7 +2097,7 @@ GLB(glClearTexImage, void, GLuint name, GLint level, GLenum format, GLenum type,
     tex_t *t = tex_of(name);
     if (!t || level < 0 || level >= MAXLV) { gl_error(GL_INVALID_OPERATION); return; }
     if (t->fmt < 0 || g_fmt[t->fmt].kind == K_BLOCK) { gl_error(GL_INVALID_OPERATION); return; }
-    uint8_t one[16]; GLenum error = clear_pixel(t->fmt, format, type, data, one);
+    uint8_t one[16]; GLenum error = convert_pixel(t->fmt, format, type, data, one);
     if (error) { gl_error(error); return; }
     @autoreleasepool {
         if (g_pend_clear.bits) clears_flush();
@@ -1946,7 +2177,7 @@ static void compressed_impl(const compressed_args *a) {
                 umax(1, t->w >> a->level) != (uint32_t)a->w || umax(1, t->h >> a->level) != (uint32_t)a->h)) { gl_error(GL_INVALID_OPERATION); return; }
             void *copy = NULL;
             if (a->data && a->size) { copy = zalloc((size_t)a->size); memcpy(copy, a->data, (size_t)a->size); }
-            tex_image(a->target, a->level, f, CV_COPY, a->w, a->h, a->d, copy, pitch);
+            tex_image(a->target, a->level, a->format, f, CV_COPY, a->w, a->h, a->d, copy, pitch);
             return;
         }
         level_t *l = &t->pend[face][a->level];
@@ -2151,7 +2382,7 @@ GLB(glCopyTexImage2D, void, GLenum target, GLint level, GLenum ifmt, GLint x, GL
         int cv, f = fmt_pick((GLint)ifmt, GL_RGBA, GL_UNSIGNED_BYTE, &cv);
         if (f < 0 || g_fmt[f].kind == K_BLOCK) { RED1("glCopyTexImage2D into internal format %#x not implemented", ifmt); return; }
         if (w <= 0 || h <= 0 || border) { gl_error(GL_INVALID_VALUE); return; }
-        tex_image(target, level, f, cv, (uint32_t)w, (uint32_t)h, 1, NULL, fmt_pitch(f, (uint32_t)w));
+        tex_image(target, level, ifmt, f, cv, (uint32_t)w, (uint32_t)h, 1, NULL, fmt_pitch(f, (uint32_t)w));
         tex_copy(target, level, 0, 0, x, y, w, h);
     }
 }
@@ -2366,7 +2597,15 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_ACTIVE_UNIFORMS: *v = x->nu; return;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
-        case GL_ACTIVE_ATTRIBUTES: *v = x->si[0] ? x->si[0]->na : 0; return;
+        case GL_ACTIVE_ATTRIBUTES:
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
+            const shinfo *vs = x->linked ? x->si[0] : NULL;
+            int n = vs ? vs->na : 0;
+            if (p == GL_ACTIVE_ATTRIBUTES) { *v = n; return; }
+            *v = 0;
+            for (int i = 0; i < n; i++) *v = (GLint)umax((uint32_t)*v, (uint32_t)strlen(vs->a[i].name) + 1);
+            return;
+        }
         case GL_DELETE_STATUS: *v = x->deleted; return;
     }
     RED1("glGetProgramiv(%#x) not implemented", p); *v = 0;
@@ -2391,6 +2630,19 @@ GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
     prog_t *p = prog_of(pr); if (!p->linked) return -1;
     for (int i = 0; i < p->si[0]->na; i++) if (!strcmp(p->si[0]->a[i].name, name)) return p->amap[p->si[0]->a[i].slot];
     return -1;
+}
+// The enumeration index is the attribute's row in the linked vertex table, independent of its bound location.
+GL(glGetActiveAttrib, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len, GLint *count, GLenum *type, GLchar *name) {
+    if (!SP_CHECK(pr, 1)) return;
+    prog_t *p = prog_of(pr);
+    const shinfo *vs = p->linked ? p->si[0] : NULL;
+    if (size < 0 || !vs || index >= (GLuint)vs->na) { gl_error(GL_INVALID_VALUE); return; }
+    const shattr *a = &vs->a[index];
+    size_t copied = 0;
+    if (name && size > 0) copied = umin((uint32_t)strlcpy(name, a->name, (size_t)size), (uint32_t)size - 1);
+    if (len) *len = (GLsizei)copied;
+    if (count) *count = 1;
+    if (type) *type = g_tenums[a->type];
 }
 GL(glGetProgramInfoLog, void, GLuint pr, GLsizei size, GLsizei *len, GLchar *log) {
     if (len) *len = 0;
@@ -2621,9 +2873,20 @@ EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext c) { (void)d; (void)
 EGL(eglCreatePbufferSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, const EGLint *attr) { (void)d; (void)cfg; (void)attr; RED1("eglCreatePbufferSurface: drawing into it is not implemented"); return (EGLSurface)(uintptr_t)4; }
 EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share, const EGLint *attr) {
     (void)d; (void)cfg;
-    int major = 0, minor = 0; for (int i = 0; attr && attr[i] != 0x3038 && i < 32; i += 2) { if (attr[i] == 0x3098) major = attr[i + 1]; else if (attr[i] == 0x30fb) minor = attr[i + 1]; }
+    int major = 1, minor = 0, profile = 1, flags = 0;
+    for (int i = 0; attr && i < 32 && attr[i] != 0x3038; i += 2) {
+        if (attr[i] == 0x3098) major = attr[i + 1];
+        else if (attr[i] == 0x30fb) minor = attr[i + 1];
+        else if (attr[i] == 0x30fc) flags = attr[i + 1];
+        else if (attr[i] == 0x30fd) profile = attr[i + 1];
+    }
     if (share) RED1("shared EGL contexts are not implemented (one context)");
-    GLOG("EGL context: OpenGL %d.%d", major, minor);
+    // 3.1 removed fixed function. A forward-compatible 3.0 context also omits it; profile selection starts at 3.2.
+    int compat = (major > 3 || (major == 3 && minor >= 2)) && profile == 2;
+    g_ctx_fixed = major < 3 || (major == 3 && minor == 0 && !(flags & 2)) || compat;
+    g_ctx_profile = g_ctx_fixed ? 2 : 1;
+    if (g_ctx_fixed) ff_init();
+    GLOG("EGL context: OpenGL %d.%d%s", major, minor, g_ctx_fixed ? " (with fixed function)" : "");
     return (EGLContext)(uintptr_t)2;
 }
 EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, const EGLint *attr) {

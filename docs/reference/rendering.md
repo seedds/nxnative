@@ -556,7 +556,9 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** on an iPhone before the A17 Pro, the game runs until its first BC texture, then `failed assertion 'Texture Descriptor Validation' … MTLTextureDescriptor has invalid pixelFormat (134).` (or another number from 130 to 153, Metal's BC formats; 134 is `BC3_RGBA`) and `CRASH sig=6`, the backtrace through `tex_mtl`, `tex_by_id` and `encode_args`.
 - **Cause:** BC textures are created and uploaded as BC, with no decompression path ([Compressed textures as render targets](#compressed-textures-as-render-targets-through-an-uncompressed-shadow), note), and the A16 and older iPhone GPUs have no BC formats (`MTLDevice.supportsBCTextureCompression` false). The format mapping is right; the device cannot make the texture.
-- **Fix:** the device is checked before the game starts. The iOS app checks it when Play is pressed (`front_ios_device_check` in `dm/ios/Sources/main.m`, called by `startGame` in `front_ios.m`, or at once in an app without a launcher) and does not start the host on such a GPU: the screen says the device is not supported and names the GPU and the devices that are (iPhone 15 Pro or newer, M1 iPads or newer), and the log has a `[RED] boot:` line. The check makes the process's first Metal device, and Metal reads `MTL_HUD_ENABLED` then, so it runs after the launcher has applied its settings; at launch (`boot_env`, before the launcher), it kept the launcher's **Performance HUD** switch from working ([GitHub issue #840](https://github.com/seedds/nxnative/issues/840)). The host's early loading, which makes no device, still starts at launch on such a GPU and is left unused. `mtl_init` (`nvn_mtl.m`) stops every other route the same way, with a `FATAL … has no BC texture formats` line, for the NVN, Vulkan and GL layers alike; the classic-only path of a device without Metal 4 (a virtual Mac's shader capture) is left as it was.
+- **Fix:** the device is checked before the game starts. The iOS app checks it when Play is pressed (`front_ios_device_check` in `dm/ios/Sources/main.m`, called by `startGame` in `front_ios.m`, or at once in an app without a launcher) and does not start the host on such a GPU: the screen says the device is not supported and names the GPU and the devices that are (iPhone 15 Pro or newer, M1 iPads or newer), and the log has a `[RED] boot:` line. The host's early loading, which makes no device, still starts at launch on such a GPU and is left unused. `mtl_init` (`nvn_mtl.m`) stops every other route the same way, with a `FATAL … has no BC texture formats` line, for the NVN, Vulkan and GL layers alike. A virtual Mac without Metal 4 can still use the classic-only path for shader capture.
+
+  The iOS check creates a Metal device, so it runs after Play has applied the launcher settings. On an M4 iPad Air, applying the **Performance HUD** choice at Play was still too late. `boot_env` now applies the saved HUD choice before `UIApplicationMain` when saved choices are in use and there is no explicit override. If the saved choice enabled the process HUD and the player switches it off before Play, `startGame` disables the HUD on the game layer. A first-time switch on takes effect at the next launch. [GitHub issue #840](https://github.com/seedds/nxnative/issues/840) · [M4 iPad Air verification](https://github.com/seedds/nxnative/pull/1966)
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md): [GitHub issue #704](https://github.com/seedds/nxnative/issues/704), an iPhone 15 (A16) with another region's copy (`0100B3600AE9A000`): the launcher ran (no BC textures), FFX aborted at its first BC3 texture.
 
 ### A depth texture drawn through a colour view
@@ -940,6 +942,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a screenshot of a window the game crops is the picture as presented: the present pass draws the crop at the window texture's own size (as `DM_NVN_SHOT_OUT` draws it at a size of its own), so its size stays the same when a dynamic resolution moves the crop. An uncropped window is still saved as its texture's own pixels. Until a regression baseline includes this, a check of a cropping game against an older revision compares two kinds of shot.
 - **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md), in regression checks of the review's steps (step 15's audit).
 
+### Screenshots of GL and Vulkan frames wait for rendering
+
+- **Symptom:** diagnostic screenshots can be black or incomplete while the corresponding GL or Vulkan frame displays correctly.
+- **Cause:** the external graphics queue signals a Metal event after writing the frame. The present queue waits for it, while the screenshot can read the texture on a separate queue.
+- **Fix:** diagnostic captures wait for the presented frame's producer event before reading it. A timeout skips the capture, and a failed Metal readback does not write a PNG.
+- **Found on:** [UnMetal](../../dm/games/01008F4014A74000/README.md#found-on-this-game). The original PR reported 82 black captures out of 86 before its producer wait and none afterward. [PR #2805](https://github.com/seedds/nxnative/pull/2805)
+- **Check:** `t_present_crop --external-screenshots` holds back submission of a producer on another Metal queue. The scheduled and queued captures both wrote black on `2149d856` and both wrote the expected green pixels with the patch. On the M4 Pro with macOS 27.2.1, both builds saved 86 captures of UnMetal 1.2.0's first cell with zero black images.
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil
@@ -1271,9 +1281,9 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** in a pass dump (`DM_NVN_PASSDUMP`), `M … indirect-count multi-draw masking: render pass split here` inside scene passes, and the periodic `indirect-count multi-draw masking:` line counts `render pass split` times in the tens of thousands. Each split loads the pass's colour and depth again (Mario Kart World: 2048x1152, 20 MB).
 - **Cause:** `mdx_run` copies a multi-draw's records at its first draw, and the compute pass that copies them cannot run inside a render pass. When an ordinary draw had already opened the pass, the copy ended it.
 - **Fix:** general (`nvn_mtl.m` `mdx_prescan`): a draw that is not such a multi-draw and opens a pass first runs the same forward scan, once per `g_mdx_epoch` and submission, so the multi-draws after it are copied before the pass. It runs only once the game has drawn such a multi-draw or an indirect mesh draw (`g_mdx_runs`), so other games do not walk their submissions for it. Ranges replayed through `draw_multi` are not scanned ahead and behave as before.
-- **Draw-written records:** a copy made ahead now comes before the draw that opens the pass, and a draw's shader can write a record a later multi-draw reads; NVN orders that write for indirect fetch only by a barrier with `ORDER_INDIRECT_DATA`. Such a barrier after a draw with shader writes since the copies were made (`g_mdx_wr` against `g_vbuf_write_epoch`) bumps `g_mdx_epoch`, and the multi-draws after it copy again. The scan from a multi-draw's own first draw had the same gap for the draws between it and later multi-draws. No game has been seen to write records from a draw; `dm/gfx/tests/t_mdx_prescan.m` checks the split counts and pictures of each case.
+- **Draw-written records and counts:** a copy made ahead comes before the draw that opens the pass, and a draw's shader can write a record or visibility count a later multi-draw reads. Both `ORDER_PRIMITIVES` and `ORDER_INDIRECT_DATA` order earlier work before later vertex or indirect fetch (`GAME_BARRIER_FULL`). Either barrier after shader writes since the copies were made (`g_mdx_wr` against `g_vbuf_write_epoch`) bumps `g_mdx_epoch`, and later multi-draws copy again. Previously only `ORDER_INDIRECT_DATA` invalidated them: Bayonetta 3's depth prepass wrote visibility flags after the prescan had read their old zeros, and its primitive barrier left those zero draw arguments cached. The colour draws then disappeared, leaving background-coloured characters and dotted surfaces. This also applies to the scan from a multi-draw's own first draw over later draws. `dm/gfx/tests/t_mdx_prescan.m` checks split counts and GPU pixels, including a real fragment store to an indexed draw's count, a 20-byte record stride, and primitive barriers with the writer at the opening draw or later in the pass.
 - **Result on Mario Kart World,** the Grand Prix route: at a race frame, masking splits 2 → 0 and mergeable splits 5 → 2 (`tbdr_pass_merge.py`: 118 → 47 MB a frame); on an iPad Pro (M5) over 10 minutes, 72,000 splits → 0; GPU time on an M4 Pro p50 13.0 ms against 13.65–14.1 ms in five runs without it; on the iPad unchanged within noise (race p50 about 14.3 ms). Those were measured before the rebase onto the mesh-grid changes. On main e5fb1556 (1.8.0, M4 Pro, the regression route, 2026-11-14): in pass dumps every 600 frames, 12 and 10 masking splits in two runs without it (two a frame from frame 4500 to 6900, one later) and 0 in two runs with it. In one run alternating `DM_NVN_MDX_PRESCAN=ab` every 300 frames: over the first ten race phases, attachment loads 69 MB and stores 47 MB a frame lower and 2.2 fewer passes, every phase. Over the last fifteen phases no difference, where the game's passes do not split. GPU time is unchanged within the noise in every window (p50 −0.15 ms in the first ten phases, about 9.6 ms over the race).
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md); [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md#rendering) (draw-written visibility counts).
 
 ### CPU reads after a drain wait only for later writes
 
@@ -1339,6 +1349,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - `DM_NVN_TF_CPU=0` sends every capture through `tf_prepare` in a pass of its own. The power summary has a `transform feedback` line: captures with the state on the CPU, through `tf_prepare`, passes and barriers in them, per frame.
 - **Check:** `t_transform_feedback` (both runs, the default and `DM_NVN_TF_CPU=0`): captures into separate ranges share a pass with no barrier; a reader of an earlier capture's output, a capture into a range written or read since the last barrier, a capture after a game barrier, and a capture with a write or an unknown read get a barrier; saves and deferred updates end the pass; the bytes and control buffers match the GPU path.
 - **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#rendering): a begin, one capture and an end with a control buffer per mesh, 73 to 182 a frame in Scarlet and Violet; 80 captures in the player's house went from 80 passes to 3.
+
+### Mesh geometry reports unused compute scratch as zero GPU addresses
+
+- **Symptom:** a composed geometry mesh renders correctly but logs zero GPU addresses for geometry argument bindings on every draw, exhausting the first 16 diagnostics.
+- **Cause:** `geo_mesh_encode` uses the lean compute kernel's argument layout. `dmsh_mesh.compose` replaces its vertex capture, vertex/index outputs and topology buffer reads with threadgroup capture, a local mask and identity indices, and rejects a kernel if those accesses remain. Their struct fields stay in the shared layout, so `encode_args` incorrectly checked the unused zero slots as live GPU pointers.
+- **Fix:** `args_check_addresses` excludes only geometry registers 0, 1, 2 and 4 while encoding the composed mesh's geometry stage. Register 3 (`vb_info`), every guest binding and every helper in the compute path are still checked. No binding, shader, draw or graphics setting changes; this fixes the diagnostic, not a measured frame-rate bottleneck.
+- **Check:** `t_geometry_mesh` fails before the fix with 12 false addresses for six draws, then passes depth, per-draw storage counters, scissor, fragment discard and samples-passed comparisons in single, gathered and encoding-thread modes. `t_cbs_fault` checks that missing `vb_info` and guest storage still report, and switching back to compute reports all missing scratch buffers.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering), geometry shader `5d537f7630ec3671_bl3`: registers 0/1/2/4 occupy argument slots 2/3/4/7. The separate performance investigation remains open.
 
 ### Geometry-shader draws encoded a run at a time
 
@@ -1940,7 +1958,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 
 - **Symptom:** Metal refuses the pipeline: "Fragment shader does not write to render target color(0), index(1)".
 - **Cause:** the GX shaders write the second blend source as an ordinary output at location 1 (no `Index` decoration), and pipelines blend with `SRC1` factors; NVIDIA's hardware feeds MRT 1 to source 1.
-- **Fix:** `vk_shaders.py` builds a variant `vk_<key>_d` with that output at `[[color(0), index(1)]]`, which the host takes for pipelines whose blend reads source 1.
+- **Fix:** `vk_shaders.py` builds a variant `vk_<key>_d` with that output at `[[color(0), index(1)]]`, which the host takes for pipelines whose blend reads source 1. Only for outputs 0 and 1 of the same type and none at location 2 or more ([SPIR-V compiled by DXC](#spir-v-compiled-by-dxc)).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
 ### Scaled and three-component vertex formats
@@ -2080,6 +2098,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** two geometry shaders (GX points and lines expanded to quads) are not translated (Metal has no geometry stage).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
+### SPIR-V compiled by DXC
+
+- **Symptom:** `vk_shaders.py` stops with `spirv-cross failed: SPIRV-Cross threw an exception: Entry point does not exist.` A shader with push constants has no `p:` row. Metal rejects a generated dual-source variant of a shader with ordinary render targets.
+- **Cause:** DXC uses entry-point names such as `PSMain`. The tool always tried to rename `main`. SPIRV-Cross changes the dots in `type.PushConstant.<name>` to underscores in MSL, so looking for the reflected type name misses the push-constant argument. A second color output can be a separate render target, such as Re:ZERO's `float2` beside a `float4`.
+- **Fix:** Rename the sole entry point reported by reflection and look up the push-constant argument under the sanitized MSL type name. Generate the dual-source variant only when the only color outputs are locations 0 and 1 with the same type.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`0100D800117F4000`, The Forge renderer on Vulkan, SDK 9.5.0).
+- **Check:** `test_vk_shaders.py` translates synthetic SPIR-V for named entry points, 1D sampling, push constants beside a uniform buffer, and dual-source and ordinary color outputs.
+
 ## OpenGL layer
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.
@@ -2091,6 +2117,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** every GL stage uses one Tier 2 argument buffer at buffer 0, with independent IDs for uniform buffers, textures and samplers. The tool gives SPIR-V resources private names before translation, preserving the game's names in the table, and records the IDs from the generated MSL. The host encodes those resources per draw, declares indirect texture and buffer reads to Metal, retains samplers until completion, and snapshots changed default uniforms in transient memory. This also separates every uniform block from vertex stream slots 15–30. Shader-table ABI 2 rejects older direct-slot tables with a rebuild message; rebuild both GL libraries and the host together. All supported Apple GPU families have Tier 2 argument buffers ([Apple feature tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf)).
 - **Check:** `test_gl_shaders.py` translates 16, 17 and 32 live samplers plus a default uniform block. `make -C dm/gfx/tests GAME=010029D00E740000 gl-arguments` generates GLSL and its table/library, then checks GPU pixels for 17 distinct sampler states, a sampler shared by both stages, vertex attribute 15, changed uniforms, changed sampler units and changed named-block ranges across three draws in one command buffer, under Metal validation. This target needs glslang and SPIRV-Cross; `gl-imports` keeps its existing dependencies.
 - **Found on:** Fate/hollow ataraxia REMASTERED (`010070E022546000`, update v131072, provisional profile): `c5b7066d3afd5bfe` has 16 samplers and buffer 16; `3f4e845c008603d4` and `469deb981b2bf744` also read `gPatternMaskTexture`, their seventeenth sampler. All three compile with argument buffers for Mac and iPhone. The game has no registered repository note yet.
+
+### OpenGL 1.x fixed function
+
+- **Symptom:** the survey reports no graphics API and the host drops OpenGL draws that have no shader program.
+- **Cause:** the packer expected `glShaderSource` as evidence of desktop OpenGL. In a legacy or compatibility context, client arrays and the current fixed-function state can draw without a program.
+- **Fix:** the packer recognizes fixed-function entry points with EGL and no evidence of shaders. It builds an empty guest GL shader library. In a context with fixed function, a draw without a program uses the host's built-in `gl_ff.metal` program, the client arrays, matrix stacks, unit 0's texture environment and alpha test. Other texture units keep their own matrices and state. Multitexturing, lighting, fog and texture-coordinate generation are outside this implementation.
+- **Found on:** [UnMetal](../../dm/games/01008F4014A74000/README.md).
 
 ### Games that render with desktop OpenGL through EGL
 
@@ -2183,8 +2216,8 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 ### GL_UNPACK_SWAP_BYTES
 
 - **Symptom:** `[RED] glPixelStorei(0xcf0, 1) not implemented`; images uploaded after it come out in the wrong colours (red / green bands for RGB565).
-- **Fix:** `pixels_convert` swaps each 2- or 4-byte element of the source into a copy of its rows (each row without its alignment padding) before the conversion.
-- **Check:** `t_gl_imports` (`test_doom3`): RGB565 red and green stored big-endian convert to the same colours as stored little-endian.
+- **Fix:** `pixels_convert` swaps each 2- or 4-byte element of the source into a copy of its rows (each row without its alignment padding) before the conversion. The packed types `GL_UNSIGNED_INT_2_10_10_10_REV` and `GL_UNSIGNED_INT_10F_11F_11F_REV` each have one four-byte element per pixel, which determines the source row stride and the swap width.
+- **Check:** `t_gl_imports` (`test_doom3`): RGB565 red and green stored big-endian convert to the same colours as stored little-endian. `test_packed_uploads` reads both packed 32-bit formats back from Metal across two source rows with padding, with swapping disabled and enabled.
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): its light projection and falloff images are RGB565 stored big-endian, as issue #1180 found.
 
 ### Smaller GL calls of an id Tech 4 renderer
@@ -2204,9 +2237,17 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
 - **Cause:** `main` imports `vkGetInstanceProcAddr` for SDL's Vulkan loader, which nothing uses; the game draws with EGL and GL.
-- **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and now leaves `vkGetInstanceProcAddr` out of its Vulkan count.
+- **Fix:** `profile_guess.py` picks GL when `main` imports `eglCreateWindowSurface` and names `glShaderSource`. It treats `vkGetInstanceProcAddr` as Vulkan evidence on its own when the RomFS contains SPIR-V, `main` has no EGL window or NVN loader import, and no loaded NRO imports the NVN loader. Re:ZERO resolves every Vulkan entry point through this loader.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): `main` imports `nvnBootstrapLoader` and 13 EGL functions. Its graphics setup (`main+0x5ed8f0`) makes an NVN device first, which only a helper beside the movie player uses (`main+0x528000`–`+0x52c400`: a memory pool and four textures next to the movie's GL textures). Then `eglGetDisplay`, `eglBindAPI(EGL_OPENGL_API)`, a 4.5 core context, a window surface on `vi::CreateLayer(w, h)` and a glad loader (`main+0x52c460`). Of the 22 games extracted here (at the time), only Digimon matches the rule. [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4 on OpenGL with SDL and LuaJIT; one boot): `main` imports the EGL functions and `vkGetInstanceProcAddr`, SDL's Vulkan loader, which nothing calls (`subsdk1` is NVIDIA's Vulkan driver); Hades and both Galaxies import 99 or 100 Vulkan functions, `vkCreateInstance` among them.
 - **Note:** [Absolum](../../dm/games/0100A83022A22000/README.md) imports the same EGL functions (SDL3) but renders with NVN and names no GL function.
+
+### GL function names in managed strings
+
+- **Symptom:** the NSP script takes an EGL game for NVN and its shader split finds no shaders.
+- **Cause:** the EGL game names `glShaderSource` in a UTF-16LE managed string. The detector only counted ASCII names.
+- **Fix:** the survey and packer both use `gl_name_count` to recognize the two encodings on the existing EGL import path. The Vulkan and NVN precedence checks still apply.
+- **Check:** `test_profile_guess.py` exercises the survey with a managed name. `test_gl_shaders.py` exercises pack-time detection with the same GL loader evidence.
+- **Found on:** [Slay the Spire 1.0](../../dm/games/010026300BA4A000/README.md).
 
 ### Draws from client memory
 
@@ -2265,6 +2306,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** both read `.glsl` files too. The name says nothing of the stage, so a `.glsl` file is translated as each stage that compiles, as a string in `main` is. No capture: the files are the shaders, byte for byte what the game compiles.
 - **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): six files in `shaders/nx/` (the sprite, CRT and composite shaders, two vertex shaders with the same text), matched byte for byte against a capture. [PR #2725](https://github.com/seedds/nxnative/pull/2725) read them as shaders the game puts together at run time and turned the capture on with a profile key.
 
+### Standalone GLSL in `.vs` and `.fs` files
+
+- **Symptom:** a game's RomFS contains the GLSL, but the packer starts a shader capture because it overlooks the `.vs` and `.fs` files.
+- **Cause:** the files use libGDX's extensions. Other engines also use `.fs` for snippets that they combine with generated code.
+- **Fix:** the packer and translator use `paired_sources` to inspect the extracted files. A directory must contain a text source defining `main` for each stage. The translator keeps the original source bytes through the first NUL so their keys match the runtime inputs. The survey has only a manifest, so it defers the decision to the pack step.
+- **Check:** `test_gl_shaders.py` exercises the packer and translator with valid pairs, snippets, an `.fs`-only directory, and separate directories whose names differ only in case.
+- **Found on:** [Slay the Spire 1.0](../../dm/games/010026300BA4A000/README.md). Its 14 files yield 11 distinct shaders.
+
 ### A function body closed with `};`
 
 - **Symptom:** `gl_shaders.py` reports `does not translate: vert: glslang: ERROR: …: 'extraneous semicolon' : not supported with this profile: es`, and the host skips that program's draws.
@@ -2321,6 +2370,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - A GLSL `bool` is a `uint` in the SPIR-V block; `gl_shaders.py` keeps the declared type, as LÖVE's `Shader:send` takes only a boolean for a bool.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md) (no `glBindAttribLocation`); [Balatro](../../dm/games/0100CD801CE5E000/README.md): LÖVE binds VertexPosition, VertexTexCoord, VertexColor and ConstantColor to 0–3 with `glBindAttribLocation` before each link, keeps VertexColor and ConstantColor as disabled arrays and sets their values with `glVertexAttrib4f` (the draw colour); it lists uniforms with `glGetActiveUniform` (types as GL enums, arrays as `name[0]`) and reads their initial values back with `glGetUniformfv` / `iv`.
 
+### GL active-attribute reflection
+
+- **Symptom:** a managed loader gets a null `glGetActiveAttrib` delegate, and calling it to enumerate the first linked program's vertex attributes throws `NullReferenceException`.
+- **Cause:** the GL host had attribute locations and reflection metadata but did not expose `glGetActiveAttrib` or `GL_ACTIVE_ATTRIBUTE_MAX_LENGTH`.
+- **Fix:** both queries use the linked program's vertex table. The enumeration index identifies a table row independently of the bound location. The maximum length includes the terminating NUL. Invalid arguments use the host's GL error flag and leave the result buffers untouched.
+- **Check:** `t_gl_imports` calls the registered query after linking and checks count, maximum length, enumeration order, name truncation and errors.
+- **Found on:** [Slay the Spire 1.0](../../dm/games/010026300BA4A000/README.md). libGDX's `ShaderProgram` enumerates attributes through its MonoGame loader.
+
 ### GL sampler objects
 
 - **Symptom:** `UNIMPL glGenSamplers`, `glSamplerParameteri`, `glSamplerParameterf`, `glSamplerParameterfv` at boot and `UNIMPL glBindSampler` at the first draw; textures sample with their own parameters, not the game's.
@@ -2351,6 +2408,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `dm/gfx/gl/hle_gl.m` counts each shader's attachments (`shader_t.refs`; one shader per stage, a new one replaces and releases the old); `glDeleteShader` of an attached shader sets `deleted`, and `shader_release` frees it with its last attachment (`glDetachShader`, a replacing attach, the program's own end). `glDeleteProgram` of the current program sets `prog_t.deleted` and `glUseProgram` of another frees it (`prog_free`, which releases its shaders); any other program goes at once. Both `GL_DELETE_STATUS` queries report the flag. A linked program already held what its link took (functions, shader tables, uniforms), so later attach, detach and delete calls leave it drawing as linked. `make -C dm/gfx/tests GAME=<id> gl-imports` checks the lifetimes through the real entry points.
 - **Found on:** no game: the report reproduced it in `t_gl_imports.m` (an attached vertex shader deleted, then a new fragment shader took its name and the program's vertex stage resolved to it). [Balatro](../../dm/games/0100CD801CE5E000/README.md) takes the path without the symptom: when LÖVE makes its window again it deletes its first three default programs' shaders while they are attached, then the programs (`DM_GL_LOG=1`: `DeleteShader 1 (attached: flagged)` … `DeleteProgram 7`), so each shader now goes with its program; it never links after deleting a shader, and the title and the tutorial draw the same as before.
 - **Check:** `t_gl_imports` also links for real (shaders with their table entries): the linked program keeps both stages' code after its vertex shader is detached and deleted, a relink without that stage fails, and the same shader attached twice is counted once. A second shader of a stage replaces the first and says so once in a red line (desktop GL would link both; the shader tables have one per stage). Since then the layer keeps GL's error flag (`glGetError` returned 0 always): the shader and program calls record `GL_INVALID_VALUE` for a name with no object, `GL_INVALID_OPERATION` for one of the other kind, a shader attached twice or detached when not attached, and `glGetError` reads and clears the first error since it was last called (one flag, as GL allows). A call or a value the layer does not implement records nothing and keeps its red line, and a link the library cannot serve still reports success (`GL_LINK_STATUS`), so no game is told of the host's own gaps; the first 8 errors are logged with the call. `t_gl_imports` checks each case, the first of two errors kept, the flag cleared by the read and left clear by calls that succeed. Balatro from a fresh save into its tutorial (75 s, frame 4,200) recorded none, so its `glGetError` answered 0 as before. The other calls record nothing on purpose: `glBindTexture` makes a texture for a name `glGenTextures` never gave (as compatibility GL does), which a core context would refuse, and an enum the layer does not take cannot be told from one it does not implement; a game found to read errors there would take the same `gl_error` / name check.
+
+### GL_RED and GL_RG uploads into four-channel textures
+
+- **Symptom:** a movie's luma is sharp, but the picture is mostly grey with false colour and a green line near the bottom.
+- **Cause:** Layton's movie player uploads its chroma plane with external format `GL_RG`, type `GL_UNSIGNED_BYTE`, and internal format `GL_RGB` (`main+0x2c0858`). The host stored RGB as RGBA8 and read three source bytes per texel. The RGBA8 allocation and subimage path instead copied the two channels packed into four-byte destination rows.
+- **Fix:** the host expands RED and RG by texel and fills missing colour channels with zero and alpha with one. Both 2D upload entry points use the source type, row length, alignment and byte order. Wider source types use the existing typed pixel conversion.
+- **Found on:** LAYTON'S MYSTERY JOURNEY, v65536 ([PR #2955](https://github.com/seedds/nxnative/pull/2955)).
+- **Check:** `t_gl_imports` checks a padded two-row RG allocation, a byte-swapped 16-bit RED subimage, and float RG uploads into normalized and floating-point storage.
 
 ### GL textures, swizzles and uploads
 

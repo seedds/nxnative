@@ -1,5 +1,5 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
-// Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
+// Without DM_WINDOW: run the guest on the current thread with the default application task role (front_role.h).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
 // confirmed with A (home_quit.h); the left mouse button is the touchscreen.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
+#include "front_role.h"
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -32,6 +33,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "user_select_mac.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -213,7 +215,10 @@ static void pad_read(GCExtendedGamepad *g) {
     if (p < 0 && (!g_press_to_join || pad_gc_unread(g.controller))) return;   // a controller read from its HID reports: GameController's controller of it stays unread
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= bit
-    K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
+    K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R);
+    // Work around nonzero resting values (Xbox LT about 0.06 with isPressed true): digital Switch triggers actuate above 25% (PR #2504).
+    if (g.leftTrigger.value > 0.25f) m |= DM_BTN_ZL;
+    if (g.rightTrigger.value > 0.25f) m |= DM_BTN_ZR;
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
@@ -234,11 +239,14 @@ static void pad_keep_system_buttons(GCController *c) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
-// The players' raw HID motion source follows the controllers (gone: one just removed, still listed): a Pro Controller's (motion_pro_mac.h)
+// The players' raw HID motion source follows the controllers (gone: one just removed, still listed): a Pro Controller's or a DualShock 4's, each model counted on its own
+// (motion_pro_mac.h)
 static void pads_motion_changed(GCController *gone) {
-    int count = 0, player = -1;
-    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
-        count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+    int count[PRO_MODELS] = {0}, player[PRO_MODELS];
+    for (int m = 0; m < PRO_MODELS; m++) player[m] = -1;
+    for (GCController *c in GCController.controllers) {
+        int m = c != gone && c.extendedGamepad ? pro_model_of_category(c.productCategory.UTF8String) : -1;
+        if (m >= 0) { count[m]++; player[m] = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
     }
     dm_motion_pro_players(count, player);
 }
@@ -329,7 +337,7 @@ static void pads_release(void) {
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) { int p = jc1pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
 }
 static void hidpad_motion_clear(void) {   // the gyro of identical Pro Controllers read from IOKit (pad_hid_mac.h)
-    for (hid_pad *d = g_hidpads; d; d = d->next) { int p = d->twin && hidpad_is_pro(d) ? pad_slot_of(&g_slots, d) : -1; if (p >= 0) dm_motion_clear_hid(p); }
+    for (hid_pad *d = g_hidpads; d; d = d->next) { int p = hidpad_full(d) ? pad_slot_of(&g_slots, d) : -1; if (p >= 0) dm_motion_clear_hid(p); }
 }
 // Each controller read as it is now (focus back, the Home quit prompt closed)
 static void pads_reread(void) {
@@ -365,15 +373,24 @@ static void input_resume(void) {
 // from its connection, with or without DM_PAD_PRESS_TO_JOIN: a device that never presses takes no player from a real controller. An identical pad (twin) is a model
 // GameController lists, so it is a player at its connection unless the setting is on
 static int hidpad_first_press(const hid_pad *d) { return !g_merge && (g_press_to_join || !d->twin); }
+static int hidpad_player(const hid_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
+// A pad of Nintendo's protocol (pad_hid_mac.h) shows its player on its lights, and its player's rumble goes to it once it answers
+static void hidpad_show_player(hid_pad *d, int p, uint64_t m) {
+    hidpad_lights(d, p);
+    if (!hidpad_rumbles(d)) return;
+    if (g_merge) { if (m) merge_rumble_to(dm_hidpad_rumble); return; }
+    if (d->sink != p + 1) { d->sink = p + 1; dm_haptics_apple_set_sink(p, dm_hidpad_rumble); }   // its rumble goes over HID, not to a Core Haptics engine
+}
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
-    int pro = d->twin && hidpad_is_pro(d);
-    if (p < 0 && (!hidpad_first_press(d) || !(pro ? d->pro_m : pad_hid_buttons(&d->st)) || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
+    int p = hidpad_player(d), full = hidpad_full(d);
+    uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
+    if (p < 0 && (!hidpad_first_press(d) || !m || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
+    hidpad_show_player(d, p, m);
     if (cp_poll()) return;   // the controller applet's prompt has the controllers
-    if (pro) { pad_set(p, d->pro_m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
+    if (full) { pad_set(p, m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
     int32_t s[4]; pad_hid_sticks(&d->st, s);
-    pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
+    pad_set(p, m, s[0], s[1], s[2], s[3]);
 }
 static void hidpad_attach(hid_pad *d) {
     if (hidpad_first_press(d)) { LOG("controller '%s' (HID) connected: press a button to play%s", d->name, g_press_to_join ? " (DM_PAD_PRESS_TO_JOIN)" : ""); hidpad_read(d); return; }
@@ -383,19 +400,22 @@ static void hidpad_attach(hid_pad *d) {
     if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));   // merged, every controller is player 1, as pads_changed has it
     hidpad_read(d);
 }
-static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n) {
+static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], uint64_t ns) {
     int p = g_input_on && !g_merge ? pad_slot_of(&g_slots, d) : -1; if (p < 0) return;
-    for (int i = 0; i < n; i++) dm_motion_set_hid(p, s[i].acc, s[i].rot, s[i].ns);
+    dm_motion_set_hid(p, acc, rot, ns);
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
 static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     if (g_merge) {   // as pads_changed: released when the last controller goes away
         LOG("controller '%s' (HID) disconnected", d->name);
+        int rumbles = 0; for (hid_pad *o = g_hidpads; o; o = o->next) rumbles |= hidpad_rumbles(o);
+        if (!rumbles && g_merge_sink == dm_hidpad_rumble) merge_rumble_to(NULL);
         if (!merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0);
         return;
     }
     int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) return;
-    if (d->twin && hidpad_is_pro(d)) dm_motion_clear_hid(p);
+    if (hidpad_full(d)) dm_motion_clear_hid(p);
+    if (d->sink) { d->sink = 0; dm_haptics_apple_set_sink(p, NULL); }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     dm_pad_players(pad_slot_mask(&g_slots));
@@ -1561,7 +1581,15 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
-    if (!getenv("DM_WINDOW")) { guest(); return; }
+    if (!getenv("DM_WINDOW")) {
+        kern_return_t kr;
+        int role_status = front_windowless_role(getenv("DM_WINDOWLESS_ROLE"), &kr);
+        if (role_status > 0) LOG("front end: applied the default application task role for windowless play");
+        else if (role_status < 0) LOG("front end: could not apply the default application task role (Mach error %d)", kr);
+        else LOG("front end: kept the existing task role (DM_WINDOWLESS_ROLE=0)");
+        guest();
+        return;
+    }
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -1721,6 +1749,17 @@ void front_web_detach(NSView *box) { if (box.window && box.window.firstResponder
 
 // Software keyboard input box (front.h): the main thread shows an NSAlert + text field and the guest thread waits synchronously for the result. Not shown in windowless mode (returns -1, the caller treats it as cancel)
 extern int g_swkbd_min_chars;   // hle_swkbd.c: this input's minimum length from ShowKeyboardArg; the applet keeps OK disabled until the text is long enough
+int front_user_select(const front_user *users, int count, int allow_create, int allow_skip) {
+    if (!g_layer) return FRONT_USER_CANCEL;
+    __block int result = FRONT_USER_CANCEL;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        g_text_box = 1; input_release();
+        result = user_select_mac(users, count, allow_create, allow_skip);
+        g_text_box = 0;
+        if (g_win.isKeyWindow) input_resume();
+    });
+    return result;
+}
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     if (!g_layer) return -1;
     __block int r = 0;

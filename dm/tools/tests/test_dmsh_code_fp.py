@@ -65,7 +65,7 @@ class CodeForm(unittest.TestCase):
         src = (TOOLS / 'dmsh_build.py').read_text()
         self.assertEqual(form(src + '\n# trailing comment\n'), form(src))
         self.assertNotEqual(form(src + '\nX = 1\n'), form(src))
-        self.assertNotEqual(form(src.replace("'--msl-version', '20300'", "'--msl-version', '20400'")), form(src))
+        self.assertNotEqual(form(src.replace("'--msl-pad-fragment-output'", "'--msl-pad-fragment-output', '--msl-decoration-binding'")), form(src))
 
 
 NO_OUTPUT = {'dmsh_mtlcache', 'dmsh_pch'}   # they only make a compile cheaper, and never change an output

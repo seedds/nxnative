@@ -73,5 +73,38 @@ int main(void) { @autoreleasepool {
     CHECK("and leaves none of them noted, so the next commit does not rewrite them after the GPU ran them", g_gmem_nslots == 0);
     CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
     CHECK("GPU has no submission error", !mtl_last_commit_error());
+    {   // A pointer in a bound storage slot reaches an existing pool that no address getter exposed.
+        mtl_sub_begin();
+        uint8_t *src = mem + 32 * MB, *dst = mem + 40 * MB; uint64_t ptr = (uint64_t)(uintptr_t)dst + 0x100;
+        mtl_pool_add(dst, 4 * MB);
+        CHECK("unaddressed target is absent", !table_has(gmem_map_gpu(), (uint64_t)(uintptr_t)dst));
+        NvShader *sh = [NvShader new]; sh->rf.ngptr = 1; sh->rf.gptr[0].reg = 0; sh->rf.gptr[0].off = 8;
+        S.ssbo[0][0] = (p_bind_buf){.addr = (uint64_t)(uintptr_t)src, .size = 16}; memcpy(src + 8, &ptr, 8);
+        uint64_t w = gmem_map_gpu(); gmem_slot_note(&w, NULL);
+        gmem_discover(sh, 0); gmem_commit_patch();
+        CHECK("pointer discovery patches the existing table", table_has(w, (uint64_t)(uintptr_t)dst));
+        int ranges = g_naddr; ptr += 0x100; memcpy(src + 8, &ptr, 8); gmem_discover(sh, 0);
+        CHECK("interior pointers reuse one logical range", g_naddr == ranges);
+        uint8_t *dst2 = mem + 56 * MB; mtl_pool_add(dst2, 4 * MB); ptr = (uint64_t)(uintptr_t)dst2;
+        S.ssbo[0][0].size = 15; memcpy(src + 8, &ptr, 8); gmem_discover(sh, 0);
+        CHECK("a short source stays unread", !table_has(gmem_map_gpu(), ptr));
+        S.ssbo[0][0].size = 16; gmem_discover(sh, 0);
+        CHECK("new pointer data without rebinding is discovered", table_has(gmem_map_gpu(), ptr));
+        uint8_t *small = mem + 36 * MB + 0x1000; mtl_pool_add(small, 0x1000); uint64_t inside = (uint64_t)(uintptr_t)small + 16;
+        memcpy(src + 8, &inside, 8); gmem_discover(sh, 0);
+        CHECK("discovery starts at the logical pool, excluding Metal's aligned padding", table_has(gmem_map_gpu(), (uint64_t)(uintptr_t)small));
+        uint8_t *dst3 = mem + 60 * MB; mtl_pool_add(dst3, 4 * MB); uint64_t queued = (uint64_t)(uintptr_t)dst3;
+        uint64_t invalid = UINT64_MAX; mtl_sub_update(&invalid, (uint64_t)(uintptr_t)src + 8, 8);
+        CHECK("unaddressed target can prime the lookup cache", mtl_addr_known(queued, 1));
+        gmem_discover(sh, 0);
+        CHECK("an all-ones word cannot admit an unrelated cached pool", !table_has(gmem_map_gpu(), queued));
+        mtl_sub_update(&queued, (uint64_t)(uintptr_t)src + 8, 8); gmem_discover(sh, 0);
+        CHECK("a queued inline pointer update is discovered", table_has(gmem_map_gpu(), queued));
+        // Source lies outside registered memory, or crosses its end: no CPU dereference.
+        S.ssbo[0][0].addr = 1; gmem_discover(sh, 0);
+        S.ssbo[0][0].addr = (uint64_t)(uintptr_t)src + 4 * MB - 12; gmem_discover(sh, 0);
+        CHECK("invalid sources leave the table intact", table_has(gmem_map_gpu(), ptr));
+        CHECK("pointer update submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
+    }
     printf("t_gmem_words: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

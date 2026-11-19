@@ -1,0 +1,5 @@
+# Hand-written translation facts (merged by dm/gfx/tools/shader_split.py over the generated shader_facts.tsv): key <TAB> fact JSON.
+# Kept from the profile the first Witcher 3 builds used (621-shader era): image formats of compute 11130a61f4a6f3ec, texture types of a52ac3530463868c and eacf9338c2835b9e.
+11130a61f4a6f3ec	{"img":{"0":{"fmt":"R8G8Unorm","type":"2d"},"1":{"fmt":"R11G11B10Float","type":"2d"}},"local":[16,16,1],"shared":1552}
+a52ac3530463868c	{"tex": {"128": "2d"}}
+eacf9338c2835b9e	{"tex":{"128":"2d","129":"2d","130":"2d","131":"2d","132":"2d"}}

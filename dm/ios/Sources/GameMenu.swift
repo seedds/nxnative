@@ -42,7 +42,7 @@ private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
         if fixed { a.subtitle = "Set in env.txt" }
         return a
     }
-    let options = s.options ?? []
+    let options = offeredOptions(s, current: now)
     let current = options.first { $0[0] == now }?[1] ?? now
     let actions = options.map { o in UIAction(title: o[1], attributes: attributes, state: o[0] == now ? .on : .off) { _ in pick(o[0]) } }
     return UIMenu(title: s.label, subtitle: fixed ? "\(current), set in env.txt" : nil, options: .singleSelection, children: actions)

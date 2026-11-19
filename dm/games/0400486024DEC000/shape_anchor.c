@@ -18,7 +18,8 @@
 //    so carries the menu mark. On the field (x 1490) both move down with the minimap, whatever their mark; on the Minus map page the game puts node 82 at the
 //    centre (x 0) and it stays with the page (measured with DM_PROBE in the stub, 2026-11-18).
 // The state of a chain rides in the translation's z as a mark (UI panes have z 0, z passes to children unchanged, and the UI projection keeps a small negative z):
-// -4/1024 inside a HUD layout, -5/1024 moved, -3/1024 inside a menu (left alone). Nothing changes at 16:9.
+// -4/1024 inside a HUD layout, -5/1024 moved, -3/1024 inside a menu (left alone), -6/1024 the Load list window, -7/1024 a Load row put back.
+// Nothing changes at 16:9.
 // Build: clang -target arm64-apple-macos -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-jump-tables -fno-asynchronous-unwind-tables -mno-outline-atomics
 //        -c shape_anchor.c, then the __text words (no relocations, no data, shape_calc at +0) as _shape_anchor in patches.py.
 typedef unsigned int u32; typedef unsigned char u8; typedef unsigned long u64;
@@ -89,6 +90,41 @@ static inline __attribute__((always_inline)) u64 edge_mask(u32 h) {
     return 0;
 }
 
+// 4. Menu art that ends at the 16:9 band (node indices and authored heights from the layouts' pane tables, all leaves). No game art is stretched, scaled or
+//    cut: art keeps its 16:9 size or is moved; only plain shading (the pause pages' dark gradient panels, the map page's backdrop, the world map's soft
+//    side shades, the Load list's frame) is made taller.
+//    Returns the authored height x 16 + how: 1 = taller by d at both ends, 3 = up by d, 4 = down by d, 6 = taller by d at the bottom (shading), 7 = the whole screen's height (shading only), 8 = a clipping window's size taller by d at the bottom (the Load list), 9 = a picture taller by d at both ends through its texture (the art keeps its 16:9 size, its edge rows run on), 10 = down by d and as wide as
+//    the screen about its page's centre (the pause pages' bottom gradient: even sideways, so a wider quad keeps its look); 0 = none.
+static inline __attribute__((always_inline)) u32 fill_kind(u32 h, long i) {
+    switch (h) {
+    case 0x7f3777e7u:   // PlusMenu_00: the dark gradient panels behind each page (the page art and its grids, node 15, keep their size); the shade under the top bar
+        if (i == 2 || i == 3 || i == 5 || i == 6) return 2000 * 16 + 7;   // to the real top and bottom
+        if (i == 20) return 800 * 16 + 3;
+        if (i >= 11 && i <= 13) return 1172 * 16 + 10;   // each page's dark gradient at the bottom: moved to the real screen bottom at its own height,
+                                                          // widened to the screen's width (it is even sideways)
+        if (i == 14) return 1172 * 16 + 4;               // a 300-wide sliver between two pages, seen only while they slide
+        break;
+    case 0xdcdc36ddu:   // SystemLoadList_00: the list's window (5, 1984 high) clips its rows, which the game attaches under it at run time (they carry its
+                        // scale, pane+0x38). Its size (pane+0x5c) grows by d and it moves down d/2, so its top edge stays and
+                        // its bottom edge reaches d lower; it takes mark 6 and its direct children move down d/2 (mark 7), unscaled (the game lays them
+                        // from the window's top edge, so the taller window puts them d/2 high): the list starts
+                        // where it does at 16:9 and shows d more below (its rows are made 436 apart well past the screen). Moving the window instead
+                        // moved the clip (the top row was cut). The top part (4) stays.
+        if (i == 5) return 1984 * 16 + 8;
+        break;
+    case 0xd77fb7adu:   // ChallengeMenu_01 (Threads of Time): its dark overlay is picture 3 (P_TapestryMask_00, a 2D gradient, origin at its bottom edge,
+                        // found by hiding and stretching panes): it reaches the real top and bottom, its art not stretched
+        if (i == 3) return 2160 * 16 + 9;
+        break;
+    case 0xb363e973u:   // MapMenu_00: the map page's dark backdrops behind the parchment (the parchment, 18, keeps its 16:9 size,
+                        // dark below it); the world map's soft side shades (the cloud edge)
+        if (i == 11 || i == 17 || i == 95) return 2160 * 16 + 7;
+        if (i == 93 || i == 94) return 2160 * 16 + 1;
+        break;
+    }
+    return 0;
+}
+
 #define UNIT (-1.0f / 1024.0f)
 
 // pane: the pane being computed; m: its new matrix as four columns of four floats (translation at m[12..14]); st: the state page (+0x48 the output height,
@@ -99,9 +135,52 @@ void shape_calc(const u8 *pane, float *m, const u8 *st) {
     if (!(d > 0.0f)) return;
     float *t = m + 12;
     float k = t[2] * -1024.0f, z = t[2]; int mark = 0;
-    if (k >= 2.5f && k <= 5.5f) { mark = (int)(k + 0.5f); if ((float)mark != k) mark = 0; else z = 0; }   // only an exact mark counts
-    if (mark == 5) return;   // already moved: the parent's move carries
+    if (k >= 2.5f && k <= 7.5f) { mark = (int)(k + 0.5f); if ((float)mark != k) mark = 0; else z = 0; }   // only an exact mark counts
+    if (mark == 5 || mark == 7) return;   // already moved, or a Load row already put back: the parent's move carries
+    if (mark == 6) { t[1] -= 0.5f * d; t[2] = z + 7.0f * UNIT; return; }   // a direct child of the Load list window: back to its 16:9 place (the game
+                                                                             // lays the rows from the window's top edge, so they come out d/2 high)
     u32 h = layout_hash(pane);
+    u32 fk = fill_kind(h, node_index(pane));
+    if (fk) {   // (4.) the height is set against the pane's y : x scale ratio, so a pane the full-screen stub already scaled in y by k is not scaled twice
+                // and an animation's even scale is kept
+        u32 how = fk & 15; float ah = (float)(fk >> 4);
+        if (how == 3) t[1] += d;
+        else if (how == 4) t[1] -= d;
+        else if (how == 10) {   // PlusMenu_00 11-13, each the bottom gradient of one page (origin at its centre; sizes 1682, 1600,
+                                // 1742; with its page shown it sits at x -1079, -94, 1100). Widened to the canvas width (3840, the same at every taller shape)
+                                // about that page's centre; the pages are 4280 apart, so two never overlap while they slide
+            long i = node_index(pane);
+            float c = i == 11 ? 1079.0f : i == 12 ? 94.0f : -1100.0f, f = 3840.0f / (i == 11 ? 1682.0f : i == 12 ? 1600.0f : 1742.0f);
+            t[0] += c * m[0]; t[1] += c * m[1] - d;
+            m[0] *= f; m[1] *= f; m[2] *= f;
+        }
+        else if (how == 8) {   // the Load list window: its size, set only from the authored height (so once), moved down d/2, mark 6 for its rows
+            float *sz = (float *)(pane + 0x58);
+            if (sz[1] > ah - 1.0f && sz[1] < ah + 1.0f) sz[1] = ah + d;
+            if (sz[1] > ah + d - 1.0f && sz[1] < ah + d + 1.0f) { t[1] -= 0.5f * d; t[2] = z + 6.0f * UNIT; }
+            return;
+        }
+        else if (how == 9) {   // a picture whose origin is its bottom edge: the quad k taller about its centre, its texture scaled by 1 / k about the
+                               // texture's centre (the texture SRT of the picture object at pane+0x08, +0x100: translate x, y, rotate, scale x, y, read
+                               // from the running game), so the art keeps its 16:9 size in the band and its clamped edge rows run on to the edges
+            float kk = 1.0f + d / 1080.0f, hg = 0.5f * ah * m[5];
+            m[4] *= kk; m[5] *= kk; m[6] *= kk; t[1] -= (kk - 1.0f) * hg;
+            u8 *pic = *(u8 *const *)(pane + 0x08);   // the object's layout differs by class (PlusMenu_00 panes: another vtable, other
+                                                     // offsets; an unguarded write there crashed the game): write only where it reads as an SRT
+            float *srt = pic ? (float *)(pic + 0x100) : 0;
+            if (srt && srt[0] == 0.0f && srt[1] == 0.0f && srt[2] == 0.0f && srt[3] == 1.0f && (srt[4] == 1.0f || srt[4] == 1.0f / kk)) srt[4] = 1.0f / kk;
+            return;
+        }
+        else {   // |y scale| : |x scale| (a mirrored pane keeps its sign)
+            float sx = m[0] < 0.0f ? -m[0] : m[0], sy = m[5] < 0.0f ? -m[5] : m[5];
+            float want = (how == 7 ? 2160.0f + 2.0f * d : ah + (how == 6 ? d : 2.0f * d)) / ah, r = sx > 1e-3f ? sy / sx : 0.0f;
+            if (r > 1e-3f) {
+                if (how == 6) t[1] -= 0.5f * d;   // 6: taller by d at the bottom only, its top edge stays
+                float fy = want / r;
+                m[4] *= fy; m[5] *= fy; m[6] *= fy;
+            }
+        }
+    }
     if (h == 0xb363e973u && t[0] > 1000.0f) {   // MapMenu_00 at the minimap: its layers at (1490, -644) (3.)
         long i = node_index(pane);
         if (i == 64 || i == 82) { t[1] -= d; t[2] = z + 5.0f * UNIT; return; }

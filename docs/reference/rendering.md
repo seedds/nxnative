@@ -1491,6 +1491,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** Super Mario Party's prebuild of 39,111 pairs, which had crashed three times out of three on an M4 Pro (macOS 27.2) after 4,000 to 22,000 pairs, ran through twice: 39,111 bases in 867 and 773 s, 21 files each, the writes 7 to 52 s for about 2,000 bases. The writes held the 14 workers' compiles back for 5,582 and 3,965 s of their time in all: 45 and 51 pairs a second against about 60 before (the crashed run's pace up to 22,000), 15 to 25% slower, the price of not crashing. The 2 s wait never ran out.
 - **Found on:** Super Mario Party (`010036B0034E4000`, no profile yet), [#2513](https://github.com/seedds/nxnative/issues/2513); one crash report of another prebuild the same day had the same two threads.
 
+### A timed archive write stalls active presentation
+
+- **Symptom:** the title screen or a menu stops for over a second. The log shows a pipeline archive write and several compiles waiting for it, even when the affected frame did little new pipeline work.
+- **Cause:** the timer flushes a partial archive after a burst of captures. Metal needs serialization and compilation to run separately, so the write can block a compile that the current frame needs.
+- **Fix:** the timer retries while a window has produced a frame in the last ten seconds. A full period still rolls over to bound Metal's store. Offline preparation, headless runs and explicit saves keep their existing flush paths.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#startup-and-menu-hitches).
+
 ### Two captures of one shader function crash in Metal's binary cache
 
 - **Symptom:** the pipeline prebuild dies with SIGSEGV (`[RED] dmhost exit code -11`) and no `CRASH` line of its own, sometimes seconds into the run and not on every run. macOS's crash report has `objc_msgSend` ← `MultiLevelAirntBinaryCache::getElementAtDestination` (+60) ← `-[MTLCompiler compileFunctionRequestInternal:…]` ← `AGX::Compiler::compileProgram<AGX::VertexProgramKey…>` ← `arch_capture` ← `pre_pair`, other prebuild workers wait in `-[_MTLBinaryArchive getBinaryDataForKey:reflectionType:]` under the same function, and no thread is in `airntSerializeToURL` (unlike [A pipeline compile crashes while an archive period is written](#a-pipeline-compile-crashes-while-an-archive-period-is-written)).

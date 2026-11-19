@@ -26,7 +26,8 @@ static void archive_cache_cleanup(void) {
 }
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
-void *front_metal_layer(void) { return NULL; }
+static CAMetalLayer *test_layer;
+void *front_metal_layer(void) { return (__bridge void *)test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
@@ -800,6 +801,37 @@ int main(int argc, char **argv) { @autoreleasepool {
         pso4_init(); crashed_flush_race(0); crashed_flush_race(1); compiler_death_notifications();
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive compiler death: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--active-flush")) {
+        pso4_init();
+        test_layer = [CAMetalLayer layer];
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        EXPECT("capture before the timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns());
+        dispatch_sync(g_arch_q, ^{ EXPECT("timer defers during presentation", 1, arch_timer_flush()); });
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("no archive file during presentation", 0, archive_files(@(dir)).count);
+        EXPECT("the partial period is still pending", 1, atomic_load(&g_arch_new));
+        atomic_store(&dm_present_ns, now_ns() - 11000000000ull);
+        dispatch_sync(g_arch_q, ^{ EXPECT("timer flushes after presentation goes idle", 0, arch_timer_flush()); });
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("the archive file was written", 1, archive_files(@(dir)).count);
+        EXPECT("the partial period was drained", 0, atomic_load(&g_arch_new));
+        atomic_store(&dm_present_ns, now_ns());
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture before explicit save", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        mtl_arch_save(5000, 0);
+        EXPECT("explicit save also writes during presentation", 2, archive_files(@(dir)).count);
+        test_layer = nil;
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture before headless timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns());
+        dispatch_sync(g_arch_q, ^{ EXPECT("headless presents do not defer the timer", 0, arch_timer_flush()); });
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("headless timer wrote the capture", 3, archive_files(@(dir)).count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive active flush: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
     }
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");

@@ -2183,8 +2183,8 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 ### GL_UNPACK_SWAP_BYTES
 
 - **Symptom:** `[RED] glPixelStorei(0xcf0, 1) not implemented`; images uploaded after it come out in the wrong colours (red / green bands for RGB565).
-- **Fix:** `pixels_convert` swaps each 2- or 4-byte element of the source into a copy of its rows (each row without its alignment padding) before the conversion.
-- **Check:** `t_gl_imports` (`test_doom3`): RGB565 red and green stored big-endian convert to the same colours as stored little-endian.
+- **Fix:** `pixels_convert` swaps each 2- or 4-byte element of the source into a copy of its rows (each row without its alignment padding) before the conversion. The packed types `GL_UNSIGNED_INT_2_10_10_10_REV` and `GL_UNSIGNED_INT_10F_11F_11F_REV` each have one four-byte element per pixel, which determines the source row stride and the swap width.
+- **Check:** `t_gl_imports` (`test_doom3`): RGB565 red and green stored big-endian convert to the same colours as stored little-endian. `test_packed_uploads` reads both packed 32-bit formats back from Metal across two source rows with padding, with swapping disabled and enabled.
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): its light projection and falloff images are RGB565 stored big-endian, as issue #1180 found.
 
 ### Smaller GL calls of an id Tech 4 renderer

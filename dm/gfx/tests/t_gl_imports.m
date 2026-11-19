@@ -284,6 +284,45 @@ static void test_compressed_arrays(void) {
     h_glDeleteTextures(1, &name);
 }
 
+static void test_packed_uploads(void) {
+    static const struct { GLenum internal, format, type; MTLPixelFormat metal; } cases[] = {
+        {GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, MTLPixelFormatRGB10A2Unorm},
+        {GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, MTLPixelFormatRG11B10Float},
+    };
+    // Two one-pixel rows, with an unused packed word between them. Alignment 1 exposes a three-byte source layout.
+    const uint8_t src[] = {0x12, 0x34, 0x56, 0x78, 0xee, 0xee, 0xee, 0xee, 0xaa, 0xbb, 0xcc, 0xdd};
+    const uint8_t want[][8] = {
+        {0x12, 0x34, 0x56, 0x78, 0xaa, 0xbb, 0xcc, 0xdd},
+        {0x78, 0x56, 0x34, 0x12, 0xdd, 0xcc, 0xbb, 0xaa},
+    };
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 2);
+    h_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    int failures = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        GLuint name;
+        h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D, name);
+        for (int swap = 0; swap <= 1; swap++) {
+            h_glPixelStorei(0xcf0, swap);   // GL_UNPACK_SWAP_BYTES
+            h_glTexImage2D(GL_TEXTURE_2D, 0, cases[i].internal, 1, 2, 0, cases[i].format, cases[i].type, src);
+            assert(h_glGetError() == GL_NO_ERROR);
+            tex_t *t = tex_of(name);
+            assert(t && tex_make(t, 0) && t->tex.pixelFormat == cases[i].metal);
+            uint8_t got[sizeof want[0]];
+            [t->tex getBytes:got bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 2) mipmapLevel:0];
+            if (memcmp(got, want[swap], sizeof got)) {
+                fprintf(stderr, "GL packed upload type %#x, GL_UNPACK_SWAP_BYTES=%d: wrong bytes\n", cases[i].type, swap);
+                failures++;
+            }
+        }
+        h_glDeleteTextures(1, &name);
+    }
+    h_glPixelStorei(0xcf0, 0);
+    h_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    assert(!failures);
+    puts("GL packed uploads (RGB10_A2, R11F_G11F_B10F): OK");
+}
+
 // What DOOM 3's renderer (id Tech 4's BFG Edition) needs of the layer: its ARB names and extension check, named uniform blocks bound by range, two-sided stencil, frame copies into
 // a texture, streamed compressed images, byte-swapped 16-bit images, programs with a vertex shader alone, sync queries and wireframe
 static void test_doom3(void) {
@@ -809,6 +848,7 @@ int main(int argc, char **argv) {
     test_uniform_buffer();
     test_compressed_arrays();
     test_doom3();
+    test_packed_uploads();
     if (!cpu) test_lod_bias();
     test_sampler_objects(!cpu);
     test_extension_names_and_egl();

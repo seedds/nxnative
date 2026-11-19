@@ -68,6 +68,7 @@ __attribute__((unused)) static NSString *nxl_read_refresh(void) {
                         && info.st_size > 0 && info.st_size <= kNxRefreshMax;
     char text[kNxRefreshMax + 1]; ssize_t length = 0;
     if (private_file) {
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): callers hold the sign-in's file lock (nxl_lock) on purpose, one refresh at a time; this reads a private regular file of at most kNxRefreshMax bytes
         for (ssize_t n; length < info.st_size && (n = read(fd, text + length, (size_t)(info.st_size - length))) > 0;) length += n;
         private_file = length == info.st_size;
     }
@@ -149,7 +150,13 @@ __attribute__((unused)) static void nxl_note_server_date(NSHTTPURLResponse *resp
 }
 __attribute__((unused)) static NSTimeInterval nxl_now(void) { return NSDate.date.timeIntervalSince1970 + atomic_load(&nxl_clock_offset); }
 
+// A request to one of the fixed endpoints above, fetched fresh. nil only if the endpoint were not a URL, which nxl_send reports as a failure
+__attribute__((unused)) static NSMutableURLRequest *nxl_request(NSString *endpoint, NSTimeInterval timeout) {
+    NSURL *url = [NSURL URLWithString:endpoint];
+    return url ? [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:timeout] : nil;
+}
 __attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSString **error) {
+    if (!request) { if (error) *error = @"the endpoint is not a URL"; return nil; }
     __block NSData *body; __block NSHTTPURLResponse *response; __block NSError *transport;
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
     NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
@@ -176,8 +183,7 @@ __attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSS
 // POSTs a grant to the token endpoint. Returns the access token and saves the refresh token that comes with it. A refused refresh
 // token (invalid_grant) is deleted, since it will never work again
 __attribute__((unused)) static NSString *nxl_token(NSDictionary<NSString *, NSString *> *grant, NSString **error) {
-    NSMutableURLRequest *post = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxTokenEndpoint]
-                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
+    NSMutableURLRequest *post = nxl_request(kNxTokenEndpoint, kNxTimeout);
     post.HTTPMethod = @"POST";
     post.HTTPBody = nxl_form_body(grant);
     [post setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
@@ -224,8 +230,7 @@ __attribute__((unused)) static NSDictionary *nxl_record(NSString *token, NSTimeI
 // /api/oauth/userinfo names the account the sign-in belongs to. The game token must be that account's (NX Port Studio checks the same):
 // a mismatch, or no answer, gives no record
 __attribute__((unused)) static BOOL nxl_same_account(NSString *access, NSDictionary *record, NSString **error) {
-    NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxUserInfoEndpoint]
-                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
+    NSMutableURLRequest *get = nxl_request(kNxUserInfoEndpoint, kNxTimeout);
     [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
     NSDictionary *answer = nxl_send(get, error);
     if (!answer) return NO;
@@ -245,8 +250,7 @@ static NSString *nxl_refusal_words(id given);
 // /api/online-status says whether this account may play online now: {"allow": true}, or {"allow": false, "reason": ...}. When it refuses,
 // the reason in words for the player; nil when it allows, cannot be asked, or gives no answer
 __attribute__((unused)) static NSString *nxl_online_refusal(NSString *access) {
-    NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxOnlineStatusEndpoint]
-                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
+    NSMutableURLRequest *get = nxl_request(kNxOnlineStatusEndpoint, 8);
     [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
     NSDictionary *answer = nxl_send(get, NULL);
     if (![answer[@"allow"] isEqual:@NO]) return nil;
@@ -277,8 +281,7 @@ __attribute__((unused)) static int nxl_lock(void) {
 
 // From an access token to a game token's record: /api/nex-token, then the account check. nil and the reason when a step fails
 __attribute__((unused)) static NSDictionary *nxl_record_for(NSString *access, NSString **error) {
-    NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxGameTokenEndpoint]
-                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
+    NSMutableURLRequest *get = nxl_request(kNxGameTokenEndpoint, kNxTimeout);
     [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
     NSDictionary *answer = nxl_send(get, error);
     NSString *token = answer[@"nex_token"];

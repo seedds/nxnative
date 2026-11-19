@@ -381,6 +381,7 @@ int dm_net_eventfd_read(int guest, uint64_t *value) {
         generation = e->generation;
         if (e->count) {
             uint64_t take = e->efd_flags & 1 ? 1 : e->count; e->count -= take;
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): both ends are non-blocking (net_register, dm_net_eventfd), and the drain must stay atomic with the count
             if (!e->count) { char byte; (void)recv(e->native, &byte, 1, 0); }
             pthread_mutex_unlock(&g_net_lock);
             if (value) *value = take; return 0;

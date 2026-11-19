@@ -198,8 +198,8 @@ HLE_FORCE_WAIT("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNinte
         char country[3] = {0}; if (dm_nextendo_account_country(country) || !na_country_ok(country)) country[0] = 0;
         const char *device = getenv("DM_NEXTENDO_COUNTRY"); if (!country[0] && na_country_ok(device)) memcpy(country, device, 3);
         char account[11] = {0}; int own = !dm_nextendo_account_birthday(account) && na_birthday_ok(account);
-        const char *birthday = own ? account : getenv("DM_NEXTENDO_BIRTHDAY");
-        memcpy(na_country, country, 3); memcpy(na_birthday, na_birthday_ok(birthday) ? birthday : "2000-01-01", 11);
+        const char *birthday = own ? account : getenv("DM_NEXTENDO_BIRTHDAY"), *use = birthday && na_birthday_ok(birthday) ? birthday : "2000-01-01";
+        memcpy(na_country, country, 3); memcpy(na_birthday, use, 11);   // use: 10 characters and the NUL (na_birthday_ok)
         static int told; if (!told++) LOG("account: Nintendo Account info: country %s, birthday %s", na_country[0] ? "set" : "none",
                                           own ? "from the Nextendo account" : na_birthday_ok(birthday) ? "from the launcher" : "2000-01-01");
     }

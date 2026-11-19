@@ -31,10 +31,8 @@ static unsigned deletes;
 dm_net_mode_t dm_net_mode(void) { return mode; }
 void dm_guest_host_wait_begin(void) { atomic_fetch_add(&waits, 1); }
 void dm_guest_host_wait_end(void) {}
-// The account file's local user selector and applet bookkeeping (seedds's multi-user accounts): never opened here
+// The account file's local user selector (seedds's multi-user accounts): never opened here. t_gate_fixture.h has the applet bookkeeping
 void dm_thread_native_wait(int entering) { (void)entering; }
-void dm_applet_enter(const char *name) { (void)name; }
-void dm_applet_leave(void) {}
 int front_user_select(const front_user *users, int n, int create, int skip) { (void)users; (void)n; (void)create; (void)skip; abort(); }
 void thr_svc_enter(uint64_t *regs, uint64_t pc) { (void)regs; (void)pc; atomic_fetch_add(&entered, 1); }
 void thr_svc_leave(void) { atomic_fetch_add(&left, 1); }

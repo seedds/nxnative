@@ -138,6 +138,24 @@ class Pack(Base):
         self.assertEqual(sorted(p.name for p in aoc.iterdir()), ['1.img', '1.img.inputs.json'])
         self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
 
+    def test_settings_read_languages_from_the_dump_romfs_when_there_is_no_nacp(self):
+        sys.path.insert(0, str(REPO / 'dm/games')); import nacp, settings
+        src = self.dump / f'updates/{VER}'
+        (src / 'romfs/System').mkdir(parents=True)
+        (src / 'romfs/System/RegionLangMask.txt').write_text('JPja USen CNzh TWzh THth EUpl\nNormal\n')
+        pack_dump.pack_version(src, TID, self.out(), say=lambda s: None)
+        self.assertFalse((self.out() / 'control.nacp').exists())
+        self.assertEqual(nacp.languages(self.out() / 'control.nacp'), ['en-US', 'ja', 'zh-Hant', 'zh-Hans'])
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'main.fixups.tsv').write_text('')
+            row = [s for s in settings.build(f'{TID:016X}', tmp, str(self.out() / 'control.nacp'))['settings'] if s['env'] == 'DM_LANG']
+            self.assertEqual(row[0]['options'], [['en-US', 'American English'], ['ja', 'Japanese'], ['zh-Hant', 'Traditional Chinese'], ['zh-Hans', 'Simplified Chinese']])
+        shutil.rmtree(src / 'romfs/System')
+        (src / 'romfs/Mals').mkdir(parents=True)
+        for tag in ('USen', 'CNzh', 'JPja'): (src / f'romfs/Mals/{tag}.Product.300.sarc.zs').write_bytes(b'sarc')
+        pack_dump.pack_version(src, TID, self.out() / 'mals', say=lambda s: None)
+        self.assertEqual(nacp.languages(self.out() / 'mals/control.nacp'), ['en-US', 'ja', 'zh-Hans'])
+
 
 class Stop(Exception): pass
 

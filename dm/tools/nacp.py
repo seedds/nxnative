@@ -5,10 +5,16 @@
 #   each prints an empty line and exits 1 when none can be read. From Python: import nacp; nacp.name(path), nacp.version(path), nacp.languages(path)
 import re, struct, sys, zlib
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import romfs
 
 # The NACP's languages in its own order (the bit order of SupportedLanguageFlag and the order of the title entries): the language code nn::oe::GetDesiredLanguage returns for each, and its name
 LANGUAGES = [('en-US', 'American English'), ('en-GB', 'British English'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'), ('es-419', 'Latin American Spanish'), ('es', 'Spanish'), ('it', 'Italian'),
              ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'), ('zh-Hant', 'Traditional Chinese'), ('zh-Hans', 'Simplified Chinese'), ('pt-BR', 'Brazilian Portuguese')]
+
+# Nintendo's region-language tags (System/RegionLangMask.txt, Mals/<tag>.Product.*) mapped to LANGUAGES codes, for a dump or NUP without control.nacp
+MALS_LANGUAGES = {'USen': 'en-US', 'EUen': 'en-GB', 'JPja': 'ja', 'EUfr': 'fr', 'EUde': 'de', 'USes': 'es-419', 'EUes': 'es', 'EUit': 'it',
+                  'EUnl': 'nl', 'USfr': 'fr-CA', 'EUpt': 'pt', 'EUru': 'ru', 'KRko': 'ko', 'TWzh': 'zh-Hant', 'CNzh': 'zh-Hans', 'USpt': 'pt-BR'}
 
 
 def name(path):
@@ -38,15 +44,29 @@ def version(path):
     return m.group().decode() if m else ''
 
 
+def romfs_languages(folder):
+    """The language codes a dump's or NUP's RomFS lists when there is no control.nacp: System/RegionLangMask.txt's first line, else the Mals/<tag>.* archives, in LANGUAGES order"""
+    r = romfs.source(folder)
+    mask, mals = r / 'System/RegionLangMask.txt', r / 'Mals'
+    try:
+        if mask.is_file(): tags = set((mask.read_text(encoding='utf-8', errors='replace').splitlines() or [''])[0].split())
+        elif mals.is_dir(): tags = {e.name.partition('.')[0] for e in mals.iterdir() if not e.name.startswith('.')}
+        else: return []
+    except (OSError, ValueError, IndexError): return []
+    have = {MALS_LANGUAGES[t] for t in tags if t in MALS_LANGUAGES}
+    return [c for c, _ in LANGUAGES if c in have]
+
+
 def languages(path):
     """The language codes the game supports (the u32 SupportedLanguageFlag at 0x302C, one bit per language in LANGUAGES order; Horizon picks the game language among them), in that order;
-    a missing file or no flag returns an empty list"""
+    without control.nacp (a dump folder, or a NUP without one), those its sibling RomFS lists; a missing file or no flag returns an empty list"""
     p = Path(path)
-    if not p.is_file(): return []
-    b = p.read_bytes()
-    if len(b) < 0x3030: return []
-    f = struct.unpack_from('<I', b, 0x302C)[0]
-    return [c for i, (c, _) in enumerate(LANGUAGES) if f >> i & 1]
+    if p.is_file():
+        b = p.read_bytes()
+        if len(b) >= 0x3030:
+            f = struct.unpack_from('<I', b, 0x302C)[0]
+            if f: return [c for i, (c, _) in enumerate(LANGUAGES) if f >> i & 1]
+    return romfs_languages(p.parent)
 
 
 if __name__ == '__main__':

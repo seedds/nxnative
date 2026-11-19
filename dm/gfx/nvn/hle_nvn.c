@@ -1385,6 +1385,8 @@ static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
 static int link_wait(const win_t *o, uint64_t timeout_ns);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
+__attribute__((weak)) void dm_detclock_present_paced(int itv) { (void)itv; }   // hle_os.c's (DM_DETCLOCK); nothing in graphics unit tests
+__attribute__((weak)) void dm_detclock_display_wait(uint64_t at) { (void)at; }   // hle_thread.c's (DM_DETCLOCK); nothing in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return PLAT_QOS_UNSPECIFIED; }
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
@@ -1409,8 +1411,13 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         else if (be_vsync_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
         else if (wait) sleep_until_ns(at);
         pace_ns = now_ns() - p0;
-    } else {   // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
-               // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
+    } else {   // DM_DETCLOCK: the texture is free at its slot time on the guest clock, and the thread waits for it there, in the kernel's bookkeeping (hle_thread.c): the idle jump
+               // reaches it once the game's other threads wait too, so a frame's time passes while the game waits for the display, as on a Switch, and not while another thread works.
+               // The present moved the clock a step before (hle_os.c), in the middle of the main thread's work when another thread presents: Mario vs. Donkey Kong's frame time read
+               // a whole frame and the game kept present interval 2 (docs/reference/threads.md, "A game stops at its first frame under DM_DETCLOCK")
+        if (wait) dm_detclock_display_wait(at);
+        // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
+        // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
         static int pace = -1; static uint64_t step, last;
         if (pace < 0) { const char *e = getenv("DM_DETCLOCK_PACE"), *d = getenv("DM_DETCLOCK"); step = d ? strtoull(d, 0, 0) : 0; pace = e && atoi(e) && step; }
         if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
@@ -1775,6 +1782,10 @@ static uint64_t present_period(const win_t *o) {
         else if (was < 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
     int itv = present_itv(o), hz = g_hz;
+    if (hz > 0 && dm_detclock_enabled()) {   // DM_DETCLOCK: the display refreshes every step of the switch, as vi's vsync event comes (hle_thread.c)
+        static uint64_t step; if (!step) { const char *d = getenv("DM_DETCLOCK"); step = d ? strtoull(d, 0, 0) : 0; }
+        if (step) return (uint64_t)itv * step;
+    }
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
 // The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
@@ -1996,6 +2007,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && be_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
+    dm_detclock_present_paced(present_itv(o));   // DM_DETCLOCK: the acquire waits for the display on the guest clock, so the frame tick below moves nothing
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);
     be_set_frame(g_frame);

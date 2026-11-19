@@ -364,8 +364,12 @@ static void *vsync_thread(void *arg) {
 HLE_FORCE("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", "indirect layer image memory: RGBA8 linear, 4 KB aligned", Result, h_vi_IndirectReq, size_t *size, size_t *align, int w, int h) {
     *size = ((size_t)(w > 0 ? w : 0) * (size_t)(h > 0 ? h : 0) * 4 + 0xfff) & ~(size_t)0xfff; *align = 0x1000; return RES_OK;
 }
+#ifndef DM_HLE_THREAD_C   // hle_thread.c's, which a test that builds this file without it does not have (t_shared_font); one that includes both has the real one
+__attribute__((weak)) void dm_detclock_vsync_event(void *ev) { (void)ev; }
+#endif
 HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", "vsync event: a host thread signals it at 60 Hz", Result, h_vi_VsyncEvent, void *ev, void *disp) {
     (void)disp; hle_bind_system_event(ev, 1);
+    dm_detclock_vsync_event(ev);   // under DM_DETCLOCK the guest clock signals it at each vsync time instead of the thread below (hle_thread.c)
     uint64_t binding = hle_system_event_binding(ev);
     pthread_mutex_lock(&g_vs_mu);
     int running = 0; for (vsync_event_t *v = g_vs_events; v; v = v->next) running |= v->binding == binding;

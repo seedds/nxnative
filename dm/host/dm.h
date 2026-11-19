@@ -114,12 +114,16 @@ uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);   // hle_thread.c: DM_DETCLOCK's clock runs again (the end of a freeze): the threads due wake, and blocked ones may jump it
-void dm_detclock_presented(void);     // hle_thread.c: DM_DETCLOCK's present moved the clock: the threads due wake; the calling thread is the one that presents
-void dm_detclock_set_jump(uint64_t (*jump)(uint64_t to));   // hle_thread.c: hle_os.c hands over DM_DETCLOCK's idle jump when the switch takes the clock over (the first present)
+void dm_detclock_presented(void);     // hle_thread.c: a present under DM_DETCLOCK (which may have moved the clock): the threads due wake; the calling thread is the one that presents
+// hle_thread.c: hle_os.c hands over DM_DETCLOCK's idle jump when the switch takes the clock over (the first present), with the vsync times origin + k × step
+void dm_detclock_set_jump(uint64_t (*jump)(uint64_t to), uint64_t origin, uint64_t step);
+void dm_detclock_vsync_event(void *ev);   // hle_thread.c: vi's vsync event, bound: under DM_DETCLOCK the guest clock signals it at each vsync time (hle_sdk16.c)
+void dm_detclock_display_wait(uint64_t at);   // hle_thread.c: under DM_DETCLOCK the thread that presents waits for the display until guest time at (hle_nvn.c's acquire)
+void dm_detclock_present_paced(int itv);   // hle_os.c: the next present is NVN's at this interval, whose acquire waits for the display: under DM_DETCLOCK it moves no clock
 void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: waits while the app is in the background (hle_os.c)
-void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, moves the guest clock to at least the previous present's value plus one step
+void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): under DM_DETCLOCK, moves the guest clock to at least the previous present's value plus one step, but for NVN's (dm_detclock_present_paced)
 uint64_t dm_nvn_frame_count(void);
 uint64_t dm_nvn_sub_cpu_ns(void);     // Cumulative CPU nanoseconds of submit (excluding present)
 void dm_backtrace(uint64_t fp);

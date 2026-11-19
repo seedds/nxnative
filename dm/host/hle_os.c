@@ -50,14 +50,21 @@ uint64_t now_ns(void) { return plat_now_ns(); }
 // Guest clock: the system counters the guest can read (mrs cntpct gate, svc GetSystemTick) all go through here. Default = now_ns().
 // Freeze (only for the test driver DM_TICK_HOLD): while frozen the guest clock does not advance ⇒ the game's next tick never comes due; after unfreezing the frozen duration is subtracted, the guest clock is continuous with no jump
 // DM_DETCLOCK=<step ns> (for replay / test runs; product runs do not set it = wall clock): from the first present on the guest clock is virtual time, moved only by guest events, not
-// following the wall clock, so that frame N in a run is byte-for-byte comparable between two passes of the same replay (the foundation of byte-for-byte picture proof):
-//   · a present sets it to the later of itself and the previous present's value plus one step (dm_guest_frame_tick): a frame is one step, or longer when the guest slept longer in it;
+// following the wall clock, so that frame N in a run is byte-for-byte comparable between two passes of the same replay (the foundation of byte-for-byte picture proof). The CPU's work
+// takes no time, and a frame's time passes where a Switch's does, while the game waits:
 //   · when no game thread can run, the last one to block moves it to the earliest guest-clock deadline (hle_thread.c det_idle, through det_jump below) and the threads due wake.
+//     The display's pace is such a deadline: NVN's window acquire waits on the guest clock until its texture is free (hle_nvn.c, dm_detclock_display_wait), and a wait on vi's vsync
+//     event lasts until the next vsync time, origin + k × step (hle_thread.c dm_detclock_vsync_event);
+//   · a present of a graphics layer that does not wait for the display that way (the guest Vulkan and OpenGL layers) moves it to the later of itself and the previous present's
+//     value plus one step (dm_guest_frame_tick); an NVN present moves nothing (dm_detclock_present_paced).
 //     Presents alone used to move it, and a thread that presents only after a thread that sleeps on the guest clock never presented again: Mario vs. Donkey Kong stopped at
-//     frame 1 (docs/reference/threads.md, "A game stops at its first frame under DM_DETCLOCK").
+//     frame 1 (docs/reference/threads.md, "A game stops at its first frame under DM_DETCLOCK"). Then every present moved it a step, also an NVN present on the thread that presents
+//     while the main thread works, whose span of work then read a whole frame (that entry's Note).
 // Before the first frame the wall clock is still used (the boot period has waits that poll by time, freezing would hang them); at the switch it continues from the guest clock value at that time, no jump.
 // It moves neither at a present nor by a jump while frozen.
 static _Atomic uint64_t g_gfrozen, g_glag, g_gdet, g_gdet_last, g_guest_frame; static _Atomic int g_gfz, g_gdet_on; static uint64_t g_gdet_step = 1;
+static _Atomic int g_gdet_paced;   // the next present's NVN interval, whose acquire waits for the display on the guest clock (0 = a present of another layer)
+void dm_detclock_present_paced(int itv) { atomic_store(&g_gdet_paced, itv > 0 ? itv : 1); }
 uint64_t dm_guest_frame(void) { return atomic_load(&g_guest_frame); }
 static int detclock_cfg(void) {
     static int c = -1; if (c < 0) { const char *e = getenv("DM_DETCLOCK"); g_gdet_step = e ? strtoull(e, 0, 0) : 0; c = g_gdet_step > 0; }
@@ -80,20 +87,22 @@ void dm_guest_frame_tick(void) {
     crash_watch_frame();
     uint64_t n = atomic_fetch_add(&g_guest_frame, 1) + 1;
     if (!detclock_cfg()) return;
+    int paced = atomic_exchange(&g_gdet_paced, 0);
     if (!atomic_load(&g_gdet_on)) {
         uint64_t w = wall_guest_ns(); atomic_store(&g_gdet, w); atomic_store(&g_gdet_last, w);
-        dm_detclock_set_jump(det_jump); atomic_store(&g_gdet_on, 1);
-        LOG("DM_DETCLOCK: from the first present on, the guest clock is virtual time: a present moves it to at least the previous present's value plus %llu ns, "
-            "and when no game thread can run it jumps to the earliest guest-clock deadline", (unsigned long long)g_gdet_step);
+        dm_detclock_set_jump(det_jump, w, g_gdet_step); atomic_store(&g_gdet_on, 1);
+        LOG("DM_DETCLOCK: from the first present on, the guest clock is virtual time: NVN's acquire waits for the display on it and vi's vsync event comes every %llu ns, another "
+            "layer's present moves it to at least the previous present's value plus that step, and when no game thread can run it jumps to the earliest guest-clock deadline",
+            (unsigned long long)g_gdet_step);
     } else if (!atomic_load(&g_gfz)) {
         uint64_t last = atomic_load(&g_gdet_last), to = last + g_gdet_step, c = atomic_load(&g_gdet);
-        while (c < to && !atomic_compare_exchange_weak(&g_gdet, &c, to)) {}
-        if (c < to) c = to;
+        if (!paced) { while (c < to && !atomic_compare_exchange_weak(&g_gdet, &c, to)) {} if (c < to) c = to; }
         atomic_store(&g_gdet_last, c);
-        if (c - last > g_gdet_step) { g_gdet_long++; if (c - last > g_gdet_longest) g_gdet_longest = c - last; }
+        uint64_t frame = (uint64_t)(paced ? paced : 1) * g_gdet_step;   // the frame its present interval asks for
+        if (c - last > frame) { g_gdet_long++; if (c - last > g_gdet_longest) g_gdet_longest = c - last; }
     }
     if (n % 300 == 0) {
-        LOG("DM_DETCLOCK: present %llu: %llu idle jumps since present %llu (%.3f ms in all), %llu frames longer than a step (the longest %.3f ms)", (unsigned long long)n,
+        LOG("DM_DETCLOCK: present %llu: %llu idle jumps since present %llu (%.3f ms in all), %llu frames longer than their present interval (the longest %.3f ms)", (unsigned long long)n,
             (unsigned long long)atomic_exchange(&g_gdet_jumps, 0), (unsigned long long)(n - 300), atomic_exchange(&g_gdet_jumped, 0) / 1e6, (unsigned long long)g_gdet_long, g_gdet_longest / 1e6);
         g_gdet_long = g_gdet_longest = 0;
     }

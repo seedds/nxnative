@@ -232,7 +232,7 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ### Display mode
 
-**Window**, **Fullscreen** or **Fullscreen around the notch**: how the game's window opens. ⌃⌘F or the green button changes it while you play. **Fullscreen around the notch** uses the whole screen of a MacBook with a notch, the strips beside the camera housing too, which hides the picture's top centre; a 16:9 picture is fitted in it, with bars at the sides. It stays on the current desktop instead of a Space of its own, and the menu bar does not come down when the pointer reaches the top; ⌘-Tab to another app puts that app in front as usual. On a screen without a notch, such as a Studio Display, it is the same as **Fullscreen**. In an `env.txt`: `DM_FULLSCREEN=1`, `2` or `0`.
+**Window**, **Fullscreen** or **Fullscreen around the notch**: how the game's window opens. ⌃⌘F or the green button changes it while you play. **Fullscreen around the notch** uses the whole screen of a MacBook with a notch, the strips beside the camera housing too, which hides the picture's top centre; a 16:9 picture is fitted in it, with bars at the sides. It stays on the current desktop instead of a Space of its own, and the menu bar does not come down when the pointer reaches the top; ⌘-Tab to another app puts that app in front as usual. On a screen without a notch, such as a Studio Display, it is the same as **Fullscreen**. A full screen game follows its screen: undock a MacBook from a Studio Display and the game goes around the notch, dock it (or close the lid) and it is a usual full screen on the other screen; a window stays a window. In an `env.txt`: `DM_FULLSCREEN=1`, `2` or `0`.
 
 ### Switch 2 controllers
 

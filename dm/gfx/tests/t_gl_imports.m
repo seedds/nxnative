@@ -730,7 +730,10 @@ static void test_rg_texture_uploads(void) {
     level = &tex_of(name)->pend[0][0];
     assert(level->pitch == 4 && !memcmp(level->data, rgba8, sizeof rgba8));
     h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RG, GL_FLOAT, float_rg);
-    assert(level->pitch == 16 && !memcmp(level->data, rgba32f, sizeof rgba32f));
+    float uploaded[4];
+    assert(level->pitch == sizeof uploaded);
+    memcpy(uploaded, level->data, sizeof uploaded);
+    for (int i = 0; i < 4; i++) assert(uploaded[i] == rgba32f[i]);
     h_glDeleteTextures(1, &name);
     puts("GL texture uploads: RED/RG expansion, typed components, row length and byte swapping: OK");
 }

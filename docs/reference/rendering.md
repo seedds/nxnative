@@ -1212,6 +1212,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md): the combinations it uses are (program, 0x3), (null, 0x2), (null, 0x7). [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) builds one program per GLSLC output and pairs them only through these composites ([Single-stage programs paired with a cover](shaders.md#single-stage-programs-paired-with-a-cover)).
 - **Note:** pass dumps print a `Z` line wherever a draw is dropped (no program, no pipeline, empty scissor, both faces culled, no render pass). That is how this one was found: 144 `Z … draw skipped: no program bound` lines in a frame whose G-buffer pass had draws but stayed black.
 
+### Single-stage programs bound with every graphics bit
+
+- **Symptom:** a black screen from boot while the game keeps running (its frame loop issues draws every frame); `[RED] program has no vertex shader (or it is not mapped)` once; GPU time 0.0 ms/s.
+- **Cause:** the game makes one program per shader (`ProgramSetShaders` with one stage) and binds each with all the graphics bits: `BindProgram(vertex program, 0x1f)`, then `BindProgram(pixel program, 0x1f)`, then the draw. `bind_stages` gave every stage in the bits to the bound program, so the pixel program's bind also took the vertex stage. Every draw had a program without a vertex shader, and `pso_get_` dropped it. The console draws these frames, so there a bind leaves a stage the program has no shader for as it was.
+- **Fix:** `bind_stages` (`nvn_mtl.m`) takes the vertex and fragment bits of a non-null program only for the stages the shader map gives it a shader for (`NvProg.stages`, set in `prog_get`, whether or not the shader loaded). A null program still unbinds the stages in its bits, as in [Programs bound per stage](#programs-bound-per-stage). Geometry and tessellation bits behave as before, and so does a program whose shaders are not in the shader map (no stage known). Programs that carry both stages are unchanged.
+- **Found on:** Little Busters! Converted Edition (0100943010310000): 51 single-stage programs (the shader map's 12 vertex and 38 pixel shaders), every bind `0x1f`. Without the fix, frames 120 and 1900 are all black; with it they show the Joy-Con strap notice and the title menu.
+
 ### Conditional rendering survives queue continuations
 
 - **Symptom:** a draw disabled by `SetRenderEnable(false)` executes after an event or fence, or a conditional clear erases a target whose preceding timestamp report should make it skip.

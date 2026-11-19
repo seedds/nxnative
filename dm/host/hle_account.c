@@ -116,7 +116,9 @@ HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "DM_NICK for
 }
 
 // ---------- Online accounts: cut ----------
-HLE_FORCE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "network service account, out of scope; cut: always unavailable", Result, h_acc_EnsureNsa, const UserHandle *h) { (void)h; return RES_FAIL; }
+// The host has only local accounts. Return the result of cancelling the SDK account applet,
+// ResultCancelledByUser (2124-0001). See "The network account check is cancelled offline" in docs/reference/services.md.
+HLE_FORCE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "offline network account check returns applet cancellation", Result, h_acc_EnsureNsa, const UserHandle *h) { (void)h; return RES_ACC_CANCELED; }
 HLE_FORCE("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", "network service account, out of scope; cut", Result, h_acc_GetNsaId, void *id, const UserHandle *h) { (void)id; (void)h; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", "network service account token, out of scope; cut", Result, h_acc_LoadTok, uint64_t *n, char *buf, uint64_t sz, const UserHandle *h) {
     (void)buf; (void)sz; (void)h; if (n) *n = 0; return RES_FAIL;

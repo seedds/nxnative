@@ -337,25 +337,18 @@ static void wake(thr_t *t, int64_t res) {
     wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; wake_queue(t);
     note_runnable(t);
 }
-// Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
+// Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT.
+// Relative timeouts use host time even in replay: this wait may hold up the next present that advances the guest clock.
 static int64_t block(thr_t *t, int kind, int64_t ns) {
     t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     hand_leave(t);
     struct timespec dl;
-    int det_wait = ns > 0 && dm_detclock_enabled();
-    uint64_t guest_deadline = det_wait ? guest_ns() + (uint64_t)ns : 0;
-    if (ns > 0 && !det_wait) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
+    if (ns > 0) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
                   if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } }
     while (!t->woke) {
-        int rc;
-        if (det_wait) {
-            uint64_t now = guest_ns();
-            if (now >= guest_deadline) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
-            (void)(guest_deadline - now);
-            rc = g_cond_wait(&t->cv, NULL);
-        } else rc = ns > 0 ? g_cond_wait(&t->cv, &dl) : g_cond_wait(&t->cv, NULL);
-        if (rc == ETIMEDOUT && !t->woke && (!det_wait || guest_ns() >= guest_deadline)) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
+        int rc = g_cond_wait(&t->cv, ns > 0 ? &dl : NULL);
+        if (rc == ETIMEDOUT && !t->woke) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     }
     return t->wres;
 }
@@ -685,13 +678,6 @@ static void wake_sync_waiters(const void *obj) {
             }
         w = n; }
 }
-void dm_guest_clock_advanced(void) {
-    if (!dm_detclock_enabled()) return;
-    g_lock();
-    for (thr_t *t = g_wait; t; t = t->next) if (t->wkind) pthread_cond_signal(&t->cv);
-    g_unlock();
-}
-
 // Handle thread / synchronization SVCs; returns 1 = handled
 static const char *thr_name(thr_t *t, char *nb, size_t n) {   // SDK ThreadType+0x1a0 = name pointer
     if (!t->arg) return t->handle == 0x1001 ? "main thread" : "?";
@@ -999,7 +985,7 @@ void dm_spin_wait(uint64_t gate, uint64_t site) {
 // back-off's start its timeout becomes the back-off's sleep (yield_backoff_ns), which, unlike the sleep, ends at once when the wait is signalled. The yields' register test does not
 // apply: at the SVC the SDK's own frames hold the time left (SDK 3.5.1 InternalConditionVariableImplByHorizon::TimedWait, x21). → the timeout to wait with
 static int64_t poll_wait_begin(int64_t ns) {
-    if (ns <= 0 || ns >= 20000 || dm_detclock_enabled()) return ns;
+    if (ns <= 0 || ns >= 20000) return ns;
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return ns;
     uint64_t now = now_ns();
     if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
@@ -1011,7 +997,7 @@ static int64_t poll_wait_begin(int64_t ns) {
 }
 // After the wait (ns: the guest's timeout): a signalled wait ends the run, the loop moves on
 static void poll_wait_end(int64_t ns, int64_t r) {
-    if (ns <= 0 || ns >= 20000 || dm_detclock_enabled()) return;
+    if (ns <= 0 || ns >= 20000) return;
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return;
     if (r == R_TIMEOUT) me->poll_ret = now_ns(); else me->yrun_svc = 0;
 }
@@ -1083,15 +1069,10 @@ static void sleep_precise(uint64_t dl) {
         struct timespec ts = {(time_t)(s / 1000000000u), (long)(s % 1000000000u)}; nanosleep(&ts, 0);
     }
 }
-// A guest thread sleeps ns nanoseconds the way SleepThread does: on the guest clock under the deterministic clock, else on time (sleep_precise). Also for host hooks that stand for a
-// call which blocks on hardware (hle_net.c: Poll / Select with nothing to wait on)
+// SleepThread takes a relative duration. Host time lets the thread resume even if its work is needed to present the next frame.
+// Also used by host hooks that block on hardware (hle_net.c: Poll / Select with nothing to wait on).
 void dm_guest_sleep_ns(int64_t ns) {
     if (ns <= 0) return;
-    if (dm_detclock_enabled()) {
-        uint64_t deadline = guest_ns() + (uint64_t)ns;
-        while (guest_ns() < deadline) { struct timespec ts = {0, 1000000}; nanosleep(&ts, 0); }
-        return;
-    }
     thr_t *me = pthread_getspecific(g_keythr); if (me) me->sleeping = 1;
     sleep_precise(now_ns() + (uint64_t)ns);
     if (me) me->sleeping = 0;
@@ -1156,8 +1137,8 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
         // the other yields (0, -1) pass the core only to threads of its own priority or higher
         if ((ns > 0 || ns == -2) && me && me->nhand) { g_lock(); hand_leave(me); g_unlock(); }
-        if (me && ns >= 20000 && (uint64_t)ns < yield_backoff_cap() && !dm_detclock_enabled()) poll_sleep(me, ns);   // a short sleep: a poll
-        else if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
+        if (me && ns >= 20000 && (uint64_t)ns < yield_backoff_cap()) poll_sleep(me, ns);   // a short sleep: a poll
+        else if (ns >= 20000) dm_guest_sleep_ns(ns);
         // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
         // which kept a core at 100% (1.4 billion calls in 200 s); as yields they get the back-off below.
         // Count and time of the main thread's yields are recorded: a render task graph's "wait for everything to finish" is often pure polling + yield; measure how much of a frame it takes

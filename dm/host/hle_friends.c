@@ -1,6 +1,6 @@
 // nn::friends (friends / presence / invitations, out of scope): every interface that connects to the friends service is cut to "unavailable".
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
-// Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
+// Unless stated otherwise, Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
 #include "account_local.h"
 #include "nextendo_account.h"
@@ -42,6 +42,10 @@ HLE_FORCE_WAIT("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistory
     if (!dm_account_uid_exists(uid)) { memset(key, 0, DM_FRIENDS_HISTORY_KEY_SIZE); return DM_FRIENDS_HISTORY_INVALID_UID; }
     return dm_friends_history_key(key, uid, input_flag);
 }
+// The form without a Uid (SDK 20; Super Nintendo Entertainment System – Nintendo Classics 6.0.0 asks first thing in nnMain, main+0xc608): the SDK's own opens the friends service and
+// aborts with 0xe15 when it cannot; cut the same way as the Uid form
+HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyEb", "play history key unavailable (cut)",
+          Result, h_fr_GetPHKeyNoUid, void *k, int local) { (void)k; (void)local; return RES_FAIL; }
 // Notification queue
 HLE_FORCE("_ZN2nn7friends17NotificationQueueC1Ev", "notification queue creates no session (cut)", void, h_fr_NqCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueueD1Ev", "notification queue has no session to close (cut)", void, h_fr_NqDtor, void *self) { (void)self; }
@@ -72,10 +76,11 @@ HLE_FORCE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAcco
 // Online play sessions (DRAGON QUEST XI S)
 HLE_FORCE_WAIT("_ZN2nn7friends28DeclareOpenOnlinePlaySessionERKNS_7account3UidE", "publish this user's actual online-play session", Result, h_fr_OpenSession, const void *uid) { return dm_net_nextendo_enabled()&&dm_account_uid_exists(uid)?dm_nextendo_social_publish(2,NULL,0):RES_FAIL; }
 HLE_FORCE_WAIT("_ZN2nn7friends29DeclareCloseOnlinePlaySessionERKNS_7account3UidE", "publish closure of this user's online-play session", Result, h_fr_CloseSession, const void *uid) { return dm_net_nextendo_enabled()&&dm_account_uid_exists(uid)?dm_nextendo_social_publish(1,NULL,0):RES_FAIL; }
-// Presence
-HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "initialize the SDK presence object for the selected local user", Result, h_fr_UpInit, void *self, const void *uid) { return dm_nextendo_presence_initialize(self,uid); }
-HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "Nextendo on: the SDK's own setter, which only writes the presence object; otherwise presence unavailable (cut)", Result, h_fr_UpDesc, void *self, const char *s) { return dm_nextendo_presence_describe(self, s); }
-HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence6CommitEv", "publish the actual SDK application-presence field", Result, h_fr_UpCommit, void *self) { return dm_nextendo_presence_commit(self); }
+// Presence. Offline a user's own presence succeeds: the host accepts initialization, description and commit without publishing to the friends service, as returning
+// failure can stop a game's startup (services.md, "Friends presence is accepted offline"). In Nextendo mode they write and publish the SDK object
+HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "offline: accepted, not published; Nextendo: initialize the SDK presence object for the selected local user", Result, h_fr_UpInit, void *self, const void *uid) { return dm_net_nextendo_enabled() ? dm_nextendo_presence_initialize(self,uid) : RES_OK; }
+HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "Nextendo on: the SDK's own setter, which only writes the presence object; offline accepted, not published", Result, h_fr_UpDesc, void *self, const char *s) { return dm_net_nextendo_enabled() ? dm_nextendo_presence_describe(self, s) : RES_OK; }
+HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence6CommitEv", "Nextendo: publish the actual SDK application-presence field; offline accepted, not published", Result, h_fr_UpCommit, void *self) { return dm_net_nextendo_enabled() ? dm_nextendo_presence_commit(self) : RES_OK; }
 
 // Additional SDK service overloads use the same provider and object lifetime.
 HLE_FORCE_WAIT("_ZN2nn7friends12AsyncContextC2Ev", "owned friends request state", void, h_fr_AcCtor2, void *self) { dm_nextendo_async_construct(self); }
@@ -94,7 +99,7 @@ HLE_FORCE("_ZN2nn7friends12AsyncContextD0Ev", "release friends request state and
 }
 HLE_FORCE_WAIT("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdEiiRKNS0_12FriendFilterE", "real provider friend identities", Result, h_fr_GetFriendIds,int *count,void *out,int off,int n,const void *filter) { return dm_nextendo_friends_list(count,out,NULL,off,n,filter,true); }
 HLE_FORCE_WAIT("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE", "real provider friend identities for the selected local user", Result, h_fr_GetFriendIdsUid,int *count,void *out,const void *uid,int off,int n,const void *filter) { return dm_nextendo_friends_list(count,out,uid,off,n,filter,true); }
-HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence10InitializeEv", "initialize the SDK presence object for the open local user", Result, h_fr_UpInitOpen,void *self) { return dm_nextendo_presence_initialize(self,NULL); }
+HLE_FORCE_WAIT("_ZN2nn7friends12UserPresence10InitializeEv", "offline: accepted, not published; Nextendo: initialize the SDK presence object for the open local user", Result, h_fr_UpInitOpen,void *self) { return dm_net_nextendo_enabled() ? dm_nextendo_presence_initialize(self,NULL) : RES_OK; }
 
 HLE_FORCE_WAIT("_ZN2nn7friends12AsyncContext7HasDoneEPb", "actual friends request completion", Result, h_fr_AcHasDone, void *self,uint8_t *done) { return dm_nextendo_async_done(self,done); }
 

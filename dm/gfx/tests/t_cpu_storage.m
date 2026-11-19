@@ -285,6 +285,25 @@ int main(void) {
           CHECK("every level of a 260x260 RG8 tile reaches its storage, every texel", !bad); free(lin); }
         mtl_tex_release(&tile); teardown(&g); mtl_tex_release(&moved2); mtl_tex_release(&moved); mtl_tex_release(&large);
         teardown(&f);
+
+        // A patterned GPU writeback distinguishes GOB orders where a uniform clear cannot. Exercise both captured texture orders through the real GPU storage kernel.
+        for (int order = 0; order < 2; order++) {
+            setup(&f, 7080 + order, CACHED, NVN_FORMAT_RGBA8, 0);
+            f.t.d.gob_order = (uint16_t)order;
+            uint8_t linear[SIZE * SIZE * 4], decoded[sizeof linear];
+            for (size_t i = 0; i < sizeof linear; i++) linear[i] = (uint8_t)(i * 37u + (i >> 7));
+            gsb_geo geo;
+            CHECK("patterned GPU writeback geometry", !gsb_geom(&f.t, 0, 0, 1, NULL, &geo));
+            uint64_t before_store = g_gsb_stores;
+            mtl_sub_begin();
+            id<MTLBuffer> src; size_t off = arena_alloc(sizeof linear, &src);
+            memcpy((uint8_t *)src.contents + off, linear, sizeof linear);
+            gsb_swz(&f.t, &geo, 1, src.gpuAddress + off, SIZE * 4, sizeof linear);
+            finish();
+            CHECK("patterned GPU writeback uses the texture's GOB order", g_gsb_stores == before_store + 1
+                  && !nvn_deswizzle(&f.t.d, 0, 0, f.mem, decoded, SIZE * 4) && !memcmp(linear, decoded, sizeof linear));
+            teardown(&f);
+        }
     }
     printf("t_cpu_storage: %d checks, %d failed\n", checks, failed);
     return failed != 0;

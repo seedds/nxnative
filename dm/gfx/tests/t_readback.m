@@ -273,10 +273,11 @@ static void stale_pools(void) {
     h_nvnTextureFinalize(&late);
     h_nvnMemoryPoolFinalize(mp); pool_object_reused((pool_t *)mp);
     EXPECT("stale: finalized texture and pool, object reused, read by ID -> empty slot", 1, by_id(601) == nil);
-    // A live texture the host already made stays what it was, with no refresh from the dead pool; one it has not made stays unmade, also through its object rather than an ID
+    // A live texture the host already made went with its pool, as its memory does on NVN (nvn_owner.m's own_pool_finalize_locked: kept, it held its memory until the object's own
+    // Finalize); one it has not made stays unmade. Neither is made or refreshed from the dead pool, by ID or through its object
     uint64_t uploads = g_pkg_uploads, reuploads = g_pkg_reuploads;
-    EXPECT("stale: live texture of a finalized pool keeps its host texture", 1, by_id(602) == made);
-    EXPECT("stale: live texture of a finalized pool, through its object", 1, tex_mtl((const tex_t *)&live) == made);
+    EXPECT("stale: live texture of a finalized pool reads as an empty slot", 1, by_id(602) == nil);
+    EXPECT("stale: live texture of a finalized pool, through its object", 1, tex_mtl((const tex_t *)&live) == nil);
     EXPECT("stale: a texture never made is not made", 1, tex_mtl((const tex_t *)&unfinalized) == nil);
     EXPECT("stale: nothing was uploaded", 1, g_pkg_uploads == uploads && g_pkg_reuploads == reuploads);
 
@@ -304,8 +305,8 @@ static void stale_pools(void) {
     mtl_reg_tex(604, (const tex_t *)&st, NULL);
     id<MTLTexture> smade = by_id(604); EXPECT("stale: sparse texture resolves", 1, smade != nil);
     h_nvnMemoryPoolFinalize(sp); pool_object_reused((pool_t *)sp);
-    EXPECT("stale: sparse texture of a finalized pool keeps its host texture", 1, by_id(604) == smade);
-    EXPECT("stale: and through its object", 1, tex_mtl((const tex_t *)&st) == smade);
+    EXPECT("stale: sparse texture of a finalized pool reads as an empty slot", 1, smade && by_id(604) == nil);
+    EXPECT("stale: and through its object", 1, tex_mtl((const tex_t *)&st) == nil);
     mtl_reg_tex(601, NULL, NULL); mtl_reg_tex(602, NULL, NULL); mtl_reg_tex(603, NULL, NULL); mtl_reg_tex(604, NULL, NULL);
     h_nvnMemoryPoolFinalize(mp2); munmap(phys, len); free(mp); free(mp2); free(sp);
 }

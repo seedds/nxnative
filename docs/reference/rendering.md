@@ -942,6 +942,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a screenshot of a window the game crops is the picture as presented: the present pass draws the crop at the window texture's own size (as `DM_NVN_SHOT_OUT` draws it at a size of its own), so its size stays the same when a dynamic resolution moves the crop. An uncropped window is still saved as its texture's own pixels. Until a regression baseline includes this, a check of a cropping game against an older revision compares two kinds of shot.
 - **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md), in regression checks of the review's steps (step 15's audit).
 
+### Screenshots of GL and Vulkan frames wait for rendering
+
+- **Symptom:** diagnostic screenshots can be black or incomplete while the corresponding GL or Vulkan frame displays correctly.
+- **Cause:** the external graphics queue signals a Metal event after writing the frame. The present queue waits for it, while the screenshot can read the texture on a separate queue.
+- **Fix:** diagnostic captures wait for the presented frame's producer event before reading it. A timeout skips the capture, and a failed Metal readback does not write a PNG.
+- **Found on:** [UnMetal](../../dm/games/01008F4014A74000/README.md#found-on-this-game). The original PR reported 82 black captures out of 86 before its producer wait and none afterward. [PR #2805](https://github.com/seedds/nxnative/pull/2805)
+- **Check:** `t_present_crop --external-screenshots` holds back submission of a producer on another Metal queue. The scheduled and queued captures both wrote black on `2149d856` and both wrote the expected green pixels with the patch. On the M4 Pro with macOS 27.2.1, both builds saved 86 captures of UnMetal 1.2.0's first cell with zero black images.
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil

@@ -399,7 +399,10 @@ static uint8_t g_seen[256];
 // The lock used to cover only the add and the delete, so two threads unmapping at once (stacks of exiting threads) could delete through a stale index and drop another live mapping
 #define MAX_MAP 4096
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
+enum { SHARED_MEMORY_STATE = 6 };
+static unsigned g_shared_maps;   // under g_map_lock
 static int g_nmap;
+static hle_transfer_mapping *g_transfer_mappings;   // in-place service mappings, under g_map_lock
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
 // Punch the alias region's host pages that the game gave back before the last sweep and has not mapped again since (g_alias_aged), then age the ones given back since. Under g_map_lock,
 // so no MapPhysicalMemory opens a page while it is punched. Called by guest_file_thread every 10 s
@@ -564,10 +567,15 @@ static uint32_t map_arguments(uint64_t dst, uint64_t src, uint64_t size) {
     if (size > UINT64_MAX - src || size > UINT64_MAX - dst) return 0xD401;
     return memory_contains((uintptr_t)g_stack, g_stack_cap, dst, size) ? 0 : 0xDC01;
 }
-static int map_source_busy(uint64_t addr, uint64_t size) { // g_map_lock held; nonwrapping ranges
+static int map_source_borrowed(uint64_t addr, uint64_t size) { // g_map_lock held; nonwrapping ranges
     for (int i = 0; i < g_nmap; ++i)
-        if (addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
+        if (g_map[i].state != SHARED_MEMORY_STATE && addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
     return 0;
+}
+static int map_source_busy(uint64_t addr, uint64_t size) {
+    for (const hle_transfer_mapping *m = g_transfer_mappings; m; m = m->next)
+        if (addr < m->address + m->size && m->address < addr + size) return 1;
+    return map_source_borrowed(addr, size);
 }
 // Device-shared memory. On Horizon, NVN gives a memory pool's storage to the GPU through nvmap, whose device mapping (svcMapDeviceAddressSpaceAligned, KPageTableBase::LockForMapDeviceAddressSpace)
 // sets KMemoryAttribute_DeviceShared on those pages and counts each mapping. UnmapPhysicalMemory and a SetHeapSize that shrinks refuse any page with an attribute set (ResultInvalidCurrentMemory,
@@ -633,19 +641,55 @@ static int map_source_backed(uint64_t src, uint64_t size) {
     module_data_query(m, off, &lo, &hi, &perm);
     return perm == 3 && hi >= lo && memory_contains(lo, hi - lo, off, size);
 }
+
+static int transfer_source_backed(uintptr_t address, size_t size) {
+    pthread_mutex_lock(&g_map_lock);
+    int backed = map_source_backed(address, size) && !map_source_busy(address, size);
+    pthread_mutex_unlock(&g_map_lock);
+    return backed;
+}
+
+int hle_map_transfer_memory(hle_transfer_mapping *mapping, uint32_t handle, uint64_t size, uint32_t owner_perm) {
+    hle_transfer_memory memory;
+    if (!size || !hle_get_transfer_memory(handle, &memory) || memory.size != size || memory.owner_perm != owner_perm)
+        return 0;
+    // The client and service share an address space. Keep the original backing in place until the service releases it.
+    pthread_mutex_lock(&g_map_lock);
+    int backed = map_source_backed(memory.address, memory.size) && !map_source_borrowed(memory.address, memory.size);
+    if (backed) {
+        if (!mapping->size) {
+            mapping->next = g_transfer_mappings;
+            g_transfer_mappings = mapping;
+        }
+        mapping->address = memory.address;
+        mapping->size = memory.size;
+    }
+    pthread_mutex_unlock(&g_map_lock);
+    return backed;
+}
+
+void hle_unmap_transfer_memory(hle_transfer_mapping *mapping) {
+    pthread_mutex_lock(&g_map_lock);
+    if (mapping->size) {
+        hle_transfer_mapping **link = &g_transfer_mappings;
+        while (*link != mapping) link = &(*link)->next;
+        *link = mapping->next;
+        *mapping = (hle_transfer_mapping){0};
+    }
+    pthread_mutex_unlock(&g_map_lock);
+}
 int svc_nro_deactivate(module_t *m) {
     pthread_mutex_lock(&g_map_lock);
     uint64_t base = (uintptr_t)m->base;
-    for (int i = 0; i < g_nmap; i++)
-        if (g_map[i].src < base + m->size && base < g_map[i].src + g_map[i].size) {
-            pthread_mutex_unlock(&g_map_lock); return 0;
-        }
-    m->loaded = 0;
-    pthread_mutex_unlock(&g_map_lock); return 1;
+    int busy = map_source_busy(base, m->size);
+    if (!busy) m->loaded = 0;
+    pthread_mutex_unlock(&g_map_lock);
+    return !busy;
 }
 static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint32_t *attr, uint64_t *perm) {
     uint64_t lo = *base, remaining = *size; // the final free page can end at 2^64
     for (int i = 0; i < g_nmap; ++i) {
+        if (g_map[i].state == SHARED_MEMORY_STATE) continue;
         uint64_t src = g_map[i].src, end = src + g_map[i].size;
         uint64_t lower = lo, upper = remaining;
         if (addr >= src && addr < end) {
@@ -907,7 +951,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int mapped = 0, in_alias = addr >= ab && addr < ae;
         if (in_alias) alias_query(addr, &rb, &rn, &mapped);
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
-        else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
+        else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=state == SHARED_MEMORY_STATE ? 1 : 3; }
         else if (in_alias && mapped) { base=rb; size=rn; state=5; perm=3; }
         else if (a >= g_as && a < g_as + g_reserve) {   // free: up to the adjacent mapping/heap boundary
             uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + g_reserve;
@@ -969,12 +1013,55 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         regs[0] = 0; regs[1] = 0; return 0;
     }
+    case 0x13: case 0x14: {  // MapSharedMemory / UnmapSharedMemory: immutable service data, in free alias pages
+        const hle_readonly_shmem *memory = hle_get_readonly_shmem((uint32_t)regs[0]);
+        uintptr_t addr = regs[1]; size_t size = regs[2], pg = (size_t)getpagesize();
+        if (!memory) { regs[0] = 0xe401u; return 0; }
+        if (addr & (pg - 1)) { regs[0] = 0xcc01u; return 0; }
+        if (size != memory->size || !size || (size & (pg - 1))) { regs[0] = 0xca01u; return 0; }
+        if (num == 0x13 && regs[3] != 1) { regs[0] = 0xd801u; return 0; }
+        if (!memory_contains((uintptr_t)g_alias, g_alias_cap, addr, size)) { regs[0] = 0xdc01u; return 0; }
+        pthread_mutex_lock(&g_map_lock);
+        int k = map_find(addr, size);
+        uint32_t result = 0xd401u;
+        if (num == 0x13 && !k && g_nmap < MAX_MAP && alias_unmapped(addr - (uintptr_t)g_alias, size) == (int64_t)(size / 4096)) {
+            void *dst = (void *)addr;
+            if (mprotect(dst, size, PROT_READ | PROT_WRITE)) die("MapSharedMemory writable mapping: errno=%d", errno);
+            dm_guest_write_prepare(dst, size);
+            memcpy(dst, memory->bytes, size);
+            if (mprotect(dst, size, PROT_READ)) die("MapSharedMemory read-only protection: errno=%d", errno);
+            if (g_gf_n) {
+                size_t first = (addr - (uintptr_t)g_alias) / pg;
+                for (size_t i = first; i < first + size / pg; ++i) {
+                    uint64_t bit = UINT64_C(1) << (i & 63);
+                    g_alias_rel[i >> 6] &= ~bit;
+                    g_alias_aged[i >> 6] &= ~bit;
+                }
+            }
+            map_add(addr, size, (uintptr_t)memory, SHARED_MEMORY_STATE);
+            ++g_shared_maps;
+            result = 0;
+        } else if (num == 0x14 && k && g_map[k-1].state == SHARED_MEMORY_STATE && g_map[k-1].base == addr &&
+                   g_map[k-1].size == size && g_map[k-1].src == (uintptr_t)memory) {
+            if (!guest_release(addr, addr + size, 1)) {
+                size_t first = (addr - (uintptr_t)g_alias) / pg;
+                for (size_t i = first; i < first + size / pg; ++i) g_alias_exposed[i >> 6] |= UINT64_C(1) << (i & 63);
+            }
+            map_del(k - 1);
+            --g_shared_maps;
+            result = 0;
+        }
+        pthread_mutex_unlock(&g_map_lock);
+        regs[0] = result;
+        return 0;
+    }
     case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)
         uintptr_t a = regs[0]; size_t size = regs[1];
         if (!size || ((a | size) & 0xfff) || !memory_contains((uintptr_t)g_alias, g_alias_cap, a, size)) {
             LOG("SVC %#x outside the alias region %p+%#zx", num, (void *)a, size); regs[0] = 0xD401; return 0;
         }
         pthread_mutex_lock(&g_map_lock);
+        if (g_shared_maps && map_find(a, size)) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xd401u; return 0; }
         // The SDK extends committed windows across borrowed stack sources
         // (Raging Loop, StandardAllocator). Recommit preserves every live byte;
         // only decommit can invalidate backing required for eventual copyback.
@@ -1030,12 +1117,16 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }
-    case 0x15: {  // CreateTransferMemory(→w1 handle; x1 address, x2 size, w3 permission): the memory stays where it is in this one address space, and the only receivers are host services
-        // (audren:u, hle_audren_sv.c), which read nothing through it. A handle outside the kernel handle table: CloseHandle passes over it. The placeholder answer left the address in w1
-        // as the handle, and a CloseHandle of an address whose low word fell in the table would have closed another object
-        static _Atomic uint32_t next;
-        { static int once; if (!once++) LOG("svc CreateTransferMemory %#llx+%#llx: a handle outside the kernel table (host services only)", regs[1], regs[2]); }
-        regs[0] = 0; regs[1] = 0xd1000000u | (atomic_fetch_add(&next, 1) & 0xffffu); return 0;
+    case 0x15: {  // CreateTransferMemory(→w1 handle; x1 address, x2 size, w3 owner permission)
+        hle_transfer_memory memory = { regs[1], regs[2], (uint32_t)regs[3] };
+        if (memory.address & 0xfff) { regs[0] = 0xcc01u; return 0; }
+        if (!memory.size || (memory.size & 0xfff)) { regs[0] = 0xca01u; return 0; }
+        if (!memory.address || memory.size > UINTPTR_MAX - memory.address) { regs[0] = 0xd401u; return 0; }
+        if (memory.owner_perm != 0 && memory.owner_perm != 1 && memory.owner_perm != 3) { regs[0] = 0xd801u; return 0; }
+        if (!transfer_source_backed(memory.address, memory.size)) { regs[0] = 0xd401u; return 0; }
+        uint32_t h = hle_new_transfer_memory(memory);
+        if (!h) { regs[0] = 0xce01u; return 0; }
+        regs[0] = 0; regs[1] = h; return 0;
     }
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
         uint32_t res = (regs[1] && regs[2] >= 4) ? *(uint32_t *)regs[1] : 0;

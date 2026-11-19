@@ -932,6 +932,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** a sampled texture in a sparse pool (not a render target, image, linear or buffer texture) is now uploaded like a packaged one, through the pool's page table ([Textures read through a 4 KB page table of a sparse pool](#textures-read-through-a-4-kb-page-table-of-a-sparse-pool)).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md): the hunter's innerwear (ASTC 6x6) came out magenta and the face black.
 
+### Block-compressed textures with sparse layout in CPU-visible pools
+
+- **Symptom:** bright magenta patches on materials that sample block-compressed textures. The Metal texture can contain all-zero ASTC blocks while the corresponding CPU-visible pool holds texture data.
+- **Cause:** `SPARSE` also selects the byte layout of textures in an ordinary, non-virtual pool. The host took sparse textures from storage only in virtual pools, and the first-use CPU upload excluded the `SPARSE` flag. An ordinary pool could therefore keep its initial zero-filled Metal texture after the game wrote the texels directly into memory.
+- **Fix:** `tex_from_storage` uses the existing tracked upload path for block-compressed textures with `SPARSE` in non-virtual, CPU-visible pools. It tracks their storage starting at first use, including textures the game fills afterward. GPU copies use the existing storage writeback path. Virtual pools continue to use their page tables.
+- **Check:** `check_t_initial_uncached` resolves a sparse-layout ASTC texture in an ordinary pool before the CPU fills it. It checks three distinct mip colors, a second CPU write, a GPU copy written back to storage, and a new texture over the rewritten storage. `check_t_sparse_copy` covers copies through a virtual pool.
+- **Found on:** [Bloodstained: Ritual of the Night](../../dm/games/0100BF500207C000/README.md), 1.60 on Apple M6. Readback found seven wholly zero-filled ASTC inputs in the portrait pass. Both the opening dialogue and Miriam's status screen render with their intended colors through the tracked upload path.
+
 ### GPU copies into a sparse pool's textures, stored through the page table
 
 - **Symptom:** a sparse texture whose levels the game fills with buffer-to-texture copies stays magenta (ASTC's error colour) or black for good; with `DM_NVN_ZBLOCK=1` its `[zb] re-upload` lines show the copied levels all-zero at every upload. A copy into a level of a texture bound from a coarser level (`sampled from level N … (finer levels not mapped)`) went to the wrong level.

@@ -958,6 +958,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the iOS libraries are compiled with `-fmetal-math-mode=relaxed` (`dm/ios/tools/ios_metal.py`; the Vulkan and GL libraries in `vk_shaders.py` and `gl_shaders.py` too). Relaxed keeps fast math's reassociation but not that assumption.
 - **Found on:** listed among the mechanisms first met in [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md); the source gives the 8,337 of 12,809 count without naming the game.
 
+### Mac math mode (relaxed)
+
+- **Symptom:** every 3D object of a game is black on the Mac while the menus draw; the colour target before the last pass shows the full scene and the last (tonemap) pass writes zeros. Godzilla: Destroy All Monsters Melee Remastered.
+- **Cause:** the tonemap's dither term is `x * inf` (an infinity constant the translation keeps from the Maxwell code, `as_type<float>(0x7f800000u)`), selected away by an `isnan` test. The Mac libraries were built in Metal's default fast mode, which lets the GPU compiler assume there is no NaN or infinity, so the select was folded the wrong way and the result was zero. The iOS libraries already had this fixed ([iOS math mode (relaxed)](#ios-math-mode-relaxed)); the Mac ones had not.
+- **Fix:** `mac_metal()` in `dm/gfx/tools/dmsh_chain.py` adds `-fmetal-math-mode=relaxed` (every game on the Mac; the chain's hash, `DMSH_CHAIN`, changes, so every game's Mac shaders are rebuilt once).
+- **Check:** Godzilla on an M4 Pro, macOS 27.2: the Practice match draws both monsters and the island at 60 fps with the GPU at 8 ms; the same build before the change was black. Hitman Absolution (`010037C022390000`, SDK 22) boots to its title, menu and New Game intro with the rebuilt shaders. `test_nsp_chain.py` passes. No `regress.py check` run on other games.
+- **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`, Unreal 4.27, update 131072).
+
 ### Front end at -O1: Apple's control-flow lowering
 
 - **Symptom:** making a pipeline archive prints `Max Unstruct ID 758 in function agc.main in shader 13941 exceeds supported limit`, and one pipeline takes many minutes, in `metal-tt` offline or in the host's prebuild on the device (`Preparing pipelines` holding one count for minutes). The line is a note, not an error: `metal-tt` goes on, exits 0 and writes that pipeline into the archive.

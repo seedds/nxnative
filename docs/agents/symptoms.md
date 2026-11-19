@@ -1159,6 +1159,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials. → [L.A. Noire WAD and VFP shader arrays](../reference/shaders.md#la-noire-wad-and-vfp-shader-arrays)
 - the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture. → [Firaxis CIVBSF shader libraries](../reference/shaders.md#firaxis-civbsf-shader-libraries)
 - the split finds only the GLSLC outputs in the executable, while the game presents a black picture and reports missing vertex, pixel and compute shaders. → [Larian LSPK packages and BSHD programs](../reference/shaders.md#larian-lspk-packages-and-bshd-programs)
 - the split finds only a loose upscaler pack, while a game's `.shdr` files and scene resources produce no shaders; the host reports missing vertex and pixel shaders and draws a blank picture. → [SHN resources and embedded shader objects](../reference/shaders.md#shn-resources-and-embedded-shader-objects)

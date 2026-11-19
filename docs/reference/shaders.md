@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### L.A. Noire WAD and VFP shader arrays
+
+- **Symptom:** the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials.
+- **Cause:** `out.wad.nx` has a span table and a name table. Its `.vfp.nx` members store the GLSLC headers, control sections and code in separate arrays.
+- **Fix:** the splitter maps `out.wad.nx` with the `WAD\x01` signature and reads its `.vfp.nx` members. It checks the name table and shader member ranges, requires non-empty code and complete coverage of the VFP arrays, then passes the original control and code bytes to the existing shader checks. The VFP arrays give individual stages. Their vertex and pixel pairing is unknown.
+- **Check:** `dm/gfx/tests/test_noire_shader.py` checks keys and bytes in both RomFS forms, the signature and basename gate, and rejection of truncated directories, invalid names and malformed spans. On M4 Pro/macOS 27.2.1, the WAD yielded zero shaders with `a6aaf66d` and 8,933 with the reader. A full split with the reader and the startup captures found 8,968 shaders, all of which compiled for the Mac.
+- **Found on:** L.A. Noire 1.2 (`0100830004FB6000`), [NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386). The Mac build with the [direct `irs` service fix](services.md#direct-irs-connection-and-status-memory) loaded the 8,968-entry map. Captures show the officers' faces, uniforms and badges in the opening patrol-car scene and on foot at the first intersection. In “Upon Reflection,” the player confirmed that the alley characters' materials rendered correctly and the notebook pages were readable on the same M4 Pro/macOS 27.2.1 build.
+
 ### Firaxis CIVBSF shader libraries
 
 - **Symptom:** the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture.

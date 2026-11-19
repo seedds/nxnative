@@ -422,6 +422,60 @@ def mshd_shaders(d, label):
     if len(out) % 2: red(f'{label} MSHD: {len(out)} stages, not in pairs')
     return out
 
+def noire_wad_shaders(d, label):
+    """RAGE's WAD v1 (L.A. Noire's out.wad.nx): u32 member count, then 12 bytes per member (u32 unknown, offset, size). After the last member is a length-prefixed name per entry
+    (u16 length, then that many bytes). Only the VFP members contain the split GLSLC arrays this reader uses."""
+    count, = field(d, '<I', 4, label)
+    if not count: red(f'{label}: empty WAD table')
+    directory = span(d, 8, 12 * count, f'{label} directory')
+    _, last_offset, last_size = struct.unpack_from('<III', directory, len(directory) - 12)
+    data_start = 8 + len(directory)
+    names = data_end = last_offset + last_size
+    if not data_start <= last_offset <= data_end <= len(d): red(f'{label}: WAD last member or names outside archive data')
+    out = []
+    shader_end = data_start
+    for _, offset, size in struct.iter_unpack('<III', directory):
+        n, = field(d, '<H', names, f'{label} member name length')
+        name = span(d, names + 2, n, f'{label} member name')
+        names += 2 + n
+        if not name.endswith(b'.vfp.nx'): continue
+        try: member = name.decode('utf-8')
+        except UnicodeDecodeError: red(f'{label}: WAD shader member name is not UTF-8: {name!r}')
+        if any(c in member for c in '\t\r\n'): red(f'{label}: WAD shader member name would break the shader map: {name!r}')
+        where = f'{label}/{member}'
+        if offset < data_start or offset + size > data_end: red(f'{where}: WAD member outside data region')
+        if offset < shader_end: red(f'{where}: overlapping or unordered WAD shader members')
+        shader_end = offset + size
+        out.extend(noire_vfp_shaders(d[offset:shader_end], where))
+    if not out: red(f'{label}: no VFP shader records')
+    return out
+
+def noire_vfp_shaders(d, label):
+    """VFP stores GLSLC headers, control sections and code in three separate arrays at the end of the file."""
+    _, headers_len, controls_len, code_len = field(d, '<4Q', 0, label)
+    header_size = 0x120
+    headers = len(d) - headers_len - controls_len - code_len
+    if not headers_len or headers_len % header_size or headers < 32:
+        red(f'{label}: invalid VFP array lengths')
+    controls = headers + headers_len
+    code = controls + controls_len
+    out = []
+    ctl_end = code_end = 0
+    for h in range(headers, controls, header_size):
+        where = f'{label}#VFP@{h:#x}'
+        if d[h:h + 4] != b'\x91\x68\x86\x19': red(f'{where}: missing GLSLC header')
+        ctl_offset, code_offset, code_size, ctl_size = struct.unpack_from('<4I', d, h + 0xc0)
+        if ctl_offset != ctl_end or code_offset != code_end or ctl_offset + ctl_size > controls_len or not 0 < code_size <= code_len - code_offset:
+            red(f'{where}: invalid VFP record spans')
+        ctl_end, code_end = ctl_offset + ctl_size, code_offset + code_size
+        ctl, instructions = d[controls + ctl_offset:controls + ctl_end], d[code + code_offset:code + code_end]
+        stage = glslc_stage(ctl, instructions) if ctl_size >= 0x708 else None
+        why = check(where, stage, ctl, instructions) if stage else 'invalid VFP shader header'
+        if why: red(f'{where}: {why}')
+        out.append((where, stage, ctl, instructions))
+    if ctl_end != controls_len or code_end != code_len: red(f'{label}: unclaimed bytes in VFP arrays')
+    return out
+
 def glslc_stage(ctl, code):
     """A GLSLC output's stage, from its code area's header (graphics: the SPH's stage bits), or compute when the code has no header and the control's thread group (+0x748) is filled"""
     if nvn2_ctl(ctl): return nvn2_stage(ctl, code)
@@ -3951,6 +4005,11 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'WAD\x01' and os.path.basename(path) == 'out.wad.nx':   # RAGE WAD variant with split GLSLC arrays (noire_wad_shaders)
+        from romfs import mmap
+        with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+            found = noire_wad_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)

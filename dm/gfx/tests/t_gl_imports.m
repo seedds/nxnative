@@ -113,6 +113,7 @@ static void test_vertex_binding(void) {
     attr_ptr(16, 2, GL_FLOAT, 0, 0, NULL); assert(geterr() == GL_INVALID_VALUE);
     attr_div(16, 1); vb_div(16, 1); assert(geterr() == GL_INVALID_VALUE); assert(geterr() == GL_NO_ERROR);
     GLint lim = 0; h_glGetIntegerv(0x82da, &lim); assert(lim == 16); h_glGetIntegerv(0x82d9, &lim); assert(lim == 2047);   // MAX_VERTEX_ATTRIB_BINDINGS, _RELATIVE_OFFSET
+    h_glGetIntegerv(0x8c2b, &lim); assert(lim == 65536);   // MAX_TEXTURE_BUFFER_SIZE
     del_buf(1, &b[0]); FETCH(8, 0, 0, 16, 0); FETCH(2, b[1], 0, 16, 255);
     bind_vao(0); del_buf(1, &b[1]);
 }
@@ -148,7 +149,7 @@ static void test_literal_stride_fetch(void) {
         pkey_t k; memset(&k, 0, sizeof k);
         vkey_set(&k, 0, attr(0), vb_of(cur_vao(), 0));
         assert(k.stride[0] == cases[c].stride && k.div[0] == (cases[c].stride ? cases[c].div : 0));   // a constant fetch has no divisor, so one pipeline serves both
-        k.cpf = MTLPixelFormatRGBA8Unorm; k.mask = 15;
+        k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.mask = 15;
         id<MTLRenderPipelineState> pso = pso_get(&p, &k);
         assert(pso);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:1 mipmapped:NO];
@@ -374,8 +375,8 @@ static void test_doom3(void) {
     pr = h_glCreateProgram(); vs = h_glCreateShader(GL_VERTEX_SHADER); shader_of(vs)->si = &vonly; shader_of(vs)->fn = [lib newFunctionWithName:@"vmain"];
     h_glAttachShader(pr, vs); h_glLinkProgram(pr); p = prog_of(pr);
     assert(p->linked && p->fn[0] && !p->fn[1] && p->si[1]->frag && !p->si[1]->nu && !p->si[1]->nt && !p->si[1]->nb && p->si[1]->ub_slot < 0);
-    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask = 15;
-    k.cpf = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
+    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.mask = 15;
+    k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
     assert(pso_get(p, &k));
     h_glDeleteProgram(pr); h_glDeleteShader(vs);
 

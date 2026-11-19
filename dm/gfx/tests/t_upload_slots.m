@@ -1,5 +1,6 @@
 // Exercise staging reuse with several batches in flight. Distinct edge bytes
 // in every allocation detect aliasing within a batch and reuse before a read.
+// The Makefile runs it with reuse forced on and off; the device rule (small working sets release staging) is checked directly.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -29,6 +30,8 @@ static void batch(unsigned batch, const size_t *sizes, unsigned count, id<MTLBuf
 }
 int main(void) { @autoreleasepool {
     mtl_init();
+    CHECK("the iPhone 17's and the M1 iPad's working set (5,461 MB) releases staging after each batch", !up_reuse_wants(5461ull << 20));
+    CHECK("6 GB of working set or more, or none known, keeps staging for reuse", up_reuse_wants(6144ull << 20) && up_reuse_wants(12124ull << 20) && up_reuse_wants(0));
     id<MTLBuffer> input = [g_dev newBufferWithLength:BYTES options:MTLResourceStorageModeShared];
     id<MTLBuffer> output = [g_dev newBufferWithLength:BYTES options:MTLResourceStorageModeShared];
     res_add(input); res_add(output);

@@ -42,7 +42,13 @@ shader_note	Ocarina of Time shaders
 fps_target	60
 
 # ---- Graphics ----
+# Screen shape (patches.py, README "Screen shape"): the picture takes the window's or the screen's shape, any from 0.25 to 6, portrait included, and follows it while
+# the game runs (DM_SCREEN_ASPECT, auto by default): wider shows more at the sides, taller more above and below; the HUD keeps its size
+screen_aspect	any
 draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The Metal 4 pipeline path on iOS, with the pipeline archive made offline (applegpu_g18p, the iPhone 17 family) and the hybrid pipelines: through the MTLDevice, a render pipeline
+# first drawn in a scene state the phone had never drawn compiled on the submit thread, about 400 ms each on an iPhone 17 (Kokiri Forest after the first boss: frames of 0.25-1.26 s)
+pso_mtl4	on

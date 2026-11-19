@@ -83,6 +83,22 @@ To enroll a cut for any game's own module:
   - FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition: the 1.0.1 cheatslips file, anchored on the cartridge's `main`, compiles to exactly the hand-verified +0x43680 on 1.0.3 (12 of 12 cheats, 4 of 4 references each). The 1.0.3 file (5 ASM cheats with a code cave, 7 stat cheats, Mog's fatigue) compiles back to identical writes on 1.0.3 and to all 18 entries on the cartridge's build (code sites: 4 exact, 3 by body digest, 2 by window).
   - [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md#cheats): a 1.10 Ryujinx list compiles back to identical writes and to 1.00, where every site lies 0x330 lower and the hook site was found by its body digest.
 
+### Build-registered adaptive-view adapters on the frame step state page
+
+- **Symptom:** on a picture taller than 16:9, cached projections, scissors, captures and field ranges keep the 16:9 values: the HUD and inline keyboard sit at the old edges, and a projection the game cached before the shape changed is reused unchanged.
+- **Cause:** the game keeps projection matrices and screen rectangles in cached objects, and its UI jobs can return a retained projection instead of going through the camera's getter. Changing the output size and the camera angle does not invalidate those caches.
+- **Fix:** a build's `FRAME_STEP` callback may also emit an owned ARM64 adapter (assembled from `view.s` by `gen_view_stubs.py`) into the patch area, then register hooks and cache checks with `ctx.site` / `ctx.put`. It shares the frame step state page (`ctx.state`), so no second state page, rewriter table or host file is needed; `dm_fps_state +0x58` carries the target aspect. Where an upstream stub and the adapter need the same site, one chained stub runs the upstream test first and then calls the adapter, with early returns retargeted to the single trailing `ret`. Hooks at a function's entry and after its global-matrix calculation are independent sites and can coexist.
+- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#adaptive-view-consistency-current), 3.0.3 `main`, with `DM_SCREEN_ASPECT`.
+- **Check:** the 14 upstream screen-shape sites, 21 adapter hooks and 29 caches rewrite one image (`0x265140` has one cut); the chained stub's three early returns reach its `ret` by disassembly; `test_view_stubs.py` and `test_patches.py` pass. Device validation is open.
+
+### A hand-emitted stub that calls must save x30, not only its argument registers
+
+- **Symptom:** the game freezes on its first frame after a site is hit, the picture stops while audio continues, and the crash report has `pc == lr` with a fault address equal to `sp` inside a mapped stack region. Under lldb `sp` rises 16 bytes per iteration and the faulting instruction is a `ret` branching to itself.
+- **Cause:** a stub emitted by hand saved the argument register it had to preserve with `str x0,[sp,#-16]!` and restored it with `ldr x0,[sp],#16` before its `ret`. The `bl` in between overwrites `x30` with its own return address, so the trailing `ret` returns to the instruction right after that `bl` — the restore — and the stub loops. Each pass pops 16 bytes without a matching push, so `sp` climbs until it reaches an unmapped page, and the store there faults. A stub that ends in a tail `b` instead of `bl` + `ret` has no such contract and needs nothing saved.
+- **Fix:** save and restore `x30` with the argument register in one pair: `stp x0,x30,[sp,#-16]!` … `ldp x0,x30,[sp],#16`, which keeps the frame at 16 bytes and leaves early returns that skip the `bl` unchanged. Any hand-emitted stub that calls and then returns must treat `x30` as live across the call; only a leaf stub may omit it.
+- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#adaptive-view-consistency-current), 3.0.3 `main+0x265140` (`nn::ui2d::DrawInfo::SetProjectionMtx`), the chained stub that runs the y-row division and then calls the adapter's `_dm_view_ui_projection`. The same site on the branch without the adapter chain is a bare `ret` and was never affected.
+- **Check:** disassemble the emitted stub for the `stp` / `ldp` pair around the `bl`; a rewrite of the same `main` from its original NSO is byte-identical to the one validated on the device.
+
 ## Thread registers
 
 ### System register accesses through x18

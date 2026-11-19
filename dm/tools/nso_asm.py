@@ -7,6 +7,12 @@ def BL(frm, to): return B(frm, to) | 0x80000000
 def CBNZW(t, frm, to):   # cbnz wt, to
     off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
     return 0x35000000 | (((off >> 2) & 0x7FFFF) << 5) | t
+def CBZ(t, frm, to):   # cbz wt, to
+    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+    return 0x34000000 | (((off >> 2) & 0x7FFFF) << 5) | t
+def TBZ(t, bit, frm, to):   # tbz wt, #bit, to
+    off = to - frm; assert -(1 << 15) <= off < (1 << 15) and off % 4 == 0
+    return 0x36000000 | ((bit & 31) << 19) | (((off >> 2) & 0x3FFF) << 5) | t
 def STP(t, t2, n, off): return 0xA9000000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
 def LDP(t, t2, n, off): return 0xA9400000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
 def STP_PRE(t, t2, n, off): return 0xA9800000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
@@ -28,6 +34,9 @@ def CMPR(n, m): return 0xEB00001F | (m << 16) | (n << 5)   # cmp xn, xm (subs xz
 def BEQ(frm, to):
     off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
     return 0x54000000 | (((off >> 2) & 0x7FFFF) << 5)
+def BCOND(cond, frm, to):   # b.<cond> to: 0 EQ, 1 NE, 12 GT, 13 LE, ...
+    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+    return 0x54000000 | (cond & 15) | (((off >> 2) & 0x7FFFF) << 5)
 def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
 def BLR(n): return 0xD63F0000 | (n << 5)
 NOP = 0xD503201F

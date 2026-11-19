@@ -360,7 +360,9 @@ static void handle_webrtc_offer(const httplib::Request &req, httplib::Response &
                             if (pkt->has_motion) {
                                 float acc[3] = { pkt->acc_x / 1000.0f, pkt->acc_y / 1000.0f, pkt->acc_z / 1000.0f };
                                 float rot[3] = { pkt->rot_x / 1000.0f, pkt->rot_y / 1000.0f, pkt->rot_z / 1000.0f };
-                                dm_motion_set(pid, acc, rot);
+                                dm_motion_set_switch(pid, acc, rot);
+                            } else {
+                                dm_motion_clear(pid);
                             }
                         }
                     }

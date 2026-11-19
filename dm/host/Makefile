@@ -94,6 +94,9 @@ WEBRTC_SRC = webrtc/webrtc_streamer.cpp webrtc/vtb_encoder.mm webrtc/opus_encode
 SRC += $(WEBRTC_SRC)
 endif
 HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework AVFAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+ifeq ($(WEBRTC_AVAILABLE),1)
+HOST_FRAMEWORKS += -framework MetalPerformanceShaders
+endif
 HOST_SRC = $(SRC) $(GFX)
 ifneq ($(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))),)
 $(error host sources outside dm/host and dm/gfx need an object rule: $(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))))

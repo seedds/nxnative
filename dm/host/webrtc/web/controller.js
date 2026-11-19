@@ -1,5 +1,17 @@
 // WebRTC Streamer & Remote Gamepad Controller Client
 
+const FLAT_ICONS = {
+  stream: `<svg class="ui-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>`,
+  controller: `<svg class="ui-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 11h4M8 9v4M15 11h.01M18 11h.01M17.3 5H6.7a4 4 0 0 0-4 3.6L2 15a4 4 0 0 0 4 4c1.2 0 2.3-.5 3-1.4L10.5 16h3l1.5 1.6A4 4 0 0 0 18 19a4 4 0 0 0 4-4l-.7-6.4A4 4 0 0 0 17.3 5z"/></svg>`,
+  gear: `<svg class="ui-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+  wheel: `<svg class="ui-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v6M3.5 16.5l6-3M20.5 16.5l-6-3"/></svg>`,
+  crosshair: `<svg class="ui-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>`,
+  soundOn: `<svg class="ui-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`,
+  soundMuted: `<svg class="ui-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`,
+  fullscreen: `<svg class="ui-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`,
+  exitFullscreen: `<svg class="ui-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>`
+};
+
 class WebRTCController {
   constructor() {
     this.playerId = 0;
@@ -163,7 +175,7 @@ class WebRTCController {
       unmuteBtn.addEventListener('click', () => {
         if (this.audioEl) {
           this.audioEl.muted = !this.audioEl.muted;
-          unmuteBtn.textContent = this.audioEl.muted ? '🔇' : '🔊';
+          unmuteBtn.innerHTML = this.audioEl.muted ? FLAT_ICONS.soundMuted : FLAT_ICONS.soundOn;
           if (!this.audioEl.muted) {
             this.audioEl.play().catch(() => {});
           }
@@ -194,7 +206,7 @@ class WebRTCController {
           if (screen.orientation && screen.orientation.lock) {
             screen.orientation.lock('landscape').catch(() => {});
           }
-          fsBtn.textContent = '⛶ Normal';
+          fsBtn.innerHTML = `${FLAT_ICONS.exitFullscreen}`;
         } else {
           if (document.exitFullscreen) {
             await document.exitFullscreen().catch(() => {});
@@ -204,7 +216,7 @@ class WebRTCController {
           if (screen.orientation && screen.orientation.unlock) {
             screen.orientation.unlock();
           }
-          fsBtn.textContent = '⛶';
+          fsBtn.innerHTML = FLAT_ICONS.fullscreen;
         }
       });
     }
@@ -214,6 +226,7 @@ class WebRTCController {
     const gyroBtn = document.getElementById('gyro-toggle-btn');
     const gyroHeaderBtn = document.getElementById('gyro-header-btn');
     const calibBtn = document.getElementById('gyro-calib-btn');
+    const calibHdrBtn = document.getElementById('gyro-calib-header-btn');
 
     const toggleGyro = async () => {
       if (!this.gyroEnabled) {
@@ -221,8 +234,19 @@ class WebRTCController {
       } else {
         this.gyroEnabled = false;
         this.hasMotion = false;
-        this.updateGyroUI('🔄 Gyro: Off', false);
-        if (calibBtn) calibBtn.style.display = 'none';
+        this.lx = 0;
+        this.rotX = 0;
+        this.rotY = 0;
+        this.rotZ = 0;
+        this.updateGyroUI('Gyro: Off', false);
+        if (calibBtn) {
+          calibBtn.classList.remove('active');
+          calibBtn.style.display = 'none';
+        }
+        if (calibHdrBtn) {
+          calibHdrBtn.classList.remove('active');
+          calibHdrBtn.style.display = 'none';
+        }
       }
     };
 
@@ -239,11 +263,12 @@ class WebRTCController {
       gyroHeaderBtn.addEventListener('click', toggleGyro);
     }
 
-    if (calibBtn) {
-      calibBtn.addEventListener('click', () => {
-        this.gyroZeroRoll = this.currentRoll || 0;
-      });
-    }
+    const triggerRecenter = () => {
+      this.recenterGyro();
+    };
+
+    if (calibBtn) calibBtn.addEventListener('click', triggerRecenter);
+    if (calibHdrBtn) calibHdrBtn.addEventListener('click', triggerRecenter);
 
     // Keyboard Overlay Toggle (Desktop)
     const kbdToggleBtn = document.getElementById('kbd-toggle-btn');
@@ -302,7 +327,7 @@ class WebRTCController {
     if (mode === 'controller-only') {
       this.appContainer.classList.add('mode-controller-only');
       this.appContainer.classList.remove('mode-full-stream');
-      if (this.modeToggleBtn) this.modeToggleBtn.textContent = '🎮 Pad';
+      if (this.modeToggleBtn) this.modeToggleBtn.innerHTML = `${FLAT_ICONS.controller} <span class="btn-lbl">Pad</span>`;
       if (this.resToggleBtn) this.resToggleBtn.style.display = 'none';
       if (resRow) resRow.style.display = 'none';
       document.querySelectorAll('.mode-btn').forEach(b => {
@@ -311,7 +336,7 @@ class WebRTCController {
     } else {
       this.appContainer.classList.remove('mode-controller-only');
       this.appContainer.classList.add('mode-full-stream');
-      if (this.modeToggleBtn) this.modeToggleBtn.textContent = '📺 Stream';
+      if (this.modeToggleBtn) this.modeToggleBtn.innerHTML = `${FLAT_ICONS.stream} <span class="btn-lbl">Stream</span>`;
       if (this.resToggleBtn) this.resToggleBtn.style.display = '';
       if (resRow) resRow.style.display = '';
       document.querySelectorAll('.mode-btn').forEach(b => {
@@ -323,7 +348,7 @@ class WebRTCController {
   setResolution(res, notifyHost = false) {
     this.streamResolution = (res === '720' || res === '720p') ? '720' : '480';
     if (this.resToggleBtn) {
-      this.resToggleBtn.textContent = `📺 ${this.streamResolution}p`;
+      this.resToggleBtn.innerHTML = `${FLAT_ICONS.gear} <span class="btn-lbl">${this.streamResolution}p</span>`;
     }
     document.querySelectorAll('.res-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.res === this.streamResolution);
@@ -342,7 +367,7 @@ class WebRTCController {
       const httpsPort = '8443';
       const httpsUrl = `https://${window.location.hostname}:${httpsPort}/?mode=${(this.operatingMode === 'full-stream') ? 'stream' : 'controller'}&p=${this.playerId + 1}`;
       const userChoice = confirm(
-        '⚠️ Browser (Android Chrome / Safari) memblokir sensor Gyro pada koneksi HTTP biasa.\n\n' +
+        '[Peringatan] Browser (Android Chrome / Safari) memblokir sensor Gyro pada koneksi HTTP biasa.\n\n' +
         'Pindah ke versi HTTPS agar Gyro aktif?\n' + httpsUrl + '\n\n' +
         'Catatan: Di halaman HTTPS, klik "Advanced" lalu "Proceed to ' + window.location.hostname + ' (unsafe)" untuk mengizinkan sertifikat lokal.'
       );
@@ -384,27 +409,56 @@ class WebRTCController {
     }
   }
 
-  updateGyroUI(text, active) {
+  updateGyroUI(label, active) {
+    const cleanText = (label || '').replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim();
     const gyroBtn = document.getElementById('gyro-toggle-btn');
     const gyroHeaderBtn = document.getElementById('gyro-header-btn');
     if (gyroBtn) {
-      gyroBtn.textContent = text;
+      gyroBtn.innerHTML = `${FLAT_ICONS.wheel} <span class="gyro-stat-lbl">${cleanText || 'Gyro'}</span>`;
       gyroBtn.classList.toggle('active', active);
     }
     if (gyroHeaderBtn) {
-      gyroHeaderBtn.textContent = text;
+      gyroHeaderBtn.innerHTML = `${FLAT_ICONS.wheel} <span class="btn-lbl">${cleanText || 'Gyro'}</span>`;
       gyroHeaderBtn.classList.toggle('active', active);
     }
+  }
+
+  recenterGyro() {
+    this.gyroZeroRoll = this.currentRoll || 0;
+    this.lx = 0;
+    this.rotX = 0;
+    this.rotY = 0;
+    this.rotZ = 0;
+    if (navigator.vibrate) navigator.vibrate(25);
+    const flashBtn = (id) => {
+      const b = document.getElementById(id);
+      if (b) {
+        const oldHtml = b.innerHTML;
+        b.innerHTML = `${FLAT_ICONS.crosshair} <span class="calib-stat-lbl">Zeroed!</span>`;
+        setTimeout(() => { b.innerHTML = oldHtml; }, 700);
+      }
+    };
+    flashBtn('gyro-calib-btn');
+    flashBtn('gyro-calib-header-btn');
   }
 
   enableGyroListeners() {
     if (this.isDesktop) return;
     this.gyroEnabled = true;
-    this.updateGyroUI('🔄 Menunggu Sensor...', true);
+    this.updateGyroUI('Menunggu Sensor...', true);
+
     const calibBtn = document.getElementById('gyro-calib-btn');
-    if (calibBtn) calibBtn.style.display = 'inline-block';
+    if (calibBtn) {
+      calibBtn.classList.add('active');
+      calibBtn.style.display = 'inline-flex';
+    }
+    const calibHdrBtn = document.getElementById('gyro-calib-header-btn');
+    if (calibHdrBtn) {
+      calibHdrBtn.classList.add('active');
+    }
 
     let receivedEvent = false;
+    let autoCalibrated = false;
 
     // Handler for deviceorientation
     const handleOrientation = (e) => {
@@ -412,48 +466,69 @@ class WebRTCController {
       this.hasMotion = true;
       receivedEvent = true;
 
-      const isLandscape = (Math.abs(window.orientation) === 90);
+      // Robust orientation detection across Safari, Chrome, and PWA
+      let angle = 0;
+      if (window.screen && window.screen.orientation && typeof window.screen.orientation.angle === 'number') {
+        angle = window.screen.orientation.angle;
+      } else if (typeof window.orientation === 'number') {
+        angle = window.orientation;
+      } else if (window.innerWidth > window.innerHeight) {
+        angle = 90;
+      }
 
-      // Inverted rawTilt so tilting phone left steers left, and tilting phone right steers right
       let rawTilt = 0;
-      if (isLandscape) {
-        if (window.orientation === 90) {
-          rawTilt = (e.beta || 0);
-        } else {
-          rawTilt = -(e.beta || 0);
-        }
-      } else {
+      if (angle === 90) {
+        // Landscape (top of phone on the left): tilting wheel left drops top (negative beta)
+        rawTilt = (e.beta || 0);
+      } else if (angle === 270 || angle === -90) {
+        // Landscape (top of phone on the right)
+        rawTilt = -(e.beta || 0);
+      } else if (angle === 180) {
+        // Upside down portrait
         rawTilt = -(e.gamma || 0);
+      } else {
+        // Portrait (Vertical mode 0 deg): tilting left is negative gamma
+        rawTilt = (e.gamma || 0);
       }
 
       this.currentRoll = rawTilt;
+
+      // Auto-center on first live reading: sets initial resting posture as true 0°
+      if (!autoCalibrated) {
+        this.gyroZeroRoll = rawTilt;
+        autoCalibrated = true;
+      }
+
       let netTilt = rawTilt - (this.gyroZeroRoll || 0);
 
-      // Deadzone diperbesar ke 6.0 deg (sebelumnya 2.5 deg) agar tidak mudah berbelok saat HP dipegang santai
-      const gyroDeadzone = 6.0;
-      const gyroMaxAngle = 26.0;
+      // Deadzone 2.0° filters hand resting tremor,
+      // while progressive 1.15 curve provides responsive, smooth steering
+      const gyroDeadzone = 2.0;
+      const gyroMaxAngle = 25.0;
       let normalized = 0;
       const absTilt = Math.abs(netTilt);
       if (absTilt > gyroDeadzone) {
         const span = gyroMaxAngle - gyroDeadzone;
-        normalized = Math.sign(netTilt) * Math.min(1.0, (absTilt - gyroDeadzone) / span);
+        const linear = Math.min(1.0, (absTilt - gyroDeadzone) / span);
+        normalized = Math.sign(netTilt) * Math.pow(linear, 1.15);
+      } else {
+        normalized = 0;
       }
 
       const deg = Math.round(absTilt);
-      let label = '🔄 0°';
+      let label = '0°';
       if (absTilt > gyroDeadzone) {
         label = netTilt < 0 ? `◄ ${deg}°` : `${deg}° ►`;
       }
       this.updateGyroUI(label, true);
 
-      // Tilt directly sets Left Stick X (kart steering)
+      // Tilt sets Left Stick X (kart steering) only if not overridden by active touch joystick
       if (!this.touchJoystickActive) {
         this.lx = Math.round(normalized * 32767);
       }
     };
 
     window.addEventListener('deviceorientation', handleOrientation, true);
-    window.addEventListener('deviceorientationabsolute', handleOrientation, true);
 
     // Also devicemotion for 6-axis accelerations and rotations
     window.addEventListener('devicemotion', (e) => {
@@ -471,34 +546,31 @@ class WebRTCController {
         this.rotY = (e.rotationRate.beta || 0) * deg2rad;
         this.rotZ = (e.rotationRate.gamma || 0) * deg2rad;
       }
+      // If within deadzone, zero angular velocity so game never wanders
+      if (Math.abs(this.currentRoll - (this.gyroZeroRoll || 0)) <= 2.0) {
+        this.rotX = 0;
+        this.rotY = 0;
+        this.rotZ = 0;
+      }
     }, true);
 
-    // Generic Sensor API fallback
-    if ('RelativeOrientationSensor' in window) {
-      try {
-        const sensor = new RelativeOrientationSensor({ frequency: 60 });
-        sensor.addEventListener('reading', () => {
-          if (!this.gyroEnabled) return;
-          receivedEvent = true;
-          this.hasMotion = true;
-          // Quaternion to Euler roll
-          const q = sensor.quaternion;
-          if (q) {
-            const roll = Math.atan2(2 * (q[0]*q[1] + q[2]*q[3]), 1 - 2 * (q[1]*q[1] + q[2]*q[2])) * (180 / Math.PI);
-            handleOrientation({ gamma: roll, beta: 0 });
-          }
-        });
-        sensor.start();
-      } catch (err) {}
-    }
+    // Fallback: only if deviceorientation produces no event after 1200ms
+    setTimeout(() => {
+      if (!receivedEvent && this.gyroEnabled) {
+        window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+      }
+    }, 1200);
 
     // Timeout check
     setTimeout(() => {
-      if (!receivedEvent && this.gyroEnabled && gyroBtn) {
-        if (!window.isSecureContext) {
-          gyroBtn.textContent = '🔄 Butuh HTTPS';
-        } else {
-          gyroBtn.textContent = '🔄 Sensor: No Event';
+      if (!receivedEvent && this.gyroEnabled) {
+        const gyroBtn = document.getElementById('gyro-toggle-btn');
+        if (gyroBtn) {
+          if (!window.isSecureContext) {
+            this.updateGyroUI('Butuh HTTPS', false);
+          } else {
+            this.updateGyroUI('Sensor: No Event', false);
+          }
         }
         console.warn('No deviceorientation event received.');
       }
@@ -770,6 +842,7 @@ class WebRTCController {
     const padLeft = document.querySelector('.pad-left');
     if (padLeft) {
       padLeft.addEventListener('touchstart', (e) => {
+        if (this.gyroEnabled) return; // Jangan bajak kemudi saat gyro steering aktif!
         if (touchId !== null) return;
         if (e.target.closest('.touch-btn') && !e.target.closest('#touch-joystick-zone')) return;
         for (let i = 0; i < e.changedTouches.length; i++) {
@@ -779,6 +852,7 @@ class WebRTCController {
       }, { passive: true });
 
       padLeft.addEventListener('touchmove', (e) => {
+        if (this.gyroEnabled) return; // Jangan bajak kemudi saat gyro steering aktif!
         if (touchId === null) {
           if (e.target.closest('.touch-btn') && !e.target.closest('#touch-joystick-zone')) return;
           for (let i = 0; i < e.changedTouches.length; i++) {

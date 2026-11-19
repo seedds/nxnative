@@ -1152,6 +1152,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- the shader split finds no shaders in the RomFS or `main`, even though the game carries a `Skyrim - Shaders.bsa`. → [Bethesda BSA v105 shader files](../reference/shaders.md#bethesda-bsa-v105-shader-files)
 - the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture. → [Firaxis CIVBSF shader libraries](../reference/shaders.md#firaxis-civbsf-shader-libraries)
 - the split finds only the GLSLC outputs in the executable, while the game presents a black picture and reports missing vertex, pixel and compute shaders. → [Larian LSPK packages and BSHD programs](../reference/shaders.md#larian-lspk-packages-and-bshd-programs)
 - the split finds only a loose upscaler pack, while a game's `.shdr` files and scene resources produce no shaders; the host reports missing vertex and pixel shaders and draws a blank picture. → [SHN resources and embedded shader objects](../reference/shaders.md#shn-resources-and-embedded-shader-objects)

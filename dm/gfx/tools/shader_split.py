@@ -427,6 +427,25 @@ def glslc_stage(ctl, code):
     headerless_cs = code[:4] not in (CS_MAGIC, GFX_MAGIC) and len(ctl) >= 0x754 and all(struct.unpack_from('<3I', ctl, 0x748))
     return 'cs' if code[:4] == CS_MAGIC or headerless_cs else sph_stage(code) if code[:4] == GFX_MAGIC and len(code) >= 0x34 else None
 
+def skyrim_fxp_shaders(d, label):
+    """Skyrim Switch's shaders011.fxp: NVN control sections (0x848 bytes) each immediately followed by their code area."""
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c + 0x708 > len(d): continue
+        nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        if not 0x760 <= nctl <= 0x880: continue
+        k = c + nctl
+        if k + 4 > len(d) or d[k:k + 4] not in (GFX_MAGIC, CS_MAGIC): continue
+        ctl = span(d, c, nctl, f'{label} control section @{c:#x}')
+        code = span(d, k, ncode, f'{label} code area @{k:#x}')
+        st = glslc_stage(ctl, code)
+        if st is None: red(f'{label} control section @{c:#x}: no stage in the code area')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label} control section @{c:#x} {st}: {why}')
+        out.append((f'{label}#SKYRIM@{c:#x}', st, ctl, code))
+    return out
+
 def glslc_layout(d, h):
     """The header of the GLSLC output at h → (the whole output's length, section count, first section header, distance between section headers), all relative to the output.
     An NVN2 output (Pokemon Pokopia's G2S containers and main: GPU code version 0xc9 at +0x30, +0x44 zero) has the same section header fields as an NVN output, further along"""
@@ -3658,6 +3677,10 @@ def fzlc_shaders(path, label):
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
+    if GAME.id == '01000A10041EA000' and ext.lower() == '.bsa': return rel, {}, set(), {}
+    if GAME.id == '01000A10041EA000' and ext.lower() == '.fxp' and 'skyrim_shaders' in os.path.normpath(path).split(os.sep):
+        with open(path, 'rb') as f: found = skyrim_fxp_shaders(f.read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), {}
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
@@ -3863,9 +3886,21 @@ def main():
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
     files, results, common = [], [], None
+    skyrim_shader_archives = 0
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
-        files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+        version_files = sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+        files += version_files
+        if GAME.id == '01000A10041EA000':
+            from skyrim_bsa import extract_shaders
+            for archive, archive_rel in version_files:
+                if os.path.basename(archive).lower() != 'skyrim - shaders.bsa': continue
+                skyrim_shader_archives += 1
+                output_dir = os.path.join(os.path.dirname(os.path.abspath(romfs)), 'skyrim_shaders')
+                try: extracted = extract_shaders(archive, output_dir)
+                except (OSError, ValueError) as e: red(f'/{archive_rel}: {e}')
+                files.extend((path, f'{archive_rel}/{member_rel}') for path, member_rel in extracted)
+                print(f'Skyrim shader archive: extracted {len(extracted)} FXP member(s)', flush=True)
         img = nso_image(mainnso)
         if not i:
             import unityfs
@@ -3894,6 +3929,8 @@ def main():
         if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
         results.append(('main', uniq_keys(found), var_pairs(found), {}))
+    if GAME.id == '01000A10041EA000' and not skyrim_shader_archives:
+        red('Skyrim - Shaders.bsa is missing from every game RomFS; the Skyrim FXP shader reader has no input')
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)

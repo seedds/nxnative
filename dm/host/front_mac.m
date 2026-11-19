@@ -1,5 +1,5 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
-// Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
+// Without DM_WINDOW: run the guest on the current thread with the default application task role (front_role.h).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
 // confirmed with A (home_quit.h); the left mouse button is the touchscreen.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
+#include "front_role.h"
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -1580,7 +1581,15 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
-    if (!getenv("DM_WINDOW")) { guest(); return; }
+    if (!getenv("DM_WINDOW")) {
+        kern_return_t kr;
+        int role_status = front_windowless_role(getenv("DM_WINDOWLESS_ROLE"), &kr);
+        if (role_status > 0) LOG("front end: applied the default application task role for windowless play");
+        else if (role_status < 0) LOG("front end: could not apply the default application task role (Mach error %d)", kr);
+        else LOG("front end: kept the existing task role (DM_WINDOWLESS_ROLE=0)");
+        guest();
+        return;
+    }
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];

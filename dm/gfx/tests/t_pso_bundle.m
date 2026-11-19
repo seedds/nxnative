@@ -4,7 +4,8 @@
 // and a draw of a covered pair takes its base from the bundle and captures nothing for the device's own archive;
 // a stamp of another depth mode or other pairs runs the device's prebuild, which still takes the bundled bases it finds; an archive whose bases the probe does not find is not trusted;
 // a folder without this GPU's file and a file that is no archive leave no archive; the compute shaders of the shader map have their pipelines in the archive (cps_new: nothing
-// built), and a shader with function constants or not in the map is built as before.
+// built), and a shader with function constants or not in the map is built as before; a pulling and a shadow-input library whose entry points the reflection names otherwise than
+// the shader's own are loaded by those names (shader_load, pull_load, vin_fn), and the archive holds the base pre_desc makes of them.
 // Without metal-tt (no Metal toolchain) it says so and passes
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
@@ -251,6 +252,51 @@ int main(void) { @autoreleasepool {
         setenv("DM_PSO_BUNDLE", "off", 1); pso_bundle_open(list, arch_plan(nil));
         EXPECT("off: none opened", 0, list.count);
         g_arch_bundle = real;
+    }
+    // The entry points of a vertex shader's pulling and shadow-input libraries are the ones its reflection names under `pull` and `vin` (side_entry), which need not be the shader's
+    // own: one compile unit that holds a shader's entry points and its pulling ones cannot name both main0. shader_load takes the names for pull_load and vin_fn, pre_desc for the
+    // base, and pso_offline.py (vertex_entry) puts that base into the archive. A reflection that names none there means the shader's own names, as the libraries have them today
+    @autoreleasepool {
+        NSString *(^vsrc)(NSArray<NSString *> *) = ^(NSArray<NSString *> *names) {
+            NSMutableString *s = [@"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n" mutableCopy]; int i = 0;
+            for (NSString *n in names) [s appendFormat:@"vertex V %@(uint id [[vertex_id]]) { V o; o.p = float4(float(id & 1), float(id >> 1), %d * 0.125, 1); return o; }\n", n, i++];
+            return s; };
+        NSArray *ownNames = @[@"main0", @"main0_z"], *ownPull = @[@"main0", @"main0_z", @"main0_wl", @"main0_z_wl"];
+        if (!lib(msl, @"vn_b", vsrc(ownNames)) && !lib(msl, @"vn_bp", vsrc(@[@"main0_p", @"main0_zp", @"main0_wl", @"main0_z_wl"])) && !lib(msl, @"vn_bv", vsrc(@[@"main0_v", @"main0_zv"])) &&
+            !lib(msl, @"vo_b", vsrc(ownNames)) && !lib(msl, @"vo_bp", vsrc(ownPull)) && !lib(msl, @"vo_bv", vsrc(ownNames))) {
+            NSString *refl = @"{\"chain\": \"%s\", \"route\": \"B\", \"bindings\": [], \"entry\": \"main0\", \"entry_z\": \"main0_z\", \"vertex_inputs\": [{\"location\": 0, \"msl_type\": \"uint4\"}], "
+                "\"pull\": {%@\"slot\": 16, \"inputs\": [0]}, \"vin\": {%@\"shadow\": [{\"location\": 0, \"float\": 16, \"sint\": 17}]}}";
+            put([msl stringByAppendingPathComponent:@"vn_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN,
+                @"\"entry\": \"main0_p\", \"entry_z\": \"main0_zp\", \"entry_wl\": \"main0_wl\", \"entry_z_wl\": \"main0_z_wl\", ", @"\"entry\": \"main0_v\", \"entry_z\": \"main0_zv\", "]);
+            put([msl stringByAppendingPathComponent:@"vo_b.json"], [NSString stringWithFormat:refl, DMSH_CHAIN, @"", @""]);   // names none
+            for (int z = 0; z < 2; z++) {
+                atomic_store(&g_depth_zero, z);
+                NvShader *vn = shader_load(@"vn_b", 0, 0), *vo = shader_load(@"vo_b", 0, 0);
+                EXPECT("entry names: shaders loaded", 1, vn && vn->fn && vo && vo->fn);
+                if (!vn || !vo) continue;
+                EXPECT("named: the shader's own entry", 1, [vn->fn.name isEqualToString:z ? @"main0_z" : @"main0"]);
+                EXPECT("named: the pulling entry", 1, [pull_fn(vn).name isEqualToString:z ? @"main0_zp" : @"main0_p"]);
+                EXPECT("named: the wide-line entry", 1, [vn->wlfn.name isEqualToString:z ? @"main0_z_wl" : @"main0_wl"]);
+                EXPECT("named: the shadow-input entry", 1, [vin_fn(vn).name isEqualToString:z ? @"main0_zv" : @"main0_v"]);
+                EXPECT("unnamed: the pulling entry has the shader's own name", 1, [pull_fn(vo).name isEqualToString:z ? @"main0_z" : @"main0"]);
+                EXPECT("unnamed: the wide-line entry", 1, [vo->wlfn.name isEqualToString:z ? @"main0_z_wl" : @"main0_wl"]);
+                EXPECT("unnamed: the shadow-input entry", 1, [vin_fn(vo).name isEqualToString:z ? @"main0_z" : @"main0"]);
+            }
+            atomic_store(&g_depth_zero, 0);
+            put([tables stringByAppendingPathComponent:@"names.tsv"], @"vn\tf1\n");
+            NSString *named = [root stringByAppendingPathComponent:@"named"];
+            int rc = sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/names.tsv --out %@ --work %@/named-work --no-compute > %@/pso_named.log 2>&1",
+                         tool, gpu, msl, tables, named, root, root]);
+            EXPECT("named: pso_offline.py made the archive", 0, rc);
+            if (rc) fprintf(stderr, "%s\n", [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_named.log"] encoding:NSUTF8StringEncoding error:nil].UTF8String);
+            NSString *namedPath = [named stringByAppendingFormat:@"/%@.mtl4a", gpu];
+            id<MTL4Archive> namedArchive = arch_file_ok(namedPath) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:namedPath] error:nil] : nil;
+            MTL4RenderPipelineDescriptor *d0 = pre_desc(@"vn", @"f1", 0), *d1 = pre_desc(@"vn", @"f1", 1);
+            EXPECT("named: archive opened", 1, namedArchive != nil);
+            EXPECT("named: the prebuild's bases name the pulling library's entry points", 1, d0 != nil && d1 != nil);
+            EXPECT("named: the host's base found in the archive", 1, d0 && [namedArchive newRenderPipelineStateWithDescriptor:d0 error:nil] != nil);
+            EXPECT("named: no base of the near = 0 entry", 0, d1 && [namedArchive newRenderPipelineStateWithDescriptor:d1 error:nil] != nil);
+        }
     }
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_bundle: %d checks, %d failed\n", checks, failed);

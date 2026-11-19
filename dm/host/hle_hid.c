@@ -1670,8 +1670,11 @@ HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; 
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for a connected controller and on connect / disconnect", void, h_hid_BindStyleEv,
           const uint32_t *id, void *ev, int clear) {
     hle_bind_system_event(ev, clear);
-    int slot = style_slot(*id); uint32_t st = style_of(*id);
-    if (slot >= 0) { pthread_mutex_lock(&g_style_lock); g_style_ev[slot] = ev; g_style_told[slot] = st; pthread_mutex_unlock(&g_style_lock); }
+    // The style is read under the lock: a controller that came between a read before it and the lock was reported by styles_sync to no bound event and told as seen, so
+    // the bind would have told the style from before it and signalled nothing (t_hid t_bind_gap)
+    int slot = style_slot(*id); uint32_t st;
+    if (slot >= 0) { pthread_mutex_lock(&g_style_lock); g_style_ev[slot] = ev; g_style_told[slot] = st = style_of(*id); pthread_mutex_unlock(&g_style_lock); }
+    else st = style_of(*id);
     if (st) hle_signal_system_event(ev);
 }
 // The Switch's player LEDs by npad (No1 1, No2 1-2, No3 1-3, No4 1-4, No5 1+4, No6 1+3, No7 1+3+4, No8 2+3; bit 0 = LED 1); Handheld and Other light LED 1 as before

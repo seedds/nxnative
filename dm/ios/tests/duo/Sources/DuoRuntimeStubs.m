@@ -3,7 +3,6 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "haptics_apple.h"
-#include "hle.h"
 #include <pthread.h>
 #include <string.h>
 
@@ -71,6 +70,7 @@ void dm_pad_players(uint32_t mask) {
     g_state.connected_players = mask;
     pthread_mutex_unlock(&g_input_lock);
 }
+int dm_players_reported(void) { return __builtin_popcount(duo_harness_state().connected_players | 1u); }
 
 void dm_motion_set(int player, const float acceleration[3], const float rotation[3]) {
     if (player < 0 || player >= DM_PLAYERS || !acceleration || !rotation) return;
@@ -101,14 +101,11 @@ void dm_set_opmode(int mode) { g_opmode = mode; }
 static int g_rumble = 1;
 void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
-void dm_audio_route_changed(void) {}   // no audio renderer in this UI harness
-void dm_movie_active(int active) { (void)active; }   // no movie decoder in this UI harness
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 
 int front_ios_boot_ok(void) { return 1; }
-int front_web_touch(void) { return 0; }   // the harness presents no offline web page
-int dm_players_reported(void) { return __builtin_popcount(duo_harness_state().connected_players | 1u); }
+bool front_ios_hud_enabled_from_saved_choice(void) { return false; }   // the harness does not enable the Metal HUD at launch
 void front_ios_boot(void) {}
 bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
 
@@ -119,9 +116,12 @@ __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
+void dm_audio_route_changed(void) {}
+void dm_movie_active(int active) { (void)active; }
 void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 const char *front_ios_boot_message(void) { return NULL; }
 const char *front_ios_device_check(void) { return NULL; }   // a supported GPU
 void dm_cloud_saves_env(void) {}
 int save_sync_flush(int timeout_ms) { (void)timeout_ms; return 1; }
+int front_web_touch(void) { return 0; }

@@ -45,7 +45,7 @@ def charsets():
     }
 
 def cut(src, out, chars, name):
-    f = TTFont(src)
+    f = TTFont(src, fontNumber=0)
     have = sorted(c for c in chars if c in (f.getBestCmap() or {}))
     # No hinting: its program sizes the engine's interpreter memory (Arial Unicode: 4,139 stack elements, a 9 KB prep). Of the layout tables only kerning: GSUB's forms grow the tables and the glyph count
     o = subset.Options(hinting=False, layout_features=['kern'], name_IDs=['*'], name_languages=['*'], notdef_outline=True, recalc_bounds=True)

@@ -85,12 +85,12 @@ class LdcOffset(unittest.TestCase):
         self.assertNotIn('65472', msl)   # 0xffc0 read as unsigned: 64 KiB away
 
     def test_dynamic_uniform_load_compares_rows_and_keeps_its_select(self):
-        import dmsh_fetch
+        import dmsh_rewrite
 
         msl = self.translate(s2r_tid_x(59), LDC_64_NEG, sts(4, 0), sts(5, 4), EXIT)
         self.assertRegex(msl, r'uint\(_\d+\) < \(\(\*spvDescriptorSet0\.cp_c25\)\._m0\[0\]\.w >> 4u\)')
         self.assertNotIn('>> 2u);', msl)
-        selected = dmsh_fetch.select_guards(msl)
+        selected = dmsh_rewrite.select_guards(msl)
         self.assertRegex(selected, r'select\(0\.0, \(\*spvDescriptorSet0\.cp_c6\)\._m0\[_\d+ \? _\d+ : 0\]\[_\d+\], _\d+\)')
 
     def test_a_fixed_word_outside_the_bank_reads_zero(self):

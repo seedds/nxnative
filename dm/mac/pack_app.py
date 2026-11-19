@@ -19,6 +19,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools'))
+import nso_syms
 import romfs as rfs
 import shader_lib
 import vol_space   # the space a build may write, with what APFS frees on demand
@@ -100,7 +101,7 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
         for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
+             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'AVFAudio', '-framework', 'CoreAudio'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -415,7 +416,7 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py', HERE.parent / 'tools/nso_syms.py'] + swift_sources()
         large = {*msls, *pso, *(p for x in programs for p in x[5])}   # the shader libraries and pipeline archives (13.5 GB for Ocarina of Time): by stat, as the RomFS trees below
         def tree(p):   # a folder's entries; a RomFS image's one row as a large file's (as_packed)
             rows = inventory(Path(p))
@@ -464,7 +465,7 @@ def pack(a):
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
-    msl_dst = res / 'msl' / (a.msl_name or msl.name)
+    msl_dst = res / 'msl' / (a.msl_name or shader_lib.name_of(msl))
     old_app = out if out.is_dir() else None
     took = {f[0]: f[1:] for f in inputs['files']}   # what the app's key took of each selected file
     common = [DATA_FORMAT, a.sign, str(codesign), digest(codesign), a.bundle_id or a.title_id]
@@ -484,9 +485,13 @@ def pack(a):
             whole = pool.submit(digest, image) if image else None
             d.mkdir(parents=True); copy_msl(msl, msls, d / msl_dst.name, clone['msl'])
             if whole: read[str(image)] = whole.result()
-        for n, _, pmsl, _, _, pmsls, _ in programs: (d / f'p{n}').mkdir(); copy_msl(pmsl, pmsls, d / f'p{n}' / pmsl.name, can_clone(pmsls[0], res))
+        for n, _, pmsl, _, _, pmsls, _ in programs:
+            program_dir = d / f'p{n}'
+            program_dir.mkdir()
+            copy_msl(pmsl, pmsls, program_dir / shader_lib.name_of(pmsl), can_clone(pmsls[0], res))
     lib_code = [digest(Path(shader_lib.__file__)), digest(Path(rfs.__file__))]   # what writes a chain library's one file
-    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], [(x[0], x[2].name, [took[str(p)] for p in x[5]]) for x in programs]], fill_msl)
+    program_lib_keys = [(n, shader_lib.name_of(pmsl), [took[str(p)] for p in pmsls]) for n, _, pmsl, _, _, pmsls, _ in programs]
+    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], program_lib_keys], fill_msl)
     if aoc: place('AddOnContent', 'aoc', 'add-on content', inventory(aoc), lambda d: copy([aoc], d, clone['aoc']))
     if pso: place('PipelineArchive', 'pso', 'pipeline archive', [took[str(p)] for p in pso], lambda d: (d.mkdir(parents=True), copy(pso, d, clone['pso'])))
     rtop = 'romfs.img' if romfs.is_file() else 'romfs'
@@ -509,6 +514,8 @@ def pack(a):
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
     info['DMModuleFiles'] = [p.name for p in mods]
+    if nso_syms.audio_input_capable(mods + [module for program in programs for module in program[4]]):
+        info['NSMicrophoneUsageDescription'] = f'{a.name} uses the microphone for in-game audio input.'
     commit = source_commit()
     if commit: info['DMCommit'] = commit
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)

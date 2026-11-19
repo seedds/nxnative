@@ -189,6 +189,13 @@ HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStat
     (void)uid; for (int i = 0; out && ids && i < n; i++) { out[3 * i] = ids[i]; out[3 * i + 1] = 0; out[3 * i + 2] = 0; }
     return RES_OK;
 }
+// The overload without a Uid returns the number of records written. In SDK 8 it gets that count through the applet proxy, which is null on the host.
+// With no system play log there are zero records (Persona 5 Strikers checks the count at main+0x10e78c before reading the array).
+HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStatisticsEPKNS_13ApplicationIdEi", "play statistics: empty system play log",
+          int, h_pdm_QueryStatsAll, void *out, const uint64_t *ids, int n) {
+    (void)out; (void)ids; (void)n;
+    return 0;
+}
 
 // ---------- web: web page applet (online lobby). Unavailable ----------
 HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "online lobby web applet (cut)", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage (cut)"); return RES_FAIL; }

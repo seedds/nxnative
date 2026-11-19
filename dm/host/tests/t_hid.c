@@ -3,13 +3,23 @@
 #include <time.h>
 #include <unistd.h>
 #include <sched.h>
+#include <pthread.h>
 static int hid_clock_gettime(clockid_t clock, struct timespec *ts);
 static int hid_usleep(useconds_t usec);
+static int hid_mutex_lock(pthread_mutex_t *m);
 #define clock_gettime hid_clock_gettime
 #define usleep hid_usleep
+#define pthread_mutex_lock hid_mutex_lock
 #include "../hle_hid.c"
 #undef clock_gettime
 #undef usleep
+#undef pthread_mutex_lock
+// Another thread's turn just before g_style_lock is taken (t_bind_gap): run once at the next lock of it, before the lock
+static void (*style_lock_turn)(void);
+static int hid_mutex_lock(pthread_mutex_t *m) {
+    if (m == &g_style_lock && style_lock_turn) { void (*f)(void) = style_lock_turn; style_lock_turn = NULL; f(); }
+    return pthread_mutex_lock(m);
+}
 #include "../pad_slots.h"
 void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
 void front_web_shot(const char *path) { (void)path; }
@@ -1701,6 +1711,23 @@ static void t_unsupported_style(void) {
     h_hid_SetStyles(0xffffffffu); pthread_mutex_lock(&g_style_lock); g_style_ev[0] = NULL; pthread_mutex_unlock(&g_style_lock);
 }
 
+// A controller that arrives while the game binds its npad's style event: the front end's report (dm_pad_players → styles_sync) runs on its own thread, here just before the bind
+// takes g_style_lock. The report finds no event bound and signals nothing, so the bind must read the style under the lock and signal it; a style read before the lock was
+// the one before the controller came, and the game heard nothing of player 3 until some later change
+static void third_player_comes(void) { dm_pad_players(0x7); }
+static void t_bind_gap(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, 2, 3}, 4); h_hid_SetStyles(STYLE_FULLKEY); dm_pad_players(0x1);
+    static uint8_t ev2[0x40]; g_signals = 0; g_signalled = NULL;
+    style_lock_turn = third_player_comes;
+    h_hid_BindStyleEv(&(uint32_t){2}, ev2, 0);
+    CHECK(!style_lock_turn, "the report ran inside the bind");
+    CHECK(h_hid_GetStyle(&(uint32_t){2}) == STYLE_FULLKEY, "player 3 is on No3");
+    CHECK(g_signalled == ev2, "a controller that came during the bind: No3's style event signalled by the bind (after the report's signal of No2's)");
+    g_signals = 0; dm_hid_opmode_changed();
+    CHECK(g_signals == 0, "the bind told No3's style: a report with no change signals nothing");
+    dm_pad_players(0x1); g_signals = 0; g_signalled = NULL;
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     setenv("DM_IMU_DELAY", "0", 1);   // the tests of the live history read it at the present; t_live_delay checks the playout delay
@@ -1764,6 +1791,7 @@ int main(void) {
         CHECK(pad_slot_take_lowest(&f, &o[DM_PLAYERS], "pad") == -1, "press: none left when every player is held");
         CHECK(pad_slot_take_lowest(&f, NULL, "pad") == -1, "press: no owner, no slot");
     }
+    t_bind_gap();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

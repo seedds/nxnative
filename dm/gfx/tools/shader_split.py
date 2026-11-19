@@ -41,6 +41,7 @@
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze, Metroid Prime Remastered): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
+#   · REDengine 3 (The Witcher 3): GLSLC outputs in RDHS material caches and FZLC static caches, see rdhs_shaders and fzlc_shaders
 #   · bnd2 (Criterion's Bundle 2: Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): whole GLSLC outputs in its zlib resources, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
@@ -3600,6 +3601,60 @@ def scan_file(args):
         print(f'[RED] {why} (its shaders are left out)', flush=True)
         return args[1], {}, set(), ('unreadable', why, 1)
 
+RDHS, FZLC = b'RDHS', b'FZLC'
+
+def rdhs_shaders(path, label):
+    """REDengine 3's shader caches (The Witcher 3: Wild Hunt — Complete Edition, shadernx.cache in content/content0, content/patch0 and each DLC's content/: 28,491 material shaders).
+    From +0, records {u64 hash, u8 1, u32 raw length, u32 stored length, then one zstd frame of the stored length}; each frame is one whole GLSLC output. The records end where the index
+    (material and technique names with their record hashes) begins: the 16-byte footer is {u64 index offset, 'RDHS', u32 version 3}. The records must end exactly at the index"""
+    zstd = zstd_mod(); out = []
+    with open(path, 'rb') as f:
+        size = f.seek(0, 2); f.seek(size - 16); idx, magic, ver = struct.unpack('<Q4sI', f.read(16))
+        if magic != RDHS or ver != 3 or not 0 <= idx <= size - 16: red(f'{label}: footer {magic!r} version {ver}, index {idx:#x}: not a version 3 RDHS shader cache')
+        f.seek(0); d = f.read(idx)
+    pos = n = 0
+    while pos < idx:
+        where = f'{label}: record {n} at {pos:#x}'
+        if pos + 17 > idx: red(f'{where}: header runs past the index at {idx:#x}')
+        flag, raw, stored = struct.unpack_from('<BII', d, pos + 8)
+        start, end = pos + 17, pos + 17 + stored
+        if flag != 1 or stored < 4 or end > idx or d[start:start + 4] != ZSTD_MAGIC:
+            red(f'{where}: flag {flag}, stored {stored}, not a zstd frame inside the records')
+        try: blob = zstd.decompress(d[start:end])
+        except zstd.ZstdError as e: red(f'{where}: invalid zstd frame ({e})')
+        if len(blob) != raw: red(f'{where} decompresses to {len(blob)} bytes, its header says {raw}')
+        got = glslc_shaders(blob, f'{label}@{pos:#x}', need=False)
+        if not got: red(f'{where} holds no whole GLSLC output')
+        out += got; pos = end; n += 1
+    return out
+
+def fzlc_shaders(path, label):
+    """REDengine 3's static shader cache (staticshadernx.cache in content/content0: the 619 engine shaders, lighting, post-processing and all 46 compute shaders; the DLC copies are empty 804-byte
+    stubs). Header {'FZLC', u32 chunk count, u32 first chunk's offset}, then per chunk {u32 stored length, u32 raw length, u32 next chunk's offset}; each chunk is one zstd frame of at most 1 MiB.
+    The GLSLC outputs run across chunk boundaries, so the chunks are joined before the outputs are read"""
+    zstd = zstd_mod()
+    with open(path, 'rb') as f: d = f.read()
+    count, at = field(d, '<II', 4, label)
+    if 12 + 12 * count > at or at > len(d): red(f'{label}: {count} chunks with data at {at:#x} in {len(d)} bytes')
+    parts = []
+    for i in range(count):
+        stored, raw, nxt = struct.unpack_from('<3I', d, 12 + 12 * i)
+        where = f'{label}: chunk {i} at {at:#x}'
+        if not stored:
+            if raw: red(f'{where}: {raw} decoded bytes but no stored data')
+            continue
+        # a chunk whose stored length equals its raw length is kept uncompressed (the DLC stubs: one 28-byte chunk, next offset 0)
+        end = at + stored
+        if end > len(d) or i + 1 < count and nxt != end: red(f'{where}: stored {stored}, next {nxt:#x}: inconsistent')
+        p = d[at:end]
+        if stored != raw:
+            if not p.startswith(ZSTD_MAGIC): red(f'{where}: compressed data has no zstd frame header')
+            try: p = zstd.decompress(p)
+            except zstd.ZstdError as e: red(f'{where}: invalid zstd frame ({e})')
+        if len(p) != raw: red(f'{where} decompresses to {len(p)} bytes, its entry says {raw}')
+        parts.append(p); at = end
+    return glslc_shaders(b''.join(parts), label, need=False)
+
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
@@ -3722,6 +3777,17 @@ def scan_file_in(args):
                 if '.fx' in entry[0] or '/shaders/' in entry[0] or entry[0].endswith(('.vs.bin', '.ps.bin', '.fs.bin')):
                     found += phyre_shaders(vbf.read(f, entry), f'/{rel}/{entry[0]}')
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == FZLC:   # REDengine 3's static shader cache (fzlc_shaders)
+        found += fzlc_shaders(path, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[8:9] == b'\x01' or os.path.basename(rel) == 'shadernx.cache':   # require the footer even under the engine's filename, which also lets us diagnose a damaged first flag
+        with open(path, 'rb') as f:
+            size = f.seek(0, 2)
+            if size >= 16: f.seek(size - 8)
+            tail = f.read(4) if size >= 16 else b''
+        if tail == RDHS:
+            found += rdhs_shaders(path, '/' + rel)
+            return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()

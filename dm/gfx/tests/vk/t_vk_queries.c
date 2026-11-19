@@ -66,6 +66,35 @@ static void stats(NVNqueue *q, hv_pool *mp, hv_cmds *c, NVNprogram *prog, NVNpro
     }
 }
 
+// DM_DETCLOCK (threads.md, "GPU timestamps on the wall clock under DM_DETCLOCK"): the guest clock is virtual time, so every report takes the guest clock at its record,
+// whatever the GPU's own clock says and however long the GPU and the completion take: two values far from the host clock, a step apart, each in one submission; a timestamp,
+// a top-of-pipe timestamp, a counted type and a type written on the CPU at completion. Before the fix the GPU's calibrated time came back (the host clock's rate)
+static void detclock(NVNqueue *q, hv_cmds *c, report *r) {
+    const uint64_t t0 = 7000000123ull, step = 16666667ull;
+    hv_detclock = 1; hv_guest_clock_ns = t0;
+    hv_draw(c, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1);
+    rep(c, NVN_COUNTER_TYPE_TIMESTAMP, &r[16]); rep(c, NVN_COUNTER_TYPE_TIMESTAMP_TOP, &r[17]); rep(c, NVN_COUNTER_TYPE_SAMPLES_PASSED, &r[18]);
+    rep(c, NVN_COUNTER_TYPE_TESS_EVALUATION_SHADER_PRIMITIVES, &r[19]);
+    hv_submit(q, c);
+    hv_guest_clock_ns = t0 + step;
+    hv_draw(c, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1);
+    rep(c, NVN_COUNTER_TYPE_TIMESTAMP, &r[20]); rep(c, NVN_COUNTER_TYPE_SAMPLES_PASSED, &r[21]);
+    plat_sleep_ns(20000000);   // wall time the guest clock does not see
+    hv_submit(q, c);
+    hv_detclock = 0;
+    const uint64_t a = nvn_timestamp_from_ns(t0), b = nvn_timestamp_from_ns(t0 + step);
+    const struct { int i; uint64_t want; const char *label; } d[] = {
+        {16, a, "DM_DETCLOCK: TIMESTAMP holds the guest clock at its record"}, {17, a, "DM_DETCLOCK: TIMESTAMP_TOP the same"},
+        {18, a, "DM_DETCLOCK: a counted type's report (SAMPLES_PASSED) the same"}, {19, a, "DM_DETCLOCK: a type written on the CPU at completion the same"},
+        {20, b, "DM_DETCLOCK: a report one step later holds the clock one step later"}, {21, b, "DM_DETCLOCK: ... and so does a counted type's"},
+    };
+    for (unsigned k = 0; k < sizeof d / sizeof *d; k++) {
+        if (r[d[k].i].timestamp != d[k].want) fprintf(stderr, "report %d: time %llu NVN ticks, expected %llu\n", d[k].i, (unsigned long long)r[d[k].i].timestamp, (unsigned long long)d[k].want);
+        t(d[k].label, r[d[k].i].timestamp == d[k].want);
+    }
+    t("DM_DETCLOCK: the counted type still counts (64 samples since its last report)", r[21].counter - r[18].counter == 64);
+}
+
 int main(void) {
     hv_up("t_vk_queries");
     hv_device(0);
@@ -122,6 +151,7 @@ int main(void) {
     t("TIMESTAMP: the counter field is 0, the timestamp field the time, in order", r[5].counter == 0 && r[5].timestamp >= r[4].timestamp);
     t("TIMESTAMP_TOP: the counter field is 0, the time in the CPU's window", r[6].counter == 0 && r[6].timestamp >= cpu0 && r[6].timestamp <= cpu1);
     t("a counter type Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES) is written with a zero count (declared)", r[7].counter == 0 && r[7].timestamp != 0xEEEEEEEEEEEEEEEEull);
+    detclock(&queue, &c, r);
     stats(&queue, &mp, &c, &prog, &xfbp);
     hv_pool_free(&mp);
     return hv_finish();

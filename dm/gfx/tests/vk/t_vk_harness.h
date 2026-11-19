@@ -63,8 +63,11 @@ int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);   // hle_nvn.c
 // ---------- What the frontend needs of the host (t_frontend.c's stubs) ----------
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return plat_now_ns(); }
-uint64_t guest_ns(void) { return plat_now_ns(); }
-int dm_detclock_enabled(void) { return 0; }
+// A test of DM_DETCLOCK sets hv_detclock: the guest clock is then hv_guest_clock_ns, which only the test moves (the host's virtual time, hle_os.c), and no longer the host clock
+static int hv_detclock;
+static uint64_t hv_guest_clock_ns;
+uint64_t guest_ns(void) { return hv_detclock ? hv_guest_clock_ns : plat_now_ns(); }
+int dm_detclock_enabled(void) { return hv_detclock; }
 void dm_guest_frame_tick(void) {}
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }

@@ -11,7 +11,7 @@
 // Counters (4.6): per pass segment, while a counter of its kind is counted, a precise occlusion query (samples passed), a pipeline statistics query (input vertices and
 // primitives, shader invocations, clipper primitives), a primitives-generated query and a transform feedback stream query (primitives written; step P8); timestamps from
 // vkCmdWriteTimestamp2; at the next point outside a pass a kernel adds a type's segments to its accumulator, converts the timestamp to NVN's 614.4 MHz units on the guest clock
-// (VK_KHR_calibrated_timestamps) and writes the 16-byte report into guest memory, in order on the GPU, so a later command of the same submission reads it (the Metal backend's
+// (VK_KHR_calibrated_timestamps; under DM_DETCLOCK the guest clock at the report's record, report_det) and writes the 16-byte report into guest memory, in order on the GPU, so a later command of the same submission reads it (the Metal backend's
 // CPU reports cannot). Conditional rendering (4.7): a one-thread kernel compares the two counters into a predicate word that the following passes test
 // (VK_EXT_conditional_rendering). Transform feedback (design 6, step P8): native, its counters between segments the backend's own, DrawTransformFeedback through
 // vkCmdDrawIndirectByteCountEXT. Feedback draws (5.5, step P8): a draw that reads an attachment of its pass splits the pass when the pass wrote it, and a pass that only reads
@@ -48,7 +48,8 @@ enum { QK_OCC, QK_STAT, QK_PGEN, QK_XFB, QK_N };
 #define K_STAT_BITS 0x3ffu
 static const uint32_t k_qk_stride[QK_N] = {8, 80, 8, 16};   // bytes of one query's results (64-bit values)
 typedef enum { POST_EVENT, POST_COUNTER } post_kind;
-typedef struct { post_kind kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; } post_op;
+// ts: a counter report's time in NVN ticks fixed at its record (DM_DETCLOCK: report_det); 0 = the guest clock at completion
+typedef struct { post_kind kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t ts; } post_op;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer pre, main; int pre_begun;
     uint64_t fence;            // the fence of the submission it holds, 0 when free
@@ -106,7 +107,7 @@ static void post_run(slot_t *s) {
     for (int i = 0; i < s->nposts; i++) {
         post_op *o = &s->posts[i];
         if (o->kind == POST_EVENT) { dm_guest_write_prepare((void *)(uintptr_t)o->val, 4); if (o->mode == NVN_EVENT_SIGNAL_MODE_ADD) *o->val += o->v; else *o->val = o->v; }
-        else { uint64_t rec[2] = {0, ts_now_nvn()}; dm_guest_write_prepare((void *)(uintptr_t)o->addr, 16); memcpy((void *)(uintptr_t)o->addr, rec, 16); }
+        else { uint64_t rec[2] = {0, o->ts ? o->ts : ts_now_nvn()}; dm_guest_write_prepare((void *)(uintptr_t)o->addr, 16); memcpy((void *)(uintptr_t)o->addr, rec, 16); }
     }
     s->nposts = 0;
 }
@@ -199,9 +200,15 @@ static int g_tf_active;
 typedef struct { uint64_t ctl; uint32_t stride; uint8_t buf; } tf_ctl_ent;
 static tf_ctl_ent g_tf_tab[64]; static int g_tf_ntab, g_tf_next;
 // A report the kernel writes: its kind's queries q0 .. q0 + nq - 1, the timestamp query ts; flags: 1 sum the queries, 2 start from the accumulator, 4 store into the accumulator,
-// 8 the counter field is the timestamp (a timestamp report); kind and field: which results are summed; type: whose accumulator
-typedef struct { uint64_t dst; uint32_t q0, nq, ts, flags; int8_t kind, field; uint8_t type; } report_t;
+// 8 the counter field is the timestamp (a timestamp report); kind and field: which results are summed; type: whose accumulator; det: the time fixed at its record (report_det), 0 =
+// the GPU's timestamp query converted
+typedef struct { uint64_t dst; uint32_t q0, nq, ts, flags; int8_t kind, field; uint8_t type; uint64_t det; } report_t;
 static report_t g_rep[64]; static int g_nrep;
+// DM_DETCLOCK (docs/reference/threads.md): the guest clock is virtual time, which a present moves one step, while the GPU's timestamp queries and the completion thread count
+// on the host's clock. A report's time is then the guest clock when the report is recorded (the game's submission: be_exec runs on the submitting thread), the time a GPU that
+// takes no time would write; a game that measures its GPU's frame against the system tick (Mario vs. Donkey Kong picks its present interval from it) reads the same values in
+// every run. Without the switch: 0, the GPU's own time (threads.md, "GPU timestamps on the wall clock under DM_DETCLOCK")
+static uint64_t report_det(void) { return dm_detclock_enabled() ? ts_now_nvn() : 0; }
 static void calibrate(void) {
     double period = hvk.lim.timestampPeriod > 0 ? hvk.lim.timestampPeriod : 1;
     g_cal_mul = (uint64_t)(period * 384.0 / 625.0 * 4294967296.0);
@@ -608,7 +615,8 @@ static void report_run(VkCommandBuffer cb, const report_t *r) {
     report_push p; memset(&p, 0, sizeof p);
     addr2(p.src, a.dev); addr2(p.acc, g_acc_dev + 8 * (VkDeviceAddress)r->type); addr2(p.ts, r->ts != UINT32_MAX ? a.dev + (VkDeviceAddress)r->nq * stride : 0); addr2(p.dst, dd);
     p.nq = r->nq; p.flags = r->flags | (r->ts != UINT32_MAX ? 16u : 0u); p.stride = stride / 8; p.field = (uint32_t)(r->field > 0 ? r->field : 0);
-    addr2(p.mul, g_cal_mul); addr2(p.g0, g_cal_g0); addr2(p.n0, g_cal_n0);
+    if (r->det) addr2(p.n0, r->det);   // DM_DETCLOCK: the time fixed at the record (mul 0: the GPU's query adds nothing)
+    else { addr2(p.mul, g_cal_mul); addr2(p.g0, g_cal_g0); addr2(p.n0, g_cal_n0); }
     hvk_kernel_dispatch(cb, HVK_K_REPORT, &p, sizeof p, 1);
     g_need_barrier = 1;
 }
@@ -656,7 +664,8 @@ void hvk_report_counter(uint64_t type, uint64_t addr) {
     if (g_cur < 0) return;
     nvn_gw_sbw_note(addr, 16, SBW_REPORT);
     VkCommandBuffer cb = hvk_main();
-    if (!hvk.dev.caps.buffer_device_address) { HVK_RED_ONCE("counter reports need buffer device addresses: written on the CPU at completion with a zero count"); post_add((post_op){POST_COUNTER, NULL, 0, 0, addr, (uint32_t)type}); return; }
+    uint64_t det = report_det();
+    if (!hvk.dev.caps.buffer_device_address) { HVK_RED_ONCE("counter reports need buffer device addresses: written on the CPU at completion with a zero count"); post_add((post_op){POST_COUNTER, NULL, 0, 0, addr, (uint32_t)type, det}); return; }
     if (hvk_dump_passes()) hvk_dump_line("Y %d report type %llu at %#llx", hvk_dump_pass_no(), (unsigned long long)type, (unsigned long long)addr);
     if (type == NVN_COUNTER_TYPE_TIMESTAMP || type == NVN_COUNTER_TYPE_TIMESTAMP_TOP) {
         // {0, time}: a timestamp report's counter field is 0, as the GPU writes it (rendering.md, "Timestamp reports count 0"). A game that wraps a clear in
@@ -664,7 +673,7 @@ void hvk_report_counter(uint64_t type, uint64_t addr) {
         // with the time in the counter field the condition held again and the clear ran on the scene drawn before it
         if (!P.active) hvk_barrier_if_needed(cb);
         uint32_t ts = ts_write(cb, type == NVN_COUNTER_TYPE_TIMESTAMP_TOP);
-        report_queue((report_t){addr, 0, 0, ts, 0u, -1, 0, (uint8_t)type});
+        report_queue((report_t){addr, 0, 0, ts, 0u, -1, 0, (uint8_t)type, det});
         return;
     }
     if (ctr_mapped(type)) {   // a counter the GPU counts: its segments since the last report (or reset) are added to its accumulator, written with a timestamp
@@ -672,7 +681,7 @@ void hvk_report_counter(uint64_t type, uint64_t addr) {
         ctr_start((int)type);   // a report before any reset counts from here
         uint32_t ts = ts_write(cb, 0);
         slot_t *s = &g_slot[g_cur];
-        report_t r = {addr, g_ct[type].first, s->nseg - g_ct[type].first, ts, 1u | (g_ct[type].valid ? 2u : 0u) | 4u, k_ctr[type].kind, k_ctr[type].field, (uint8_t)type};
+        report_t r = {addr, g_ct[type].first, s->nseg - g_ct[type].first, ts, 1u | (g_ct[type].valid ? 2u : 0u) | 4u, k_ctr[type].kind, k_ctr[type].field, (uint8_t)type, det};
         g_ct[type].first = s->nseg; g_ct[type].valid = 1;
         if (P.active) seg_open(cb);
         report_queue(r);
@@ -682,7 +691,7 @@ void hvk_report_counter(uint64_t type, uint64_t addr) {
     if (!(atomic_fetch_or(&seen, 1u << (type & 31)) >> (type & 31) & 1))
         hostvk_log("[RED] [hostvk] counter type %llu (%s): no Vulkan counter on this device, the report is written on the CPU at completion with a zero count", (unsigned long long)type,
                    type < NCTR ? k_ctr[type].name : "unknown");
-    post_add((post_op){POST_COUNTER, NULL, 0, 0, addr, (uint32_t)type});
+    post_add((post_op){POST_COUNTER, NULL, 0, 0, addr, (uint32_t)type, det});
 }
 void hvk_reset_counter(uint64_t type);
 void hvk_reset_counter(uint64_t type) {

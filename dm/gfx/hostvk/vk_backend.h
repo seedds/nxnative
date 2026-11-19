@@ -286,3 +286,4 @@ int hvk_up(void);                     // the device is up, initializing it on th
 // What the frontend's host provides (dm/host): its pre-write hook, before the backend writes guest memory from the CPU (events, counter reports)
 void dm_guest_write_prepare(void *addr, size_t len);
 uint64_t guest_ns(void);              // the guest clock (counter timestamps are on it)
+int dm_detclock_enabled(void);        // DM_DETCLOCK: the guest clock is virtual time (counter reports take their time at their record: vk_commands.c report_det)

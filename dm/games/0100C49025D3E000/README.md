@@ -4,6 +4,10 @@ Update 1.8d.310c (v393216), SDK 22.2.0, on NVN (API 55.15). **Frostbite** 2025.1
 
 On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 logos, the title, the offline notice (no EA servers), the user agreement, the favourite-team setup, the main menu over its 3D training ground, Kick Off, and a Classic Match (Atlanta United v Orlando City at Mercedes-Benz Stadium): the stadium and crowd, the pre-match presentation (tifo, coaches, line-ups), kick-off, and the first half and into the second (67 minutes of match time) played with the pad (passing, shooting, a goal for Orlando, a corner, the in-game tactics tutorial). The game runs at 30 fps on the Switch; here menus and the match run at 60 ([Frame rate](#frame-rate)): frame time p50 16.7 ms, the match clock at its 30 fps rate. Resident memory stays at about 3.5 GB, GPU allocated 1.9 GB.
 
+## Updates 1.8d.6523 (v458752) and 1.8d.f570 (v524288)
+
+`game.tsv` registers both builds (`main` `570dc9f1750fa7ea9df20b95b482d039` and `464512b32a94dd3b6517a5b5d711d0d0`; the `sdk` `fed212d6…` and the renderer NRO `d924da0d…` are the same in both and in 1.8d.310c) and packs v524288, whose shaders number 7,883: `shader_map.tsv` has the two update builds' ten extra `vs_patch.bin` / `ps_patch.bin` rows, and the compute facts and pair tables are unchanged. `hle_fpslock.c` has a frame regulator row for each build (`main+0xda450d8` for 1.8d.6523 and `main+0xda5d0f8` for 1.8d.f570): the setter (`main+0x5d66b70`, then `main+0x5d75db0`) is 1.8d.310c's instruction for instruction and 21 functions load the slot in both, and `nso_fnmap.py` cannot carry it because the eh_frame lists only 405 functions, so each was found by the setter's instruction words. Open: a full match at 60 fps with the log's `FIFA frame regulator` line read.
+
 ## What it needs
 
 | Setting | Where | Why |

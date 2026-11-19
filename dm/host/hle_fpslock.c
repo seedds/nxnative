@@ -52,6 +52,12 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // EA SPORTS FC 27 1.8d.6523: the same regulator moved. The setter main+0x5d66b70 loads the object from [main+0xda450d8] and has the same fmov v1.2d, #30.0; stur q1, [x9, #8]; the tick is
+    // main+0x9a0b690. Found by the setter's instruction pattern (no 310c NSP was on disk for nso_fnmap.py byte matching).
+    { "570dc9f1750fa7ea9df20b95b482d039", "FIFA frame regulator", 0xda450d8, 0x8, FPS_F64, 2, 0 },
+    // EA SPORTS FC 27 1.8d.f570 (v524288): the same regulator, its pointer 0x18020 further on in the data segment. The setter, now main+0x5d75db0, is 1.8d.6523's instruction for instruction
+    // and loads the object from [main+0xda5d0f8]; 21 functions load that slot, as 21 loaded 1.8d.6523's. Found by the setter's instruction words (eh_frame lists only 405 functions).
+    { "464512b32a94dd3b6517a5b5d711d0d0", "FIFA frame regulator", 0xda5d0f8, 0x8, FPS_F64, 2, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 #define MAX_LOCKS (NLOCKS + 7)   // target, Monolith, four Unreal rows, Unity targetFrameRate

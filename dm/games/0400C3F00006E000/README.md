@@ -21,7 +21,7 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 
 ## Shaders
 
-The registered v0 split resolves the strict packing failure. First-copy selection changes 36 map rows, 31 from the BNSH at `0x3328000` and 5 from `0x3345000`. There are 22 source-label changes and 14 additional index-only changes. The 96 embedded occurrences form 40 keys, and all 22 duplicate groups have byte-identical complete controls and code. The full first-copy and last-copy splits emit the same 11,558 records byte for byte by key. The 726 shader facts, 5,171 shader pairs and 4,377 supplemental pairs each match the registered table. Two RomFS duplicate groups have different complete controls, including compute workgroup dimensions for `134406a70d2133de`. Both splits choose the same full records for those keys. [Issue #2950](https://github.com/seedds/nxnative/issues/2950)
+The registered v0 split resolves the strict packing failure. First-copy selection changes 36 map rows, 31 from the BNSH at `0x3328000` and 5 from `0x3345000`. There are 22 source-label changes and 14 additional index-only changes. The 96 embedded occurrences form 40 keys, and all 22 duplicate groups have byte-identical complete controls and code. The full first-copy and last-copy splits emit the same 11,558 records byte for byte by key. The 726 shader facts, 5,171 shader pairs and 4,377 supplemental pairs each match the registered table. [Issue #2950](https://github.com/seedds/nxnative/issues/2950)
 
 The v0 split also verifies the BAHS record filter. It rejects two candidates for the already-removed `agl_common.sharcb` key `9b3f57f8a4011005` and one candidate at `0x2efac` in `DrivePassShaderDefault.sharcb`. All three candidates lie outside the binary entry slots. The v0 map drops the remaining key `492c73d1f5f3d6d6`, so the next 1,079 rows in `vs_shader.bin` each decrease by one index. That removal and reindexing reproduce the last-copy map in order. [BAHS record validation](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry)
 
@@ -33,6 +33,15 @@ The Mac shader build relies on four general changes.
 - 8 pixel shaders use UP2UR with masks 8 and 0x40, and one compute shader (`ab77eaee44cfef88`) SURED: [Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2).
 - The 168 compute shaders of `DrivePassShaderDefault` that declare 48 KB of shared memory build since [Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb); before it, the 3D scene of the title had sky and clouds over black geometry. A probe on the base game (2026-11-09) counted their dispatches from the title to the first race: all direct, of 1 to 3 workgroups, 700 to 2,400 every 300 frames before the race and 6 a frame in it, so the slices indexed modulo 512 they had before never collided here (pull request #1242).
 - `dcb0504c844f1ecc` copies a flat per-primitive attribute into an R8Uint target, so it needs the integer entry point `fs_uint` now gives such a shader.
+
+### RomFS duplicate controls
+
+Two v0 RomFS keys have copies whose complete controls differ. The full first-copy and last-copy splits choose the same record for each key. Within each group the stage and code match, and the original program starts with an unconditional Ampere `EXIT`.
+
+- **Compute `134406a70d2133de`.** Its 11 occurrences have three local sizes at control offset `0x58`, `32×1×1` (registered), `1×1×1`, and `8×4×1`. Swapping the control bytes with the registered facts held fixed produced identical output. Using each control's local size in the facts changed only SPIR-V `LocalSize` and the reflected dimensions the host uses for dispatch. The generated MSL and Metal libraries were byte-identical. On an Apple M4 Pro, the empty kernel completed both direct and indirect Metal dispatches at all three sizes.
+- **Pixel `9bff82dccc5b4c09`.** Its 100 occurrences have two values, 0 and 1, at control byte `0x5d`. Both variants produced byte-identical SPIR-V, reflection, MSL, and Metal libraries.
+
+The v0 Mac trace on chain `8d8fd1496933` covered boot, the title screen and Grand Prix menus, and Mario Bros. Circuit at 50cc with the kart stationary. It reached frame 12,600 and recorded 119 compute and 1,106 render pipeline entries. Neither key appeared in the program-load, draw, dispatch, or pipeline logs.
 
 ## Rendering
 

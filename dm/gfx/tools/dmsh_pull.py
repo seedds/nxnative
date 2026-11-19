@@ -132,7 +132,7 @@ def variant(msl) -> 'tuple[str, dict] | tuple[None, str]':
         mm = re.fullmatch(r'    (float4|uint4|int4) (m_\d+(?:_\d+)*) \[\[attribute\((\d+)\)\]\];', ln)   # m_28_0: an input array split per element
         if not mm: return None, 'an input declaration not understood: ' + ln.strip()[:60]
         members.append((mm.group(1), mm.group(2), int(mm.group(3))))
-    if any(l >= 16 for _, _, l in members): return None, 'an input at attribute 16 or above'
+    if any(l >= 32 for _, _, l in members): return None, 'an input at attribute 32 or above'   # NVN2 has 32 attributes; the layout block holds them all
     head = msl[:m.start()] + '\nstruct main0_in\n{\n' + '\n'.join(f'    {t} {n};' for t, n, _ in members) + '\n};'
     body = _drop_entries(msl[m.end():], ('main0', 'main0_z'))
     entries = {}; wl = []; wle = set()

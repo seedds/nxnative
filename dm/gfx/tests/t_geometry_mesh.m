@@ -85,7 +85,7 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
     op_hdr end = {OP_END, 8}; memcpy(mem + used, &end, 8);
     #undef EMIT
     state_reset(); memset(&R, 0, sizeof R); S.ds.dt = 1; S.ds.dw = 1; S.ds.df = 2;   // LESS, written
-    uint64_t runs0 = g_mrun_runs, rdraws0 = g_mrun_draws, mesh0 = g_geo_mesh_n;
+    uint64_t runs0 = g_mrun_runs, rdraws0 = g_mrun_draws, mesh0 = g_geo_mesh_n, za0 = g_za_total;
     mtl_sub_begin(); mtl_exec(mem);
     id<MTLBuffer> b = [g_dev newBufferWithLength:MR_W * MR_H * 4 options:MTLResourceStorageModeShared]; res_add(b);
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MR_W, MR_H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:MR_W * 4 destinationBytesPerImage:MR_W * MR_H * 4];
@@ -93,6 +93,7 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
     int ready = g_geo_mesh_n - mesh0 == MR_DRAWS && (!geo_mesh_run_on() || g_mrun_draws - rdraws0 == MR_DRAWS);   // the pipelines are built in the background: earlier passes draw some other way
     int bad = 0;
     if (ready) {
+        EXPECT("mesh-local geometry scratch is not a missing GPU binding", 0, g_za_total - za0);
         const float *px = b.contents; unsigned drawn = 0;
         for (unsigned g = 0; g < MR_TRIS; g++) {
             float want = 1;

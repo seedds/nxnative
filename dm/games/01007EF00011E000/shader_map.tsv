@@ -1,5 +1,5 @@
 # kind: evidence  Breath of the Wild shaders (BNSH / BAHS in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
-# column 5 records where each key first appears; this game has no PC version to pair with
+# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied
 package	index	stage	dm_ctl_sha16	source
 ps_effect.bin	0	pixel	2788fb66ab4dab06	/Effect/AncientBall.sesetlist#BNSH@0x2000#var0
 vs_effect.bin	0	vertex	ba40eb97d7dffe19	/Effect/AncientBall.sesetlist#BNSH@0x2000#var0
@@ -14457,11 +14457,11 @@ ps_layout.bin	16	pixel	14977330c83472bf	/Pack/Bootup.pack/Layout/Common.sblarc/b
 ps_layout.bin	17	pixel	44ecac3a4aa99ad7	/Pack/Bootup.pack/Layout/Common.sblarc/bgsh/__ArchiveShader.bnsh#BNSH@0x0#var7
 ps_layout.bin	18	pixel	06bc5f0b79dd80fe	/Pack/Bootup.pack/Layout/Common.sblarc/bgsh/__ArchiveShader.bnsh#BNSH@0x0#var8
 ps_layout.bin	19	pixel	2bbe1b414d45af3c	/Pack/Bootup.pack/Layout/Common.sblarc/bgsh/__ArchiveShader.bnsh#BNSH@0x0#var9
-vs_main.bin	0	vertex	21fe759b8114941c	main#BNSH@0x1d7a000#var2
-ps_main.bin	0	pixel	927c123422ea91e2	main#BNSH@0x1d7a000#var3
-ps_main.bin	1	pixel	8a8ff7f89e3d786a	main#BNSH@0x1d7a000#var4
-vs_main.bin	1	vertex	60e2041ed375cae1	main#BNSH@0x1d7a000#var5
-ps_main.bin	2	pixel	e790d4de0bb76d91	main#BNSH@0x1d7a000#var5
+vs_main.bin	0	vertex	21fe759b8114941c	main#BNSH@0x1d7a000#var0
+ps_main.bin	0	pixel	927c123422ea91e2	main#BNSH@0x1d7a000#var0
+ps_main.bin	1	pixel	8a8ff7f89e3d786a	main#BNSH@0x1d7a000#var1
+ps_main.bin	2	pixel	e790d4de0bb76d91	main#BNSH@0x1d7a000#var2
+vs_main.bin	1	vertex	60e2041ed375cae1	main#BNSH@0x1d7a000#var3
 vs_main.bin	2	vertex	9f8de48697e031b5	main#BNSH@0x1d83000#var0
 ps_main.bin	3	pixel	d898eb245efdd495	main#BNSH@0x1d83000#var0
 vs_main.bin	3	vertex	71018be49e22ab4a	main#BNSH@0x1d83000#var1
@@ -14469,29 +14469,29 @@ ps_main.bin	4	pixel	e6a88e12dbae9743	main#BNSH@0x1d83000#var1
 ps_main.bin	5	pixel	be1d4af059205375	main#BNSH@0x1d83000#var10
 ps_main.bin	6	pixel	3a0122d004ea74ca	main#BNSH@0x1d83000#var11
 ps_main.bin	7	pixel	57984f1f48115868	main#BNSH@0x1d83000#var12
-vs_main.bin	4	vertex	5275c47bd2f93f12	main#BNSH@0x1d83000#var13
 ps_main.bin	8	pixel	f29dde3d00fb2972	main#BNSH@0x1d83000#var13
-vs_main.bin	5	vertex	86208e96540877ab	main#BNSH@0x1d83000#var14
+vs_main.bin	4	vertex	86208e96540877ab	main#BNSH@0x1d83000#var14
 ps_main.bin	9	pixel	cc37329bf8b7d773	main#BNSH@0x1d83000#var14
-vs_main.bin	6	vertex	51deaed0b27374b9	main#BNSH@0x1d83000#var15
+vs_main.bin	5	vertex	51deaed0b27374b9	main#BNSH@0x1d83000#var15
 ps_main.bin	10	pixel	87d900168952ea49	main#BNSH@0x1d83000#var15
+vs_main.bin	6	vertex	4fb3d55c47745276	main#BNSH@0x1d83000#var16
 ps_main.bin	11	pixel	aa209f57b133e862	main#BNSH@0x1d83000#var16
 ps_main.bin	12	pixel	af07227eeb90304b	main#BNSH@0x1d83000#var17
 ps_main.bin	13	pixel	adcbe3846d1d1ed7	main#BNSH@0x1d83000#var18
 ps_main.bin	14	pixel	43593beb906b7c6f	main#BNSH@0x1d83000#var19
 ps_main.bin	15	pixel	11bb9006c60d49d6	main#BNSH@0x1d83000#var2
-ps_main.bin	16	pixel	e7004fcb0aa6ce8c	main#BNSH@0x1d83000#var21
+vs_main.bin	7	vertex	5275c47bd2f93f12	main#BNSH@0x1d83000#var2
+ps_main.bin	16	pixel	e7004fcb0aa6ce8c	main#BNSH@0x1d83000#var20
 ps_main.bin	17	pixel	896bfbc0413048c9	main#BNSH@0x1d83000#var22
 ps_main.bin	18	pixel	e1d0faffe4d027a2	main#BNSH@0x1d83000#var23
 ps_main.bin	19	pixel	8064cd6f18b1b5ed	main#BNSH@0x1d83000#var24
 ps_main.bin	20	pixel	71c2b3751a9e65f7	main#BNSH@0x1d83000#var25
 ps_main.bin	21	pixel	3dfe1aa3d996e91e	main#BNSH@0x1d83000#var26
-vs_main.bin	7	vertex	4fb3d55c47745276	main#BNSH@0x1d83000#var27
 ps_main.bin	22	pixel	e8ec1269c0f3f2db	main#BNSH@0x1d83000#var27
 ps_main.bin	23	pixel	302afdb62561cc5c	main#BNSH@0x1d83000#var3
 ps_main.bin	24	pixel	31e27998ede8f19f	main#BNSH@0x1d83000#var4
 ps_main.bin	25	pixel	0d532fb24cf738e5	main#BNSH@0x1d83000#var5
-ps_main.bin	26	pixel	6599d9842b242912	main#BNSH@0x1d83000#var7
+ps_main.bin	26	pixel	6599d9842b242912	main#BNSH@0x1d83000#var6
 ps_main.bin	27	pixel	9a09e7e1e7c4cf84	main#BNSH@0x1d83000#var8
 ps_main.bin	28	pixel	5c490d6406951546	main#BNSH@0x1d83000#var9
 vs_shader.bin	0	vertex	54dfafe00a0fe3d9	/Pack/Bootup_Graphics.pack/Shader/uking_flower.product.sbfsha#BNSH@0x1c7000#var0

@@ -103,6 +103,16 @@ class BufferImageOffsets(unittest.TestCase):
         self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_t_cb4_A', res))   # another uniform slot
         self.assertEqual(got[0]['n'], 4)   # the table's length: entries 0 to 3 in one uint4 (the image's entry 3 counts)
 
+    def test_wrapped_buffer_fetch_offsets(self):
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* cp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    texture2d<uint> cp_t_tcb_8 [[id(1)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'textures': [{'binding': 1, 'cbuf_slot': -1, 'handle': 8, 'array': 1, 'tbx': 0, 'row_bias': True}]}
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual(got[0]['n'], 4)   # lead and logical width, padded to uint4
+        self.assertEqual((got[1]['tbx'], got[1]['fetch1d']), (0, True))
+
     def test_buffer_texture_arrays(self):
         # An array of buffer textures (a dynamic slot array, cb0_40000000; an array of the driver table's handles, cb2) takes an entry per element from its first; an array of
         # other textures with the same handle takes none, and the table is as long as the entries, in uint4s
@@ -144,6 +154,20 @@ class PoolTable(unittest.TestCase):
     def test_loads_only_read(self):
         got = self.reflect(['Global memory operation "Load" traced to no storage buffer: it goes through the memory pool table.'])
         self.assertEqual((got[1]['kind'], got[1]['rw']), ('gmem_map', False))
+
+    def test_pointer_sources_use_the_existing_table(self):
+        got = self.reflect(['translator: gptr site 1: c0[68] +0', 'translator: gptr site 0: c0[68] +8', 'translator: gptr site 2: c3[14] +16'])
+        self.assertEqual([b['kind'] for b in got], ['sbuf', 'gmem_map'])
+        self.assertEqual(got[1]['pointers'], [[0, 8], [0, 0]])
+        self.assertFalse(got[1]['rw'])
+
+    def test_pointer_sources_follow_each_stage_table(self):
+        for stage, base in dmsh_reflect.SSBO.items():
+            with self.subTest(stage=stage):
+                got = dmsh_reflect.gptr_sites(stage, {'notes': [f'translator: gptr site 0: c0[{(base + dmsh_abi.C0_ROW) // 4}] +32']})
+                self.assertEqual(got, [[1, 32]])
+        with self.assertRaises(ValueError):
+            dmsh_reflect.gptr_sites('vs', {'notes': ['translator: gptr site 1: c0[68] +0']})
 
     def test_write_log(self):   # the stores also log their pages in a host buffer reserved at offset 1 of the sentinel slot
         source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* vp_s0 [[id(0)]];\n    device uint* vp_s1 [[id(1)]];\n};\n'

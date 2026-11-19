@@ -110,6 +110,58 @@ static void vorbis_flush(void) {
     assert(vorbis_samples(&d, audio, 8) == before);
     puts("Vorbis movie sound: the samples come again after a Flush");
 }
+
+// Generate AAC with the system encoder, then seek back to the first packet.
+// A flushed decoder must produce the same samples as a freshly opened decoder,
+// not overlap them with the tail of the old playback position. No game media.
+typedef struct { int16_t samples[48000 * 6]; unsigned pos, ch; } aac_input;
+static OSStatus aac_pcm(AudioConverterRef c, UInt32 *n, AudioBufferList *b, AudioStreamPacketDescription **pd, void *u) {
+    (void)c; (void)pd; aac_input *s = u;
+    if (*n > 48000 - s->pos) *n = 48000 - s->pos;
+    b->mNumberBuffers = 1;
+    b->mBuffers[0] = (AudioBuffer){s->ch, *n * s->ch * 2, s->samples + s->pos * s->ch};
+    s->pos += *n; return 0;
+}
+static void aac_flush(unsigned ch) {
+    aac_input *input = calloc(1, sizeof *input); assert(input); input->ch = ch;
+    for (unsigned i = 0; i < 48000 * ch; i++) input->samples[i] = (int16_t)((i * 37u % 24000) - 12000);
+    AudioStreamBasicDescription pcm = {.mSampleRate = 48000, .mFormatID = kAudioFormatLinearPCM,
+        .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+        .mBytesPerPacket = 2 * ch, .mFramesPerPacket = 1, .mBytesPerFrame = 2 * ch, .mChannelsPerFrame = ch, .mBitsPerChannel = 16};
+    AudioStreamBasicDescription compressed = {.mSampleRate = 48000, .mFormatID = kAudioFormatMPEG4AAC,
+        .mFramesPerPacket = 1024, .mChannelsPerFrame = ch};
+    AudioConverterRef encoder = NULL; assert(!AudioConverterNew(&pcm, &compressed, &encoder));
+    uint8_t packets[12][8192]; unsigned lengths[12];
+    for (int i = 0; i < 12; i++) {
+        UInt32 n = 1; AudioStreamPacketDescription desc;
+        AudioBufferList b = {1, {{ch, sizeof packets[i], packets[i]}}};
+        assert(!AudioConverterFillComplexBuffer(encoder, aac_pcm, input, &n, &b, &desc));
+        assert(n == 1 && b.mBuffers[0].mDataByteSize > 0);
+        lengths[i] = b.mBuffers[0].mDataByteSize;
+    }
+    AudioConverterDispose(encoder); free(input);
+    mdec_t d = {.type = MD_TYPE_AAC, .nout = MD_NOUT_AAC, .started = 1, .ch = (int)ch, .rate = 48000};
+    pthread_mutex_init(&d.dmu, NULL); pthread_mutex_init(&d.mu, NULL);
+    uint8_t first[16384]; size_t first_n = 0;
+    for (int i = 0; i < 12; i++) {
+        assert(md_aac(&d, packets[i], (int)lengths[i], 0));
+        assert(d.out[0].bytes == 1024 * ch * 2);
+        if (!i) { first_n = d.out[0].bytes; assert(first_n <= sizeof first); memcpy(first, d.out[0].frm, first_n); }
+    }
+    // Negative control: replaying packet zero without resetting retains the
+    // previous position's overlap. This is the behavior before the repair.
+    assert(md_aac(&d, packets[0], (int)lengths[0], 0));
+    assert(d.out[0].bytes == first_n && memcmp(first, d.out[0].frm, first_n));
+    void *self[2] = {NULL, &d};
+    for (int repeat = 0; repeat < 3; repeat++) {
+        assert(!h_movie_Flush(self));
+        assert(md_aac(&d, packets[0], (int)lengths[0], 0));
+        assert(d.out[0].bytes == first_n && !memcmp(first, d.out[0].frm, first_n));
+    }
+    AudioConverterDispose(d.aac); free(d.out[0].frm);
+    pthread_mutex_destroy(&d.dmu); pthread_mutex_destroy(&d.mu);
+    printf("AAC %u channels: seek / repeated Flush restarts with the original PCM and frame count\n", ch);
+}
 // At a window change each packet leaves with (previous blocksize + its blocksize) / 4 samples. With blocksizes 64 / 256, stb_vorbis gives 176 and 32 for a long window before a short one and the short one,
 // where the specification has 128 and 80. Samples kept across a change do not survive a Flush
 static void vorbis_window_change(void) {
@@ -149,6 +201,7 @@ static void *buffer_data(const void *buf) { return (void *)((const test_buffer *
 static size_t buffer_size(const void *buf) { return ((const test_buffer *)buf)->used; }
 static size_t buffer_capacity(const void *buf) { return sizeof ((const test_buffer *)buf)->bytes; }
 static void unused_export(void) { abort(); }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 static int exports_const, exports_mutable, mutable_lookups;
 void *guest_sym(const char *name) {
     static const struct { const char *modern, *early; void *fn; } getters[] = {
@@ -177,6 +230,7 @@ int main(void) {
     movie_buffer_exports();
     playing();
     vorbis_flush();
+    aac_flush(2); aac_flush(6);
     vorbis_window_change();
     vorbis_split();
     int w = 0, h = 0;

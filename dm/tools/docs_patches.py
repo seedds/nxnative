@@ -119,7 +119,7 @@ SWITCH_BINDING = [
      'why': "the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code"}),
     ('game_env', 'DOTNET_GCRegionRange=', {'what': ".NET's garbage-collector region range", 'now': 'game', 'goal': 'game', 'purpose': 'address space', 'why': "measured for the game's regions"}),
     ('stdalloc_cap', '', {'what': "StandardAllocator's address space", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
-     'why': "what the regions after it need, measured by the NSP script's region check; the host's cap is the default"}),
+     'why': "what the regions after it need, measured by the NSP script's region check, or 1 GB from its heap check; the host's cap is the default"}),
     ('shader_key_skip', '', {'what': 'control-section bytes left out of shader keys', 'now': 'game', 'goal': 'game', 'purpose': 'shaders',
      'why': "the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key"}),
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),

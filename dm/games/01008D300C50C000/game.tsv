@@ -1,0 +1,39 @@
+# Game profile of Super Nintendo Entertainment System – Nintendo Classics (Switch, update 6.0.0 = v1966080 over the base game). Plays on the Mac
+# Format: see dm/games/README.md
+# Nintendo's own SNES emulator app (a Lua UI over its own NVN renderer), SDK 20.5.21 with NPLN / gRPC, Mnpp and LDN linked in; offline it answers like every other offline game (no network,
+# no network service account). Shaders: 10 GLSLC outputs in bootapp/resources/shaders/*.nvnc, 2 in sysdata/shaders/*.glslc, and the GLSLC outputs in main (23 stage shaders).
+# The update's ExeFS carries subsdk0 as a byte-identical copy of sdk (the base game's subsdk0–2 are other modules); both are loaded, as on Horizon
+
+# ---- Identity ----
+title_id	01008D300C50C000
+program_id	01008D300C50C000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Super Nintendo Entertainment System – Nintendo Classics
+ipa	SuperNintendoEntertainmentSystemNintendoClassics.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1966080	6.0.0	main=fe4a4fe0c808b28795aa8d42b171f9bf	subsdk0=c668ae02ea221e429677aa61d3dab7c6	sdk=c668ae02ea221e429677aa61d3dab7c6
+package	v1966080
+shader_versions	v1966080
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 is the same NSO as sdk in this update)
+modules	main subsdk0 sdk
+romfs_marker	titles/S-2029_e/S-2029_e.sfrom
+zip_store	.dat:.png:.sfrom:.ttf:.metallib
+
+# ---- Memory ----
+# No system resource in the NPDM (IsVirtualAddressMemoryEnabled false): main sets a heap of at most the pool − 64 MB, the 4 GB layout with a 3328 MB heap region. Measured on the Mac:
+# resident 0.66–0.71 GB and 0.94 GB of GPU memory over the list and a game
+sys_resource	0x0
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Shader split ----
+shader_groups	/bootapp/=bootapp /titles/=titles /sysdata/=sysdata /crt240/=crt240
+shader_note	Super Nintendo Entertainment System – Nintendo Classics shaders

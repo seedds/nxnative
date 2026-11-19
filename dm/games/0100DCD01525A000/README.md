@@ -50,8 +50,9 @@ sticks with a DualSense on the Mac (the D-pad was fine).
   input, and the game reads the sticks only through `GetNpadState` (full key,
   handheld, joy dual), the same calls P4G makes. A Mac controller's axes each
   reach full tilt on their own, so a diagonal reads up to about 1.15 of it,
-  past the circle a Switch stick reports; holding each stick inside that circle
-  in the host is a candidate, kept out of this profile because it changes every
-  game. Not yet confirmed.
+  past the circle a Switch stick reports. With the host holding each stick
+  inside that circle ([#3053](https://github.com/seedds/nxnative/pull/3053),
+  a change for every game) the sticks move normally with a DualSense; open
+  here until that lands.
 - Only the 1.0.2 build (`v131072`) is registered.
 - iPhone: not built, not tested.

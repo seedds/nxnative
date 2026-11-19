@@ -300,6 +300,8 @@ static void hidpad_use(hid_pad *d) {
         if (!d->proto) LOG("controller '%s' (HID, %04x:%04x): buttons in Nintendo's report 0x3F: read with its numbering", d->name, d->vid, d->pid);
     } else if (d->st.layout == PAD_HID_X360)
         LOG("controller '%s' (HID, %04x:%04x): Xbox 360 layout (Z / Rz triggers, Rx / Ry right stick)", d->name, d->vid, d->pid);
+    else if (d->st.layout == PAD_HID_HORI)
+        LOG("controller '%s' (HID, %04x:%04x): HORI's Switch layout (1 Y, 2 B, 3 A, 4 X)", d->name, d->vid, d->pid);
     else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
@@ -321,13 +323,14 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     d->vid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)) intValue];
     d->pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductIDKey)) intValue];
     NSArray *els = CFBridgingRelease(IOHIDDeviceCopyMatchingElements(hid, NULL, kIOHIDOptionsTypeNone));
-    uint8_t has[PH_AXES] = {0};
+    uint8_t has[PH_AXES] = {0}; int buttons = 0;   // the highest button usage it declares
     for (id o in els) {
-        IOHIDElementRef e = (__bridge IOHIDElementRef)o; uint32_t page = IOHIDElementGetUsagePage(e);
-        int a = pad_hid_axis_of(page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
+        IOHIDElementRef e = (__bridge IOHIDElementRef)o; uint32_t page = IOHIDElementGetUsagePage(e), usage = IOHIDElementGetUsage(e);
+        int a = pad_hid_axis_of(page, usage); if (a >= 0) has[a] = 1;
+        if (page == kHIDPage_Button && usage <= 32 && (int)usage > buttons) buttons = (int)usage;
         d->nin |= pad_hid_nin_bit(IOHIDElementGetType(e) == kIOHIDElementTypeOutput, IOHIDElementGetReportID(e), page);
     }
-    enum pad_hid_layout layout = pad_hid_layout_for(d->nin, d->vid, d->pid, has);
+    enum pad_hid_layout layout = pad_hid_layout_for(d->nin, d->vid, d->pid, has, buttons);
     pad_hid_init(&d->st, getenv("DM_HID_MAP"), layout);
     for (int a = 0; a < PH_AXES; a++) if (has[a]) d->st.has[pad_hid_axis_for(layout, a)] = 1;
     d->hid = (IOHIDDeviceRef)CFRetain(hid);

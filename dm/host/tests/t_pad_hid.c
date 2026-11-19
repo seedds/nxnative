@@ -1,4 +1,4 @@
-// Raw HID gamepads (pad_hid.h, GitHub issue #637): the default map and DM_HID_MAP, the Xbox 360 layout of virtual pads (issue #2465), report 0x3F's map, raw sticks and Nintendo's descriptor (PR #989), hat directions, axis scaling, the stick dead zone and analog triggers
+// Raw HID gamepads (pad_hid.h, GitHub issue #637): the default map and DM_HID_MAP, the Xbox 360 layout of virtual pads (issue #2465), HORI's Switch layout, report 0x3F's map, raw sticks and Nintendo's descriptor (PR #989), hat directions, axis scaling, the stick dead zone and analog triggers
 #include <stdio.h>
 #include "../pad_hid.h"
 
@@ -70,12 +70,12 @@ int main(void) {
     // The Xbox 360 layout (a virtual 045e:028e pad read as HID, Steam Link's GamePad-N, issue #2465): one-at-a-time presses of a GameSir G8 through Steam Link as macOS
     // delivered them: bottom, right, top, left, back, start, LB, RB, then the d-pad up, right, down, left
     uint8_t has[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RX] = 1, [PH_RY] = 1, [PH_RZ] = 1};
-    CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_X360);
-    CHECK(pad_hid_layout_for(0, 0x045e, 0x02ea, has) == PAD_HID_DEFAULT);
-    CHECK(pad_hid_layout_for(0, 0x054c, 0x028e, has) == PAD_HID_DEFAULT);
-    CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x045e, 0x028e, has) == PAD_HID_NINTENDO);
-    has[PH_RX] = 0; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_DEFAULT);
-    has[PH_RX] = 1; has[PH_ACCEL] = 1; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has, 0) == PAD_HID_X360);
+    CHECK(pad_hid_layout_for(0, 0x045e, 0x02ea, has, 0) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(0, 0x054c, 0x028e, has, 0) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x045e, 0x028e, has, 0) == PAD_HID_NINTENDO);
+    has[PH_RX] = 0; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has, 0) == PAD_HID_DEFAULT);
+    has[PH_RX] = 1; has[PH_ACCEL] = 1; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has, 0) == PAD_HID_DEFAULT);
     pad_hid_init(&h, NULL, PAD_HID_X360);
     { static const unsigned usage[] = {1, 2, 4, 3, 10, 9, 5, 6, 12, 15, 13, 14};
       static const uint64_t want[] = {DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_Y, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_L, DM_BTN_R, DM_BTN_UP, DM_BTN_RIGHT, DM_BTN_DOWN, DM_BTN_LEFT};
@@ -94,6 +94,17 @@ int main(void) {
     CHECK(s[2] == -DM_STICK_MAX && abs(s[3]) < 2);                                          // the right stick from Rx / Ry
     CHECK(pad_hid_buttons(&h) == DM_BTN_ZL);                                                // left trigger down, right one up
     pad_hid_init(&h, "A=1,B=2", PAD_HID_X360); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    // HORI's Switch layout (the Taiko drum 0f0d:00f0: 14 buttons, a hat, X / Y / Z / Rz), only for its vendor with 14 buttons; report 0x3F still wins
+    uint8_t hori[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RZ] = 1};
+    CHECK(pad_hid_layout_for(0, 0x0f0d, 0x00f0, hori, 14) == PAD_HID_HORI);
+    CHECK(pad_hid_layout_for(0, 0x0f0d, 0x00f0, hori, 13) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(0, 0x2dc8, 0x00f0, hori, 14) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x0f0d, 0x00f0, hori, 14) == PAD_HID_NINTENDO);
+    pad_hid_init(&h, NULL, PAD_HID_HORI);
+    { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_LS, DM_BTN_RS, 0, 0};
+      for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
+    pad_hid_init(&h, "A=1,Y=3", PAD_HID_HORI); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    h.buttons = 0;
     // identical pads: a model is read here only with two or more pads and more than GameController lists, after the wait, and stops at once
     CHECK(pad_dupes_want(1, 0, 0, 1) == 0); CHECK(pad_dupes_want(2, 2, 1, 0) == 0); CHECK(pad_dupes_want(3, 3, 0, 1) == 0);
     CHECK(pad_dupes_want(2, 1, 0, 0) == -1); CHECK(pad_dupes_want(2, 1, 0, 1) == 1); CHECK(pad_dupes_want(2, 0, 0, 1) == 1);

@@ -260,7 +260,24 @@ static void hid_layouts(void) {
     pad_hid_sticks(&find(nin)->st, s); assert(s[2] == DM_STICK_MAX && s[3] == -DM_STICK_MAX);
     for (TestDev *d in @[steam, other, nin]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d));
     assert(!attached && !g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
-    puts("t_pad_hid_mac: Xbox axis matching and Nintendo report precedence passed");
+
+    // HORI's Switch pads: 14 buttons, its usage 3 is A; another HORI pad with fewer buttons keeps the default map, whose usage 3 is nothing
+    NSMutableArray *buttons14 = [NSMutableArray arrayWithObjects:x, y, z, rz, nil], *buttons13 = [NSMutableArray arrayWithObjects:x, y, z, rz, nil];
+    for (uint32_t u = 1; u <= 14; u++) { [buttons14 addObject:elem(0, 0, 9, u)]; if (u <= 13) [buttons13 addObject:elem(0, 0, 9, u)]; }
+    [buttons14 addObject:elem(0, 0, 9, 0xFFFFFFFF)];   // a padding element's usage does not count
+    TestDev *drum = virtual_pad(@"Taiko Controller", 0x0f0d, 116), *pc = virtual_pad(@"HORI PC pad", 0x0f0d, 117);
+    drum.pid = pc.pid = 0x00f0; drum.virtualDevice = pc.virtualDevice = nil; drum.elements = buttons14; pc.elements = buttons13;
+    for (TestDev *d in @[drum, pc]) hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
+    wait_ms(2200);
+    assert(find(drum)->st.layout == PAD_HID_HORI && find(pc)->st.layout == PAD_HID_DEFAULT);
+    push_value(drum, buttons14[4 + 2], 1); assert(buttons == DM_BTN_A);
+    push_value(drum, buttons14[4 + 2], 0); assert(buttons == 0);
+    push_value(drum, buttons14[4 + 9], 1); assert(buttons == DM_BTN_PLUS);
+    push_value(drum, buttons14[4 + 9], 0);
+    push_value(pc, buttons13[4 + 2], 1); assert(buttons == 0);
+    for (TestDev *d in @[drum, pc]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d));
+    assert(!attached && !g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
+    puts("t_pad_hid_mac: Xbox axis matching, Nintendo report precedence and HORI's Switch layout passed");
 }
 
 int main(void) { @autoreleasepool {

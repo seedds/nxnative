@@ -118,9 +118,11 @@ class GlslSources(unittest.TestCase):
         self.assertEqual(shaderless['graphics'][0], 'gl')
         self.assertTrue(shaderless['gl_fixed'][0])
         self.assertFalse(shaderless['gl_capture'][0])
-        for evidence in ({'gl_names': 1}, {'gl_src': 1}, {'gl_files': 1}, {'nro_imports': {'glShaderSource'}}):
-            with self.subTest(evidence=evidence):
-                with_shaders = pg.shader_sources(egl, 0, [], 0, 0, gl_fixed_calls=True, **evidence)
+        for gl_names, gl_src, gl_files, nro_imports in ((1, 0, 0, frozenset()), (0, 1, 0, frozenset()),
+                                                      (0, 0, 1, frozenset()), (0, 0, 0, frozenset({'glShaderSource'}))):
+            with self.subTest(gl_names=gl_names, gl_src=gl_src, gl_files=gl_files, nro_imports=nro_imports):
+                with_shaders = pg.shader_sources(egl, 0, [], 0, 0, gl_fixed_calls=True, gl_names=gl_names,
+                                                 gl_src=gl_src, gl_files=gl_files, nro_imports=nro_imports)
                 self.assertEqual(with_shaders['graphics'][0], 'gl')
                 self.assertFalse(with_shaders['gl_fixed'][0])
         for imports, api in ((egl | {'vkCreateInstance'}, 'vulkan'), (egl | {'nvnBootstrapLoader'}, 'nvn')):

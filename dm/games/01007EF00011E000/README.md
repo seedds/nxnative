@@ -225,6 +225,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- [An early display-link wake logs zero lateness](../../../docs/reference/frame-rate.md#an-early-display-link-wake-logs-zero-lateness) (resolved in the host, from PR #1041).
 - [Queued frames wait for the frame's display-link ticks](../../../docs/reference/frame-rate.md#queued-frames-wait-for-the-frames-display-link-ticks) (resolved in the host, from PR #1045).
 - [Repeated Metal texture conformance checks](../../../docs/reference/nvn-objects.md#repeated-metal-texture-conformance-checks) (resolved in the host).
 - [ARC traffic at texture and render encoder lookups](../../../docs/reference/nvn-objects.md#arc-traffic-at-texture-and-render-encoder-lookups): 1.9.0 outdoors, standing at the same save on an M4 Pro with deferred encoding enabled, replay took 16,284 → 16,245 instructions per draw and 5.206 → 5.169 ms of CPU per frame against `a739027a`. One run per host, measured over 58–108 s ([PR #1473](https://github.com/seedds/nxnative/pull/1473)).

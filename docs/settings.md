@@ -99,6 +99,9 @@ Shows the frames per second at the top left.
 
 ## Controls
 
+**Microphone (Mac).** Apps that support microphone input have this switch off by default. Turn it on and press Play to grant macOS access. The first enabled launch can ask even if the settings window is hidden. Choose an input device while the switch is on. Microphone gain is under Advanced settings.
+
+
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.

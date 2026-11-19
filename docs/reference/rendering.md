@@ -2218,6 +2218,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): `main` imports `nvnBootstrapLoader` and 13 EGL functions. Its graphics setup (`main+0x5ed8f0`) makes an NVN device first, which only a helper beside the movie player uses (`main+0x528000`–`+0x52c400`: a memory pool and four textures next to the movie's GL textures). Then `eglGetDisplay`, `eglBindAPI(EGL_OPENGL_API)`, a 4.5 core context, a window surface on `vi::CreateLayer(w, h)` and a glad loader (`main+0x52c460`). Of the 22 games extracted here (at the time), only Digimon matches the rule. [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4 on OpenGL with SDL and LuaJIT; one boot): `main` imports the EGL functions and `vkGetInstanceProcAddr`, SDL's Vulkan loader, which nothing calls (`subsdk1` is NVIDIA's Vulkan driver); Hades and both Galaxies import 99 or 100 Vulkan functions, `vkCreateInstance` among them.
 - **Note:** [Absolum](../../dm/games/0100A83022A22000/README.md) imports the same EGL functions (SDL3) but renders with NVN and names no GL function.
 
+### GL function names in managed strings
+
+- **Symptom:** the NSP script takes an EGL game for NVN and its shader split finds no shaders.
+- **Cause:** the EGL game names `glShaderSource` in a UTF-16LE managed string. The detector only counted ASCII names.
+- **Fix:** the survey and packer both use `gl_name_count` to recognize the two encodings on the existing EGL import path. The Vulkan and NVN precedence checks still apply.
+- **Check:** `test_profile_guess.py` exercises the survey with a managed name. `test_gl_shaders.py` exercises pack-time detection with the same GL loader evidence.
+- **Found on:** [Slay the Spire 1.0](https://github.com/seedds/nxnative/pull/2322).
+
 ### Draws from client memory
 
 - **Symptom:** the game draws thousands of vertices per frame and the window shows text only; a sprite scene is black while its text layer is perfect.
@@ -2274,6 +2282,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cause:** `gl_shaders.py` read `.vert` / `.frag` files and MVGL archives, and `profile_guess.py` counted only those; the game compiles GLSL files named `.glsl`, as they are.
 - **Fix:** both read `.glsl` files too. The name says nothing of the stage, so a `.glsl` file is translated as each stage that compiles, as a string in `main` is. No capture: the files are the shaders, byte for byte what the game compiles.
 - **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): six files in `shaders/nx/` (the sprite, CRT and composite shaders, two vertex shaders with the same text), matched byte for byte against a capture. [PR #2725](https://github.com/seedds/nxnative/pull/2725) read them as shaders the game puts together at run time and turned the capture on with a profile key.
+
+### Standalone GLSL in `.vs` and `.fs` files
+
+- **Symptom:** a game's RomFS contains the GLSL, but the packer starts a shader capture because it overlooks the `.vs` and `.fs` files.
+- **Cause:** the files use libGDX's extensions. Other engines also use `.fs` for snippets that they combine with generated code.
+- **Fix:** the packer and translator use `paired_sources` to inspect the extracted files. A directory must contain a text source defining `main` for each stage. The translator keeps the original source bytes through the first NUL so their keys match the runtime inputs. The survey has only a manifest, so it defers the decision to the pack step.
+- **Check:** `test_gl_shaders.py` exercises the packer and translator with valid pairs, snippets, an `.fs`-only directory, and separate directories whose names differ only in case.
+- **Found on:** [Slay the Spire 1.0](https://github.com/seedds/nxnative/pull/2322). Its 14 files yield 11 distinct shaders.
 
 ### A function body closed with `};`
 

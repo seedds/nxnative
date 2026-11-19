@@ -36,7 +36,15 @@ GL_ENTRY = rb'\bvoid\s+main\s*\('  # a whole shader has its entry point (gl_shad
 def gl_sources(img):
     """the GLSL sources gl_shaders.py takes from a main: '#version' strings (GL_SRC) that define an entry point"""
     return sum(1 for m in re.finditer(GL_SRC, img) if re.search(GL_ENTRY, img[m.start() + 1:img.find(b'\0', m.start() + 1, m.start() + 0x10000)]))
-GL_FILES = ('.mvgl', '.vert', '.frag', '.glsl')   # the RomFS files gl_shaders.py reads GLSL from
+
+
+def gl_name_count(img, imports):
+    """An EGL renderer's GL names can be C strings or UTF-16LE managed literals."""
+    if 'eglCreateWindowSurface' not in imports: return 0
+    return img.count(b'glShaderSource') + img.count('glShaderSource'.encode('utf-16-le'))
+
+
+GL_FILES = ('.mvgl', '.vert', '.frag', '.glsl')   # formats detected from file names alone, including in the survey manifest
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
@@ -116,7 +124,7 @@ def facts_of(exefs, romfs):
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
         if p.name == 'main':
             F['unity'] = {v.decode() for v in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)}
-            F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), img.count(b'glShaderSource')
+            F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), gl_name_count(img, m['imports'])
             F['gl_src'] = gl_sources(img)
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
@@ -319,7 +327,7 @@ def romfs_glsl_files(romfs):
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
-    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = gl_sources(main)
+    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = gl_name_count(main, imports); gl_src = gl_sources(main)
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
@@ -336,7 +344,11 @@ def build_sources(exefs, romfs, modules):
         for n in names:
             if n.endswith('.trpfs'):
                 with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
-    gl_files = sum(1 for _, _, names in os.walk(romfs) for n in names if n.lower().endswith(GL_FILES)) if 'eglCreateWindowSurface' in imports else 0
+    gl_files = 0
+    if gl_names:
+        from gl_shaders import paired_sources
+        for d, _, names in os.walk(romfs):
+            gl_files += sum(n.lower().endswith(GL_FILES) for n in names) + len(paired_sources(d, names))
     oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
     for d, _, names in os.walk(romfs):
         for n in names:

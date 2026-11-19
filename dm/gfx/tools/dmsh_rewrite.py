@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
-# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), uniform words tested against constants, which the front end would
+# arithmetic (precise), warp-synchronous shared memory fences (tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
-# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu) and a pixel shader's depth snapped to
-# its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES)
-# and of every shader's cache key (dmsh_build.py CODE_FP).
+# past Metal's limit (tg_spill), one copy of the raw global memory lookup's search (raw_noinline), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
+# its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
+# so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
 import dmsh_abi as abi, dmsh_side
 
@@ -12,36 +12,106 @@ import dmsh_abi as abi, dmsh_side
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
-_MEMBAR = 'threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture);'
-def membar_fence(msl):
-    """MEMBAR as a fence, not a barrier. The translator turns BAR.SYNC into OpControlBarrier (workgroup scope; SPIRV-Cross prints threadgroup_barrier(mem_flags::mem_threadgroup)) and
-    MEMBAR.GPU / .SYS into OpMemoryBarrier at device scope (Ryujinx CodeGen/Spirv/Instructions.cs GenerateMemoryBarrier), which SPIRV-Cross prints as a threadgroup_barrier with device,
-    threadgroup and texture memory: an execution barrier the Switch code does not have. Where the threads of a group are not converged it waits for threads that never come.
-    PRAGMATA's GPU culling queue 12a52b683eec95c1 has no BAR.SYNC at all, only MEMBAR.SC.GPU; ERRBAR inside its persistent work loop. Each becomes the fence it is,
-    atomic_thread_fence at device scope, sequentially consistent; two in a row (MEMBAR.SC and ERRBAR) become one. From uncraftablexd's PRAGMATA bring-up (PR #1407)"""
-    if _MEMBAR not in msl: return msl
-    fence = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);   // MEMBAR (membar_fence)'
-    msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
-    return msl.replace(_MEMBAR, fence)
 
-TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+PER_VERTEX_BASE = 64   # the translator's Declarations.PerVertexLocationBase: dm_pv<L>_<v> is at user(locn<64 + 3L + v>), past every attribute's own location
+PER_VERTEX_IN = re.compile(r'\n    float4 dm_pv(\d+)_([012]) \[\[user\(locn(\d+)\)(?:, flat)?\]\];')
+VERTEX_INDEX = ('first', 'second', 'third')
+METAL4 = 'vertex_value<'   # in a source that needs MSL 4.0 (ios_metal.compile)
+def per_vertex(msl):
+    """A user attribute as each vertex of the triangle holds it, which Ampere's LDTRAM reads in a pixel shader (fragment shader barycentrics: Resident Evil 4's shaders weigh
+    the three values with the barycentric coordinates themselves). SPIRV-Cross has no MSL form of SPIR-V's PerVertexKHR, so the translator declares each vertex read as a flat
+    input of its own, dm_pv<L>_<v> at user(locn<64 + 3L + v>) (InstEmitAmpereMem ALdTram). Here the reads of attribute L become one vertex_value<float4> at user(locn<L>), which the
+    vertex shader's output there feeds, and each read that vertex's get(vertex_index::...): the vertices the [[barycentric_coord]] weights refer to, as on NVIDIA.
+    vertex_value is MSL 4.0 (macOS 26, iOS 26): the Mac's deployment target has it, and ios_metal.compile compiles a source using it with -std=metal4.0.
+    Raises ValueError when attribute L is also an ordinary input of the shader, which one location cannot be at once (no game known)"""
+    found = list(PER_VERTEX_IN.finditer(msl))
+    if not found: return msl
+    for m in found:
+        if int(m[3]) != PER_VERTEX_BASE + 3 * int(m[1]) + int(m[2]): raise ValueError(f'per-vertex input dm_pv{m[1]}_{m[2]} at user(locn{m[3]}), not at the translator\'s location')
+    locs = sorted({int(m[1]) for m in found})
+    st = re.search(r'\nstruct main0_in\n\{(\n.*?)\n\};', msl, re.S)
+    if not st or not all(st.start(1) <= m.start() < st.end(1) for m in found): raise ValueError('per-vertex inputs outside main0_in')
+    both = [l for l in locs if re.search(rf'\[\[user\(locn{l}\)', st[1])]
+    if both: raise ValueError(f'attribute {both[0]} read both per vertex and as an ordinary input')
+    decls = ''.join(f'\n    vertex_value<float4> dm_pv{l} [[user(locn{l})]];' for l in locs)
+    out = msl[:found[0].start()] + decls + ''.join(msl[a.end():b.start()] for a, b in zip(found, found[1:])) + msl[found[-1].end():]
+    return re.sub(r'\.dm_pv(\d+)_([012])\b', lambda m: f'.dm_pv{m[1]}.get(vertex_index::{VERTEX_INDEX[int(m[2])]})', out)
+
+BIT0_AND = re.compile(r'^[ \t]*(u?int) (_\d+) = ([^;\n]+) & 1u?;$', re.M)
+BIT0_LOOSER = re.compile(r'\|\||&&|[|^?,]')   # an operator binding looser than &: `a | b & 1` is a | (b & 1), not bit 0
+def bit0_operand(e):   # the left operand outside its parentheses binds at least as tightly as &
+    while True:
+        f = re.sub(r'\([^()]*\)', '', e)
+        if f == e: return not BIT0_LOOSER.search(e)
+        e = f
+BIT0_TEST = re.compile(r'^[ \t]*bool (_\d+) = (_\d+) != 0u?;$', re.M)
+BIT0_MASK = re.compile(r'= (_\d+) \? \(-1\) : 0;')
+BIT0_WRITE = re.compile(r'\b(_\d+)\b[ \t]*(?:<<|>>|[-+*/%&|^])?=(?!=)')   # an assignment, plain or compound, a declaration's too
+BIT0_OTHER = re.compile(r'(?:\+\+|--)[ \t]*(_\d+)\b|\b(_\d+)[ \t]*(?:\+\+|--)|&(_\d+)\b')   # an increment, or the temporary's address
+BIT0_BODY = re.compile(r'^\{\n.*?^\}$', re.M | re.S)   # a function's body: its braces alone in column 0
+def bit0_mask(msl):
+    """The 0 / -1 mask of a tested bit 0, written from the bit and not from its compare. The translator makes a predicate of `x & 1` twice over: the compare
+    `bool b = (x & 1) != 0`, and where the Switch code keeps the predicate in a register, its integer form `b ? -1 : 0`. Where the shader also branches on b the compare has
+    two users in the AIR, a sign extension and a branch, and Apple's GPU compiler for the M3 and later (applegpu_g15 and up, macOS 26 and 27) can pick a bit-test jump it has
+    no encoding for: `LLVM ERROR: Failed to encode.` under llvm::MCObjectStreamer::emitInstruction, which ends the compiler service while a pipeline with the shader is built
+    (XPC_ERROR_CONNECTION_INTERRUPTED). It needs x in a uniform the compiler's per-draw constant program has loaded and no room left there for the test itself, so one
+    shader in thousands with the idiom meets it: PRAGMATA's pixel shader c4ac3ca598cea32e (`AND` of a constant buffer word with 1, its predicate kept and branched on).
+    With the mask as `-(x & 1)`, the same value, the compare is left with its branch alone. Only a declaration `int a = ... & 1;` with a declaration `bool b = a != 0;`
+    counts, neither assigned again (SPIRV-Cross temporaries); b is in scope where the mask is taken, so a is. Other shaders come back as the same object"""
+    if ' ? (-1) : 0;' not in msl: return msl
+    def body(f):   # one function: SPIRV-Cross numbers its temporaries by function, and the build's extra entry points repeat a body
+        src = f[0]
+        if ' ? (-1) : 0;' not in src: return src
+        bits = {m[2]: m[1] for m in BIT0_AND.finditer(src) if bit0_operand(m[3])}
+        tests = {m[1]: m[2] for m in BIT0_TEST.finditer(src) if m[2] in bits}
+        writes = collections.Counter(m[1] for m in BIT0_WRITE.finditer(src))   # a temporary written once, in its declaration
+        other = {m[1] or m[2] or m[3] for m in BIT0_OTHER.finditer(src)}
+        tests = {b: a for b, a in tests.items() if writes[a] == 1 and writes[b] == 1 and a not in other and b not in other}
+        def mask(m):
+            a = tests.get(m[1])
+            if a is None: return m[0]
+            return '= -%s;   // bit 0 as a mask (bit0_mask)' % (a if bits[a] == 'int' else 'int(%s)' % a)
+        return BIT0_MASK.sub(mask, src) if tests else src
+    out = BIT0_BODY.sub(body, msl)
+    return out if out != msl else msl
+
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')   # tg_fence looks for the name 'dmsh_tg_fence' before it runs this: a change of the name here is one there too
 def tg_fence(src):
-    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
-    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
-    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
-    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
-    threadgroup array are touched. A plain or compound assignment (SPIRV-Cross folds a load, an operation and a store of the same element into `_46[i] += 1u;`), also to a
-    member or component (`_39[i].x = v;`). From uncraftablexd's Orbitals bring-up (PR #1775)"""
-    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
-    if not names: return src
-    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\](?:\.\w+)?\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
-    out = []
-    for ln in src.split('\n'):
-        out.append(ln)
-        m = store.match(ln)
-        if m: out.append(m.group(1) + TG_FENCE)
-    return '\n'.join(out)
+    """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
+    at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
+    lane's old value (Orbitals: Niagara's sorted index list wrong every frame, PR #1775). The translator calls dmsh_tg_fence() before each shared memory load that some path
+    reaches from a shared memory store with no barrier between (SharedMemoryFence.cs). Its body there is a memory barrier at workgroup scope, which SPIRV-Cross prints as a
+    threadgroup-scope fence on every memory (MSL 3.2); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
+    an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
+    fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    if 'dmsh_tg_fence' not in src: return src   # every helper match needs its name; let the pattern check its declaration
+    m = TG_FENCE_FN.search(src)
+    if not m: return src
+    return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
+
+# A float add to storage memory whose result nothing reads (RED.F32, InstEmitMemory EmitAtomicAddF32) reaches the MSL as a compare-and-swap loop on the word. Metal has
+# atomic_float on device memory (MSL 3.0, which the Mac's and the iPhone's deployment targets both compile at), but the translator cannot ask for it: its storage buffers are uint arrays,
+# and a float pointer to one is an OpBitcast that logical addressing forbids, which spirv-cross then writes as a reinterpret_cast of the loaded value, not its address. agl's
+# scene analysis adds every thread's value into the same few words, so the loops retried for each other: Ocarina of Time's 6e28359aa3558f61 (one workgroup of 256 threads,
+# four words) took 0.25 ms a frame and 1bba09ec4bc8ff67 0.40 ms on a MacBook Air M4, under 0.13 ms each as one atomic_fetch_add; the exposure the same (PR #1930). Only the
+# exact loop spirv-cross writes, on the same word for the load and the swap, is replaced: the word and sum are local to the do-block, so its result is read nowhere. The retry flag
+# is declared outside the block and may be read later: keep it as false, the only value on normal loop exit. Anything else
+# (an add through the memory pool table, a bounded buffer's guarded swap, shared memory, an ATOM whose result is used) stays a loop, which is correct and only slower. test_dmsh_ampere_alu.py FloatRed checks that
+# the translator's loop still has this shape
+# The add is `old + v`, or spvFAdd(old, v) where the translator marks it exact (XLATE_REDUCED=0): one atomic add has nothing to contract, so both become the native add.
+FLOAT_ADD = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=ind)\{\n'
+                       r'(?P=ind)    float (?P<old>_\d+) = as_type<float>\((?P<addr>[^\n]*?)\);\n'
+                       r'(?P=ind)    float (?P<sum>_\d+) = (?:(?P=old) \+ (?P<val>[^;\n]+)|spvFAdd\((?P=old), (?P<valp>[^;\n]+)\));\n'
+                       r'(?P=ind)    uint (?P<want>_\d+) = as_type<uint>\((?P=old)\);\n(?P=ind)    uint (?P<seen>_\d+);\n(?P=ind)    do\n(?P=ind)    \{\n(?P=ind)        (?P=seen) = (?P=want);\n'
+                       r'(?P=ind)    \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<addr2>[^\n]*?), &(?P=seen), as_type<uint>\((?P=sum)\), '
+                       r'memory_order_relaxed, memory_order_relaxed\) && (?P=seen) == (?P=want)\);\n'
+                       r'(?P=ind)    uint (?P<found>_\d+) = (?P=seen);\n(?P=ind)    (?P=again) = int\((?P=found)\) != as_type<int>\((?P=old)\);\n(?P=ind)\} while \((?P=again)\);\n')
+def float_add_msl(msl):
+    if 'atomic_compare_exchange_weak_explicit' not in msl: return msl
+    return FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
+                         f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
+                         f"{m.group('ind')}bool {m.group('again')} = false;\n", msl)
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
@@ -55,17 +125,95 @@ def mul_extended(msl):
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
+# A read of a game uniform slot at a computed offset, as the translator bounds it (TranslationFlags.MetalUniformBounds, GitHub issue #1860): the value when the slot's bound size
+# (the size table, bank DMSH_CBSIZE_BANK) holds its index, else 0, and out of bounds the read's index is row 0, so it stays inside the binding
+# (bool _5 = word < size; _5 ? c[_5 ? _3 : 0][_4] : 0.0). Reads at fixed offsets are not bounded in the shader: the host gives a binding shorter than they reach zeros up to there
+# (the reflection's "fixed", nvn_mtl.m ub_padded; GitHub issue #2066).
+# The translator's bounded read is a load and a choice (OpLoad, then OpSelect: the word is read wherever the size says, and only its value is chosen), but spirv-cross writes OpSelect
+# on a scalar as a conditional expression and forwards the load into it, cond ? read : 0, which reads only when the condition holds: Metal's compiler makes a branch, a load inside it
+# and a phi of every bounded read (seen in its LLVM IR at -O1 and -O2), where select(0, read, cond) is one load and a select. select_guards writes every bounded read as that select,
+# the translator's own meaning.
+# The branches are also what an M1's compiler gets wrong (GitHub PR #2127, macOS 26 on an M1 Pro, when reads at fixed offsets were bounded so too): OCTOPATH TRAVELER's tree material
+# (pixel shader 040208cd98c2ac2f) wrote a wrong volumetric lightmap word to G-buffer target 5 whenever a tree dither-faded, with every guard true; the lighting made NaN of it and
+# depth of field spread that into blue, green and white blocks. Which compiler step fails is not known (the same source was right at -O0, without the guards and with select; not
+# seen on newer Macs or an iPhone).
+# A bounded read select_guards cannot write as a select is an error (ValueError), so a change in what spirv-cross writes cannot bring the branches back unseen
+_GSIZE = r'\(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> (?:2|4)u\)' % abi.CBSIZE_BANK   # a slot's size in words or vec4 rows
+_GZERO = r'0(?:\.0|u)?'
+def _gchoice(cond, read):   # cond ? read : 0 as spirv-cross writes it, in parentheses (those after a name or > are a call's) or not as the expression around it needs
+    return re.compile('|'.join(form % (n, cond, n, read % n, n, _GZERO) for n, form in
+                               ((1, r'(?<![\w>])\((?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)\)'), (2, r'(?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)(?![\w.])'))))
+# The comparisons start with the text "bool ", which re skips to: with \b first it tried them at every character of every source. The lookbehind takes that text in and is the \b
+# (no word character before it), so the matches are the same (test_shader_rewrites.py GuardScans)
+_GBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
+_GROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\](?:\[[^\]\n]+\]|\.[xyzw])')
+_GLEFT = re.compile(r'%s\) \?' % _GSIZE)
+# A bounded storage buffer's read (TranslationFlags.MetalStorageBounds, GitHub issue #2618): the same choice, the word when it lies in the memory the host bound there (the length table,
+# bank DMSH_SBLEN_BANK: bool _5 = (uint(idx) + before) < total) else 0, and out of bounds the index is word 0, inside the binding (_5 ? buf[_5 ? idx : 0] : 0u). Written as a select too:
+# the load needs no branch, and its words stay plain for wide_loads (dmsh_wide.py)
+_STABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
+_SBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
+_SROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_s\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\]')
+_GNAME = re.compile(r'(?<!\[)\b(_\d+) \?')   # a choice on a name; a read's index has its own, after the bracket
+# _GROW, _SROW and _GNAME have no text to skip to (an alternation, a lookbehind), and re tried them at every character of a source with bounded reads. Each is tried only where
+# one of its matches can start, found from text every match holds, and the pattern itself decides there: the matches, their order and the result are those of sub and finditer
+# (GuardScans)
+_GREAD = ' ? (*spvDescriptorSet0.'   # follows the condition of every choice of a read
+
+def _gsub(pat, repl, msl):
+    """pat.sub(repl, msl) for a _gchoice pattern: a match starts at its condition, the last _ before a _GREAD, or at the parenthesis before that"""
+    k = msl.find(_GREAD)
+    if k < 0: return msl
+    out, pos, low = [], 0, 0   # copied up to pos; no match starts before low (the end of the last match, or past a _GREAD that began none)
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = (pat.match(msl, s - 1) if s > pos and msl[s - 1] == '(' else None) or (pat.match(msl, s) if s >= 0 else None)
+        if m: out += (msl[pos:m.start()], repl(m)); pos = low = m.end()
+        else: low = k + 1
+        k = msl.find(_GREAD, low)
+    out.append(msl[pos:])
+    return ''.join(out)
+
+def _gleft(msl, conds):
+    """The first match of _GNAME whose name is in conds, or None: a match ends with a " ?" and starts at the last _ before it"""
+    k, low = msl.find(' ?'), 0
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = _GNAME.match(msl, s) if s >= 0 else None
+        if m and m.group(1) in conds: return m
+        low = k + 2; k = msl.find(' ?', low)
+    return None
+
+def select_guards(msl):
+    if 'spvDescriptorSet0' not in msl: return msl
+    bools, sbools = set(_GBOOL.findall(msl)), set(_SBOOL.findall(msl))
+    def select(m, conds):
+        n = '1' if m.group('q1') else '2'; c = m.group('q' + n)
+        if c not in conds or m.group('i' + n) != c: return m.group(0)
+        return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
+    if bools: msl = _gsub(_GROW, lambda m: select(m, bools), msl)
+    if sbools: msl = _gsub(_SROW, lambda m: select(m, sbools), msl)
+    left = _GLEFT.search(msl)
+    conds = bools | sbools   # no condition names: no choice can be left over from one, so only the scan below is skipped (the size test above always runs)
+    if not left and conds: left = _gleft(msl, conds)
+    if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
+    return msl
+
 # A game uniform word tested against integer constants, as the translator writes a GLSL switch (Ryujinx's structurizer: one test of the word per case, flags for the fall-throughs,
 # the cases nested in each other): bool _5 = as_type<int>((*spvDescriptorSet0.fp_c5)._m0[16].w) != 102. The Metal front end's SimplifyCFG (at -O1 too) folds a chain of blocks
 # that each hold only such a test of one value into a switch, whose cases jump into the nested blocks past their joins. Apple's GPU compiler then takes a pixel shader with dozens of
 # such switches for hours and tens of gigabytes (applegpu-nt, metal-tt 32023.922): Nintendo Switch Sports Resort's material pixel shader 692008b305ce264f (42 switches) ran past
 # 10 minutes and 13 GB alone where it had taken 7 s, and the Mac app's pipeline archive spent 15 hours on four pipelines. The reads were plain since the host pads a short binding
-# (dmsh_fetch.select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
+# (select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
 # (dm_uword), which the front end can neither merge with the next test's nor move out of its block, so no chain is folded; a uniform load per test is less than the bounds test
 # each read had then. Only words of the game's uniform slots (c3 and up) tested against a constant more than once: a single test is no chain, and the driver's banks (c0 to c2)
 # are left as written, since later rewrites look for their reads (dmsh_entry.vs_base_instance) and the host fills them. Returns the shader unchanged when there are none
-_UTEST_READ = r'as_type<(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # game slots c3 and up, not the driver's banks
-_UTEST = re.compile(r'(?<![\w.])%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= )%s' % (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
+_UTEST_READ = r'(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # after as_type<: game slots c3 and up, not the driver's banks
+# A literal start lets re skip to casts. The lookbehinds include that consumed prefix, so they still check the characters before the cast; spans and groups stay the same.
+# The prefix is written three times, at the start and in both lookbehinds: a change to one is a change to all three (test_shader_rewrites.py UniformMatchScan holds this
+# pattern to the one it replaced, match by match)
+_UTEST = re.compile(r'as_type<(?:(?<![\w.]as_type<)%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= as_type<)%s)' %
+                   (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
 _UTEST_LEFT = re.compile(r'(?<![\w.])-?\d+u? [!=]= $')
 UWORD = ('#ifndef DM_UWORD\n#define DM_UWORD\ntemplate<typename T, int N> static inline __attribute__((always_inline)) T dm_uword(const constant vec<T, N>& v, int i) '
          '{ return ((const volatile constant T*)&v)[i]; }\n#endif\n')
@@ -173,6 +321,141 @@ def block_end(src, start):   # the index of the brace closing the block opened a
         depth += 1 if b.group() == '{' else -1
         if depth == 0: return b.start()
     raise ValueError('dmsh_hmma16816_f16: block not closed')
+
+# Compute loop containment, based on uncraftablexd / FifteenPen's #2254 and computerguy526 / uncraftablexd's #2709. A platform workaround, not the runaway's cause's fix:
+# committed GPU work can survive process exit and wedge the Mac (#2664). The per-function budget also counts nested and consecutive loops; legitimate work can exhaust it.
+# Only compute is guarded. A GPU-written abort word shortens the submission's other loops; CPU writes to a running kernel were unreliable. Helpers carry the same state, but
+# have their own function budget. A loop containing an execution barrier (also through calls) has a fresh private budget, only raises the abort, and never reads it:
+# differing work before or inside it must not make threads leave its barriers on different iterations. Cap hits record a loop site separately
+# for each kernel, so a kernel shortened by another's abort is not blamed. Source sites are written into the reflection; the host reports hits after completion, once per kernel.
+LOOP_CAP = 1 << 18
+LOOP_ABORT_EVERY = 1024
+_LOOP = re.compile(r'\b(for|while)\s*\(')
+_LOOP_COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.S)
+
+
+def compute_loops(msl):
+    """(MSL, loop sites): cap compute entry functions and their reachable helpers, carrying the submission's abort and kernel's hit record through callers.
+    SPIRV-Cross's function braces stand alone; loop bodies may be compact (the chain's matrix helpers). Other stages and loop-free compute shaders are unchanged."""
+    if not re.search(r'^kernel\s+void\s+main0\s*\(', msl, re.M): return msl, []
+    fns = []
+    for m in FUNC_OPEN.finditer(msl):
+        close = m.start() - 1
+        if close < 0 or msl[close] != ')': continue
+        depth, op = 1, close
+        while depth and op:
+            op -= 1; depth += (msl[op] == ')') - (msl[op] == '(')
+        name = re.search(r'(\w+)\s*$', msl[:op])
+        if not name: continue
+        start = msl.rfind('\n', 0, op) + 1
+        body = m.end() + 2
+        end = block_end(msl, body - 1)
+        fns.append((name[1], start, op, close, body, end))
+    names = {f[0] for f in fns}
+    calls = {n: set() for n in names}
+    bodies = {n: '' for n in names}
+    def code(text): return _LOOP_COMMENT.sub(lambda m: re.sub(r'[^\n]', ' ', m[0]), text)
+    for n, _, _, _, b, e in fns: bodies[n] += code(msl[b:e])
+    def uses(text, n): return re.search(rf'\b{re.escape(n)}\s*(?:<[^;\n()]*>)?\s*\(', text)
+    for n in names: calls[n] = {c for c in names if uses(bodies[n], c)}
+    def grow(seed, edges):
+        found = set(seed)
+        while True:
+            more = {n for n in names if edges(n, found)} - found
+            if not more: return found
+            found |= more
+    reach = grow({'main0'}, lambda n, s: any(n in calls[c] for c in s))
+    loops = {n for n in reach if _LOOP.search(bodies[n])}
+    guarded = grow(loops, lambda n, s: bool(calls[n] & s)) & reach
+    if not loops: return msl, []
+    if re.search(rf'\[\[buffer\({abi.LOOP_SLOT}\)\]\]', msl): raise ValueError(f'compute buffer {abi.LOOP_SLOT} is taken')
+    barriers = grow({n for n in names if re.search(r'\b(?:threadgroup|simdgroup)_barrier\s*\(', bodies[n])}, lambda n, s: bool(calls[n] & s))
+    edits, sites = [], []
+    def call_edits(text):
+        out = []
+        for c in guarded:
+            for call in re.finditer(rf'\b{re.escape(c)}\s*(?:<[^;\n()]*>)?\s*\(', code(text)):
+                tail = dmsh_side._close(text, call.end(), '(', ')')
+                if tail < 0: raise ValueError(f'loop containment: unclosed call to {c}')
+                out.append((tail - 1, (', ' if text[call.end():tail - 1].strip() else '') + 'dm_loop'))
+        return out
+    for n, _, op, close, b, e in fns:
+        if n not in guarded: continue
+        param = 'device dm_loop_state& dm_loop' + (f' [[buffer({abi.LOOP_SLOT})]]' if n == 'main0' else '')
+        edits.append((close, close, (', ' if msl[op + 1:close].strip() else '') + param))
+        body, conditions = msl[b:e], []
+        masked = code(body)
+        if n in loops: edits.append((b, b, '\n    uint dm_lg = 0u;'))
+        for loop in _LOOP.finditer(masked):
+            close = dmsh_side._close(masked, loop.end(), '(', ')') - 1
+            if close < 0: raise ValueError(f'loop containment: unclosed condition in {n}')
+            lo, hi = loop.end(), close
+            if loop[1] == 'for':
+                semis = [m.start() for m in re.finditer(';', masked[lo:hi])]
+                if len(semis) != 2: raise ValueError(f'loop containment: unknown loop in {n}')
+                lo, hi = lo + semis[0] + 1, lo + semis[1]
+            after = close + 1
+            while after < len(masked) and masked[after].isspace(): after += 1
+            before = masked[:loop.start()].rstrip()
+            begin = loop.start()
+            if loop[1] == 'while' and after < len(masked) and masked[after] == ';' and before.endswith('}'):
+                # A do/while: locate its body backwards, including any nested blocks.
+                depth, start = 1, len(before) - 1
+                while depth and start:
+                    start -= 1; depth += (masked[start] == '}') - (masked[start] == '{')
+                do = re.search(r'\bdo\s*$', masked[:start])
+                if not do: raise ValueError(f'loop containment: no do in {n}')
+                begin, end = do.start(), after + 1
+                inside = masked[start:len(before)]
+            elif after < len(masked) and masked[after] == '{':
+                end = block_end(masked, after) + 1
+                inside = masked[after:end]
+            else:
+                end = masked.find(';', after)
+                if end < 0: raise ValueError(f'loop containment: no loop body in {n}')
+                inside = masked[after:end]
+                end += 1
+            context = masked[loop.end():close] + inside
+            barrier = bool(re.search(r'\b(?:threadgroup|simdgroup)_barrier\s*\(', context)) or any(uses(context, c) for c in barriers)
+            site = len(sites) + 1
+            sites.append({'site': site, 'function': n, 'line': msl.count('\n', 0, b + loop.start()) + 1, 'barrier': barrier})
+            counter = f'dm_lg_b{site}' if barrier else 'dm_lg'
+            if barrier:
+                edits.extend(((b + begin, b + begin, f'{{ uint {counter} = 0u; '), (b + end, b + end, ' }')))
+            check = f'dm_lg_{"cap" if barrier else "go"}({counter}, dm_loop, {site}u)'
+            out = body[lo:hi].strip() or 'true'
+            for at, text in sorted(call_edits(out), reverse=True): out = out[:at] + text + out[at:]
+            edits.append((b + lo, b + hi, f'({out}) && {check} /* dm_loop_site {site}: {n} */'))
+            conditions.append((lo, hi))
+        # Calls inside conditions were rewritten with their condition; the remaining calls include loop-free wrappers and nested calls in ordinary statements.
+        for at, text in call_edits(body):
+            if not any(lo <= at <= hi for lo, hi in conditions): edits.append((b + at, b + at, text))
+    for a, b, text in sorted(edits, reverse=True): msl = msl[:a] + text + msl[b:]
+    head = re.search(r'^using namespace metal;\s*\n', msl, re.M)
+    if not head: raise ValueError('loop containment: no metal namespace')
+    helper = f'''
+struct dm_loop_state
+{{
+    device atomic_uint* abort;
+    atomic_uint hit;
+}};
+static inline __attribute__((always_inline)) bool dm_lg_cap(thread uint& n, device dm_loop_state& s, uint site)
+{{
+    if (++n < {LOOP_CAP}u) return true;
+    if (n == {LOOP_CAP}u)
+    {{
+        atomic_fetch_min_explicit(&s.hit, site, memory_order_relaxed);
+        atomic_store_explicit(s.abort, 1u, memory_order_relaxed);
+    }}
+    return false;
+}}
+static inline __attribute__((always_inline)) bool dm_lg_go(thread uint& n, device dm_loop_state& s, uint site)
+{{
+    if (!dm_lg_cap(n, s, site)) return false;
+    return (n & {LOOP_ABORT_EVERY - 1}u) != 0u || atomic_load_explicit(s.abort, memory_order_relaxed) == 0u;
+}}
+'''
+    return msl[:head.end()] + helper + msl[head.end():], sites
 
 # B kept in the SIMD-group (hmma_bslots). The lanes hold B in registers and the matrix hardware fills its matrices only from memory: a lane writing its elements through
 # thread_elements() from SIMD shuffles (the 8x8 lane layout measured on an M6: lane l holds row (l/16)*4 + (l/2)%4, columns 2(l%2) + 4((l/8)%2) and the next) took a chain of
@@ -356,6 +639,25 @@ def shared_store_msl(msl):
         u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
     return src
 
+# A compute shader's local size as the kernel's [[max_total_threads_per_threadgroup]]. A Metal compute pipeline's maxTotalThreadsPerThreadgroup is not fixed at 1,024: on GPUs without
+# Dynamic Caching (the M1 and M2, applegpu_g13* / g14*, and the iPhone GPUs of their generation) it falls with the registers the kernel's code takes, 1,024 threads at up to 52 32-bit
+# registers, 512 at up to 104, 384 at 128, and the GPU compiler chooses the registers without knowing the size the host will dispatch. The host dispatches the Switch shader's own local size
+# (nvn_mtl.m), so a kernel compiled past that size's budget gets a dispatch larger than its pipeline allows, which runs no invocation: Ocarina of Time's froxel light injection 9ed48d1011f1b48b
+# (8x8x8) took 128 registers on applegpu_g14g once its 195 uniform reads at computed offsets were bounded as selects (918e9f34) and 104, exactly the 512-thread budget, as plain reads, and its
+# 128x72x96 volumes stayed zero on M2s, so the forest haze was gone (issue #2425); on the M3 and later (g15 / g16) every size up to 1,024 fits and the code is the same with the attribute.
+# With it, the compiler fits the kernel to the size (spilling where it must), as it does for a pipeline descriptor's maxTotalThreadsPerThreadgroup. Only sizes above 384 get it: 128
+# registers, the most a thread has, still allow 384, so no smaller size can be refused, and on g13 / g14 the attribute changes the code of most kernels that already fit (a 64-thread kernel's
+# registers and spill go down a little), which those sizes are left out of. The line goes before the kernel's, which tools match at the start of a line. local: the translator's [x, y, z];
+# a missing or out-of-range size leaves the shader as it is
+MAX_THREADS = 1024   # Metal's limit for a compute threadgroup on every Apple GPU
+ALWAYS_FITS = 384   # threads a pipeline allows at the most registers a thread can take (128) on g13 / g14
+
+def max_threads(msl, local):
+    if not local or len(local) != 3 or any(not isinstance(v, int) or v < 1 for v in local): return msl
+    n = local[0] * local[1] * local[2]
+    if n <= ALWAYS_FITS or n > MAX_THREADS or '[[max_total_threads_per_threadgroup(' in msl: return msl
+    return re.sub(r'^(kernel void main0\()', '[[max_total_threads_per_threadgroup(%d)]]\n\\1' % n, msl, count=1, flags=re.M)
+
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
@@ -423,9 +725,23 @@ def gather_quad(off):
     if sorted(rel) != sorted(GATHER_QUAD): return None
     return f'int2({bx}, {by})', ''.join(GATHER_QUAD[r] for r in rel)
 
+# A raw global access's pool table lookup (GlobalToStorage TryGenerateRawStorageOp) checks the entry it chose last at the access and, past it, calls dmsh_raw_find (GetRawFindFunction:
+# the chunk's hint, a binary search), one function per shader that the translator names. spirv-cross writes every function always_inline (it ignores SPIR-V's DontInline), so with the
+# access helpers inlined Metal's compiler built a copy of the search at every access: Ocarina of Time's foliage mesh shader 3439aaa071d868ae makes 141, and its task / mesh pipeline
+# took 1.9 s to compile cold on an M2 Air (25 s for the route's 54 at the first start), while the GPU waited at its first draw (Native mesh pipelines compiled at their first draw).
+# Written noinline, it is one function the misses branch to. Only the search: the last entry's check and the access stay inline, since keeping the whole access helper apart
+# put the last entry and the vector words behind the call at every access (2.5 ms of a 15 ms frame on an M4 Pro)
+# Workaround for Apple's M1/M2 mesh compiler: some mesh programs calling this helper crash in MachineOperand::setReg. Keep the search inline in every final mesh library,
+# including one composed from vertex/geometry sources already rewritten noinline. Other stages retain one search; the compiler defect itself remains open.
+RAW_FIND = re.compile(r'\nstatic (?:inline __attribute__\(\(always_inline\)\)|__attribute__\(\(noinline\)\))\n(\w+ dmsh_raw_find\w*\()')
+def raw_noinline(msl, stage='cs'):
+    attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
+    return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
+
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 
 def gather_offsets(msl):
+    if 'spvGather' not in msl: return msl   # both gather helper names need this prefix
     if not re.search(r'\bspvGather(Compare)?ConstOffsets\(spvDesc|= spvGather(Compare)?ConstOffsets\(', msl): return msl
     arrays = {}
     for m in re.finditer(r'\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);', msl):
@@ -579,21 +895,34 @@ def frag_z_snap(msl):
 # The rule belongs to the blender, so it depends on the draw's blend state, which a shader does not know: the host gives it (nvn_mtl.m bz_bind) as a word at fragment buffer
 # DMSH_BLEND_BUFFER, DMSH_BLEND_ZERO_BITS bits per colour output: where the output's source colour weight is zero (dmsh_abi.h has the cases), a non-finite rgb is returned as 0, which is
 # what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
-# it is: NVIDIA stores that NaN or Inf too. A finite colour is never changed, nor the alpha.
+# it is: NVIDIA stores that NaN or Inf too. This part never changes a finite colour, nor the alpha.
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
-# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u / main0_m, main0_d, main0_f and
+# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_d, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
-BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
+# The same call rounds what goes into a normalized target as NVIDIA's colour unit does (the struct's second word, round, DMSH_BLEND_ROUND_BITS a colour output, from nvn_mtl.m rop_word).
+# The two convert a float colour differently where it lies within rounding of a half step: Apple stores the nearest integer to the exact x * (2^n - 1) (dm/gfx/tests/t_rop_round.m
+# measures it, an M6), NVIDIA's rounds the float32 product to nearest even. Sonic Frontiers writes its G-buffer material flags as the constant 66.5 / 255 in float32
+# (0.2607843279838562): exactly 66.5 once multiplied in float32, so 66 on the Switch, but 66.5000036 exactly, so 67 on the Mac, whose bit 0 sends the lighting to an ambient
+# the G-buffer leaves black. Here the colour becomes rint(float32(saturate(c) * scale)) / scale, which Apple's conversion stores as that integer. Only where the stored value is the
+# conversion of the shader's colour: blending off, MIN or MAX (they pick one of two stored values) or a logic operation; a blended sum is rounded after the blend, which a shader cannot reach.
+BLEND_ZERO = '''struct dm_blend_state { uint zero; uint round; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
 {
     m &= %du;
     if (!((m == 1u && c.w == 0.0f) || (m == 2u && c.w == 1.0f))) return c;
     return float4(select(c.xyz, float3(0.0f), (as_type<uint3>(c.xyz) & uint3(0x7f800000u)) == uint3(0x7f800000u)), c.w);   // NaN or Inf by its bits: fast math may assume there is none
 }
+static inline __attribute__((always_inline)) float4 dm_rop(float4 c, uint m)
+{
+    m &= %du;
+    if (m == 0u) return c;
+    float4 s = m == %du ? float4(255.0f) : (m == %du ? float4(65535.0f) : float4(1023.0f, 1023.0f, 1023.0f, 3.0f));
+    return rint(precise::clamp(c, 0.0f, 1.0f) * s) / s;   // precise: NaN goes to 0, as both store it; the product is float32's, rint rounds it to nearest even
+}
 static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
-    uint m = dm_s.zero;
-    if (m == 0u) return;
+    uint m = dm_s.zero, r = dm_s.round;
+    if ((m | r) == 0u) return;
 %s}
 '''
 BLEND_ZERO_PARAM = f'constant dm_blend_state& dm_blend [[buffer({abi.BLEND_BUFFER})]]'
@@ -612,6 +941,7 @@ def blend_zero(msl):
     n = len(re.findall(r'\breturn\b', body))
     body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
     if not k or k != n: return msl, 0
-    bits = abi.BLEND_ZERO_BITS
-    helper = BLEND_ZERO % ((1 << bits) - 1, ''.join(f'    dm_o.{nm} = dm_bz(dm_o.{nm}, m >> {bits * c}u);\n' for nm, c in cols))
+    bits, rb = abi.BLEND_ZERO_BITS, abi.BLEND_ROUND_BITS
+    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16,
+                           ''.join(f'    dm_o.{nm} = dm_rop(dm_bz(dm_o.{nm}, m >> {bits * c}u), r >> {rb * c}u);\n' for nm, c in cols))
     return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

@@ -21,10 +21,13 @@ check_program() {   # RomFS, marker, shader libraries, shader folder
         [ "$4" = "b-$V" ] || die "The prepared shaders are chain $4, the sources are now at b-$V: prepare the game again (build_ipa_from_nsp.py --prepare-xcode)";;
     esac
 }
-# The folders beside a RomFS (nx_extract --html, the NSP script's nn::jit image) into the app folder given, where the host finds them beside its RomFS (hle_web.c, loader.c dm_jit_serve_dir)
+# The folders beside a RomFS (nx_extract --html, the NSP script's nn::jit image, the other programs' RomFS from a NUP) into the app folder given, where the host finds them beside its RomFS
+# (hle_web.c, loader.c dm_jit_serve_dir, hle_fs.c MountRom by program index); a first copy is a clone, as sync_dir's below
 beside_romfs() {
-    for d in html jit; do
-        if [ -d "$(dirname "$1")/$d" ]; then mkdir -p "$2/$d"; /usr/bin/rsync -a --delete -- "$(dirname "$1")/$d/" "$2/$d/"; else rm -rf "${2:?}/$d"; fi
+    for d in html jit romfs_programs; do
+        if [ ! -d "$(dirname "$1")/$d" ]; then rm -rf "${2:?}/$d"
+        elif [ ! -d "$2/$d" ]; then mkdir -p "$2/$d"; /bin/cp -cRp -- "$(dirname "$1")/$d/." "$2/$d/" || die "copy $(dirname "$1")/$d"
+        else /usr/bin/rsync -a --delete -- "$(dirname "$1")/$d/" "$2/$d/"; fi
     done
 }
 DM_RESOURCE_PROGRAMS=${DM_RESOURCE_PROGRAMS:-}
@@ -43,17 +46,33 @@ sync_dir() {   # source folder, destination folder
     if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then mkdir -p "$2"; /bin/cp -cRp -- "$1/." "$2/" || die "copy $1 to $2"
     else /usr/bin/rsync -a --delete -- "$1/" "$2/" || die "sync $1 to $2"; fi
 }
+sync_image() (   # source image, destination image
+    # Keep rsync's size and whole-second mtime check on rebuilds.
+    if [ -f "$2" ] && [ ! -L "$2" ]; then
+        source_stamp=$(/usr/bin/stat -L -f '%z:%m' -- "$1") || die "stat $1"
+        staged_stamp=$(/usr/bin/stat -f '%z:%m' -- "$2") || die "stat $2"
+        [ "$source_stamp" != "$staged_stamp" ] || return 0
+    fi
+    [ ! -d "$2" ] || die "Image destination is a directory: $2"
+    # Clone to a fresh path on the destination volume, then publish the complete image.
+    stage_dir=$(/usr/bin/mktemp -d "${2%/*}/.stage-image.XXXXXXXX") || die "create staging directory for $2"
+    trap '/bin/rm -rf -- "$stage_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    /bin/cp -cp -- "$1" "$stage_dir/image" || die "copy $1 to $2"
+    /bin/mv -f -- "$stage_dir/image" "$2" || die "replace $2"
+)
 sync_libraries() {   # shader libraries (a folder, or an NVN game's one file: dm/tools/shader_lib.py), the app's msl folder for them, their name there
     if [ -f "$1" ]; then
-        rm -rf "${2:?}/$3"; mkdir -p "$2"
-        if [ -f "$2/$3.img" ]; then /usr/bin/rsync -a -- "$1" "$2/$3.img"; else /bin/cp -cp -- "$1" "$2/$3.img" || die "copy $1"; fi
+        mkdir -p "$2"
+        sync_image "$1" "$2/$3.img"
+        rm -rf "${2:?}/$3"
     else
         rm -f "${2:?}/$3.img"; sync_dir "$1" "$2/$3"
     fi
 }
 sync_romfs() {   # the RomFS (an image file or a folder), the app folder it goes in
     if [ -f "$1" ]; then
-        if [ -f "$2/romfs.img" ]; then /usr/bin/rsync -a -- "$1" "$2/romfs.img"; else /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"; fi
+        sync_image "$1" "$2/romfs.img"
         rm -rf "$2/romfs"; rm -f "$2/romfs.id"
     else
         sync_dir "$1" "$2/romfs"

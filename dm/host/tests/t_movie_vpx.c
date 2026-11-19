@@ -32,26 +32,36 @@ static void decode(int type, int format, const uint8_t *packet, int size) {
     vpx_codec_destroy(&d.vpx);
     free(d.out[0].frm);
 }
-// The frame step's movie signal (dm_movie_playing): a video picture handed out raises it for MD_PLAYING_NS; an audio output does not
+// The frame step's movie signal (dm_movie_hz): the rate of the video pictures handed out in the last MD_PLAYING_NS, from their times; audio outputs do not count
 static uint64_t test_now = 1000000000ull;
 uint64_t now_ns(void) { return test_now; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 void mavc_drop(mavc *a) { (void)a; }   // hle_movie_avc.c: no H.264 here
 static void playing(void) {
-    static mdec_t video = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 }, audio = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
-    pthread_mutex_init(&video.mu, NULL); pthread_mutex_init(&audio.mu, NULL);
-    void *vs[2] = { NULL, &video }, *as[2] = { NULL, &audio };
+    static mdec_t video = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 }, audio = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 }, other = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 };
+    pthread_mutex_init(&video.mu, NULL); pthread_mutex_init(&audio.mu, NULL); pthread_mutex_init(&other.mu, NULL);
+    void *vs[2] = { NULL, &video }, *as[2] = { NULL, &audio }, *os[2] = { NULL, &other };
     int idx, left; int64_t pts; uint32_t flags;
-    assert(!dm_movie_playing());
-    audio.outq[0] = 0; audio.noutq = 1;
-    assert(!h_movie_AcqOut(as, &idx, &pts, &flags, &left) && idx == 0 && !dm_movie_playing());
-    video.outq[0] = 3; video.noutq = 1;
-    assert(!h_movie_AcqOut(vs, &idx, &pts, &flags, &left) && idx == 3 && dm_movie_playing());
-    test_now += MD_PLAYING_NS - 1; assert(dm_movie_playing());
-    assert(h_movie_AcqOut(vs, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && dm_movie_playing());   // no picture ready: nothing handed out, the signal is not renewed
-    test_now += 1; assert(!dm_movie_playing());
-    puts("movie signal: a video picture raises it for half a second, audio outputs do not");
+#define HAND(d, q, slot, time) do { (d).outq[0] = (slot); (d).noutq = 1; (d).out[slot].pts = (time); assert(!h_movie_AcqOut(q, &idx, &pts, &flags, &left) && idx == (slot)); } while (0)
+    assert(!dm_movie_hz());
+    HAND(audio, as, 0, 0); HAND(audio, as, 0, 16667); HAND(audio, as, 0, 33333); assert(!dm_movie_hz());   // audio outputs are no movie
+    HAND(video, vs, 3, 0); assert(!dm_movie_hz());   // one picture gives no rate yet
+    test_now += 33000000; HAND(video, vs, 3, 33333); assert(dm_movie_hz() == 30);   // 33,333 µs apart: 30 a second
+    test_now += MD_PLAYING_NS - 1; assert(dm_movie_hz() == 30);
+    assert(h_movie_AcqOut(vs, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && dm_movie_hz() == 30);   // no picture ready: nothing handed out, the signal is not renewed
+    test_now += 1; assert(!dm_movie_hz());
+    HAND(video, vs, 3, 2000000); assert(dm_movie_hz() == 30);   // after a pause the decoder keeps its rate
+    HAND(other, os, 1, 0); test_now += 16000000; HAND(other, os, 1, 16667); assert(dm_movie_hz() == 60);   // two decoders: the faster one's rate
+    dm_movie_stopped(&other); assert(dm_movie_hz() == 30);   // a stopped decoder leaves at once
+    dm_movie_stopped(&video); assert(!dm_movie_hz());
+    for (int k = 0; k < 20; k++) { test_now += 16666667; HAND(other, os, 1, k * 16667 / 1000 * 1000); if (k >= MD_RATE_PICS) assert(dm_movie_hz() == 60); }   // whole milliseconds (Ocarina of Time's times), 16 and 17 apart: 60 over the window
+    dm_movie_stopped(&other);
+    for (int k = 0; k < MD_RATE_AFTER; k++) { assert(!dm_movie_hz()); HAND(video, vs, 3, 0); }   // times that give no rate: nn::movie's pictures count as 30 after MD_RATE_AFTER
+    assert(dm_movie_hz() == 30);
+    dm_movie_stopped(&video);
+#undef HAND
+    puts("movie signal: the rate of the video pictures handed out in the last half second, the fastest decoder's; audio outputs do not count; a stop ends it");
 }
 // A Flush (a seek, or a movie that loops) must not end the movie's Vorbis sound. A synthetic one-channel stream (both block sizes 64, all-zero residue; no game data), made as the demuxer hands it over:
 // the identification and setup headers, then raw audio packets. Before the fix, stb_vorbis_flush_pushdata left the decoder searching for an Ogg page and it gave no sample again
@@ -100,6 +110,58 @@ static void vorbis_flush(void) {
     assert(vorbis_samples(&d, audio, 8) == before);
     puts("Vorbis movie sound: the samples come again after a Flush");
 }
+
+// Generate AAC with the system encoder, then seek back to the first packet.
+// A flushed decoder must produce the same samples as a freshly opened decoder,
+// not overlap them with the tail of the old playback position. No game media.
+typedef struct { int16_t samples[48000 * 6]; unsigned pos, ch; } aac_input;
+static OSStatus aac_pcm(AudioConverterRef c, UInt32 *n, AudioBufferList *b, AudioStreamPacketDescription **pd, void *u) {
+    (void)c; (void)pd; aac_input *s = u;
+    if (*n > 48000 - s->pos) *n = 48000 - s->pos;
+    b->mNumberBuffers = 1;
+    b->mBuffers[0] = (AudioBuffer){s->ch, *n * s->ch * 2, s->samples + s->pos * s->ch};
+    s->pos += *n; return 0;
+}
+static void aac_flush(unsigned ch) {
+    aac_input *input = calloc(1, sizeof *input); assert(input); input->ch = ch;
+    for (unsigned i = 0; i < 48000 * ch; i++) input->samples[i] = (int16_t)((i * 37u % 24000) - 12000);
+    AudioStreamBasicDescription pcm = {.mSampleRate = 48000, .mFormatID = kAudioFormatLinearPCM,
+        .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+        .mBytesPerPacket = 2 * ch, .mFramesPerPacket = 1, .mBytesPerFrame = 2 * ch, .mChannelsPerFrame = ch, .mBitsPerChannel = 16};
+    AudioStreamBasicDescription compressed = {.mSampleRate = 48000, .mFormatID = kAudioFormatMPEG4AAC,
+        .mFramesPerPacket = 1024, .mChannelsPerFrame = ch};
+    AudioConverterRef encoder = NULL; assert(!AudioConverterNew(&pcm, &compressed, &encoder));
+    uint8_t packets[12][8192]; unsigned lengths[12];
+    for (int i = 0; i < 12; i++) {
+        UInt32 n = 1; AudioStreamPacketDescription desc;
+        AudioBufferList b = {1, {{ch, sizeof packets[i], packets[i]}}};
+        assert(!AudioConverterFillComplexBuffer(encoder, aac_pcm, input, &n, &b, &desc));
+        assert(n == 1 && b.mBuffers[0].mDataByteSize > 0);
+        lengths[i] = b.mBuffers[0].mDataByteSize;
+    }
+    AudioConverterDispose(encoder); free(input);
+    mdec_t d = {.type = MD_TYPE_AAC, .nout = MD_NOUT_AAC, .started = 1, .ch = (int)ch, .rate = 48000};
+    pthread_mutex_init(&d.dmu, NULL); pthread_mutex_init(&d.mu, NULL);
+    uint8_t first[16384]; size_t first_n = 0;
+    for (int i = 0; i < 12; i++) {
+        assert(md_aac(&d, packets[i], (int)lengths[i], 0));
+        assert(d.out[0].bytes == 1024 * ch * 2);
+        if (!i) { first_n = d.out[0].bytes; assert(first_n <= sizeof first); memcpy(first, d.out[0].frm, first_n); }
+    }
+    // Negative control: replaying packet zero without resetting retains the
+    // previous position's overlap. This is the behavior before the repair.
+    assert(md_aac(&d, packets[0], (int)lengths[0], 0));
+    assert(d.out[0].bytes == first_n && memcmp(first, d.out[0].frm, first_n));
+    void *self[2] = {NULL, &d};
+    for (int repeat = 0; repeat < 3; repeat++) {
+        assert(!h_movie_Flush(self));
+        assert(md_aac(&d, packets[0], (int)lengths[0], 0));
+        assert(d.out[0].bytes == first_n && !memcmp(first, d.out[0].frm, first_n));
+    }
+    AudioConverterDispose(d.aac); free(d.out[0].frm);
+    pthread_mutex_destroy(&d.dmu); pthread_mutex_destroy(&d.mu);
+    printf("AAC %u channels: seek / repeated Flush restarts with the original PCM and frame count\n", ch);
+}
 // At a window change each packet leaves with (previous blocksize + its blocksize) / 4 samples. With blocksizes 64 / 256, stb_vorbis gives 176 and 32 for a long window before a short one and the short one,
 // where the specification has 128 and 80. Samples kept across a change do not survive a Flush
 static void vorbis_window_change(void) {
@@ -139,6 +201,7 @@ static void *buffer_data(const void *buf) { return (void *)((const test_buffer *
 static size_t buffer_size(const void *buf) { return ((const test_buffer *)buf)->used; }
 static size_t buffer_capacity(const void *buf) { return sizeof ((const test_buffer *)buf)->bytes; }
 static void unused_export(void) { abort(); }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 static int exports_const, exports_mutable, mutable_lookups;
 void *guest_sym(const char *name) {
     static const struct { const char *modern, *early; void *fn; } getters[] = {
@@ -167,6 +230,7 @@ int main(void) {
     movie_buffer_exports();
     playing();
     vorbis_flush();
+    aac_flush(2); aac_flush(6);
     vorbis_window_change();
     vorbis_split();
     int w = 0, h = 0;

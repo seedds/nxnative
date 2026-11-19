@@ -26,6 +26,19 @@ def dynsyms(img):
         if s: out.append((s, shndx != 0, info >> 4))
     return out
 
+# Only the SDK polling overload the host serves. Legacy AudioIn and the event-based overload have separate ABIs.
+_INPUT_STREAM_OPEN = '_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi'
+
+
+def audio_input_capable(modules):
+    for module in modules:
+        if not module.name.endswith('.patched.bin'): continue
+        try: symbols = dynsyms(module.read_bytes())
+        except (AssertionError, KeyError, IndexError, ValueError, struct.error): continue
+        if any(name == _INPUT_STREAM_OPEN and not defined for name, defined, _ in symbols): return True
+    return False
+
+
 def defined(img):   # {name: (offset, size)} of the module's defined dynamic symbols; {} without a symbol table it can read (New Super Mario Bros. U Deluxe's sdk: a 32-bit module, whose dynamic table has 8-byte entries)
     try:
         mod0 = struct.unpack_from('<I', img, 4)[0]
@@ -62,7 +75,7 @@ def host_hooks(host, forced=True):
     for f in glob.glob(os.path.join(d, '*.c')) + glob.glob(os.path.join(d, '../gfx/*.c')) + glob.glob(os.path.join(d, '../gfx/nvn/*.c')):
         t = open(f, encoding='utf-8', errors='replace').read()
         hooks |= set(re.findall(r'\bHLE\(\s*"([^"]+)"', t))
-        if forced: hooks |= set(re.findall(r'\bHLE_FORCE(?:_BIG)?\(\s*"([^"]+)"', t))
+        if forced: hooks |= set(re.findall(r'\bHLE_FORCE(?:_DIRECT|_ALIAS)?\(\s*"([^"]+)"', t))
         if os.path.basename(f) == 'hle_table.c': hooks |= set(re.findall(r'\bL\((\w+)\)', t))
     for f in glob.glob(os.path.join(d, '../gfx/vk/*.m')):
         hooks |= set(re.findall(r'^VKB?\((vk\w+),', open(f, encoding='utf-8', errors='replace').read(), re.M))

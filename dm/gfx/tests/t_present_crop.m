@@ -170,11 +170,57 @@ int main(void) { @autoreleasepool {
         EXPECT("resizing keeps the previous scaler until replacement",1,g_fx_present.sc==first);
         g_present_n=31;
         EXPECT("stable new size makes its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
-        EXPECT("replacement has the new picture size",96,(int)g_fx_present.out.width);
+        EXPECT("replacement has the new picture size",96,(int)g_fx_present.sc.outputWidth);
         EXPECT("exactly two scalers made",2,g_fx_present.made);
         g_present_n=32;
         EXPECT("same size reuses its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
         EXPECT("reuse makes no new scaler",2,g_fx_present.made);
+        // DM_FX_INPLACE and DM_FX_DIRECT: the scaler reads a private window texture in place and writes a canvas it can write, while the frame that draws that texture is
+        // still running on the queue (committed just before, as a present follows its frame). The scaler must still see the whole frame: the encoder before it orders it after
+        // the queue's earlier work only around work of its own (an encoder of barriers alone ordered nothing, and the scaler read the frame before, in every round)
+        {
+            const int S=256,ROUNDS=8;
+            MTLTextureDescriptor *wd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:S height:S mipmapped:NO];
+            wd.storageMode=MTLStorageModePrivate;wd.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;id<MTLTexture> win=[g_dev newTextureWithDescriptor:wd];
+            MTLTextureDescriptor *cd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:2*S height:2*S mipmapped:NO];
+            cd.storageMode=MTLStorageModePrivate;cd.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;id<MTLTexture> canvas=[g_dev newTextureWithDescriptor:cd];
+            id<MTLBuffer> args=[g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared],rb=[g_dev newBufferWithLength:4*S*S*4 options:MTLResourceStorageModeShared];
+            res_add(win);res_add(canvas);res_add(args);res_commit();
+            NSError *err=nil;id<MTL4Compiler> comp=[g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
+            id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct A { uint iters; uint tag; };\n"
+                "kernel void frame(constant A &a [[buffer(0)]], texture2d<float, access::write> t [[texture(0)]], uint2 i [[thread_position_in_grid]]) {\n"
+                "  float x = float(i.x); for (uint k = 0; k < a.iters; k++) x = fma(x, 1.0000001f, 0.5f); float g = x > -1.0f ? float(a.tag) / 255.0f : 0.0f; t.write(float4(g, g, g, 1), i); }\n" options:nil error:&err];
+            MTL4LibraryFunctionDescriptor *fd=[MTL4LibraryFunctionDescriptor new];fd.name=@"frame";fd.library=lib;
+            MTL4ComputePipelineDescriptor *pd=[MTL4ComputePipelineDescriptor new];pd.computeFunctionDescriptor=fd;
+            id<MTLComputePipelineState> ps=lib&&comp?[comp newComputePipelineStateWithDescriptor:pd compilerTaskOptions:nil error:&err]:nil;
+            EXPECT("the slow frame kernel compiles",1,ps!=nil);
+            MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new];ad.maxBufferBindCount=1;ad.maxTextureBindCount=1;
+            id<MTL4ArgumentTable> at=[g_dev newArgumentTableWithDescriptor:ad error:&err];
+            id<MTL4CommandAllocator> fal=[g_dev newCommandAllocator],pal=[g_dev newCommandAllocator];id<MTLSharedEvent> ev=[g_dev newSharedEvent];
+            g_present_n=1000;int stale=0,kinds=0;
+            for (int round=1;ps&&round<=ROUNDS;round++) {
+                uint32_t tag=40+round*23;((uint32_t *)args.contents)[0]=50000;((uint32_t *)args.contents)[1]=tag;
+                [at setAddress:args.gpuAddress atIndex:0];[at setTexture:win.gpuResourceID atIndex:0];[fal reset];[pal reset];
+                id<MTL4CommandBuffer> fcb=[g_dev newCommandBuffer];[fcb beginCommandBufferWithAllocator:fal];
+                id<MTL4ComputeCommandEncoder> ce=[fcb computeCommandEncoder];[ce setComputePipelineState:ps];[ce setArgumentTable:at];
+                [ce dispatchThreads:MTLSizeMake(S,S,1) threadsPerThreadgroup:MTLSizeMake(16,16,1)];[ce endEncoding];[fcb endCommandBuffer];
+                id<MTL4CommandBuffer> pcb=[g_dev newCommandBuffer];[pcb beginCommandBufferWithAllocator:pal];
+                kinds+=present_encode_m4(pcb,win,canvas,NULL,g_present_uv[0],&g_fx_present)==PRESENT_METALFX;[pcb endCommandBuffer];
+                [g_q4 commit:&fcb count:1];[g_q4 commit:&pcb count:1];[g_q4 signalEvent:ev value:round];
+                if (![ev waitUntilSignaledValue:round timeoutMS:10000]) { EXPECT("in-place present completes",1,0); break; }
+                id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+                [bl copyFromTexture:canvas sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(2*S,2*S,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:2*S*4 destinationBytesPerImage:4*S*S*4];
+                [bl endEncoding];[cb commit];[cb waitUntilCompleted];
+                const uint8_t *o=rb.contents;int bad=0;
+                for (int y=4;y<2*S-4;y+=9) for (int x=4;x<2*S-4;x+=9) bad+=abs(o[4*(y*2*S+x)+1]-(int)tag)>3;
+                stale+=bad!=0;
+            }
+            EXPECT("in-place presents go through MetalFX",ROUNDS,kinds);
+            EXPECT("the scaler read the window texture in place: no input copy made",1,g_fx_present.in==nil&&g_fx_present.in_place_n>=ROUNDS);
+            EXPECT("the scaler wrote the canvas: no present pass, no output texture made",1,g_fx_present.out==nil&&g_fx_present.direct_n>=ROUNDS);
+            EXPECT("the scaler saw the whole frame still drawing at the present, rounds stale",0,stale);
+            res_remove(win);res_remove(canvas);res_remove(args);
+        }
         g_present_n=savedPresent;
 
         // Whole-window capture uses the same upscale and remains asynchronous; its completion includes the final BGRA readback.

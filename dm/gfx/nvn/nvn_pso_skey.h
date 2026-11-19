@@ -69,9 +69,10 @@ static inline int pso_skey_parse(const char *hex, pso_skey *out) {
 
 // M rows carry their optional object shader separately. They never use a tile-specialized fragment or a vertex layout.
 static inline int pso_mesh_skey_parse(const char *hex, pso_skey *out) {
-    if (pso_skey_parse(hex, out) || !out->vs[0] || out->vs_stage != 4 ||
+    if (pso_skey_parse(hex, out) || !out->vs[0] || (out->vs_stage != 4 && out->vs_stage != 7) ||
         (out->fs[0] && out->fs_stage != 1) || out->merged || out->fz ||
         out->k.vs || out->k.fs || out->k.fsfn || !pso_ds_valid(out->k.dfmt, out->k.sfmt)) return -1;
+    out->vs_stage = 4;   // An older prewarm S row could load this mesh with NVN2's stage 7; warm_parse also checks the shader map.
     memset(out->k.attr, 0, sizeof out->k.attr);
     memset(out->k.attr_hi, 0, sizeof out->k.attr_hi);
     memset(out->k.stream, 0, sizeof out->k.stream);

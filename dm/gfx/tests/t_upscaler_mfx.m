@@ -2,8 +2,12 @@
 // 1920x1080 image is replaced by the spatial scaler, which fills the whole image with the texture's colour; equal sizes, another shader, and DM_UPSCALER unset
 // (the last run) leave the dispatch to the shader. Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
 // none swaps no shader; the MetalFX draw itself (up_mfx_encode) does not look at the key. The colour (up_mfx_color) comes from synthetic code holding the curves' constants: a variant with sRGB input
-// comes out decoded to linear, and one whose output stays encoded is left to its shader
+// comes out decoded to linear, one whose code squares its result keeping the sign (square-rooted input) comes out squared, through the scaler's own input even where the game's texture could
+// go straight, and one whose output stays encoded, or whose code says nothing of its colour, is left to its shader. The scaler comes after the work before it and the next draw pass after the scaler
+// (mfx_order): a slow pass that ends with no barrier writes the input just before each dispatch, and a draw pass copies the image just after it (the Makefile's
+// DM_NVN_BARRIER=game run makes that pass skip its consumer barrier unless the scaler cleared the relaxed end)
 #include "../nvn/nvn_mtl.m"
+#include "t_mfx_passes.h"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -39,6 +43,26 @@ static int matches(id<MTLTexture> t, const float inside[4], MTLRegion region, co
     }
     return 1;
 }
+// Every texel of an R11G11B10F texture holds rgb (HDR scaler rounding on each channel), and their mean is within 1.5 % (or 0.005): MetalFX's own R11G11B10F writes come out about 3 % low
+static float r11_unpack(uint32_t v, int mb) { uint32_t e = v >> mb, m = v & ((1u << mb) - 1); return e ? ldexpf(1 + m / (float)(1u << mb), (int)e - 15) : ldexpf(m / (float)(1u << mb), -14); }
+static int matches_r11(id<MTLTexture> t, const float rgb[3]) {
+    NSUInteger n = t.width * t.height; id<MTLBuffer> b = [g_dev newBufferWithLength:n * 4 options:MTLResourceStorageModeShared];
+    if (!b) { fprintf(stderr, "readback buffer did not allocate\n"); return 0; }
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+    [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(t.width, t.height, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:t.width * 4 destinationBytesPerImage:n * 4];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint32_t *p = b.contents; double sum[3] = {0};
+    for (NSUInteger i = 0; i < n; i++) {
+        float c[3] = {r11_unpack(p[i] & 0x7ff, 6), r11_unpack(p[i] >> 11 & 0x7ff, 6), r11_unpack(p[i] >> 22, 5)};
+        for (int k = 0; k < 3; k++) sum[k] += c[k];
+        for (int k = 0; k < 3; k++) if (!(fabsf(c[k] - rgb[k]) <= fmaxf(0.01f, 0.03f * fabsf(rgb[k])))) {
+            fprintf(stderr, "texel %lu,%lu channel %d: %g, expected %g\n", (unsigned long)(i % t.width), (unsigned long)(i / t.width), k, c[k], rgb[k]);
+            return 0;
+        }
+    }
+    for (int k = 0; k < 3; k++) if (!(fabs(sum[k] / n - rgb[k]) <= fmax(0.005, 0.015 * fabs(rgb[k])))) { fprintf(stderr, "channel %d: mean %g, expected %g\n", k, sum[k] / n, rgb[k]); return 0; }
+    return 1;
+}
 // Code holding each constant 12 times, among others: the shape of a real variant's curves
 static int color_of(const float *f32, int n32, const float *f16, int n16) {
     uint8_t code[4096]; size_t o = 0;
@@ -47,6 +71,19 @@ static int color_of(const float *f32, int n32, const float *f16, int n16) {
         for (int i = 0; i < n32; i++) { memcpy(code + o, &f32[i], 4); o += 16; }
         for (int i = 0; i < n16; i++) { __fp16 h = f16[i]; memcpy(code + o, &h, 2); o += 16; }
     }
+    return up_mfx_color(code, sizeof code);
+}
+// Code whose 16-byte instructions are zero but for n FMUL (0x220) or HMUL2 (0x232) of a register by itself, |x| on the sides asked (abs_a: Ra, bit 73; abs_b: Rb, bit 62), at index 8 + 3 * i;
+// reg 0xff is RZ; hswz: HMUL2's B lanes (bits 60..61), A's left at 0. Then the extra instructions, from index 1, and each f32 constant of f32[] 12 times from the end
+static int color_of_squares(unsigned op, int abs_a, int abs_b, int n, unsigned reg, unsigned hswz, const uint64_t (*extra)[2], int nextra, const float *f32, int n32) {
+    uint8_t code[8192] = {0};
+    for (int i = 0; i < n; i++) {
+        unsigned r = reg == 0xff ? 0xff : (unsigned)(reg + i);
+        uint64_t lo = op | (uint64_t)r << 24 | (uint64_t)r << 32 | (uint64_t)abs_b << 62 | (uint64_t)hswz << 60, hi = (uint64_t)abs_a << 9;
+        memcpy(code + 16 * (8 + 3 * i), &lo, 8); memcpy(code + 16 * (8 + 3 * i) + 8, &hi, 8);
+    }
+    for (int i = 0; i < nextra; i++) { memcpy(code + 16 * (1 + i), &extra[i][0], 8); memcpy(code + 16 * (1 + i) + 8, &extra[i][1], 8); }
+    for (int r = 0, o = (int)sizeof code - 16; r < 12; r++) for (int i = 0; i < n32; i++, o -= 16) memcpy(code + o, &f32[i], 4);
     return up_mfx_color(code, sizeof code);
 }
 static NvShader *upscaler(const char *key) {
@@ -66,6 +103,22 @@ int main(void) { @autoreleasepool {
     CHECK(color_of(dec, 2, NULL, 0) == UP_COLOR_KEEP, "a shape no pack has shown (a decode in floats, no encode): the shader runs");
     CHECK(color_of(NULL, 0, (const float[4]){0.040435791015625f, 2.3984375f, 0.07745361328125f, enc16[0]}, 4) == UP_COLOR_KEEP, "a half float encode must not read as encoded input: the shader runs");
     CHECK(up_mfx_color(rare, sizeof rare) == UP_COLOR_KEEP, "a constant used once is chance, not a curve");
+    // Square-rooted input, linear output (Ocarina of Time's agl_ndsr_vr.pck FMUL, agl_ndsr_vr_light.pck HMUL2): x * |x| from 8 times, no power, no constant of a curve
+    const uint64_t ex2[1][2] = {{0x308, 2ull << 10}}, lg2[1][2] = {{0x308, 3ull << 10}}, sqrt_[1][2] = {{0x308, 8ull << 10}}, rcp[1][2] = {{0x308, 4ull << 10}};
+    const float k1292[1] = {12.92f};
+    CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_ROOT, "FMUL x, |x| 8 times: square-rooted input, linear output");
+    CHECK(color_of_squares(0x232, 1, 0, 32, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_ROOT, "HMUL2 |x|, x on the same lanes: square-rooted input, linear output");
+    CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, rcp, 1, NULL, 0) == UP_COLOR_ROOT, "a MUFU that is no power (RCP) beside the squares does not count");
+    CHECK(color_of_squares(0x220, 0, 0, 8, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_KEEP, "x * x keeps no sign: not the square-rooted shape, the shader runs");
+    CHECK(color_of_squares(0x220, 1, 1, 8, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_KEEP, "|x| * |x| keeps no sign: the shader runs");
+    CHECK(color_of_squares(0x220, 0, 1, 7, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_KEEP, "7 squares are chance: the shader runs");
+    CHECK(color_of_squares(0x220, 0, 1, 8, 0xff, 0, NULL, 0, NULL, 0) == UP_COLOR_KEEP, "RZ * |RZ| is no square: the shader runs");
+    CHECK(color_of_squares(0x232, 0, 1, 8, 10, 1, NULL, 0, NULL, 0) == UP_COLOR_KEEP, "HMUL2 of a register's two different lanes is no square: the shader runs");
+    CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, ex2, 1, NULL, 0) == UP_COLOR_KEEP && color_of_squares(0x220, 0, 1, 8, 10, 0, lg2, 1, NULL, 0) == UP_COLOR_KEEP,
+          "squares beside a power (MUFU.EX2 / LG2): a curve may follow them, the shader runs");
+    CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, NULL, 0, k1292, 1) == UP_COLOR_KEEP, "squares beside a curve's constant alone (12.92 in floats): the shader runs");
+    CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, ex2, 1, enc, 2) == UP_COLOR_KEEP, "squares, then an encode (Ocarina of Time's 12 encoding variants): the output stays encoded, the shader runs");
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, sqrt_, 1, NULL, 0) == UP_COLOR_KEEP, "no curve and no square (a pre-pass that square-roots): nothing says its colour, the shader runs");
     const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
@@ -85,6 +138,17 @@ int main(void) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> written = tex_by_id(702); os_unfair_lock_unlock(&g_rmu);
     CHECK(matches(written, on ? colour : black, MTLRegionMake2D(0, 0, 1920, 1080), black), on ? "MetalFX filled the whole 1920x1080 image with the texture's colour" : "without the switch the image is untouched");
     if (on) {
+        // Passes around the scaler (see the top): each round a new colour, the last one the texture's colour again for the checks below
+        tex_t cp = texture(82, 1920, 1080, NVN_FORMAT_RGBA16F); mtl_tex_init(&cp);
+        const float rc[2][4] = {{0.125f, 0.625f, 0.25f, 1.0f}, {colour[0], colour[1], colour[2], colour[3]}}; int drawn = 0, stale_in = 0, stale_out = 0;
+        for (int round = 0; round < 8; round++) {
+            mtl_sub_begin(); drawn += slow_draw(tex_mtl(&in), rc[round & 1], 200000, 1); drawn += up_mfx_encode(named); drawn += copy_draw(written, tex_mtl(&cp));
+            CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with passes around the scaler completes");
+            stale_in += !matches(written, rc[round & 1], MTLRegionMake2D(0, 0, 1920, 1080), black); stale_out += !matches(tex_mtl(&cp), rc[round & 1], MTLRegionMake2D(0, 0, 1920, 1080), black);
+        }
+        CHECK(drawn == 24, "the passes around the scaler are drawn and MetalFX draws each dispatch");
+        CHECK(!stale_in, "the scaler reads the input the pass just before it wrote, in every round");
+        CHECK(!stale_out, "the pass after the scaler reads its output, in every round");
         tex_t packed = texture(80, 976, 548, NVN_FORMAT_R11G11B10F);
         mtl_tex_init(&packed); mtl_reg_tex(704, &packed, NULL);
         const float hdr[4] = {2.0f, 0.5f, 0.25f, 1.0f};
@@ -129,6 +193,49 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
+        // The input the game's own texture in its own format when the rectangle is the whole texture (DM_NVN_MFX_DIRECT, on by default; =0: only RGBA16F), the output only in RGBA16F:
+        // R11G11B10F into R11G11B10F, as Ocarina of Time's (the output drawn back, at full precision); into a whole RGBA16F image (both straight); into an offset rectangle (drawn back)
+        int any = !(getenv("DM_NVN_MFX_DIRECT") && !strcmp(getenv("DM_NVN_MFX_DIRECT"), "0"));
+        tex_t r11 = texture(83, 960, 540, NVN_FORMAT_R11G11B10F), r11_out = texture(84, 1920, 1080, NVN_FORMAT_R11G11B10F);
+        r11_out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_tex_init(&r11); mtl_tex_init(&r11_out);
+        mtl_reg_tex(706, &r11, NULL); mtl_reg_image(707, &r11_out, NULL);
+        fill(tex_mtl(&r11), MTLClearColorMake(hdr[0], hdr[1], hdr[2], 1)); fill(tex_mtl(&r11_out), MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 706; S.img[5][1] = 707;
+        uint64_t s_in = g_up_mfx_straight[0], s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into R11G11B10F");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the R11G11B10F submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out, any ? "R11G11B10F whole textures: the input the game's own, the output drawn back" : "DM_NVN_MFX_DIRECT=0: R11G11B10F goes through RGBA16F");
+        CHECK(matches_r11(tex_mtl(&r11_out), hdr), "the R11G11B10F image holds the HDR colour everywhere, not darkened");
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); S.img[5][1] = 702; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into RGBA16F");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the mixed-format submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out + 1, "R11G11B10F into RGBA16F: the output the game's own, the input too with the switch");
+        CHECK(matches(written, hdr, MTLRegionMake2D(0, 0, 1920, 1080), black), "the RGBA16F image holds the HDR colour everywhere");
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); { const uint32_t r[8] = {0, 0, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); }
+        s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes R11G11B10F into an offset rectangle");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the offset submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in + any && g_up_mfx_straight[1] == s_out, "an offset output rectangle is drawn back, the whole input still the game's own");
+        CHECK(matches(written, hdr, MTLRegionMake2D(13, 9, 1900, 1060), black), "the offset output fills only its destination rectangle");
+        { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 701;
+        // Square-rooted input (Ocarina of Time's networks): the input squared on its copy into the scaler's RGBA16F texture, never straight, even a whole R11G11B10F or RGBA16F texture
+        // that linear input sends straight; MetalFX in HDR mode, so the image holds the square as the game's shader writes it: 1, 0.5, 0.25 → 1, 0.25, 0.0625 in R11G11B10F (squares
+        // a 5-bit mantissa holds exactly: MetalFX's result a hair low drawn into blue's 5 bits drops a whole step, 0.5625 to 0.546875; and at 4.0 its HDR mode's own curve gives 3.875),
+        // 0.5, 0.25, 0.75 → 0.25, 0.0625, 0.5625 in RGBA16F
+        named->up_color = UP_COLOR_ROOT;
+        const float squared[4] = {0.25f, 0.0625f, 0.5625f, 1.0f}, hdr_squared[3] = {1.0f, 0.25f, 0.0625f};
+        fill(tex_mtl(&r11), MTLClearColorMake(1.0, 0.5, 0.25, 1)); fill(tex_mtl(&r11_out), MTLClearColorMake(0, 0, 0, 1));
+        S.tex[5][0] = 706; S.img[5][1] = 707; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes square-rooted R11G11B10F input");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-rooted R11G11B10F submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in && g_up_mfx_straight[1] == s_out, "a square-rooted whole R11G11B10F input goes through the squaring copy, its output drawn back");
+        CHECK(matches_r11(tex_mtl(&r11_out), hdr_squared), "the square-rooted R11G11B10F input comes out squared into linear colour");
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); S.tex[5][0] = 701; S.img[5][1] = 702; s_in = g_up_mfx_straight[0]; s_out = g_up_mfx_straight[1]; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes square-rooted RGBA16F input");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-rooted RGBA16F submission completes");
+        CHECK(g_up_mfx_straight[0] == s_in && g_up_mfx_straight[1] == s_out + 1, "a square-rooted whole RGBA16F input still goes through the squaring copy; the output straight");
+        CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-rooted RGBA16F input comes out squared into linear colour");
+        named->up_color = UP_COLOR_LINEAR;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
         S.tex[5][0] = 701;

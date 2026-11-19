@@ -17,7 +17,7 @@ enum { BIG_BYTES = 48u << 20 };
 
 static id<MTLBuffer> buf(size_t n) {
     id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModePrivate];
-    CHECK("buffer allocates", b != nil); if (!b) exit(1);
+    if (!b) abort();
     return b;
 }
 

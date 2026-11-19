@@ -672,6 +672,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `check_t_rt_recycle` verifies the cap and heap reuse. `check_t_rt_lifetime` exercises rendering before a target can retire. An isolated iPhone comparison is open.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### A full colour texture grew the shared zero buffer
+
+- **Symptom:** the shared zero buffer stayed at 64 MB in the Ocarina of Time iPhone 17 residency census in [PR #2566](https://github.com/seedds/nxnative/pull/2566).
+- **Cause:** `tex_zero_fill` copied a whole colour image at once. `clear_rect_zero` did the same for a scissored clear. The shared buffer grew to fit the largest copy.
+- **Fix:** both paths copy row bands sized to the shared buffer. They request room for one row, which fits in the 4 MiB buffer at supported widths. The texture-size guard and clear ordering still apply.
+- **Check:** `check_t_zero_colour` reads every byte of poisoned colour textures after filling, including mip levels, array layers and 3D slices. `check_t_lazy_clear_order` reads back a rectangle larger than one band and checks the surrounding pixels. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Repeated GPU out-of-memory failures end the game
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.

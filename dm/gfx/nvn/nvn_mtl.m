@@ -2242,14 +2242,14 @@ static void ubd_read(uint64_t lo, size_t n, void *out) {
 // Breath of the Wild updates part of a bound block about 226 times a frame outdoors and ended a pass for nearly every one (about 900 MB of attachment loads and stores a frame on an iPhone).
 // DM_NVN_UB_PARTIAL=0 turns it off
 static int ub_partial_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_PARTIAL"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_PARTIAL=0: a binding the deferred uniform updates cover only in part ends the pass as before"); } return v; }
-enum { GW_N = 1 << 16, GW_PAGES = 4096 };   // full at 4,096 (Ocarina of Time), every slot then a false hit for some page: 35 passes a frame ended over a block no GPU write touched
-typedef struct { uint64_t page, fence; } gw_ent;
-static gw_ent g_gw[GW_N];   // page ~0: two live pages met in the slot, so any page there counts as written until fence completes
-static gw_ent g_gwx[GW_N];  // the same without the inline updates the host remembers (um_ent): what a uniform shadow cannot read from memory
+enum { GW_SETS = 1 << 14, GW_WAYS = 7, GW_PAGES = 4096 };   // set-associative with a non-latching per-set overflow fence: a direct-mapped slot that collapsed to ~0 on a 2-page collision stayed latched as ~0 forever while any page in that slot kept writing each frame, causing false gw_live hits in rc_source()
+typedef struct { uint64_t page[GW_WAYS], fence[GW_WAYS], over_fence; } gw_set;
+static gw_set g_gw[GW_SETS];   // pages written by running submissions; over_fence covers any page that spilled past GW_WAYS live pages in the set without latching onto later non-overflowing writes
+static gw_set g_gwx[GW_SETS];  // the same without the inline updates the host remembers (um_ent): what a uniform shadow cannot read from memory
 static uint64_t g_gw_all;                            // every page counts as written until this fence completes (a submission whose writes could not all be listed)
 static uint64_t g_ubp_made, g_ubp_reused, g_ubp_refused;   // partial shadows made / taken from the cache / refused (the pass ended), for the residency set line
 static uint64_t g_ubp_why[6];   // why ubp_get refused: 0 too large or off, 1 other GPU writes in this submission (sbw), 2 GPU writes of an earlier submission still running, 3 a copy, fill or feedback write queued, 4 unreadable or too many writes, 5 a report of an earlier submission still to land (hw_live)
-static inline unsigned gw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 48) & (GW_N - 1); }
+static inline unsigned gw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 50) & (GW_SETS - 1); }
 // Writes of GW_PAGES pages or more, kept whole. They used to count as a write anywhere (g_gw_all): one storage binding over 16 MB in each submission (Splatoon Raiders) refused every uniform shadow of the next one, and the
 // pass ended for each. The same range comes back every submission, so few are live at a time; only when none of the slots is free does it still count as a write anywhere
 enum { GWW_N = 32 };
@@ -2260,20 +2260,31 @@ static void gww_put(uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) {
     if (free_slot >= 0) { g_gww[free_slot].lo = lo; g_gww[free_slot].hi = hi; g_gww[free_slot].fence = fence; }
     else if (fence > g_gw_all) g_gw_all = fence;
 }
-static void gw_put_in(gw_ent *t, uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) {
+static void gw_put_in(gw_set *t, uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) {
     if (hi <= lo) return;
     uint64_t p0 = lo >> 12, p1 = (hi - 1) >> 12;
     if (p1 - p0 >= GW_PAGES) { gww_put(lo, hi, fence, done); return; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned s = gw_slot(pg);
-        t[s].page = t[s].page == pg || t[s].fence <= done ? pg : ~0ull;
-        if (fence > t[s].fence) t[s].fence = fence; }
+    for (uint64_t pg = p0; pg <= p1; pg++) {
+        gw_set *s = &t[gw_slot(pg)]; int free_i = -1, hit = 0;
+        for (int w = 0; w < GW_WAYS; w++) {
+            if (s->page[w] == pg) { if (fence > s->fence[w]) s->fence[w] = fence; hit = 1; break; }
+            if (free_i < 0 && s->fence[w] <= done) free_i = w;
+        }
+        if (hit) continue;
+        if (free_i >= 0) { s->page[free_i] = pg; s->fence[free_i] = fence; }
+        else if (fence > s->over_fence) s->over_fence = fence;
+    }
 }
 static void gw_put(uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) { gw_put_in(g_gw, lo, hi, fence, done); gw_put_in(g_gwx, lo, hi, fence, done); }
-static int gw_live_in(const gw_ent *t, uint64_t lo, uint64_t hi) {
+static int gw_live_in(const gw_set *t, uint64_t lo, uint64_t hi) {
     uint64_t done = g_done;   // read without the lock as elsewhere: a stale value only refuses more
     if (g_gw_all > done) return 1;
     for (int i = 0; i < GWW_N; i++) if (g_gww[i].fence > done && lo < g_gww[i].hi && g_gww[i].lo < hi) return 1;
-    for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned s = gw_slot(pg); if ((t[s].page == pg || t[s].page == ~0ull) && t[s].fence > done) return 1; }
+    for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) {
+        const gw_set *s = &t[gw_slot(pg)];
+        if (s->over_fence > done) return 1;
+        for (int w = 0; w < GW_WAYS; w++) if (s->page[w] == pg && s->fence[w] > done) return 1;
+    }
     return 0;
 }
 // The records the host writes into guest memory when a submission completes (post_run): counter reports and samples-passed results, 16 bytes each. Until then memory holds what was there
@@ -2284,7 +2295,7 @@ static int gw_live_in(const gw_ent *t, uint64_t lo, uint64_t hi) {
 // submission that do not fit in the ring's finished slots go into the page tables as before. Samples-passed results used to count nowhere. DM_NVN_REPORT_EXACT=0 refuses by page as before
 enum { HW_N = 4096 };
 static struct { uint64_t lo, fence; } g_hwr[HW_N]; static uint64_t g_nhwr;   // fences grow along the ring
-static gw_ent g_gwr[GW_N];   // the pages of the records in the ring
+static gw_set g_gwr[GW_SETS];   // the pages of the records in the ring
 static int hw_exact_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_REPORT_EXACT"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_REPORT_EXACT=0: a counter report of a running submission refuses uniform shadows over its whole page"); } return v; }
 static void hw_note(uint64_t addr) {
     if (g_nhw_sub == g_hw_cap) { int c = g_hw_cap ? g_hw_cap * 2 : 256; uint64_t *p = realloc(g_hw_sub, (size_t)c * sizeof *p); if (!p) { g_sbw_over = 1; return; } g_hw_sub = p; g_hw_cap = c; }   // over: every page counts as written (gw_commit)
@@ -18567,8 +18578,11 @@ void dm_gfx_addr_note(uint64_t a, char *note, size_t n) {
     const treg_t *tr = g_treg; int nt = g_ntreg, shown = 0;
     for (int i = 1; tr && i < nt && shown < 2; i++) { const tex_t *t = &tr[i].t; uint64_t m = (uint64_t)(uintptr_t)t->mem;
         if (tr[i].ok && m && a >= m && a < m + t->L.size) { NOTE(" texture ser=%llu %ux%u format %#x storage +%#llx", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, (unsigned long long)(a - m)); shown++; } }
-    uint64_t pg = a >> 12, done = atomic_load(&g_done); const gw_ent *e = &g_gw[gw_slot(pg)];
-    if (e->page == pg || e->page == ~0ull) NOTE(" GPU write recorded on the page%s: fence %llu (completed %llu, last %llu)", e->page == ~0ull ? " (shared slot)" : "", (unsigned long long)e->fence, (unsigned long long)done, (unsigned long long)mtl_last_fence());
+    uint64_t pg = a >> 12, done = atomic_load(&g_done); const gw_set *s = &g_gw[gw_slot(pg)];
+    uint64_t wf = 0; int shared = 0;
+    for (int w = 0; w < GW_WAYS; w++) if (s->page[w] == pg && s->fence[w] > wf) wf = s->fence[w];
+    if (s->over_fence > wf) { wf = s->over_fence; shared = 1; }
+    if (wf) NOTE(" GPU write recorded on the page%s: fence %llu (completed %llu, last %llu)", shared ? " (shared set)" : "", (unsigned long long)wf, (unsigned long long)done, (unsigned long long)mtl_last_fence());
     for (int i = 0; i < GWW_N; i++) if (g_gww[i].fence && a >= g_gww[i].lo && a < g_gww[i].hi) NOTE(" in a large GPU write %#llx..%#llx: fence %llu", (unsigned long long)g_gww[i].lo, (unsigned long long)g_gww[i].hi, (unsigned long long)g_gww[i].fence);
     id<MTLBuffer> gm = g_gmem_buf;   // the raw global memory table (gmem_map): what a raw load or store of the address reaches
     if (gm) { const uint64_t *t = (const uint64_t *)gm.contents; int hit = 0;

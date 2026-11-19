@@ -95,5 +95,26 @@ int main(void){@autoreleasepool{
     CHECK("a later timestamp restores known zero after the opaque writer",rc_value((uint64_t)rec,&x)&&x==0);
     rc_forget();atomic_store(&g_rc_complete,completed);}
     pend_reset();
+    // Set-associative running-write table: up to GW_WAYS distinct pages hashing to the same set must not falsely taint another page in that set,
+    // and an overflow (> GW_WAYS live pages in one set) must expire once its own fence completes rather than latching forever onto later single-page writes.
+    {static uint64_t victim[2]={1,0};
+    uint64_t vaddr=(uint64_t)(uintptr_t)&victim[1], vpg=vaddr>>12; unsigned vslot=gw_slot(vpg);
+    uint64_t coll[GW_WAYS+1]; int nc=0;
+    for(uint64_t pg=0x7400000ull; nc<GW_WAYS+1; pg++) if(pg!=vpg && gw_slot(pg)==vslot) coll[nc++]=pg;
+    uint64_t was_done=g_done, was_all=g_gw_all; g_gw_all=0; memset(g_gw,0,sizeof g_gw); memset(g_gwx,0,sizeof g_gwx);
+    uint64_t f0=was_done+100;
+    for(int i=0;i<GW_WAYS;i++) gw_put(coll[i]<<12,(coll[i]<<12)+64,f0,was_done);
+    int all_coll_live=1; for(int i=0;i<GW_WAYS;i++) all_coll_live&=gw_live(coll[i]<<12,(coll[i]<<12)+64);
+    uint64_t x=~0ull;
+    CHECK("GW_WAYS colliding live pages are all tracked",all_coll_live);
+    CHECK("an unrelated page in the same set is not tainted by GW_WAYS collisions",!gw_live(vaddr,vaddr+8)&&rc_value(vaddr,&x)&&x==0);
+    // Overflow the set with an (GW_WAYS+1)-th live page at f0, then keep writing one page at f0+1 before f0 completes.
+    gw_put(coll[GW_WAYS]<<12,(coll[GW_WAYS]<<12)+64,f0,was_done);
+    CHECK("more than GW_WAYS live pages in one set conservatively taint the set",gw_live(vaddr,vaddr+8));
+    gw_put(coll[0]<<12,(coll[0]<<12)+64,f0+1,was_done);
+    g_done=f0;
+    CHECK("overflow fence expires once f0 completes even while one page stays live at f0+1",!gw_live(vaddr,vaddr+8)&&gw_live(coll[0]<<12,(coll[0]<<12)+64)&&rc_value(vaddr,&x)&&x==0);
+    g_done=was_done; g_gw_all=was_all; memset(g_gw,0,sizeof g_gw); memset(g_gwx,0,sizeof g_gwx);}
+    pend_reset();
     printf("t_sbw: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

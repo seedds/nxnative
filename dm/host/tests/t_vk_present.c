@@ -360,8 +360,7 @@ static void d12_window(const hostvk_dev *d, uint64_t serial, const int *crop, ui
 // ---------- DM_CTL "shot" without a window (vk_backend.c dm_gfx_shot_at) ----------
 #define SHOT_PNG "t_vk_present.shot.png"
 void dm_gfx_shot_at(long k, const char *path);
-static _Atomic int g_shot_waiting;
-static void *shot_main(void *arg) { (void)arg; atomic_store(&g_shot_waiting, 1); dm_gfx_shot_at(1, SHOT_PNG); return NULL; }
+static int file_there(const char *path) { FILE *f = fopen(path, "rb"); if (f) fclose(f); return f != NULL; }
 static uint32_t rd_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 // The RGB rows of a PNG the shot wrote (8-bit RGB, one IDAT of stored deflate blocks, filter 0 on every row): w x h x 3 bytes, NULL for anything else
 static uint8_t *png_read_stored(const char *path, uint32_t *w, uint32_t *h) {
@@ -626,16 +625,20 @@ int main(int argc, char **argv) {
         int got = hvk_present_last(pic, sizeof pic, &pi), exact = got && pi.width == CW && pi.height == CH;
         for (int y = 0; exact && y < CH; y++) for (int x = 0; x < CW; x++) if (memcmp(pic + ((size_t)y * CW + x) * 4, frame_texel(CX + x, CY + y), 4)) { exact = 0; break; }
         t("the headless presenter: the crop's region, every byte as stored", tk && exact);
-        // DM_CTL "shot" (vk_backend.c dm_gfx_shot_at): the next frame the headless presenter copies, as a PNG of its RGB; the shot waits for that frame on its own thread
-        remove(SHOT_PNG);
-        pthread_t sh;
-        const int started = !pthread_create(&sh, NULL, shot_main, NULL);
-        for (int i = 0; started && i < 200 && !atomic_load(&g_shot_waiting); i++) plat_sleep_ns(1000000);
-        plat_sleep_ns(20000000);   // the shot has read the frame count it waits past
+        // DM_CTL "shot" (vk_backend.c dm_gfx_shot_at): the next frame the headless presenter copies, as a PNG of its RGB. The call notes the request and returns; the present of
+        // that frame writes the file before it returns, so the thread that asked is not held and the frame count it reads next is the one it asked at
+        remove(SHOT_PNG); remove(SHOT_PNG ".2");
+        dm_gfx_shot_at(1, SHOT_PNG); dm_gfx_shot_at(2, SHOT_PNG ".2");
+        t("DM_CTL shot: the call returns before its frame, nothing written yet", !file_there(SHOT_PNG) && !file_there(SHOT_PNG ".2"));
+        uint64_t stk = be_present_ext(serial, 1.0 / 60, NULL, 0, crop);
+        const int at_present = file_there(SHOT_PNG), early = file_there(SHOT_PNG ".2");   // before anything waits for the present
+        be_present_wait(stk);
+        t("DM_CTL shot: the next frame's present writes it before it returns, and not the shot of the frame after", at_present && !early);
         be_present_wait(be_present_ext(serial, 1.0 / 60, NULL, 0, crop));
-        if (started) pthread_join(sh, NULL);
+        t("DM_CTL shot: a shot of the second frame from the call is written by that frame's present", file_there(SHOT_PNG ".2"));
+        remove(SHOT_PNG ".2");
         uint32_t sw = 0, shh = 0;
-        uint8_t *rgb = started ? png_read_stored(SHOT_PNG, &sw, &shh) : NULL;
+        uint8_t *rgb = png_read_stored(SHOT_PNG, &sw, &shh);
         int same = rgb && sw == CW && shh == CH;
         for (int y = 0; same && y < CH; y++) for (int x = 0; x < CW; x++) if (memcmp(rgb + ((size_t)y * CW + x) * 3, frame_texel(CX + x, CY + y), 3)) { same = 0; break; }
         t("DM_CTL shot without a window: the next frame as a PNG, the crop's region, its RGB as stored", same);

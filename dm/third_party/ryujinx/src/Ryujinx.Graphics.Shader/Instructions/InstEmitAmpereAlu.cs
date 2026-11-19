@@ -52,6 +52,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0a4, InstName.Imad, AImad, uniform: true);
             alu(0x025, InstName.Imad, AImadWide);
             alu(0x027, InstName.Imad, AImadHi);
+            alu(0x026, InstName.Idp, AIdp);
             alu(0x0a5, InstName.Imad, AImadWide, uniform: true);
             alu(0x012, InstName.Lop3, ALop3);
             alu(0x092, InstName.Lop3, ALop3, uniform: true);
@@ -73,6 +74,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
             alu(0x01b, InstName.Bfe, ABmsk);
+            alu(0x014, InstName.Vabsdiff, AVabsdiff);
 
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
@@ -617,7 +619,83 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
+            // Keep the original operand order for the plain half pack.
+            Operand fb = AFloat(context, b);
+            Operand fa = AFloat(context, a);
+            bool relu = x.Bit(75);
+            bool towardZero = x.Bits(79, 81) == (int)RoundMode.Rz;
+
+            if (relu)
+            {
+                fb = AF2fpRelu(context, fb);
+                fa = AF2fpRelu(context, fa);
+            }
+
+            if (x.Bit(76))
+            {
+                Operand high = context.ShiftLeft(AF2fpBf16(context, fa, towardZero), Const(16));
+
+                ASet(context, x, context.BitwiseOr(high, AF2fpBf16(context, fb, towardZero)), AUniform(context));
+                return;
+            }
+
+            Operand packed = context.PackHalf2x16(fb, fa);
+
+            if (towardZero || relu)
+            {
+                Operand low = AF2fpHalf(context, fb, context.BitwiseAnd(packed, Const(0xffff)), towardZero, relu);
+                Operand high = AF2fpHalf(context, fa, context.ShiftRightU32(packed, Const(16)), towardZero, relu);
+                packed = context.BitwiseOr(context.ShiftLeft(high, Const(16)), low);
+            }
+
+            ASet(context, x, packed, AUniform(context));
+        }
+
+        private static Operand AF2fpRelu(EmitterContext context, Operand f)
+        {
+            // Clamp -0 through -inf to +0 and leave a NaN for the packer to canonicalize.
+            Operand neg = context.ICompareGreaterOrEqualUnsigned(f, Const(unchecked((int)0x80000000)));
+            Operand notNan = context.ICompareLessOrEqualUnsigned(f, Const(unchecked((int)0xff800000)));
+
+            return context.ConditionalSelect(context.BitwiseAnd(neg, notNan), Const(0), f);
+        }
+
+        private static Operand AF2fpBf16(EmitterContext context, Operand f, bool towardZero)
+        {
+            Operand nan = context.ICompareGreaterUnsigned(context.BitwiseAnd(f, Const(0x7fffffff)), Const(0x7f800000));
+
+            if (!towardZero)
+            {
+                // The retained low bit lets a midpoint increment exactly when it is odd.
+                Operand odd = context.BitwiseAnd(context.ShiftRightU32(f, Const(16)), Const(1));
+                f = context.IAdd(f, context.IAdd(odd, Const(0x7fff)));
+            }
+
+            return context.ConditionalSelect(nan, Const(0x7fff), context.ShiftRightU32(f, Const(16)));
+        }
+
+        private static Operand AF2fpHalf(EmitterContext context, Operand f, Operand half, bool towardZero, bool relu)
+        {
+            Operand magnitude = context.BitwiseAnd(f, Const(0x7fffffff));
+
+            if (towardZero)
+            {
+                // Widen the rounded magnitude exactly and compare float bits as unsigned
+                // integers. Step back only if a finite input rounded away from zero.
+                // The mask also prevents the pack/unpack optimizer from skipping the rounding.
+                Operand nearest = context.UnpackHalf2x16Low(context.BitwiseAnd(half, Const(0x7fff)));
+                Operand away = context.BitwiseAnd(context.ICompareLessUnsigned(magnitude, Const(0x7f800000)),
+                    context.ICompareGreaterUnsigned(nearest, magnitude));
+                half = context.ConditionalSelect(away, context.IAdd(half, Const(-1)), half);
+            }
+
+            if (relu)
+            {
+                Operand nan = context.ICompareGreaterUnsigned(magnitude, Const(0x7f800000));
+                half = context.ConditionalSelect(nan, Const(0x7fff), half);
+            }
+
+            return half;
         }
 
         // F2IP.U8 Rd, a, b: a and b to saturated bytes, a in byte 1 and b in byte 0, like F2FP's halves; bits 78..79 the rounding, as F2I's. Ocarina of Time's FoliageShader writes colour with it
@@ -1296,6 +1374,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res, u);
         }
 
+        // IDP Rd, a, b, c (PTX dp4a / dp2a): c plus a dot product, the low 32 bits. Bit 73: a's parts signed, 74: b's bytes signed, 76: .2A, 77: .2A.HI.
+        // .4A sums the four products of a's bytes and b's bytes; .2A sums a's two 16-bit halves times b's bytes 0 and 1 (.LO) or 2 and 3 (.HI).
+        public static void AIdp(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bit(72) || x.Bit(75) || x.Bits(78, 81) != 0 || (!x.Bit(76) && x.Bit(77)))
+            {
+                throw AFail(context, "IDP modifiers");
+            }
+
+            bool signedA = x.Bit(73), signedB = x.Bit(74), two = x.Bit(76);
+            int aBits = two ? 16 : 8, bFirst = x.Bit(77) ? 2 : 0;
+            Operand va = AGet(context, a), vb = AGet(context, b);
+            Operand res = AGet(context, c);
+
+            Operand Part(Operand v, int pos, int width, bool signed)
+            {
+                return signed ? context.BitfieldExtractS32(v, Const(pos), Const(width)) : context.BitfieldExtractU32(v, Const(pos), Const(width));
+            }
+
+            for (int i = 0; i < (two ? 2 : 4); i++)
+            {
+                Operand pa = Part(va, i * aBits, aBits, signedA);
+                Operand pb = Part(vb, (bFirst + i) * 8, 8, signedB);
+
+                res = context.IAdd(res, context.IMultiply(pa, pb));
+            }
+
+            ASet(context, x, res);
+        }
+
         // IMAD.WIDE Rd, a, b, c: the 64-bit a * b (signed 73) + the pair {c + 1:c}, to the pair {Rd + 1:Rd}
         public static void AImadWide(EmitterContext context)
         {
@@ -1579,6 +1690,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
 
             ASet(context, x, context.ConditionalSelect(APred(context, x, 87, 90, u), min, max), u);
+        }
+
+        // VABSDIFF Rd, a, b, c (PTX sad) computes |a - b| + c with 32-bit wraparound.
+        // Bit 73 selects signed comparison. The recorded encoding uses PT in the
+        // Pu predicate field (bits 81..83). Other predicate values and modifiers are unverified.
+        public static void AVabsdiff(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex || x.Bit(72) || x.Bits(74, 81) != 0 || x.Bits(84, 91) != 0)
+            {
+                throw AFail(context, "VABSDIFF predicate field or modifiers");
+            }
+
+            Operand srcA = AGet(context, a);
+            Operand srcB = AGet(context, b);
+            bool signed = x.Bit(73);
+
+            Operand min = signed ? context.IMinimumS32(srcA, srcB) : context.IMinimumU32(srcA, srcB);
+            Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
+
+            ASet(context, x, context.IAdd(context.ISubtract(max, min), AGet(context, c)));
         }
 
         public static void AIabs(EmitterContext context)

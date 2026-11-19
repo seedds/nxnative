@@ -6,6 +6,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
+- [Microphone input on Mac](#microphone-input-on-mac)
 - [Following main](#following-main)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
@@ -118,6 +119,12 @@ An app that links the host and the front end's game view into its own process (a
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
 
 An iOS front end that supplies its own audio-session lifecycle also implements `int dm_ios_output_channels(void)`, returning its active `AVAudioSession.outputNumberOfChannels`. After activating a session or changing routes, request six output channels when `maximumOutputNumberOfChannels` permits them. On `AVAudioSessionRouteChangeNotification`, apply that preference before calling `dm_audio_route_changed()`; keep the existing suspend/resume and media-services-reset calls. The bundled `front_ios.m` implements this contract. The Mac host watches its output routes itself. See [Output channels](reference/audio.md#output-channels).
+
+## Microphone input on Mac
+
+A packed Mac app exposes `DM_MIC` in its settings list when a game imports the supported SDK input stream. Its default is off. The app requests macOS permission before it starts the host on the first enabled launch, including with `DM_LAUNCHER=0`. A denied request starts the game with input disabled. Front ends that spawn the host themselves must request consent in their own app and include `NSMicrophoneUsageDescription` in its Info.plist.
+
+The Mac launcher stores a selected input device's Core Audio UID as the string `launcher.DM_MIC_DEVICE` in the app's preferences. A `DM_MIC_DEVICE` set at launch or in an env file takes precedence. Use `default` to follow the system input. `DM_MIC_GAIN` uses the saved choices described above.
 
 ## Following main
 

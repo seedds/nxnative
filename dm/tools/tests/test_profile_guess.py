@@ -108,6 +108,20 @@ class HeapCheckAddressSpace(unittest.TestCase):
 
 
 class GlslSources(unittest.TestCase):
+    def test_survey_detects_a_managed_gl_loader(self):
+        managed = 'glShaderSource'.encode('utf-16-le')
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'main').write_bytes(b'NSO0')
+            manifest = root / 'romfs_manifest.tsv'
+            manifest.write_text('# Empty RomFS\n')
+            imports = [('eglCreateWindowSurface', False, 1)]
+            with mock.patch.object(pg, 'nso', return_value=(managed, '', [0, 0, 0], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', return_value=imports):
+                facts = pg.facts_of(root, manifest)
+            self.assertEqual(facts['gl_names'], 1)
+            self.assertEqual(pg.gl_name_count(b'\0glShaderSource\0' + managed, {'eglCreateWindowSurface'}), 2)
+            self.assertEqual(pg.gl_name_count(managed, set()), 0)
+
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)
 

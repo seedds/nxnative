@@ -109,6 +109,8 @@ typedef struct {
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
     int16_t cq[CQ][FRAME_MAX * DM_AUDIO_SINK_CHANNELS]; int cq_n[CQ]; uint32_t cq_head, cq_tail;   // output queue of catch-up frames
+    // A fresh render holds cq_mu while the SDK signals the renderer event. A woken guest thread can enter RequestUpdate and need cq_mu before the signal's handoff returns.
+    // Take the mutex with dm_host_lock so a thread waiting for it counts as blocked.
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // serializes catch-up publication, dequeue and fresh renders; wake on enqueue, dequeue or close
     int sink_logged;
     int32_t up_buf[DM_AUDIO_SINK_CHANNELS * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
@@ -150,7 +152,7 @@ static void render_main(void *arg) {
             if (!atomic_load(&a->open)) break;
         }
         if (!nfree) break;
-        pthread_mutex_lock(&a->cq_mu);
+        dm_host_lock(&a->cq_mu);
         // Leave some slack below the 5 ms block duration. Device callbacks can return several blocks at once,
         // but back-to-back SDK renders can coalesce their events before the game can update.
         while (!prefill && a->cq_head == a->cq_tail && atomic_load(&a->open)) {
@@ -287,7 +289,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
     ar_t *a = NULL;
     for (int i = 0; i < AR_MAX && !a; i++) if (g_ar[i].handle[0] == obj) a = &g_ar[i];
     if (a && a->render_tt) {
-        pthread_mutex_lock(&a->cq_mu);
+        dm_host_lock(&a->cq_mu);
         atomic_store(&a->open, 0);
         pthread_cond_broadcast(&a->cq_cv);
         pthread_mutex_unlock(&a->cq_mu);
@@ -604,7 +606,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     ar_t *a = ar_of_sys(sys);
     if (!a) return orig(sys, o, on, p, pn, in, inn);   // two renderers just opened, neither has rendered: at most one catch-up frame less
     uint64_t u = atomic_fetch_add(&a->updates, 1) + 1;
-    pthread_mutex_lock(&a->cq_mu);
+    dm_host_lock(&a->cq_mu);
     if (atomic_load(&a->open) && a->updated && atomic_load(&a->renders) == a->last_r) {
         uint64_t c = atomic_fetch_add(&a->catchups, 1) + 1;
         if (c <= 3) LOG("audren: renderer %d: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", ar_index(a), (unsigned long long)u, (unsigned long long)c);
@@ -624,7 +626,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     if (u < 200 && getenv("DM_AUDREN_TRACE")) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&a->renders) - (a->updated ? a->last_r : 0)));
     pthread_mutex_unlock(&a->cq_mu);
     Result res = orig(sys, o, on, p, pn, in, inn);
-    pthread_mutex_lock(&a->cq_mu);
+    dm_host_lock(&a->cq_mu);
     a->last_r = atomic_load(&a->renders); a->updated = 1;
     pthread_mutex_unlock(&a->cq_mu);
     return res;

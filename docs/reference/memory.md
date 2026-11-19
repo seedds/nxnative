@@ -525,6 +525,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_upload_budget` uses actual Metal uploads during an open render pass, with direct and deferred encoding and Metal validation. A 2 GiB burst retained 2,048 MiB before the fix; afterwards it peaks at 384 MiB and retains only the three reusable blocks (96 MiB) after upload completion, before the rendering fence. It also checks every uploaded pixel and the render pass's clear. For a game, capture both frequent `phys_footprint` samples and the kernel's peak ledger; the existing `resident` log label denotes footprint, and staging blocks `created in total` is cumulative, not live memory.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#memory), investigating issue #147. Mac reproduction and device validation are tracked in the game note.
 
+### Upload staging keeps its largest blocks after a load
+
+- **Symptom:** up to 192 MiB of private GPU memory stays in upload slots after a scene load, even when steady play needs little staging.
+- **Cause:** the three slots retain a primary block sized by past demand and one overflow block, each up to 32 MiB. The upload batch budget limits temporary staging and leaves these cached blocks resident.
+- **Fix:** opt-in for NVN (`DM_NVN_UPLOAD_IDLE_MS`, default `0` on all platforms). At the start of a submission, completed slots idle for the interval drop both blocks and their cached demand. An active slot drops an unused overflow block after the interval and sizes its next primary allocation by recent demand. Busy slots keep their buffers until upload completion. The host commits the removals before it encodes new uploads. Setting the switch explicitly, including to `0`, logs retained slot MiB, allocations and trims at startup, on the first trim, and every 30 seconds while submitting.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The [original PR](https://github.com/seedds/nxnative/pull/1491) reported 192 MiB retained with trimming off and 0 MiB at the 30-second samples with a 2,000 ms interval during five minutes on an M4 Pro Mac. Staging allocations rose from 19 to 46, and GPU p50 was 21–23 ms in both runs. The [matched M5 iPad Pro test](https://github.com/seedds/nxnative/pull/1491#issuecomment-6966693656) is pending.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_upload_idle` checks retention by default and at explicit zero, pending uploads behind a GPU gate, overflow and primary trimming, residency removal, allocation size after trimming, and upload readback with Metal validation.
+
 ### Two source buffers for each staged upload from a large pool
 
 - **Symptom:** the first frame of a scene that draws hundreds of new packaged textures takes a quarter to half a second, nearly all of it in `submit+present` (`[longframe] … texture uploads 855 first …, 908.5 MB`), and the `residency set up to frame` line of that window counts about twice as many shared buffers from `up_big_src` as packaged textures (2,866 and 1,433).
@@ -655,6 +663,30 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** general (`nvn_owner.m` `own_pool_finalize_locked`). The owner indexes the live texture objects of each pool from their initialization to their Finalize (`g_pool_tex`, the pool recorded at initialization). A pool's Finalize ends those objects' entries, whatever they hold (a shared texture, a view of one, a packaged texture, the texture the GPU's first write took over from a package), then every live or ghost entry that still names one of those textures, a packaged texture of the pool (`g_pkg_share`) or a part of one (`own_hook_parts`), each as a note. The held counts say how many entries name them, so that walk is skipped when none does and stops once it has found them all (`drop_entries_naming_locked`, which the release of a drawn-over target uses too). Work encoded before the Finalize keeps the textures until it completes (`own_hook_drop`), and a pin (a queued descriptor or a saved binding) still holds them. A later lookup of such a serial makes nothing and reads as an empty slot ([A texture read after its memory pool object was freed](nvn-objects.md#a-texture-read-after-its-memory-pool-object-was-freed)); the object's own Finalize finds nothing left to end. The 300-frame memory line counts these entries (`evicted with pools N (serial entries that went with them M)`). Left as before: a ghost entry that holds a package's texture after the package itself has gone (no table names it any more); the ghost table's own trim lets it go once idle past `NGHOST`.
 - **Check:** `t_serial_owner` (a pool's live object holding a packaged texture and a finalized serial holding the package's texture both lose their entries, each noted, another pool's texture keeps its own, and the object's later Finalize ends nothing; `own_check_locked` checks the pool index against the live texture objects; it fails without the index), `t_rt_recycle` (a 32 MB target whose pool is finalized while its texture object is live is freed, its heap waits in the recycled list, a lookup makes nothing; 3 checks fail without the fix), `t_readback` (`stale_pools`: a live packaged or sparse texture of a finalized pool reads as an empty slot and nothing is uploaded).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([PR #2775](https://github.com/seedds/nxnative/pull/2775), which found the holder with a trace of every texture of 256 MB or more). On the Mac with the iPhone's settings, Kakariko Village to Hyrule Field and back from the 2026-11-13 save (2026-11-15, the PR's version of the fix, which treats this shared target the same way): the old heap was let go about 330 submissions after the pool's Finalize, the set in the field was 3,850 MB against 4,211 MB, and the peak after a commit at the village load 4,142 MB against 4,375 MB. Whether the iPhone 17 now survives the castle-grounds load is **open**: no phone run has had the fix.
+
+### Large render targets over-allocate recycled heaps
+
+- **Symptom:** the Ocarina of Time residency census in [PR #2566](https://github.com/seedds/nxnative/pull/2566) found a 296 MB shadow target in a 333 MB Metal heap.
+- **Cause:** new recycled heaps kept an eighth of each target's size as headroom for reuse. The resident overhead grew with the target.
+- **Fix:** `rh_heap` caps new heap headroom at 4 MiB. Targets up to 32 MiB still get an eighth, and the existing heap selection and retirement rules apply.
+- **Check:** `check_t_rt_recycle` verifies the cap and heap reuse. `check_t_rt_lifetime` exercises rendering before a target can retire. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### A full colour texture grew the shared zero buffer
+
+- **Symptom:** the shared zero buffer stayed at 64 MB in the Ocarina of Time iPhone 17 residency census in [PR #2566](https://github.com/seedds/nxnative/pull/2566).
+- **Cause:** `tex_zero_fill` copied a whole colour image at once. `clear_rect_zero` did the same for a scissored clear. The shared buffer grew to fit the largest copy.
+- **Fix:** both paths copy row bands sized to the shared buffer. They request room for one row, which fits in the 4 MiB buffer at supported widths. The texture-size guard and clear ordering still apply.
+- **Check:** `check_t_zero_colour` reads every byte of poisoned colour textures after filling, including mip levels, array layers and 3D slices. `check_t_lazy_clear_order` reads back a rectangle larger than one band and checks the surrounding pixels. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Guest texture source buffers accumulate within an upload batch
+
+- **Symptom:** Ocarina of Time's field load on iPhone 17 added 732 MB of zero-copy upload sources to Metal residency within a 300-frame window in [PR #2270](https://github.com/seedds/nxnative/pull/2270).
+- **Cause:** the staging budget measures private scratch buffers. It excludes the no-copy buffers that wrap guest pages and stay resident until the upload batch completes.
+- **Fix:** `DM_NVN_UPLOAD_SRC_MB` sets an opt-in budget for page-rounded source bytes. A regular upload can start a fresh batch before it wraps the source, and each batch releases its own buffers on completion. A single large texture or a sparse gather can exceed the budget. When staging splits a batch, the upload resolves its source in the new batch or uses the CPU path if wrapping fails.
+- **Check:** `check_t_upload_src` compares the batch and buffer counts at 0 and 96 MiB and reads back every texel in both runs. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### Repeated GPU out-of-memory failures end the game
 

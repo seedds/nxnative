@@ -593,6 +593,45 @@ static void test_program_validation(void) {
     h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
 }
 
+static void test_active_attributes(void) {
+    void (*active)(GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, GLchar *) = import("glGetActiveAttrib");
+    assert(active && h_eglGetProcAddress("glGetActiveAttrib") == (void *)active);
+    assert(h_eglGetProcAddress("glGetActiveAttribARB") == (void *)active);
+    static shattr attrs[] = {{.name = "position", .slot = 0, .type = T_VEC3}, {.name = "uv", .slot = 2, .type = T_VEC2}};
+    static shinfo vsi = {.ub_slot = -1, .na = 2, .a = attrs};
+    GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER);
+    GLint value;
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &value); assert(value == 0);
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = (id)[NSObject new];
+    h_glAttachShader(pr, vs); h_glBindAttribLocation(pr, 7, "position"); h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTES, &value); assert(value == 2);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &value); assert(value == sizeof "position");
+    assert(h_glGetAttribLocation(pr, "position") == 7);
+
+    GLsizei length; GLint count; GLenum type; char name[16];
+    active(pr, 0, sizeof name, &length, &count, &type, name);
+    assert(length == 8 && count == 1 && type == GL_FLOAT_VEC3 && !strcmp(name, "position"));
+    active(pr, 1, 2, &length, &count, &type, name);
+    assert(length == 1 && count == 1 && type == GL_FLOAT_VEC2 && !strcmp(name, "u"));
+    active(pr, 0, 0, &length, NULL, NULL, name);
+    assert(length == 0 && !strcmp(name, "u") && h_glGetError() == GL_NO_ERROR);
+
+    length = 23; count = 42; type = GL_INT;
+    active(pr, 2, sizeof name, &length, &count, &type, name);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    active(pr, 0, -1, &length, &count, &type, name);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    active(vs, 0, sizeof name, &length, &count, &type, name);
+    assert(h_glGetError() == GL_INVALID_OPERATION);
+    assert(length == 23 && count == 42 && type == GL_INT && !strcmp(name, "u"));
+
+    h_glDetachShader(pr, vs); h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTES, &value); assert(value == 0);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &value); assert(value == 0);
+    h_glDeleteProgram(pr); h_glDeleteShader(vs);
+    puts("GL attribute reflection: count, maximum length, enumeration, truncation and errors: OK");
+}
+
 static void test_fate_calls(void) {
     assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
     assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
@@ -856,6 +895,7 @@ int main(int argc, char **argv) {
     test_sampler_objects(!cpu);
     test_extension_names_and_egl();
     test_program_validation();
+    test_active_attributes();
     test_fate_calls();
     if (fixture) test_argument_buffers(fixture);
 

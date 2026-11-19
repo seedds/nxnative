@@ -220,7 +220,7 @@ flowchart LR
 
 ### Performance HUD
 
-Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
+Apple's performance overlay shows frame rate, frame and GPU times, and memory. It helps compare settings. Leave it off for play. On iPhone and iPad, switch it on, press **Play** to save the choice, then quit and reopen the app. The saved choice enables the HUD at launch. Switching it off before **Play** hides it for that session and saves the off choice.
 
 ### Reset to tested defaults
 

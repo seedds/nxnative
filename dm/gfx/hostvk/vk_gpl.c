@@ -95,8 +95,6 @@ static int fmt_float(VkFormat f) {
 //   clamp to As + Ad holds as Cs + Cd <= As + Ad for premultiplied colours); on a float target exact while no sum passes 1 (no difference falls below 0);
 //   alpha of every f / X / Y / Z blend mode: As + Ad (1 - As), ONE, ONE_MINUS_SRC_ALPHA.
 // Exact under a condition (R_COND), used as the closest fixed-function blend where the state's own functions would be arbitrary (the error is bounded and has a known sign):
-//   LINEARDODGE: f = min(1, Cs' + Cd'): Cs + Cd (ONE, ONE) while Cs' + Cd' <= 1 per channel, and on a fixed-point target also where source and destination are opaque; a
-//     saturated pixel of a translucent source or destination comes out brighter than the Switch's (Cs + Cd against As Ad + Cs (1 - Ad) + Cd (1 - As): at most 1/4 on a UNORM target);
 //   MULTIPLY: Cs Cd + Cs (1 - Ad) + Cd (1 - As), three terms: DST_COLOR, ONE_MINUS_SRC_ALPHA drops Cs (1 - Ad), exact over an opaque destination (Ad = 1), darker by Cs (1 - Ad) elsewhere;
 //   INVERT_RGB: Cs (Ad - Cd) + Cd (1 - As): ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, exact over an opaque destination, brighter by Cs (1 - Ad) elsewhere;
 //   LIGHTEN: max(Cs + Cd (1 - As), Cd + Cs (1 - Ad)): the MAX operation (factors ignored) gives max(Cs, Cd), exact where both are opaque, darker elsewhere (at most 1/4 over the
@@ -108,6 +106,15 @@ static int fmt_float(VkFormat f) {
 // disjoint and conjoint overlaps (min / max weights). A source that is not premultiplied needs As in the source term, which only a source factor of ONE can take (SRC_ALPHA): rows
 // whose source factor is another, or that read the source colour in the destination factor or use MIN / MAX, are not reduced for it. Dual-source factors would help only with a
 // second fragment output the translator does not write (the chain's, not the backend's).
+// Kept on the state's own functions on purpose, neither reduced nor drawn through the extension (adv_kept; open): LINEARDODGE. Its equation is f = min(1, Cs' + Cd'), so
+// Cs + Cd (ONE, ONE) while unsaturated, which the extension draws exactly too; the blend microcode NVN uploads for it (premultiplied, uncorrelated) computes the same,
+// min(Cs Ad + Cd As, As Ad) + Cs (1 - Ad) + Cd (1 - As), with no clamp of its inputs in its operands (Ryujinx's reading of the microcode, Ryujinx.Graphics.Gpu Blender/
+// AdvancedBlendFunctions.cs GenUncorrelatedLinearDodgePremul, UcodeAssembler.cs). Mario vs. Donkey Kong's fire bird writes a negative colour (its shader's own
+// rgb = lit - s, a = 1 - s, negative at the flame's edges, as its Maxwell code has it) into a B10G11R11 float target: ONE, ONE adds it in full and the store clamps the sum at 0 (black
+// edges, red bands), where the state's SRC_ALPHA, ONE scales it by As and draws the soft flame the game was seen with on the Mac (Metal keeps the state's functions). Whether
+// the Switch clamps such a source before the microcode on an unsigned float target is not known, so the mode keeps the picture it had before the equation was used
+// (docs/reference/rendering.md, "Advanced blend modes on the Vulkan backend")
+static int adv_kept(unsigned mode) { return mode == NVN_BLEND_ADVANCED_MODE_LINEARDODGE; }
 enum { R_EXACT = 1, R_UNORM, R_COND };   // exact; exact on a fixed-point target (float: while unclamped); exact under the row's condition
 typedef struct { uint8_t s, d, eq, sa, da, eqa, mask, cls; } adv_row;
 #define ROW(s, d, eq, sa, da, eqa, mask, cls) {NVN_BLEND_FUNC_##s, NVN_BLEND_FUNC_##d, NVN_BLEND_EQUATION_##eq, NVN_BLEND_FUNC_##sa, NVN_BLEND_FUNC_##da, NVN_BLEND_EQUATION_##eqa, mask, cls}
@@ -134,7 +141,6 @@ static const adv_row k_red[NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY + 1] = {
     [NVN_BLEND_ADVANCED_MODE_RED] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x1, R_EXACT),
     [NVN_BLEND_ADVANCED_MODE_GREEN] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x2, R_EXACT),
     [NVN_BLEND_ADVANCED_MODE_BLUE] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x4, R_EXACT),
-    [NVN_BLEND_ADVANCED_MODE_LINEARDODGE] = ROW(ONE, ONE, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
     [NVN_BLEND_ADVANCED_MODE_MULTIPLY] = ROW(DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
     [NVN_BLEND_ADVANCED_MODE_INVERT_RGB] = ROW(ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ZERO, ONE, ADD, 0xf, R_COND),
     [NVN_BLEND_ADVANCED_MODE_LIGHTEN] = ROW(ONE, ONE, MAX, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
@@ -142,8 +148,6 @@ static const adv_row k_red[NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY + 1] = {
 #undef ROW
 static const char *adv_cond(unsigned mode) {   // what a conditional reduction gets wrong, for its red line
     switch (mode) {
-        case NVN_BLEND_ADVANCED_MODE_LINEARDODGE: return "exact while Cs/As + Cd/Ad <= 1 per channel (on a UNORM target also where source and destination are opaque); a saturated "
-                                                         "pixel of a translucent source or destination comes out brighter than the Switch's (by at most 1/4 on a UNORM target)";
         case NVN_BLEND_ADVANCED_MODE_MULTIPLY: return "exact over an opaque destination; where Ad < 1 the result is darker by Cs (1 - Ad)";
         case NVN_BLEND_ADVANCED_MODE_INVERT_RGB: return "exact over an opaque destination; where Ad < 1 the result is brighter by Cs (1 - Ad)";
         case NVN_BLEND_ADVANCED_MODE_LIGHTEN: return "MAX, exact where source and destination are opaque; darker where either is translucent";
@@ -176,7 +180,11 @@ static blend_st adv_blend(blend_st b, VkFormat f, uint32_t *mask, int quiet) {
     int exact = 0; const adv_row *r = adv_row_of(&b, f, &exact);
     static _Atomic uint64_t seen_none, seen_apx; uint64_t bit = 1ull << (b.adv & 63);
     if (!r) {
-        if (!quiet && !(atomic_fetch_or(&seen_none, bit) & bit))
+        if (quiet || (atomic_fetch_or(&seen_none, bit) & bit)) return b;
+        if (adv_kept(b.adv))
+            hostvk_log("[RED] [hostvk] advanced blend mode %#x (overlap %d, %spremultiplied source) is drawn with the state's blend functions on purpose: its equation adds a negative "
+                       "source colour in full, and whether the Switch clamps such a source is not known (open)", (unsigned)b.adv, (int)b.adv_ovl, b.adv_npm ? "not " : "");
+        else
             hostvk_log("[RED] [hostvk] advanced blend mode %#x (overlap %d, %spremultiplied source) has no fixed-function equivalent and %s: the state's blend functions are used",
                        (unsigned)b.adv, (int)b.adv_ovl, b.adv_npm ? "not " : "", adv_ext_why());
         return b;
@@ -238,7 +246,7 @@ static int adv_basic(unsigned mode) {   // the operations a device without advan
 // The advanced op the extension draws attachment state b of a pass of nc colour attachments with (format f), or 0 (reduced): the limits above
 static VkBlendOp adv_op(const blend_st *b, VkFormat f, int nc) {
     const hostvk_dev *d = &hvk.dev;
-    if (!d->x.blend_adv || !b->adv || b->adv >= sizeof k_adv_vk / sizeof *k_adv_vk || !k_adv_vk[b->adv]) return 0;
+    if (!d->x.blend_adv || !b->adv || b->adv >= sizeof k_adv_vk / sizeof *k_adv_vk || !k_adv_vk[b->adv] || adv_kept(b->adv)) return 0;
     int exact = 0;
     if (adv_row_of(b, f, &exact) && exact) return 0;   // the fixed-function blend is the mode: no extension needed
     if ((uint32_t)nc > d->x.blend_adv_max_att || (nc > 1 && !d->x.blend_adv_indep) || (!d->x.blend_adv_all && !adv_basic(b->adv)) ||

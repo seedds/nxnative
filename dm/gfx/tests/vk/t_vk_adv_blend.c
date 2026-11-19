@@ -5,9 +5,11 @@
 // 1. every mode reduced exactly to fixed-function factors, on an RGBA8 target, for opaque, translucent and transparent sources over opaque and translucent destinations, the
 //    source premultiplied and, where the reduction takes it, not; on level A (dynamic blend state) and level D (the blend baked into the pipeline). SCREEN, EXCLUSION, MINUS,
 //    MINUS_CLAMPED, RED, GREEN and BLUE are new: before them they kept the state's functions (here ONE, ZERO), so these checks fail on the earlier code;
-// 2. the conditional reductions (LINEARDODGE, MULTIPLY, INVERT_RGB, LIGHTEN): exact where their condition holds, and where it does not the error the table states (the pixel is
-//    the fixed-function blend's, and it differs from the reference by the stated amount in the stated direction); the clamped modes on an RGBA16F target, where the fixed-function
-//    blend does not clamp;
+// 2. the conditional reductions (MULTIPLY, INVERT_RGB, LIGHTEN): exact where their condition holds, and where it does not the error the table states (the pixel is the
+//    fixed-function blend's, and it differs from the reference by the stated amount in the stated direction); the clamped modes on an RGBA16F target, where the fixed-function
+//    blend does not clamp; LINEARDODGE drawn with the state's own functions on every path (vk_gpl.c adv_kept: neither reduced nor drawn through the extension, open), a
+//    negative source on an RGBA16F target with Mario vs. Donkey Kong's SRC_ALPHA, ONE scaled by As (ONE, ONE and the mode's equation add it in full, so these checks fail on
+//    the code that reduced it), and on RGBA8 the state's ONE, ZERO as a replace, premultiplied or not, on levels A and D;
 //    and an advanced draw, a plain one and an advanced one again in one pass (the dynamic state shadow of vk_commands.c dyn_apply);
 // 3. on a device with VK_EXT_blend_operation_advanced (and advancedBlendCoherentOperations): every mode its limits allow, drawn through the extension against the reference, on
 //    level A (the advanced state dynamic, with extendedDynamicState3ColorBlendAdvanced) and with the blend baked (levels B and D), and the alternation of advanced and plain
@@ -142,17 +144,16 @@ static uint16_t float_to_half(float f) {   // round to nearest, for the values t
     return (uint16_t)((uint32_t)(e + 14) << 10 | (mant & 1023));
 }
 static double qh(double v) { return half_to_float(float_to_half((float)v)); }
-// One draw: src from the uniform buffer over a target of format fmt (RGBA8 or RGBA16F) cleared to dst; out: the texel at (0, 0) as values in [0, 1] (RGBA8) or the floats
-static int draw_case(unsigned mode, int npm, int ovl, const double src[4], const double dst[4], int fmt, double out[4]) {
+// One draw with blend state b: src from the uniform buffer over a target of format fmt (RGBA8 or RGBA16F) cleared to dst; out: the texel at (0, 0) as values in [0, 1] (RGBA8)
+// or the floats
+static int draw_state(const blend_st *b, const double src[4], const double dst[4], int fmt, double out[4]) {
     tex_t target = hv_tex(NVN_TEXTURE_TARGET_2D, fmt, 4, 4, 1, 1, 0);
     const tex_t *rt[1] = {&target};
     for (int i = 0; i < 4; i++) g_ubo[i] = (float)src[i];
     hv_rt(&g_c, 1, rt, NULL); hv_clear_color(&g_c, 0, 15, (float)dst[0], (float)dst[1], (float)dst[2], (float)dst[3]);
     hv_bind(&g_c, &g_ucol, 0x1f); hv_depth(&g_c, 0, 0, NVN_DEPTH_FUNC_ALWAYS); hv_cull(&g_c, NVN_FACE_NONE);
     hv_buf(&g_c, OP_BIND_UBO, 1, 0, g_ubo, 16);
-    // the state's own functions: ONE, ZERO (a replace), which the GPU ignores while the mode is set
-    blend_st b = {0, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD, mode, (unsigned)npm, (unsigned)ovl};
-    hv_state(&g_c, 0, &b, sizeof b);
+    hv_state(&g_c, 0, b, sizeof *b);
     color_st cs = {1, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; hv_state(&g_c, 1, &cs, sizeof cs);
     hv_draw(&g_c, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1);
     blend_st off = {0, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD, 0, 0, 0}; hv_state(&g_c, 0, &off, sizeof off);
@@ -161,6 +162,11 @@ static int draw_case(unsigned mode, int npm, int ovl, const double src[4], const
     if (fmt == NVN_FORMAT_RGBA8) { uint8_t px[4]; if (!hv_read(&target, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, 1, 1, 4, px)) return 0; for (int i = 0; i < 4; i++) out[i] = px[i] / 255.0; }
     else { uint16_t px[4]; if (!hv_read(&target, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, 1, 1, 8, px)) return 0; for (int i = 0; i < 4; i++) out[i] = half_to_float(px[i]); }
     return 1;
+}
+// One draw of mode with the state's own functions ONE, ZERO (a replace), which the GPU ignores while the mode is set
+static int draw_case(unsigned mode, int npm, int ovl, const double src[4], const double dst[4], int fmt, double out[4]) {
+    blend_st b = {0, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD, mode, (unsigned)npm, (unsigned)ovl};
+    return draw_state(&b, src, dst, fmt, out);
 }
 static const char *mode_name(unsigned m) {
     static const char *const n[] = {[NVN_BLEND_ADVANCED_MODE_ZERO] = "ZERO", "SRC", "DST", "SRC_OVER", "DST_OVER", "SRC_IN", "DST_IN", "SRC_OUT", "DST_OUT", "SRC_ATOP", "DST_ATOP", "XOR",
@@ -223,10 +229,10 @@ static int alt_case(unsigned mode, const double src[4], const double dst[4], dou
     return 1;
 }
 
-// The device draws a mode through VK_EXT_blend_operation_advanced (vk_gpl.c adv_op), one target: its limits. dynamic: the blend equation is dynamic (level A), which needs
-// extendedDynamicState3ColorBlendAdvanced as well
+// The device draws a mode through VK_EXT_blend_operation_advanced (vk_gpl.c adv_op), one target: its limits, and not LINEARDODGE, which keeps the state's functions (adv_kept).
+// dynamic: the blend equation is dynamic (level A), which needs extendedDynamicState3ColorBlendAdvanced as well
 static int ext_takes(const hostvk_dev *d, unsigned m, int npm, int ovl) {
-    if (!d->x.blend_adv || d->x.blend_adv_max_att < 1) return 0;
+    if (!d->x.blend_adv || d->x.blend_adv_max_att < 1 || m == NVN_BLEND_ADVANCED_MODE_LINEARDODGE) return 0;
     int basic = (m >= NVN_BLEND_ADVANCED_MODE_MULTIPLY && m <= NVN_BLEND_ADVANCED_MODE_DIFFERENCE) || m == NVN_BLEND_ADVANCED_MODE_EXCLUSION || m >= NVN_BLEND_ADVANCED_MODE_HSL_HUE;
     return (d->x.blend_adv_all || basic) && (!npm || d->x.blend_adv_npm_src) && (!ovl || d->x.blend_adv_correlated);
 }
@@ -285,9 +291,6 @@ int main(void) {
     int ext_here = d->x.blend_adv && (!(d->eds_present >> HOSTVK_EDS_BLEND_EQUATION & 1) || d->x.blend_adv_dyn);
     {
         struct { unsigned m; const char *cond; double src[4], dst[4]; int inside; } c[] = {
-            {NVN_BLEND_ADVANCED_MODE_LINEARDODGE, "unsaturated (Cs/As + Cd/Ad <= 1), translucent", {0.3, 0.1, 0.2, 0.5}, {0.1, 0.3, 0.2, 0.5}, 1},
-            {NVN_BLEND_ADVANCED_MODE_LINEARDODGE, "saturated, source and destination opaque", {0.9, 0.7, 0.5, 1.0}, {0.2, 0.8, 0.4, 1.0}, 1},
-            {NVN_BLEND_ADVANCED_MODE_LINEARDODGE, "saturated, translucent source over an opaque destination", {0.4, 0.35, 0.25, 0.5}, {0.6, 0.6, 0.6, 1.0}, 0},
             {NVN_BLEND_ADVANCED_MODE_MULTIPLY, "over an opaque destination, translucent source", {0.3, 0.1, 0.2, 0.5}, {0.2, 0.8, 0.4, 1.0}, 1},
             {NVN_BLEND_ADVANCED_MODE_MULTIPLY, "over a translucent destination", {0.6, 0.2, 0.4, 1.0}, {0.1, 0.3, 0.2, 0.5}, 0},
             {NVN_BLEND_ADVANCED_MODE_INVERT_RGB, "over an opaque destination, translucent source", {0.3, 0.1, 0.2, 0.5}, {0.2, 0.8, 0.4, 1.0}, 1},
@@ -304,7 +307,6 @@ int main(void) {
             const double *S = c[k].src, *D = dq; double As = S[3], Ad = D[3];
             for (int i = 0; i < 3; i++) {
                 switch (c[k].m) {
-                    case NVN_BLEND_ADVANCED_MODE_LINEARDODGE: fx[i] = S[i] + D[i]; break;
                     case NVN_BLEND_ADVANCED_MODE_MULTIPLY: fx[i] = S[i] * D[i] + D[i] * (1 - As); break;
                     case NVN_BLEND_ADVANCED_MODE_INVERT_RGB: fx[i] = S[i] * (1 - D[i]) + D[i] * (1 - As); break;
                     default: fx[i] = fmax(S[i], D[i]); break;
@@ -319,11 +321,11 @@ int main(void) {
                 ok = ok && e_ref <= t8;
                 snprintf(name, sizeof name, "%s %s: exact (%s; worst %.4f)", mode_name(c[k].m), c[k].cond, ext ? "through VK_EXT_blend_operation_advanced" : "fixed-function", e_ref);
             } else {
-                // the pixel is the fixed-function blend's, off the reference by the amount the table states, in the stated direction (LINEARDODGE and INVERT_RGB brighter,
-                // MULTIPLY and LIGHTEN darker), and that amount is not zero
-                int brighter = c[k].m == NVN_BLEND_ADVANCED_MODE_LINEARDODGE || c[k].m == NVN_BLEND_ADVANCED_MODE_INVERT_RGB, dir = 1;
+                // the pixel is the fixed-function blend's, off the reference by the amount the table states, in the stated direction (INVERT_RGB brighter, MULTIPLY and
+                // LIGHTEN darker), and that amount is not zero
+                int brighter = c[k].m == NVN_BLEND_ADVANCED_MODE_INVERT_RGB, dir = 1;
                 for (int i = 0; i < 3; i++) if (fabs(fx[i] - ref[i]) > t8) dir &= brighter ? fx[i] > ref[i] : fx[i] < ref[i];
-                double bound = c[k].m == NVN_BLEND_ADVANCED_MODE_LINEARDODGE || c[k].m == NVN_BLEND_ADVANCED_MODE_LIGHTEN ? 0.25 : S[0] * (1 - Ad) + 1e-9;
+                double bound = c[k].m == NVN_BLEND_ADVANCED_MODE_LIGHTEN ? 0.25 : S[0] * (1 - Ad) + 1e-9;
                 if (c[k].m == NVN_BLEND_ADVANCED_MODE_MULTIPLY || c[k].m == NVN_BLEND_ADVANCED_MODE_INVERT_RGB) { double b2 = 0; for (int i = 0; i < 3; i++) b2 = fmax(b2, S[i] * (1 - Ad)); bound = b2 + 1e-9; }
                 ok = ok && e_fx <= t8 && stated > 4 * t8 && stated <= bound && dir;
                 snprintf(name, sizeof name, "%s %s: the fixed-function blend (off by %.4f), %.4f %s than the reference as stated (bound %.4f)", mode_name(c[k].m), c[k].cond, e_fx, stated,
@@ -333,9 +335,40 @@ int main(void) {
                              fx[0], fx[1], fx[2], fx[3], ref[0], ref[1], ref[2], ref[3]);
             t(name, ok);
         }
-        // Mario vs. Donkey Kong's mode (LINEARDODGE, premultiplied source, uncorrelated) through a source that is not premultiplied: SRC_ALPHA takes As, unsaturated exact
-        t("LINEARDODGE, source not premultiplied, unsaturated: exact (SRC_ALPHA, ONE)", check_exact("", NVN_BLEND_ADVANCED_MODE_LINEARDODGE, 1, 0, (const double[4]){0.6, 0.2, 0.4, 0.5},
-                                                                                                        dsts[1], NVN_FORMAT_RGBA8, t8));
+    }
+    // LINEARDODGE keeps the state's own functions on every path (vk_gpl.c adv_kept; open): Mario vs. Donkey Kong's fire bird (premultiplied source, uncorrelated, state functions
+    // SRC_ALPHA, ONE for colour and ONE, ZERO for alpha) writes a negative colour into a float target. With the state's functions it is scaled by As: Cs As + Cd; ONE, ONE (the
+    // reduction) and the mode's equation (the extension) give Cs + Cd where unsaturated, so the checks tell them apart. On RGBA8 the state's ONE, ZERO is a replace, the source as
+    // it is, premultiplied or not (the reduction gave Cs + Cd, or Cs As + Cd for a source that is not premultiplied)
+    for (int lv = 0; lv < 2; lv++) {
+        if (lv) hvk_pso_test_level('D');
+        const char *lvn = lv ? "level D (blend baked)" : "level A (blend dynamic)";
+        static const double neg[4] = {-0.3, 0.2, -0.1, 0.5}, over[4] = {0.1, 0.3, 0.2, 1.0};
+        const double th = 1.0 / 512;
+        blend_st b = {0, NVN_BLEND_FUNC_SRC_ALPHA, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD,
+                      NVN_BLEND_ADVANCED_MODE_LINEARDODGE, 0, 0};
+        double got[4], dq[4], want[4];
+        int ok = draw_state(&b, neg, over, NVN_FORMAT_RGBA16F, got);
+        dst_stored(over, NVN_FORMAT_RGBA16F, dq);
+        for (int i = 0; i < 3; i++) want[i] = neg[i] * neg[3] + dq[i];
+        want[3] = neg[3];
+        ok = ok && max_diff(got, want) <= th;
+        if (!ok) fprintf(stderr, "%s LINEARDODGE, negative source on RGBA16F: got %.4f %.4f %.4f %.4f, the state's SRC_ALPHA, ONE / ONE, ZERO give %.4f %.4f %.4f %.4f\n", lvn,
+                         got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
+        char name[300];
+        snprintf(name, sizeof name, "%s: LINEARDODGE, negative source (%.1f %.1f %.1f, alpha %.1f) on RGBA16F: the state's SRC_ALPHA, ONE scale it by As (%.4f %.4f %.4f), not added "
+                 "in full", lvn, neg[0], neg[1], neg[2], neg[3], want[0], want[1], want[2]);
+        t(name, ok);
+        for (int npm = 0; npm < 2; npm++) {
+            const double *s = npm ? srcs_npm[1] : srcs[1]; double q[4];
+            ok = draw_case(NVN_BLEND_ADVANCED_MODE_LINEARDODGE, npm, 0, s, dsts[1], NVN_FORMAT_RGBA8, got);
+            for (int i = 0; i < 4; i++) q[i] = q8(s[i]);
+            ok = ok && max_diff(got, q) <= t8;
+            if (!ok) fprintf(stderr, "%s LINEARDODGE on RGBA8 with ONE, ZERO: got %.4f %.4f %.4f %.4f, the source %.4f %.4f %.4f %.4f\n", lvn, got[0], got[1], got[2], got[3], q[0], q[1], q[2], q[3]);
+            snprintf(name, sizeof name, "%s: LINEARDODGE, %spremultiplied source, on RGBA8: the state's ONE, ZERO (a replace)", lvn, npm ? "not " : "");
+            t(name, ok);
+        }
+        if (lv) hvk_pso_test_level('A');
     }
     // The clamped modes on a float target: exact while unclamped; where the mode clamps, the fixed-function blend (which does not on a float target) passes 1 or falls below 0
     {
@@ -357,7 +390,7 @@ int main(void) {
     }
 
     // An advanced draw, a plain one and an advanced one again in one pass (the dynamic state shadow): MULTIPLY over an opaque destination, which every device draws exactly
-    // (reduced, or through the extension); on a device with the extension also modes no fixed-function blend gives (OVERLAY; LINEARDODGE where every operation is supported)
+    // (reduced, or through the extension); on a device with the extension also a mode no fixed-function blend gives (OVERLAY)
     {
         static const double src[4] = {0.3, 0.1, 0.2, 0.5}, dst[4] = {0.2, 0.8, 0.4, 1.0};
         double w = 1; int ok = alt_case(NVN_BLEND_ADVANCED_MODE_MULTIPLY, src, dst, &w);
@@ -399,8 +432,8 @@ int main(void) {
             char name[200]; snprintf(name, sizeof name, "extension, level %c: %d cases (modes x source kinds x overlaps the device allows) against the reference, %d off by more than 3/255", lv, n, failed);
             t(name, failed == 0 && n > 0);
             // advanced, plain, advanced in one pass through the extension
-            unsigned alt[2] = {NVN_BLEND_ADVANCED_MODE_OVERLAY, NVN_BLEND_ADVANCED_MODE_LINEARDODGE};
-            for (int a = 0; a < 2; a++) {
+            unsigned alt[1] = {NVN_BLEND_ADVANCED_MODE_OVERLAY};
+            for (int a = 0; a < 1; a++) {
                 if (!ext_takes(d, alt[a], 0, 0)) continue;
                 static const double src[4] = {0.4, 0.35, 0.25, 0.5}, dst[4] = {0.6, 0.6, 0.6, 1.0};
                 double w = 1; int ok = alt_case(alt[a], src, dst, &w);

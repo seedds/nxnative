@@ -21,6 +21,17 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 // A hitch that steps hold 1 up: seven frames of 1.6 vsyncs (pipeline compiles), 4.2 vsyncs behind in the last 30 frames and 3.6 without the longest, more than FSTEP_LATE a frame on average. Three such
 // frames among frames on time are paid back by the step and keep hold 1 (below)
 static void hitch(sim *m) { run(m, 7, 1.6, 1, 3, 0); }
+// Frames with the GPU time reported (nvn_fstep gpu_on): CPU work cpu and GPU time gpu (vsyncs). paced = 1: the frame waits out its hold in the host's pacing, so its cost is
+// max(cpu, gpu); paced = 0: the game waits for its frames elsewhere (Ocarina of Time), so the whole time shown is its cost
+static void rung(sim *m, int n, double cpu, double gpu, int paced, int kmin, int kmax) {
+    for (int i = 0; i < n; i++) {
+        int k = m->s.k ? m->s.k : kmin, step = m->next ? m->next : kmin;
+        double w = cpu > gpu ? cpu : gpu, shown = w > k ? w : k;
+        m->real += shown; m->game += step;
+        m->s.gpu_on = 1; m->s.gpu = gpu;
+        m->next = nvn_fstep_next(&m->s, shown, paced ? w : shown, kmin, kmax, 0, m->slow);
+    }
+}
 
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
@@ -546,6 +557,83 @@ int main(void) {
         pw = 2; check(nvn_fstep_drain_cut(33, 17, 0, 16, &pw) == 17 && pw == 2, "a drain in a later acquire of the previous frame: the time, not the pacing wait");
         pw = 3; check(nvn_fstep_drain_cut(40, 17, 9, 0, &pw) == 37 && pw == 0, "a drain counted no larger than the pacing wait it was part of");
         pw = 0; check(nvn_fstep_drain_cut(0, 17, 0, 5, &pw) == 0, "the first frame (no previous start): nothing to cut");
+    }
+    {   // Ocarina of Time on a warm start (2026-11-08, run hu_fog): the first frames after a 162 s pipeline prepare ran 2–7 vsyncs with the GPU idle (0.01–0.02 vsyncs) while an
+        // archive write ran, and stepped the hold 1 → 2 → 3; its frames wait outside the host's pacing, so their cost is the hold and it stayed at 3 (20 fps) for 1,470 presents
+        sim m = {0}; rung(&m, 8, 0.4, 0.01, 0, 1, 3);
+        static const double burst[] = {1.9, 4.5, 7.0, 5.6, 4.6, 6.6, 5.4, 4.8, 7.0};
+        for (int i = 0; i < 9; i++) rung(&m, 1, burst[i], 0.01, 0, 1, 3);
+        snprintf(b, sizeof b, "late frames with the GPU idle (a progress screen after a prepare) do not step up (k %d, ups %llu)", m.s.k, (unsigned long long)m.s.ups);
+        check(m.s.k == 1 && m.s.ups == 0, b);
+        rung(&m, 600, 0.8, 0.75, 0, 1, 3);
+        check(m.s.k == 1 && m.s.ups == 0, "  then the scene (GPU 0.75, frames not waiting in the pacing) holds hold 1");
+    }
+    {   // the same game stepped to 3 by a real hitch (three frames of 3.5 vsyncs with the GPU busy): at hold 3 its cost is the hold, the GPU 0.75 fits hold 1, so a probe
+        // brings hold 1 back within 2 s instead of never (no fit trial: the cost never fits k − 1)
+        sim m = {0}; rung(&m, 600, 0.8, 0.75, 0, 1, 3); rung(&m, 3, 3.5, 0.75, 0, 1, 3);
+        check(m.s.k == 3, "self-paced game, a hitch with the GPU busy: hold 3");
+        double t0 = m.real, back = -1;
+        for (int i = 0; i < 1200 && back < 0; i++) { rung(&m, 1, 0.8, 0.75, 0, 1, 3); if (m.s.k == 1) back = m.real - t0; }
+        rung(&m, 1200, 0.8, 0.75, 0, 1, 3);
+        snprintf(b, sizeof b, "  its hold the GPU does not explain is probed: hold 1 after %.0f vsyncs, and it stays (k %d, probes %llu, failed %llu)", back, m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check(back > 0 && back <= 120 && m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0, b);
+    }
+    {   // a CPU-bound game (1.4 vsyncs of CPU, GPU 0.3) waits out hold 2 in the pacing: its cost explains the hold, so no probe
+        sim m = {0}; rung(&m, 60, 0.5, 0.3, 1, 1, 3); rung(&m, 1200, 1.4, 0.3, 1, 1, 3);
+        snprintf(b, sizeof b, "CPU-bound game paced at hold 2 (cost 1.4, GPU 0.3): stays at 2, no probes (k %d, probes %llu)", m.s.k, (unsigned long long)m.s.probes);
+        check(m.s.k == 2 && m.s.probes == 0, b);
+    }
+    {   // a CPU-bound game at 3.2 vsyncs (late even at hold 3, so no pacing wait), GPU 0.3: the probes fail and spread out 1 → 2 → 4 → 8 s
+        sim m = {0}; rung(&m, 60, 0.5, 0.3, 1, 1, 3); rung(&m, 30, 3.2, 0.3, 1, 1, 3);
+        double last = m.real, gaps[4] = {-1, -1, -1, -1}; int ng = 0; uint64_t probes = m.s.probes;
+        for (int i = 0; i < 6000 && ng < 4; i++) { rung(&m, 1, 3.2, 0.3, 1, 1, 3); if (m.s.probes != probes) { probes = m.s.probes; gaps[ng++] = m.real - last; last = m.real; } }
+        snprintf(b, sizeof b, "CPU-bound game at 3.2 vsyncs: probes %.0f, %.0f, %.0f, %.0f vsyncs apart; %llu failed", gaps[0], gaps[1], gaps[2], gaps[3], (unsigned long long)m.s.failed);
+        check(ng == 4 && gaps[1] >= 120 && gaps[2] >= 240 && gaps[3] >= 480 && m.s.failed >= 3, b);
+    }
+    {   // the same self-paced game, but its GPU clock falls at hold 3 (GPU 0.75 at hold 1, 1.0 at hold 3): GPU time that fits k − 1 still starts the probe
+        sim m = {0}; rung(&m, 600, 0.8, 0.75, 0, 1, 3); rung(&m, 3, 3.5, 1.0, 0, 1, 3);
+        for (int i = 0; i < 2400; i++) rung(&m, 1, 0.8, m.s.k > 1 ? 1.0 : 0.75, 0, 1, 3);
+        snprintf(b, sizeof b, "self-paced game whose GPU clock falls at the longer hold: probed back to hold 1 and stays (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check(m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0, b);
+    }
+    {   // a CPU-heavy scene that draws almost nothing (CPU 1.5 vsyncs, GPU 0.01, paced): its late frames are not a load, so FSTEP_RUN of them in a row still step up to 2
+        sim m = {0}; rung(&m, 60, 0.5, 0.01, 1, 1, 3); rung(&m, 3000, 1.5, 0.01, 1, 1, 3);
+        snprintf(b, sizeof b, "CPU-heavy scene with the GPU idle: steps up once and holds 2 (k %d, ups %llu, late %llu)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.late);
+        check(m.s.k == 2 && m.s.ups == 1 && m.s.late <= 40, b);
+    }
+    {   // a self-paced game whose CPU needs hold 2 (CPU 1.5, GPU 0.3; 20,000 frames, about 11 minutes): the unpaced probes fail and their hold-off grows to 60 s
+        sim m = {0}; rung(&m, 60, 0.5, 0.3, 0, 1, 3); rung(&m, 20000, 1.5, 0.3, 0, 1, 3);
+        snprintf(b, sizeof b, "self-paced game that needs hold 2: at most one probe a minute after the first few (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check(m.s.k == 2 && m.s.probes <= 16 && m.s.failed == m.s.probes, b);
+    }
+    {   // a host-paced CPU-bound game at 2.95 vsyncs (pacing wait under FSTEP_LATE at hold 3): 20,000 frames, about 17 minutes: probes at most once a minute after the first few, the game within 1.5% of real time (one failed probe every 8 s: 5.5% slow)
+        sim m = {0}; rung(&m, 60, 0.5, 0.3, 1, 1, 3); rung(&m, 30, 2.95, 0.3, 1, 1, 3);
+        double r0 = m.real, g0 = m.game; rung(&m, 20000, 2.95, 0.3, 1, 1, 3);
+        snprintf(b, sizeof b, "host-paced game at 2.95 vsyncs: game/real %.3f (probes %llu, failed %llu)", (m.game - g0) / (m.real - r0), (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check((m.game - g0) / (m.real - r0) >= 0.985 && m.s.probes <= 24, b);
+    }
+    {   // a 30 fps cap (kmin = kmax = 2) whose frames run late (Ocarina of Time on an iPhone: 36.5 ms, GPU 32 ms): the hold cannot rise, so the frame step asks the caller to show each late
+        // frame at the next vsync (nvn_fstep.fine: the 60 Hz display link) instead of the next tick of the cap's 30 Hz link, and returns to it once the frames fit for FSTEP_HOLD_MAX
+        sim m = {0}; rung(&m, 120, 1.2, 1.0, 1, 2, 2);
+        check(m.s.k == 2 && !m.s.fine, "30 fps cap, frames that fit hold 2: the cap's own link");
+        rung(&m, 2, 2.19, 1.92, 1, 2, 2); check(!m.s.fine, "  two late frames are not yet a scene that does not fit");
+        rung(&m, 1, 2.19, 1.92, 1, 2, 2); check(m.s.fine && m.s.k == 2 && m.s.fines == 1, "  the third: late frames show at the next vsync, the hold stays 2");
+        double r0 = m.real, g0 = m.game; rung(&m, 1800, 2.19, 1.92, 1, 2, 2);
+        snprintf(b, sizeof b, "  1,800 late frames: stays at the next vsync, game time %.3f of real time (switches %llu)", (m.game - g0) / (m.real - r0), (unsigned long long)m.s.fines);
+        check(m.s.fine && m.s.fines == 1 && (m.game - g0) / (m.real - r0) > 0.99, b);
+        rung(&m, 200, 1.2, 1.0, 1, 2, 2); check(m.s.fine, "  frames that fit for 400 vsyncs keep it (no flapping)");
+        rung(&m, 60, 1.2, 1.0, 1, 2, 2); check(!m.s.fine, "  after 8 s of frames that fit, the cap's own link again");
+        for (int i = 0; i < 20; i++) { rung(&m, 1, 2.3, 2.0, 1, 2, 2); rung(&m, 49, 1.2, 1.0, 1, 2, 2); }
+        check(!m.s.fine && m.s.fines == 1, "  a single late frame every 50 does not switch");
+        sim i = {0}; rung(&i, 120, 1.2, 1.0, 1, 2, 2); rung(&i, 20, 2.5, 0.01, 1, 2, 2);
+        check(!i.s.fine, "30 fps cap, 20 late frames with the GPU idle (a load): the cap's own link");
+        rung(&i, 20, 2.5, 0.01, 1, 2, 2); check(i.s.fine, "  30 in a row are a CPU-heavy scene, as for a step up");
+        sim u = {0}; rung(&u, 120, 0.5, 0.4, 1, 1, 3); rung(&u, 600, 2.19, 1.92, 1, 1, 3);
+        check(u.s.k == 3 && !u.s.fine, "60 fps cap, 36.5 ms frames: the hold rises to 3, no fine pacing needed");
+        sim f = {0}; rung(&f, 120, 1.2, 1.0, 1, 2, 2); rung(&f, 10, 2.19, 1.92, 1, 2, 2); run(&f, 1, 2.19, 2, 2, 2);
+        check(!f.s.fine, "the game fixing its own step ends it");
+        sim c = {0}; rung(&c, 120, 1.2, 1.0, 1, 2, 2); rung(&c, 10, 2.19, 1.92, 1, 2, 2); rung(&c, 1, 0.8, 0.7, 1, 1, 3);
+        check(!c.s.fine, "the cap rising (the hold may rise again) ends it");
     }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;

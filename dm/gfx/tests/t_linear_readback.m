@@ -1,8 +1,10 @@
 // NVN linear image storage: GPU image writes must be visible through the memory-pool CPU mapping.
 // Synthetic 160x90 RGBA8_SRGB IMAGE|LINEAR textures use a valid 640-byte row pitch. A linear texture whose rows no view can take (DM_TBUF_ALIGN=64) is uploaded at its stride.
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_fstep_fine nvn_fstep_fine_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_fstep_fine
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft

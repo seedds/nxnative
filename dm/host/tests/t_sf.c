@@ -20,6 +20,20 @@ static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
     m[4] = 0x49434653; m[5] = 0; m[6] = cmd; m[7] = 0;
     return h_sf_Send(h, m, 0x100);
 }
+// RunClusteringProcessor sends a PID, an IR camera handle, the applet resource user ID, and a packed configuration.
+static Result irs_cluster_request(uint32_t h, uint32_t *m, uint32_t camera, uint8_t gain) {
+    memset(m, 0, 0x100);
+    m[0] = 4; m[1] = (3 + 4 + 14) | 1u << 31;   // alignment, CMIF header, 0x38 bytes of arguments
+    m[2] = 1; m[3] = 0x1234;
+    m[8] = 0x49434653; m[10] = 307;
+    m[12] = camera; m[14] = 0x1234;
+    uint32_t *config = m + 16;
+    config[0] = 300000;                          // exposure time
+    ((uint8_t *)config)[9] = gain;
+    config[5] = 320 | 240u << 16;                // window width and height
+    config[7] = 3; config[8] = 76800;           // minimum and maximum pixel count
+    return h_sf_Send(h, m, 0x100);
+}
 // The same on a domain session as the SDK's notif:a client sends it: the process ID in a special header when pid, one B descriptor (the buffer buf) when buf, the domain header for
 // object 1 at the first 16-byte boundary after them, then "SFCI"
 static Result domain_request(uint32_t h, uint32_t *m, unsigned cmd, int pid, void *buf, uint32_t size) {
@@ -59,7 +73,14 @@ int main(void) {
                       "each camera is disconnected, stopped and has no samples");
             }
         }
-        CHECK(request(irs, m, 307) == RES_OK && m[6] == RES_OK, "IRS accepts clustering configuration without a camera");
+        CHECK(irs_cluster_request(irs, m, 0, 1) == RES_OK && m[6] == RES_OK, "IRS accepts minimum clustering gain without a camera");
+        CHECK(irs_cluster_request(irs, m, 0xffff0008, 16) == RES_OK && m[6] == RES_OK,
+              "IRS accepts handheld, ignores reserved handle bytes and accepts maximum clustering gain");
+        CHECK(irs_cluster_request(irs, m, 9, 8) == RES_OK && m[6] == 0x198cdu, "IRS rejects an out-of-range clustering player index");
+        CHECK(irs_cluster_request(irs, m, 0x100, 8) == RES_OK && m[6] == 0x198cdu, "IRS rejects a nonzero clustering camera type");
+        CHECK(irs_cluster_request(irs, m, 0, 0) == RES_OK && m[6] == 0x19ccdu, "IRS rejects clustering gain below one");
+        CHECK(irs_cluster_request(irs, m, 0, 17) == RES_OK && m[6] == 0x19ccdu, "IRS rejects clustering gain above sixteen");
+        CHECK(request(irs, m, 307) == RES_OK && m[6] == 0x1ce0au, "IRS rejects a truncated clustering configuration");
         h_sf_Close(irs);
     }
 

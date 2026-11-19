@@ -14,8 +14,16 @@ static Result irs_answer(sf_req *r) {
     switch (r->cmd) {
     case 302: case 303: case 319:   // Activate, deactivate, activate with function level
     case 305: case 318:            // Stop an image processor that is already stopped
-    case 307:                     // This SDK aborts if clustering configuration fails. The status page still reports no camera or samples.
         return RES_OK;
+    case 307: {                   // RunClusteringProcessor: camera handle, padding, u64 ARUID, packed configuration
+        if (r->in_len < 0x38) return 0x1ce0au;
+        if (r->in[0] >= IRS_CAMERA_COUNT || r->in[1] != 0) return 0x198cdu;   // player index and camera type
+        uint8_t gain = r->in[0x10 + 9];   // packed configuration starts at +0x10, gain at +9 within it
+        if (gain < 1 || gain > 16) return 0x19ccdu;
+        // Retail firmware 20.5.0 and 21.2.0 accept the initial configuration before a worker tries to start the camera.
+        // The status page reports the camera disconnected, with no samples.
+        return RES_OK;
+    }
     case 304:
         r->out_copy = hle_new_readonly_shmem(&irs_memory);
         return RES_OK;

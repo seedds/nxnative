@@ -7,15 +7,23 @@
 #pragma once
 #import <GameController/GameController.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include "dm_input.h"
 
 static inline int dm_pad_labelled(GCController *c) {
     NSString *k = c.productCategory;
     return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
 }
-// DM_BTN_A / B / X / Y of the pad's pressed face buttons
-static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
+// DM_BTN_A / B / X / Y of the pad's pressed face buttons. by_label: every pad name for name, so the button marked Y on an Xbox pad is the game's Y; otherwise as above
+static inline uint64_t dm_pad_face_as(GCExtendedGamepad *g, int by_label) {
     GCControllerButtonInput *a = g.buttonA, *b = g.buttonB, *x = g.buttonX, *y = g.buttonY;
-    if (!dm_pad_labelled(g.controller)) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }   // by position: right A, bottom B, top X, left Y
+    if (!by_label && !dm_pad_labelled(g.controller)) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }   // by position: right A, bottom B, top X, left Y
     return (a.isPressed ? DM_BTN_A : 0) | (b.isPressed ? DM_BTN_B : 0) | (x.isPressed ? DM_BTN_X : 0) | (y.isPressed ? DM_BTN_Y : 0);
+}
+// DM_PAD_LABELS=1: by label on every pad; read once, as this runs for each pad on each read
+static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
+    static int by_label = -1;
+    if (by_label < 0) { const char *e = getenv("DM_PAD_LABELS"); by_label = e && !strcmp(e, "1"); }
+    return dm_pad_face_as(g, by_label);
 }

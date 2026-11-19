@@ -79,6 +79,10 @@ void front_save_failed(int err);
 // The Mac front end leaves full screen, says why in an alert and quits with exit status 70; without a window it ends the run as the default weak implementation (nvn_mtl.m) does, which the iOS
 // front end keeps: a FATAL line and an abort. Called on Metal's feedback queue; the front end switches to the main thread itself and must not block
 void front_gpu_lost(void);
+// HDR (DM_HDR, nvn/hdr.h): the present wants the layer in extended dynamic range (edr = 1: RGBA16Float, kCGColorSpaceExtendedLinearSRGB, wantsExtendedDynamicRangeContent) for the
+// game's HDR10 picture, or back exactly as the front end made it (edr = 0: BGRA8Unorm, its own colour space, no EDR). Called from the present thread on a change only; the Mac front end
+// switches the layer on its main thread and does not block (the present draws into each drawable's own format meanwhile). A weak no-op default in nvn_mtl.m (iOS, tests)
+void front_hdr_layer(int edr);
 
 // Offline HTML pages (the web applet's offline pages; hle_web.c): a web view over the game picture (web_apple.m, Mac and iPhone). Called from guest threads; the front end works on its main
 // thread. front_web_open: dir = the folder the document path is relative to (an HtmlDocument's html-document), path = the document path with its query, callback = the URL prefix whose

@@ -40,6 +40,17 @@ static int check_present_resize(id<MTLTexture> src, int w, int h) {
 }
 #endif
 
+#ifndef CROP_LEGACY_HEADER
+// One present of src into a w x h canvas (m4: the Metal 4 offscreen path, else the classic encoder); the canvas's RGBA bytes, the caller frees them
+static uint8_t *present_to(id<MTLTexture> src, const int crop[4], int w, int h, int m4) {
+    MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
+    if(m4){EXPECT("Metal 4 present",1,present_offscreen_wait(src,crop,ot)!=PRESENT_FAILED);}
+    else{id<MTLCommandBuffer> cb=[g_q commandBuffer];EXPECT("classic present",1,present_encode(cb,src,ot,crop));[cb commit];[cb waitUntilCompleted];}
+    uint8_t *o=malloc(w*h*4);[ot getBytes:o bytesPerRow:w*4 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];res_remove(ot);return o;
+}
+#endif
+
 static void check(id<MTLTexture> src, const char *name, const int crop[4], int w, int h, int color) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
@@ -77,7 +88,30 @@ static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
     return queued;
 }
 
+#ifndef CROP_LEGACY_HEADER
+// HDR (nvn/hdr.h): an 8x8 texture of one texel value; a present of it into a w x h canvas of format pf (m4: Metal 4 offscreen, else classic), the canvas's centre texel as floats
+static id<MTLTexture> tex_fill(MTLPixelFormat pf, uint32_t texel) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:8 height:8 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> t=[g_dev newTextureWithDescriptor:d];uint32_t px[64];for(int i=0;i<64;i++)px[i]=texel;
+    [t replaceRegion:MTLRegionMake2D(0,0,8,8) mipmapLevel:0 withBytes:px bytesPerRow:32];res_add(t);res_commit();return t;
+}
+static uint32_t pq_texel(int r, int g, int b) { return (uint32_t)r | (uint32_t)g << 10 | (uint32_t)b << 20 | 3u << 30; }
+static void present_px(id<MTLTexture> src, MTLPixelFormat pf, int w, int h, int m4, float out[4]) {
+    MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
+    if(m4){EXPECT("Metal 4 present",1,present_offscreen_wait(src,NULL,ot)!=PRESENT_FAILED);}
+    else{id<MTLCommandBuffer> cb=[g_q commandBuffer];EXPECT("classic present",1,present_encode(cb,src,ot,NULL));[cb commit];[cb waitUntilCompleted];}
+    MTLRegion c=MTLRegionMake2D(w/2,h/2,1,1);
+    if(pf==MTLPixelFormatRGBA16Float){__fp16 v[4];[ot getBytes:v bytesPerRow:8 fromRegion:c mipmapLevel:0];for(int i=0;i<4;i++)out[i]=v[i];}
+    else{uint8_t v[4];[ot getBytes:v bytesPerRow:4 fromRegion:c mipmapLevel:0];for(int i=0;i<4;i++)out[i]=v[i];}
+    res_remove(ot);
+}
+static int near(double a, double b, double tol) { return fabs(a-b)<=tol; }
+#endif
 int main(void) { @autoreleasepool {
+#ifndef CROP_LEGACY_HEADER
+    setenv("DM_HDR","auto",1);   // read once, on first use (the HDR block at the end)
+#endif
     mtl_init();
 #ifndef CROP_LEGACY_HEADER
     mtl_present_layer(1,1);   // square fixtures: a sized square layer, so the checks below see the crop's texels and the bars of that shape; the display's own shape is checked at the end
@@ -327,6 +361,75 @@ int main(void) { @autoreleasepool {
         h_nvnWindowFinalize((NVNwindow *)&w3);
         EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
         res_remove(sw);
+    }
+    {   // HDR (DM_HDR, nvn/hdr.h, msl/present.metal): the decision through screen changes, what vi answers, the layer's wish, and the present's four variants on the GPU
+        mtl_present_layer(1,1);   // the square fixtures fill the canvas
+        id<MTLTexture> sdr=tex_fill(MTLPixelFormatRGBA8Unorm,0xff408020u),pqw=tex_fill(MTLPixelFormatRGB10A2Unorm,pq_texel(594,594,594));
+        uint8_t *sdr_before[2];for(int m4=0;m4<2;m4++)sdr_before[m4]=present_to(sdr,NULL,16,16,m4);
+        float px[4];
+        // Before the game is told HDR an RGB10A2 window texture is an SDR picture, presented as before (fs: its code values as they are)
+        EXPECT("not told: RGB10A2 is not PQ",0,present_pq(pqw));
+        for(int m4=0;m4<2;m4++){present_px(pqw,MTLPixelFormatRGBA8Unorm,16,16,m4,px);EXPECT("not told: RGB10A2 presented raw (594/1023 → 148)",148,(int)px[1]);}
+        // The decision: DM_HDR=auto (setenv above), the screen decides; screen changes never change the setting
+        EXPECT("DM_HDR=auto read",HDR_PREF_AUTO,dm_hdr_pref());
+        EXPECT("no screen yet: off",0,dm_hdr_on());uint16_t peak=1;EXPECT("no screen yet: vi answers SDR",0,dm_hdr_answer(&peak));EXPECT("SDR: peak 0",0,peak);
+        EXPECT("SDR answers do not mark the game told",0,dm_hdr_told());
+        EXPECT("MacBook (potential 16): on",1,dm_hdr_screen(16.0,8.0));EXPECT("on",1,dm_hdr_on());
+        EXPECT("vi answers HDR",1,dm_hdr_answer(&peak));EXPECT("peak: 16 × 203 capped at 1600",1600,peak);EXPECT("told",1,dm_hdr_told());
+        EXPECT("current headroom 8",8,(int)dm_hdr_headroom());
+        EXPECT("Studio Display (potential 1): off",0,dm_hdr_screen(1.0,1.0));EXPECT("vi answers SDR again",0,dm_hdr_answer(&peak));EXPECT("peak 0",0,peak);
+        EXPECT("setting unchanged on the Studio Display",HDR_PREF_AUTO,dm_hdr_pref());EXPECT("headroom at least 1",1,(int)dm_hdr_headroom());
+        EXPECT("back on the MacBook: on again",1,dm_hdr_screen(16.0,8.0));EXPECT("vi answers HDR again",1,dm_hdr_answer(&peak));EXPECT("setting still auto",HDR_PREF_AUTO,dm_hdr_pref());
+        dm_hdr_headroom_set(0.5);EXPECT("a headroom below 1 reads 1",1,(int)dm_hdr_headroom());dm_hdr_headroom_set(8.0);
+        EXPECT("paper white 203",203,dm_hdr_paper_white());
+        dm_hdr_meta_set(HDR_META_STD,0,406);dm_hdr_meta_set(HDR_META_EXT,0,1400);dm_hdr_meta_set(HDR_META_GAMUT,1,0);dm_hdr_meta_set(HDR_META_TONE,0,0);
+        dm_hdr_meta m;dm_hdr_meta_get(&m);EXPECT("metadata kept: standard max",406,m.std_hi);EXPECT("metadata kept: extended max",1400,m.ext_hi);EXPECT("metadata kept: gamut",1,m.gamut);EXPECT("metadata seen",1,m.set);
+        // Variants by picture and target
+        EXPECT("SDR → BGRA8: fs",PV_SDR,present_variant(0,MTLPixelFormatBGRA8Unorm));EXPECT("HDR10 → RGBA16Float: fs_edr",PV_EDR,present_variant(1,MTLPixelFormatRGBA16Float));
+        EXPECT("HDR10 → BGRA8: fs_pq_sdr",PV_PQ_SDR,present_variant(1,MTLPixelFormatBGRA8Unorm));EXPECT("SDR → RGBA16Float: fs_sdr_lin",PV_SDR_LIN,present_variant(0,MTLPixelFormatRGBA16Float));
+        EXPECT("told: RGB10A2 is PQ",1,present_pq(pqw));EXPECT("told: RGBA8 is not",0,present_pq(sdr));
+        // fs_edr on the GPU against the CPU decode: paper white grey, 1000 nits grey, 10000 nits (clamped at headroom 8), BT.2020 red at paper white (negative G and B kept)
+        const int codes[][3]={{594,594,594},{769,769,769},{1023,1023,1023},{594,0,0},{0,0,0}};
+        for(unsigned i=0;i<sizeof codes/sizeof *codes;i++){
+            id<MTLTexture> t=tex_fill(MTLPixelFormatRGB10A2Unorm,pq_texel(codes[i][0],codes[i][1],codes[i][2]));
+            double code[3]={codes[i][0]/1023.0,codes[i][1]/1023.0,codes[i][2]/1023.0},want[3];hdr_pq_to_edr(code,203,8,want);
+            for(int m4=0;m4<2;m4++){
+                present_px(t,MTLPixelFormatRGBA16Float,16,16,m4,px);int ok=1;
+                for(int c=0;c<3;c++)ok&=near(px[c],want[c],fmax(fabs(want[c])*0.01,0.002));
+                char name[160];snprintf(name,sizeof name,"%s fs_edr PQ (%d,%d,%d) → (%.3f %.3f %.3f), CPU (%.3f %.3f %.3f)",m4?"Metal 4":"classic",codes[i][0],codes[i][1],codes[i][2],px[0],px[1],px[2],want[0],want[1],want[2]);
+                EXPECT(name,1,ok);
+            }
+            res_remove(t);
+        }
+        // fs_pq_sdr: paper white grey into an 8-bit target is 247 (hdr_sdr_shoulder), 10000 nits stays below 255
+        for(int m4=0;m4<2;m4++){present_px(pqw,MTLPixelFormatRGBA8Unorm,16,16,m4,px);EXPECT("fs_pq_sdr: paper white → 247 (±1)",1,near(px[1],247,1));}
+        { id<MTLTexture> t=tex_fill(MTLPixelFormatRGB10A2Unorm,pq_texel(1023,1023,1023));present_px(t,MTLPixelFormatRGBA8Unorm,16,16,1,px);EXPECT("fs_pq_sdr: 10000 nits → 255 at most, 254 at least",1,px[0]>=254&&px[0]<=255);res_remove(t); }
+        // fs_sdr_lin: the game's SDR bytes into the extended linear drawable while it switches back: decoded (0x80 → 0.2158)
+        for(int m4=0;m4<2;m4++){present_px(sdr,MTLPixelFormatRGBA16Float,16,16,m4,px);EXPECT("fs_sdr_lin: 0x80 → 0.216",1,near(px[1],0.2158,0.002));}
+        // SDR pictures into 8-bit targets stay byte-identical with HDR on and the game told
+        for(int m4=0;m4<2;m4++){uint8_t *o=present_to(sdr,NULL,16,16,m4);EXPECT("HDR on: an SDR picture's present byte-identical",0,memcmp(o,sdr_before[m4],16*16*4));free(o);free(sdr_before[m4]);}
+        // The screenshot of an HDR10 picture: through fs_pq_sdr into 8 bits, never its PQ bytes (paper white grey → 247)
+        char dir[]="/tmp/t_present_crop_XXXXXX";if(mkdtemp(dir)){char path[256];snprintf(path,sizeof path,"%s/hdr.png",dir);shot(pqw,path,1,NULL);
+            CGImageSourceRef is=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:@(path)],NULL);CGImageRef im=is?CGImageSourceCreateImageAtIndex(is,0,NULL):NULL;
+            EXPECT("HDR screenshot written",1,im!=NULL);
+            if(im){CFDataRef dd=CGDataProviderCopyData(CGImageGetDataProvider(im));const uint8_t *b=CFDataGetBytePtr(dd);size_t bpr=CGImageGetBytesPerRow(im);const uint8_t *c=b+4*bpr+4*4;
+                EXPECT("HDR screenshot: 8-bit",8,(int)CGImageGetBitsPerComponent(im));EXPECT("HDR screenshot: paper white grey 247 (±1), not PQ's 148",1,near(c[1],247,1)&&near(c[0],247,1)&&near(c[2],247,1));
+                CFRelease(dd);CGImageRelease(im);}
+            if(is)CFRelease(is);unlink(path);rmdir(dir);}
+        // MetalFX under HDR: the scaler keeps the HDR10 picture's format (its own output texture, never the float drawable), and fs_edr converts after it
+        { g_fx_mode=1;uint64_t was_n=g_present_n;g_present_n=g_fx_present.made_at+FX_REMAKE_PRESENTS;   // past the scaler-remake throttle
+          MTLTextureDescriptor *cd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:32 height:32 mipmapped:NO];
+          cd.storageMode=MTLStorageModeShared;cd.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;id<MTLTexture> canvas=[g_dev newTextureWithDescriptor:cd];res_add(canvas);res_commit();
+          id<MTL4CommandAllocator> al=[g_dev newCommandAllocator];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];id<MTLSharedEvent> ev=[g_dev newSharedEvent];uint64_t direct=g_fx_present.direct_n;
+          [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,pqw,canvas,NULL,g_present_uv[0],&g_fx_present);[cb endCommandBuffer];
+          [g_q4 commit:&cb count:1];[g_q4 signalEvent:ev value:1];EXPECT("HDR MetalFX present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);
+          EXPECT("HDR: through MetalFX",PRESENT_METALFX,kind);
+          EXPECT("HDR: the scaler's output keeps the picture's format (RGB10A2)",MTLPixelFormatRGB10A2Unorm,g_fx_present.out?(int)g_fx_present.out.pixelFormat:-1);
+          EXPECT("HDR: the scaler never writes the float drawable",1,g_fx_present.direct_n==direct);
+          __fp16 v[4];[canvas getBytes:v bytesPerRow:8 fromRegion:MTLRegionMake2D(16,16,1,1) mipmapLevel:0];
+          char name[96];snprintf(name,sizeof name,"HDR MetalFX: paper white grey → 1.0 (got %.3f)",(float)v[1]);EXPECT(name,1,near(v[1],1.0,0.02));
+          res_remove(canvas);g_fx_mode=0;g_present_n=was_n; }
+        res_remove(sdr);res_remove(pqw);mtl_present_layer(0,0);
     }
 #endif
     h_nvnQueueFinalize(&queue);

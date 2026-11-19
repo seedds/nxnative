@@ -2,6 +2,7 @@
 // frame the present queue handed on with a present tick (one the Mac dropped too: a Switch shows every frame it is handed), 1 for one still queued, the frame numbers of GetLatestFrameNumber. Unreal's RHI takes the
 // first status-2 entry as its latest flip (Minecraft Dungeons II main+0x142b0b0), so the newest shown frame has to come first
 #include "../../gfx/hle_vi.c"
+#include "../../gfx/nvn/hdr.c"   // the HDR state vi answers from (DM_HDR)
 #include <assert.h>
 
 static uint64_t g_count, g_in, g_done, g_gns = 5000000000ull, g_hns = 9000000000ull;
@@ -41,5 +42,21 @@ int main(void) {
     assert(fi[5][3] == ticks(g_gns - 1000000000ull));   // the first-seen time stays
     assert(h_vi_FrameHist(fi, 2, NULL) == 2 && fi[0][1] == 10 && fi[1][1] == 9);   // a smaller buffer gets the newest
     puts("vi frame history: count query 8, newest first, shown once handed on, presented or first-seen tick, dropped frames shown, queued ones not");
+    // HDR (nvn/hdr.c): QueryDisplayHdrStatus follows the window's screen under DM_HDR=auto, the paper white is 203, the layer metadata is kept, and every call succeeds
+    setenv("DM_HDR", "auto", 1);
+    uint8_t on = 9; uint32_t fmt = 9; uint16_t peak = 9, pw = 0;
+    assert(h_vi_HdrStatus(&on, &fmt, &peak, NULL) == RES_OK && on == 0 && fmt == 0 && peak == 0);   // no screen yet: SDR, as before
+    assert(h_vi_PaperWhite(&pw, NULL) == RES_OK && pw == 203);
+    dm_hdr_screen(16.0, 8.0);                                                                        // a MacBook Pro's XDR panel
+    assert(h_vi_HdrStatus(&on, &fmt, &peak, NULL) == RES_OK && on == 1 && fmt == 0 && peak == 1600 && dm_hdr_told());
+    dm_hdr_screen(1.0, 1.0);                                                                         // moved to a screen without HDR
+    assert(h_vi_HdrStatus(&on, &fmt, &peak, NULL) == RES_OK && on == 0 && peak == 0 && dm_hdr_pref() == HDR_PREF_AUTO);
+    dm_hdr_screen(16.0, 8.0);
+    assert(h_vi_HdrStatus(&on, &fmt, &peak, NULL) == RES_OK && on == 1 && peak == 1600);           // and back, the setting untouched
+    assert(h_vi_HdrStdLum(NULL, 0, 406) == RES_OK && h_vi_HdrExtLum(NULL, 0, 1400) == RES_OK && h_vi_HdrGamut(NULL, 1) == RES_OK && h_vi_HdrToneMap(NULL, 0) == RES_OK);
+    dm_hdr_meta m; dm_hdr_meta_get(&m);
+    assert(m.set && m.std_lo == 0 && m.std_hi == 406 && m.ext_lo == 0 && m.ext_hi == 1400 && m.gamut == 1 && m.tone == 0);
+    assert(h_vi_HdrBezier(NULL, 1, 2, 3) == RES_OK && h_vi_HdrGamutClear(NULL) == RES_OK);
+    puts("vi HDR: SDR with no screen, HDR with peak 1600 on an XDR screen, SDR on a screen without HDR and back, paper white 203, the layer metadata kept");
     return 0;
 }

@@ -1062,6 +1062,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### Play statistics without a user ID
+
+- **Symptom:** a null read at `sdk+0x2a4fc0` during startup in the `pdm::QueryApplicationPlayStatistics` overload without a `Uid`.
+- **Cause:** the SDK dereferences the applet proxy from `nn::am::GetApplicationFunctions` to query the system play log. The proxy is null on the host. The SDK returns the number of output records, and `main+0x10e78c` checks that there is at least one before reading the array.
+- **Fix:** `hle_offline.c` serves that overload by returning zero records for the empty system play log.
+- **Found on:** [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md) (1.0.0, SDK 8.3.2).
+
 ### `account::GetUserId` copies the Uid of any handle
 
 - **Symptom:** a second controller ends the game with `FATAL account::GetUserId: the handle was not issued by the host (0x2)`, at boot with both connected or when the second joins during play (EA SPORTS FC 27 1.8d.6523; the FC 26 patch reports `(0x8)`).

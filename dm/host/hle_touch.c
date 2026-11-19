@@ -17,18 +17,47 @@ static struct { int down, pend; float x, y; } g_gf[16];   // the gesture recogni
 static pthread_mutex_t g_tl = PTHREAD_MUTEX_INITIALIZER;
 static int64_t g_tsamp; static uint64_t g_tlast_ns;
 
+// On a picture wider than 16:9 the game's interface keeps a 16:9 projection (view.s's Lscreen_projection scales the layout projection's x by
+// (16/9)/r), so it is drawn centred across that fraction of the width while the picture itself fills the screen. The front end normalises a
+// touch on the whole picture, so map it back onto that centred rectangle: a control is hit where it is drawn, and the screen's edges reach the
+// interface's edges (a touch outside it clamps there). 16:9 and taller pictures are left alone.
+__attribute__((weak)) uint8_t *dm_fps_state;   // loader.c defines it; a unit test that links only this file has no frame step page, and NULL means 16:9
+// Only a build with screen-shape stubs draws its interface centred on a picture that is not 16:9 (DM_GAME_SCREEN_ASPECT); another build's interface is
+// the picture's shape, and its touches are already where the game draws them.
+static float ui_x(float x) {
+#if !DM_GAME_SCREEN_ASPECT
+    return x;
+#endif
+    if (!dm_fps_state) return x;
+    float r; memcpy(&r, dm_fps_state + 0x58, 4);
+    if (!(r > 16.0f / 9.0f)) return x;
+    float v = 0.5f + (x - 0.5f) / ((16.0f / 9.0f) / r);
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+// The same for a picture taller than 16:9: the interface keeps a 16:9 band in the picture's middle, and a touch on the picture maps back onto it.
+static float ui_y(float y) {
+#if !DM_GAME_SCREEN_ASPECT
+    return y;
+#endif
+    if (!dm_fps_state) return y;
+    float r; memcpy(&r, dm_fps_state + 0x58, 4);
+    float v = y;
+    if (r > 0.0f && r < 16.0f / 9.0f) v = 0.5f + (y - 0.5f) * ((16.0f / 9.0f) / r);
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
 static void touch_apply(const dm_touch *t, int n) {
     pthread_mutex_lock(&g_tl);
     int seen[16] = {0};
     for (int i = 0; i < n; i++) {
         uint32_t id = t[i].id; if (id >= 16) continue;
+        float tx = ui_x(t[i].x), ty = ui_y(t[i].y);
         seen[id] = 1;
         if (!g_gf[id].down) g_gf[id].pend = 1;
-        g_gf[id].down = 1; g_gf[id].x = t[i].x; g_gf[id].y = t[i].y;
-        if (g_f[id].st == F_LIFTED && g_f[id].reported) { g_f[id].again = 1; g_f[id].ax = t[i].x; g_f[id].ay = t[i].y; continue; }
+        g_gf[id].down = 1; g_gf[id].x = tx; g_gf[id].y = ty;
+        if (g_f[id].st == F_LIFTED && g_f[id].reported) { g_f[id].again = 1; g_f[id].ax = tx; g_f[id].ay = ty; continue; }
         if (g_f[id].st == F_EMPTY) { g_f[id].st = F_DOWN; g_f[id].reported = 0; }
         else if (g_f[id].st == F_LIFTED) g_f[id].st = F_DOWN;              // Pressed again before the lift was reported: treat it as held down all along
-        g_f[id].x = t[i].x; g_f[id].y = t[i].y;
+        g_f[id].x = tx; g_f[id].y = ty;
     }
     for (int id = 0; id < 16; id++) {
         if (!seen[id]) g_gf[id].down = 0;

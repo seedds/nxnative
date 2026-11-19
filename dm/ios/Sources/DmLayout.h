@@ -33,6 +33,16 @@ static inline CGRect dm_aspect_fill(CGRect b, CGFloat aspect) {
 
 static inline BOOL dm_picture_fill(const char *_Nullable value) { return value && !strcmp(value, "fill"); }   // DM_PICTURE_FIT: fit (default) or fill
 
+// Picture shape "auto" (the launcher's Match screen): the shape of the area the picture fills, so its background covers that area with nothing cropped.
+// Lying down that is the screen's own wide shape (a 19.5:9 phone at 2.17:1); standing up it is the upper half's shape (twice the screen's width / its
+// height: 0.92 on a 19.5:9 phone), so the picture fills that half and the rest of the window is free. A game's screen-shape stubs translate the shape
+// into its own sizes, and the shapes a game accepts are the ones its adapter was built for; the range is loader.c's. 0 = 16:9.
+static inline float dm_picture_shape_auto(CGSize window) {
+    double r = window.height > window.width ? 2 * window.width / MAX(window.height, 1)   // standing up: the upper half's shape
+                                            : MAX(window.width, window.height) / MAX(MIN(window.width, window.height), 1);
+    return r >= 0.9 && r < 2.4 ? (float)r : 0.0f;
+}
+
 static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
     if (CGRectIsNull(division) || division.size.width <= division.size.height) return CGRectNull;
     // Preserve zero-height inactive folds and clip regions during display handoff.

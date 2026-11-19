@@ -810,6 +810,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             raw = targetCbs.Count == 0;
 
+            // nxnative: metadata only, before helper reuse or vector-load folding. The host discovers the actual target pool at binding time; scalar, vector and mixed-path
+            // accesses keep the existing raw table and helper signatures (including stores' write-log entries).
+            if ((raw || rawFallback >= 0) && operation.Inst == Instruction.Load)
+            {
+                FindPointerSite(resourceManager, gpuAccessor, operation);
+            }
+
             if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
             {
                 return true;
@@ -968,7 +975,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // nxnative: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
         // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
-        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
+        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, span}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
         public const int GmemMapCbSlot = 0xff;
         private const int GmemMapLog2 = 13;
         private const int GmemMapEntryWords = 8;
@@ -1060,7 +1067,21 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             int lastBinding = resourceManager.AddRawLastEntryMemory();
             Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
             Operand lastEntry = context.IMultiply(last, Const(GmemMapEntryWords));
-            Operand lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+            Operand lastHolds;
+            if (writes)
+            {
+                lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+            }
+            else
+            {
+                // The host supplies a span only for ranges within one 4 GiB window.
+                // Unsigned subtraction rejects addresses below the start in that same
+                // window. A zero span always takes the exact lookup below.
+                Operand offset = context.ISubtract(addrLow, MapWord(lastEntry, 0));
+                lastHolds = context.BitwiseAnd(
+                    context.ICompareEqual(addrHigh, MapWord(lastEntry, 1)),
+                    context.ICompareLessUnsigned(offset, MapWord(lastEntry, 7)));
+            }
             context.Copy(selected, last);
             context.BranchIfTrue(lblChosen, lastHolds);
 
@@ -1255,6 +1276,154 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // nxnative: bit 15 marks a target whose words hold a bindless constant buffer handle (SearchResult.Handle); constant buffer slots stay below it
         private const int HandleBit = 0x8000;
+
+        // nxnative: a raw load's pointer source for host-side pool discovery. Ocarina of Time's model shaders read five pointers at bytes 0-0x20 of storage slot 1 and load through each plus an index;
+        // 99.5% of its raw-table accesses (2,173 shaders) have that form. The address's low word is the sum of a storage buffer word at a constant offset and index terms, and its high
+        // word holds the next word of the same buffer: that pair is the pointer. When the high word names no such word, a single candidate in the low word is taken: the host
+        // only adds a real pool to the existing table; a guessed source cannot change the address the shader reads. Returns the source number, or -1
+        private static int FindPointerSite(ResourceManager resourceManager, IGpuAccessor gpuAccessor, Operation operation)
+        {
+            List<(int, int)> low = [];
+            List<(int, int)> high = [];
+            CollectPointerWords(operation.GetSource(0), 0, low, []);
+            CollectPointerWords(operation.GetSource(1), 0, high, []);
+
+            (int, int)? pick = null;
+
+            foreach ((int binding, int word) in low)
+            {
+                if (high.Contains((binding, word + 1)))
+                {
+                    if (pick != null && pick != (binding, word))
+                    {
+                        return -1;   // two pointers summed: none is the base
+                    }
+
+                    pick = (binding, word);
+                }
+            }
+
+            if (pick == null && low.Count == 1)
+            {
+                pick = low[0];
+            }
+
+            if (pick is not (int pb, int pw) || pw > 0xfff8 / 4 || !resourceManager.TryGetStorageBufferDescriptor(pb, out int cbSlot, out int cbOffset))
+            {
+                return -1;
+            }
+
+            var key = (cbSlot, cbOffset, pw * 4);
+
+            if (!resourceManager.PointerSites.TryGetValue(key, out int site))
+            {
+                if (resourceManager.PointerSites.Count >= 64)
+                {
+                    return -1;
+                }
+
+                site = resourceManager.PointerSites.Count;
+                resourceManager.PointerSites.Add(key, site);
+                gpuAccessor.Log($"gptr site {site}: c{cbSlot}[{cbOffset}] +{pw * 4}");
+            }
+
+            return site;
+        }
+
+        // The storage buffer words at constant offsets an address word is summed from: (binding, word offset), through copies, adds, ORs and masks
+        private static void CollectPointerWords(Operand op, int depth, List<(int, int)> words, HashSet<INode> seen)
+        {
+            if (op == null || op.Type != OperandType.LocalVariable || depth > 16 || op.AsgOp == null || !seen.Add(op.AsgOp))
+            {
+                return;
+            }
+
+            if (op.AsgOp is PhiNode phi)
+            {
+                for (int i = 0; i < phi.SourcesCount; i++)
+                {
+                    CollectPointerWords(phi.GetSource(i), depth + 1, words, seen);
+                }
+
+                return;
+            }
+
+            if (op.AsgOp is not Operation o) return;
+
+            switch (o.Inst)
+            {
+                case Instruction.Load:
+                    if (o.StorageKind == StorageKind.StorageBuffer && o.SourcesCount == 3 && o.GetSource(0).Type == OperandType.Constant)
+                    {
+                        long? word = ConstValue(o.GetSource(2), 0);
+
+                        if (word is long w && w >= 0 && w <= int.MaxValue && !words.Contains((o.GetSource(0).Value, (int)w)))
+                        {
+                            words.Add((o.GetSource(0).Value, (int)w));
+                        }
+                    }
+
+                    return;
+                case Instruction.Copy:
+                case Instruction.Add:
+                case Instruction.BitwiseOr:
+                    for (int i = 0; i < o.SourcesCount; i++)
+                    {
+                        CollectPointerWords(o.GetSource(i), depth + 1, words, seen);
+                    }
+
+                    return;
+                case Instruction.Subtract:
+                    CollectPointerWords(o.GetSource(0), depth + 1, words, seen);
+                    return;
+                case Instruction.BitwiseAnd:
+                    if (o.GetSource(1).Type == OperandType.Constant)
+                    {
+                        CollectPointerWords(o.GetSource(0), depth + 1, words, seen);
+                    }
+                    else if (o.GetSource(0).Type == OperandType.Constant)
+                    {
+                        CollectPointerWords(o.GetSource(1), depth + 1, words, seen);
+                    }
+
+                    return;
+            }
+        }
+
+        // A value made only of constants, or null
+        private static long? ConstValue(Operand op, int depth)
+        {
+            if (op == null)
+            {
+                return 0;
+            }
+
+            if (op.Type == OperandType.Constant)
+            {
+                return op.Value;
+            }
+
+            if (op.Type != OperandType.LocalVariable || depth > 16 || op.AsgOp is not Operation o)
+            {
+                return null;
+            }
+
+            long? a = o.SourcesCount > 0 ? ConstValue(o.GetSource(0), depth + 1) : null;
+            long? b = o.SourcesCount > 1 ? ConstValue(o.GetSource(1), depth + 1) : null;
+
+            return o.Inst switch
+            {
+                Instruction.Copy => a,
+                Instruction.Add when a.HasValue && b.HasValue => a + b,
+                Instruction.Subtract when a.HasValue && b.HasValue => a - b,
+                Instruction.Multiply when a.HasValue && b.HasValue => a * b,
+                Instruction.ShiftLeft when a.HasValue && b.HasValue => a << (int)b,
+                Instruction.ShiftRightU32 when a.HasValue && b.HasValue => (long)((uint)a >> (int)b),
+                Instruction.BitwiseAnd when a.HasValue && b.HasValue => a & b,
+                Instruction.BitwiseOr when a.HasValue && b.HasValue => a | b,
+                _ => null,
+            };
+        }
 
         private static uint PackCbSlotAndOffset(int cbSlot, int cbOffset, bool handle = false)
         {

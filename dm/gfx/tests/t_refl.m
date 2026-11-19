@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include "../nvn/dmsh_abi.h"
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -17,6 +18,40 @@ static void check(const char *what, long want, long got) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   // Pointer discovery is metadata on the existing pool-table binding; there is no new GPU argument.
+        NSMutableDictionary *b = [@{@"kind": @"gmem_map", @"arg_id": @0, @"msl_name": @"cp_s0", @"pointers": @[@[@1, @8], @[@0, @0]]} mutableCopy];
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[b]};
+        check("raw pointers: conversion", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("raw pointers: existing table kind", NVN_RB_GMEM, r.b[0].kind); check("raw pointers: count", 2, r.ngptr);
+        check("raw pointers: slot", 1, r.gptr[0].reg); check("raw pointers: byte", 8, r.gptr[0].off);
+        for (id invalid in @[@[@[@16, @0]], @[@[@0, @65529]], @[@[@0]], @[@[@"bad", @0]], @"bad"]) {
+            b[@"pointers"] = invalid; check("raw pointers: malformed source rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+        }
+        NSMutableArray *many = [NSMutableArray array]; for (int i = 0; i <= DMSH_GPTR_MAX; i++) [many addObject:@[@0, @(8 * i)]];
+        b[@"pointers"] = many; check("raw pointers: too many rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+    }
+    {   // A row-wrapped BUFFER binding has a lead group followed by logical widths.
+        NSArray *forms = @[
+            @{@"kind": @"tex", @"reg": @0, @"msl_name": @"cp_t_tcb_8", @"msl_type": @"texture2d<uint>"},
+            @{@"kind": @"tex_ubo", @"reg": @0, @"msl_name": @"cp_t_cb3_A", @"msl_type": @"texture2d<uint>"},
+            @{@"kind": @"tex_ubo", @"reg": @0, @"msl_name": @"cp_t_cb3_A", @"msl_type": @"array<texture2d<uint>, 2>"},
+            @{@"kind": @"tex", @"msl_name": @"cp_t_cb0_40000000", @"msl_type": @"array<texture2d<uint>, 2>"},
+            @{@"kind": @"tex_c2a", @"off": @0, @"soff": @0, @"msl_name": @"cp_t_cb2_0", @"msl_type": @"array<texture2d<uint>, 2>"}];
+        for (NSDictionary *form in forms) {
+            NSMutableDictionary *binding = [form mutableCopy]; binding[@"fetch1d"] = @YES; binding[@"tbx"] = @0;
+            NSMutableDictionary *table = [@{@"kind": @"tbias", @"n": @4, @"msl_name": @"cp_c17"} mutableCopy];
+            NSDictionary *j = @{@"route": @"B", @"bindings": @[table, binding]};
+            check("row binding: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+            check("row binding: fetch1d preserved", 1, r.b[1].f1d);
+            check("row binding: lead index", 1, r.b[1].tbx);
+            binding[@"tbx"] = @3;
+            check("row binding: width past declared table rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+            binding[@"tbx"] = @511; table[@"n"] = @512;
+            check("row binding: width past capacity rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+            binding[@"tbx"] = @0; [binding removeObjectForKey:@"fetch1d"];
+            check("ordinary 2D offset metadata rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+        }
+    }
     {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},

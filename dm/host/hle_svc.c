@@ -399,6 +399,8 @@ static uint8_t g_seen[256];
 // The lock used to cover only the add and the delete, so two threads unmapping at once (stacks of exiting threads) could delete through a stale index and drop another live mapping
 #define MAX_MAP 4096
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
+enum { SHARED_MEMORY_STATE = 6 };
+static unsigned g_shared_maps;   // under g_map_lock
 static int g_nmap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
 // Punch the alias region's host pages that the game gave back before the last sweep and has not mapped again since (g_alias_aged), then age the ones given back since. Under g_map_lock,
@@ -566,7 +568,7 @@ static uint32_t map_arguments(uint64_t dst, uint64_t src, uint64_t size) {
 }
 static int map_source_busy(uint64_t addr, uint64_t size) { // g_map_lock held; nonwrapping ranges
     for (int i = 0; i < g_nmap; ++i)
-        if (addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
+        if (g_map[i].state != SHARED_MEMORY_STATE && addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
     return 0;
 }
 // Device-shared memory. On Horizon, NVN gives a memory pool's storage to the GPU through nvmap, whose device mapping (svcMapDeviceAddressSpaceAligned, KPageTableBase::LockForMapDeviceAddressSpace)
@@ -637,7 +639,7 @@ int svc_nro_deactivate(module_t *m) {
     pthread_mutex_lock(&g_map_lock);
     uint64_t base = (uintptr_t)m->base;
     for (int i = 0; i < g_nmap; i++)
-        if (g_map[i].src < base + m->size && base < g_map[i].src + g_map[i].size) {
+        if (g_map[i].state != SHARED_MEMORY_STATE && g_map[i].src < base + m->size && base < g_map[i].src + g_map[i].size) {
             pthread_mutex_unlock(&g_map_lock); return 0;
         }
     m->loaded = 0;
@@ -646,6 +648,7 @@ int svc_nro_deactivate(module_t *m) {
 static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint32_t *attr, uint64_t *perm) {
     uint64_t lo = *base, remaining = *size; // the final free page can end at 2^64
     for (int i = 0; i < g_nmap; ++i) {
+        if (g_map[i].state == SHARED_MEMORY_STATE) continue;
         uint64_t src = g_map[i].src, end = src + g_map[i].size;
         uint64_t lower = lo, upper = remaining;
         if (addr >= src && addr < end) {
@@ -907,7 +910,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int mapped = 0, in_alias = addr >= ab && addr < ae;
         if (in_alias) alias_query(addr, &rb, &rn, &mapped);
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
-        else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
+        else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=state == SHARED_MEMORY_STATE ? 1 : 3; }
         else if (in_alias && mapped) { base=rb; size=rn; state=5; perm=3; }
         else if (a >= g_as && a < g_as + g_reserve) {   // free: up to the adjacent mapping/heap boundary
             uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + g_reserve;
@@ -969,12 +972,55 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         regs[0] = 0; regs[1] = 0; return 0;
     }
+    case 0x13: case 0x14: {  // MapSharedMemory / UnmapSharedMemory: immutable service data, in free alias pages
+        const hle_readonly_shmem *memory = hle_get_readonly_shmem((uint32_t)regs[0]);
+        uintptr_t addr = regs[1]; size_t size = regs[2], pg = (size_t)getpagesize();
+        if (!memory) { regs[0] = 0xe401u; return 0; }
+        if (addr & (pg - 1)) { regs[0] = 0xcc01u; return 0; }
+        if (size != memory->size || !size || (size & (pg - 1))) { regs[0] = 0xca01u; return 0; }
+        if (num == 0x13 && regs[3] != 1) { regs[0] = 0xd801u; return 0; }
+        if (!memory_contains((uintptr_t)g_alias, g_alias_cap, addr, size)) { regs[0] = 0xdc01u; return 0; }
+        pthread_mutex_lock(&g_map_lock);
+        int k = map_find(addr, size);
+        uint32_t result = 0xd401u;
+        if (num == 0x13 && !k && g_nmap < MAX_MAP && alias_unmapped(addr - (uintptr_t)g_alias, size) == (int64_t)(size / 4096)) {
+            void *dst = (void *)addr;
+            if (mprotect(dst, size, PROT_READ | PROT_WRITE)) die("MapSharedMemory writable mapping: errno=%d", errno);
+            dm_guest_write_prepare(dst, size);
+            memcpy(dst, memory->bytes, size);
+            if (mprotect(dst, size, PROT_READ)) die("MapSharedMemory read-only protection: errno=%d", errno);
+            if (g_gf_n) {
+                size_t first = (addr - (uintptr_t)g_alias) / pg;
+                for (size_t i = first; i < first + size / pg; ++i) {
+                    uint64_t bit = UINT64_C(1) << (i & 63);
+                    g_alias_rel[i >> 6] &= ~bit;
+                    g_alias_aged[i >> 6] &= ~bit;
+                }
+            }
+            map_add(addr, size, (uintptr_t)memory, SHARED_MEMORY_STATE);
+            ++g_shared_maps;
+            result = 0;
+        } else if (num == 0x14 && k && g_map[k-1].state == SHARED_MEMORY_STATE && g_map[k-1].base == addr &&
+                   g_map[k-1].size == size && g_map[k-1].src == (uintptr_t)memory) {
+            if (!guest_release(addr, addr + size, 1)) {
+                size_t first = (addr - (uintptr_t)g_alias) / pg;
+                for (size_t i = first; i < first + size / pg; ++i) g_alias_exposed[i >> 6] |= UINT64_C(1) << (i & 63);
+            }
+            map_del(k - 1);
+            --g_shared_maps;
+            result = 0;
+        }
+        pthread_mutex_unlock(&g_map_lock);
+        regs[0] = result;
+        return 0;
+    }
     case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)
         uintptr_t a = regs[0]; size_t size = regs[1];
         if (!size || ((a | size) & 0xfff) || !memory_contains((uintptr_t)g_alias, g_alias_cap, a, size)) {
             LOG("SVC %#x outside the alias region %p+%#zx", num, (void *)a, size); regs[0] = 0xD401; return 0;
         }
         pthread_mutex_lock(&g_map_lock);
+        if (g_shared_maps && map_find(a, size)) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xd401u; return 0; }
         // The SDK extends committed windows across borrowed stack sources
         // (Raging Loop, StandardAllocator). Recommit preserves every live byte;
         // only decommit can invalidate backing required for eventual copyback.

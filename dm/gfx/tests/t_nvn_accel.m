@@ -45,7 +45,7 @@ static uint64_t guest_buffer(size_t n) {
     n = (n + 255) & ~(size_t)255;
     if (!n) n = 256;
     if (memory_used + n > memory_size || buffer_count == 64) { fprintf(stderr,"test storage exhausted\n"); exit(2); }
-    NVNbufferBuilder b;
+    NVNbufferBuilder b = {0};
     h_nvnBufferBuilderSetDefaults(&b);
     h_nvnBufferBuilderSetStorage(&b,(NVNmemoryPool *)&pool,(ptrdiff_t)memory_used,n);
     NVNbuffer *object = &buffers[buffer_count++];

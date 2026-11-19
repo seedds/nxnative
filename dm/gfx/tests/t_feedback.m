@@ -641,7 +641,7 @@ static void reuse_tables_case(void) {
     uint64_t done0 = g_done, fence0 = g_fence, made0 = g_pool_made, reused0 = g_pool_reused;
     id<MTLBuffer> a = pool_table_take(1000);
     CHECK(a && a.length == 0x10000 && g_pool_made == made0 + 1, "a new table, its size rounded up to 64 KB");
-    pool_table_give(a);
+    pool_table_give(a, -1, 0);
     id<MTLBuffer> b = pool_table_take(1000);
     CHECK(b != a && g_pool_made == made0 + 2, "not while the submission that may read it runs");
     g_done = g_fence + 1;
@@ -649,7 +649,7 @@ static void reuse_tables_case(void) {
     CHECK(c == a && g_pool_reused == reused0 + 1, "the same buffer once its fence has passed");
     id<MTLBuffer> d = pool_table_take(0x10001);
     CHECK(d != a && d.length == 0x20000, "a larger table is its own buffer");
-    pool_table_give(b); pool_table_give(c); pool_table_give(d);
+    pool_table_give(b, -1, 0); pool_table_give(c, -1, 0); pool_table_give(d, -1, 0);
     g_done = done0; g_fence = fence0;
 }
 // A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
@@ -748,7 +748,8 @@ static void om_case(const char *dir) {
     int before = failed; NSString *d = @(dir);
     NSData *oj = [NSData dataWithContentsOfFile:[d stringByAppendingPathComponent:@"om.json"]];
     NSDictionary *facts = oj ? [NSJSONSerialization JSONObjectWithData:oj options:0 error:nil] : nil;
-    CHECK(facts && [facts[@"calls"] count] == 0 && [facts[@"outputs"] count] == 1, "the om-only fixture has no samples and one colour output");
+    NSArray *calls = facts[@"calls"], *outputs = facts[@"outputs"];
+    CHECK(facts && calls.count == 0 && outputs.count == 1, "the om-only fixture has no samples and one colour output");
     NSError *e = nil;
     id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543212_bf.metallib"], &e);
     CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded om-only library exposes main0_f");

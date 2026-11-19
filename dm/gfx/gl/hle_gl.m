@@ -88,7 +88,7 @@ enum {
     GL_CLAMP_TO_BORDER = 0x812d, GL_CLAMP_TO_EDGE = 0x812f, GL_TEXTURE_MIN_LOD = 0x813a, GL_TEXTURE_MAX_LOD, GL_TEXTURE_MAX_LEVEL = 0x813d,
     GL_DEPTH_COMPONENT16 = 0x81a5, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT32,
     GL_MAJOR_VERSION = 0x821b, GL_MINOR_VERSION, GL_NUM_EXTENSIONS, GL_RG = 0x8227, GL_R8 = 0x8229, GL_RG8 = 0x822b, GL_R16F = 0x822d, GL_R32F, GL_RG16F, GL_RG32F,
-    GL_UNSIGNED_SHORT_5_6_5 = 0x8363, GL_MIRRORED_REPEAT = 0x8370,
+    GL_UNSIGNED_SHORT_5_6_5 = 0x8363, GL_UNSIGNED_INT_2_10_10_10_REV = 0x8368, GL_MIRRORED_REPEAT = 0x8370,
     GL_COMPRESSED_RGB_S3TC_DXT1 = 0x83f0, GL_COMPRESSED_RGBA_S3TC_DXT1, GL_COMPRESSED_RGBA_S3TC_DXT3, GL_COMPRESSED_RGBA_S3TC_DXT5,
     GL_TEXTURE0 = 0x84c0, GL_MAX_RENDERBUFFER_SIZE = 0x84e8, GL_DEPTH_STENCIL = 0x84f9, GL_UNSIGNED_INT_24_8 = 0x84fa, GL_MAX_TEXTURE_LOD_BIAS = 0x84fd,
     GL_TEXTURE_MAX_ANISOTROPY = 0x84fe, GL_MAX_TEXTURE_MAX_ANISOTROPY, GL_TEXTURE_LOD_BIAS = 0x8501,
@@ -99,7 +99,8 @@ enum {
     GL_FRAGMENT_SHADER = 0x8b30, GL_VERTEX_SHADER, GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8b4d, GL_SHADER_TYPE = 0x8b4f, GL_DELETE_STATUS = 0x8b80, GL_COMPILE_STATUS,
     GL_LINK_STATUS, GL_VALIDATE_STATUS, GL_INFO_LOG_LENGTH, GL_ATTACHED_SHADERS, GL_ACTIVE_UNIFORMS, GL_ACTIVE_UNIFORM_MAX_LENGTH, GL_SHADER_SOURCE_LENGTH,
     GL_ACTIVE_ATTRIBUTES, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, GL_SHADING_LANGUAGE_VERSION = 0x8b8c, GL_CURRENT_PROGRAM,
-    GL_R11F_G11F_B10F = 0x8c3a, GL_SRGB8_ALPHA8 = 0x8c43, GL_COMPRESSED_SRGB_S3TC_DXT1 = 0x8c4c, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3,
+    GL_R11F_G11F_B10F = 0x8c3a, GL_UNSIGNED_INT_10F_11F_11F_REV = 0x8c3b, GL_SRGB8_ALPHA8 = 0x8c43,
+    GL_COMPRESSED_SRGB_S3TC_DXT1 = 0x8c4c, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3,
     GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5, GL_DEPTH_COMPONENT32F = 0x8cac, GL_DEPTH32F_STENCIL8,
     GL_FRAMEBUFFER_BINDING = 0x8ca6, GL_RENDERBUFFER_BINDING, GL_COLOR_ATTACHMENT0 = 0x8ce0, GL_DEPTH_ATTACHMENT = 0x8d00, GL_STENCIL_ATTACHMENT = 0x8d20,
     GL_FRAMEBUFFER = 0x8d40, GL_RENDERBUFFER, GL_STENCIL_INDEX8 = 0x8d48, GL_RGB565 = 0x8d62, GL_MAX_SAMPLES = 0x8d57,
@@ -465,9 +466,9 @@ static void win_make(uint32_t w, uint32_t h) {
 
 // ---------- Formats ----------
 // fmt: index into g_fmt. A swizzle only where Metal's default differs from GL's: Metal reads a channel a format lacks as 0 (alpha 1), as GL does, so only the luminance /
-// alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
+// alpha formats and DXT1 without alpha have one (Metal refuses a swizzle on a render target, and GL cannot render into those). Conversions on upload: CV_COPY (the bytes as given), CV_RGB8 (RGB → RGBA), CV_EXPAND_RG (RED/RG → RGBA), CV_565 / CV_4444 / CV_5551 (16-bit packed → RGBA8), CV_INDEX (8-bit colour
 // indices through the glColorTable palette). bw / bh: block size of a compressed format, bytes: per texel or per block
-enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE };
+enum { CV_COPY, CV_RGB8, CV_565, CV_4444, CV_5551, CV_INDEX, CV_NONE, CV_EXPAND_RG };
 enum { K_COL, K_DEPTH, K_DS, K_BLOCK };
 typedef struct { MTLPixelFormat pf; uint8_t bytes, bw, bh, kind; MTLTextureSwizzleChannels swz; const char *name; } fmt_t;
 #define SWZ(r, g, b, a) {MTLTextureSwizzle##r, MTLTextureSwizzle##g, MTLTextureSwizzle##b, MTLTextureSwizzle##a}
@@ -507,16 +508,19 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
     if (type == GL_UNSIGNED_SHORT_4_4_4_4) { *cv = CV_4444; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_5_5_5_1) { *cv = CV_5551; return F_RGBA8; }
     int half = type == GL_HALF_FLOAT, fl = type == GL_FLOAT;
+    int rg = format == GL_RED || format == GL_RG;
     switch (ifmt) {
         case GL_RGBA: case GL_RGBA8: case 4:
+            if (rg && ifmt == GL_RGBA8) return F_RGBA8;
             if (fl) return F_RGBA32F;
             if (half) return F_RGBA16F;
             if (format == GL_BGRA) return F_BGRA8;
             if (format == GL_RGB) { *cv = CV_RGB8; return F_RGBA8; }
             return F_RGBA8;
         case GL_RGB: case GL_RGB8: case 3:
-            if (fl || half) { *cv = CV_NONE; return F_RGBA16F; }
-            if (format == GL_RGBA) return F_RGBA8;
+            if (rg && ifmt == GL_RGB8) return F_RGBA8;
+            if (fl || half) { if (!rg) *cv = CV_NONE; return F_RGBA16F; }
+            if (format == GL_RGBA || rg) return F_RGBA8;
             *cv = CV_RGB8; return F_RGBA8;
         case GL_BGRA: return F_BGRA8;
         case GL_RGBA4: case GL_RGB5_A1: case GL_RGB565: return F_RGBA8;   // glTexStorage2D's sized formats (no data: the uploads are converted by their type)
@@ -526,13 +530,13 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
         case GL_LUMINANCE: case 1: return F_L8;
         case GL_ALPHA: return F_A8;
         case GL_LUMINANCE_ALPHA: case 2: return F_LA8;
-        case GL_RGBA16F: if (fl) { *cv = CV_NONE; } return F_RGBA16F;
+        case GL_RGBA16F: if (fl && !rg) { *cv = CV_NONE; } return F_RGBA16F;
         case GL_RGBA32F: return F_RGBA32F;
         case GL_R16F: return F_R16F;
         case GL_RG16F: return F_RG16F;
         case GL_R32F: return F_R32F;
         case GL_RG32F: return F_RG32F;
-        case GL_R11F_G11F_B10F: if (type != 0x8c3b) *cv = CV_NONE; return F_RG11B10F;
+        case GL_R11F_G11F_B10F: if (type != GL_UNSIGNED_INT_10F_11F_11F_REV) *cv = CV_NONE; return F_RG11B10F;
         case GL_RGB10_A2: return F_RGB10A2;
         case GL_RGBA16: return F_RGBA16;
         case GL_DEPTH_COMPONENT16: return F_D16;
@@ -562,6 +566,8 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
 static size_t fmt_pitch(int f, uint32_t w) { const fmt_t *m = &g_fmt[f]; return (size_t)((w + m->bw - 1) / m->bw) * m->bytes; }
 static size_t fmt_rows(int f, uint32_t h) { const fmt_t *m = &g_fmt[f]; return (h + m->bh - 1) / m->bh; }
 
+static GLenum convert_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t *out);
+
 // The given pixels (GL unpack rules: rows of unpack_row or w pixels, each row aligned to unpack_align) → the Metal texture's bytes, rows packed. NULL data → zeros
 static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum format, GLenum type, int f, int cv, size_t *pitch_out) {
     size_t dp = fmt_pitch(f, w), rows = fmt_rows(f, h);
@@ -574,21 +580,39 @@ static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum form
                 format >= GL_RED && format <= GL_LUMINANCE_ALPHA ? comps_of[format - GL_RED] : 4;
     int tbytes = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 4 : type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 2 : 1;
     if (cv == CV_565 || cv == CV_4444 || cv == CV_5551) { comps = 1; tbytes = 2; }
+    else if (type == GL_UNSIGNED_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_10F_11F_11F_REV) { comps = 1; tbytes = 4; }
+    if (cv == CV_COPY && (format == GL_RED || format == GL_RG) &&
+        ((type >= GL_BYTE && type <= GL_FLOAT) || type == GL_HALF_FLOAT) &&
+        (f == F_RGBA8 || f == F_SRGBA8 || f == F_RGBA16 || f == F_RGBA16F || f == F_RGBA32F))
+        cv = CV_EXPAND_RG;
     size_t sp = (size_t)(S.unpack_row ? S.unpack_row : w) * comps * tbytes; sp = (sp + S.unpack_align - 1) / S.unpack_align * S.unpack_align;
-    const uint8_t *s = src;
+    const uint8_t *source = src;
     // GL_UNPACK_SWAP_BYTES: each 2- or 4-byte element of the source in the other byte order (DOOM 3's light images are RGB565 stored big-endian), swapped into a copy
     // of the rows as given, each row without its alignment padding
     uint8_t *swapped = NULL;
     if (S.unpack_swap && tbytes > 1 && h) {
         size_t row = (size_t)w * comps * tbytes; swapped = malloc(sp * (h - 1) + row);
-        for (uint32_t y = 0; y < h; y++) for (size_t i = 0; i < row; i += tbytes) for (int b = 0; b < tbytes; b++) swapped[y * sp + i + b] = s[y * sp + i + tbytes - 1 - b];
-        s = swapped;
+        for (uint32_t y = 0; y < h; y++) for (size_t i = 0; i < row; i += tbytes) for (int b = 0; b < tbytes; b++) swapped[y * sp + i + b] = source[y * sp + i + tbytes - 1 - b];
+        source = swapped;
     }
-    for (uint32_t y = 0; y < h; y++, s += sp) {
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *s = source + y * sp;
         uint8_t *d = dst + y * dp;
         switch (cv) {
             case CV_COPY: memcpy(d, s, umin((uint32_t)dp, (uint32_t)((size_t)w * comps * tbytes))); break;
             case CV_RGB8: for (uint32_t x = 0; x < w; x++) { d[4 * x] = s[3 * x]; d[4 * x + 1] = s[3 * x + 1]; d[4 * x + 2] = s[3 * x + 2]; d[4 * x + 3] = 255; } break;
+            case CV_EXPAND_RG:
+                if (type == GL_UNSIGNED_BYTE && (f == F_RGBA8 || f == F_SRGBA8)) {
+                    for (uint32_t x = 0; x < w; x++) {
+                        d[4 * x] = s[comps * x];
+                        if (comps == 2) d[4 * x + 1] = s[comps * x + 1];
+                        d[4 * x + 3] = 255;
+                    }
+                } else {
+                    for (uint32_t x = 0; x < w; x++)
+                        convert_pixel(f, format, type, s + (size_t)x * comps * tbytes, d + (size_t)x * g_fmt[f].bytes);
+                }
+                break;
             case CV_565: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 5 & 63) * 255 / 63; d[4 * x + 2] = (v & 31) * 255 / 31; d[4 * x + 3] = 255; } break;
             case CV_4444: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 12) * 17; d[4 * x + 1] = (v >> 8 & 15) * 17; d[4 * x + 2] = (v >> 4 & 15) * 17; d[4 * x + 3] = (v & 15) * 17; } break;
             case CV_5551: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 6 & 31) * 255 / 31; d[4 * x + 2] = (v >> 1 & 31) * 255 / 31; d[4 * x + 3] = v & 1 ? 255 : 0; } break;
@@ -1789,8 +1813,8 @@ static uint32_t pixel_ufloat(double v, int bits) {
     if (m == 2u << bits) { m >>= 1; exp++; }
     return exp >= 31 ? 31u << bits : ((uint32_t)exp << bits) | (m - (1u << bits));
 }
-// Convert one clear value into the actual texture format. Unlike an upload, this consumes no unpack state and never treats differently typed data as storage bytes.
-static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t out[16]) {
+// Convert one pixel into the actual texture format. The caller handles any unpack state and provides room for a destination texel.
+static GLenum convert_pixel(int f, GLenum format, GLenum type, const void *data, uint8_t *out) {
     int n;
     switch (format) {
         case GL_RED: case GL_GREEN: case GL_BLUE: case GL_ALPHA: case GL_DEPTH_COMPONENT: case GL_STENCIL_INDEX: n = 1; break;
@@ -1807,7 +1831,7 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
         {GL_UNSIGNED_SHORT_4_4_4_4, 4, 2, {4, 4, 4, 4}, 0}, {0x8365, 4, 2, {4, 4, 4, 4}, 1},
         {GL_UNSIGNED_SHORT_5_5_5_1, 4, 2, {5, 5, 5, 1}, 0}, {0x8366, 4, 2, {5, 5, 5, 1}, 1},
         {0x8035, 4, 4, {8, 8, 8, 8}, 0}, {0x8367, 4, 4, {8, 8, 8, 8}, 1},
-        {0x8036, 4, 4, {10, 10, 10, 2}, 0}, {0x8368, 4, 4, {10, 10, 10, 2}, 1},
+        {0x8036, 4, 4, {10, 10, 10, 2}, 0}, {GL_UNSIGNED_INT_2_10_10_10_REV, 4, 4, {10, 10, 10, 2}, 1},
     };
     int pk = -1, bytes = 0;
     for (unsigned i = 0; i < sizeof packed / sizeof *packed; i++) if (packed[i].type == type) pk = (int)i;
@@ -1818,12 +1842,12 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
             case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: bytes = 2; break;
             case GL_INT: case GL_UNSIGNED_INT: case GL_FLOAT: bytes = 4; break;
             case GL_UNSIGNED_INT_24_8: case 0x8dad /* FLOAT_32_UNSIGNED_INT_24_8_REV */: if (format != GL_DEPTH_STENCIL) return GL_INVALID_OPERATION; break;
-            case 0x8c3b /* UNSIGNED_INT_10F_11F_11F_REV */: case 0x8c3e /* UNSIGNED_INT_5_9_9_9_REV */: if (n != 3) return GL_INVALID_OPERATION; break;
+            case GL_UNSIGNED_INT_10F_11F_11F_REV: case 0x8c3e /* UNSIGNED_INT_5_9_9_9_REV */: if (n != 3) return GL_INVALID_OPERATION; break;
             default: return GL_INVALID_ENUM;
         }
     }
     if (format == GL_DEPTH_STENCIL && type != GL_UNSIGNED_INT_24_8 && type != 0x8dad) return GL_INVALID_OPERATION;
-    memset(out, 0, 16); if (!data) return GL_NO_ERROR;
+    memset(out, 0, g_fmt[f].bytes); if (!data) return GL_NO_ERROR;
     double c[4] = {0, 0, 0, 1}; uint32_t stencil = 0;
     if (format == GL_DEPTH_STENCIL) {
         uint32_t v; memcpy(&v, data, 4);
@@ -1832,7 +1856,7 @@ static GLenum clear_pixel(int f, GLenum format, GLenum type, const void *data, u
     } else if (pk >= 0) {
         uint32_t v = 0; memcpy(&v, data, packed[pk].bytes); int off = packed[pk].rev ? 0 : packed[pk].bytes * 8;
         for (int i = 0; i < n; i++) { int b = packed[pk].bits[i]; if (!packed[pk].rev) off -= b; c[i] = (double)(v >> off & ((1u << b) - 1)) / ((1u << b) - 1); if (packed[pk].rev) off += b; }
-    } else if (type == 0x8c3b || type == 0x8c3e) {
+    } else if (type == GL_UNSIGNED_INT_10F_11F_11F_REV || type == 0x8c3e) {
         uint32_t v; memcpy(&v, data, 4);
         if (type == 0x8c3e) for (int i = 0; i < 3; i++) c[i] = ldexp(v >> (i * 9) & 511, (int)(v >> 27) - 24);
         else for (int i = 0; i < 3; i++) { int b = i == 2 ? 10 : 11; uint16_t h = (uint16_t)((v >> (i * 11) & ((1u << b) - 1)) << (15 - b)); _Float16 a; memcpy(&a, &h, 2); c[i] = (double)a; }
@@ -1866,7 +1890,7 @@ GLB(glClearTexImage, void, GLuint name, GLint level, GLenum format, GLenum type,
     tex_t *t = tex_of(name);
     if (!t || level < 0 || level >= MAXLV) { gl_error(GL_INVALID_OPERATION); return; }
     if (t->fmt < 0 || g_fmt[t->fmt].kind == K_BLOCK) { gl_error(GL_INVALID_OPERATION); return; }
-    uint8_t one[16]; GLenum error = clear_pixel(t->fmt, format, type, data, one);
+    uint8_t one[16]; GLenum error = convert_pixel(t->fmt, format, type, data, one);
     if (error) { gl_error(error); return; }
     @autoreleasepool {
         if (g_pend_clear.bits) clears_flush();
@@ -2366,7 +2390,15 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_ACTIVE_UNIFORMS: *v = x->nu; return;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
-        case GL_ACTIVE_ATTRIBUTES: *v = x->si[0] ? x->si[0]->na : 0; return;
+        case GL_ACTIVE_ATTRIBUTES:
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
+            const shinfo *vs = x->linked ? x->si[0] : NULL;
+            int n = vs ? vs->na : 0;
+            if (p == GL_ACTIVE_ATTRIBUTES) { *v = n; return; }
+            *v = 0;
+            for (int i = 0; i < n; i++) *v = (GLint)umax((uint32_t)*v, (uint32_t)strlen(vs->a[i].name) + 1);
+            return;
+        }
         case GL_DELETE_STATUS: *v = x->deleted; return;
     }
     RED1("glGetProgramiv(%#x) not implemented", p); *v = 0;
@@ -2391,6 +2423,19 @@ GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
     prog_t *p = prog_of(pr); if (!p->linked) return -1;
     for (int i = 0; i < p->si[0]->na; i++) if (!strcmp(p->si[0]->a[i].name, name)) return p->amap[p->si[0]->a[i].slot];
     return -1;
+}
+// The enumeration index is the attribute's row in the linked vertex table, independent of its bound location.
+GL(glGetActiveAttrib, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len, GLint *count, GLenum *type, GLchar *name) {
+    if (!SP_CHECK(pr, 1)) return;
+    prog_t *p = prog_of(pr);
+    const shinfo *vs = p->linked ? p->si[0] : NULL;
+    if (size < 0 || !vs || index >= (GLuint)vs->na) { gl_error(GL_INVALID_VALUE); return; }
+    const shattr *a = &vs->a[index];
+    size_t copied = 0;
+    if (name && size > 0) copied = umin((uint32_t)strlcpy(name, a->name, (size_t)size), (uint32_t)size - 1);
+    if (len) *len = (GLsizei)copied;
+    if (count) *count = 1;
+    if (type) *type = g_tenums[a->type];
 }
 GL(glGetProgramInfoLog, void, GLuint pr, GLsizei size, GLsizei *len, GLchar *log) {
     if (len) *len = 0;

@@ -36,7 +36,15 @@ GL_ENTRY = rb'\bvoid\s+main\s*\('  # a whole shader has its entry point (gl_shad
 def gl_sources(img):
     """the GLSL sources gl_shaders.py takes from a main: '#version' strings (GL_SRC) that define an entry point"""
     return sum(1 for m in re.finditer(GL_SRC, img) if re.search(GL_ENTRY, img[m.start() + 1:img.find(b'\0', m.start() + 1, m.start() + 0x10000)]))
-GL_FILES = ('.mvgl', '.vert', '.frag', '.glsl')   # the RomFS files gl_shaders.py reads GLSL from
+
+
+def gl_name_count(img, imports):
+    """An EGL renderer's GL names can be C strings or UTF-16LE managed literals."""
+    if 'eglCreateWindowSurface' not in imports: return 0
+    return img.count(b'glShaderSource') + img.count('glShaderSource'.encode('utf-16-le'))
+
+
+GL_FILES = ('.mvgl', '.vert', '.frag', '.glsl')   # formats detected from file names alone, including in the survey manifest
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
@@ -116,7 +124,7 @@ def facts_of(exefs, romfs):
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
         if p.name == 'main':
             F['unity'] = {v.decode() for v in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)}
-            F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), img.count(b'glShaderSource')
+            F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), gl_name_count(img, m['imports'])
             F['gl_src'] = gl_sources(img)
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
@@ -249,13 +257,13 @@ def modules_supplying(exefs, want, modules, hooks=None):   # the modules left ou
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
-def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0):
+def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0, oodle_ttdat=0):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
     GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
     alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
-    GLSL source where gl_shaders.py looks, gl_src strings in main and gl_files files in the RomFS: it puts its shaders together at run time, LÖVE from its Lua), glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (Unreal paks keep the shaders Oodle-compressed
-    in their shader code archives, which only the game's own Oodle decodes), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives, oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries, oodle_ue3 Unreal Engine 3 packages with Oodle chunks
-    or frostbite Frostbite superbundles, whose cas files are Oodle Leviathan:
+    GLSL source where gl_shaders.py looks, gl_src strings in main and gl_files files in the RomFS: it puts its shaders together at run time, LÖVE from its Lua), glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (prepare shared Unreal shader code
+    archives for the split), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives, oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries, oodle_ue3 Unreal Engine 3 packages with Oodle chunks
+    or frostbite Frostbite superbundles, whose cas files are Oodle Leviathan, or oodle_ttdat TT Games CC4 DAT archives:
     Oodle-compressed file by file, which the shader split decodes with the game's own decoder in the Mac host's tool mode), ue_legacy (Unreal paks whose shaders are inline in the cooked packages:
     legacy paks, version 4, which the shader split reads through the game's own decoder the same way, and version 11 paks without shader code archives, Zlib, read by uepak.py itself).
     unreal_paks counts the paks with shader code archives, legacy_paks those with inline shaders (uepak.inline_shaders). Checked against every profile: Hades and Super Mario Galaxy Vulkan, Galaxy alone with no SPIR-V file, Three Houses alone compiling
@@ -283,11 +291,12 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                               f'the NROs the game loads call glslcCompile in {", ".join(glslc_mods)}: shaders compiled at run time (Portal), captured by booting it on the Mac' if nro_glslc and not ((glsl_src or romfs_glsl) and 'glslcCompile' in imports) else
                               f'the RomFS holds {romfs_glsl} GLSL source files and main calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Turrican Anthology Vol. I), captured by booting it on the Mac' if romfs_glsl and not glsl_src else
                               f'main holds {glsl_src} GLSL sources and calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Fire Emblem: Three Houses), captured by booting it on the Mac'),
-            'ue_decode': (not vulkan and not gl and bool(unreal_paks), f'{unreal_paks} Unreal pak(s): the shaders are Oodle-compressed in their shader code archives (Octopath Traveler 0), decoded by booting the game on the Mac'),
-            'oodle_packs': (not vulkan and not gl and bool(trinity_packs or oodle_pkz or oodle_gfpak or oodle_ue3 or frostbite), (f'{trinity_packs} Trinity pack file(s) (ONEPACK, arc/data.trpfs: Pokémon Legends: Z-A)' if trinity_packs else
+            'ue_decode': (not vulkan and not gl and bool(unreal_paks), f'{unreal_paks} Unreal pak(s) selected for shared shader archive preparation'),
+            'oodle_packs': (not vulkan and not gl and bool(trinity_packs or oodle_pkz or oodle_gfpak or oodle_ue3 or frostbite or oodle_ttdat), (f'{trinity_packs} Trinity pack file(s) (ONEPACK, arc/data.trpfs: Pokémon Legends: Z-A)' if trinity_packs else
                             'Frostbite superbundles (Data/layout.toc, cas files: EA SPORTS FC 27), the shaders in their CompiledBytecode resources' if frostbite else
                             f'{oodle_pkz} PlatinumGames PKZ archive(s) with Oodle Kraken entries (Bayonetta 3)' if oodle_pkz else
                             f'{oodle_gfpak} Game Freak GFPAK archive(s) with Oodle Kraken entries (Pokémon Legends: Arceus)' if oodle_gfpak else
+                            f'{oodle_ttdat} TT Games CC4 DAT archive(s) with .nnx_shaders members (Skywalker Saga)' if oodle_ttdat else
                             f'{oodle_ue3} Unreal Engine 3 package(s) with Oodle-compressed chunks (Batman: Arkham Knight, its combined shader cache among them)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
             'ue_legacy': (not vulkan and not gl and bool(legacy_paks), f'{legacy_paks} Unreal pak(s) with the shaders inline in the cooked packages (legacy, version 4, UE 4.18: DRAGON QUEST XI S, LZ5, decoded by the game\'s own decoder in the Mac host, dm/host/hle_oodle.c DM_OODLE_SERVE; '
                           'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib, or with the cooked packages in an IoStore container beside it: Mario & Luigi: Brothership, Oodle): the shader split reads them file by file')}
@@ -319,7 +328,7 @@ def romfs_glsl_files(romfs):
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
-    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = gl_sources(main)
+    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = gl_name_count(main, imports); gl_src = gl_sources(main)
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
@@ -336,7 +345,11 @@ def build_sources(exefs, romfs, modules):
         for n in names:
             if n.endswith('.trpfs'):
                 with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
-    gl_files = sum(1 for _, _, names in os.walk(romfs) for n in names if n.lower().endswith(GL_FILES)) if 'eglCreateWindowSurface' in imports else 0
+    gl_files = 0
+    if gl_names:
+        from gl_shaders import paired_sources
+        for d, _, names in os.walk(romfs):
+            gl_files += sum(n.lower().endswith(GL_FILES) for n in names) + len(paired_sources(d, names))
     oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
     for d, _, names in os.walk(romfs):
         for n in names:
@@ -363,9 +376,11 @@ def build_sources(exefs, romfs, modules):
             if 0 < i and i + 16 <= len(h):
                 nb = (struct.unpack_from('<I', h, i + 12)[0] + max(struct.unpack_from('<I', h, i + 4)[0], 1) - 1) // max(struct.unpack_from('<I', h, i + 4)[0], 1)
                 oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
+    import ttdat
+    oodle_ttdat = sum(ttdat.needs_oodle(os.path.join(d, n)) for d, _, names in os.walk(romfs) for n in names if n.lower().endswith('.dat'))
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
     return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl)
+                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)
@@ -497,12 +512,20 @@ def heap_signals(log, g):
             out['mem_reserve'] = (f'{0x10000000 + keep + stack + heap:#x}', f'the game asked for a {max(req) / 2**30:.2f} GB heap')
     top = [float(x) for x in re.findall(r'\[mem\] alias region mapped up to \+([0-9.]+) GB', log)]
     alias = int(g.get('mem_alias'), 0) / 2**30
-    if not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25 and int(g.get('app_pool'), 0) > 0x40000000:
+    if (not req and '[mem] heap ' not in log and int(g.get('sys_resource', '0'), 0) and top and max(top) > alias - 0.25
+            and int(g.get('app_pool'), 0) > HEAP_CHECK_STDALLOC and not int(g.get('stdalloc_cap', '0'), 0)):
         # no heap, and the alias region nearly full within seconds: nninitStartup handed pool − used to StandardAllocator as one address region and the game reserves regions of its own
         # beside it (Unity 2020 / 2022: Ace Attorney Investigations Collection, Brain Memory Training Academy, Patrick's Parabox, Monster Train 2, AI: THE SOMNIUM FILES - nirvanA Initiative,
-        # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool)
-        out['app_pool'] = ('0x40000000', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: a 1 GB pool, so StandardAllocator\'s region leaves the game room for its own')
+        # whose heap check reached +4.26 GB of 4.38 in 5 s with the 3.2 GB pool); Unity 2018.3 maps only in StandardAllocator's region (Raging Loop keeps the hardware pool).
+        # What has to shrink is that region, not the pool: the game also reads the pool as the machine's memory (Unity's SystemInfo.systemMemorySize; Pokémon Friends saves its Low
+        # graphics at 2048 MB or less and then renders its 3D at 672x378, issue #2830). The host's allocator gate gives the region stdalloc_cap (hle_svc.c "StandardAllocator's address
+        # space"), so the pool stays the hardware's and the region about what a 1 GB pool gave it (pool − used), as Sonic Superstars' hand-set 1.5 GB does
+        out['stdalloc_cap'] = (f'{HEAP_CHECK_STDALLOC:#x}', f'no heap set and the alias region used up to +{max(top):.2f} GB of {alias:.2f} GB in the heap check: 1 GB of address space for StandardAllocator, '
+                               'so its region leaves the game room for its own, while the pool the game reads as its memory stays the hardware\'s')
     return out
+
+
+HEAP_CHECK_STDALLOC = 0x40000000   # a starting point, not a measured minimum: Advance Wars 1+2: Re-Boot Camp needed a 2 GB pool
 
 
 # ---- Checking the rules against the hand-made profiles ----

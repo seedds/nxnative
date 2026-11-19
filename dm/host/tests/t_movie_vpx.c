@@ -201,6 +201,7 @@ static void *buffer_data(const void *buf) { return (void *)((const test_buffer *
 static size_t buffer_size(const void *buf) { return ((const test_buffer *)buf)->used; }
 static size_t buffer_capacity(const void *buf) { return sizeof ((const test_buffer *)buf)->bytes; }
 static void unused_export(void) { abort(); }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 static int exports_const, exports_mutable, mutable_lookups;
 void *guest_sym(const char *name) {
     static const struct { const char *modern, *early; void *fn; } getters[] = {

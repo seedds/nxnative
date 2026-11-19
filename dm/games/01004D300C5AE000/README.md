@@ -62,6 +62,7 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 ## Found on this game
 
+- [iOS drops a lone Joy-Con without an extended gamepad profile](../../../docs/reference/services.md#ios-drops-a-lone-joy-con-without-an-extended-gamepad-profile).
 - [HAL's `.cmp` containers: a size-prefixed frame](../../../docs/reference/shaders.md#hals-cmp-containers-a-size-prefixed-frame).
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff).
 - [Typed outputs for every pixel shader](../../../docs/reference/shaders.md#typed-outputs-for-every-pixel-shader): its 76 shaders writing an R8Uint colour 5 in Waddle Dee Town ([#2760](https://github.com/seedds/nxnative/issues/2760)).

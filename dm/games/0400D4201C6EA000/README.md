@@ -24,6 +24,8 @@ The NRO and the archive need no key: the NSP script captures one and `shader_spl
 
 ## Shaders
 
+- **Resolved: duplicate representative labels (2026-11-18, [issue #2924](https://github.com/seedds/nxnative/issues/2924#issuecomment-6950980547)).** A fresh macOS split of the registered v327680 dump and its captured `nro0.nro` changes 36 map rows from BNSH blocks at `0x176e000` and `0x1793000` (22 source labels, plus 14 rows with only a package index change). All 96 embedded occurrences reduce to 40 keys with byte-identical complete controls and code within each key. All 35,045 package records match the prior split byte for byte by key. Shader facts and both pair tables match the profile. A full Mac shader build and host rebuild on macOS 27.2.1 with Xcode 27.2 pass on chain `cf3be507e0eb`. The library stamp matches the refreshed profile. Gameplay and iPhone verification remain open for this refresh.
+
 35,045 in [`shader_map.tsv`](shader_map.tsv): 26,096 from models (one FSHA each), 5,331 from `ssg_system`, 3,316 from effects, 138 from `shader/`, 124 from layouts, 40 in the NRO's data. All translate. A full build takes about an hour on an M4 Pro with another job running (not timed from an empty cache in one go). [`pso_manifest.tsv`](pso_manifest.tsv) (1,351 lines) is one Mac session: boot, the movie, the menus, a match.
 
 One does not load (current): `3032440e5027bbe5`, `shader/audience/audience_compute`, reads `array<texture2d<float>, 32> cp_t2d_cb0_0`, the compute texture handles of NVN2's per-shader `c[0]` indexed by its workgroup ID. `dmsh_reflect.py` `c2_array` only knows c2; fixing it is a chain change. The dispatch is skipped, a red line says so, and the crowd still draws; what the shader adds has not been seen.
@@ -50,6 +52,7 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - [A game that decodes its code at run time](../../../docs/reference/services.md#a-game-that-decodes-its-code-at-run-time) and [NRR version 1](../../../docs/reference/services.md#nrr-version-1).
 - [One scrambled archive indexed by the NRO](../../../docs/reference/shaders.md#one-scrambled-archive-indexed-by-the-nro).
 - [Shared font stand-ins sized for the game's font engines](../../../docs/reference/services.md#shared-font-stand-ins-sized-for-the-games-font-engines): a null pointer in `nn::font` at boot (resolved: the host's fonts load in the game's own 50 KB engine).

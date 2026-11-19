@@ -10,6 +10,7 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "hle_movie_vt.h"
 #include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
@@ -86,6 +87,7 @@ typedef struct {
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
+    movie_vt_control vt;
     int avc_due;                                 // H.264: a picture that is next in presentation order waits for a free slot (md_pump); a released slot pumps again
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     int vpx_cs, vpx_full;   // the colour matrix (vpx_color_space_t) and range of the last VP8 / VP9 picture, for md_format
@@ -128,6 +130,31 @@ static struct {
 typedef struct { const void *dec; const char *lib; uint64_t ns, base_ns; int64_t ts, base_ts, win[MD_RATE_PICS]; int hz, unknown_hz, logged_hz, nwin; uint32_t n, pace_n; } md_slot;
 static md_slot g_md_slots[MD_SLOTS];
 static pthread_mutex_t g_md_slots_mu = PTHREAD_MUTEX_INITIALIZER;
+// iOS can refuse hardware decoders while inactive. Keep the current packet on
+// its worker until activation; never consume the stream waiting for hardware.
+static pthread_mutex_t g_vt_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_vt_cv = PTHREAD_COND_INITIALIZER;
+static int g_vt_active = 1;
+void dm_movie_active(int active) {
+    pthread_mutex_lock(&g_vt_mu); g_vt_active = active; pthread_cond_broadcast(&g_vt_cv); pthread_mutex_unlock(&g_vt_mu);
+}
+void movie_vt_cancel(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu); control->cancelled = 1; pthread_cond_broadcast(&g_vt_cv); pthread_mutex_unlock(&g_vt_mu);
+}
+void movie_vt_continue(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu); control->cancelled = 0; pthread_mutex_unlock(&g_vt_mu);
+}
+int movie_vt_wait(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu);
+    while (!g_vt_active && !(control && control->cancelled)) pthread_cond_wait(&g_vt_cv, &g_vt_mu);
+    int ready = !(control && control->cancelled); pthread_mutex_unlock(&g_vt_mu); return ready;
+}
+int movie_vt_wait_unavailable(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu);
+    int waited = !g_vt_active;
+    while (!g_vt_active && !(control && control->cancelled)) pthread_cond_wait(&g_vt_cv, &g_vt_mu);
+    int result = control && control->cancelled ? -1 : waited; pthread_mutex_unlock(&g_vt_mu); return result;
+}
 static int md_slot_hz(const md_slot *s, uint64_t now) { return !s->dec || now - s->ns >= MD_PLAYING_NS ? 0 : s->hz ? s->hz : s->n >= MD_RATE_AFTER ? s->unknown_hz : 0; }
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz) {
     uint64_t now = now_ns();
@@ -473,7 +500,7 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
 }
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
 // Absolum's movies bring csd-0 / csd-1 to Configure, and a decoder made there used to stay NV12: the frames' bytes went into the RGBA texture as they were
-static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
+static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(&d->vt); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
 // H.264: decode the packet (if any) and hand out the next picture in presentation order (with jflush every queued one in turn); 1 = a picture is in the slot, its time in jpts_out
 static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     md_avc_open(d);
@@ -665,6 +692,7 @@ HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
           void **self, int type, int fmt) { h_movie_Decoder3(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
+    movie_vt_cancel(&d->vt);
     // The pump thread first, before its pending signals are dropped, the decoder thread is told to quit and any buffer is freed: a pump still running queues signals for
     // this decoder (md_defer_at), and one queued after the drop would reach the deferred thread after free(d)
     if (d->pk_on) { pthread_mutex_lock(&d->pkm); d->pk_quit = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm); pthread_join(d->pk, NULL); }
@@ -730,6 +758,7 @@ HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, n
 }
 // clear the queues and slots; with close, the libvpx decoder is closed too (rebuilt at the next packet)
 static void md_reset(mdec_t *d, int close) {
+    movie_vt_cancel(&d->vt);
     dm_host_lock(&d->dmu);   // wait for the packet being decoded
     if (close) md_job(d, MDJ_CLOSE);
     else {
@@ -757,6 +786,7 @@ static void md_reset(mdec_t *d, int close) {
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
+    movie_vt_continue(&d->vt);
     pthread_mutex_unlock(&d->dmu);
 }
 HLE_FORCE("_ZN5movie7Decoder4StopEv", "movie decoder stop", int, h_movie_Stop, void **self) {

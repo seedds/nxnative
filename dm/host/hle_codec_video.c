@@ -26,6 +26,7 @@
 #include "hle_movie_yuv.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
 #include "hle_movie_av1.h"   // AV1 on VideoToolbox
+#include "hle_movie_vt.h"
 
 #define CV_MAGIC 0x56436d44u        // 'DmCV'
 #define CV_SYNC 0x53436d44u         // 'DmCS': a sync handle the host made (dec id, index, generation)
@@ -49,6 +50,7 @@ typedef struct {
     uint32_t magic, id; pthread_mutex_t mu; vpx_codec_ctx_t vpx; int vpx_ok; void *event; uint64_t submits, pictures;
     int codec; uint16_t w, h; mavc *avc; uint8_t *csd; size_t csd_n;   // H.264: VideoToolbox and the parameter sets Initialize gave
     mav1 *av1;   // AV1: VideoToolbox, or dav1d where the chip has no AV1 decoder (hle_movie_av1.c)
+    movie_vt_control vt;
     struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
@@ -278,11 +280,11 @@ HLE_FORCE("_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoo
 // VP8 and VP9 through libvpx, H.264 through VideoToolbox and AV1 through VideoToolbox or dav1d (hle_movie_avc.c, hle_movie_av1.c, whose NV12 pictures are copied into the pool as I420)
 static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream starts at the next key frame
     if (d->codec == CV_AV1) {
-        if (!d->av1) d->av1 = mav1_new(); else mav1_reset(d->av1);
+        if (!d->av1) d->av1 = mav1_new(&d->vt); else mav1_reset(d->av1);
         d->vpx_ok = 1;
         return;
     }
-    if (d->codec == CV_H264) { if (!d->avc) d->avc = mavc_new(); else mavc_drop(d->avc); if (d->csd_n) mavc_param_sets(d->avc, d->csd, d->csd_n); d->vpx_ok = 1; return; }
+    if (d->codec == CV_H264) { if (!d->avc) d->avc = mavc_new(&d->vt); else mavc_drop(d->avc); if (d->csd_n) mavc_param_sets(d->avc, d->csd, d->csd_n); d->vpx_ok = 1; return; }
     if (d->vpx_ok) vpx_codec_destroy(&d->vpx);
     // Made as hle_movie.c makes its own (md_vpx_open). With 2 threads and no row threading, Mario Tennis Fever's 2560x1440 60 fps opening decoded too slowly for its player,
     // which stopped the sound for 60-80 ms at a time whenever the picture fell behind
@@ -311,6 +313,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
 static Result cv_dec_fin(void *t) {
     cv_dec *d = cv_of(t); if (!d) return 0;
     dm_host_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; dm_host_mutex_lock(&d->mu); d->quit = 1; pthread_cond_signal(&d->work); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
+    movie_vt_cancel(&d->vt);
     dm_host_thread_join(d->th, NULL);   // a packet it decodes ends first (a codec cannot be stopped inside one); its pictures are dropped
     dm_movie_stopped(d);
     cv_stat_sum(d);
@@ -361,6 +364,7 @@ static Result cv_dec_reset(void *t, int stop) {
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
     d->nheld = 0; d->eos_pending = 0;
     d->epoch++; d->reopen = 1;
+    movie_vt_cancel(&d->vt);
     cv_stat_sum(d);
     pthread_cond_signal(&d->work);   // it may have waited for room
     if (d->event) hle_signal_system_event(d->event);
@@ -462,6 +466,7 @@ static void *cv_worker(void *arg) {
         typeof(d->q[0]) p = d->q[d->qhead]; d->qhead = (d->qhead + 1) % CV_HOLD; d->qcount--;
         cv_out o = {.d = d, .epoch = d->epoch};
         int reopen = d->reopen; d->reopen = 0; d->busy = 1;
+        if (reopen) movie_vt_continue(&d->vt);
         pthread_mutex_unlock(&d->mu);
         if (reopen) cv_open(d);
         uint64_t t0 = now_ns();

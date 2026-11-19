@@ -2,20 +2,18 @@
 // Tegra X1 block-linear layout (public descriptions: deko3d / Ryujinx BlockLinearLayout):
 //   GOB = 64 bytes × 8 rows = 512 bytes; offset of (x byte, y row) within a GOB =
 //     (x%64/32)·256 + (y%8/2)·64 + (x%32/16)·32 + (y%2)·16 + x%16
-//   The Switch 2 (NVN2) orders a GOB's 16-byte pieces otherwise: (x%64/32)·256 + (y%8/4)·128 + (x%32/16)·64 + (y%4/2)·32 + (y%2)·16 + x%16 (nvn_gob_switch2)
+//   The Switch 2 (NVN2) orders a GOB's 16-byte pieces otherwise: (x%64/32)·256 + (y%8/4)·128 + (x%32/16)·64 + (y%4/2)·32 + (y%2)·16 + x%16 (nvn_gob_order)
 //   block = 1 GOB wide × 2^tileH GOBs high × 2^tileD GOBs deep, ordered y first then z within a block; blocks fill the level in x → y → z row-major order.
 // Level / layer start offsets and the actual block height and block depth of this level come from nvn_tex.c; here we only do intra-level addressing and copying.
 #include "nvn_deswizzle.h"
 #include <string.h>
 
-int nvn_gob_switch2;   // see nvn_deswizzle.h
-
-static uint32_t gob_off(uint32_t x, uint32_t y) {
-    if (nvn_gob_switch2) return (x % 64 / 32) * 256 + (y % 8 / 4) * 128 + (x % 32 / 16) * 64 + (y % 4 / 2) * 32 + (y % 2) * 16 + x % 16;
+static uint32_t gob_off(uint32_t x, uint32_t y, int switch2) {
+    if (switch2) return (x % 64 / 32) * 256 + (y % 8 / 4) * 128 + (x % 32 / 16) * 64 + (y % 4 / 2) * 32 + (y % 2) * 16 + x % 16;
     return (x % 64 / 32) * 256 + (y % 8 / 2) * 64 + (x % 32 / 16) * 32 + (y % 2) * 16 + x % 16;
 }
 
-uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned th, unsigned td) {
+uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned th, unsigned td, int switch2) {
     uint32_t bh = 1u << th, bd = 1u << td;
     uint64_t gobs_x = (row_bytes + 63) / 64, blocks_y = (rows + 8 * bh - 1) / (8 * bh);
     uint64_t block = 512ull * bh * bd;                                  // bytes in one block
@@ -23,7 +21,7 @@ uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, u
          + (y / (8 * bh)) * gobs_x * block                             // which block row
          + (x / 64) * block                                            // which block column
          + ((z % bd) * bh + (y % (8 * bh)) / 8) * 512ull               // which GOB within the block
-         + gob_off(x, y);
+         + gob_off(x, y, switch2);
 }
 
 static uint32_t mip(uint32_t s, unsigned l) { s >>= l; return s ? s : 1; }
@@ -58,7 +56,7 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
     static const uint16_t koy1[8] = {0, 16, 64, 80, 128, 144, 192, 208};      // (y%8/2)*64 + (y%2)*16
     static const uint16_t kox2[4] = {0, 64, 256, 320};                        // the Switch 2's order (gob_off): x%32/16 at 64
     static const uint16_t koy2[8] = {0, 16, 32, 48, 128, 144, 160, 176};      // (y%8/4)*128 + (y%4/2)*32 + (y%2)*16
-    const uint16_t *kox = nvn_gob_switch2 ? kox2 : kox1, *koy = nvn_gob_switch2 ? koy2 : koy1;
+    const int s2 = nvn_gob_order(d); const uint16_t *kox = s2 ? kox2 : kox1, *koy = s2 ? koy2 : koy1;
     uint32_t bh = 1u << th, bd = 1u << td;
     uint64_t block = 512ull * bh * bd, gobs_x = (uint64_t)(lb + 63) >> 6, blocks_y = ((uint64_t)rows + 8 * bh - 1) >> (3 + th);
     for (uint32_t z = 0; z < slices; z++) {
@@ -99,7 +97,7 @@ int nvn_deswizzle_pick(const nvn_texdesc *d, unsigned level, unsigned layer, con
     const uint8_t *bl = (const uint8_t *)src + base; uint8_t *o = dst;
     for (uint32_t j = 0; j < ny; j++) {
         uint32_t y = j * step + step / 2; if (y >= rows) y = rows - 1;
-        for (uint32_t i = 0; i < nx; i++, o += bpb) { uint32_t x = i * step + step / 2; if (x >= bx) x = bx - 1; memcpy(o, bl + nvn_bl_offset(x * bpb, y, 0, lb, rows, th, td), bpb); }
+        for (uint32_t i = 0; i < nx; i++, o += bpb) { uint32_t x = i * step + step / 2; if (x >= bx) x = bx - 1; memcpy(o, bl + nvn_bl_offset(x * bpb, y, 0, lb, rows, th, td, nvn_gob_order(d)), bpb); }
     }
     return 0;
 }
@@ -117,7 +115,7 @@ int nvn_deswizzle_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32
     if (pitch < w) return -1;
     const uint8_t *s = tile; uint8_t *o = dst;
     for (uint32_t y = 0; y < h; y++)
-        for (uint32_t x = 0; x < w; x += 16) memcpy(o + (size_t)y * pitch + x, s + nvn_bl_offset(x, y, 0, trb, trows, th, 0), w - x < 16 ? w - x : 16);
+        for (uint32_t x = 0; x < w; x += 16) memcpy(o + (size_t)y * pitch + x, s + nvn_bl_offset(x, y, 0, trb, trows, th, 0, nvn_gob_order(d)), w - x < 16 ? w - x : 16);
     *wb = w; *nrows = h;
     return 0;
 }

@@ -403,6 +403,43 @@ static void t_vibration(void) {
     CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
 }
 
+static void t_joycon_vibration_lifetime(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1}, 2); dm_pad_players(1);
+    h_hid_SetStyles(STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
+    dm_joy_attach(0, 3); h_hid_JoyDual(&(uint32_t){0}); dm_haptics_route(0, 1);
+    uint32_t dual[2], left, right;
+    dm_vibration values[] = {{0.2f, 160, 0, 320}, {0.7f, 160, 0, 320}};
+    CHECK(h_hid_VibHandles(dual, 2, &(uint32_t){0}, STYLE_JOYDUAL) == 2, "rumbling pair: one handle per physical motor");
+    h_hid_SendVibs(dual, values, 2);
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_VibHandles(&left, 1, &(uint32_t){0}, STYLE_JOYLEFT) == 1 &&
+          h_hid_VibHandles(&right, 1, &(uint32_t){1}, STYLE_JOYRIGHT) == 1, "split while rumbling: a handle on each npad");
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0.2f && dm_haptics_actual(0, 1).amplitude_low == 0.7f,
+          "assignment changes keep the physical motors' persistent state");
+    h_hid_SendVib(&left, &(dm_vibration){0.4f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.4f && vibration[0].motor[1].amplitude_low == 0.7f,
+          "left npad updates motor 0 without changing the right npad's motor");
+    h_hid_SendVib(&right, &(dm_vibration){0.6f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.4f && vibration[0].motor[1].amplitude_low == 0.6f,
+          "right npad updates motor 1 on the same physical pair");
+    h_hid_JoyDual(&(uint32_t){0});
+    vibration_calls = 0;
+    h_hid_SendVib(&left, &values[0]); h_hid_SendVib(&right, &values[1]);
+    CHECK(!vibration_calls && !h_hid_VibMounted(&left) && !h_hid_VibMounted(&right), "rejoin invalidates both single-npad handles");
+    h_hid_SendVibs(dual, values, 2);
+    CHECK(vibration_calls == 1 && vibration[0].motor[0].amplitude_low == 0.2f && vibration[0].motor[1].amplitude_low == 0.7f,
+          "rejoined pair accepts its original dual handles, still one per motor");
+    h_hid_JoySingleT(&(uint32_t){0}, 1);   // the right half stays on No1 this time
+    CHECK(h_hid_VibHandles(&right, 1, &(uint32_t){0}, STYLE_JOYRIGHT) == 1 &&
+          h_hid_VibHandles(&left, 1, &(uint32_t){1}, STYLE_JOYLEFT) == 1, "split keeping the right half: the npads swap");
+    h_hid_SendVib(&left, &(dm_vibration){0.3f, 160, 0, 320});
+    h_hid_SendVib(&right, &(dm_vibration){0.8f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.3f && vibration[0].motor[1].amplitude_low == 0.8f,
+          "swapping logical npads does not swap the physical motors");
+    h_hid_JoyDual(&(uint32_t){0}); dm_joy_attach(0, 0); dm_haptics_route(0, 0);
+    h_hid_SetStyles(0xffffffffu);
+}
+
 static void *vibration_sender(void *arg) {
     (void)arg;
     const uint32_t handles[] = {3, 0};
@@ -1678,6 +1715,7 @@ int main(void) {
     t_vibration();
     t_opmode();
     t_joycons();
+    t_joycon_vibration_lifetime();
     t_unsupported_style();
     t_jcms();
     t_rumble_log();

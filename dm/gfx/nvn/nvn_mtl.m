@@ -1,4 +1,5 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
+#include <spawn.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
@@ -220,6 +221,8 @@ static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_done;                 // GPU complete and all CPU-visible effects through this fence published
 static _Atomic(uint32_t *) g_mesh_scr;         // the mesh scratch buffer's head words, once made (nvn_geometry.inc mesh_scratch): post_complete publishes g_done there
 static _Atomic uint64_t g_arena_made, g_arena_live, g_arena_live_bytes, g_arena_freed, g_arena_freed_bytes;
+// DM_NVN_MTLQ2 (E2 v2; the rest is with the post records, below): the second Metal queue, each queue's fence event, the switch, segments of the current submission committed
+static id<MTL4CommandQueue> g_q4b; static id<MTLSharedEvent> g_evq[2]; static int g_q2_mode, g_q2_up_q; static uint32_t g_sub_segs; static void q2_watch(void); int mtl_q2_strict(void);
 static uint64_t g_cm_mdraws;
 static uint64_t g_cm_enc, g_cm_enc0, g_cm_mdraws0, g_cm_hist[7], g_cm_big_enc, g_cm_big_draws, g_cm_big_z;   // per submission: encoders begun and Metal draws, by size, the largest (DM_NVN_ALLOCPROF=2)
 static int g_allocprof = -1; static uint64_t g_ap_bytes[64], g_ap_fn[8];
@@ -858,6 +861,21 @@ static void mtl_init_once(void) {
     // BC textures are created and uploaded as BC, with no decompression path (dm/gfx/tex/README.md); without BC the first one aborts in Metal's descriptor validation mid-game
     // (GitHub issue #704: an iPhone 15, A16). The iOS front end refuses such a device before the launcher (main.m); this stops every other route at the device, with the reason
     if (!g_dev.supportsBCTextureCompression) MDIE("the Metal device %s has no BC texture formats, which the games' textures use and the host does not decompress: an iPhone needs an A17 Pro or later, an iPad an M1 or later", g_dev.name.UTF8String);
+    g_q2_mode = sw_mode("DM_NVN_MTLQ2", 0);
+    if (g_q2_mode) { const char *why = rec_on() ? "DM_NVN_ENC_THREAD=0 (the encode thread commits to the one queue)" : NULL;   // frame generation (its own queue, FG.q), where a build has it, is allowed: it reads queue-0 render work (the scene, the canvas, the camera block) and orders itself after it by an event signalled on g_q4; second-queue work reaches those passes only through the cross-queue waits already encoded on g_q4 before them, and it uses no fence numbers
+        if (why) { MLOG("[RED] DM_NVN_MTLQ2 needs %s: off, one Metal queue", why); g_q2_mode = 0; } }
+    if (g_q2_mode) {
+        // A feedback queue of its own (two descriptors given one dispatch queue over-release it at their dealloc), targeting the first queue's, so both queues' handlers run one at a time
+        static dispatch_queue_t g_feedback_qb; g_feedback_qb = dispatch_queue_create_with_target("dm.nvn.mtl4-feedback-b", DISPATCH_QUEUE_SERIAL, g_feedback_q);
+        MTL4CommandQueueDescriptor *q4bd = [MTL4CommandQueueDescriptor new]; q4bd.feedbackQueue = g_feedback_qb; q4bd.label = @"nvn-mtl async compute";
+        g_q4b = [g_dev newMTL4CommandQueueWithDescriptor:q4bd error:&re];
+        if (!g_q4b) { MLOG("[RED] DM_NVN_MTLQ2: no second MTL4CommandQueue (%s): off", re ? re.localizedDescription.UTF8String : ""); g_q2_mode = 0; }
+        else { g_evq[0] = [g_dev newSharedEvent]; g_evq[1] = [g_dev newSharedEvent];   // no residency set attached: each command buffer names it (cb_end)
+               MLOG("DM_NVN_MTLQ2: an NVN queue whose pieces are all compute runs on a second Metal queue (%s; waits only at the game's hand-offs%s)", g_q2_mode == 1 ? "on" : "in the DM_AB phases", mtl_q2_strict() ? "; DM_NVN_MTLQ2_STRICT: and at every piece of an NVN queue" : "");
+               static dispatch_source_t q2t; q2t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+               dispatch_source_set_timer(q2t, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
+               dispatch_source_set_event_handler(q2t, ^{ q2_watch(); }); dispatch_resume(q2t); }
+    }
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
     for (int i = 0; i < 3; i++) {
@@ -1619,7 +1637,7 @@ static _Atomic uint64_t g_cur_frame;
 static uint64_t g_alloc_frame, g_alloc_shared, g_alloc_shares; static int g_alloc_used;   // the current allocator: the frame it was taken in, the submissions it has served since its reset; submissions that shared one so far
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
-static void up_flush(void);
+static void up_flush(void); static int g_up_gpu_read;
 static void up_idle_release(void);
 // The upload batch belongs only to the submit thread (the thread that called mtl_sub_begin): the batch's encoder cannot be used across threads. Every entry point asserts current thread == submit thread,
 // and on mismatch prints the stack and aborts on the spot - so that 'another thread touched the batch' is exposed deterministically on Mac too, not by timing (real iOS device stuck at the main menu: the present thread flushed the submit thread's batch via q_cb).
@@ -1660,8 +1678,12 @@ static void treg_sparse_notes(void);
 static void pass_split_try(void);
 static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
 static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
+static int g_last_end_relaxed, g_game_barrier, g_q2_rel0, g_q2_gb0;   // DM_NVN_MTLQ2: the draw-pass barrier state as this submission began (restored when it goes to the second queue: see mtl_sub_commit)
+static int g_rel_pre, g_rel_act;   // g_last_end_relaxed as it was before mtl_queue_activate cleared it, and whether it ran since the last submission began
+static uint64_t g_m0_serial, g_cur_serial;   // the NVN queue whose submission went last to the first Metal queue; the active one (mtl_queue_activate)
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
+    g_q2_rel0 = g_rel_act ? g_rel_pre : g_last_end_relaxed; g_q2_gb0 = g_game_barrier; g_rel_act = 0;
+    mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1; g_sub_segs = 0;   // until its first samples-passed reset or report (vis_need_scan)
     treg_sparse_notes();   // the mappings made before this submission
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
@@ -2671,6 +2693,161 @@ typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *op
 // comes after the one that last held it has completed and run its writes (post_complete runs every record up to a fence before it raises g_done). 128 records, sized for one
 // allocator per submission, wrapped once allocators were shared (PR #2090): Super Mario Party's 70-80 submissions a frame overran them two frames behind the feedback (PR #2469)
 enum { POST_RING = SUB_FLIGHT_MAX };
+// ---------- DM_NVN_MTLQ2 (0 / 1 / ab, off by default; E2 v2, notes/.specs/e2v2.md): an NVN queue whose work is all compute on a Metal queue of its own ----------
+// Ampere runs an async-compute NVN queue beside the 3D queue; on one Metal queue its pieces run between the other queue's render passes (Ocarina of Time's queue 5: all of the
+// frame's compute, 11 pieces and 139 dispatches, alternating with queue 1's passes). With the switch on, nvn_queue.inc asks for the second Metal queue (g_q4b) for a compute-only
+// piece of such a queue, and mtl_sub_commit gives it there unless the piece carries host transfers (reports, samples, readbacks: queue 0's order), committed a segment already, or an
+// upload batch on queue 0 has no queue-0 fence behind it yet. Both queues keep the one fence numbering: each signals its own shared event (g_evq) with its fences, a commit waits
+// on the other queue's event only for the fences nvn_queue.inc names (mtl_sub_route: the game's hand-offs, V1), and completion may come out of order: per-queue completion
+// (g_qdone) answers a wait for one command buffer (mtl_fence_done), g_done ("everything through here") stays for what recycles by a marker or a last use either queue may hold.
+// E2 as built (caraway/mtlq2b-c7) lost frame time to waits the game never asked for (every queue-1 commit waited on queue 0) and a residency set attached to both queues: v2 needs
+// the residency set named on each command buffer, attached to no queue (cb_end), and DM_NVN_ENC_THREAD=0 (the encode thread commits to the one queue)
+static int g_q2_want, g_q2_mq, g_q2_upl_dirty, g_q2_up1_now;   // the next commit's request; the last commit's queue; an upload batch on queue 0 with no queue-0 fence behind it yet; the queue up_flush commits to
+static uint64_t g_q2_need[2], g_q2_up_fence[2];   // fences on each queue the next commit waits for; per queue, the first fence after its last upload batch (queue 0) or the piece it went with (queue 1)
+static uint8_t g_fmq[POST_RING]; static uint64_t g_fdone[POST_RING];   // each in-flight fence's queue; fences done (the fence itself, so a stale slot never matches)
+static _Atomic uint64_t g_q2_stat[Q2S_N];
+static int q2_on(void) { int sw_on_(int); return g_q4b && sw_on_(g_q2_mode); }
+void mtl_sub_route(int want_b, const uint64_t need[2]) { g_q2_want = want_b; g_q2_need[0] = need[0]; g_q2_need[1] = need[1]; }
+int mtl_sub_mq(void) { return g_q2_mq; }
+int mtl_fence_mq(uint64_t fence) { return g_q4b && fence ? g_fmq[fence % POST_RING] : 0; }
+void mtl_q2_stats(uint64_t s[Q2S_N]) { for (int i = 0; i < Q2S_N; i++) s[i] = atomic_load(&g_q2_stat[i]); }
+static unsigned g_q2_chk;   // mtl_q2_chain: the Metal queues the next submission's chain waits ask for
+void mtl_q2_chain(unsigned mask) { g_q2_chk = mask; }
+void mtl_q2_note(int kind) { if (g_q4b) atomic_fetch_add(&g_q2_stat[kind == 0 ? Q2S_CHAIN : kind == 1 ? Q2S_HANDOFF : Q2S_PRESENT], 1); }
+// DM_NVN_MTLQ2_TRACE=A-B: frames A to B (B default A+60) trace each piece and its completion ([q2trace] lines, nvn_queue.inc); times on the GPU feedback's clock (host uptime, s)
+int mtl_q2_trace(void) {
+    static int init; static uint64_t a = 1, b = 0;
+    if (!init) { const char *e = getenv("DM_NVN_MTLQ2_TRACE"); if (e) { char *x; a = strtoull(e, &x, 10); b = *x == '-' ? strtoull(x + 1, NULL, 10) : a + 60; } init = 1; }
+    if (!g_q4b) return 0; uint64_t f = atomic_load(&g_cur_frame); return f >= a && f <= b;
+}
+int mtl_q2_on(void) { return q2_on(); }
+int mtl_q2_syncdone(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MTLQ2_SYNCDONE"); v = e && atoi(e) == 1; } return v && g_q4b; }
+// A continuation on the second Metal queue (an async NVN queue's piece after a game event or sync wait) waits for everything committed before it on the first queue: Ocarina of
+// Time's async compute (NVN queue 5) depends on earlier queue-0 work no game event names (on one Metal queue it could never run ahead of it), and without it about one run in three
+// showed a frame with the canopy cut to sky or the ground blown out (pic1-pic8, 3 of 9; with this rule 0 of 8, pic10; render waiting for compute instead, 5 of 9, pic9). It keeps
+// most of the overlap: still A/B s2q0 frame p50 -1.82 ms against one queue (s1 without it -2.1).
+// DM_NVN_MTLQ2_WAITALL (default q0): 0 off (bisects), 1 both ways, q0 = waits for the first queue's last commit only, q1 = for the second's only. A mask of Metal queues
+int mtl_q2_waitall(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MTLQ2_WAITALL"); v = !e ? 5 : !strcmp(e, "q0") ? 1 : !strcmp(e, "q1") ? 2 : !strcmp(e, "q0all") ? 5 : atoi(e) == 1 ? 3 : 0;   /* default q0all (bit 4): every second-queue piece waits for the first queue's last commit, not only one after a wait (q0 alone left one-frame flashes in Ocarina of Time) */ } return q2_on() ? v : 0; }   // DM_NVN_MTLQ2 in effect now (the DM_AB phase, with =ab)
+int mtl_q2_strict(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MTLQ2_STRICT"); v = e && atoi(e) == 1; } return v; }
+// Out-of-order completion: the highest fence through which every fence is done, from done (g_fdone holds each done fence's number in its slot)
+static uint64_t q2_done_through(uint64_t done) { while (g_fdone[(done + 1) % POST_RING] == done + 1) done++; return done; }
+// g_qdone[q] = every fence of Metal queue q through this one is complete and its records (CPU-visible effects) have run. One Metal queue completes in commit order
+static _Atomic uint64_t g_qdone[2];
+static void q2_qdone_raise(int q, uint64_t f) { uint64_t c = atomic_load(&g_qdone[q]); while (f > c && !atomic_compare_exchange_weak(&g_qdone[q], &c, f)) {} }
+// Hang check: each cross-queue wait a commit encodes is kept; once a second, one whose fence is not done after 2 s while the other queue's event is still below the value is
+// said as a [RED] line with the wait state
+typedef struct { uint64_t fence, v, t; uint8_t mq, k; } q2_wait_t;
+enum { Q2W_N = 256 };
+static q2_wait_t g_q2w[Q2W_N]; static uint32_t g_q2w_i; static pthread_mutex_t g_q2w_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_q2_sig[2];   // the last value each queue's event was told to reach (commit order)
+uint64_t mtl_q2_last(int k) { return atomic_load(&g_q2_sig[k]); }   // the last fence committed to Metal queue k
+static uint64_t g_ftime[POST_RING];   // each in-flight fence's commit time (q2_now)
+static uint64_t q2_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+// Commit ring: the last CR_N queue operations of every thread, as they reach Metal, dumped beside a stuck-fence or slow-frame sample (commits.txt and the like)
+enum { CR_N = 1024 };
+enum { CR_COMMIT = 1, CR_WAIT, CR_SIGNAL, CR_UPLOAD, CR_RESIDENCY, CR_PRESENT, CR_FEEDBACK };
+static const char *const cr_name[] = {"", "commit", "waitForEvent", "signalEvent", "upload commit", "residency commit", "present wait", "feedback"};
+typedef struct { uint64_t t, a, b; uint32_t tid; uint8_t kind, q; } cring_t;
+static cring_t g_cr[CR_N]; static _Atomic uint64_t g_cr_i;
+static void cr_put(int kind, int q, uint64_t a, uint64_t b) {
+    if (!g_q4b) return;
+    uint64_t i = atomic_fetch_add(&g_cr_i, 1), tid = 0; pthread_threadid_np(NULL, &tid);
+    g_cr[i % CR_N] = (cring_t){clock_gettime_nsec_np(CLOCK_UPTIME_RAW), a, b, (uint32_t)tid, (uint8_t)kind, (uint8_t)q};
+}
+static void cr_dump(const char *path) {
+    FILE *f = fopen(path, "w"); if (!f) return;
+    uint64_t n = atomic_load(&g_cr_i), i0 = n > CR_N ? n - CR_N : 0, t0 = g_cr[i0 % CR_N].t;
+    fprintf(f, "# DM_NVN_MTLQ2 commit ring: the last %llu queue operations (index, ms from the first listed, thread, kind, Metal queue, a, b)\n# commit/feedback: a = fence (feedback: b = the GPU start-end on this ms axis); waitForEvent: a = the queue whose event, b = value; signalEvent: b = value; residency commit: b = ns; upload: a = queue; present wait: b = fence\n", (unsigned long long)(n - i0));
+    for (uint64_t i = i0; i < n; i++) { cring_t e = g_cr[i % CR_N];
+        if (e.kind == CR_FEEDBACK) fprintf(f, "%llu\t%.3f\t%u\t%s\tq%u\t%llu\tgpu %.3f-%.3f\n", (unsigned long long)i, (e.t - t0) / 1e6, e.tid, cr_name[e.kind], e.q, (unsigned long long)e.a,
+                                           (e.t - t0) / 1e6 - (e.b >> 32) / 1e3, (e.t - t0) / 1e6 - (e.b & 0xffffffffu) / 1e3);
+        else fprintf(f, "%llu\t%.3f\t%u\t%s\tq%u\t%llu\t%llu\n", (unsigned long long)i, (e.t - t0) / 1e6, e.tid, e.kind <= CR_FEEDBACK ? cr_name[e.kind] : "?", e.q, (unsigned long long)e.a, (unsigned long long)e.b); }
+    fclose(f);
+}
+void mtl_wait_state_dump(void); int mtl_fence_done(uint64_t fence);
+// A stack sample of this process (/usr/bin/sample, no privileges), into the run folder (beside DM_CTL) or /tmp
+static void q2_sample_to(const char *file, int secs) {
+    char path[1024], pid[16], sec[8]; const char *ctl = getenv("DM_CTL"); snprintf(pid, sizeof pid, "%d", getpid()); snprintf(sec, sizeof sec, "%d", secs);
+    if (ctl && strrchr(ctl, '/')) snprintf(path, sizeof path, "%.*s/%s", (int)(strrchr(ctl, '/') - ctl), ctl, file); else snprintf(path, sizeof path, "/tmp/dmhost-%d-%s", getpid(), file);
+    char *argv[] = {"/usr/bin/sample", pid, sec, "-file", path, NULL}; pid_t sp; extern char **environ;
+    int rc = posix_spawn(&sp, "/usr/bin/sample", NULL, NULL, argv, environ);
+    MLOG("DM_NVN_MTLQ2: stack sample of this process for %d s into %s (%s)", secs, path, rc ? strerror(rc) : "started");
+}
+static void q2_ring_to(const char *file) {
+    char p[1024]; const char *c = getenv("DM_CTL");
+    if (c && strrchr(c, '/')) snprintf(p, sizeof p, "%.*s/%s", (int)(strrchr(c, '/') - c), c, file); else snprintf(p, sizeof p, "/tmp/dmhost-%d-%s", getpid(), file);
+    cr_dump(p); MLOG("DM_NVN_MTLQ2: commit ring (the last %d queue operations) into %s", CR_N, p);
+}
+// Slow state (E2's c7q2b-ring1: frames of 115 ms against 31, no stuck fence): once, the first frame over DM_NVN_MTLQ2_SLOW ms (default 0, off: its two 3 s stack samples slowed the game for ~5 s after the frame that set them off, Saffron's fgq2 arm c f3607-f3757) past frame DM_NVN_MTLQ2_SLOW_FROM
+// (default 1200) dumps the commit ring (slow-commits.txt) and two 3 s samples 5 s apart (slow1.sample, slow2.sample)
+void mtl_q2_frame(uint64_t f, double frame_ms) {
+    static int done, ms = -1; static uint64_t from;
+    if (!g_q4b || done) return;
+    if (ms < 0) { const char *e = getenv("DM_NVN_MTLQ2_SLOW"), *e2 = getenv("DM_NVN_MTLQ2_SLOW_FROM"); ms = e ? atoi(e) : 0; from = e2 ? strtoull(e2, NULL, 10) : 1200; }
+    if (!ms || f < from || frame_ms <= ms) return;
+    done = 1;
+    MLOG("[RED] DM_NVN_MTLQ2: frame %llu took %.1f ms (over %d ms past frame %llu): the commit ring, two stack samples", (unsigned long long)f, frame_ms, ms, (unsigned long long)from);
+    q2_ring_to("slow-commits.txt"); q2_sample_to("slow1.sample", 3);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ q2_sample_to("slow2.sample", 3); });
+}
+static void q2_watch(void) {
+    static int said, sampled; int dump = 0; uint64_t now = q2_now();
+    pthread_mutex_lock(&g_q2w_mu);
+    for (int i = 0; i < Q2W_N; i++) {
+        q2_wait_t *w = &g_q2w[i]; if (!w->fence || mtl_fence_done(w->fence) || now - w->t < 2000000000ull) continue;
+        uint64_t sv = g_evq[w->k].signaledValue;
+        if (sv >= w->v) { w->fence = 0; continue; }
+        if (said < 4) { said++; dump = 1;
+            MLOG("[RED] DM_NVN_MTLQ2: fence %llu on queue %d has waited %.1f s for queue %d's event to reach %llu; it is at %llu (last told to reach %llu); g_done %llu, queue done %llu / %llu, g_fence %llu",
+                 (unsigned long long)w->fence, w->mq, (now - w->t) / 1e9, w->k, (unsigned long long)w->v, (unsigned long long)sv, (unsigned long long)atomic_load(&g_q2_sig[w->k]),
+                 (unsigned long long)atomic_load(&g_done), (unsigned long long)atomic_load(&g_qdone[0]), (unsigned long long)atomic_load(&g_qdone[1]), (unsigned long long)atomic_load(&g_fence)); }
+        w->fence = 0;
+    }
+    pthread_mutex_unlock(&g_q2w_mu);
+    // A cross-queue wait stuck past 2 s: the commit ring at once (the host may be ended before the 5 s stuck-fence dump below: fp5 phi-1, whose blocker on queue 0 was not named)
+    { static int ringed; if (dump && !ringed++) q2_ring_to("commits-wait.txt"); }
+    // Any command buffer, with or without a cross-queue wait: the oldest fence not done after 5 s (a GPU hang on either queue)
+    static uint64_t said_f; uint64_t d = atomic_load(&g_done), top = atomic_load(&g_fence);
+    for (uint64_t f = d + 1; f <= top && f <= d + POST_RING; f++) {
+        if (mtl_fence_done(f) || g_fdone[f % POST_RING] == f) continue;
+        uint64_t t = g_ftime[f % POST_RING]; if (!t || now < t || now - t < 5000000000ull) break;   // fences commit in order: none older
+        if (f != said_f && said < 8) { said++; said_f = f; dump = 1;
+            MLOG("[RED] DM_NVN_MTLQ2: fence %llu on queue %d not done %.1f s after its commit; g_done %llu, queue done %llu / %llu, events at %llu / %llu (told %llu / %llu), g_fence %llu",
+                 (unsigned long long)f, g_fmq[f % POST_RING], (now - t) / 1e9, (unsigned long long)d, (unsigned long long)atomic_load(&g_qdone[0]), (unsigned long long)atomic_load(&g_qdone[1]),
+                 (unsigned long long)g_evq[0].signaledValue, (unsigned long long)g_evq[1].signaledValue, (unsigned long long)atomic_load(&g_q2_sig[0]), (unsigned long long)atomic_load(&g_q2_sig[1]),
+                 (unsigned long long)top);
+            if (!sampled++) { q2_sample_to("stuck.sample", 3); q2_ring_to("commits.txt"); } }
+        break;
+    }
+    if (dump) mtl_wait_state_dump();
+}
+int mtl_fence_done(uint64_t fence) {
+    if (!fence || fence <= atomic_load(&g_done)) return 1;
+    if (!g_q4b || fence > atomic_load(&g_fence)) return 0;
+    return fence <= atomic_load(&g_qdone[g_fmq[fence % POST_RING]]);
+}
+// A present (queue 0) after its NVN queue's piece on the second queue (nvn_queue.inc): queue 0 waits for it on the GPU
+void mtl_q2_wait_q0(uint64_t fence) {
+    if (!g_q4b || mtl_fence_done(fence) || g_fmq[fence % POST_RING] != 1) return;
+    [g_q4 waitForEvent:g_evq[1] value:fence]; cr_put(CR_PRESENT, 0, 1, fence); atomic_fetch_add(&g_q2_stat[Q2S_WAIT], 1);
+}
+// mtl_sub_commit: the queue this submission goes to, and the upload waits it adds (V1: an upload batch goes with its piece; one already on the other queue is waited for only while in flight)
+static int q2_route(void) {
+    g_q2_mq = 0;
+    if (!g_q4b) return 0;
+    int mq = 0;
+    if (g_q2_want && q2_on()) {
+        int hostpost = g_nvs != 0; for (int i = 0; i < g_npost; i++) if (g_post[i].kind != 1 && g_post[i].kind != POST_BUFFER_COPY) hostpost = 1;   // a report, samples or a readback: queue 0 (g_rc_complete); an event write or a copy's dirty mark (nvn_dirty_gpu_written, locked, order-free) runs at the piece's own completion
+        if ((g_q2_upl_dirty || hostpost || g_sub_segs) && mtl_q2_trace()) MLOG("[q2trace] kept on queue 0: upload batch behind it %d, host records %d (vis %d, posts %d), segments committed %u", g_q2_upl_dirty, hostpost, g_nvs, g_npost, g_sub_segs);
+        if (g_q2_upl_dirty || hostpost || g_sub_segs) { atomic_fetch_add(&g_q2_stat[Q2S_KEPT], 1); if (g_q2_upl_dirty) atomic_fetch_add(&g_q2_stat[Q2S_KEPT_UP], 1); }
+        else mq = 1;
+    }
+    for (int k = 0; k < 2; k++) if (k != mq && g_q2_up_fence[k] && !mtl_fence_done(g_q2_up_fence[k]) && g_q2_up_fence[k] > g_q2_need[k]) { g_q2_need[k] = g_q2_up_fence[k]; atomic_fetch_add(&g_q2_stat[Q2S_UPLOAD], 1); }
+    for (int k = 0; k < 2; k++) if ((g_q2_chk >> k & 1) && k != mq) atomic_fetch_add(&g_q2_stat[Q2S_CHAIN], 1);   // only a chain on the other queue is a cross-queue wait
+    g_q2_chk = 0;
+    g_q2_want = 0; g_q2_mq = mq; g_q2_up_q = mq;   // an upload batch flushed for this piece goes with it (up_flush)
+    return mq;
+}
 static post_rec g_postr[POST_RING];
 static pthread_mutex_t g_post_mu = PTHREAD_MUTEX_INITIALIZER;
 // A successful claim holds the lock until post_run finishes. Ownership alone
@@ -2728,20 +2905,37 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
 }
 // Both GPU feedback and an early waiter complete records in submission order.
 // Delayed callbacks carry their fence, never the identity of a recyclable slot.
+static void post_one(uint64_t f, uint64_t fence, uint64_t now, uint64_t c0, uint64_t c1) {
+    post_rec *r = &g_postr[f % POST_RING];
+    if (!post_claim(r, f)) return;
+    uint64_t start = r->t_commit;
+    if (r->sc && r->sc->ncm) {   // nor before the command buffer committed before it ended
+        uint64_t pe = atomic_load(&r->sc->t[r->sc->cm[r->sc->ncm - 1]][1]); if (pe > start) start = pe;
+    }
+    if (start > now) start = now;
+    post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
+}
+static inline void mesh_scr_done(void) {   // under g_mu, after g_done moved: the slices of groups the fences through g_done cut off are free again
+    uint32_t *scr = atomic_load(&g_mesh_scr); if (scr) __atomic_store_n(scr + DMSH_MESH_SCRATCH_DONE, (uint32_t)g_done, __ATOMIC_RELAXED);
+}
 static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     uint64_t now = guest_ns();
-    for (uint64_t f = g_done + 1; f <= fence; f++) {
-        post_rec *r = &g_postr[f % POST_RING];
-        if (!post_claim(r, f)) continue;
-        uint64_t start = r->t_commit;
-        if (r->sc && r->sc->ncm) {   // nor before the command buffer committed before it ended
-            uint64_t pe = atomic_load(&r->sc->t[r->sc->cm[r->sc->ncm - 1]][1]); if (pe > start) start = pe;
+    if (g_q4b) {   // DM_NVN_MTLQ2: this queue's records run in its own order, at its own completion; g_done advances through consecutive done fences
+        int q = g_fmq[fence % POST_RING];
+        for (uint64_t f = atomic_load(&g_done) + 1; f <= fence; f++) {   // every fence of queue q through this one is complete
+            if (g_fmq[f % POST_RING] != q || g_fdone[f % POST_RING] == f) continue;
+            post_one(f, fence, now, c0, c1); g_fdone[f % POST_RING] = f;
         }
-        if (start > now) start = now;
-        post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
+        q2_qdone_raise(q, fence);
+        pthread_mutex_lock(&g_mu); uint64_t through = q2_done_through(g_done); if (through < fence) atomic_fetch_add(&g_q2_stat[Q2S_OOO], 1);
+        if (through > g_done) g_done = through;
+        mesh_scr_done(); pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
+        nvn_queue_gpu_progress();
+        return;
     }
+    for (uint64_t f = g_done + 1; f <= fence; f++) post_one(f, fence, now, c0, c1);
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence;
-    uint32_t *scr = atomic_load(&g_mesh_scr); if (scr) __atomic_store_n(scr + DMSH_MESH_SCRATCH_DONE, (uint32_t)g_done, __ATOMIC_RELAXED);   // the slices of groups this fence cut off are free again
+    mesh_scr_done();
     pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
     nvn_queue_gpu_progress();
 }
@@ -2766,12 +2960,36 @@ static void cb_commit(DmCommitFB *o, int end) {   // end: the submission ends wi
     res_commit();
     cb_end(g_cb, nil);
     rec_commit(g_cb, o, end); g_cbgen++;
+    if (!end) g_sub_segs++;   // DM_NVN_MTLQ2: a segment went to queue 0; the rest of the submission stays there
+}
+// DM_NVN_MTLQ2: cb_commit for a submission routed by q2_route: to its Metal queue, after GPU waits for the other queue's fences it was given (mtl_sub_route, q2_route) that are
+// not complete yet, then that queue's own event raised to its fence
+static void q2_commit(DmCommitFB *o, uint64_t fence, int lost_test) {
+    int mq = g_q2_mq; id<MTL4CommandQueue> tq = mq ? g_q4b : g_q4;
+    cb_seal(); res_commit();
+    cb_end(g_cb, nil);
+    for (int k = 0; k < 2; k++) { uint64_t v = g_q2_need[k]; if (k == mq || !v) continue;
+        if (mtl_fence_done(v)) { atomic_fetch_add(&g_q2_stat[Q2S_DONE], 1); if (!mtl_q2_syncdone()) continue; }   // DM_NVN_MTLQ2_SYNCDONE: encoded all the same (satisfied at once; it orders the memory)
+        [tq waitForEvent:g_evq[k] value:v]; cr_put(CR_WAIT, mq, k, v); atomic_fetch_add(&g_q2_stat[Q2S_WAIT], 1);
+        pthread_mutex_lock(&g_q2w_mu); g_q2w[g_q2w_i++ % Q2W_N] = (q2_wait_t){fence, v, q2_now(), (uint8_t)mq, (uint8_t)k}; pthread_mutex_unlock(&g_q2w_mu); }
+    ubc_wait(ubc_head());
+    id<MTL4CommandBuffer> buffers[] = {g_cb}; MTL4CommitOptions *co = commit_opts(o);
+    if (co) [tq commit:buffers count:1 options:co]; else [tq commit:buffers count:1];
+    cr_put(CR_COMMIT, mq, fence, 0); g_cbgen++;
+    if (!lost_test) { [tq signalEvent:g_evq[mq] value:fence]; atomic_store(&g_q2_sig[mq], fence); cr_put(CR_SIGNAL, mq, 0, fence); }
+    g_q2_need[0] = g_q2_need[1] = 0; g_q2_up_q = 0;
 }
 uint64_t mtl_sub_commit(void) {
     if (g_tf_enc) tf_pass_end();   // the capture pass and the saves it holds (nvn_feedback.inc), before this submission's writes are counted
     lc_land();   // clears still waiting (the command list ends with them)
     rp_flush(); ubd_land();
     g_ts_pend = -1;   // nothing after it: the last segment's end is the command buffer's own (rep_ticks)
+    q2_route();   // DM_NVN_MTLQ2: which Metal queue, before the upload batch is sealed (it goes with the piece)
+    // DM_NVN_MTLQ2: a piece on the second queue (compute only, no draw pass) leaves the first queue's draw-pass barrier state as it found it. A Metal 4 queue barrier orders work of its own
+    // queue only, so its encoders' full end barriers order nothing on queue 0, and its game barriers order its own NVN queue, whose hand-offs to queue 0 are cross-queue waits (V1). Left
+    // as they were, every second-queue piece made the next draw pass on queue 0 take the full consumer barrier (enc_r_begin_pass): smoke e2v2s-a2, full 9208 against 8904 on one queue
+    if (g_q2_mq == 1) { g_last_end_relaxed = g_q2_rel0; g_game_barrier = g_q2_gb0; }
+    else g_m0_serial = g_cur_serial;   // mtl_queue_activate compares the next queue with it
     cb_seal();   // before the fence and the writes it counts
     g_cut_copy = 0;
     own_ghost_trim();   // idle finalized textures past the ghost table's size go behind this submission's fence
@@ -2780,6 +2998,11 @@ uint64_t mtl_sub_commit(void) {
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
     uint64_t fence = ++g_fence;
+    if (g_q4b) {   // DM_NVN_MTLQ2: the fence's queue (g_fdone keeps the fence number itself: an older slot never matches); the fences an upload batch is behind
+        g_fmq[fence % POST_RING] = (uint8_t)g_q2_mq; g_ftime[fence % POST_RING] = q2_now(); atomic_fetch_add(&g_q2_stat[Q2S_ALL], 1); if (g_q2_mq) atomic_fetch_add(&g_q2_stat[Q2S_Q1], 1);
+        if (g_q2_up1_now) { g_q2_up_fence[1] = fence; g_q2_up1_now = 0; }
+        if (g_q2_mq == 0 && g_q2_upl_dirty) { g_q2_up_fence[0] = fence; g_q2_upl_dirty = 0; }
+    }
     if (g_nvs) { post((post_op){3, NULL, VIS_FOLD, 0, 0, 0, vis_snapshot()}); vis_clear(); }   // this submission's slots after its last report: read at its completion (Occlusion queries)
     gw_commit(fence); rc_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
@@ -2791,7 +3014,7 @@ uint64_t mtl_sub_commit(void) {
     DmCommitFB *o = [DmCommitFB new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
-    uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
+    uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f); int q2tr = mtl_q2_trace();
     NSString *cctx = @(cctx_snap());
     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
@@ -2802,6 +3025,8 @@ uint64_t mtl_sub_commit(void) {
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
+        cr_put(CR_FEEDBACK, mtl_fence_mq(fence), fence, 0xffffffffffffffffull);
+        if (q2tr) MLOG("[q2trace] F%llu done fence %llu mq %d gpu %.6f %.6f", (unsigned long long)gpu_f, (unsigned long long)fence, mtl_fence_mq(fence), cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
@@ -2814,8 +3039,9 @@ uint64_t mtl_sub_commit(void) {
     void arena_commit(uint64_t fence); arena_commit(fence);
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
-    cb_commit(o, 1);   // the stores it holds come before any later upload batch (gsb_held)
-    if (!lost_test) rec_signal(g_ev, fence);
+    if (g_q4b) q2_commit(o, fence, lost_test);   // DM_NVN_MTLQ2: its queue, its waits, its queue's event (g_ev is raised by the CPU only)
+    else { cb_commit(o, 1);   // the stores it holds come before any later upload batch (gsb_held)
+    if (!lost_test) rec_signal(g_ev, fence); }
     // With the encode thread the records go to it and the replay goes on with the next submission: what comes after it on the queue is a record too (the next submission's commits,
     // upload batches, snapshot copies), a CPU wait for the GPU waits for the fence's signal behind this commit, and a present of the game's own texture waits for this note
     // (sub_commit_wait). The replay used to wait for the encode thread here: Ocarina of Time makes about 30 submissions a frame (one at each event signal), and on the iPhone the GPU
@@ -2845,13 +3071,16 @@ static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = get
 static void post_early(uint64_t fence) {
     post_complete(fence, 0, 0);
 }
+// The game's own waits (SyncWait, acquire, a poll) wait for one command buffer: mtl_fence_done (DM_NVN_MTLQ2: on its own Metal queue). The host's own waits keep g_done
+static int wait_done(uint64_t fence, int site) { return site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_SYNC_POLL || site == WS_ACQ ? mtl_fence_done(fence) : g_done >= fence; }
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
-    if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
+    if (wait_done(fence, site)) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
-        int ok = g_done >= fence;
+        id<MTLSharedEvent> ev = g_q4b ? g_evq[g_fmq[fence % POST_RING]] : g_ev;   // DM_NVN_MTLQ2: the fence's own queue's event
+        if ([ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        int ok = wait_done(fence, site);
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
         // The event and feedback waits share a finite budget; a timeout must not buy another full wait.
@@ -2868,7 +3097,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     int r = 0;
     // An unbounded wait still waiting after 10 s is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error)
     struct timespec said; clock_gettime(CLOCK_REALTIME, &said); said.tv_sec += 10; int told = timeout_ns != UINT64_MAX;
-    while (g_done < fence) {
+    while (!wait_done(fence, site)) {
         int late = !told && (dl.tv_sec > said.tv_sec || (dl.tv_sec == said.tv_sec && dl.tv_nsec > said.tv_nsec));
         if (!(r = pthread_cond_timedwait(&g_cv, &g_mu, late ? &said : &dl))) continue;
         if (!late) break;
@@ -2880,7 +3109,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
             pthread_mutex_unlock(&g_mu); cbs_fly_report(stuck); pthread_mutex_lock(&g_mu);   // the list's lock is not taken under g_mu
         }
     }
-    int ok = g_done >= fence;
+    int ok = wait_done(fence, site);
     pthread_mutex_unlock(&g_mu);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
     return ok;
@@ -3522,7 +3751,16 @@ static void up_flush(void) {
     }];
     res_commit();
     cb_end(cb, nil);
-    rec_commit_upload(cb, o);
+    // DM_NVN_MTLQ2: the batch reads guest storage and textures the GPU may have written (the deswizzles from pool storage, the copies from a predecessor texture). On one queue it
+    // ran after every earlier submission; on two a batch that reads such memory waits for the other queue's last commit first (a batch of CPU data alone does not), so it never reads what a submission of the other queue still writes. Without it, one
+    // frame in about three runs of Ocarina of Time's Kokiri Forest still (pic1-B1 f956, pic2-B3 f957, pic3-B1 f960, at the area banner's fade) lost its haze and showed the canopy as sky
+    if (g_q4b && mtl_q2_trace()) MLOG("[q2trace] F%llu upload batch to mq %d: reads GPU-writable memory %d, the other queue last committed %llu (%s)", (unsigned long long)atomic_load(&g_cur_frame), g_q2_up_q == 1, g_up_gpu_read,
+        (unsigned long long)atomic_load(&g_q2_sig[g_q2_up_q != 1]), atomic_load(&g_q2_sig[g_q2_up_q != 1]) && !mtl_fence_done(atomic_load(&g_q2_sig[g_q2_up_q != 1])) ? "running" : "done");
+    if (g_q4b && g_up_gpu_read) { int uq = g_q2_up_q == 1, oq = !uq; uint64_t v = atomic_load(&g_q2_sig[oq]);
+        if (v && !mtl_fence_done(v)) { [(uq ? g_q4b : g_q4) waitForEvent:g_evq[oq] value:v]; cr_put(CR_WAIT, uq, oq, v); atomic_fetch_add(&g_q2_stat[Q2S_UPWAIT], 1); } }
+    g_up_gpu_read = 0;
+    if (g_q4b && g_q2_up_q == 1) { id<MTL4CommandBuffer> b[] = {cb}; [g_q4b commit:b count:1 options:o]; cr_put(CR_UPLOAD, 1, 0, 0); g_q2_up1_now = 1; }   // DM_NVN_MTLQ2: with its second-queue piece
+    else { rec_commit_upload(cb, o); if (g_q4b) { g_q2_upl_dirty = 1; cr_put(CR_UPLOAD, 0, 0, 0); } }   // DM_NVN_MTLQ2: a second-queue piece waits for the next queue-0 fence while it runs
     // Outside a submission nothing else hands the encode thread its current block until the next submission, so a batch flushed on the spot stayed a record and every wait for it
     // (nvnQueueFinish on any thread, up_begin on another) waited for that submission: hand it over now (from PR #141, which found the nvnQueueFinish half)
     if (!g_cb) rec_publish();
@@ -3623,7 +3861,9 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
 
 // Deswizzle parameter blocks: 64 bytes per cell, cut sequentially from a 64 KB shared-storage block; a full block is replaced by a new one, and the old block is released lazily by fence
 static id<MTLBuffer> g_up_pblock; static size_t g_up_pblock_off;
+static int g_up_gpu_read;   // DM_NVN_MTLQ2: the open batch reads memory the GPU may write (a deswizzle or gather from guest storage, a copy from a texture): see up_flush
 static id<MTLBuffer> up_param_alloc(size_t *off) {
+    g_up_gpu_read = 1;   // every GPU deswizzle and gather takes a parameter block
     if (!g_up_pblock || g_up_pblock_off + 64 > g_up_pblock.length) {
         if (g_up_pblock) defer_obj_release(g_up_pblock);
         g_up_pblock = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared];
@@ -3651,7 +3891,7 @@ static void up_t2b_add(id<MTLTexture> src, NSUInteger slice, NSUInteger level, M
 }
 static void up_copy_add(id<MTLTexture> src, MTLSize size, id<MTLTexture> dst, NSUInteger slice, NSUInteger level) {
     up_blit_add_at(nil, 0, 0, 0, size, dst, slice, level, MTLOriginMake(0, 0, 0));
-    g_up_blits[g_nup_blits - 1].tsrc = src;
+    g_up_blits[g_nup_blits - 1].tsrc = src; g_up_gpu_read = 1;
     if (!g_up_views) g_up_views = [NSMutableArray array];
     if (g_up_views.lastObject != src) [g_up_views addObject:src];
 }
@@ -5793,6 +6033,9 @@ static int sw_mode(const char *name, int dflt) {
     return m;
 }
 static inline int sw_on(int m) { return sw_on_at(m, atomic_load_explicit(&g_ab_phase, memory_order_relaxed)); }
+int mtl_sw_mode(const char *name, int dflt) { return sw_mode(name, dflt); }   // for switches outside this file (DM_NVN_QDEFER in nvn_queue.inc): the same 0 / 1 / ab[:k,k/n] modes and [ab] lines
+int mtl_sw_on(int m) { return sw_on(m); }
+int sw_on_(int m) { return sw_on(m); }   // DM_NVN_MTLQ2 (q2_on, above sw_on)
 // Each phase is reported once its frames' GPU times have arrived (8 frames late) as an [ab] line: the switches on in it, GPU time and whole frame time (p50 / p90 / mean over the phase
 // without its first quarter, while the GPU clock and the frame step settle), and attachment traffic and render passes per frame (the bandwidth ledger)
 enum { AB_MAXF = 4096 };
@@ -8464,6 +8707,12 @@ static void queue_program_preserve(void) {
 }
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
     if (g_active_queue && g_active_queue->serial == serial) return;
+    // Another NVN queue's work begins here (PR #2523, 61967a56): the relaxed end barrier of the last draw pass (DM_NVN_BARRIER=game) orders this queue's own next pass only as far as
+    // that queue's nvnCommandBufferBarrier bits ask, and this queue's work after an event or sync wait must see all of the other queue's writes, vertex and indirect fetch included.
+    // Its first pass takes the full barrier when the last work on the first Metal queue was another NVN queue's. DM_NVN_MTLQ2: work that went to the second queue is ordered by
+    // the cross-queue wait the hand-off encodes (a command buffer boundary), and leaves the first queue's state as it found it (mtl_sub_commit)
+    g_rel_pre = g_last_end_relaxed; g_rel_act = 1; g_cur_serial = serial;
+    if (serial != g_m0_serial) g_last_end_relaxed = 0;
     if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; g_active_queue->rc_skip=g_rc_skip; }
     queue_state *q = g_queue_states;
     while (q && q->serial != serial) q = q->next;

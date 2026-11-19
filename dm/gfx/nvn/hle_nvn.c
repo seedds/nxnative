@@ -2113,6 +2113,11 @@ static void power_line(uint64_t frame) {
         { void mtl_tf_stats(uint64_t v[4]); static uint64_t ptf[4]; uint64_t tf[4]; mtl_tf_stats(tf);
           if (tf[0] + tf[1] > ptf[0] + ptf[1]) LOG("[nvn] transform feedback up to frame %llu, per frame: %.1f captures with the state on the CPU, %.1f through tf_prepare, in %.1f passes with %.1f barriers inside them", frame, (tf[0] - ptf[0]) / nf, (tf[1] - ptf[1]) / nf, (tf[2] - ptf[2]) / nf, (tf[3] - ptf[3]) / nf);
           memcpy(ptf, tf, sizeof ptf); }
+        { static uint64_t pd[NQD_N+1]; uint64_t d[NQD_N+1]; nq_defer_stats(d);   // DM_NVN_QDEFER
+          if (d[NQD_N] != pd[NQD_N] || d[NQD_DEFER] != pd[NQD_DEFER]) LOG("[nvn] queue defer up to frame %llu, per frame: pieces held %.2f (another queue's node went first %.2f times); held pieces run because nothing else qualified %.2f, at the cap %.2f, before a present %.2f, before a later frame %.2f, before a piece of the other class %.2f",
+            frame, (d[NQD_N] - pd[NQD_N]) / nf, (d[NQD_DEFER] - pd[NQD_DEFER]) / nf, (d[NQD_RUN_NONE_ELSE] - pd[NQD_RUN_NONE_ELSE]) / nf, (d[NQD_RUN_CAP] - pd[NQD_RUN_CAP]) / nf,
+            (d[NQD_RUN_BEFORE_PRESENT] - pd[NQD_RUN_BEFORE_PRESENT]) / nf, (d[NQD_RUN_LATER_FRAME] - pd[NQD_RUN_LATER_FRAME]) / nf, (d[NQD_RUN_OTHER_CLASS] - pd[NQD_RUN_OTHER_CLASS]) / nf);
+          memcpy(pd, d, sizeof pd); }
         char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
@@ -2126,6 +2131,12 @@ static void power_line(uint64_t frame) {
             (unsigned long long)(cut - pcut), (unsigned long long)(ccut - pccut), (unsigned long long)(bsp - pbsp), (unsigned long long)(ud - pud), (unsigned long long)(uc - puc), (unsigned long long)(pm - ppm), (unsigned long long)(pr - ppr), (unsigned long long)(pf_ - ppf), (unsigned long long)(w5[1] - pw5[1]), (unsigned long long)(w5[2] - pw5[2]), (unsigned long long)(w5[5] - pw5[5]), (unsigned long long)(w5[3] - pw5[3]), (unsigned long long)(w5[0] - pw5[0]), (unsigned long long)(w5[4] - pw5[4]), (unsigned long long)(lt - plt), (unsigned long long)(ll - pll), (unsigned long long)(smp - psmp), (unsigned long long)(smc - psmc), (unsigned long long)(smw - psmw), (unsigned long long)(chm - pchm), (unsigned long long)(chd - pchd),
             (unsigned long long)(chs[1] - pchs[1]), (unsigned long long)(chs[2] - pchs[2]), (unsigned long long)(chs[3] - pchs[3]), (unsigned long long)(chs[7] - pchs[7]), (unsigned long long)(chs[5] - pchs[5]),
             (ld - pld) / 1048576.0 / nf, (st - pst) / 1048576.0 / nf, (fu - pfu) / nf, (udc - pudc) / 1048576.0 / nf); pbs = bs; pbf = bf; pcut = cut; pccut = ccut; pbsp = bsp; pud = ud; puc = uc; ppm = pm; ppr = pr; ppf = pf_; memcpy(pw5, w5, sizeof pw5); plt = lt; pll = ll; psmp = smp; psmc = smc; psmw = smw; pchm = chm; pchd = chd; memcpy(pchs, chs, sizeof pchs);
+        { void mtl_q2_stats(uint64_t[Q2S_N]); static uint64_t pq[Q2S_N]; uint64_t c[Q2S_N]; mtl_q2_stats(c);   // DM_NVN_MTLQ2 (E2 v2)
+          if (c[Q2S_ALL] != pq[Q2S_ALL] && c[Q2S_Q1] + c[Q2S_KEPT] != pq[Q2S_Q1] + pq[Q2S_KEPT]) LOG("[nvn] second Metal queue up to frame %llu, per frame: submissions %.2f, on the second queue %.2f, kept on the first %.2f (by an upload %.2f); "
+            "cross-queue waits encoded %.2f (already complete, not encoded %.2f), asked for by a game barrier %.2f, an event or sync hand-off %.2f, an upload %.2f, a present %.2f; upload batches behind the other queue %.2f; completions out of order %.2f",
+            frame, (c[Q2S_ALL] - pq[Q2S_ALL]) / nf, (c[Q2S_Q1] - pq[Q2S_Q1]) / nf, (c[Q2S_KEPT] - pq[Q2S_KEPT]) / nf, (c[Q2S_KEPT_UP] - pq[Q2S_KEPT_UP]) / nf, (c[Q2S_WAIT] - pq[Q2S_WAIT]) / nf, (c[Q2S_DONE] - pq[Q2S_DONE]) / nf,
+            (c[Q2S_CHAIN] - pq[Q2S_CHAIN]) / nf, (c[Q2S_HANDOFF] - pq[Q2S_HANDOFF]) / nf, (c[Q2S_UPLOAD] - pq[Q2S_UPLOAD]) / nf, (c[Q2S_PRESENT] - pq[Q2S_PRESENT]) / nf, (c[Q2S_UPWAIT] - pq[Q2S_UPWAIT]) / nf, (c[Q2S_OOO] - pq[Q2S_OOO]) / nf);
+          memcpy(pq, c, sizeof pq); }
         void mtl_geohoist_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t pgh, pgr, pgs[6]; uint64_t gh, gr, gs[6]; mtl_geohoist_stats(&gh, &gr, gs);
         if (gh != pgh || gr != pgr) LOG("[nvn] geometry hoist up to frame %llu: %llu draws prepared ahead of their pass in %llu runs; runs ended by a raster read %llu, a draw that cannot be passed %llu, the table %llu, a kernel or capture hazard %llu, a draw not lean %llu, another op %llu",
             frame, (unsigned long long)(gh - pgh), (unsigned long long)(gr - pgr), (unsigned long long)(gs[0] - pgs[0]), (unsigned long long)(gs[1] - pgs[1]), (unsigned long long)(gs[2] - pgs[2]),
@@ -2728,6 +2739,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (prev_in) {
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
+        mtl_q2_frame(f, fr);   // DM_NVN_MTLQ2 slow-state / stall dumps
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@sync_ms", atomic_exchange(&g_sync_ns, 0) / 1e6); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
         trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);

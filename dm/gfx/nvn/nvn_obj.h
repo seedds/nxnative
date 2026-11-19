@@ -312,6 +312,10 @@ void mtl_set_samp_pool_n(int n);                           // Sampler descriptor
 void mtl_set_frame(uint64_t f);
 void mtl_ub_present(double iv_ms);   // Same-process alternating measurement (DM_NVN_UB): the present thread reports the actual present interval every frame
 double mtl_gpu_ms(uint64_t f);
+void mtl_q2_frame(uint64_t f, double frame_ms);   // DM_NVN_MTLQ2 slow-state dump (nvn_mtl.m)
+// DM_NVN_MTLQ2 counters (mtl_q2_stats): commits on the second queue, kept on the first, of those by an upload, cross-queue waits encoded, waits not encoded (already complete), asked for by a
+// game barrier, by an event or sync hand-off, by an upload, by a present, completions out of order, all commits
+enum { Q2S_Q1, Q2S_KEPT, Q2S_KEPT_UP, Q2S_WAIT, Q2S_DONE, Q2S_CHAIN, Q2S_HANDOFF, Q2S_UPLOAD, Q2S_PRESENT, Q2S_OOO, Q2S_ALL, Q2S_UPWAIT, Q2S_N };
 void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms);   // DM_AB phases (nvn_mtl.m)
 void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time

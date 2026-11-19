@@ -377,6 +377,7 @@ t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
 check_t_queue_origin: t_queue_origin
 	MTL_DEBUG_LAYER=1 ./t_queue_origin
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_queue_origin
+	DM_NVN_BARRIER=game MTL_DEBUG_LAYER=1 ./t_queue_origin
 t_rt_lifetime: t_rt_lifetime.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_rt_lifetime
@@ -830,9 +831,26 @@ t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
 check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_WAITALL=q0 DM_NVN_COPY_CUT=0 DM_NVN_MTLQ2_ASYNC=all ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_WAITALL=q0 DM_NVN_COPY_CUT=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_QDEFER=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_WAITALL=q0 DM_NVN_COPY_CUT=0 DM_NVN_QDEFER=1 ./$<
+# The DM_NVN_MTLQ2 lines of check_t_wait_event and check_t_queue_lifetime test the hand-off rules: DM_NVN_MTLQ2_WAITALL=q0 (the default q0all also holds a second-queue piece behind
+# queue 0, which the held-queue cases rule out) and DM_NVN_COPY_CUT=0 (their pieces are buffer copies, whose cut commits a segment to queue 0 and keeps the piece there).
+# The stress below runs the defaults.
+# E2 v2's stress alone, longer: one Metal queue, then the second queue with the async queue found by itself, then every queue async, then E2's every-piece chain (STRICT)
+.PHONY: check_t_queue_stress
+check_t_queue_stress: t_wait_event
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 T_STRESS_ONLY=1 T_STRESS_N=2000 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 T_STRESS_ONLY=1 T_STRESS_N=2000 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_ASYNC=all T_STRESS_ONLY=1 T_STRESS_N=2000 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_ASYNC=all DM_NVN_MTLQ2_STRICT=1 T_STRESS_ONLY=1 T_STRESS_N=2000 ./$<
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_WAITALL=q0 DM_NVN_COPY_CUT=0 DM_NVN_MTLQ2_ASYNC=all ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_QDEFER=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_MTLQ2=1 DM_NVN_MTLQ2_WAITALL=q0 DM_NVN_COPY_CUT=0 DM_NVN_QDEFER=1 ./$<
 
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

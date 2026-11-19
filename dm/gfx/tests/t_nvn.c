@@ -1736,7 +1736,7 @@ int main(void) {
         uint64_t f = 0; int encoded = 0; struct timespec deadline;
         clock_gettime(CLOCK_REALTIME, &deadline); deadline.tv_sec += 5;
         pthread_mutex_lock(&nq_mu);
-        while (!(encoded = nq_sync_encoded((const sync_t *)&busy_sync, &f)))
+        uint64_t f2 = 0; while (!(encoded = nq_sync_encoded((const sync_t *)&busy_sync, &f, &f2)))
             if (pthread_cond_timedwait(&nq_cv, &nq_mu, &deadline)) break;
         pthread_mutex_unlock(&nq_mu);
         EXPECT("busy submission receives its own physical fence", 1, encoded);

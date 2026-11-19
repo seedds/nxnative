@@ -118,11 +118,225 @@ static void case_cross_queue(void) {
     if(!drained) _Exit(2);
     P(nvnSyncFinalize)(&consumed); P(nvnSyncFinalize)(&produced);
 }
+// ---- DM_NVN_MTLQ2 (E2 v2, notes/.specs/e2v2.md) ----
+// Out-of-order completion: g_done advances only through consecutive done fences (q2_done_through)
+static void case_q2_through(void) {
+    printf("CASE second Metal queue: completion out of order\n");
+    uint64_t base=1000000; for(int i=0;i<POST_RING;i++) g_fdone[i]=0;
+    g_fdone[(base+2)%POST_RING]=base+2; g_fdone[(base+3)%POST_RING]=base+3;
+    CHECK(q2_done_through(base)==base,"q2: fences 2 and 3 done, 1 not: nothing advances");
+    g_fdone[(base+1)%POST_RING]=base+1;
+    CHECK(q2_done_through(base)==base+3,"q2: fence 1 done too: through 3");
+    g_fdone[(base+4+POST_RING)%POST_RING]=base+4-POST_RING;   // a stale slot (the fence a ring earlier)
+    CHECK(q2_done_through(base+3)==base+3,"q2: a slot holding an older fence does not count");
+    for(int i=0;i<POST_RING;i++) g_fdone[i]=0;
+}
+static int receipt_encoded(NVNsync *sync,uint64_t timeout);   // below
+static uint64_t sync_fence(NVNsync *s) { uint64_t f=0,f2=0; pthread_mutex_lock(&nq_mu); if(!nq_sync_encoded((const sync_t *)s,&f,&f2)) f=0; pthread_mutex_unlock(&nq_mu); return f; }
+// An empty submission on Metal queue mq (0 or 1), made directly as the queue worker does; the caller holds g_sub_mu
+static uint64_t direct_commit(int mq) { uint64_t none[2]={0,0}; mtl_sub_begin(); mtl_sub_route(mq,none); return mtl_sub_commit(); }
+// Hold one Metal queue (the other runs on): a GPU wait on an event the test raises, behind a fence of that queue
+static id<MTLSharedEvent> gate_q(int mq,uint64_t *held) {
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    pthread_mutex_lock(&g_sub_mu);
+    uint64_t pre=direct_commit(0);   // a queue-0 fence after any upload batch, so a second-queue piece waits for nothing gated
+    pthread_mutex_unlock(&g_sub_mu); mtl_wait(pre,5000000000ull);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [(mq ? g_q4b : g_q4) waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu);
+    *held=direct_commit(mq); pthread_mutex_unlock(&g_sub_mu);
+    return gate;
+}
+static void q2_stats_now(uint64_t s[Q2S_N]) { mtl_q2_stats(s); }
+// 1. A fence completes on its own Metal queue while the other is held: its records run, mtl_fence_done and the game's SyncWait see it; g_done (the recyclers' bound) does not pass the held one
+static void case_q2_queue_done(void) {
+    printf("CASE second Metal queue: a fence completes on its own queue while the first is held\n");
+    uint64_t f0; id<MTLSharedEvent> gate=gate_q(0,&f0);
+    pthread_mutex_lock(&g_sub_mu); uint64_t f1=direct_commit(1); int mq1=mtl_sub_mq(); pthread_mutex_unlock(&g_sub_mu);
+    CHECK(mq1==1 && mtl_fence_mq(f0)==0,"q2: the held fence is on queue 0, the next on queue 1");
+    uint64_t t0=now_ns(); while(!mtl_fence_done(f1) && now_ns()-t0<2000000000ull) usleep(1000);
+    CHECK(mtl_fence_done(f1) && !mtl_fence_done(f0),"q2: the queue-1 fence is done while the earlier queue-0 one is held");
+    CHECK(mtl_completed_fence()<f0,"q2: g_done stays before the held fence (everything that recycles by g_done waits)");
+    CHECK(mtl_wait(f1,1000000000ull),"q2: a SyncWait on the queue-1 fence returns while queue 0 is held");
+    CHECK(!mtl_wait(f0,50000000ull),"q2: a SyncWait on the held fence does not");
+    gate.signaledValue=1;
+    CHECK(mtl_wait(f0,5000000000ull) && mtl_completed_fence()>=f1,"q2: released, g_done passes both");
+}
+// 2. An event wait parked on a second-queue ADD (no release at encode) is released when that write's command buffer completes, not when g_done passes it (E2's 0m26b loss)
+int mtl_q2_waitall(void);
+static void case_q2_scan_release(void) {
+    printf("CASE second Metal queue: a wait on a second-queue ADD is released at that write's completion, with queue 0 held\n");
+    volatile uint32_t *scratch=source+3; NVNbufferAddress scratch_addr=source_addr+12;
+    *source=after; *scratch=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    uint64_t f0=0; id<MTLSharedEvent> gate=gate_q(0,&f0);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],source_addr,scratch_addr,4,0);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_ADD,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    static job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&pj,250000000ull);
+    begin_cmd(0);
+    P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],scratch_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    enqueue(&cj,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int cr=returned(&cj,250000000ull);
+    int pe=receipt_encoded(&produced,1000000000ull); uint64_t pf=sync_fence(&produced); int pmq=mtl_fence_mq(pf);
+    CHECK(pr && pe && pmq==1,"q2: the producer (a compute-only piece) runs on queue 1");
+    int enc=receipt_encoded(&consumed,2000000000ull); uint64_t cf=sync_fence(&consumed); int cmq=mtl_fence_mq(cf);
+    CHECK(enc,"q2: the consumer is released and committed while queue 0 is still held");
+    int waitall0=mtl_q2_waitall()&1;   // the default rule: a second-queue continuation also waits for the first queue's last commit, the held one
+    if(cmq==1 && !waitall0) { NVNsyncWaitResult r=P(nvnSyncWait)(&consumed,2000000000ull); uint32_t got=*result;
+        CHECK((r==NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r==NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED) && got==after,"q2: on queue 1 it runs and reads the payload while queue 0 is held"); }
+    if(cmq==1 && waitall0) CHECK(!landed(&consumed,200000000ull),"q2: on queue 1 it waits for queue 0's last commit (held), as the rule says (DM_NVN_MTLQ2_WAITALL=q0)");
+    CHECK(!mtl_fence_done(f0),"q2: queue 0 was held throughout");
+    gate.signaledValue=1; require_returned(&pj,pr); require_returned(&cj,cr);
+    NVNsyncWaitResult r2=P(nvnSyncWait)(&consumed,5000000000ull);
+    if(r2!=NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && r2!=NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
+    CHECK(*result==after,"q2: released, the consumer read the producer's payload");
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
+}
+// 3. V1, one NVN queue: a second-queue piece (a copy) and the queue's next piece, which holds a timestamp report (a host transfer: queue 0). With queue 1 held, the next piece waits
+// for the copy only where the game ordered them: bar 0 none (its command buffer completes while queue 1 is held; its FenceSync, which covers every earlier command of the NVN queue, still waits for the copy through fence2), 1 a barrier at the head of the next piece, 2 a barrier after the copy in its own piece.
+// With a barrier it reads the copy's word once queue 1 is released
+static void case_q2_chain(int bar) {
+    printf("CASE second Metal queue: one NVN queue's next piece waits for its second-queue piece %s\n",bar==0?"not at all without a barrier":bar==1?"behind a barrier at its head":"behind a barrier after that piece's work");
+    volatile uint32_t *scratch=source+3; NVNbufferAddress scratch_addr=source_addr+12; enum { REPOFF=98304-65536 };   // a report slot in the pool's spare range
+    *source=after; *scratch=before; *result=sentinel;
+    uint64_t s0[Q2S_N],s1[Q2S_N]; q2_stats_now(s0);
+    uint64_t f1=0; id<MTLSharedEvent> gate=gate_q(1,&f1);
+    NVNsync second; P(nvnSyncInitialize)(&second,&device);
+    begin_cmd(1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],source_addr,scratch_addr,4,0);
+    if(bar==2) P(nvnCommandBufferBarrier)(&commands[1],NVN_BARRIER_ORDER_PRIMITIVES_BIT|NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    static job aj,bj; enqueue(&aj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); require_returned(&aj,0);
+    begin_cmd(1);
+    if(bar==1) P(nvnCommandBufferBarrier)(&commands[1],NVN_BARRIER_ORDER_PRIMITIVES_BIT|NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],scratch_addr,result_addr,4,0);
+    P(nvnCommandBufferReportCounter)(&commands[1],NVN_COUNTER_TYPE_TIMESTAMP,source_addr+REPOFF);
+    P(nvnCommandBufferFenceSync)(&commands[1],&second,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    enqueue(&bj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); require_returned(&bj,0);
+    int enc=receipt_encoded(&second,2000000000ull); uint64_t sf=sync_fence(&second);
+    q2_stats_now(s1);
+    printf("  second piece fence %llu on Metal queue %d; chain waits asked %llu, waits encoded %llu\n",(unsigned long long)sf,mtl_fence_mq(sf),(unsigned long long)(s1[Q2S_CHAIN]-s0[Q2S_CHAIN]),(unsigned long long)(s1[Q2S_WAIT]-s0[Q2S_WAIT]));
+    CHECK(enc && mtl_fence_mq(sf)==0,"q2 chain: the piece with the report runs on queue 0");
+    if(bar==0) {
+        CHECK(s1[Q2S_CHAIN]==s0[Q2S_CHAIN],"q2 chain: no barrier, no wait asked for");
+        uint64_t t0=now_ns(); while(!mtl_fence_done(sf) && now_ns()-t0<2000000000ull) usleep(1000);
+        CHECK(mtl_fence_done(sf),"q2 chain: no barrier: its command buffer completes while queue 1 is held");
+        CHECK(!landed(&second,100000000ull),"q2 chain: no barrier: its FenceSync (all earlier commands of the NVN queue) still waits for the held queue-1 piece");
+        gate.signaledValue=1;
+        CHECK(landed(&second,5000000000ull),"q2 chain: no barrier: released, the FenceSync lands");
+    } else {
+        CHECK(s1[Q2S_CHAIN]>s0[Q2S_CHAIN] && s1[Q2S_WAIT]>s0[Q2S_WAIT],"q2 chain: the barrier asks for a wait, encoded (queue 1 is held)");
+        CHECK(!landed(&second,100000000ull),"q2 chain: with the barrier it does not complete while queue 1 is held");
+        gate.signaledValue=1;
+        CHECK(landed(&second,5000000000ull) && *result==after,"q2 chain: released, it read the second-queue piece's word");
+    }
+    landed(&second,5000000000ull);
+    P(nvnSyncFinalize)(&second);
+}
+// 4. V1, uploads: an upload batch flushed for a second-queue piece goes with it (queue 1), so the piece is not kept on queue 0 and waits for no queue-0 fence; a consumer on another
+// NVN queue, released at encode by the piece's exact signal, reads the uploaded and copied word
+static void case_q2_upload(void) {
+    printf("CASE second Metal queue: an upload batch goes with its second-queue piece\n");
+    volatile uint32_t *scratch=source+3; NVNbufferAddress scratch_addr=source_addr+12;
+    *source=before; *scratch=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    uint64_t s0[Q2S_N],s1[Q2S_N]; q2_stats_now(s0);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],source_addr,scratch_addr,4,0);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,7);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    static job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); require_returned(&pj,0);
+    begin_cmd(0);
+    P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,7);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],scratch_addr,result_addr,4,0);
+    P(nvnCommandBufferReportCounter)(&commands[0],NVN_COUNTER_TYPE_TIMESTAMP,source_addr+(98304-65536));   // queue 0
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    enqueue(&cj,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); require_returned(&cj,0);
+    int both=landed(&consumed,5000000000ull) && landed(&produced,5000000000ull); q2_stats_now(s1);
+    uint64_t pf=sync_fence(&produced);
+    printf("  producer on Metal queue %d; kept on queue 0 by an upload %llu, upload waits %llu\n",mtl_fence_mq(pf),(unsigned long long)(s1[Q2S_KEPT_UP]-s0[Q2S_KEPT_UP]),(unsigned long long)(s1[Q2S_UPLOAD]-s0[Q2S_UPLOAD]));
+    CHECK(both && *result==after,"q2 upload: the consumer read the uploaded and copied word");
+    CHECK(mtl_fence_mq(pf)==1 && s1[Q2S_KEPT_UP]==s0[Q2S_KEPT_UP],"q2 upload: the producer and its upload ran on queue 1, not kept on queue 0");
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
+}
+// 5. Stress: two NVN queues, N producer/consumer pairs on one event counter. Producer i (queue B) writes its own word and signals (ADD 1, or an exact WRITE of i+1), with a game
+// barrier at random; consumer i (queue A) waits for the counter to reach i+1 and copies that word to its own slot, half of them with a timestamp report (queue 0), and one Metal
+// queue is held for 0-2 ms every 37 pairs. A consumer that ran before its producer's write copies a 0: the GPU's own result checks the order
+static void case_q2_stress(void) {
+    const char *e=getenv("T_STRESS_N"); int N=e?atoi(e):400; if(N<1) N=1; if(N>2000) N=2000;
+    printf("CASE two-queue stress: %d producer/consumer pairs, mixed ADD / WRITE, barriers, mixed Metal queues, one held at times\n",N);
+    enum { BASE=98304, SRC=0, DST=8192, REP=16384, SPARE=24576 };
+    memset(memory+BASE,0,32768);
+    NVNbufferBuilder bb={0}; NVNbuffer buf; P(nvnBufferBuilderSetDefaults)(&bb); P(nvnBufferBuilderSetDevice)(&bb,&device); P(nvnBufferBuilderSetStorage)(&bb,&pool,BASE,32768);
+    if(!P(nvnBufferInitialize)(&buf,&bb)) { CHECK(0,"stress buffer"); return; }
+    NVNbufferAddress a=P(nvnBufferGetAddress)(&buf); volatile uint32_t *src=(volatile uint32_t *)(memory+BASE+SRC),*dst=(volatile uint32_t *)(memory+BASE+DST);
+    P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    uint64_t s0[Q2S_N]={0},s1[Q2S_N]={0}; if(g_q4b) mtl_q2_stats(s0);
+    unsigned seed=12345; NVNsync last; P(nvnSyncInitialize)(&last,&device);
+    job pj,cj; int have=0;
+    for(int i=0;i<N;i++) {
+        if(i%37==36 && g_q4b) { uint64_t f; id<MTLSharedEvent> g=gate_q((i/37)&1,&f); uint64_t us=(seed=seed*1103515245u+12345u)%2000;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)us*1000),dispatch_get_global_queue(QOS_CLASS_DEFAULT,0),^{ g.signaledValue=1; }); }
+        if(have) { require_returned(&pj,0); require_returned(&cj,0); }
+        seed=seed*1103515245u+12345u; int write=(seed>>16)&1, report=(seed>>17)&1, bar=(seed>>18)&3;
+        begin_cmd(1); uint32_t v=0x5a000000u|(uint32_t)i;
+        P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],a+SRC+4*i,4,0,4,&v);
+        if(bar==1) P(nvnCommandBufferBarrier)(&commands[1],NVN_BARRIER_ORDER_PRIMITIVES_BIT);
+        P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],a+SRC+4*i,a+SPARE+4*(i%2048),4,0);   // compute class: the piece may go to queue 1
+        if(bar==2) P(nvnCommandBufferBarrier)(&commands[1],NVN_BARRIER_INVALIDATE_SHADER_BIT);
+        P(nvnCommandBufferSignalEvent)(&commands[1],&event,write?NVN_EVENT_SIGNAL_MODE_WRITE:NVN_EVENT_SIGNAL_MODE_ADD,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,write?(uint32_t)(i+1):1);
+        enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1]));
+        begin_cmd(0);
+        P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_GEQUAL_WRAP,(uint32_t)(i+1));
+        P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],a+SRC+4*i,a+DST+4*i,4,0);
+        if(report) P(nvnCommandBufferReportCounter)(&commands[0],NVN_COUNTER_TYPE_TIMESTAMP,a+REP+16*(i%1024));
+        if(i==N-1) P(nvnCommandBufferFenceSync)(&commands[0],&last,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+        enqueue(&cj,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); have=1;
+    }
+    require_returned(&pj,0); require_returned(&cj,0);
+    int done=landed(&last,30000000000ull);
+    CHECK(done,"stress: the last consumer lands (no deadlock, no hold)");
+    if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,(uint32_t)N); _Exit(2); }
+    int bad=0,first=-1; for(int i=0;i<N;i++) if(dst[i]!=(0x5a000000u|(uint32_t)i)) { if(first<0) first=i; bad++; }
+    if(bad) printf("  first bad pair %d: copied %#x, source %#x\n",first,dst[first],src[first]);
+    CHECK(!bad,"stress: every consumer copied its producer's word (GPU-checked order)");
+    if(g_q4b) { mtl_q2_stats(s1); printf("  second Metal queue: %llu of %llu submissions, %llu cross-queue waits (%llu not needed), kept on queue 0 %llu, chain %llu, hand-offs %llu, uploads %llu, completions out of order %llu\n",
+        (unsigned long long)(s1[Q2S_Q1]-s0[Q2S_Q1]),(unsigned long long)(s1[Q2S_ALL]-s0[Q2S_ALL]),(unsigned long long)(s1[Q2S_WAIT]-s0[Q2S_WAIT]),(unsigned long long)(s1[Q2S_DONE]-s0[Q2S_DONE]),
+        (unsigned long long)(s1[Q2S_KEPT]-s0[Q2S_KEPT]),(unsigned long long)(s1[Q2S_CHAIN]-s0[Q2S_CHAIN]),(unsigned long long)(s1[Q2S_HANDOFF]-s0[Q2S_HANDOFF]),(unsigned long long)(s1[Q2S_UPLOAD]-s0[Q2S_UPLOAD]),(unsigned long long)(s1[Q2S_OOO]-s0[Q2S_OOO]));
+        const char *as=getenv("DM_NVN_MTLQ2_ASYNC"); if(as && !strcmp(as,"all")) CHECK(s1[Q2S_Q1]>s0[Q2S_Q1],"stress: the second Metal queue was used (sensitivity)"); }
+    P(nvnSyncFinalize)(&last); P(nvnBufferFinalize)(&buf);
+}
+// DM_NVN_QDEFER's policy and its classification of recorded pieces (the replay order it changes is exercised by every case above, run again with the switch on in the check)
+static void case_qdefer(void) {
+    printf("CASE queue defer: policy and piece classes\n");
+    nq_node render={.kind=NQ_COMMANDS,.cls_first=NQC_RENDER,.cls_last=NQC_RENDER}, comp={.kind=NQ_COMMANDS,.cls_first=NQC_COMPUTE,.cls_last=NQC_COMPUTE}, ev={.kind=NQ_EVENT}, empty={.kind=NQ_COMMANDS};
+    uint64_t cap=3000000; nq_node pres={.kind=NQ_PRESENT};
+    CHECK(nq_holdable(&comp,NQC_RENDER,0) && nq_holdable(&render,NQC_COMPUTE,0),"defer: a piece of the other class than the last one's is held");
+    CHECK(!nq_holdable(&render,NQC_RENDER,0) && !nq_holdable(&comp,NQC_COMPUTE,0) && !nq_holdable(&comp,NQC_NONE,0) && !nq_holdable(&ev,NQC_RENDER,0) && !nq_holdable(&empty,NQC_RENDER,0),"defer: same class, nothing replayed yet, waits and state-only pieces are not held");
+    CHECK(!nq_holdable(&comp,NQC_RENDER,1),"defer: nothing is held while a CPU thread waits on a fence");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&render,10,100,cap)==NQD_DEFER,"defer: render → (held compute) → render: the render piece goes first");
+    CHECK(nq_defer_decide(NQC_COMPUTE,10,0,&comp,10,100,cap)==NQD_DEFER,"defer: compute → (held render) → compute: the compute piece goes first");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&ev,10,100,cap)==NQD_DEFER && nq_defer_decide(NQC_RENDER,10,0,&empty,10,100,cap)==NQD_DEFER,"defer: a ready wait or state-only piece goes first");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&comp,10,100,cap)==NQD_RUN_OTHER_CLASS,"defer: another piece of the held one's class does not qualify");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&pres,10,100,cap)==NQD_RUN_BEFORE_PRESENT,"defer: never behind a present");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&render,11,100,cap)==NQD_RUN_LATER_FRAME,"defer: never behind a later frame's work");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,NULL,0,100,cap)==NQD_RUN_NONE_ELSE,"defer: nothing else ready: the held piece runs");
+    CHECK(nq_defer_decide(NQC_RENDER,10,50,&render,10,50+cap,cap)==NQD_RUN_CAP && nq_defer_decide(NQC_RENDER,10,50,&render,10,49+cap,cap)==NQD_DEFER,"defer: the cap runs it, not a nanosecond earlier");
+    CHECK(nq_op_class(OP_DISPATCH)==NQC_COMPUTE && nq_op_class(OP_COPY_B2B)==NQC_COMPUTE && nq_op_class(OP_DRAW_IDX)==NQC_RENDER && nq_op_class(OP_CLEAR_TEX)==NQC_RENDER && nq_op_class(OP_SIGNAL_EVENT)==NQC_NONE && nq_op_class(OP_BARRIER)==NQC_NONE,"defer: op classes");
+    // A recorded copy-only piece is compute-only (the class DM_NVN_QDEFER holds)
+    nq_job *j=calloc(1,sizeof *j); if(!j) _Exit(2); j->objects.klen=16; NVNsync f; P(nvnSyncInitialize)(&f,&device);
+    pthread_mutex_lock(&g_sub_mu); nq_flatten(j,(const uint8_t *)(uintptr_t)consumer(0,0,&f,0)); nq_end(j); pthread_mutex_unlock(&g_sub_mu);
+    nq_node *c=j->first; while(c && c->kind!=NQ_COMMANDS) c=c->next;
+    CHECK(c && c->cls_any==1u<<NQC_COMPUTE && c->cls_first==NQC_COMPUTE && c->cls_last==NQC_COMPUTE,"defer: a recorded copy-only piece is compute-only");
+    for(nq_node *m=j->first,*nx;m;m=nx) { nx=m->next; if(m->receipt) nq_put(m->receipt); free(m->signals); free(m->bytes); free(m); }
+    pthread_mutex_lock(&g_sub_mu); nq_job_free(j); pthread_mutex_unlock(&g_sub_mu); P(nvnSyncFinalize)(&f);
+}
 // Receipt tests observe public sync completion. This helper only waits until the scheduler has encoded the logical fence, so a negative GPU assertion cannot pass merely because its CPU worker has not run yet.
 static int receipt_encoded(NVNsync *sync,uint64_t timeout) {
     uint64_t start=now_ns(),fence=0; int ready=0;
     pthread_mutex_lock(&nq_mu);
-    while(!(ready=nq_sync_encoded((const sync_t *)sync,&fence))) {
+    uint64_t fence2=0; while(!(ready=nq_sync_encoded((const sync_t *)sync,&fence,&fence2))) {
         uint64_t elapsed=now_ns()-start; if(elapsed>=timeout) break;
         uint64_t left=timeout-elapsed; struct timespec ts={(time_t)(left/1000000000ull),(long)(left%1000000000ull)};
         pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&ts);
@@ -184,7 +398,7 @@ static void receipt_wait_only(int command_wait) {
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); rec_drain(); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); rec_drain(); [g_q4 waitForEvent:gate value:1]; if(g_q4b) [g_q4b waitForEvent:gate value:1];   /* DM_NVN_MTLQ2: the gate holds both Metal queues */ pthread_mutex_unlock(&g_sub_mu);
     begin_cmd(1); uint32_t payload=after; P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
     job producer,waiter; enqueue(&producer,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&producer,250000000ull);
     P(nvnQueueFenceSync)(&queues[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
@@ -212,7 +426,7 @@ static void event_stale_gpu_reset(void) {
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; if(g_q4b) [g_q4b waitForEvent:gate value:1];   /* DM_NVN_MTLQ2: the gate holds both Metal queues */ pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync reset,consumed; P(nvnSyncInitialize)(&reset,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(0);
     P(nvnCommandBufferSignalEvent)(&commands[0],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,0);
@@ -240,7 +454,7 @@ static void event_queued_write(int mode) {
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; if(g_q4b) [g_q4b waitForEvent:gate value:1];   /* DM_NVN_MTLQ2: the gate holds both Metal queues */ pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(1); uint32_t payload=after;
     P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
@@ -268,7 +482,7 @@ static void event_signal_no_cut(void) {
     P(nvnEventSignal)(&second,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; uint64_t first_fence=mtl_last_fence(); pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; if(g_q4b) [g_q4b waitForEvent:gate value:1];   /* DM_NVN_MTLQ2: the gate holds both Metal queues */ uint64_t first_fence=mtl_last_fence(); pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(1); uint32_t payload=after, other=before;
     P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
@@ -298,7 +512,7 @@ static void frame_shares_allocator(void) {
     *source=before; *result=sentinel;
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
     if (!gate) abort();
-    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; if(g_q4b) [g_q4b waitForEvent:gate value:1];   /* DM_NVN_MTLQ2: the gate holds both Metal queues */
     uint64_t waits=g_alloc_waits, shares=g_alloc_shares; int pool=g_alloc_n, ring=g_vis_ring_n; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
     static NVNsync fences[N]; static job jobs[N]; int submitted=0, encoded=0;
     for(int i=0;i<N;i++) {
@@ -397,6 +611,7 @@ int main(void) { @autoreleasepool {
     // Warm the actual copy/fence path before making bounded negative assertions.
     *source=before; *result=sentinel; NVNsync warm; P(nvnSyncInitialize)(&warm,&device); job w; enqueue(&w,&queues[0],consumer(0,0,&warm,0));
     require_returned(&w,0); int warm_ok=landed(&warm,5000000000ull); CHECK(warm_ok && *result==before,"real GPU copy and fence warm-up"); if(!warm_ok) _Exit(2); P(nvnSyncFinalize)(&warm);
+    if(getenv("T_STRESS_ONLY")) case_q2_stress(); else {   // check_t_queue_stress: the stress alone, longer
     case_wait("CPU release equality",0,0,1,0);
     case_wait("equality rejects a larger value",0,2,1,0);
     case_wait("wrap accepts zero after ffffffff",1,0,0xffffffff,1);
@@ -404,6 +619,11 @@ int main(void) { @autoreleasepool {
     case_wait("wrap accepts half-range minus one",1,0x7fffffff,0,1);
     case_wait("wrap rejects exactly half-range",1,0x80000000,0,0);
     case_cross_queue();
+    if(!g_q4b) case_q2_through();   // the ring is the live one with the switch on
+    const char *as=getenv("DM_NVN_MTLQ2_ASYNC"); int all=as && !strcmp(as,"all");
+    if(g_q4b) { case_q2_queue_done(); if(all) { case_q2_scan_release(); case_q2_chain(0); case_q2_chain(1); case_q2_chain(2); case_q2_upload(); } }
+    case_q2_stress();   // before event_mirror_publication: its render target's storage (pool offset 98304, the stress buffer's) stays write-protected after it, and this fixture has no fault handler
+    case_qdefer();
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
@@ -412,6 +632,7 @@ int main(void) { @autoreleasepool {
     vis_ring_grows();
     receipt_tests();
     event_mirror_publication();
+    }
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);
     printf("wait-event fixture: %d checks, %d failed\n",checks,fails);
     // The process owns the fixture pool until all callbacks have retired.

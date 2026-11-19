@@ -348,8 +348,10 @@ t_present_queue: t_present_queue.m $(MTL_T_DEP)
 check_t_present_queue: t_present_queue
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_queue own
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_queue slot
+	DM_PRESENT_QUEUE=1 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_queue resize
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_queue own
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_queue slot
+	DM_PRESENT_QUEUE=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_queue resize
 # A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
 t_gpu_lost: t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_SRC) $(FW)

@@ -1,7 +1,7 @@
 // Presents of snapshots on their own queue (g_qpres, DM_PRESENT_QUEUE): real Metal 4 queues and offscreen drawables, the display link's callback called by hand (no window, no game
 // files). own: a present runs while the game's queue is held (a gate stands for the next frame's work and for the drawable wait in front of it). slot: the copy that reuses a ring
 // slot waits for the present that read it, though that present was processed (committed) and the game's queue is free. Run with DM_PRESENT_QUEUE=0, own fails: the present waits
-// behind the gate on g_q4
+// behind the gate on g_q4. resize: a held present must not keep the texture retired by the preceding resize in the residency set.
 #include "../nvn/nvn_mtl.m"
 @interface FakeLinkUpdate : NSObject
 @property id<CAMetalDrawable> drawable;
@@ -17,14 +17,14 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
-static tex_t source(unsigned serial, uint8_t left, uint8_t right) {   // 8x8 grey, the left four columns one value and the right four another
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
+static tex_t source(unsigned serial, unsigned height, uint8_t left, uint8_t right) {   // eight grey columns, each half a different value
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:height mipmapped:NO];
     d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; uint8_t bytes[256];
-    for (int i = 0; i < 64; i++) { uint8_t v = i % 8 < 4 ? left : right; bytes[4 * i] = bytes[4 * i + 1] = bytes[4 * i + 2] = v; bytes[4 * i + 3] = 255; }
-    [mt replaceRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0 withBytes:bytes bytesPerRow:32];
+    id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; uint8_t row[32];
+    for (int i = 0; i < 8; i++) { uint8_t v = i < 4 ? left : right; row[4 * i] = row[4 * i + 1] = row[4 * i + 2] = v; row[4 * i + 3] = 255; }
+    for (unsigned y = 0; y < height; y++) [mt replaceRegion:MTLRegionMake2D(0, y, 8, 1) mipmapLevel:0 withBytes:row bytesPerRow:sizeof row];
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=serial};
-    t.d.width = t.d.height = 8; t.d.depth = t.d.levels = t.d.samples = 1;
+    t.d.width = 8; t.d.height = height; t.d.depth = t.d.levels = t.d.samples = 1;
     t.d.target = NVN_TEXTURE_TARGET_2D; t.d.format = NVN_FORMAT_RGBA8;
     serial_put(t.serial, mt); res_add(mt); res_commit(); return t;
 }
@@ -93,6 +93,45 @@ static void slot_case(tex_t *a, tex_t *b, tex_t *c) {
     CHECK("the ring slot holds the new copy", bad_pixels(g_snap[slot].tex, 200, 210) == 0);
     tick(); CHECK("the third present ran", all_done(g_pq_in, 5.0));
 }
+static void resize_case(tex_t *a) {
+    tex_t b = source(92004, 16, 100, 100), c = source(92005, 24, 200, 200);
+    for (int i = 0; i < 2; i++) {
+        present_enqueue(a, 1. / 60, NULL, 0, NULL); copied(); tick();
+        CHECK("an initial present ran", all_done(g_pq_in, 5.0));
+    }
+    CHECK("the present queue exists", g_qpres != nil);
+    if (!g_qpres) return;
+    id<MTLTexture> first = g_snap[0].tex;
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); copied();
+    id<MTLTexture> second = g_snap[0].tex;
+    CHECK("the first resize keeps the previous texture resident", first && second != first && g_snap[0].old == first && [g_snap_res containsAllocation:first]);
+
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    [g_qpres waitForEvent:gate value:1];
+    uint64_t ticket = g_pq_in;
+    tick();   // holds the last present of the second texture
+    present_enqueue(a, 1. / 60, NULL, 0, NULL); copied(); tick();
+    pthread_mutex_lock(&g_pq_mu); int processed = g_pq_done >= ticket && g_pq_inflight == 2; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t present = g_snap[0].pq;
+    CHECK("the second texture's present is committed and pending", processed && present && g_pres_ev.signaledValue < present);
+
+    uint64_t before = g_snap_v;
+    present_enqueue(&c, 1. / 60, NULL, 0, NULL);
+    snap_commit_wait(g_snap_v);
+    CHECK("the second resize took a snapshot and its copy waits for the held present", g_snap_v == before + 1 && g_snap_ev.signaledValue < g_snap_v);
+    CHECK("the first texture leaves the residency set at the second resize", ![g_snap_res containsAllocation:first]);
+    CHECK("the second texture stays resident while its present is held", g_snap[0].old == second && [g_snap_res containsAllocation:second]);
+    gate.signaledValue = 1;
+    copied();
+    CHECK("the held presents ran", all_done(ticket + 1, 5.0));
+    tick(); CHECK("the resized snapshot was presented", all_done(g_pq_in, 5.0));
+
+    present_enqueue(a, 1. / 60, NULL, 0, NULL); copied(); tick();
+    CHECK("the other slot's present ran", all_done(g_pq_in, 5.0));
+    present_enqueue(&c, 1. / 60, NULL, 0, NULL);
+    CHECK("the second texture leaves the residency set at the next reuse", ![g_snap_res containsAllocation:second] && !g_snap[0].old);
+    copied(); tick(); CHECK("the final present ran", all_done(g_pq_in, 5.0));
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(30); setbuf(stdout, NULL);
     if (argc != 2) return 2;
@@ -102,9 +141,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     mtl_present_layer(8, 8);   // the picture fills the square drawables (present_shape)
     g_dm_present_link = 1; g_link_started = 1; g_link_owns_layer = 1; g_delegate = [NvMetalDisplayLinkDelegate new];   // display-link mode without a link thread (t_present_alloc)
-    tex_t a = source(92001, 50, 150), b = source(92002, 100, 100), c = source(92003, 200, 210);
+    tex_t a = source(92001, 8, 50, 150), b = source(92002, 8, 100, 100), c = source(92003, 8, 200, 210);
     if (!strcmp(argv[1], "own")) own_case(&a);
     else if (!strcmp(argv[1], "slot")) slot_case(&a, &b, &c);
+    else if (!strcmp(argv[1], "resize")) resize_case(&a);
     else return 2;
     printf("present queue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

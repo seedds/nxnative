@@ -12,10 +12,13 @@ static int checks, fails, events;
 uint32_t hle_new_event(uint32_t *write_end) { events++; if (write_end) *write_end = 0x2000 + events; return 0x1000 + events; }
 static const hle_readonly_shmem *shared;
 uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory) { shared = memory; return 0x2001; }
-static uint8_t irs_work[0x13000];
-void *hle_map_transfer_memory(uint32_t handle, uint64_t size, uint32_t owner_perm) {
-    return handle == 0x2002 && size == sizeof irs_work && owner_perm == 0 ? irs_work : NULL;
+static uint8_t irs_work[2][0x13000];
+int hle_map_transfer_memory(hle_transfer_mapping *mapping, uint32_t handle, uint64_t size, uint32_t owner_perm) {
+    if (handle < 0x2002 || handle > 0x2003 || size != sizeof irs_work[0] || owner_perm) return 0;
+    *mapping = (hle_transfer_mapping){ .address = (uintptr_t)irs_work[handle - 0x2002], .size = size };
+    return 1;
 }
+void hle_unmap_transfer_memory(hle_transfer_mapping *mapping) { *mapping = (hle_transfer_mapping){0}; }
 
 // A CMIF request for command cmd on a non-domain session (HIPC type 4, no special header, no descriptors): the data words from +8, "SFCI" at +0x10
 static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
@@ -24,16 +27,31 @@ static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
     m[4] = 0x49434653; m[5] = 0; m[6] = cmd; m[7] = 0;
     return h_sf_Send(h, m, 0x100);
 }
-// Run commands send a PID and packed arguments. The image-transfer modes include one copied handle.
-static Result irs_run_request(uint32_t h, unsigned cmd, uint32_t *m, const uint32_t *body, size_t size, uint32_t copy) {
+// IRS commands send a PID and packed arguments. Image-transfer starts copy a handle and the state query receives a B buffer.
+static Result irs_request(uint32_t h, unsigned cmd, uint32_t *m, const uint32_t *body, size_t size, uint32_t copy, void *buf, uint32_t capacity) {
     memset(m, 0, 0x100);
-    unsigned align = copy ? 2 : 3;
-    m[0] = 4; m[1] = (align + 4 + (unsigned)(size / 4)) | 1u << 31;
-    m[2] = copy ? 3 : 1; m[3] = DM_APPLET_RESOURCE_USER_ID; m[5] = copy;
-    m[8] = 0x49434653; m[10] = cmd;
-    memcpy(m + 12, body, size);
+    m[0] = 4 | (buf ? 1u << 24 : 0);
+    uint32_t *p = m + 2;
+    *p++ = copy ? 3 : 1;
+    *p++ = DM_APPLET_RESOURCE_USER_ID;
+    *p++ = 0;
+    if (copy) *p++ = copy;
+    if (buf) {
+        uint64_t address = (uintptr_t)buf;
+        *p++ = capacity;
+        *p++ = (uint32_t)address;
+        *p++ = (uint32_t)(address >> 32 & 0xf) << 28 | (uint32_t)(address >> 36) << 2;
+    }
+    unsigned align = (unsigned)(-(p - m)) & 3;
+    p += align;
+    m[1] = (align + 4 + (unsigned)(size / 4)) | 1u << 31;
+    p[0] = 0x49434653; p[2] = cmd;
+    memcpy(p + 4, body, size);
     if (h_sf_Send(h, m, 0x100) || m[4] != 0x4f434653) return RES_FAIL;
     return m[6];
+}
+static Result irs_run_request(uint32_t h, unsigned cmd, uint32_t *m, const uint32_t *body, size_t size, uint32_t copy) {
+    return irs_request(h, cmd, m, body, size, copy, NULL, 0);
 }
 
 static Result irs_cluster_request(uint32_t h, uint32_t *m, uint32_t camera, uint8_t gain) {
@@ -66,7 +84,7 @@ static void irs_run_checks(uint32_t h, uint32_t *m) {
         } else if (cmd == 310 || cmd == 317) {
             body[1] = body[2] = UINT32_MAX;   // opaque until the worker runs
         }
-        if (transfer) body[cmd == 308 ? 10 : 12] = sizeof irs_work;
+        if (transfer) body[cmd == 308 ? 10 : 12] = sizeof irs_work[0];
         uint32_t copy = transfer ? 0x2002 : 0;
         CHECK(irs_run_request(h, cmd, m, body, size, copy) == RES_OK, "valid IRS start succeeds with no camera");
         CHECK(irs_run_request(h, cmd, m, body, size - 4, copy) == 0x1ce0au, "short IRS start body rejected");
@@ -97,6 +115,57 @@ static void irs_run_checks(uint32_t h, uint32_t *m) {
         if (cmd != 310 && cmd != 317)
             CHECK(irs_run_request(h, cmd, m, body, size, copy) == 0x19ccdu, "invalid processor configuration rejected");
     }
+}
+
+static void irs_control_checks(uint32_t h, uint32_t *m) {
+    const unsigned cmds[] = {309, 313, 314, 315};
+    uint32_t player[4] = {0, 0, DM_APPLET_RESOURCE_USER_ID}, handheld[4] = {8, 0, DM_APPLET_RESOURCE_USER_ID};
+    uint8_t pixels[16], before[sizeof pixels];
+    memset(pixels, 0xa5, sizeof pixels);
+    memcpy(before, pixels, sizeof before);
+    for (size_t i = 0; i < sizeof cmds / sizeof *cmds; ++i) {
+        unsigned cmd = cmds[i];
+        void *buf = cmd == 309 ? pixels : NULL;
+        CHECK(irs_request(h, cmd, m, player, 12, 0, buf, sizeof pixels) == 0x1ce0au, "short IRS control body rejected");
+        player[0] = 0x100;
+        CHECK(irs_request(h, cmd, m, player, sizeof player, 0, buf, sizeof pixels) == 0x198cdu, "bad camera type rejected");
+        player[0] = 0;
+        player[2]++;
+        CHECK(irs_request(h, cmd, m, player, sizeof player, 0, buf, sizeof pixels) == 0x60au, "other applet rejected");
+        player[2]--;
+    }
+    CHECK(irs_run_request(h, 309, m, player, sizeof player, 0) == 0x1ce0au, "image query requires an output descriptor");
+    CHECK(irs_request(h, 309, m, player, sizeof player, 0, pixels, sizeof pixels) == 0xf0cdu, "idle image query returns no image");
+    CHECK(irs_run_request(h, 313, m, player, sizeof player, 0) == RES_OK, "idle suspend succeeds");
+
+    player[1] = 3 | 11u << 16;
+    CHECK(irs_run_request(h, 314, m, player, sizeof player, 0) == 0xdecdu, "first firmware check reports missing MCU");
+    CHECK(irs_run_request(h, 314, m, player, sizeof player, 0) == RES_OK, "pending firmware check returns success");
+    CHECK(irs_run_request(h, 314, m, handheld, sizeof handheld, 0) == 0xdecdu, "firmware check is per camera");
+    player[1] = 3;
+    CHECK(irs_run_request(h, 315, m, player, sizeof player, 0) == RES_OK && irs_cameras[0].function_level == 3,
+          "IRS stores the requested function level for the camera");
+
+    uint32_t image[14] = {0, 0, DM_APPLET_RESOURCE_USER_ID, 0, 300000, 0, 8u << 8};
+    image[10] = sizeof irs_work[0];
+    CHECK(irs_run_request(h, 308, m, image, 0x30, 0x2002) == RES_OK, "start image transfer for player one");
+    image[0] = 8; image[10] = 0; image[12] = sizeof irs_work[0];
+    CHECK(irs_run_request(h, 316, m, image, sizeof image, 0x2003) == RES_OK, "start extended transfer for handheld");
+    CHECK(irs_request(h, 309, m, player, sizeof player, 0, pixels, sizeof pixels) == 0xf0cdu,
+          "image query after start still returns no image");
+    CHECK(irs_run_request(h, 313, m, player, sizeof player, 0) == RES_OK &&
+          !irs_cameras[0].transfer.size && irs_cameras[8].transfer.size, "suspend releases only its camera's mapping");
+    CHECK(irs_request(h, 309, m, player, sizeof player, 0, pixels, sizeof pixels) == 0xf0cdu &&
+          !memcmp(pixels, before, sizeof pixels), "image queries leave the output buffer untouched");
+    CHECK(irs_run_request(h, 313, m, handheld, sizeof handheld, 0) == RES_OK && !irs_cameras[8].transfer.size,
+          "suspend also releases an extended transfer mapping");
+    CHECK(irs_run_request(h, 316, m, image, sizeof image, 0x2003) == RES_OK, "restart after suspend");
+    CHECK(irs_run_request(h, 318, m, handheld, sizeof handheld, 0) == RES_OK && !irs_cameras[8].transfer.size,
+          "stop releases the extended transfer mapping");
+    CHECK(irs_run_request(h, 316, m, image, sizeof image, 0x2003) == RES_OK, "restart after stop");
+    CHECK(irs_run_request(h, 303, m, player + 2, 8, 0) == RES_OK && !irs_cameras[8].transfer.size,
+          "deactivation releases remaining mappings");
+    CHECK(irs_run_request(h, 314, m, player, sizeof player, 0) == 0xdecdu, "deactivation clears pending firmware checks");
 }
 // The same on a domain session as the SDK's notif:a client sends it: the process ID in a special header when pid, one B descriptor (the buffer buf) when buf, the domain header for
 // object 1 at the first 16-byte boundary after them, then "SFCI"
@@ -129,6 +198,7 @@ int main(void) {
         CHECK(request(irs, m, 304) == RES_OK && m[6] == RES_OK && m[3] == 0x2001 && m[1] >> 31 && m[2] == 2,
               "IRS returns one copied shared memory handle");
         CHECK(shared && shared->size == 0x8000, "IRS status manager has its ABI size");
+        irs_control_checks(irs, m);
         irs_run_checks(irs, m);
         if (shared) {
             const uint32_t *words = shared->bytes;

@@ -42,7 +42,7 @@ const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { return handl
 static hle_transfer_memory transfer_memory;
 uint32_t hle_new_transfer_memory(hle_transfer_memory memory) { transfer_memory = memory; return 0x1043; }
 int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) {
-    if (handle != 0x1043) return 0;
+    if (handle != 0x1043 || !transfer_memory.size) return 0;
     *memory = transfer_memory;
     return 1;
 }
@@ -178,12 +178,19 @@ static void transfer_memory_setup(void) {
     svc_dispatch(0x15, regs, 0);
     assert(!regs[0] && regs[1] == 0x1043 && transfer_memory.address == addr);
     *(uint8_t *)addr = 0x42;
-    assert(hle_map_transfer_memory(0x1043, size, 0) == (void *)addr && *(uint8_t *)addr == 0x42);
-    assert(!hle_map_transfer_memory(0x1042, size, 0));
-    assert(!hle_map_transfer_memory(0x1043, size * 2, 0));
-    assert(!hle_map_transfer_memory(0x1043, size, 1));
+    hle_transfer_mapping mapping = {0};
+    assert(hle_map_transfer_memory(&mapping, 0x1043, size, 0));
+    assert(mapping.address == addr && *(uint8_t *)mapping.address == 0x42);
+    assert(!hle_map_transfer_memory(&mapping, 0x1042, size, 0));
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size * 2, 0));
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size, 1));
+    transfer_memory.size = 0;   // The guest closed its own handle.
+    assert(pages(0, addr, size) == BAD);
+    hle_unmap_transfer_memory(&mapping);
+    hle_unmap_transfer_memory(&mapping);
     assert(!pages(0, addr, size));
-    assert(!hle_map_transfer_memory(0x1043, size, 0));
+    transfer_memory = (hle_transfer_memory){addr, size, 0};
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size, 0));
 }
 static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
     fflush(NULL); pid_t pid = fork(); assert(pid >= 0);

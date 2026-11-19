@@ -777,6 +777,68 @@ static void test_rg_texture_uploads(void) {
     puts("GL texture uploads: RED/RG expansion, typed components, row length and byte swapping: OK");
 }
 
+static void test_fixed_function(int gpu) {
+    const EGLint core[] = {0x3098, 3, 0x30fb, 2, 0x3038};
+    const EGLint compat[] = {0x3098, 3, 0x30fb, 2, 0x30fd, 2, 0x3038};
+    const EGLint gl31[] = {0x3098, 3, 0x30fb, 1, 0x3038};
+    const EGLint forward[] = {0x3098, 3, 0x30fc, 2, 0x3038};
+    h_eglCreateContext(NULL, NULL, NULL, core); assert(!g_ctx_fixed);
+    h_eglCreateContext(NULL, NULL, NULL, gl31); assert(!g_ctx_fixed);
+    h_eglCreateContext(NULL, NULL, NULL, forward); assert(!g_ctx_fixed);
+    h_eglCreateContext(NULL, NULL, NULL, compat);
+    GLint profile; h_glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile); assert(g_ctx_fixed && profile == 2);
+    h_eglCreateContext(NULL, NULL, NULL, NULL); assert(g_ctx_fixed);
+
+    __typeof__(S) saved = S;
+    h_glActiveTexture(GL_TEXTURE0);
+    const GLfloat color[] = {-1, 0.25f, 0.5f, 2};
+    h_glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, color);
+    assert(F.envc[0][0] == 0 && F.envc[0][1] == 0.25f && F.envc[0][2] == 0.5f && F.envc[0][3] == 1);
+    h_glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, 0.5f); assert(h_glGetError() == GL_INVALID_ENUM);
+    h_glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, 1); assert(h_glGetError() == GL_INVALID_ENUM);
+    assert(F.envc[0][1] == 0.25f && F.envc[0][3] == 1);
+    h_glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, NAN); assert(h_glGetError() == GL_INVALID_ENUM && F.env[0] == GL_MODULATE);
+    h_glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE); assert(F.env[0] == GL_REPLACE);
+    h_glMatrixMode(GL_TEXTURE);
+    h_glActiveTexture(GL_TEXTURE0 + 1);
+    h_glTranslatef(0.5f, 0, 0);
+    assert(F.texture[0].m[0][12] == 0 && F.texture[1].m[0][12] == 0.5f);
+    h_glMatrixMode(GL_MODELVIEW);
+
+    if (gpu) {
+        GLuint tex[2], fb, vao;
+        h_glGenTextures(2, tex);
+        h_glBindTexture(GL_TEXTURE_2D, tex[0]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+        h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, tex[1]);
+        const uint8_t green[8] = {0, 255, 0, 255, 0, 255, 0, 255};
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+        h_glEnable(GL_TEXTURE_2D);
+
+        h_glUseProgram(0); h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glBindBuffer(GL_ARRAY_BUFFER, 0);
+        const GLfloat vertices[] = {-1, -1, 3, -1, -1, 3};
+        const uint8_t red[9] = {255, 0, 0, 255, 0, 0, 255, 0, 0};
+        h_glVertexPointer(2, GL_FLOAT, 0, vertices); h_glEnableClientState(GL_VERTEX_ARRAY);
+        h_glColorPointer(3, GL_UNSIGNED_BYTE, 0, red); h_glEnableClientState(GL_COLOR_ARRAY);
+        h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST);
+        h_glColorMask(1, 1, 1, 1);
+        h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);   // default mip filter, incomplete image: use vertex color
+        h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        h_glViewport(1, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);   // complete image: GL_REPLACE uses the sampled color
+        uint8_t pixels[8];
+        h_glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(pixels[0] == 255 && pixels[1] == 0 && pixels[3] == 255);
+        assert(pixels[4] == 0 && pixels[5] == 255 && pixels[7] == 255);
+        h_glDeleteVertexArrays(1, &vao); h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(2, tex);
+    }
+    assert(h_glGetError() == GL_NO_ERROR);
+    S = saved;
+    h_eglCreateContext(NULL, NULL, NULL, core);
+    puts("GL fixed-function context, texture environment and draw: OK");
+}
+
 int main(int argc, char **argv) {
     int stubs = 0, cpu = 0; const char *fixture = NULL;
     for (int i = 1; i < argc; i++) {
@@ -897,6 +959,7 @@ int main(int argc, char **argv) {
     test_program_validation();
     test_active_attributes();
     test_fate_calls();
+    test_fixed_function(!cpu);
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;

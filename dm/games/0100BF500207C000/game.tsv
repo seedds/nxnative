@@ -31,6 +31,10 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x4600000
 
+# ---- Frame rate ----
+# Unreal's rhi.SyncInterval is found by its registered name. One vsync per frame yields 60 fps.
+fps_target	60
+
 # ---- Shader split ----
 # Two shared v1 shader archives supply the engine's global shaders and the game's material shaders.
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game

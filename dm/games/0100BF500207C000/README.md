@@ -11,7 +11,13 @@ Update 1.60 (v851968) with the base game and five DLC, Nintendo SDK 7.6.0, Unrea
 
 Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac --package v851968` and use the printed run command. Set `DM_METAL_HUD=1` to show the Metal HUD. From the title screen choose Game Start. Start a new game or resume a Galleon Minerva save. Plus skips the illustrated prologue and the first dialogue.
 
-On Apple M6 with macOS 27.2.1, the registered build reached the title, loaded a Galleon Minerva save, and rendered the opening dialogue and the gameplay status screen at the game's 30 fps limit.
+On Apple M6 with macOS 27.2.1, the registered build reached the title, loaded a Galleon Minerva save, and rendered the opening dialogue and the gameplay status screen.
+
+## Frame rate
+
+The profile selects 60 fps with `fps_target 60`. The shared Unreal timing code finds `rhi.SyncInterval` by its registered name and sets it to one vsync per frame. The stock configuration uses two. Set `DM_FPS_TARGET=0` to use the game's original 30 fps timing. [Unreal's frame limit and present interval](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name)
+
+On Apple M6, standing in the first Galleon Minerva cabin for 12 seconds yielded 360 frames at the stock cap and 720 at 60 fps. Median frame time was 33.36 ms at the stock cap and 16.65 ms at 60 fps. The in-game timer advanced 21 seconds across the same 21-second interval in both runs, measured from the status screen.
 
 ## Found on this game
 

@@ -118,8 +118,24 @@ No idle arena releases were needed in either candidate run: sharing prevented th
 
 The allocator fixture passes 25/25/22/20 checks with encoding off/on, trimming off and sharing off, including pending and latest-writer fences, current-block residency, large-block counters and actual buffer release while its shader cache survives. An isolated mutation restoring the strong shader reference fails the release assertion; the working tree is unchanged by that check. Existing `t_args_gen` retains the address-rollover regressions and passes all 42 checks. No iPhone run. Isaac was skipped at the user's request.
 
+## Windowless Mac audio
+
+kenCalx diagnosed the problem in NX18 and Oliver Ames ported the change to nxnative. In NieR, Wwise keeps four blocks of 1,024 frames in its AudioOut queue. NX18's System Trace recorded runnable waits of up to 30–40 ms with the unspecified role and up to 1.6 ms with a foreground-role wrapper. Underruns occurred in four of five controls, and all three wrapper runs had zero. NX18 also reported a separate 300-second run with the foreground role that had zero underruns, compared with five in the preceding run. [NX18 change](https://github.com/kencalx/NX18/commit/7c3d6eb7135b27fefd0682d0e0d5adc52e550e9a) · [PR #2876](https://github.com/seedds/nxnative/pull/2876).
+
+The nxnative comparison used main at `a739027a` with PR #2876 and a variant that changed only the Mach role. On an M4 Pro with macOS 27.2.1 and Xcode 27.2, NieR 1.0.3 ran the opening-flight inputs from [smoke.tsv](smoke.tsv) for 300 seconds. Each run started from a fresh copy of the same save and pipeline archive and used real Core Audio with output muted.
+
+| Role | Sampled interactive priority | Underruns / zero-filled audio per 58,000 reported callbacks |
+|---|---:|---:|
+| Unspecified | 31 | 53 / 223.3 ms |
+| Default application | 46 | 0 / 0 ms |
+| Foreground application | 47 | 0 / 0 ms in both runs |
+
+The default-role run and its paired foreground run measured frame p95 of 17.11 and 16.94 ms over the 140–200 s flight window. One 840.5 ms frame in the foreground run occurred with audio callbacks continuing. The local runs sampled light load from the daemons named in the NX18 trace. The runnable wait measurements above come from NX18.
+
 ## Found on this game
 
+- **Resolved:** [SIGTERM during the first Metal initialization](../../../docs/reference/rendering.md#sigterm-during-the-first-metal-initialization). On an M4 Pro with macOS 27.2.1 and Xcode 27.2, early SIGTERM trapped in 16 of 24 windowless NieR 1.0.3 launches on `efd1bddd`, the parent of PR #2876. The fix exited cleanly in all 24 matched trials. A 100-second opening-flight run reached frame 5,977 and then shut down cleanly on SIGTERM.
+- [Underruns in a run without a window](../../../docs/reference/audio.md#underruns-in-a-run-without-a-window): [Mac audio comparison](#windowless-mac-audio).
 - [A pipeline a hybrid draw stood in for listed only once built](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built): controlled [preparation-cost measurement](#preparation-cost-of-a-recorded-backlog); the unfinished gameplay backlog was not reproduced on this Mac.
 - [Per-frame arena blocks made for every submission in flight](../../../docs/reference/memory.md#per-frame-arena-blocks-made-for-every-submission-in-flight).
 - **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).

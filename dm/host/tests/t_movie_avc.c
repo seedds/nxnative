@@ -435,6 +435,41 @@ static void native_buffers(void) {
     assert(md_out_tex(&d, 0, &b) == 0x100b && native_copies == 2);
     pthread_mutex_destroy(&d.mu);
 }
+static void save_color_key(void *md, const char *key, int value) {
+    if (!strcmp(key, "nv12-colorspace")) *(int *)md = value;
+}
+static void ignore_rect(void *md, const char *key, int l, int t, int r, int b) {
+    (void)md; (void)key; (void)l; (void)t; (void)r; (void)b;
+}
+static void color_keys(void) {
+    mdec_t d = {.type = MD_TYPE_AVC, .fmt = MD_FMT_NV12, .w = 1920, .h = 1080, .avc = mavc_new(NULL)};
+    G.set_i32 = save_color_key;
+    G.set_rect = ignore_rect;
+    int key = -1;
+    md_format(&d, &key);
+    assert(key == 3);   // SDK 4.4.1, BT.709 limited
+    G.native_color_keys = 1;
+    md_format(&d, &key);
+    assert(key == 2);   // SDK 7.3.2, same planes
+    d.h = 480;
+    md_format(&d, &key);
+    assert(key == 4);   // BT.601 limited
+    mavc_free(d.avc);
+    d.avc = NULL;
+    d.type = MD_TYPE_VP9;
+    d.vpx_full = 1;
+    d.vpx_cs = VPX_CS_BT_601;
+    md_format(&d, &key);
+    assert(key == 1);   // BT.601 full
+    d.vpx_cs = VPX_CS_BT_709;
+    md_format(&d, &key);
+    assert(key == 3);   // BT.709 full
+    G.native_color_keys = 0;
+    md_format(&d, &key);
+    assert(key == 4);
+    puts("movie NV12 metadata: SDK 4.4.1 and 7.3.2 keys match the matrix and delivered range");
+}
+
 int main(void) {
     dpb_order(); dpb_reordered_b(); dpb_limits(); pump_due();
     puts("AVC DPB: reference occupancy drives output, with variable/zero PTS, POC and frame_num wraps, IDR/Flush, reordered B-pictures, bounds, unsupported marking and slot-release pumping");
@@ -477,5 +512,6 @@ int main(void) {
     drain(MD_NOUT_VIDEO); drain(2);
     puts("AVC end of stream: every queued picture leaves without the flag, then an output without a picture carries it, also when the client holds the slots");
     terminal_inputs();
+    color_keys();
     puts("movie inputs: already-held inputs after EOS are returned once without another output; rejected sends keep the stream open, Flush accepts a new stream");
 }

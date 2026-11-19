@@ -22,6 +22,60 @@ static int g_fail, g_n;
 #define P(name) ((NVNT_##name)proc(#name))
 static PFNNVNDEVICEGETPROCADDRESSPROC gpa; static NVNdevice dev;
 static void *proc(const char *n) { void *p = (void *)gpa(&dev, n); if (!p) { printf("address lookup failed %s\n", n); exit(1); } return p; }
+extern int dm_test_sdk_ounce;   // the strong SDK-target test hook in t_host_stubs.c
+static void texture_gob_orders(void) {
+    static uint8_t storage[4 * 65536] __attribute__((aligned(16384)));
+    uint8_t linear[16 * 8 * 4], back[sizeof linear];
+    NVNcopyRegion all = {0, 0, 0, 16, 8, 1}, pixel = {4, 0, 0, 1, 1, 1};
+    const uint8_t marker[4] = {0xa1, 0xb2, 0xc3, 0xd4};
+    for (int ounce = 0; ounce < 2; ounce++) {
+        dm_test_sdk_ounce = ounce;
+        NVNdevice owner[2], later; NVNdeviceBuilder db;
+        P(nvnDeviceBuilderSetDefaults)(&db);
+        for (int mode = 0; mode < 2; mode++) {
+            P(nvnDeviceBuilderSetFlags)(&db, mode ? 0x10000 : 0);
+            P(nvnDeviceInitialize)(&owner[mode], &db);
+        }
+        NVNmemoryPool pool; NVNmemoryPoolBuilder pb;
+        P(nvnMemoryPoolBuilderSetDefaults)(&pb); P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage);
+        P(nvnMemoryPoolInitialize)(&pool, &pb);
+        NVNtexture tex[4] = {0};
+        for (int mode = 0; mode < 2; mode++) for (int image = 0; image < 2; image++) {
+            int k = mode * 2 + image, order = ounce && !mode;
+            NVNtextureBuilder b = {0};
+            P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetDevice)(&b, &owner[mode]);
+            P(nvnTextureBuilderSetSize2D)(&b, 16, 8); P(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8);
+            P(nvnTextureBuilderSetFlags)(&b, image ? NVN_TEXTURE_FLAGS_IMAGE : 0);
+            P(nvnTextureBuilderSetStorage)(&b, &pool, k * 65536);
+            P(nvnTextureInitialize)(&tex[k], &b);
+            EXPECT("texture order comes from its own SDK/device flags", order, nvn_gob_order(&((tex_t *)&tex[k])->d));
+            EXPECT("capturing order leaves guest texture flags unchanged", image ? NVN_TEXTURE_FLAGS_IMAGE : 0, P(nvnTextureGetFlags)(&tex[k]));
+            for (size_t i = 0; i < sizeof linear; i++) linear[i] = (uint8_t)(i * 17u + i / 23u);
+            P(nvnTextureWriteTexels)(&tex[k], NULL, &all, linear);
+            size_t at = (size_t)k * 65536 + (order ? 64 : 32);   // byte x16, y0, at independently calculated GOB addresses
+            EXPECT("whole WriteTexels uses the captured GOB order", linear[16], storage[at]);
+            P(nvnTextureWriteTexels)(&tex[k], NULL, &pixel, marker); memcpy(linear + 16, marker, sizeof marker);
+            EXPECT("partial WriteTexels uses the captured GOB order", marker[0], storage[at]);
+            P(nvnTextureReadTexels)(&tex[k], NULL, &all, back);
+            EXPECT("ReadTexels agrees after whole and partial writes", 0, memcmp(linear, back, sizeof linear));
+        }
+        P(nvnDeviceBuilderSetFlags)(&db, 0);
+        P(nvnDeviceInitialize)(&later, &db);
+        NVNtexture copied = tex[2];
+        EXPECT("a later device does not change a texture's captured order", 0, nvn_gob_order(&((tex_t *)&copied)->d));
+        for (int k = 0; k < 4; k++) P(nvnTextureFinalize)(&tex[k]);
+        NVNtextureBuilder unbound = {0};
+        P(nvnTextureBuilderSetDefaults)(&unbound);
+        P(nvnTextureInitialize)(&tex[0], &unbound);
+        EXPECT("a builder with no device retains the SDK default order", ounce, nvn_gob_order(&((tex_t *)&tex[0])->d));
+        P(nvnTextureFinalize)(&tex[0]);
+        P(nvnMemoryPoolFinalize)(&pool);
+        for (int k = 0; k < 2; k++) P(nvnDeviceFinalize)(&owner[k]);
+        P(nvnDeviceFinalize)(&later);
+    }
+    dm_test_sdk_ounce = 0;
+    NVNdeviceBuilder db; P(nvnDeviceBuilderSetDefaults)(&db); P(nvnDeviceInitialize)(&dev, &db);
+}
 // CRC-16 with the reflected polynomial 0xA001, from 0: the hash Super Mario Odyssey's sampler cache takes of a sampler's bytes 8 on (main+0x96e400)
 static uint16_t crc16_a001(const uint8_t *p, size_t n) {
     uint16_t c = 0;
@@ -360,6 +414,7 @@ int main(void) {
     // 2. Device
     NVNdeviceBuilder db; P(nvnDeviceBuilderSetDefaults)(&db); P(nvnDeviceBuilderSetFlags)(&db, 0);
     EXPECT("DeviceInitialize succeeds", 1, P(nvnDeviceInitialize)(&dev, &db));
+    texture_gob_orders();
     int v; P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_UNIFORM_BUFFER_ALIGNMENT, &v);
     EXPECT("uniform buffer alignment (256 measured on X1)", 256, v);
     P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_TEXTURE_DESCRIPTOR_SIZE, &v); EXPECT("texture descriptor size (32)", 32, v);
@@ -1401,6 +1456,8 @@ int main(void) {
         EXPECT("ordinary packaged pitch remains unpadded",0x102000,P(nvnTextureBuilderGetStorageSize)(&b));
         P(nvnTextureBuilderSetPackagedTextureLayout)(&b,NULL);
         EXPECT("clearing packaged layout clears width too",0,((tex_builder_t*)&b)->d.pkg_layout);
+        layout.layout[0]=0xff; layout.layout[1]=0xff; P(nvnTextureBuilderSetPackagedTextureLayout)(&b,&layout);
+        EXPECT("all packaged H/D/W bits plus presence fit in 16 bits",0x1000,((tex_builder_t*)&b)->d.pkg_layout);
     }
 
     // 6c. Write-protected dirty pages: after a packaged texture is uploaded its pool pages are read-only; game write → page fault → mark dirty → re-upload on next use; a direct host read() write needs prepare first

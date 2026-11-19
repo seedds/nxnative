@@ -237,14 +237,18 @@ def publish_cache(key, digest, rule_fp, code_fp):
             for name in names:
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
                 if name.endswith('.json'):
-                    value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (ps_libraries, vin_finish, pull_finish)
+                    value = json.load(open(src))
+                    for field in ('fetch', 'vin', 'pull', 'alpha', 'logic', 'chain_metal_cut'):
+                        value.pop(field, None)   # fin regenerates the side libraries and records how the base was built for each target
                     STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
                 else: STORE.put_file(f'{root}/{label}/{name}', src)
         STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
 
-def write_refl(key, refl):
+def write_refl(key, refl, cut_targets=()):
     for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
-        atomic_json(os.path.join(d, key + '_b.json'), MTL.with_compiler(target, refl))
+        recorded = MTL.with_compiler(target, refl)
+        if target in cut_targets: recorded['chain_metal_cut'] = True
+        atomic_json(os.path.join(d, key + '_b.json'), recorded)
 
 VIN_STATS = collections.Counter()
 PULL_STATS = collections.Counter()
@@ -309,6 +313,45 @@ def vin_finish(key, full, refl):
     refl['vin'] = {'entry': 'main0', 'entry_z': 'main0_z', 'shadow': shadows}
     VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
     return refl
+
+def vs_libraries(key, msl, full):
+    """A vertex shader's libraries: <key>_b with its own entry points, its pulling library <key>_bp (pull_finish) and its shadow-input library <key>_bv (vin_finish). A shader with
+    a pulling library gets them cut from one compile through the MSL-keyed Metal cache (dmsh_side.vs_unit, dmsh_side.cut), which holds the body once where the three sources held it
+    nine or twelve times. Each target's unit holds the libraries that target gets: without the pulling entry points where DMSH_IOS_PULL=0 leaves the iPhone's library out, and a
+    target with neither side library compiles the plain source. A shader with layer entry points keeps its shadow-input library a compile of its own: that library repeats them
+    for the host (nvn_mtl.m vin_fn), and one unit cannot hold two main0_l.
+    A shader whose unit does not build, or whose source is not of the shape vs_unit knows, gets the three compiles as before, each library from its own source, with a red line; so
+    does one without a pulling library, with none. Returns the 'pull' and 'vin' reflection and the targets whose base library was cut from a unit. Raises CalledProcessError when the
+    plain source does not compile."""
+    targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
+    cut_targets = set()
+    pv, pinfo = dmsh_pull.variant(full); why = None
+    if pv and isinstance(pinfo, dict):
+        vv, shadows = dmsh_vin.variant(full)
+        vu = None if re.search(r'^vertex \S+ main0_l\(', full, re.M) else vv
+        try:
+            whole = dmsh_side.vs_unit(full, pv, vu); rest = dmsh_side.vs_unit(full, None, vu) if vu else None   # rest: for a target without the pulling library
+            for t, d in targets:
+                src, pn, vn = whole if t == 'mac' or IOS_PULL else rest or (None, None, None)
+                if not src: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib')); continue
+                names = ['_b'] + (['_bp'] if pn else []) + (['_bv'] if vn else []); groups = [set(n.values()) for n in (pn, vn) if n]
+                u = os.path.join(w, f'{key}_bu_{t}.metal'); open(u, 'w').write(src)
+                try: MTL.compile_split(t, u, [os.path.join(d, key + n + '.metallib') for n in names], lambda lib, groups=groups: dmsh_side.cut(lib, *groups))
+                finally: os.unlink(u)
+                cut_targets.add(t)
+        except (subprocess.CalledProcessError, ValueError) as e: why = str(e)[:120]
+        else:
+            PULL_STATS['generated'] += 1; PULL_STATS['unit'] += bool(cut_targets)
+            refl = {'stage': 'vs', 'pull': {k: v for k, v in {**pinfo, **whole[1]}.items() if v is not None}}
+            if not vu: vin_finish(key, full, refl)   # none, or the layer shader's own compile
+            else:
+                refl['vin'] = {'entry': 'main0', 'entry_z': 'main0_z', **whole[2], 'shadow': shadows}
+                VIN_STATS['generated'] += 1; VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
+            return {k: refl[k] for k in ('pull', 'vin') if k in refl}, cut_targets
+    for t, d in targets: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
+    if why: PULL_STATS['unit failed'] += 1; print(f'[RED] {key}: its libraries do not build from one compile ({why}): each is compiled from its own source', flush=True)   # after the plain source built: a source that does not compile at all is the caller's failure, not the unit's
+    refl = pull_finish(key, full, vin_finish(key, full, {'stage': 'vs'}))
+    return {k: refl[k] for k in ('pull', 'vin') if k in refl}, set()
 
 def ps_libraries(key, msl, full, bindings):
     """A pixel shader's libraries, cut from one compile through the MSL-keyed Metal cache (dmsh_side.cut): <key>_b with its own entry points, <key>_bx with its alpha test and logic
@@ -788,6 +831,11 @@ def finish(key, w, j, c1):
     try: src = dmsh_reflect.pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    res = json.load(open(os.path.join(w, key + '.res.json')))
+    # The MSL s<n> number indexes the buffers in binding order, as in dmsh_reflect.reflect. The raw pool table is host data.
+    read_only = {i for i, b in enumerate(sorted(res['sbufs'], key=lambda b: b['binding']))
+                 if not b['flags'] & 1 and b['cb_slot'] != abi.GMEM_MAP_CB_SLOT}   # BufferUsageFlags.Write (includes atomics)
+    src = dmsh_wide.constant_reads(src, read_only, dmsh_chain.storage_constant_mode())
     src = dmsh_rewrite.tg_fence(src)   # warp-synchronous shared memory: the translator's dmsh_tg_fence() as a simdgroup-scope fence (see tg_fence)
     src = dmsh_rewrite.border_emu(src)   # border colours Metal lacks (see border_emu)
     if j['stage'] == 'ps': src = dmsh_rewrite.frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
@@ -826,7 +874,6 @@ def finish(key, w, j, c1):
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
-    res = json.load(open(os.path.join(w, key + '.res.json')))
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = dmsh_entry.vs_depth(src)
@@ -847,17 +894,19 @@ def finish(key, w, j, c1):
     else: fu = fd = None
     try: binds = dmsh_reflect.reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
-    side, lost = {}, []
+    lost = []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
-        if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read(), binds)); return
+        if j['stage'] == 'ps': return ps_libraries(key, msl, open(msl).read(), binds), set()
+        if j['stage'] == 'vs': return vs_libraries(key, msl, open(msl).read())
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
-    try: compile_targets()
+        return {}, set()
+    try: side, cut_targets = compile_targets()
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
         lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('dual source', fd)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
         open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, typed-output and dual-source entry points are extras: a library that does not build with them is built without
-        try: compile_targets()
+        try: side, cut_targets = compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
@@ -878,9 +927,8 @@ def finish(key, w, j, c1):
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in dmsh_reflect.attributes(src)],
             'raster': {**dmsh_reflect.raster_facts(j['stage'], src), **({'omap': ps_omap(open(j['code'], 'rb').read())} if j['stage'] == 'ps' else {})}, 'vs_pad': pad, **({'tess': tess} if tess else {})}
-    if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
-    refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries)
-    write_refl(key, refl)
+    refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries); the pulling and shadow-input libraries (vs_libraries)
+    write_refl(key, refl, cut_targets)
     return 'ok', '', refl
 
 keys = build_keys(want, loc, PAIRS)
@@ -1013,7 +1061,10 @@ def fin(key, wb):
         if key in cache_hits and restored(key, wb):
             refl = json.loads(output_of('mac', key + '_b.json'))
             src = output_of('mac', key + '_b.metal').decode() if refl['stage'] in ('ps', 'vs') else ''
-            if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
+            if refl['stage'] == 'vs':
+                side, cut_targets = vs_libraries(key, os.path.join(out, key + '_b.metal'), src)
+                refl.update(side)   # stored without the side-library reflection (publish_cache)
+                write_refl(key, refl, cut_targets)
             if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src, refl['bindings'])); write_refl(key, refl)   # stored without them (publish_cache)
             return key, 'ok', '', refl
         if key in xerr or not os.path.exists(os.path.join(wb, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
@@ -1164,7 +1215,8 @@ print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]}
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
 print(f'alpha test and logic operation libraries (<key>_bx, dmsh_side.py): {SIDE_STATS["generated"]} generated, {SIDE_STATS["failed"]} failed to compile, {SIDE_STATS["not generated"]} pixel shaders without either')
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
-      f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')
+      f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed); '
+      f'{PULL_STATS["unit"]} vertex shaders\' libraries cut from one compile (dmsh_side.vs_unit), {PULL_STATS["unit failed"]} compiled each from its own source instead')
 print('mesh libraries (<vertex>_<geometry>_m3, dmsh_mesh.py): ' + (', '.join(f'{k} {v}' for k, v in MESH_STATS.items()) or 'none'))
 print(MTL.summary())
 for lvl in [k for k in st if k != 'ok']:

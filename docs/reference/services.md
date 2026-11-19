@@ -841,6 +841,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the IR camera (`irsensor`) answers every camera unconnected, and processors cannot run.
 - **Found on:** [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3, NintendoWare Bezel Engine).
 
+### Direct `irs` connection and status memory
+
+- **Symptom:** `[RED] sf: the game connects to service irs itself, which the host does not serve`, then a null read at `main+0xeaca34` before the first scene.
+- **Cause:** the game's `nn::irsensor` client makes its own HIPC session. With `irs` unregistered, the client object remains null. Letting it connect without supplying command 304's copied handle exposes a second fault: SVC `0x13` answered success without mapping the StatusManager, and the SDK read its applet table at +0x7fb0 (`main+0xeaf7b8`).
+- **Fix:** `hle_irs.c` registers the service and supplies a read-only 0x8000-byte StatusManager with all nine cameras disconnected and no samples. SVC `0x13` and `0x14` map and unmap immutable service memory on free host-page-aligned alias pages. Command 307 accepts the clustering configuration with no samples: this SDK aborts when it receives an error from that command. The exact response of a Switch without an IR camera connected was not measured.
+- **Check:** `t_sf` checks the camera handle, activation, copied handle and status data. `t_svc_memory` checks read-only mapping metadata, physical-map conflicts and unmap/reuse. The Mac windowed run passed the direct service initialization and reached the frame loop with audio.
+- **Found on:** L.A. Noire 1.2 ([NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386)).
+
 ## Software keyboard and applets
 
 ### System applets opened by `Show…` calls
@@ -1061,6 +1069,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_account.c`, `hle_friends.c`, `hle_offline.c`): `account::ListAllUsers`; `account::PushOpenUsers` (nothing to hand over); `account::LoadCachedNintendoAccountInfo` (fails: no Nintendo Account; Big Brain Academy then skips the birthday and country getters); `friends::GetBlockedUserList`, `DeclareOpen` / `DeclareCloseOnlinePlaySession` (unavailable); `friends::StartFacedFriendRequest` / `StartSendingFriendRequest` (fail); the Nintendo Account request's `GetAuthorizationCode` and `GetState` (both fail, as `GetIdToken`); `pdm::QueryApplicationPlayStatistics`, which asks how often this user launched two other games and reads only the launch count, so each is never played.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
+
+### Play statistics without a user ID
+
+- **Symptom:** a null read at `sdk+0x2a4fc0` during startup in the `pdm::QueryApplicationPlayStatistics` overload without a `Uid`.
+- **Cause:** the SDK dereferences the applet proxy from `nn::am::GetApplicationFunctions` to query the system play log. The proxy is null on the host. The SDK returns the number of output records, and `main+0x10e78c` checks that there is at least one before reading the array.
+- **Fix:** `hle_offline.c` serves that overload by returning zero records for the empty system play log.
+- **Found on:** [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md) (1.0.0, SDK 8.3.2).
 
 ### `account::GetUserId` copies the Uid of any handle
 

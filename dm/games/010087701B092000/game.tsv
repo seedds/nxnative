@@ -33,6 +33,8 @@ stdalloc_cap	0x60000000
 
 # ---- Graphics ----
 depth_mode	zero
+# Use the frame-rate settings found by Unity's internal-call matcher.
+fps_target	60
 
 # ---- Shader split ----
 shader_groups	/Data/=data

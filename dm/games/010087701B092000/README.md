@@ -17,9 +17,17 @@ The profile gives StandardAllocator 1.5 GiB through the existing SDK-symbol gate
 - All 44,277 shaders built for macOS and iOS with Xcode 27.2's Metal compiler (`32023.922`). The prewarm list covers startup, the title screen and the opening story scenes.
 - The rewriter leaves Unity's bucket allocator alone. Its `ALLOC_BUCKET` string is copied into an object instead of passed in the register expected by the existing matcher. The startup failure above was resolved with the StandardAllocator cap.
 
+## Frame rate
+
+The game starts at a present interval of two vblanks (30 fps). `fps_target 60` uses the [shared Unity frame-rate support](../../../docs/reference/frame-rate.md#unitys-vsynccount-and-targetframerate-found-through-the-internal-call-table). The rewriter finds `Application.targetFrameRate` and `QualitySettings.vSyncCount` from Unity's internal calls. The host changes the active quality level's count from two to one and applies the corresponding 60 fps present cap. The only title-specific setting is the target in [`game.tsv`](game.tsv).
+
+On the M6 Mac mini with the iPhone alias limit, the same prologue route measured 33.34 ms p50 / 33.60 ms p95 at the original rate and 16.67 ms p50 / 16.91 ms p95 with the profile default. The opening subtitles reached the same cues at 12, 18 and 24 seconds after confirming the name, and both runs reached the office scene by 36 seconds. These checkpoints cover the prologue before the first tactical battle.
+
+The iOS launcher's Frame rate setting offers 30 and 60 fps. On the Mac, `DM_FPS_TARGET=0` uses the game's original timing for comparison.
+
 ## Mac validation
 
-On an Apple M6 Mac mini, the game ran for six minutes with the iPhone's alias limit. It rendered the intro movie, title, main and difficulty menus, software keyboard name entry, and the opening dialogue through the Café Leblanc scene. All four DLC indices mounted and the host opened a six-channel audio output. The last 300-frame dialogue window measured 33.34 ms p50 and 33.57 ms p95 (about 30 fps). A second boot prewarmed all 346 recorded entries with no missing shader keys.
+At the original 30 fps, the game ran for six minutes on an Apple M6 Mac mini with the iPhone's alias limit. It rendered the intro movie, title, main and difficulty menus, software keyboard name entry, and the opening dialogue through the Café Leblanc scene. All four DLC indices mounted and the host opened a six-channel audio output. The last 300-frame dialogue window measured 33.34 ms p50 and 33.57 ms p95. A second boot prewarmed all 346 recorded entries with no missing shader keys.
 
 ## Running
 

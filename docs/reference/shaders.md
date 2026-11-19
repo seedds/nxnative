@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### L.A. Noire WAD and VFP shader arrays
+
+- **Symptom:** the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials.
+- **Cause:** `out.wad.nx` has a span table and a name table. Its `.vfp.nx` members store the GLSLC headers, control sections and code in separate arrays.
+- **Fix:** the splitter maps `out.wad.nx` with the `WAD\x01` signature and reads its `.vfp.nx` members. It checks the name table and shader member ranges, requires non-empty code and complete coverage of the VFP arrays, then passes the original control and code bytes to the existing shader checks. The VFP arrays give individual stages. Their vertex and pixel pairing is unknown.
+- **Check:** `dm/gfx/tests/test_noire_shader.py` checks keys and bytes in both RomFS forms, the signature and basename gate, and rejection of truncated directories, invalid names and malformed spans. On M4 Pro/macOS 27.2.1, the WAD yielded zero shaders with `a6aaf66d` and 8,933 with the reader. A full split with the reader and the startup captures found 8,968 shaders, all of which compiled for the Mac.
+- **Found on:** L.A. Noire 1.2 (`0100830004FB6000`), [NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386). The Mac build with the [direct `irs` service fix](services.md#direct-irs-connection-and-status-memory) loaded the 8,968-entry map. Captures show the officers' faces, uniforms and badges in the opening patrol-car scene and on foot at the first intersection. In “Upon Reflection,” the player confirmed that the alley characters' materials rendered correctly and the notebook pages were readable on the same M4 Pro/macOS 27.2.1 build.
+
 ### Firaxis CIVBSF shader libraries
 
 - **Symptom:** the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture.
@@ -621,6 +629,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the paks are version 8, which `uepak.py` did not read (only 4 and 11): `footer` raised, and `unreal_paks` skipped both paks as no Unreal paks. Version 8 keeps version 4's per-file index, but its footer is version 11's (key GUID, encrypted flag, magic 0xcc from the end, five 32-byte compression method names after the SHA-1), and an FPakEntry's compression method is an index (from 1) into those names instead of version 4's flags.
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
 - **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
+
+### Unreal Engine short version 8 paks and version 1 shader archives
+
+- **Symptom:** the shader split finds no Unreal shaders on a game whose paks hold shared shader archives. The footer reader skips these version 8 paks with `no pak footer`.
+- **Cause:** the short version 8 footer has four compression method slots, putting its magic `0xac` bytes from the end. Each entry uses one byte for the method and has a 50-byte stored header. The version 1 shader archive stores a flat table of SHA-1 hashes, offsets, sizes and frequencies followed by stored or Zlib-compressed LSLG records.
+- **Fix:** `uepak.py` selects the entry layout from the footer and routes shared archives to the decode step. A pak can also supply inline shaders, so `shader_split.py` scans its inline files and takes the shared shaders from the decode step. The version 1 reader bounds each record and normalizes it to a decoded version 2 archive with no shader maps.
+- **Found on:** Minecraft Dungeons (`01006C100EC08000`). All 5 base pak indexes and all 46 update pak indexes parse to their declared end. The base game's two archives contain 8,398 records and the full split writes 7,853 unique shaders. For v1769472 the two archives contain 15,596 records and the full split with local DLC writes 14,903 unique shaders. Bloodstained: Ritual of the Night (`0100BF500207C000`, 1.60, v851968 with five DLC) has seven short v8 pak indexes that parse to their declared end. Its two archives contain 33,767 records, and the full split writes 33,401 unique shaders with zero unreadable files. [Minecraft Dungeons PR #1270](https://github.com/seedds/nxnative/pull/1270) · [Bloodstained PR #2652](https://github.com/seedds/nxnative/pull/2652)
 
 ### Unreal Engine frozen pak indices (version 9)
 

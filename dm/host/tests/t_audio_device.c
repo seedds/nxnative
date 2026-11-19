@@ -431,9 +431,18 @@ int main(void) {
     // A stereo output stays stereo on a six-channel route (the guest writes two channels): a route change leaves its unit alone
     uint32_t outs[16] = {0};
     assert(h_au_OpenDef0(outs, prm) == RES_OK && ao(outs)->dev_ch == 2 && unit.format_ch == 2);
+    // changed() queues an async route check (route_queue, off the main thread); wait for it to settle before
+    // the route is written again, as test_route_without_output does, instead of racing it with a fixed sleep
     unit.route_ch = 2; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
-    usleep(100000); dm_audio_route_changed(); unit.route_ch = 6; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
-    usleep(100000); dm_audio_route_changed(); assert(ao(outs)->dev_ch == 2 && unit.disposals == 10);
+    dm_audio_route_changed();
+    uint64_t route_until = now_ns() + NSEC_PER_SEC;
+    while (dm_audio_route() != 2 && now_ns() < route_until) usleep(1000);
+    assert(dm_audio_route() == 2);
+    unit.route_ch = 6; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    dm_audio_route_changed();
+    route_until = now_ns() + NSEC_PER_SEC;
+    while (dm_audio_route() != 6 && now_ns() < route_until) usleep(1000);
+    assert(dm_audio_route() == 6 && ao(outs)->dev_ch == 2 && unit.disposals == 10);
     h_au_Close(outs);
     assert(!object.key && unit.disposals == 11);
     // A mono output goes to a mono unit as the guest writes it, on either route (it is not downmixed as six channels)

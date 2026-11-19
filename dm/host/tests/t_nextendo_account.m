@@ -74,8 +74,11 @@ static void identity_tests(void) {
     CHECK(dm_nextendo_account_available(&available) == 0 && available && dm_nextendo_account_id(&pid) == 0 && pid == 1800000042ull, "real metadata PID is returned without a fabricated fallback");
     char name[33] = "x", nick[33];
     CHECK(dm_nextendo_account_username(name) == 0 && !strcmp(name, "synthetic_user"), "the username is the signed-in record's");
-    const uint64_t launch_uid[2] = {DM_UID0, DM_UID1};   // user 1, the Nextendo account's; it is registered without a save store (hle_account_users.c)
-    unsetenv("DM_NICK"); CHECK(H(uint32_t (*)(char *, const void *), "_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE")(nick, launch_uid) == 0 && !strcmp(nick, "synthetic_user"), "Nextendo mode: the nickname is the account's username");
+    const uint64_t launch_uid[2] = {DM_UID0, DM_UID1};   // user 1, registered without a save store (hle_account_users.c)
+    unsetenv("DM_NICK");
+    CHECK(H(uint32_t (*)(char *, const void *), "_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE")(nick, launch_uid) == 0 && !strcmp(nick, "Player"), "before the game opens a user, no user is the Nextendo account's");
+    uint64_t opened[3]; CHECK(H(uint32_t (*)(void *), "_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE")(opened) == 0, "the game opens the launch user: it becomes the active user");
+    CHECK(H(uint32_t (*)(char *, const void *), "_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE")(nick, launch_uid) == 0 && !strcmp(nick, "synthetic_user"), "Nextendo mode: the nickname is the account's username");
     int calls = atomic_load(&providerCalls);
     for (unsigned i = 0; i < 3; i++) { mode = (dm_net_mode_t)i; available = 9; pid = 9; CHECK(dm_nextendo_account_available(&available) == 0 && !available && dm_nextendo_account_id(&pid) != 0 && !pid && dm_nextendo_account_ensure() != 0, "offline/LAN/LDN never load an online credential"); }
     CHECK(atomic_load(&providerCalls) == calls, "disabled modes do not query credentials"); mode = DM_NET_AUTO;

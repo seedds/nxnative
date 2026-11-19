@@ -1,13 +1,14 @@
 // nn::account: durable local profiles, process-local open sessions, and the native user selector.
-// Online service identity belongs to user 1 (the launch user) only, and requires an explicit provider and an actual unexpired NEX proof.
+// Online service identity belongs to the active user (the first user the game opens) only, and requires an explicit provider and an actual unexpired NEX proof.
 // Nintendo Account authorization remains unavailable; OAuth is not a game credential.
-// DM_NICK names user 1 (default the Nextendo username in Nextendo mode, else Player); other users are Player N.
+// DM_NICK names user 1 (default Player); the active user is named by the Nextendo username in Nextendo mode unless DM_NICK names it; other users are Player N.
 #include "hle.h"
 #include "front.h"
 #include "account_users.h"
 #include "account_local.h"
 #include "nextendo_account.h"
 #include "net_socket.h"
+#include <stdatomic.h>
 
 typedef struct { uint64_t v[2]; } Uid;
 typedef struct { uint64_t v[3]; } UserHandle;
@@ -15,12 +16,19 @@ _Static_assert(sizeof(Uid) == 16 && sizeof(UserHandle) == 24, "account ABI");
 static const Uid k_uid = {{DM_UID0, DM_UID1}};
 static Uid user_uid(int i) { return (Uid){{DM_UID0 + (uint64_t)i, DM_UID1}}; }
 #define RES_ACC_CANCELED (124u | 1u << 9)
-int dm_account_uid_exists(const void *uid) { return uid && !memcmp(uid, &k_uid, sizeof k_uid); }
-int dm_account_copy_uid(void *output) { if (!output) return 0; memcpy(output, &k_uid, sizeof k_uid); return 1; }
-// The Nextendo account is user 1's. A handle carries its user's Uid in its first two words (the third is the session, GetUserId below)
-static int online_user(const UserHandle *h) { return h && h->v[0] == k_uid.v[0] && h->v[1] == k_uid.v[1]; }
+// The Nextendo account is the active user's: the first user the game opens a session for (open_user). That is the launch user when the game opens the
+// preselected user, and the player's choice when it shows the user selector first. It is kept for the rest of the run: a user opened later (a second
+// local player) must not move the online identity under a game that is already online. -1 until the game opens a user, and then no user is online
+static _Atomic int g_active_user = -1;
+int dm_account_uid_exists(const void *uid) { int user = atomic_load(&g_active_user); return user >= 0 && dm_uid_user(uid) == user; }
+int dm_account_copy_uid(void *output) {
+    int user = atomic_load(&g_active_user); if (!output || user < 0) return 0;
+    Uid uid = user_uid(user); memcpy(output, &uid, sizeof uid); return 1;
+}
+// A handle carries its user's Uid in its first two words (the third is the session, GetUserId below)
+static int online_user(const UserHandle *h) { return h && dm_account_uid_exists(h); }
 // In Nextendo mode each online account call's answer is logged the first time it is given (the call, its result, and what the availability check said; never the
-// token or the account), so a device log shows which step of a game's sign-in stopped. value: -1 none, 0 / 1 not available / available, -2 not user 1's handle
+// token or the account), so a device log shows which step of a game's sign-in stopped. value: -1 none, 0 / 1 not available / available, -2 not the active user's handle
 enum { ACC_NONE = -1, ACC_NOT_LOCAL = -2 };
 static Result acc_note(const char *call, Result r, int value) {
     if (!dm_net_nextendo_enabled()) return r;
@@ -30,7 +38,7 @@ static Result acc_note(const char *call, Result r, int value) {
     if (fresh && count < 64) { seen[count].call = call; seen[count].r = r; seen[count].value = value; count++; }
     pthread_mutex_unlock(&lock);
     if (fresh) LOG("%saccount: %s -> 0x%x%s", r ? "[RED] " : "", call, r,
-                   value == ACC_NOT_LOCAL ? " (not user 1's handle)" : value == 1 ? " (available)" : value == 0 ? " (not available)" : "");
+                   value == ACC_NOT_LOCAL ? " (not the active user's handle)" : value == 1 ? " (available)" : value == 0 ? " (not available)" : "");
     return r;
 }
 #define ACC_USER(h) (online_user(h) ? ACC_NONE : ACC_NOT_LOCAL)
@@ -64,7 +72,9 @@ static Result open_user(UserHandle *h, const Uid *uid) {
     pthread_mutex_lock(&g_account_lock);
     s->user = i; s->token = ++g_account_token; s->next = g_account_sessions; g_account_sessions = s;
     h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = s->token; g_last_user = i;
-    pthread_mutex_unlock(&g_account_lock); return RES_OK;
+    pthread_mutex_unlock(&g_account_lock);
+    int none = -1; if (atomic_compare_exchange_strong(&g_active_user, &none, i)) LOG("account: user %d is the active user (the Nextendo account's in Nextendo mode)", i + 1);
+    return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account10InitializeEv", "connects to the local account service", void, h_acc_Init, void) { (void)dm_account_users(); }
 HLE_FORCE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", "only users with a live account session", Result, h_acc_ListOpen, int *n, Uid *out, int max) {
@@ -134,33 +144,32 @@ HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Ui
     // word. The game's own handles (third word 2 or 8) must continue to work.
     out->v[0] = h->v[0]; out->v[1] = h->v[1]; return RES_OK;
 }
-// nn::account::Nickname = struct { char name[33]; }, UTF-8. User 1: DM_NICK first; in Nextendo mode then the signed-in account's username (what other players and the
-// Nextendo site see), read once and kept, as games ask for it often; else Player. Other registered users: Player N
+// nn::account::Nickname = struct { char name[33]; }, UTF-8. User 1: DM_NICK first. The active user in Nextendo mode: then the signed-in account's username (what other
+// players and the Nextendo site see), read once and kept, as games ask for it often. Else Player for user 1, Player N for the other registered users
 // A wait hook: the first call in Nextendo mode may fetch the sign-in over the network (hle_nextendo_login_apple.m)
-HLE_FORCE_WAIT("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user 1: DM_NICK, else the Nextendo username in Nextendo mode, else Player; Player N for other registered users", Result, h_acc_GetNick, char *nick, const Uid *uid) {
+HLE_FORCE_WAIT("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user 1's DM_NICK, else the active user's Nextendo username in Nextendo mode, else Player (user 1) or Player N", Result, h_acc_GetNick, char *nick, const Uid *uid) {
     int user = dm_account_user(uid); if (user < 0) return RES_FAIL;
-    if (user) { user_nickname(nick, user); return RES_OK; }
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; static char account[33];
-    const char *e = getenv("DM_NICK");
+    const char *e = user ? NULL : getenv("DM_NICK");
     memset(nick, 0, 33);
     if (e) {   // whole UTF-8 characters only, as the Nextendo name is cut
         size_t n = strlen(e); if (n > 32) { n = 32; while (n && ((unsigned char)e[n] & 0xc0) == 0x80) n--; }
         memcpy(nick, e, n); return RES_OK;
     }
-    if (dm_net_nextendo_enabled()) {
+    if (dm_net_nextendo_enabled() && dm_account_uid_exists(uid)) {
         dm_guest_host_wait_begin(); pthread_mutex_lock(&lock);   // a caller behind a fetch frees its guest core
         if (!account[0] && !dm_nextendo_account_username(account)) LOG("account: nickname from the Nextendo account");
         memcpy(nick, account, 33); pthread_mutex_unlock(&lock); dm_guest_host_wait_end();
         if (nick[0]) return RES_OK;
     }
-    strncpy(nick, "Player", 32);
+    user_nickname(nick, user);
     return RES_OK;
 }
 
 // ---------- Online accounts ----------
 // Offline the host has only local accounts and returns the result of cancelling the SDK account applet, ResultCancelledByUser (2124-0001); see "The network account
-// check is cancelled offline" in docs/reference/services.md. In Nextendo mode user 1's check needs the actual unexpired Nextendo NEX proof
-HLE_FORCE_WAIT("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "offline: applet cancellation; Nextendo mode: user 1's actual unexpired Nextendo NEX proof", Result, h_acc_EnsureNsa, const UserHandle *h) {
+// check is cancelled offline" in docs/reference/services.md. In Nextendo mode the active user's check needs the actual unexpired Nextendo NEX proof
+HLE_FORCE_WAIT("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "offline: applet cancellation; Nextendo mode: the active user's actual unexpired Nextendo NEX proof", Result, h_acc_EnsureNsa, const UserHandle *h) {
     if (!dm_net_nextendo_enabled()) return RES_ACC_CANCELED;
     return acc_note("EnsureNetworkServiceAccountAvailable", online_user(h) ? dm_nextendo_account_ensure() : RES_FAIL, ACC_USER(h));
 }
@@ -286,7 +295,7 @@ HLE_FORCE("_ZN2nn7account27StoreSaveDataThumbnailImageERKNS0_3UidEPKvm", "save-d
     (void)uid; (void)img; (void)n; return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account28DeleteSaveDataThumbnailImageERKNS0_3UidE", "save-data thumbnail; the host keeps none", Result, h_acc_DeleteThumb, const Uid *uid) { (void)uid; return RES_OK; }
-HLE_FORCE_WAIT("_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE", "only a coherent unexpired Nextendo NEX credential enables user 1's NSA; other users have none", Result, h_acc_NsaAvail, uint8_t *out, const UserHandle *h) {
+HLE_FORCE_WAIT("_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE", "only a coherent unexpired Nextendo NEX credential enables the active user's NSA; other users have none", Result, h_acc_NsaAvail, uint8_t *out, const UserHandle *h) {
     if (!out) return RES_FAIL; *out = 0;
     Result r = online_user(h) ? dm_nextendo_account_available(out) : RES_OK;   // another user has no network service account: not available
     return acc_note("IsNetworkServiceAccountAvailable", r, online_user(h) ? *out != 0 : ACC_NOT_LOCAL);

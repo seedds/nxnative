@@ -665,8 +665,9 @@ endforeach()
 # and two capturing pipelines in one pass), t_vk_geometry (the Metal test's geometry expansion over array, indexed, indirect and GPU-written draws, a line strip with adjacency
 # widened into quads, and layered rendering from the geometry and the vertex stage), t_vk_tessellation (quad and triangle domains, the triangles made counted by a capture),
 # t_vk_feedback (draws that sample their own attachment, the pass split when the pass wrote it) and t_vk_raster (Bresenham lines on levels A and D, advanced blend modes,
-# indirect quads, an array of descriptor handles, draw-based copies); t_vk_queries above covers the counters of step P8
-foreach(t IN ITEMS transform_feedback geometry tessellation feedback raster)
+# indirect quads, an array of descriptor handles, draw-based copies); t_vk_queries above covers the counters of step P8. t_vk_adv_blend: NVN's advanced blend modes against a CPU
+# reference of NV_blend_equation_advanced (the exact and the conditional fixed-function reductions; VK_EXT_blend_operation_advanced where the device has it, skipped on lavapipe)
+foreach(t IN ITEMS transform_feedback geometry tessellation feedback raster adv_blend)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()

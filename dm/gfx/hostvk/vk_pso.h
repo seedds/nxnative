@@ -27,8 +27,11 @@ typedef struct {
 // The key (design 3.1): the attachment formats, the entry point, the depth mode, the topology class (left out where the device draws any class from one pipeline), and what the
 // device cannot set dynamically at the pipeline level (hvk_pso_level: the device's, or DM_VK_LEVEL's). k is zeroed first, so keys compare with memcmp
 void hvk_key_fill(hvk_gfx_key *k, hvk_shader *const sh[6], int klass, const hvk_key_src *s);
-// One colour attachment's blend state as Vulkan takes it: blending off on a format that cannot blend (t_vk_integer_blend), the factors of MIN / MAX equations ONE
-void hvk_blend_of(const blend_st *b, int on, VkFormat f, uint32_t wmask4, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm);
+// The colour attachments' dynamic blend state as Vulkan takes it (nc of them; blend_en and chmask NVN's bits): blending off on a format that cannot blend (t_vk_integer_blend),
+// the factors of MIN / MAX equations ONE, NVN's advanced modes reduced to fixed-function factors (vk_gpl.c), and adv[i] the advanced state of an attachment that
+// VK_EXT_blend_operation_advanced draws (advancedBlendOp 0: none), to set after the equation
+void hvk_blend_dyn(const blend_st b[8], uint32_t blend_en, const VkFormat f[8], uint32_t chmask, int nc, uint32_t en[8], VkColorBlendEquationEXT eq[8], VkColorComponentFlags wm[8],
+                   VkColorBlendAdvancedEXT adv[8]);
 // The attachment format of NVN format nf as vk_texture.c makes an image of it (the table's, or its substitute where the device lacks the use), and its numeric class (vk_texture.c)
 VkFormat hvk_attach_format(int nf, uint8_t *cls);
 // The rasterization state's chain with the provoking vertex (2026-11-02; vk_pipeline.c): NVN's last-vertex convention where the device has VK_EXT_provoking_vertex

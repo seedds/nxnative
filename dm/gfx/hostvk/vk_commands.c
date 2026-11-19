@@ -19,7 +19,7 @@
 // writes earlier in the submission, before the draw's pass; the CPU only past the GPU path's limit. Draws whose count the GPU holds (indirect draws, indirect-count multi-draws,
 // DrawTransformFeedback; 2026-11-02): converted on the GPU from their records by the same rules and placement (convert_indirect), drawn from the indexed indirect records written.
 // Declared with a red line: the counter types Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES, ZCULL_STATS);
-// the alpha test (its reference is not recorded); advanced blend modes other than the Porter-Duff ones (VK_EXT_blend_operation_advanced is not used); viewport swizzles other
+// the alpha test (its reference is not recorded); inexact advanced blend modes VK_EXT_blend_operation_advanced cannot draw (vk_gpl.c); viewport swizzles other
 // than a negated y without VK_NV_viewport_swizzle; tessellation without a control shader; presentation (phase P4).
 // Pipelines (phase P5): the draw fills its key through vk_gpl.c's hvk_key_fill and takes its pipeline from hvk_gfx_pipeline, which counts the time a draw waits for it; after
 // a draw that waited, the look-ahead (vk_predict.c) queues the pipelines of the draws still to come in the submission; the first submission starts the prewarm (vk_prewarm.c),
@@ -306,7 +306,8 @@ static int g_rc_skip;                      // SetRenderEnable(false): draws and 
 static int g_cond_on; static VkBuffer g_cond_buf; static VkDeviceSize g_cond_off;   // a GPU condition: the predicate word the passes test
 static struct { int valid; VkPipeline pipe; } g_bound;   // the pipeline bound and whether the dynamic state shadow below holds
 static struct dyn_shadow { int valid; VkViewport vp; VkRect2D sc; uint32_t cull, front, topo, dt, dw, dcmp, st, sop[2][4], scm[2], swm[2], sref[2], rd, dbe, pr, poly, dclamp, a2c, samples, logic_en, logic, patch;
-                           float bias[3], bc[4], lw; VkColorComponentFlags wm[8]; uint32_t ben[8]; VkColorBlendEquationEXT beq[8]; uint32_t line; VkViewportSwizzleNV swz; } g_dyn;
+                           float bias[3], bc[4], lw; VkColorComponentFlags wm[8]; uint32_t ben[8]; VkColorBlendEquationEXT beq[8]; uint32_t line; VkViewportSwizzleNV swz;
+                           VkColorBlendAdvancedEXT badv[8]; } g_dyn;   // badv: the advanced state set after the equation (advancedBlendOp 0: none; hvk_blend_dyn)
 static void reports_flush(void);
 static void cond_begin(VkCommandBuffer cb) {
     if (!g_cond_on || !hvk.dev.caps.cond_render) return;
@@ -1006,7 +1007,7 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int restart,
     n.pr = restart != 0;   // vk_index.c's plan: an indexed strip or fan, or a list the device restarts, of the game's or widened indices (restart index all ones); none converted
     memcpy(n.bc, S.blend_color, 16); n.lw = 1;
     n.dclamp = S.depth_clamp != 0; n.a2c = S.ms.a2c != 0; n.samples = P.samples; n.logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY; n.logic = S.color.logic_op;
-    for (int i = 0; i < P.nc; i++) hvk_blend_of(&S.blend[i], (int)(S.color.blend_en >> i & 1), P.cfmt[i], S.chmask.mask >> (4 * i), &n.ben[i], &n.beq[i], &n.wm[i]);
+    hvk_blend_dyn(S.blend, S.color.blend_en, P.cfmt, S.chmask.mask, P.nc, n.ben, n.beq, n.wm, n.badv);
     int all = !g_dyn.valid;
     #define CH(field) (all || memcmp(&n.field, &g_dyn.field, sizeof n.field))
     if (CH(vp)) vkCmdSetViewportWithCount(cb, 1, &n.vp);
@@ -1056,7 +1057,16 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int restart,
     if (hvk.dev.x.vp_swizzle_nv && CH(swz)) vkCmdSetViewportSwizzleNV(cb, 0, 1, &n.swz);
     if (P.nc) {
         if ((e >> HOSTVK_EDS_BLEND_ENABLE & 1) && CH(ben)) vkCmdSetColorBlendEnableEXT(cb, 0, (uint32_t)P.nc, n.ben);
-        if ((e >> HOSTVK_EDS_BLEND_EQUATION & 1) && CH(beq)) vkCmdSetColorBlendEquationEXT(cb, 0, (uint32_t)P.nc, n.beq);
+        // NVN's advanced modes through VK_EXT_blend_operation_advanced (vk_gpl.c hvk_blend_dyn): every pipeline declares the equation and the advanced state dynamic, and either
+        // command satisfies a draw for an attachment (VUID-vkCmdDraw-None-10864). Both set the attachment's blend operation (VK_EXT_extended_dynamic_state3's proposal: the
+        // advanced state is colorBlendOp with the advanced parameters), and dynamic state persists until another setting command modifies it (pipelines.adoc,
+        // "dynamic-state-lifetime"), so the later call is the one that applies: the equation is set for every attachment, then the advanced state for those that take it. A
+        // change of either (plain after advanced, advanced after plain, other parameters) sets both again, even where the equations equal the shadow's
+        int adv_dyn = hvk.dev.x.blend_adv_dyn && (e >> HOSTVK_EDS_BLEND_EQUATION & 1);
+        if ((e >> HOSTVK_EDS_BLEND_EQUATION & 1) && (CH(beq) || (adv_dyn && CH(badv)))) {
+            vkCmdSetColorBlendEquationEXT(cb, 0, (uint32_t)P.nc, n.beq);
+            if (adv_dyn) for (int i = 0; i < P.nc; i++) if (n.badv[i].advancedBlendOp) vkCmdSetColorBlendAdvancedEXT(cb, (uint32_t)i, 1, &n.badv[i]);
+        }
         if ((e >> HOSTVK_EDS_WRITE_MASK & 1) && CH(wm)) vkCmdSetColorWriteMaskEXT(cb, 0, (uint32_t)P.nc, n.wm);
     }
     #undef CH

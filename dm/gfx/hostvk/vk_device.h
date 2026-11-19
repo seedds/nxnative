@@ -159,7 +159,17 @@ typedef struct hostvk_dev {
         // Step P4a (design 7.3): the window presenter's vsync source, enabled only with a surface wanted (want_surface)
         uint32_t present_wait : 1;            // VK_KHR_present_id and VK_KHR_present_wait with presentId and presentWait: when each present reached the screen
         uint32_t display_timing : 1;          // VK_GOOGLE_display_timing: the refresh duration and the actual present times
+        // NVN's advanced blend modes (vk_gpl.c adv_ext): VK_EXT_blend_operation_advanced, enabled only with advancedBlendCoherentOperations (the command stream places no
+        // VK_ACCESS_COLOR_ATTACHMENT_READ_NONCOHERENT_BIT_EXT barriers between overlapping draws), and the limits of VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT
+        uint32_t blend_adv : 1;               // the extension with advancedBlendCoherentOperations: enabled
+        uint32_t blend_adv_all : 1;           // advancedBlendAllOperations: every advanced operation (else only the blend modes multiply to exclusion and the HSL ones)
+        uint32_t blend_adv_indep : 1;         // advancedBlendIndependentBlend: attachments may blend with different advanced operations
+        uint32_t blend_adv_npm_src : 1;       // advancedBlendNonPremultipliedSrcColor: srcPremultiplied may be VK_FALSE (NVN's SetAdvancedPremultipliedSrc(false))
+        uint32_t blend_adv_correlated : 1;    // advancedBlendCorrelatedOverlap: the disjoint and conjoint overlaps
+        uint32_t blend_adv_dyn : 1;           // extendedDynamicState3ColorBlendAdvanced with blend_adv and advancedBlendMaxColorAttachments >= 8: enabled; pipelines whose blend
+                                              // equation is dynamic declare VK_DYNAMIC_STATE_COLOR_BLEND_ADVANCED_EXT and draws set it (vk_gpl.c hvk_blend_dyn)
         uint32_t xfb_buffers;                 // maxTransformFeedbackBuffers
+        uint32_t blend_adv_max_att;           // advancedBlendMaxColorAttachments: a pipeline with an advanced operation has at most this many colour attachments
     } x;
     char missing[1024];                   // what of design 9.1's optional list the device lacks, comma-separated, as the level line prints it ("" when nothing)
     char eds_missing[512];                // the dynamic states of level A it lacks, comma-separated

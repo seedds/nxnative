@@ -71,42 +71,200 @@ static int fmt_blendable(VkFormat f) {
     if ((uint32_t)f < 256) atomic_store(&g_blendable[f], (uint8_t)(yes ? 2 : 1));
     return yes;
 }
-// An advanced blend mode (blend_st.adv, hle_nvn.c) replaces the blend functions (step P8, design 6). The Porter-Duff modes with uncorrelated overlap are sums of the source and
-// destination weighted by 1, 0, As, Ad and their complements (NV_blend_equation_advanced, premultiplied colours), which the fixed-function factors give exactly through the ADD
-// equation; a source that is not premultiplied is multiplied by As first, which only a source factor of ONE can take (SRC_ALPHA). The Metal backend's reduction (nvn_mtl.m
-// adv_blend), the same table. The other modes (multiply, screen, overlay, the HSL modes) and the other overlaps need VK_EXT_blend_operation_advanced (NVIDIA's drivers have it;
-// lavapipe does not, so no device here could run that path): they keep the state's own functions with a red line naming the mode, as on Metal
-static blend_st adv_blend(blend_st b) {
+// Whether f is a floating-point format, whose attachments blend without clamping (the specification's "Blend Operations": fixed-point attachments clamp the source, the
+// destination and the factors to [0, 1]; their stored result is clamped too). The colour formats NVN renders to: the 16- and 32-bit floats and R11G11B10F
+static int fmt_float(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16B16_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32_SFLOAT:
+        case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+            return 1;
+        default: return 0;
+    }
+}
+// ---------- Advanced blend modes (step P8, design 6; docs/reference/rendering.md, "Advanced blend modes on the Vulkan backend") ----------
+// While an advanced mode is set (blend_st.adv, hle_nvn.c) the Switch's GPU blends by NV_blend_equation_advanced and ignores the state's own functions. VK_EXT_blend_operation_advanced
+// is the same definition (the specification's "Advanced Blend Operations"): with uncorrelated overlap, premultiplied colours (Cs, As), (Cd, Ad) and Cs' = Cs / As, Cd' = Cd / Ad,
+//   RGB = f(Cs', Cd') As Ad + Y Cs' As (1 - Ad) + Z Cd' Ad (1 - As),   A = X As Ad + Y As (1 - Ad) + Z Ad (1 - As)
+// for the f / X / Y / Z modes, and closed forms for the "additional RGB" ones (PLUS ... BLUE). A source that is not premultiplied (SetAdvancedPremultipliedSrc(false)) enters as
+// Cs = c As, with c the shader's colour. Where the result is a fixed-function blend Cs Fs (op) Cd Fd for every input, the mode is that blend (k_red: exact). The table was derived
+// by algebra and checked numerically over a grid of colours and alphas (the CPU reference of t_vk_adv_blend, which draws each row against it):
+//   ZERO .. XOR (Porter-Duff), PLUS: sums of Cs and Cd weighted by 1, 0, As, Ad and their complements (the Metal backend's table, nvn_mtl.m adv_blend);
+//   SCREEN: f As Ad = Cs Ad + Cd As - Cs Cd, so RGB = Cs + Cd (1 - Cs): ONE, ONE_MINUS_SRC_COLOR; EXCLUSION: RGB = Cs (1 - Cd) + Cd (1 - Cs);
+//   MINUS: Cd - Cs and Ad - As, REVERSE_SUBTRACT; RED, GREEN, BLUE: the source's channel over the destination's, a write mask of that channel;
+//   PLUS_CLAMPED, PLUS_CLAMPED_ALPHA, MINUS_CLAMPED: PLUS and MINUS clamped to [0, 1], exact on a fixed-point target, whose stored result is clamped (PLUS_CLAMPED_ALPHA's
+//   clamp to As + Ad holds as Cs + Cd <= As + Ad for premultiplied colours); on a float target exact while no sum passes 1 (no difference falls below 0);
+//   alpha of every f / X / Y / Z blend mode: As + Ad (1 - As), ONE, ONE_MINUS_SRC_ALPHA.
+// Exact under a condition (R_COND), used as the closest fixed-function blend where the state's own functions would be arbitrary (the error is bounded and has a known sign):
+//   LINEARDODGE: f = min(1, Cs' + Cd'): Cs + Cd (ONE, ONE) while Cs' + Cd' <= 1 per channel, and on a fixed-point target also where source and destination are opaque; a
+//     saturated pixel of a translucent source or destination comes out brighter than the Switch's (Cs + Cd against As Ad + Cs (1 - Ad) + Cd (1 - As): at most 1/4 on a UNORM target);
+//   MULTIPLY: Cs Cd + Cs (1 - Ad) + Cd (1 - As), three terms: DST_COLOR, ONE_MINUS_SRC_ALPHA drops Cs (1 - Ad), exact over an opaque destination (Ad = 1), darker by Cs (1 - Ad) elsewhere;
+//   INVERT_RGB: Cs (Ad - Cd) + Cd (1 - As): ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, exact over an opaque destination, brighter by Cs (1 - Ad) elsewhere;
+//   LIGHTEN: max(Cs + Cd (1 - As), Cd + Cs (1 - Ad)): the MAX operation (factors ignored) gives max(Cs, Cd), exact where both are opaque, darker elsewhere (at most 1/4 over the
+//     grid; a transparent source keeps the destination, as the mode does).
+// Not reduced (the state's own functions stay, with a red line naming the mode): OVERLAY, HARDLIGHT, SOFTLIGHT, COLORDODGE, COLORBURN, VIVIDLIGHT, LINEARLIGHT, PINLIGHT,
+// HARDMIX, LINEARBURN, DIFFERENCE (piecewise or quotients of Cs' and Cd'), DARKEN (MIN would be exact only for opaque pairs and turns a transparent source texel black), the HSL
+// modes (they mix the channels), PLUS_DARKER (min(1, As + Ad) - (As - Cs) - (Ad - Cd): an alpha term no factor carries; it is PLUS only while As + Ad <= 1), CONTRAST
+// (Ad / 2 + 2 (Cd - Ad / 2)(Cs - As / 2)), INVERT (As Ad + Cd (1 - 2 As)) and INVERT_OVG (As (1 - Cd) + (1 - As) Cd: OpenVG's invert), whose source term is As alone; and the
+// disjoint and conjoint overlaps (min / max weights). A source that is not premultiplied needs As in the source term, which only a source factor of ONE can take (SRC_ALPHA): rows
+// whose source factor is another, or that read the source colour in the destination factor or use MIN / MAX, are not reduced for it. Dual-source factors would help only with a
+// second fragment output the translator does not write (the chain's, not the backend's).
+enum { R_EXACT = 1, R_UNORM, R_COND };   // exact; exact on a fixed-point target (float: while unclamped); exact under the row's condition
+typedef struct { uint8_t s, d, eq, sa, da, eqa, mask, cls; } adv_row;
+#define ROW(s, d, eq, sa, da, eqa, mask, cls) {NVN_BLEND_FUNC_##s, NVN_BLEND_FUNC_##d, NVN_BLEND_EQUATION_##eq, NVN_BLEND_FUNC_##sa, NVN_BLEND_FUNC_##da, NVN_BLEND_EQUATION_##eqa, mask, cls}
+static const adv_row k_red[NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY + 1] = {
+    [NVN_BLEND_ADVANCED_MODE_ZERO] = ROW(ZERO, ZERO, ADD, ZERO, ZERO, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_SRC] = ROW(ONE, ZERO, ADD, ONE, ZERO, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_DST] = ROW(ZERO, ONE, ADD, ZERO, ONE, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_SRC_OVER] = ROW(ONE, ONE_MINUS_SRC_ALPHA, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_DST_OVER] = ROW(ONE_MINUS_DST_ALPHA, ONE, ADD, ONE_MINUS_DST_ALPHA, ONE, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_SRC_IN] = ROW(DST_ALPHA, ZERO, ADD, DST_ALPHA, ZERO, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_DST_IN] = ROW(ZERO, SRC_ALPHA, ADD, ZERO, SRC_ALPHA, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_SRC_OUT] = ROW(ONE_MINUS_DST_ALPHA, ZERO, ADD, ONE_MINUS_DST_ALPHA, ZERO, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_DST_OUT] = ROW(ZERO, ONE_MINUS_SRC_ALPHA, ADD, ZERO, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_SRC_ATOP] = ROW(DST_ALPHA, ONE_MINUS_SRC_ALPHA, ADD, ZERO, ONE, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_DST_ATOP] = ROW(ONE_MINUS_DST_ALPHA, SRC_ALPHA, ADD, ONE, ZERO, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_XOR] = ROW(ONE_MINUS_DST_ALPHA, ONE_MINUS_SRC_ALPHA, ADD, ONE_MINUS_DST_ALPHA, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_PLUS] = ROW(ONE, ONE, ADD, ONE, ONE, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED] = ROW(ONE, ONE, ADD, ONE, ONE, ADD, 0xf, R_UNORM),
+    [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED_ALPHA] = ROW(ONE, ONE, ADD, ONE, ONE, ADD, 0xf, R_UNORM),
+    [NVN_BLEND_ADVANCED_MODE_SCREEN] = ROW(ONE, ONE_MINUS_SRC_COLOR, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_EXCLUSION] = ROW(ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_COLOR, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_MINUS] = ROW(ONE, ONE, REVERSE_SUB, ONE, ONE, REVERSE_SUB, 0xf, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_MINUS_CLAMPED] = ROW(ONE, ONE, REVERSE_SUB, ONE, ONE, REVERSE_SUB, 0xf, R_UNORM),
+    [NVN_BLEND_ADVANCED_MODE_RED] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x1, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_GREEN] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x2, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_BLUE] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x4, R_EXACT),
+    [NVN_BLEND_ADVANCED_MODE_LINEARDODGE] = ROW(ONE, ONE, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
+    [NVN_BLEND_ADVANCED_MODE_MULTIPLY] = ROW(DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
+    [NVN_BLEND_ADVANCED_MODE_INVERT_RGB] = ROW(ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ZERO, ONE, ADD, 0xf, R_COND),
+    [NVN_BLEND_ADVANCED_MODE_LIGHTEN] = ROW(ONE, ONE, MAX, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
+};
+#undef ROW
+static const char *adv_cond(unsigned mode) {   // what a conditional reduction gets wrong, for its red line
+    switch (mode) {
+        case NVN_BLEND_ADVANCED_MODE_LINEARDODGE: return "exact while Cs/As + Cd/Ad <= 1 per channel (on a UNORM target also where source and destination are opaque); a saturated "
+                                                         "pixel of a translucent source or destination comes out brighter than the Switch's (by at most 1/4 on a UNORM target)";
+        case NVN_BLEND_ADVANCED_MODE_MULTIPLY: return "exact over an opaque destination; where Ad < 1 the result is darker by Cs (1 - Ad)";
+        case NVN_BLEND_ADVANCED_MODE_INVERT_RGB: return "exact over an opaque destination; where Ad < 1 the result is brighter by Cs (1 - Ad)";
+        case NVN_BLEND_ADVANCED_MODE_LIGHTEN: return "MAX, exact where source and destination are opaque; darker where either is translucent";
+        default: return "exact on a UNORM target; on this float target sums over 1 (differences below 0) are not clamped as the mode clamps them";
+    }
+}
+// The reduction of b for a target of format f: the row, or NULL (not reducible: overlap, mode, or a source that is not premultiplied where the row cannot take As). *exact: exact
+// for every input on this target
+static const adv_row *adv_row_of(const blend_st *b, VkFormat f, int *exact) {
+    const adv_row *r = b->adv < sizeof k_red / sizeof *k_red && k_red[b->adv].cls ? &k_red[b->adv] : NULL;
+    if (!r || b->adv_ovl) return NULL;
+    if (b->adv_npm && ((r->s != NVN_BLEND_FUNC_ONE && r->s != NVN_BLEND_FUNC_ZERO) || r->d == NVN_BLEND_FUNC_SRC_COLOR || r->d == NVN_BLEND_FUNC_ONE_MINUS_SRC_COLOR ||
+                       r->eq == NVN_BLEND_EQUATION_MAX || r->eq == NVN_BLEND_EQUATION_MIN)) return NULL;
+    *exact = r->cls == R_EXACT || (r->cls == R_UNORM && !fmt_float(f));
+    return r;
+}
+// Why VK_EXT_blend_operation_advanced did not draw a mode, for the red lines
+static const char *adv_ext_why(void) {
+    if (!(hvk.dev.opt_present >> HOSTVK_OPT_BLEND_ADVANCED & 1)) return "the device has not VK_EXT_blend_operation_advanced";
+    if (!hvk.dev.x.blend_adv) return "the device's VK_EXT_blend_operation_advanced lacks advancedBlendCoherentOperations (the barriers between overlapping draws it needs are not placed)";
+    if ((hvk.dev.eds_present >> HOSTVK_EDS_BLEND_EQUATION & 1) && !hvk.dev.x.blend_adv_dyn)
+        return "VK_EXT_blend_operation_advanced is enabled, but this device sets the blend equation dynamically and has not extendedDynamicState3ColorBlendAdvanced with "
+               "advancedBlendMaxColorAttachments of 8 (vkCmdSetColorBlendAdvancedEXT is not used)";
+    return "VK_EXT_blend_operation_advanced is enabled, but the device's limits exclude this case (advancedBlendAllOperations, NonPremultipliedSrcColor, CorrelatedOverlap, "
+           "IndependentBlend or MaxColorAttachments)";
+}
+// quiet: no red line (the draw's dynamic state on a device whose pipelines bake the blend: hvk_key_fill, which decides there, says it)
+static blend_st adv_blend(blend_st b, VkFormat f, uint32_t *mask, int quiet) {
     if (!b.adv) return b;
-    enum { Z = NVN_BLEND_FUNC_ZERO, O = NVN_BLEND_FUNC_ONE, SA = NVN_BLEND_FUNC_SRC_ALPHA, ISA = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA, DA = NVN_BLEND_FUNC_DST_ALPHA, IDA = NVN_BLEND_FUNC_ONE_MINUS_DST_ALPHA };
-    static const uint8_t pd[][4] = {   // {source factor, destination factor} for colour, then for alpha
-        [NVN_BLEND_ADVANCED_MODE_ZERO] = {Z, Z, Z, Z},        [NVN_BLEND_ADVANCED_MODE_SRC] = {O, Z, O, Z},           [NVN_BLEND_ADVANCED_MODE_DST] = {Z, O, Z, O},
-        [NVN_BLEND_ADVANCED_MODE_SRC_OVER] = {O, ISA, O, ISA}, [NVN_BLEND_ADVANCED_MODE_DST_OVER] = {IDA, O, IDA, O},
-        [NVN_BLEND_ADVANCED_MODE_SRC_IN] = {DA, Z, DA, Z},     [NVN_BLEND_ADVANCED_MODE_DST_IN] = {Z, SA, Z, SA},
-        [NVN_BLEND_ADVANCED_MODE_SRC_OUT] = {IDA, Z, IDA, Z},  [NVN_BLEND_ADVANCED_MODE_DST_OUT] = {Z, ISA, Z, ISA},
-        [NVN_BLEND_ADVANCED_MODE_SRC_ATOP] = {DA, ISA, Z, O},  [NVN_BLEND_ADVANCED_MODE_DST_ATOP] = {IDA, SA, O, Z},
-        [NVN_BLEND_ADVANCED_MODE_XOR] = {IDA, ISA, IDA, ISA},  [NVN_BLEND_ADVANCED_MODE_PLUS] = {O, O, O, O},
-        [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED] = {O, O, O, O}, [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED_ALPHA] = {O, O, O, O},
-    };
-    const uint8_t *f = b.adv < sizeof pd / sizeof *pd && pd[b.adv][0] ? pd[b.adv] : NULL;
-    if (!f || b.adv_ovl || (b.adv_npm && f[0] != O && f[0] != Z)) {
-        static _Atomic uint64_t seen; uint64_t bit = 1ull << (b.adv & 63);
-        if (!(atomic_fetch_or(&seen, bit) & bit))
-            hostvk_log("[RED] [hostvk] advanced blend mode %#x (overlap %d, %spremultiplied source) has no fixed-function equivalent and VK_EXT_blend_operation_advanced is not used: "
-                       "the state's blend functions are used", (unsigned)b.adv, (int)b.adv_ovl, b.adv_npm ? "not " : "");
+    int exact = 0; const adv_row *r = adv_row_of(&b, f, &exact);
+    static _Atomic uint64_t seen_none, seen_apx; uint64_t bit = 1ull << (b.adv & 63);
+    if (!r) {
+        if (!quiet && !(atomic_fetch_or(&seen_none, bit) & bit))
+            hostvk_log("[RED] [hostvk] advanced blend mode %#x (overlap %d, %spremultiplied source) has no fixed-function equivalent and %s: the state's blend functions are used",
+                       (unsigned)b.adv, (int)b.adv_ovl, b.adv_npm ? "not " : "", adv_ext_why());
         return b;
     }
-    b.src_rgb = b.adv_npm && f[0] == O ? SA : f[0]; b.dst_rgb = f[1]; b.src_a = f[2]; b.dst_a = f[3];
-    b.eq_rgb = b.eq_a = NVN_BLEND_EQUATION_ADD;
+    if (!exact && !quiet && !(atomic_fetch_or(&seen_apx, bit) & bit))
+        hostvk_log("[RED] [hostvk] advanced blend mode %#x (overlap %d, %spremultiplied source) drawn with its closest fixed-function blend, %s (%s)", (unsigned)b.adv, (int)b.adv_ovl,
+                   b.adv_npm ? "not " : "", adv_cond(b.adv), adv_ext_why());
+    b.src_rgb = b.adv_npm && r->s == NVN_BLEND_FUNC_ONE ? NVN_BLEND_FUNC_SRC_ALPHA : r->s; b.dst_rgb = r->d; b.src_a = r->sa; b.dst_a = r->da;
+    b.eq_rgb = r->eq; b.eq_a = r->eqa; *mask = r->mask;
     return b;
 }
-void hvk_blend_of(const blend_st *b0, int on, VkFormat f, uint32_t wmask4, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm) {
+static void blend_of(const blend_st *b0, int on, VkFormat f, uint32_t wmask4, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm, int quiet) {
     *en = on && f && fmt_blendable(f);
-    blend_st bb = *en ? adv_blend(*b0) : *b0; const blend_st *b = &bb;
+    uint32_t mask = 0xf;
+    blend_st bb = *en ? adv_blend(*b0, f, &mask, quiet) : *b0; const blend_st *b = &bb;
     *eq = (VkColorBlendEquationEXT){bf(b->src_rgb), bf(b->dst_rgb), bo(b->eq_rgb), bf(b->src_a), bf(b->dst_a), bo(b->eq_a)};
     if (bo(b->eq_rgb) == VK_BLEND_OP_MIN || bo(b->eq_rgb) == VK_BLEND_OP_MAX) { eq->srcColorBlendFactor = eq->dstColorBlendFactor = VK_BLEND_FACTOR_ONE; }
     if (bo(b->eq_a) == VK_BLEND_OP_MIN || bo(b->eq_a) == VK_BLEND_OP_MAX) { eq->srcAlphaBlendFactor = eq->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; }
-    *wm = (VkColorComponentFlags)(wmask4 & 0xf);
+    *wm = (VkColorComponentFlags)(wmask4 & mask & 0xf);
+}
+// VK_EXT_blend_operation_advanced (exact, as NVN sets the mode, the premultiplied source and the overlap) for a mode whose reduction is not exact on this target. Only with
+// advancedBlendCoherentOperations (vk_device.c): a device without it would need a VK_ACCESS_COLOR_ATTACHMENT_READ_NONCOHERENT_BIT_EXT dependency between overlapping advanced
+// blends, a pass split per draw under dynamic rendering, which is not done: it keeps the reductions. Two ways, by whether the blend equation is dynamic:
+// - baked (HVK_BAKE_BLEND with the equation not dynamic; levels B and D, or a device without extendedDynamicState3ColorBlendEquation): the pipeline's attachment takes the
+//   advanced op (colour and alpha the same, VUID-VkPipelineColorBlendAttachmentState-colorBlendOp-01406) and VkPipelineColorBlendAdvancedStateCreateInfoEXT, which is one per
+//   pipeline (srcPremultiplied, blendOverlap): a second attachment with other parameters is reduced (adv_ext);
+// - dynamic (level A with extendedDynamicState3ColorBlendAdvanced, x.blend_adv_dyn): every pipeline with colour attachments declares VK_DYNAMIC_STATE_COLOR_BLEND_ADVANCED_EXT
+//   beside the equation (hvk_dyn_states), and the draw sets an advanced attachment with vkCmdSetColorBlendAdvancedEXT after vkCmdSetColorBlendEquationEXT (hvk_blend_dyn,
+//   vk_commands.c dyn_apply): per attachment, so attachments may differ in their parameters.
+// The limits both keep: advancedBlendAllOperations (-advancedBlendAllOperations-01409: without it only MULTIPLY to EXCLUSION and the HSL modes), advancedBlendIndependentBlend
+// (-advancedBlendIndependentBlend-01407: without it one op for all attachments, so such a device uses the extension for single-target passes only), advancedBlendMaxColorAttachments
+// (-colorBlendOp-01410, VUID-vkCmdDraw-advancedBlendMaxColorAttachments-07480), NonPremultipliedSrcColor and CorrelatedOverlap
+// (VUID-VkPipelineColorBlendAdvancedStateCreateInfoEXT-srcPremultiplied-01424 / -blendOverlap-01426, VUID-VkColorBlendAdvancedEXT-srcPremultiplied-07505 / -blendOverlap-07507).
+// dstPremultiplied is VK_TRUE: NVN's destination is premultiplied (NV_blend_equation_advanced has no switch for it)
+static const VkBlendOp k_adv_vk[NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY + 1] = {
+    [NVN_BLEND_ADVANCED_MODE_ZERO] = VK_BLEND_OP_ZERO_EXT, [NVN_BLEND_ADVANCED_MODE_SRC] = VK_BLEND_OP_SRC_EXT, [NVN_BLEND_ADVANCED_MODE_DST] = VK_BLEND_OP_DST_EXT,
+    [NVN_BLEND_ADVANCED_MODE_SRC_OVER] = VK_BLEND_OP_SRC_OVER_EXT, [NVN_BLEND_ADVANCED_MODE_DST_OVER] = VK_BLEND_OP_DST_OVER_EXT,
+    [NVN_BLEND_ADVANCED_MODE_SRC_IN] = VK_BLEND_OP_SRC_IN_EXT, [NVN_BLEND_ADVANCED_MODE_DST_IN] = VK_BLEND_OP_DST_IN_EXT,
+    [NVN_BLEND_ADVANCED_MODE_SRC_OUT] = VK_BLEND_OP_SRC_OUT_EXT, [NVN_BLEND_ADVANCED_MODE_DST_OUT] = VK_BLEND_OP_DST_OUT_EXT,
+    [NVN_BLEND_ADVANCED_MODE_SRC_ATOP] = VK_BLEND_OP_SRC_ATOP_EXT, [NVN_BLEND_ADVANCED_MODE_DST_ATOP] = VK_BLEND_OP_DST_ATOP_EXT, [NVN_BLEND_ADVANCED_MODE_XOR] = VK_BLEND_OP_XOR_EXT,
+    [NVN_BLEND_ADVANCED_MODE_PLUS] = VK_BLEND_OP_PLUS_EXT, [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED] = VK_BLEND_OP_PLUS_CLAMPED_EXT,
+    [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED_ALPHA] = VK_BLEND_OP_PLUS_CLAMPED_ALPHA_EXT, [NVN_BLEND_ADVANCED_MODE_PLUS_DARKER] = VK_BLEND_OP_PLUS_DARKER_EXT,
+    [NVN_BLEND_ADVANCED_MODE_MULTIPLY] = VK_BLEND_OP_MULTIPLY_EXT, [NVN_BLEND_ADVANCED_MODE_SCREEN] = VK_BLEND_OP_SCREEN_EXT, [NVN_BLEND_ADVANCED_MODE_OVERLAY] = VK_BLEND_OP_OVERLAY_EXT,
+    [NVN_BLEND_ADVANCED_MODE_DARKEN] = VK_BLEND_OP_DARKEN_EXT, [NVN_BLEND_ADVANCED_MODE_LIGHTEN] = VK_BLEND_OP_LIGHTEN_EXT, [NVN_BLEND_ADVANCED_MODE_COLORDODGE] = VK_BLEND_OP_COLORDODGE_EXT,
+    [NVN_BLEND_ADVANCED_MODE_COLORBURN] = VK_BLEND_OP_COLORBURN_EXT, [NVN_BLEND_ADVANCED_MODE_HARDLIGHT] = VK_BLEND_OP_HARDLIGHT_EXT, [NVN_BLEND_ADVANCED_MODE_SOFTLIGHT] = VK_BLEND_OP_SOFTLIGHT_EXT,
+    [NVN_BLEND_ADVANCED_MODE_DIFFERENCE] = VK_BLEND_OP_DIFFERENCE_EXT, [NVN_BLEND_ADVANCED_MODE_MINUS] = VK_BLEND_OP_MINUS_EXT, [NVN_BLEND_ADVANCED_MODE_MINUS_CLAMPED] = VK_BLEND_OP_MINUS_CLAMPED_EXT,
+    [NVN_BLEND_ADVANCED_MODE_EXCLUSION] = VK_BLEND_OP_EXCLUSION_EXT, [NVN_BLEND_ADVANCED_MODE_CONTRAST] = VK_BLEND_OP_CONTRAST_EXT, [NVN_BLEND_ADVANCED_MODE_INVERT] = VK_BLEND_OP_INVERT_EXT,
+    [NVN_BLEND_ADVANCED_MODE_INVERT_RGB] = VK_BLEND_OP_INVERT_RGB_EXT, [NVN_BLEND_ADVANCED_MODE_INVERT_OVG] = VK_BLEND_OP_INVERT_OVG_EXT,
+    [NVN_BLEND_ADVANCED_MODE_LINEARDODGE] = VK_BLEND_OP_LINEARDODGE_EXT, [NVN_BLEND_ADVANCED_MODE_LINEARBURN] = VK_BLEND_OP_LINEARBURN_EXT,
+    [NVN_BLEND_ADVANCED_MODE_VIVIDLIGHT] = VK_BLEND_OP_VIVIDLIGHT_EXT, [NVN_BLEND_ADVANCED_MODE_LINEARLIGHT] = VK_BLEND_OP_LINEARLIGHT_EXT, [NVN_BLEND_ADVANCED_MODE_PINLIGHT] = VK_BLEND_OP_PINLIGHT_EXT,
+    [NVN_BLEND_ADVANCED_MODE_HARDMIX] = VK_BLEND_OP_HARDMIX_EXT, [NVN_BLEND_ADVANCED_MODE_RED] = VK_BLEND_OP_RED_EXT, [NVN_BLEND_ADVANCED_MODE_GREEN] = VK_BLEND_OP_GREEN_EXT,
+    [NVN_BLEND_ADVANCED_MODE_BLUE] = VK_BLEND_OP_BLUE_EXT, [NVN_BLEND_ADVANCED_MODE_HSL_HUE] = VK_BLEND_OP_HSL_HUE_EXT, [NVN_BLEND_ADVANCED_MODE_HSL_SATURATION] = VK_BLEND_OP_HSL_SATURATION_EXT,
+    [NVN_BLEND_ADVANCED_MODE_HSL_COLOR] = VK_BLEND_OP_HSL_COLOR_EXT, [NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY] = VK_BLEND_OP_HSL_LUMINOSITY_EXT,
+};
+static int adv_basic(unsigned mode) {   // the operations a device without advancedBlendAllOperations has (VUID-VkPipelineColorBlendAttachmentState-advancedBlendAllOperations-01409)
+    return (mode >= NVN_BLEND_ADVANCED_MODE_MULTIPLY && mode <= NVN_BLEND_ADVANCED_MODE_DIFFERENCE) || mode == NVN_BLEND_ADVANCED_MODE_EXCLUSION ||
+           (mode >= NVN_BLEND_ADVANCED_MODE_HSL_HUE && mode <= NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY);
+}
+// The advanced op the extension draws attachment state b of a pass of nc colour attachments with (format f), or 0 (reduced): the limits above
+static VkBlendOp adv_op(const blend_st *b, VkFormat f, int nc) {
+    const hostvk_dev *d = &hvk.dev;
+    if (!d->x.blend_adv || !b->adv || b->adv >= sizeof k_adv_vk / sizeof *k_adv_vk || !k_adv_vk[b->adv]) return 0;
+    int exact = 0;
+    if (adv_row_of(b, f, &exact) && exact) return 0;   // the fixed-function blend is the mode: no extension needed
+    if ((uint32_t)nc > d->x.blend_adv_max_att || (nc > 1 && !d->x.blend_adv_indep) || (!d->x.blend_adv_all && !adv_basic(b->adv)) ||
+        (b->adv_npm && !d->x.blend_adv_npm_src) || (b->adv_ovl && !d->x.blend_adv_correlated)) return 0;
+    return k_adv_vk[b->adv];
+}
+// The baked way: the op for attachment b of key k, whose advanced state it fixes (the first advanced attachment's) or must match
+static VkBlendOp adv_ext(const blend_st *b, VkFormat f, int nc, hvk_gfx_key *k) {
+    if (hvk.dev.eds_present >> HOSTVK_EDS_BLEND_EQUATION & 1) return 0;   // the equation is dynamic: hvk_blend_dyn's way, or none
+    VkBlendOp op = adv_op(b, f, nc);
+    if (!op || (k->adv_on && (k->adv_src_pm != !b->adv_npm || k->adv_overlap != b->adv_ovl))) return 0;
+    k->adv_on = 1; k->adv_src_pm = (uint8_t)!b->adv_npm; k->adv_overlap = (uint8_t)b->adv_ovl;   // NVN's overlap values are VkBlendOverlapEXT's (0 uncorrelated, 1 disjoint, 2 conjoint)
+    return op;
+}
+// The dynamic blend state of a draw's nc colour attachments (vk_pso.h). clampResults is VK_FALSE: NV_blend_equation_advanced clamps as the basic equations do (issue 11: inputs to
+// [0, 1] on a UNORM target, whose stored result is clamped too) and not on a float target, where only the modes' own clamps (PLUS_CLAMPED and the like, issue 18) apply
+void hvk_blend_dyn(const blend_st b[8], uint32_t blend_en, const VkFormat f[8], uint32_t chmask, int nc, uint32_t en[8], VkColorBlendEquationEXT eq[8], VkColorComponentFlags wm[8],
+                   VkColorBlendAdvancedEXT adv[8]) {
+    int dyn = hvk.dev.x.blend_adv_dyn && (hvk.dev.eds_present >> HOSTVK_EDS_BLEND_EQUATION & 1);
+    int quiet = (hvk.dev.eds_present & HOSTVK_EDS_BLEND) != HOSTVK_EDS_BLEND;   // the pipelines bake the blend: hvk_key_fill says what is approximate
+    for (int i = 0; i < nc && i < 8; i++) {
+        int on = (int)(blend_en >> i & 1);
+        VkBlendOp op = dyn && on && f[i] && fmt_blendable(f[i]) ? adv_op(&b[i], f[i], nc) : (VkBlendOp)0;
+        blend_of(&b[i], on, f[i], chmask >> (4 * i), &en[i], &eq[i], &wm[i], quiet || op);   // the equation set first: valid, and replaced by the advanced state after it
+        adv[i] = op ? (VkColorBlendAdvancedEXT){op, b[i].adv_npm ? VK_FALSE : VK_TRUE, VK_TRUE, (VkBlendOverlapEXT)b[i].adv_ovl, VK_FALSE} : (VkColorBlendAdvancedEXT){0};
+    }
 }
 
 // ---------- Vertex input ----------
@@ -161,7 +319,13 @@ void hvk_key_fill(hvk_gfx_key *k, hvk_shader *const sh[6], int klass, const hvk_
     if ((e & HOSTVK_EDS_BLEND) != HOSTVK_EDS_BLEND) {
         k->baked |= HVK_BAKE_BLEND;
         for (int i = 0; i < nc; i++) { uint32_t en; VkColorBlendEquationEXT q; VkColorComponentFlags wm;
-            hvk_blend_of(&s->blend[i], (int)(s->blend_en >> i & 1), s->cfmt[i], s->chmask >> (4 * i), &en, &q, &wm);
+            VkBlendOp op = (s->blend_en >> i & 1) && s->cfmt[i] && fmt_blendable(s->cfmt[i]) ? adv_ext(&s->blend[i], s->cfmt[i], nc, k) : (VkBlendOp)0;
+            if (op) {   // the advanced operation itself (its factors are not used); the channel mask as the game set it
+                k->blend[i] = (VkPipelineColorBlendAttachmentState){VK_TRUE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, op, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, op,
+                                                                    (VkColorComponentFlags)(s->chmask >> (4 * i) & 0xf)};
+                continue;
+            }
+            blend_of(&s->blend[i], (int)(s->blend_en >> i & 1), s->cfmt[i], s->chmask >> (4 * i), &en, &q, &wm, 0);
             if (!en) memset(&q, 0, sizeof q);   // a target that does not blend: its factors are not part of the pipeline (NVN's reset leaves ONE / ZERO there, a row zero)
             k->blend[i] = (VkPipelineColorBlendAttachmentState){en, q.srcColorBlendFactor, q.dstColorBlendFactor, q.colorBlendOp, q.srcAlphaBlendFactor, q.dstAlphaBlendFactor, q.alphaBlendOp, wm}; }
         k->logic_en = s->logic_op != NVN_LOGIC_OP_COPY;
@@ -211,6 +375,7 @@ uint32_t hvk_dyn_states(VkDynamicState *d, int vertex_dynamic, int colors, int b
     if (e >> HOSTVK_EDS_LOGIC_OP_ENABLE & 1) d[n++] = VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT;
     if (colors && (e >> HOSTVK_EDS_BLEND_ENABLE & 1)) d[n++] = VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
     if (colors && (e >> HOSTVK_EDS_BLEND_EQUATION & 1)) d[n++] = VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
+    if (colors && (e >> HOSTVK_EDS_BLEND_EQUATION & 1) && hvk.dev.x.blend_adv_dyn) d[n++] = VK_DYNAMIC_STATE_COLOR_BLEND_ADVANCED_EXT;   // NVN's advanced modes (hvk_blend_dyn)
     if (colors && (e >> HOSTVK_EDS_WRITE_MASK & 1)) d[n++] = VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
     if (e >> HOSTVK_EDS_DEPTH_CLAMP & 1) d[n++] = VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
     if (e >> HOSTVK_EDS_POLYGON_MODE & 1) d[n++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
@@ -286,7 +451,8 @@ void hvk_pso_test_optimize(int on) { g_opt_on = on != 0; }
 typedef struct { uint8_t cls, baked; uint8_t nvb, nva, nvd, pad[3]; VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescriptionKHR vd[16]; } vi_key;
 typedef struct { const void *sh[4]; const void *layout; uint32_t patch_points; uint8_t depth_clip_ndc, poly_mode, depth_clamp, baked, line_mode, pad[3]; } pr_key;
 typedef struct { const void *fs; const void *layout; uint8_t entry, pad[7]; } fs_key;
-typedef struct { VkFormat color[8], depth, stencil; uint32_t samples, baked; uint8_t ccount, logic_en, logic_op, a2c; VkPipelineColorBlendAttachmentState blend[8]; } fo_key;
+typedef struct { VkFormat color[8], depth, stencil; uint32_t samples, baked; uint8_t ccount, logic_en, logic_op, a2c, adv_on, adv_src_pm, adv_overlap, pad;
+                 VkPipelineColorBlendAttachmentState blend[8]; } fo_key;
 typedef struct { _Atomic int state; VkPipeline p; } lib_ent;   // state: 0 being made, 1 made, 2 failed
 typedef struct { const void *sh[5]; const void *layout; hvk_gfx_key k; } gpl_key;   // a whole pipeline: vertex, tess control, tess evaluation, geometry, fragment
 enum { K_FAST, K_OPT, K_MONO };
@@ -336,6 +502,12 @@ static void tess_state(const hvk_gfx_key *k, VkPipelineTessellationStateCreateIn
     *tdo = (VkPipelineTessellationDomainOriginStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO, NULL, VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT};
     *ts = (VkPipelineTessellationStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, tdo, 0, k->patch_points ? k->patch_points : 1};
 }
+// The advanced blend state of a pipeline whose key has an advanced operation (adv_ext): chained to its colour blend state (the specification's
+// VkPipelineColorBlendAdvancedStateCreateInfoEXT); a fragment output library holds it with the rest of the blend state
+static void adv_state(const hvk_gfx_key *k, VkPipelineColorBlendAdvancedStateCreateInfoEXT *a) {
+    *a = (VkPipelineColorBlendAdvancedStateCreateInfoEXT){VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT, NULL, k->adv_src_pm ? VK_TRUE : VK_FALSE, VK_TRUE,
+                                                          (VkBlendOverlapEXT)k->adv_overlap};
+}
 static VkPipeline lib_make(int part, const pso_ent *e) {
     const hvk_gfx_key *k = &e->k; hvk_shader *const *sh = e->sh;
     int vdyn = hvk.dev.caps.vertex_input_dynamic;
@@ -359,7 +531,8 @@ static VkPipeline lib_make(int part, const pso_ent *e) {
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
     VkPipelineColorBlendAttachmentState ba[8]; for (int i = 0; i < 8; i++) ba[i] = k->blend[i];
-    VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0, k->logic_en, (VkLogicOp)k->logic_op, k->ccount, ba, {0, 0, 0, 0}};
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT adv; adv_state(k, &adv);
+    VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, k->adv_on ? &adv : NULL, 0, k->logic_en, (VkLogicOp)k->logic_op, k->ccount, ba, {0, 0, 0, 0}};
     switch (part) {
         case L_VI: ci.pVertexInputState = &vi; ci.pInputAssemblyState = &ia; break;
         case L_PR: {
@@ -400,6 +573,7 @@ static lib_ent *lib_get(int part, const pso_ent *e, int *made, int *waited) {
         case L_FS: u.fs.fs = e->sh[1]; u.fs.layout = e->l; u.fs.entry = k->entry[0]; klen = sizeof u.fs; break;
         case L_FO: memcpy(u.fo.color, k->color, sizeof k->color); u.fo.depth = k->depth; u.fo.stencil = k->stencil; u.fo.samples = k->samples; u.fo.ccount = k->ccount;
             u.fo.baked = k->baked & (HVK_BAKE_BLEND | HVK_BAKE_LOGIC_OP | HVK_BAKE_RASTER); u.fo.logic_en = k->logic_en; u.fo.logic_op = k->logic_op; u.fo.a2c = k->a2c;
+            u.fo.adv_on = k->adv_on; u.fo.adv_src_pm = k->adv_src_pm; u.fo.adv_overlap = k->adv_overlap;
             memcpy(u.fo.blend, k->blend, sizeof k->blend); klen = sizeof u.fo; break;
     }
     pthread_mutex_lock(&g_mu);
@@ -450,7 +624,8 @@ static VkPipeline mono_make(const pso_ent *e, uint64_t *t) {   // levels C and D
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     VkPipelineColorBlendAttachmentState ba[8]; for (int i = 0; i < 8; i++) ba[i] = k->blend[i];
-    VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0, k->logic_en, (VkLogicOp)k->logic_op, k->ccount, ba, {0, 0, 0, 0}};
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT adv; adv_state(k, &adv);
+    VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, k->adv_on ? &adv : NULL, 0, k->logic_en, (VkLogicOp)k->logic_op, k->ccount, ba, {0, 0, 0, 0}};
     VkDynamicState dsv[48]; uint32_t nd = hvk_dyn_states(dsv, vdyn, k->ccount > 0, k->nvb > 0);
     VkPipelineDynamicStateCreateInfo dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, nd, dsv};
     VkPipelineRenderingCreateInfo ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, NULL, 0, k->ccount, k->color, k->depth, k->stencil};

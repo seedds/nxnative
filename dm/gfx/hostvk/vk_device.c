@@ -106,6 +106,9 @@ typedef struct {
     int list_restart;   // VK_EXT_primitive_topology_list_restart (the index conversions)
     VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT flr;
     int pv;             // VK_EXT_provoking_vertex (the provoking vertex)
+    int blend_adv;      // VK_EXT_blend_operation_advanced (NVN's advanced blend modes)
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT fba;
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT pba;
     VkPhysicalDeviceProvokingVertexFeaturesEXT fpv;
     VkPhysicalDeviceProvokingVertexPropertiesEXT ppv;
     VkPhysicalDeviceTransformFeedbackPropertiesEXT pxfb;
@@ -176,6 +179,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->display_timing = has_ext(q, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     q->list_restart = has_ext(q, VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
     q->pv = has_ext(q, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+    q->blend_adv = has_ext(q, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -203,6 +207,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->list_restart) { q->flr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT; *next = &q->flr; next = &q->flr.pNext; }
     if (q->pv) { q->fpv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT; *next = &q->fpv; next = &q->fpv.pNext; }
     if (q->present_wait) { q->fpw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR; *next = &q->fpw; next = &q->fpw.pNext; }
+    if (q->blend_adv) { q->fba.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT; *next = &q->fba; next = &q->fba.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
     q->p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -213,6 +218,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->eds3) { q->peds3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT; *next = &q->peds3; next = &q->peds3.pNext; }
     if (q->pv) { q->ppv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_PROPERTIES_EXT; *next = &q->ppv; next = &q->ppv.pNext; }
     if (q->xfb) { q->pxfb.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT; *next = &q->pxfb; next = &q->pxfb.pNext; }
+    if (q->blend_adv) { q->pba.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT; *next = &q->pba; next = &q->pba.pNext; }
     vkGetPhysicalDeviceProperties2(p, &q->p);
 }
 
@@ -544,6 +550,21 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     d->x.provoking_last = q->pv && q->fpv.provokingVertexLast && !g_test_no_pv;
     d->x.provoking_per_pipeline = d->x.provoking_last && q->ppv.provokingVertexModePerPipeline;
     if (d->x.provoking_last) ext[ne++] = VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
+    // NVN's advanced blend modes (vk_gpl.c adv_ext): VK_EXT_blend_operation_advanced only with advancedBlendCoherentOperations. Without it the specification ("Advanced Blend
+    // Operations"; the feature's description) asks for a memory dependency with VK_ACCESS_COLOR_ATTACHMENT_READ_NONCOHERENT_BIT_EXT between two advanced blends of one sample,
+    // which inside a dynamic-rendering pass of Vulkan 1.3 means a pass split per overlapping draw; the command stream does not place those, so such a device keeps the
+    // fixed-function reductions (said by adv_blend's red line). Its limits are kept for the pipelines that use it. Where the blend equation is dynamic (level A), the advanced
+    // state is dynamic too, with extendedDynamicState3ColorBlendAdvanced (VUID-VkGraphicsPipelineCreateInfo-extendedDynamicState3ColorBlendAdvanced-07386), only on a device
+    // whose advancedBlendMaxColorAttachments covers NVN's 8 targets: with that state and the blend enable dynamic, a draw that blends any attachment may have at most that many
+    // colour attachments, advanced or not (VUID-vkCmdDraw-advancedBlendMaxColorAttachments-07480)
+    d->x.blend_adv = q->blend_adv && q->fba.advancedBlendCoherentOperations;
+    if (d->x.blend_adv) {
+        ext[ne++] = VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME;
+        d->x.blend_adv_all = q->pba.advancedBlendAllOperations != 0; d->x.blend_adv_indep = q->pba.advancedBlendIndependentBlend != 0;
+        d->x.blend_adv_npm_src = q->pba.advancedBlendNonPremultipliedSrcColor != 0; d->x.blend_adv_correlated = q->pba.advancedBlendCorrelatedOverlap != 0;
+        d->x.blend_adv_max_att = q->pba.advancedBlendMaxColorAttachments;
+        d->x.blend_adv_dyn = eds3 && (eds >> HOSTVK_EDS_BLEND_EQUATION & 1) && q->feds3.extendedDynamicState3ColorBlendAdvanced && d->x.blend_adv_max_att >= 8;
+    }
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
     d->x.draw_parameters = q->f11.shaderDrawParameters != 0;   // enabled below: a module declaring DrawParameters without it fails validation (VUID-VkShaderModuleCreateInfo-pCode-08740)
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
@@ -592,6 +613,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     feds3.extendedDynamicState3AlphaToCoverageEnable = (eds >> HOSTVK_EDS_ALPHA_TO_COVERAGE) & 1;
     feds3.extendedDynamicState3LineRasterizationMode = d->x.line_mode_dynamic;
     feds3.extendedDynamicState3ViewportSwizzle = d->x.vp_swizzle_nv;
+    feds3.extendedDynamicState3ColorBlendAdvanced = d->x.blend_adv_dyn;
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fvid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, NULL, VK_TRUE};
     VkPhysicalDeviceConditionalRenderingFeaturesEXT fcr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
     VkPhysicalDeviceCustomBorderColorFeaturesEXT fcb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, NULL, VK_TRUE, d->x.border_without_format};
@@ -627,6 +649,8 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     VkPhysicalDevicePresentIdFeaturesKHR fpid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, NULL, VK_TRUE};
     VkPhysicalDevicePresentWaitFeaturesKHR fpw = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, NULL, VK_TRUE};
     if (d->x.present_wait) { *next = &fpid; next = &fpid.pNext; *next = &fpw; next = &fpw.pNext; }
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT fba = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT, NULL, VK_TRUE};
+    if (d->x.blend_adv) { *next = &fba; next = &fba.pNext; }
     // One queue for graphics, compute and copies; the transfer-only family (transfer_family) gets a queue when uploads move to it
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, d->queue_family, 1, &prio};

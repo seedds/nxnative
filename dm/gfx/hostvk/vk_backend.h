@@ -186,6 +186,9 @@ typedef struct {
     VkPipelineColorBlendAttachmentState blend[8];
     uint8_t logic_en, logic_op, poly_mode, depth_clamp, a2c;
     uint8_t line_mode;         // VkLineRasterizationModeEXT when the device has line rasterization but cannot set the mode dynamically (HVK_BAKE_LINE; step P8)
+    // an attachment of blend[] blends with an advanced operation of VK_EXT_blend_operation_advanced (vk_gpl.c adv_ext; only with the blend baked): the pipeline's
+    // VkPipelineColorBlendAdvancedStateCreateInfoEXT, one for every attachment (srcPremultiplied, blendOverlap; the destination is premultiplied, as NVN's)
+    uint8_t adv_on, adv_src_pm, adv_overlap;
     // vertex input when the device has no dynamic vertex input
     uint8_t nvb, nva;
     VkVertexInputBindingDescription vb[16];

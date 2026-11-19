@@ -418,6 +418,43 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the hardware ignores the blend state's own functions while an advanced mode is set.
 - **Fix:** the blend state keeps the mode, the premultiplied-source flag and the overlap (`blend_st` in `nvn_obj.h`), and the pipeline (`adv_blend` in `nvn_mtl.m`) blends the Porter-Duff modes (ZERO, SRC, DST, SRC/DST_OVER, _IN, _OUT, _ATOP, XOR, the PLUS modes) with the fixed-function factors they amount to under uncorrelated overlap, with premultiplied colours as NV_blend_equation_advanced defines them; a source that is not premultiplied is multiplied by As where the source factor is ONE. Multiply, screen, overlay, the HSL modes and the other overlaps need the destination colour in the shader and keep the state's functions, with a red line naming the mode.
 - **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) (SRC_OVER, on one blend state in the levels).
+- **Note:** the Vulkan backend reduces more modes (SCREEN, EXCLUSION, MINUS, the channel modes, and LINEARDODGE, MULTIPLY, INVERT_RGB, LIGHTEN under a condition) and uses `VK_EXT_blend_operation_advanced` where it can: [Advanced blend modes on the Vulkan backend](#advanced-blend-modes-on-the-vulkan-backend). The Metal table has not those rows yet.
+
+### Advanced blend modes on the Vulkan backend
+
+- **Symptom:** on the Vulkan backend (Linux, Windows), `[RED] [hostvk] advanced blend mode 0x26 (overlap 0, premultiplied source) has no fixed-function equivalent and VK_EXT_blend_operation_advanced is not used: the state's blend functions are used` (LINEARDODGE, in level 3-2); no wrong picture was seen, none was compared.
+- **Cause:** while an advanced mode is set the Switch's GPU blends by NV_blend_equation_advanced and ignores the state's own functions, so the functions the backend fell back to are arbitrary. The backend reduced only the Porter-Duff modes. With uncorrelated overlap, premultiplied colours and Cs' = Cs / As, Cd' = Cd / Ad, the f / X / Y / Z modes are RGB = f(Cs', Cd') As Ad + Y Cs (1 - Ad) + Z Cd (1 - As) and A = X As Ad + Y As (1 - Ad) + Z Ad (1 - As) (the Vulkan specification's "Advanced Blend Operations", which `VK_EXT_blend_operation_advanced` shares with the GL extension); more of them are fixed-function blends than the Porter-Duff ones.
+- **Fix:** `dm/gfx/hostvk/vk_gpl.c` (`k_red`, `adv_blend`, `adv_ext`). Without the extension, each mode is one of three kinds:
+  - **Exact** for every input. These are the Porter-Duff modes and PLUS, plus SCREEN (Cs + Cd (1 - Cs): ONE, ONE_MINUS_SRC_COLOR), EXCLUSION (Cs (1 - Cd) + Cd (1 - Cs)) and MINUS (REVERSE_SUBTRACT). RED, GREEN and BLUE are the source's channel over the destination's, so they are a write mask of that channel. PLUS_CLAMPED, PLUS_CLAMPED_ALPHA and MINUS_CLAMPED are exact on a fixed-point target, which clamps the stored result. On a float target they are exact only while no sum passes 1 and no difference falls below 0. The alpha of every blend mode is As + Ad (1 - As).
+  - **Closest under a condition.** These modes have one fixed-function form, used in place of the arbitrary state functions. Each logs a red line once per mode, naming what is approximate:
+    - LINEARDODGE (ONE, ONE) is exact while Cs' + Cd' ≤ 1. On a UNORM target it is also exact where both source and destination are opaque. Elsewhere a saturated pixel comes out brighter than the Switch's, by at most 1/4 on UNORM.
+    - MULTIPLY (DST_COLOR, ONE_MINUS_SRC_ALPHA) is exact over an opaque destination and darker by Cs (1 - Ad) elsewhere.
+    - INVERT_RGB (ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA) is exact over an opaque destination and brighter by Cs (1 - Ad) elsewhere.
+    - LIGHTEN (MAX) is exact where both are opaque and darker elsewhere. A transparent source keeps the destination.
+  - **Not reduced.** These keep today's behaviour and red line: the piecewise modes (OVERLAY, HARDLIGHT, SOFTLIGHT, the dodges and burns, VIVIDLIGHT, LINEARLIGHT, PINLIGHT, HARDMIX), DIFFERENCE, and DARKEN (MIN would turn a transparent source texel black). Also not reduced:
+    - the HSL modes, which mix channels;
+    - PLUS_DARKER (Core Graphics' plus-darker: min(1, As + Ad) - (As - Cs) - (Ad - Cd));
+    - CONTRAST (Ad / 2 + 2 (Cd - Ad / 2)(Cs - As / 2));
+    - INVERT and INVERT_OVG (OpenVG's invert), whose source term is As alone;
+    - the disjoint and conjoint overlaps.
+
+  A source that is not premultiplied enters as c As. Only a source factor of ONE can take that As (as SRC_ALPHA), so rows with another source factor, a source-colour destination factor or MIN / MAX are not reduced for it. Dual-source factors would need a second shader output, which the translator does not write.
+
+  With `VK_EXT_blend_operation_advanced` and `advancedBlendCoherentOperations` (`vk_device.c` enables both only when present), a mode whose reduction is not exact is drawn exactly through the extension, as NVN sets it (`VkPipelineColorBlendAdvancedStateCreateInfoEXT`: srcPremultiplied from `SetAdvancedPremultipliedSrc`, dstPremultiplied true, NVN's overlap), within the device's limits: `advancedBlendAllOperations` (without it, only MULTIPLY to EXCLUSION and the HSL modes), `NonPremultipliedSrcColor`, `CorrelatedOverlap`, `IndependentBlend` (without it, single-target passes only) and `MaxColorAttachments`. Two ways, by whether the blend equation is dynamic:
+  - **Dynamic (level A, as on the RTX 4060).** This needs `extendedDynamicState3ColorBlendAdvanced` and an `advancedBlendMaxColorAttachments` of at least 8: with the advanced state and the blend enable dynamic, any blending draw may have at most that many colour attachments (`VUID-vkCmdDraw-advancedBlendMaxColorAttachments-07480`). Every pipeline with colour attachments then also declares `VK_DYNAMIC_STATE_COLOR_BLEND_ADVANCED_EXT`. `dyn_apply` (`vk_commands.c`) sets the equation of every attachment, then `vkCmdSetColorBlendAdvancedEXT` for those the extension draws (`hvk_blend_dyn`), with clampResults false. With both states dynamic either command satisfies a draw (`VUID-vkCmdDraw-None-10864`), and both set the attachment's blend operation, so the later call applies. A change of either (plain after advanced, advanced after plain, other parameters) sets both again, even where the equations equal the shadow's.
+  - **Baked (levels B and D, or no dynamic equation).** The pipeline's attachment takes the advanced op and `VkPipelineColorBlendAdvancedStateCreateInfoEXT`, one per pipeline, so a second attachment with other parameters is reduced.
+
+  A device without `advancedBlendCoherentOperations` keeps the reductions. It would need a `VK_ACCESS_COLOR_ATTACHMENT_READ_NONCOHERENT_BIT_EXT` dependency between overlapping advanced draws, a pass split per draw under dynamic rendering, which is not done.
+
+  clampResults is false because NV_blend_equation_advanced clamps as the basic equations do (its issue 11: on a UNORM target, inputs to [0, 1] and the stored result), and not on a float target, where only the modes' own clamps apply (issue 18). Whether Maxwell does exactly that on float targets has not been checked on hardware.
+- **Check:** `t_vk_adv_blend` (CTest) has a CPU reference of every mode and overlap. On lavapipe it covers:
+  - every exact row, premultiplied and not, on levels A and D: SCREEN, EXCLUSION, MINUS, MINUS_CLAMPED and the channel modes fail on the code before this change;
+  - each conditional row, exact under its condition and, outside it, off by the stated amount in the stated direction;
+  - the clamped modes on RGBA16F;
+  - an advanced draw, a plain one and an advanced one again in one pass.
+
+  A third part compares every mode the device allows through the extension, on level A and on the baked levels B and D, with the advanced-plain-advanced pass through it (OVERLAY, and LINEARDODGE where every operation is supported). Lavapipe has no extension, so it is skipped there. Not run anywhere yet: the extension path, on level A and baked, which needs a device with it, such as NVIDIA's.
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), level 3-2 (LINEARDODGE, uncorrelated, premultiplied source: now the ONE, ONE blend, exact unless a pixel saturates).
 
 ### Depth clamp
 

@@ -49,10 +49,15 @@ void *objmap_del(const void *k) {
 uint64_t now_ns(void) { return plat_now_ns(); }
 // Guest clock: the system counters the guest can read (mrs cntpct gate, svc GetSystemTick) all go through here. Default = now_ns().
 // Freeze (only for the test driver DM_TICK_HOLD): while frozen the guest clock does not advance ⇒ the game's next tick never comes due; after unfreezing the frozen duration is subtracted, the guest clock is continuous with no jump
-// DM_DETCLOCK=<step ns> (for replay / test runs; product runs do not set it = wall clock): from the first present on the guest clock becomes "advance a fixed step per present", not following the wall clock --
-// the client's per-frame dt and the server tick catch-up snapshots are both determined by the present count, so frame N in a run is byte-for-byte comparable between two passes of the same replay (the foundation of byte-for-byte picture proof).
-// Before the first frame the wall clock is still used (the boot period has waits that poll by time, freezing would hang them); at the switch it continues from the guest clock value at that time, no jump. It does not advance while frozen.
-static _Atomic uint64_t g_gfrozen, g_glag, g_gdet, g_guest_frame; static _Atomic int g_gfz, g_gdet_on; static uint64_t g_gdet_step = 1;
+// DM_DETCLOCK=<step ns> (for replay / test runs; product runs do not set it = wall clock): from the first present on the guest clock is virtual time, moved only by guest events, not
+// following the wall clock, so that frame N in a run is byte-for-byte comparable between two passes of the same replay (the foundation of byte-for-byte picture proof):
+//   · a present sets it to the later of itself and the previous present's value plus one step (dm_guest_frame_tick): a frame is one step, or longer when the guest slept longer in it;
+//   · when no game thread can run, the last one to block moves it to the earliest guest-clock deadline (hle_thread.c det_idle, through det_jump below) and the threads due wake.
+//     Presents alone used to move it, and a thread that presents only after a thread that sleeps on the guest clock never presented again: Mario vs. Donkey Kong stopped at
+//     frame 1 (docs/reference/threads.md, "A game stops at its first frame under DM_DETCLOCK").
+// Before the first frame the wall clock is still used (the boot period has waits that poll by time, freezing would hang them); at the switch it continues from the guest clock value at that time, no jump.
+// It moves neither at a present nor by a jump while frozen.
+static _Atomic uint64_t g_gfrozen, g_glag, g_gdet, g_gdet_last, g_guest_frame; static _Atomic int g_gfz, g_gdet_on; static uint64_t g_gdet_step = 1;
 uint64_t dm_guest_frame(void) { return atomic_load(&g_guest_frame); }
 static int detclock_cfg(void) {
     static int c = -1; if (c < 0) { const char *e = getenv("DM_DETCLOCK"); g_gdet_step = e ? strtoull(e, 0, 0) : 0; c = g_gdet_step > 0; }
@@ -61,15 +66,38 @@ static int detclock_cfg(void) {
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
+// The idle jump (hle_thread.c det_idle, holding its lock): the clock moves to `to` when that is later, unless it is frozen; returns the clock after it.
+// The jumps and the frames longer than a step since the last line are logged every 300 presents
+static _Atomic uint64_t g_gdet_jumps, g_gdet_jumped;
+static uint64_t g_gdet_long, g_gdet_longest;   // the presenting thread's
+static uint64_t det_jump(uint64_t to) {
+    uint64_t c = atomic_load(&g_gdet);
+    if (atomic_load(&g_gfz)) return c;
+    while (c < to) if (atomic_compare_exchange_weak(&g_gdet, &c, to)) { atomic_fetch_add(&g_gdet_jumps, 1); atomic_fetch_add(&g_gdet_jumped, to - c); return to; }
+    return c;
+}
 void dm_guest_frame_tick(void) {
     crash_watch_frame();
-    atomic_fetch_add(&g_guest_frame, 1);
+    uint64_t n = atomic_fetch_add(&g_guest_frame, 1) + 1;
     if (!detclock_cfg()) return;
     if (!atomic_load(&g_gdet_on)) {
-        atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
-        LOG("DM_DETCLOCK: from the first present on, the guest clock advances by presents, step %llu ns", (unsigned long long)g_gdet_step); return;
+        uint64_t w = wall_guest_ns(); atomic_store(&g_gdet, w); atomic_store(&g_gdet_last, w);
+        dm_detclock_set_jump(det_jump); atomic_store(&g_gdet_on, 1);
+        LOG("DM_DETCLOCK: from the first present on, the guest clock is virtual time: a present moves it to at least the previous present's value plus %llu ns, "
+            "and when no game thread can run it jumps to the earliest guest-clock deadline", (unsigned long long)g_gdet_step);
+    } else if (!atomic_load(&g_gfz)) {
+        uint64_t last = atomic_load(&g_gdet_last), to = last + g_gdet_step, c = atomic_load(&g_gdet);
+        while (c < to && !atomic_compare_exchange_weak(&g_gdet, &c, to)) {}
+        if (c < to) c = to;
+        atomic_store(&g_gdet_last, c);
+        if (c - last > g_gdet_step) { g_gdet_long++; if (c - last > g_gdet_longest) g_gdet_longest = c - last; }
     }
-    if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step); dm_guest_clock_advanced(); }
+    if (n % 300 == 0) {
+        LOG("DM_DETCLOCK: present %llu: %llu idle jumps since present %llu (%.3f ms in all), %llu frames longer than a step (the longest %.3f ms)", (unsigned long long)n,
+            (unsigned long long)atomic_exchange(&g_gdet_jumps, 0), (unsigned long long)(n - 300), atomic_exchange(&g_gdet_jumped, 0) / 1e6, (unsigned long long)g_gdet_long, g_gdet_longest / 1e6);
+        g_gdet_long = g_gdet_longest = 0;
+    }
+    dm_detclock_presented();   // hle_thread.c: the threads now due wake; the thread that presents is recorded
 }
 static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
@@ -95,7 +123,9 @@ void guest_clock_freeze_for(int reason, int on) {
     guest_clock_freeze_apply(g_gfz_reasons != 0);
     atomic_store(&g_gfz_bg, (g_gfz_reasons & 2u) != 0);
     if (!(g_gfz_reasons & 2u)) pthread_cond_broadcast(&g_gfz_cv);   // after the clock is running again: a released read sees it continue
+    int running = !on && !g_gfz_reasons;
     pthread_mutex_unlock(&g_gfz_mu);
+    if (running) dm_guest_clock_advanced();   // DM_DETCLOCK: game threads that all blocked while the clock was frozen jump now (hle_thread.c; nothing without the switch)
 }
 void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }
 // Entropy source: true random by default (arc4random); with DM_DETCLOCK on it becomes a fixed-seed splitmix64 stream (so that replay pictures are byte-for-byte comparable, the camp blue fire particles differed between two passes).

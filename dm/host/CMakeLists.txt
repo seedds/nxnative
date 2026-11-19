@@ -477,6 +477,9 @@ host_test(t_condvar SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PROFILE
 host_test(t_condvar_old SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PROFILE DEFS DM_TEST_HOOKS DM_TEST_CV_OLD_ORDER DM_TEST_GUEST_C INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_preempt SOURCES t_preempt.c t_condvar_stub.c PROFILE DEFS DM_TEST_GUEST_C RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_notify_sched SOURCES t_notify_sched.c t_condvar_stub.c PROFILE DEFS DM_TEST_THREAD_ENTER DM_TEST_GUEST_C RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
+# The deterministic guest clock (DM_DETCLOCK; hle_os.c and hle_thread.c, both included): a thread that presents only after a worker's sleeps and timeouts on the guest clock
+# runs on, every clock value at its exact virtual time, and no jump while that thread waits for a host-signalled event (docs/reference/threads.md)
+host_test(t_detclock SOURCES t_detclock.c PROFILE DEFS DM_TEST_THREAD_ENTER DM_TEST_GUEST_C INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_movie_vpx SOURCES t_movie_vpx.c PROFILE VPX DEFS DM_TEST_GUEST_C)
 # The port's H.264 stopgap: a black picture per access unit, in presentation order (hle_movie_avc.c without VideoToolbox; on Windows the same pictures from hle_movie_win32.c
 # with Media Foundation taken as absent, an N edition's case)

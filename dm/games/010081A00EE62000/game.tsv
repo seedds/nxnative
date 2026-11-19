@@ -1,0 +1,42 @@
+# Game profile of Boomerang Fu (Switch, update 1.3.7 = v1441792, with the two licence-only DLC). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2022.3.54f1 (IL2CPP) with FMOD, SDK 18.3.5: the sdk and the movie module (subsdk0) are Monster Train 2's builds (Super Mario Galaxy's sdk), whose node area cut is already in
+# dm/tools/sdk_patches.py. The game shows no movie. The provisional profile was right as generated; it needed no host change
+# Local multiplayer, controller only: left stick moves, A slashes, B dashes, X throws; one player plays against bots
+
+# ---- Identity ----
+title_id	010081A00EE62000
+program_id	010081A00EE62000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Boomerang Fu
+ipa	BoomerangFu.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1441792	1.3.7	main=c00a9c56ae9796fdd55d7f156dcce0f9	subsdk0=8a72a4dcbfd375d2952288284259da94	sdk=6075151627016eef437c1312f2e3ed56
+package	v1441792
+shader_versions	v1441792
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie, which main imports from)
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets1.assets.resS
+zip_store	.assets:.bank:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands application pool − used memory to StandardAllocator as virtual address memory
+# and never calls SetMemoryHeapSize. Monster Train 2's layout (the heap check's 1 GB pool, the 5 GB block). Measured on the Mac over 10 minutes of matches: about 1.0 GB mapped, the
+# alias region's high-water mark +4.27 GB of 4.375 GB (the SDK's AddressRegionManager places a new region in the highest free gap first, so the mark climbs while freed gaps below
+# are reused once the top is full; play went on for 6 more minutes there), 1.6 GB resident and 1.2 GB of Metal allocations, flat
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x40000000
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+# everything is under Data/: the player's serialized files and the StreamingAssets files
+shader_groups	/Data/=data
+shader_note	Boomerang Fu shaders

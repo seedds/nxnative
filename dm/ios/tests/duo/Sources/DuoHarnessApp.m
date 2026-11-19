@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import "DmLayout.h"
 #import "DuoHarnessRuntime.h"
+#import "DmRotation.h"
 #include <stdlib.h>
 #include <string.h>
 #if __has_include(<UIKit/UIHingeInteraction.h>)
@@ -60,6 +61,10 @@ static NSArray<NSArray<NSNumber *> *> *DuoHarnessTouchArray(DuoHarnessInput inpu
     options:(UISceneConnectionOptions *)options {
     (void)application; (void)options;
     return [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:session.role];
+}
+// As the production app delegate (main.m): Rotation replaces the Info.plist list, so a phone can turn upright
+- (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+    (void)application; (void)window; return front_ios_app_orientations();
 }
 @end
 

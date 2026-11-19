@@ -52,6 +52,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0a4, InstName.Imad, AImad, uniform: true);
             alu(0x025, InstName.Imad, AImadWide);
             alu(0x027, InstName.Imad, AImadHi);
+            alu(0x026, InstName.Idp, AIdp);
             alu(0x0a5, InstName.Imad, AImadWide, uniform: true);
             alu(0x012, InstName.Lop3, ALop3);
             alu(0x092, InstName.Lop3, ALop3, uniform: true);
@@ -73,6 +74,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
             alu(0x01b, InstName.Bfe, ABmsk);
+            alu(0x014, InstName.Vabsdiff, AVabsdiff);
 
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
@@ -1372,6 +1374,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res, u);
         }
 
+        // IDP Rd, a, b, c (PTX dp4a / dp2a): c plus a dot product, the low 32 bits. Bit 73: a's parts signed, 74: b's bytes signed, 76: .2A, 77: .2A.HI.
+        // .4A sums the four products of a's bytes and b's bytes; .2A sums a's two 16-bit halves times b's bytes 0 and 1 (.LO) or 2 and 3 (.HI).
+        public static void AIdp(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bit(72) || x.Bit(75) || x.Bits(78, 81) != 0 || (!x.Bit(76) && x.Bit(77)))
+            {
+                throw AFail(context, "IDP modifiers");
+            }
+
+            bool signedA = x.Bit(73), signedB = x.Bit(74), two = x.Bit(76);
+            int aBits = two ? 16 : 8, bFirst = x.Bit(77) ? 2 : 0;
+            Operand va = AGet(context, a), vb = AGet(context, b);
+            Operand res = AGet(context, c);
+
+            Operand Part(Operand v, int pos, int width, bool signed)
+            {
+                return signed ? context.BitfieldExtractS32(v, Const(pos), Const(width)) : context.BitfieldExtractU32(v, Const(pos), Const(width));
+            }
+
+            for (int i = 0; i < (two ? 2 : 4); i++)
+            {
+                Operand pa = Part(va, i * aBits, aBits, signedA);
+                Operand pb = Part(vb, (bFirst + i) * 8, 8, signedB);
+
+                res = context.IAdd(res, context.IMultiply(pa, pb));
+            }
+
+            ASet(context, x, res);
+        }
+
         // IMAD.WIDE Rd, a, b, c: the 64-bit a * b (signed 73) + the pair {c + 1:c}, to the pair {Rd + 1:Rd}
         public static void AImadWide(EmitterContext context)
         {
@@ -1655,6 +1690,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
 
             ASet(context, x, context.ConditionalSelect(APred(context, x, 87, 90, u), min, max), u);
+        }
+
+        // VABSDIFF Rd, a, b, c (PTX sad) computes |a - b| + c with 32-bit wraparound.
+        // Bit 73 selects signed comparison. The recorded encoding uses PT in the
+        // Pu predicate field (bits 81..83). Other predicate values and modifiers are unverified.
+        public static void AVabsdiff(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex || x.Bit(72) || x.Bits(74, 81) != 0 || x.Bits(84, 91) != 0)
+            {
+                throw AFail(context, "VABSDIFF predicate field or modifiers");
+            }
+
+            Operand srcA = AGet(context, a);
+            Operand srcB = AGet(context, b);
+            bool signed = x.Bit(73);
+
+            Operand min = signed ? context.IMinimumS32(srcA, srcB) : context.IMinimumU32(srcA, srcB);
+            Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
+
+            ASet(context, x, context.IAdd(context.ISubtract(max, min), AGet(context, c)));
         }
 
         public static void AIabs(EmitterContext context)

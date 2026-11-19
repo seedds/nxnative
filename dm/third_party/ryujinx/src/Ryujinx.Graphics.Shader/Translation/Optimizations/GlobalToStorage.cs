@@ -975,7 +975,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // nxnative: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
         // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
-        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
+        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, span}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
         public const int GmemMapCbSlot = 0xff;
         private const int GmemMapLog2 = 13;
         private const int GmemMapEntryWords = 8;
@@ -1067,7 +1067,21 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             int lastBinding = resourceManager.AddRawLastEntryMemory();
             Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
             Operand lastEntry = context.IMultiply(last, Const(GmemMapEntryWords));
-            Operand lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+            Operand lastHolds;
+            if (writes)
+            {
+                lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+            }
+            else
+            {
+                // The host supplies a span only for ranges within one 4 GiB window.
+                // Unsigned subtraction rejects addresses below the start in that same
+                // window. A zero span always takes the exact lookup below.
+                Operand offset = context.ISubtract(addrLow, MapWord(lastEntry, 0));
+                lastHolds = context.BitwiseAnd(
+                    context.ICompareEqual(addrHigh, MapWord(lastEntry, 1)),
+                    context.ICompareLessUnsigned(offset, MapWord(lastEntry, 7)));
+            }
             context.Copy(selected, last);
             context.BranchIfTrue(lblChosen, lastHolds);
 

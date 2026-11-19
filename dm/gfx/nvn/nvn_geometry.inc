@@ -353,12 +353,14 @@ static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int insta
     static int lean_on = -1; if (lean_on < 0) { const char *e = getenv("DM_NVN_GEO_LEAN"); lean_on = !(e && !strcmp(e, "0")); }
     NvShader *vs = pr->sh[0], *base = pr->sh[2];
     if (!lean_on || instances > 1 || (gs && gs->geo_invocations != 1) || base->geo_invocations != 1 || !vs || vs->discard_fn || S.tf_on || !pr->sh[1] || !(topology == 0 || topology == 1 || topology == 3)) return NULL;
-    if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([[[NSString stringWithUTF8String:base->key] substringToIndex:16] stringByAppendingString:@"_bgv"], 0); }
+    if (!(base->geo_bg_tried & 0x80)) {
+        base->geo_bg_tried |= 0x80;
+        base->geo_bgv_v = shader_get([NSString stringWithFormat:@"%.16s_bgv", base->key], 0);
+    }
     if (base->geo_bgv_v && base->geo_bgv_v->layer_out) return NULL;
     if (!(base->geo_lean_tried >> topology & 1)) {
         base->geo_lean_tried |= 1 << topology;
-        NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
-        base->geo_lean_v[topology] = shader_get([key stringByAppendingFormat:@"_bl%d", topology], 2);
+        base->geo_lean_v[topology] = shader_get([NSString stringWithFormat:@"%.16s_bl%d", base->key, topology], 2);
     }
     NvShader *lean = base->geo_lean_v[topology];
     if (!lean || !lean->geo_slot || lean->geo_vertices != (uint32_t)nvn_geo_width(topology) || lean->geo_invocations != 1) return NULL;
@@ -922,10 +924,13 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     if (cp_on()) { if (drained) g_cp_geo_waited++; else g_cp_geo_safe++; }
     // The kernel for this topology and the reader, looked up by name once per geometry shader: building the names on every draw took about 40 % of geo_prep's time
     // in Donkey Kong Bananza (an NSString format, a substring and two dictionary lookups a draw, at hundreds of geometry draws a frame)
-    if (!(base->geo_bg_tried >> topology & 1) || !(base->geo_bg_tried & 0x80)) {
-        NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
-        if (!(base->geo_bg_tried >> topology & 1)) { base->geo_bg_tried |= 1 << topology; base->geo_bg_v[topology] = shader_get([key stringByAppendingFormat:@"_bg%d", topology], 2); }
-        if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([key stringByAppendingString:@"_bgv"], 0); }
+    if (!(base->geo_bg_tried >> topology & 1)) {
+        base->geo_bg_tried |= 1 << topology;
+        base->geo_bg_v[topology] = shader_get([NSString stringWithFormat:@"%.16s_bg%d", base->key, topology], 2);
+    }
+    if (!(base->geo_bg_tried & 0x80)) {
+        base->geo_bg_tried |= 0x80;
+        base->geo_bgv_v = shader_get([NSString stringWithFormat:@"%.16s_bgv", base->key], 0);
     }
     NvShader *gs = base->geo_bg_v[topology], *reader = base->geo_bgv_v;
     if (!gs || !reader) return 0;
@@ -1082,10 +1087,13 @@ static id<MTLComputePipelineState> __strong *geo_pack_psos(void) {
 static uint64_t geo_gpu_kernels(NvProg *pr, NvShader *__strong *gs_out, NvShader *__strong *reader_out) {
     NvShader *base = pr->sh[2]; int topology = nvn_geo_topology(4);
     if (!base || !base->geo_vertices || topology < 0) return 0;
-    if (!(base->geo_bg_tried >> topology & 1) || !(base->geo_bg_tried & 0x80)) {
-        NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
-        if (!(base->geo_bg_tried >> topology & 1)) { base->geo_bg_tried |= 1 << topology; base->geo_bg_v[topology] = shader_get([key stringByAppendingFormat:@"_bg%d", topology], 2); }
-        if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([key stringByAppendingString:@"_bgv"], 0); }
+    if (!(base->geo_bg_tried >> topology & 1)) {
+        base->geo_bg_tried |= 1 << topology;
+        base->geo_bg_v[topology] = shader_get([NSString stringWithFormat:@"%.16s_bg%d", base->key, topology], 2);
+    }
+    if (!(base->geo_bg_tried & 0x80)) {
+        base->geo_bg_tried |= 0x80;
+        base->geo_bgv_v = shader_get([NSString stringWithFormat:@"%.16s_bgv", base->key], 0);
     }
     NvShader *gs = base->geo_bg_v[topology], *reader = base->geo_bgv_v;
     if (!gs || !reader) return 0;

@@ -90,8 +90,7 @@ void dm_nextendo_login_online_check(const char *when) { @autoreleasepool {
     NSString *line;
     if (!token) line = @"[RED] nextendo: online status not asked: no game token (no sign-in, or its refresh failed)";
     else {
-        NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxOnlineStatusEndpoint]
-                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
+        NSMutableURLRequest *get = nxl_request(kNxOnlineStatusEndpoint, 8);
         [get setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
         NSString *why = nil;
         dm_guest_host_wait_begin(); NSDictionary *answer = nxl_send(get, &why); dm_guest_host_wait_end();

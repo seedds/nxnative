@@ -512,7 +512,9 @@ def glslc_program(d, h, size, label):
     if len(secs) < 2 or len(set(sts)) < len(sts) or any(not st or check(label, st, ctl, code) for st, (ctl, code) in zip(sts, secs)): return []
     return [(f'{label}#GLSLC@{h:#x}#var', st, ctl, code) for st, (ctl, code) in zip(sts, secs)]
 
-def glslc_shaders(d, label, need=True, skip=(), ranges=None):
+GLSLC_MAGIC = b'\x91\x68\x86\x19'
+
+def glslc_shaders(d, label, need=True, skip=(), ranges=None, offsets=None):
     """GLSLC compiler outputs (838 in 13 Sentinels' main read-only segment, one stage each): from the magic 0x19866891, +0x44 = the whole output's length; an output of one stage holds exactly one control section,
     read by its section header (glslc_section), else with the code area right after it (control +0x20 = control length); one of several stages is read by its section headers (glslc_program).
     The magic is only 4 bytes, so only outputs that pass the triple check are kept. Every game's main is searched: Unity's player has 11 of its own (Fire Emblem Engage, Ace Attorney Investigations
@@ -526,10 +528,11 @@ def glslc_shaders(d, label, need=True, skip=(), ranges=None):
         out.extend(programs)
         if programs and ranges is not None: ranges.append((h, h + size))
 
-    for m in re.finditer(b'\x91\x68\x86\x19', d):
-        if any(a <= m.start() < b for a, b in skip): continue
-        if m.start() + 0x48 > len(d): continue
-        h = m.start(); size, _, first, _ = glslc_layout(d, h)
+    if offsets is None: offsets = (m.start() for m in re.finditer(re.escape(GLSLC_MAGIC), d))
+    for h in offsets:
+        if any(a <= h < b for a, b in skip): continue
+        if h + 0x48 > len(d): continue
+        size, _, first, _ = glslc_layout(d, h)
         if first == 0xa8:   # NVN2: its section headers say everything; its control sections are too short for the rule below
             if not 0 < size <= len(d) - h: continue
             secs = glslc_section(d, h, size) or []
@@ -4064,6 +4067,9 @@ def scan_file_in(args):
         if tail == RDHS:
             found += rdhs_shaders(path, '/' + rel)
             return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'NXCX' and head[12:16] == bytes(4) and head[8:12] != GFX_MAGIC and head[4:8] not in (ZSTD_MAGIC, LZ4_FRAME_MAGIC):
+        with open(path, 'rb') as f: archive = nxcx_shaders(f, '/' + rel)
+        if archive is not None: return rel, uniq_keys(archive), var_pairs(archive), trees
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
@@ -4099,6 +4105,28 @@ def scan_file_in(args):
         # main's 49). Metroid Dread's MSHD files hold GLSLC outputs too, which mshd_shaders already reads; no other profile's loose files hold any
         if not found and d[:4] != b'MSHD' and b'\x91\x68\x86\x19' in d: found += glslc_shaders(d, '/' + rel, need=False)
     return rel, uniq_keys(found), var_pairs(found), trees
+
+def nxcx_shaders(f, label):
+    """Scan the stored bytes of an NXCX texture archive (TSUKIHIME's w_allpac.mrg is 15.6 GiB).
+    Its header selects the loose-file path. An internal BAHS magic only activated that path's search
+    for other embedded formats. If any of those formats may be present, use the normal scanner.
+    Seek to GLSLC candidates through a mapping so random magic in compressed textures needs no full-file copy.
+    """
+    from romfs import mmap
+    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', NEEDLE, SUMO_NX, NVNSH)
+    overlap = max(map(len, other)) - 1
+    offsets, tail, at = [], b'', 0
+    loose = False
+    while block := f.read(16 << 20):
+        chunk = tail + block
+        if any(magic in chunk for magic in other): return None
+        loose = loose or b'BAHS' in chunk or MGFX in chunk
+        offsets.extend(at - len(tail) + m.start() for m in re.finditer(re.escape(GLSLC_MAGIC), chunk) if m.end() > len(tail))
+        tail = chunk[-overlap:]
+        at += len(block)
+    if not loose and not offsets: return []
+    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        return sead_prim_shaders(d, label) or glslc_shaders(d, label, need=False, offsets=offsets)
 
 def uniq_keys(found):
     uniq = {}

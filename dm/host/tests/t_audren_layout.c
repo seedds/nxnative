@@ -37,6 +37,7 @@ void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) { (void)fn; (void)arg; (void)prio; (void)stack; return NULL; }
 void dm_guest_thread_join(void *tt) { (void)tt; }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 uint64_t now_ns(void) { return pace.now; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open_sink(void) { return NULL; }

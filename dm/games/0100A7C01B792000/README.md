@@ -33,6 +33,7 @@ No host or rewriter rule is specific to this game.
 
 ## Found on this game
 
+- [Local account selection, sessions and separate saves](../../../docs/reference/services.md#local-account-selection-sessions-and-separate-saves): host repair landed in [9e6acda6](https://github.com/seedds/nxnative/commit/9e6acda68d5f61f2e75be537b660684f2df3f47c), addressing [PR #2846](https://github.com/seedds/nxnative/pull/2846), and verified with synthetic accounts and saves across two fresh process restarts. The original PR reported about 40 seconds of two-player play on a carried implementation; gameplay and iOS validation of the landed implementation remain [open](#open).
 - [Provisional Unreal profiles asked an iPhone for 64 GB](../../../docs/reference/memory.md#provisional-unreal-profiles-asked-an-iphone-for-64-gb): resolved, the profile takes the 5 GB block (GitHub issue #2278); not yet on an iPhone
 - [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): compute shader `ce4e9fdf514d0196` (8x8x8) took 124 registers on `applegpu_g13s` / `applegpu_g14g`, which allows 384 threads, so on an M1 or M2 its dispatches ran nothing; 104 with the local size on the kernel. What it draws is not known.
 - [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name): 60 and 120 by `rhi.SyncInterval` alone
@@ -45,5 +46,7 @@ No host or rewriter rule is specific to this game.
 ## Open
 
 - iPhone: no IPA built; the guest block needs measuring for a phone ([What it needs](#what-it-needs)).
+- **Account gameplay after #2846:** explicitly choose or create player 2, verify joining and playing together, then close/rejoin an account. Make different progress for both users, quit and relaunch, and verify that each loads their own committed progress. These checks have not been run in Minecraft on the landed implementation; synthetic host save tests do not establish the game's behavior.
+- **iOS account selection after #2846:** on an actual device, test user selection and cancellation, return to gameplay, and separate progress for both users across relaunches. The host's iOS source compile checks passed; the native selector and saves have not been tested on a device.
 - The prewarm list (`pso_manifest.tsv`) is empty.
-- Only the start of the first level was played: later levels, couch co-op (more controllers), saves across boots and the other languages are untested.
+- Only the start of the first level was played: later levels and the other languages are untested; account/co-op and save checks are listed above.

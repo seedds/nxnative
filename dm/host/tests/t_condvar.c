@@ -8,7 +8,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
-int svc_thread(int num, uint64_t *regs);
+int svc_thread(int num, uint64_t *regs);   // regs is the guest's whole register frame x0..x30: every SVC reads x30 as the caller's LR, so each r[] below has all 31 (a shorter array is read past its end)
 uint32_t svc_thread_main_init(void);
 void (*dm_test_cv_after_release)(void);
 

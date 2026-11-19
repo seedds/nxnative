@@ -41,7 +41,7 @@ static int g_log;
 #define VK(name, ret, ...)                                                                       \
     static ret h_##name(__VA_ARGS__);                                                            \
     static const PFN_##name chk_##name __attribute__((unused)) = h_##name;                       \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name}; \
+    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name}); \
     static ret h_##name(__VA_ARGS__)
 // VKB: the same, run on the thread's big host stack (hle_bigstack.c; register arguments only): for the functions that call into Metal on game threads, whose stacks can be small
 #define VKB(name, ret, ...)                                                                      \
@@ -50,7 +50,7 @@ static int g_log;
     extern const char h_##name##_bs[];                                                           \
     __asm__(".text\n.p2align 2\n.globl _h_" #name "_bs\n.private_extern _h_" #name "_bs\n_h_" #name "_bs:\n" \
             "    adrp x16, _h_" #name "@PAGE\n    add x16, x16, _h_" #name "@PAGEOFF\n    b _dm_bigstack_enter\n"); \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
+    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name##_bs}); \
     static ret h_##name(__VA_ARGS__)
 
 static uint32_t umin(uint32_t a, uint32_t b) { return a < b ? a : b; }
@@ -120,6 +120,21 @@ static const fmt_t *fmt_of(VkFormat f) {
 }
 static int fmt_has_depth(const fmt_t *f) { return f && (f->kind == K_DEPTH || f->kind == K_DS); }
 static int fmt_has_stencil(const fmt_t *f) { return f && (f->kind == K_STENCIL || f->kind == K_DS); }
+static int fmt_is_signed_int(const fmt_t *f) {
+    if (!f || f->kind != K_INT) return 0;
+    switch (f->vk) {
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32A32_SINT: return 1;
+    default: return 0;
+    }
+}
+// VkClearColorValue is a union whose member the cleared format names: int32 for a signed integer format, uint32 for an unsigned one, float32 for every other. Metal takes
+// doubles and converts them to the attachment's type, so the member must be read as its own type (a uint32 above INT32_MAX saturates a signed attachment)
+static MTLClearColor fmt_clear_color(const fmt_t *f, const VkClearColorValue *v) {
+    if (fmt_is_signed_int(f)) return MTLClearColorMake(v->int32[0], v->int32[1], v->int32[2], v->int32[3]);
+    if (f && f->kind == K_INT) return MTLClearColorMake(v->uint32[0], v->uint32[1], v->uint32[2], v->uint32[3]);
+    return MTLClearColorMake(v->float32[0], v->float32[1], v->float32[2], v->float32[3]);
+}
 
 // ---------- Device-wide state ----------
 static id<MTLDevice> g_dev;
@@ -152,7 +167,7 @@ static void sh_load(void) {
         if (line[0] == '#' || line[0] == '\n') continue;
         char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");   // strsep keeps the empty resource field of a shader without resources
         if (!key || !stage || strlen(key) != 16) continue;
-        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; g_sh = realloc(g_sh, cap * sizeof *g_sh); }
+        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; shinfo *q = realloc(g_sh, cap * sizeof *g_sh); if (!q) die("[vk] out of memory for the shader table"); g_sh = q; }
         shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
         memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag");
         for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
@@ -1114,7 +1129,7 @@ static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
     if (cb->n + need > cb->cap) {
         size_t c = cb->cap ? cb->cap * 2 : 4096; while (c < cb->n + need) c *= 2;
-        cb->buf = realloc(cb->buf, c); if (!cb->buf) die("[vk] out of command buffer memory %zu", c); cb->cap = c;
+        uint8_t *q = realloc(cb->buf, c); if (!q) die("[vk] out of command buffer memory %zu", c); cb->buf = q; cb->cap = c;
     }
     chdr *h = (chdr *)(cb->buf + cb->n); h->op = op; h->size = (uint32_t)need; cb->n += need;
     return h + 1;
@@ -1294,7 +1309,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
         ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
         ca.loadAction = load_a(at->load); s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
-        if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) { const float *f = c->clear[a].color.float32; ca.clearColor = MTLClearColorMake(f[0], f[1], f[2], f[3]); }
+        if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) ca.clearColor = fmt_clear_color(fmt_of(at->fmt), &c->clear[a].color);
         int r = rp->res[i];
         if (r >= 0 && (uint32_t)r < fb->n) { ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
     }
@@ -1473,7 +1488,7 @@ static void fan_prepare(rs_t *s, const chdr *h) {
         else if (h->op == C_DRAWI) {
             const c_drawi *x = c;
             if (!pipe || !pipe->fan || x->count < 3 || !x->inst || !ib || !ib->mem) continue;
-            if (s->nfj == s->fjcap) { s->fjcap = s->fjcap ? 2 * s->fjcap : 16; s->fj = realloc(s->fj, s->fjcap * sizeof *s->fj); if (!s->fj) die("[vk] out of memory"); }
+            if (s->nfj == s->fjcap) { s->fjcap = s->fjcap ? 2 * s->fjcap : 16; fan_job *q = realloc(s->fj, s->fjcap * sizeof *s->fj); if (!q) die("[vk] out of memory"); s->fj = q; }
             s->fj[s->nfj++] = (fan_job){c, size, ib, {ib->off + ibo + (VkDeviceSize)x->first * isz, x->count, isz, (uint32_t)pipe->restart, x->inst, x->voff, x->first_inst}};
             size += (32 + (uint64_t)(x->count - 2) * 12 + 31) & ~31ull;   // arguments, then indices
         }
@@ -1652,9 +1667,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                             if (!x->ds) {
                                 MTLRenderPassColorAttachmentDescriptor *a = d.colorAttachments[0]; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;
                                 a.loadAction = MTLLoadActionClear; a.storeAction = MTLStoreActionStore;
-                                const VkClearColorValue *cv = &x->v.color;
-                                a.clearColor = im->f->kind == K_INT ? MTLClearColorMake(cv->uint32[0], cv->uint32[1], cv->uint32[2], cv->uint32[3])
-                                                                     : MTLClearColorMake(cv->float32[0], cv->float32[1], cv->float32[2], cv->float32[3]);
+                                a.clearColor = fmt_clear_color(im->f, &x->v.color);
                             } else {
                                 if (fmt_has_depth(im->f) && (r->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                                     MTLRenderPassDepthAttachmentDescriptor *a = d.depthAttachment; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;

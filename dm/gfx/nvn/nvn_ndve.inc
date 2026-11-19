@@ -73,7 +73,7 @@ static void ndve_build(void) {
         if (!lib) { MLOG("[RED] NDVE engine: no library (%s); the game's network runs", e.localizedDescription.UTF8String); g_nd.state = -1; return; }
         for (int k = 0; k < NK_N; k++) {
             id<MTLFunction> f = [lib newFunctionWithName:@(k_ndve_kern[k])];
-            g_nd.ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+            g_nd.ps[k] = f ? dev_cps(f, &e) : nil;
             if (!g_nd.ps[k]) { MLOG("[RED] NDVE engine: no pipeline for %s; the game's network runs", k_ndve_kern[k]); g_nd.state = -1; return; }
         }
         id<MTLCommandBuffer> cb = [[g_dev newCommandQueue] commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];

@@ -1,7 +1,7 @@
 // Vertex pulling for the <key>_bp variant of a vertex shader (dmsh_pull.py): the attribute words Maxwell's vertex fetch gives the shader, read from a per-draw layout block.
 // The host fills dm_vlayout for each draw (nvn_mtl.m): per stream the base address (kept 4-byte aligned: a base's low bits go into its attributes' offsets), stride (0: every vertex
 // reads element 0) and divisor (0: per vertex; else the element is base instance + (instance - base instance) / divisor, Metal's own rule for a step rate with a base instance;
-// the base instance is the draw's [[base_instance]], so indirect draws, whose arguments the CPU never reads, are right too), and per NVN attribute the raw NVN attribute state word
+// the base instance is the draw's [[base_instance]], so indirect draws, whose arguments the CPU never reads, are right too), and per NVN attribute (all 32 of NVN2's, so an input at attribute 16 or above is pulled too) the raw NVN attribute state word
 // (format 8 bits, offset 19, stream 5; format 0 or one this table does not know reads zeros, as the host's zero buffer).
 // The result is four 32-bit register words: float formats as float bits (unorm and snorm through the unpack builtins, which round as Metal's vertex fetch does; a plain division
 // under fast math is a unit in the last place off for some values), integer formats zero- or sign-extended, the int-to-float formats converted, missing components 0, 0, 0 and
@@ -9,7 +9,7 @@
 // Table byte per NVN vertex format: (components - 1) | size code << 2 (0: 8, 1: 16, 2: 32 bits) | kind << 4; kinds 1 unorm, 2 snorm, 3 uint, 4 sint, 5 float, 6 / 7 unsigned /
 // signed integer read as float, 8 unorm 10:10:10:2, 9 snorm 10:10:10:2, 10 R11G11B10F, 11 BGRA8 unorm. The codes are those nvn_mtl.m vfmt knows (t_pull.m checks every one)
 struct dm_vstream { device const uchar *base; uint stride; uint divisor; };
-struct dm_vlayout { dm_vstream s[16]; uint attr[16]; };
+struct dm_vlayout { dm_vstream s[16]; uint attr[32]; };
 constant uchar dm_ftab[256] = {
       0,  16,  32,  48,  64,  84,  20,  36,  52,  68,  88,  56,  72,  17,  33,  49,
      65,  85,  21,  37,  53,  69,  89,  57,  73,  18,  34,  50,  66,  86,  22,  38,

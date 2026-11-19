@@ -14,6 +14,16 @@ dm/gfx/tests/*	-	graphics tests
 dm/host/tests/*	-	host tests
 dm/gfx/tex/tests/*	-	CPU texture tests
 dm/sanitizers/*	-	test sanitizer configuration
+dm/host/hle.h	*:*	HLE and service registration declarations shared by every game
+dm/host/registration.h	*:*	linker registration layout shared by every game and graphics API
+dm/host/hle_table.c	*:*	C library import registrations shared by every game
+dm/host/hle_offline.c	*:*	offline service registrations present in every host
+dm/host/hle_movie_av1.*	hle:*Av1Decoder*	AV1 decoding on the codec worker, beyond the static caller graph
+dm/host/hle_movie_avc.*	hle:*H264Decoder*	H.264 decoding on the codec worker, beyond the static caller graph
+dm/host/hle_movie_avc.*	hle:_ZN*5movie7Decoder*	H.264 decoding on the movie worker, beyond the static caller graph
+dm/host/hle_movie_vt.h	hle:*Av1Decoder*	VideoToolbox reference history and lifecycle recovery
+dm/host/hle_movie_vt.h	hle:*H264Decoder*	VideoToolbox reference history and lifecycle recovery
+dm/host/hle_movie_vt.h	hle:_ZN*5movie7Decoder*	VideoToolbox reference history and lifecycle recovery
 dm/ios/tests/*	-	iOS tests
 .github/*	-	CI
 dm/games/*/README.md	-	a game's note
@@ -51,7 +61,7 @@ dm/gfx/nvn/nvn_mtl.m:mdi_|mdx_	nvn:nvnCommandBufferMultiDraw*	indirect multi-dra
 dm/gfx/nvn/nvn_mtl.m:present|snap|metalfx|upscale	present:*	the present path
 dm/gfx/tex/*	api:*	texture layouts: every game
 dm/gfx/vk/*	api:vulkan	Vulkan on Metal
-dm/gfx/gl/*	api:gl	OpenGL on Metal
+dm/gfx/gl/*	api:gl	OpenGL on Metal, including per-stage argument buffers
 dm/gfx/tools/dmsh_atomic.py	shader:image_atomic*	image atomics in the MSL
 dm/gfx/tools/dmsh_wide.py	shader:stage:*	storage buffer reads in the MSL: every NVN game
 dm/gfx/tools/dmsh_build.py:vs_tf|tf_layout	shader:transform_feedback	transform feedback capture
@@ -98,7 +108,7 @@ dm/third_party/ryujinx/*/InstEmitTexture*.cs	shader:binding:tex	texture instruct
 dm/third_party/ryujinx/*/InstEmitMemory.cs	shader:buffer_atomic	global and shared memory, buffer atomics
 dm/third_party/ryujinx/*	shader:stage:*	fallback: any other translator change
 dm/gfx/tools/vk_shaders.py	api:vulkan	Vulkan shaders
-dm/gfx/tools/gl_shaders.py	api:gl	OpenGL shaders
+dm/gfx/tools/gl_shaders.py	api:gl	OpenGL shaders and resource-binding ABI
 dm/gfx/tools/pso_offline.py	present:pipeline_prebuild	the offline pipeline archive of the Mac app and the iPhone
 dm/gfx/tools/c1_guard.py	shader:stage:*	the c1 guard table
 dm/gfx/tools/cb_extent.py	shader:stage:*	the uniform read extents
@@ -121,6 +131,7 @@ dm/mac/Launcher.swift	*:*	the Mac settings window, linked into every Mac app
 dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources
 dm/gfx/tools/cpk.py	shader:stage:*	CRI archive input to shader scanning
 dm/gfx/tools/vbf.py	shader:stage:*	Virtuos archive input to shader scanning
+dm/gfx/tools/kit.py	shader:stage:*	KIT archive input to shader scanning
 dm/gfx/tools/dmsh_mesh.py	shader:stage:gs	passthrough geometry composed into a mesh shader
 dm/host/hle_fpslock.c	present:*	build-gated engine frame limits and dynamic resolution
 dm/host/hle_uecvar.c	present:*	Unreal console variables found by name; the texture pool (profile ue_texture_pool)
@@ -131,6 +142,8 @@ dm/host/romfs_image.h	hle:*fs*	RomFS image index validation shared by mounts and
 dm/host/romfs_identity.h	*:*	RomFS identity checks at iOS startup for every game's separate deployment
 dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
 dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
+dm/host/audio_input.*	hle:*InputStream*	SDK polling microphone queues, format conversion and device lifecycle
+dm/host/audio_input_mac.m	hle:*InputStream*	Mac microphone capture and hot-plug recovery
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
@@ -140,12 +153,13 @@ dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
 dm/host/hle.c	hle:*	the HLE tables
 dm/host/front_mac.m	present:*	the Mac front end
+dm/host/front_role.h	present:*	task scheduling for windowless Mac games
 dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
-dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion transport and routing
+dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller and DualShock 4 raw motion transport and routing
 dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)

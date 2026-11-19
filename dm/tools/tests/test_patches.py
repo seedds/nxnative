@@ -159,6 +159,42 @@ class Registry(unittest.TestCase):
         self.assertIn(0x52800048, words)   # mov w8,#2: the cap
         self.assertEqual(ctx.step_max, 2)
 
+    def test_ocarina_movie_player_takes_two_pictures_a_frame(self):
+        # its movie player advances at most the pictures a frame its constructor sets (1 for the game's one caller), so a frame of two vsyncs left the picture behind the sound for
+        # good. One cut of one word in the constructor: cinc w8, w28, ge (1, or 2 for an argument of 2 or more) → mov w8, #2, into the register both stores take (the limit, and
+        # twice it for the queue). Not 3: no value of the constructor's, and the game stopped at the movie's start with it
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rules = m.MATCH_CUTS['main']
+        self.assertEqual(len(rules), 3)
+        (delta, old, new, why), = rules[0]['cuts']
+        self.assertEqual((old, new), ('88b79c1a', '48008052'), why)
+        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # the same destination register
+        self.assertLess(delta, rules[0]['size'])
+        self.assertTrue(any(e['what'].startswith('movie pictures a frame') for e in m.BINDING))
+
+    def test_ocarina_movie_update_caps_at_three(self):
+        # the update's cap is its one read of the limit (ldr w9, [x0, #0x20]); 3 goes there into the same register, so a frame of three vsyncs can take three pictures while the
+        # constructor's limit (2) keeps sizing the pool and the inputs
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rule, = [r for r in m.MATCH_CUTS['main'] if r['name'] == m.movie_cap]
+        (delta, old, new, why), = rule['cuts']
+        self.assertEqual((old, new), ('092040b9', '69008052'), why)
+        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # w9 both
+        self.assertLess(delta, rule['size'])
+        self.assertTrue(any(e['what'].startswith('movie update cap') for e in m.BINDING))
+
+    def test_ocarina_movie_frame_counts_pictures(self):
+        # the movie's frame, which its event's timeline (subtitles, voice, logo) follows, gained 1 per frame drawn, half the pictures once the player takes two a frame. Both draws
+        # replace ldr w8, [x20, #0x2f8]; add w8, w8, #1 with ldr x8, [x20, #0x10]; ldr w8, [x8, #0xc] (the player's pictures taken), keeping the store after them
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rule, = [r for r in m.MATCH_CUTS['main'] if r['name'] == m.movie_frame]
+        self.assertEqual(len(rule['functions']), 2)
+        for fn in rule['functions']:
+            (delta, old, new, why), = fn['cuts']
+            self.assertEqual((old, new), ('88fa42b908050011', '880a40f9080d40b9'), why)
+            self.assertLess(delta + 8, fn['size'])
+        self.assertTrue(any(e['what'].startswith('movie frame') for e in m.BINDING))
+
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
         # area; 0x400000, 0x2000000 and 0x40000000, the alignments of the 4 MB, 32 MB and 1 GB classes; as movz or orr from wzr) with the reviewed one (62 MB; SDK 20's 2 MB) in the same register

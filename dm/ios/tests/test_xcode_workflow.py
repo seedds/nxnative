@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -238,6 +239,12 @@ class ImageStaging(unittest.TestCase):
             environment['DM_COPY_ROMFS'] = 'NO'; stage(); self.assertFalse((app / 'romfs.img').exists())
             self.assertTrue(romfs_image.same_identity((app / 'romfs.id').read_text(), romfs_image.identity(image)))   # the slim build names the image it needs
             environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file()); self.assertFalse((app / 'romfs.id').exists())
+            # the other programs' RomFS beside the image (scripts/pack_nup.py), where the host mounts them by program index: staged with the RomFS, also in the slim build (main.m names it)
+            programs = root / 'romfs_programs'; programs.mkdir(); (programs / '0.img').write_bytes(b'switch 1 data')
+            stage(); self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data')
+            (programs / '0.img').write_bytes(b'switch 1 data, updated'); environment['DM_COPY_ROMFS'] = 'NO'; stage()
+            self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data, updated')
+            environment.pop('DM_COPY_ROMFS'); shutil.rmtree(programs); stage(); self.assertFalse((app / 'romfs_programs').exists())
 
     def test_one_library_file_is_staged_as_it_is(self):   # an NVN game's libraries (dm/tools/shader_lib.py), and the folder of a build from before them, each replacing the other
         import romfs_image
@@ -258,8 +265,23 @@ class ImageStaging(unittest.TestCase):
                 result = subprocess.run(['bash', str(ios / 'tools/stage_resources.sh')], env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             stage(packed)
-            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img']); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'library file')
-            packed.write_bytes(b'newer'); stage(packed); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'newer')
+            staged_romfs, staged_shaders = app / 'romfs.img', app / 'msl/b-abc.img'
+            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
+            self.assertEqual(staged_shaders.read_bytes(), b'library file')
+            romfs_inode, shader_inode = staged_romfs.stat().st_ino, staged_shaders.stat().st_ino
+            stage(packed)
+            self.assertEqual(staged_romfs.stat().st_ino, romfs_inode)
+            self.assertEqual(staged_shaders.stat().st_ino, shader_inode)
+
+            previous = image.stat()
+            (source / 'marker').write_text('updated!')
+            romfs_image.pack(source, image)
+            self.assertEqual(image.stat().st_size, previous.st_size)
+            os.utime(image, ns=(previous.st_atime_ns, previous.st_mtime_ns + 2_000_000_000))
+            packed.write_bytes(b'newer')
+            stage(packed)
+            self.assertEqual(staged_romfs.read_bytes(), image.read_bytes())
+            self.assertEqual(staged_shaders.read_bytes(), b'newer')
             stage(folder); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc']); self.assertEqual((app / 'msl/b-abc/k_b.metallib').read_text(), 'loose')
             stage(packed); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
 

@@ -37,16 +37,21 @@ static void copy_in(pool_t *cpool, NVNtexture *tx, unsigned level, unsigned w, c
 }
 static int words_not(const uint8_t *p, uint64_t n, uint32_t want) { int bad = 0; for (uint64_t i = 0; i < n; i += 4) bad += *(const uint32_t *)(p + i) != want; return bad; }
 // Texels of level `level` (w x w) of the host texture other than want: the texture is looked up (and uploaded if its pages changed) in this submission, and read after it
-static int host_not(const tex_t *t, unsigned level, unsigned w, uint32_t want) {
-    id<MTLTexture> mt = tex_mtl_all(t);
-    next_sub();
-    if (!mt || level >= mt.mipmapLevelCount || mt.width != t->d.width) return -1;
+static int texture_not(id<MTLTexture> mt, unsigned level, unsigned w, uint32_t want) {
+    if (!mt || level >= mt.mipmapLevelCount) return -1;
     id<MTLBuffer> b = [g_dev newBufferWithLength:(NSUInteger)w * w * 4 options:MTLResourceStorageModeShared];
+    if (!b) abort();
     id<MTLCommandBuffer> c = q_cb(); id<MTLBlitCommandEncoder> e = [c blitCommandEncoder];
     [e copyFromTexture:mt sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, w, 1) toBuffer:b destinationOffset:0
         destinationBytesPerRow:w * 4 destinationBytesPerImage:(NSUInteger)w * w * 4];
     [e endEncoding]; [c commit]; [c waitUntilCompleted];
     return words_not(b.contents, (uint64_t)w * w * 4, want);
+}
+static int host_not(const tex_t *t, unsigned level, unsigned w, uint32_t want) {
+    id<MTLTexture> mt = tex_mtl_all(t);
+    next_sub();
+    if (!mt || mt.width != t->d.width) return -1;
+    return texture_not(mt, level, w, want);
 }
 static void run(int gpu, pool_t *virt, pool_t *phys, uint8_t *pmem, pool_t *cpool, uint8_t *cmem, uint64_t VO, uint64_t P0, uint64_t P1) {
     const uint32_t A = 0xff112233, B = 0xff445566, C = 0xff778899;
@@ -114,6 +119,47 @@ static void gather_only(int gpu, pool_t *virt, pool_t *gphys, uint8_t *gmem, uin
     snprintf(n, sizeof n, "%s: and leaves it out of the residency set (pools resident %d, before %d)", how, g_pool_res_n, res); CHECK(g_pool_res_n == res, n);
     h_nvnTextureFinalize(&tx);
 }
+// A buffer copy through a sparse virtual address must invalidate uploads from its physical pages, including textures reached through the page table.
+static void buffer_alias(pool_t *virt, pool_t *phys, uint8_t *pmem, uint8_t *cmem) {
+    const uint64_t vo = 0x500000, po = 0x100000, n = 0x10000;
+    const uint32_t old = 0xff123456, copied = 0xffabcdef;
+    dm_guest_write_prepare(pmem + po, n);
+    for (uint64_t i = 0; i < n; i += 4) { *(uint32_t *)(pmem + po + i) = old; *(uint32_t *)(cmem + 0x40000 + i) = copied; }
+    CHECK(map(virt, phys, vo, po, n), "buffer-copy destination mapped to physical pages");
+    tex_t physical = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial(), .pool = phys, .mem = pmem + po, .off = po, .has_layout = 1};
+    physical.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 128, .height = 128, .depth = 1, .levels = 1, .samples = 1};
+    nvn_tex_layout(&physical.d, &physical.L);
+    NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, 128); h_nvnTextureBuilderSetHeight(&tb, 128);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)virt, vo);
+    CHECK(h_nvnTextureInitialize(&tx, &tb), "texture over the sparse destination initialized");
+    mtl_tex_cpu_written(&physical);
+    CHECK(host_not(&physical, 0, 128, old) == 0 && host_not((const tex_t *)&tx, 0, 128, old) == 0, "physical and sparse textures uploaded before the copy");
+    mtl_sub_copy((uint64_t)(uintptr_t)(cmem + 0x40000), (uint64_t)(uintptr_t)(virt->mem + vo), n);
+    next_sub();
+    CHECK(words_not(pmem + po, n, copied) == 0, "buffer copy writes the physical pages");
+    CHECK(host_not(&physical, 0, 128, copied) == 0, "completed sparse buffer copy invalidates the physical texture");
+    CHECK(host_not((const tex_t *)&tx, 0, 128, copied) == 0, "completed sparse buffer copy invalidates the sparse texture");
+    CHECK(tex_mtl_all(&physical) && tex_mtl_all((const tex_t *)&tx), "both destination textures accessed in the copy's submission");
+    for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(cmem + 0x40000 + i) = old;
+    struct { op_hdr c; uint64_t a[3]; op_hdr bc; p_blend_color col; op_hdr end; } ops = {
+        .c = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a = {(uintptr_t)(cmem + 0x40000), (uintptr_t)(virt->mem + vo), n},
+        .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
+    mtl_exec((const uint8_t *)&ops);
+    id<MTLTexture> direct = tex_mtl_all(&physical), mapped = tex_mtl_all((const tex_t *)&tx);
+    next_sub();
+    CHECK(texture_not(direct, 0, 128, old) == 0, "same-submission sparse copy invalidates the physical texture");
+    CHECK(texture_not(mapped, 0, 128, old) == 0, "same-submission sparse copy invalidates the sparse texture");
+    CHECK(host_not(&physical, 0, 128, old) == 0, "physical upload includes the preceding copy's completion stamp");
+    for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(cmem + 0x40000 + i) = copied;
+    mtl_sub_copy((uintptr_t)(cmem + 0x40000), (uintptr_t)(virt->mem + vo), n);
+    CHECK(map(virt, NULL, vo, 0, n), "destination unmapped before the copy completes");
+    next_sub();
+    CHECK(words_not(pmem + po, n, copied) == 0, "copy still writes the physical pages retained by its Metal buffer");
+    CHECK(host_not(&physical, 0, 128, copied) == 0, "completion invalidates the physical destination after unmapping");
+    mtl_tex_release(&physical); h_nvnTextureFinalize(&tx);
+}
 void crash_install(void);
 int main(void) { @autoreleasepool {
     alarm(120); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();
@@ -140,6 +186,7 @@ int main(void) { @autoreleasepool {
     run(0, &virt, &phys, pmem, &cpool, cmem, 0x200000, 0x080000, 0x0C0000);
     gather_only(0, &virt, &gphys, gmem, 0x400000, 0x10000);
     g_nvn_deswz_gpu = gpu;
+    buffer_alias(&virt, &phys, pmem, cmem);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&cpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&gphys);
     mtl_sub_commit(); mtl_drain(); free(pmem); free(cmem); free(gmem);

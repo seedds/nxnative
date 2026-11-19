@@ -1,7 +1,7 @@
 // Storage bounds (GitHub issue #2618): a storage buffer the shader takes by address from a game uniform slot or the push constants (SBUFU / SBUFQ) has no size, and on the console the
 // shader reads the GPU's page table as far as it indexes, an unmapped page reading 0. The host binds the Metal buffer that holds the address (mtl_gpu_addr) and gives the shader the
 // memory bound there in its length table (nvn_mtl.m sblen_put, dmsh_abi.h DMSH_SBLEN_BANK): the words readable before the address and in all. The kernels below do what a translated
-// shader does with them (Instructions.cs TryGetBoundedStoragePointer: in = idx + before < total, unsigned; a load reads word 0 and gives 0 outside, as a select (dmsh_fetch.select_guards), a store or an
+// shader does with them (Instructions.cs TryGetBoundedStoragePointer: in = idx + before < total, unsigned; a load reads word 0 and gives 0 outside, as a select (dmsh_rewrite.select_guards), a store or an
 // atomic is skipped).
 // Cases: an address inside an ordinary pool (words before it readable too, nothing past the pool), PRAGMATA's hangar binding (a 1 MB sparse pool with one 0x30000-byte run mapped at its
 // base, read 0x50000 bytes: the run, then zeros where its GI voxeliser ef4ad01151918469 read other memory), and a dummy binding (nothing readable). Runs under Metal validation
@@ -29,7 +29,7 @@ static const char *kSource =
     "static bool inside(constant L &t, int idx) { return (uint(idx) + t.m[1].z) < t.m[1].w; }\n"
     "kernel void rd(device uint *buf [[buffer(0)]], constant L &t [[buffer(1)]], constant int &first [[buffer(2)]], device uint *out [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
     "    int idx = first + int(i); bool in = inside(t, idx);\n"
-    "    out[i] = select(0u, buf[in ? idx : 0], in);\n"   // as dmsh_fetch.select_guards writes the translator's read
+    "    out[i] = select(0u, buf[in ? idx : 0], in);\n"   // as dmsh_rewrite.select_guards writes the translator's read
     "}\n"
     "kernel void wr(device uint *buf [[buffer(0)]], constant L &t [[buffer(1)]], constant int *idxs [[buffer(2)]], uint i [[thread_position_in_grid]]) {\n"
     "    int idx = idxs[i]; bool in = inside(t, idx);\n"

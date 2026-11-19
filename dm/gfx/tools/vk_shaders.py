@@ -12,7 +12,7 @@
 #   · a push-constant block gets the buffer slot after the descriptor buffers (spirv-cross puts it at buffer(0), where the first uniform buffer goes), listed as p:0.0=slot;
 #     the host sets the pushed bytes there (Super Mario Galaxy: 54 of its 56 built-in shaders have one)
 #   · stages other than vertex and fragment are skipped and counted: Metal has no geometry shaders (Super Mario Galaxy has 2)
-#   · a fragment shader with an output at location 1 also gets a variant vk_<key>_d where that output is [[color(0), index(1)]]: Super Mario Galaxy's GX shaders write
+#   · a fragment shader with only outputs 0 and 1 of the same type gets a variant vk_<key>_d with [[color(0), index(1)]]: Super Mario Galaxy's GX shaders write
 #     the second blend source at location 1 (no Index decoration), which NVIDIA's hardware feeds to dual-source blending; the host picks the variant for pipelines
 #     whose blend factors read source 1
 # Super Mario Galaxy generates its GX shaders at run time; they come from a capture folder (the Mac host's DM_VK_CAPTURE), read like a RomFS: every input folder is
@@ -22,6 +22,7 @@
 #   p push constants)
 # Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
+from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -39,7 +40,7 @@ SLOT_CLASS = {'u': 'buffer', 'b': 'buffer', 't': 'texture', 's': 'sampler', 'c':
 # that the fill light (from the camera's left) faces came out white (GitHub issue 72)
 PRECISE = re.compile(r'\bfast::(min|max|clamp)\(')
 
-def red(msg): sys.exit('[RED] ' + msg)
+def red(msg: str) -> NoReturn: sys.exit('[RED] ' + msg)
 
 def spirv_files(root):
     for d, _, fs in os.walk(root):
@@ -79,6 +80,12 @@ def fix_strides(words):
         if t in arrays and t not in have: add.setdefault(t, stride)
     if not add: return words
     return words[:at] + [w for t, s in add.items() for w in ((4 << 16) | OP_DECORATE, t, DEC_ARRAY_STRIDE, s)] + words[at:]
+
+def entry_args(src, key, path):
+    """Find the translated entry point with its argument list in group 1."""
+    m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
+    if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
+    return m
 
 def one(path, tmp, root):
     data = open(path, 'rb').read()
@@ -120,29 +127,33 @@ def one(path, tmp, root):
     open(spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
     # --msl-texture-1d-as-2d: a 1D image is a one-row 2D texture in the host (hle_vk.m vkCreateImage), since Metal's 1D texture cannot be drawn into, mipmapped or depth; spirv-cross samples it at
     # the row's centre (float2(x, 0.5)) and reads it at (x, 0)
-    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--msl-texture-1d-as-2d', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--msl-texture-1d-as-2d',
+           '--rename-entry-point', eps[0]['name'], f'vk_{key}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--flip-vert-y')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: red(f'{path}: spirv-cross failed: {r.stderr.strip()[:300]}')
     # The reflection lists every declared resource; the Metal entry point only takes the ones the shader uses (Hades' ShadowMap.frag declares a buffer it never reads,
     # which the game's own pipeline layout leaves out): keep the rows whose slot is an argument of the entry point, so the host only binds, and only reports, real ones
-    src = open(msl).read(); m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
-    if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
+    src = open(msl).read(); m = entry_args(src, key, path)
     if pcs:   # the push-constant argument is `constant <block type>& name [[buffer(0)]]`: move it to its own slot
-        tname = refl['types'][pcs[0]['type']]['name']
+        # SPIRV-Cross sanitizes DXC names such as type.PushConstant.RootConstants on output.
+        tname = re.sub(r'[^A-Za-z0-9_]', '_', refl['types'][pcs[0]['type']]['name'])
         a = re.search(r'constant\s+' + re.escape(tname) + r'&\s+\w+\s+\[\[buffer\((\d+)\)\]\]', m.group(1))
         if a:
             s0, s1 = m.start(1) + a.start(1), m.start(1) + a.end(1)
-            src = src[:s0] + str(pc_slot) + src[s1:]; open(msl, 'w').write(src)
-            m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
+            src = src[:s0] + str(pc_slot) + src[s1:]
+            m = entry_args(src, key, path)
             res.append(f'p:0.0={pc_slot}')
     used = {(c, int(n)) for c, n in re.findall(r'\[\[(buffer|texture|sampler)\((\d+)\)\]\]', m.group(1))}
     res = [x for x in res if (SLOT_CLASS[x[0]], int(x.rsplit('=', 1)[1].split('*')[0])) in used]
     src = PRECISE.sub(r'precise::\1(', src); open(msl, 'w').write(src)
     msls = [msl]
-    if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
-        msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
-        open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
+    if stage == 'frag':
+        # Metal requires two outputs of the same type for the dual-source variant.
+        outs = {int(i): t for t, i in re.findall(r'(\w+)\s+\w+\s+\[\[color\((\d+)\)\]\]', src)}
+        if outs.keys() == {0, 1} and outs[0] == outs[1]:
+            msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
+            open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
     return key, stage, res, msls, '/' + os.path.relpath(path, root)
 
 def metallib(msls, out, sdk, extra):

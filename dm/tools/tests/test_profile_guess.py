@@ -108,6 +108,26 @@ class HeapCheckAddressSpace(unittest.TestCase):
 
 
 class GlslSources(unittest.TestCase):
+    def test_fixed_function_detection_preserves_shader_and_api_evidence(self):
+        egl = {'eglCreateWindowSurface'}
+        for image, imports in ((b'glVertexPointer\0', egl), (b'', egl | {'glMatrixMode'}),
+                               (('glEnableClientState' + '\0').encode('utf-16-le'), egl)):
+            self.assertTrue(pg.gl_fixed_calls(image, imports))
+        self.assertFalse(pg.gl_fixed_calls(b'glVertexPointerSomething\0', egl))
+        shaderless = pg.shader_sources(egl, 0, [], 0, 0, gl_fixed_calls=True)
+        self.assertEqual(shaderless['graphics'][0], 'gl')
+        self.assertTrue(shaderless['gl_fixed'][0])
+        self.assertFalse(shaderless['gl_capture'][0])
+        for evidence in ({'gl_names': 1}, {'gl_src': 1}, {'gl_files': 1}, {'nro_imports': {'glShaderSource'}}):
+            with self.subTest(evidence=evidence):
+                with_shaders = pg.shader_sources(egl, 0, [], 0, 0, gl_fixed_calls=True, **evidence)
+                self.assertEqual(with_shaders['graphics'][0], 'gl')
+                self.assertFalse(with_shaders['gl_fixed'][0])
+        for imports, api in ((egl | {'vkCreateInstance'}, 'vulkan'), (egl | {'nvnBootstrapLoader'}, 'nvn')):
+            other = pg.shader_sources(imports, 0, [], 0, 0, gl_fixed_calls=True)
+            self.assertEqual(other['graphics'][0], api)
+            self.assertFalse(other['gl_fixed'][0])
+
     def test_survey_detects_a_managed_gl_loader(self):
         managed = 'glShaderSource'.encode('utf-16-le')
         with tempfile.TemporaryDirectory() as d:

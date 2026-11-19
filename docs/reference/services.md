@@ -841,6 +841,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the IR camera (`irsensor`) answers every camera unconnected, and processors cannot run.
 - **Found on:** [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3, NintendoWare Bezel Engine).
 
+### Direct `irs` connection and status memory
+
+- **Symptom:** `[RED] sf: the game connects to service irs itself, which the host does not serve`, then a null read at `main+0xeaca34` before the first scene.
+- **Cause:** the game's `nn::irsensor` client makes its own HIPC session. With `irs` unregistered, the client object remains null. Letting it connect without supplying command 304's copied handle exposes a second fault: SVC `0x13` answered success without mapping the StatusManager, and the SDK read its applet table at +0x7fb0 (`main+0xeaf7b8`).
+- **Fix:** `hle_irs.c` registers the service and supplies a read-only 0x8000-byte StatusManager with all nine cameras disconnected and no samples. SVC `0x13` and `0x14` map and unmap immutable service memory on free host-page-aligned alias pages. Command 307 accepts the clustering configuration with no samples: this SDK aborts when it receives an error from that command. The exact response of a Switch without an IR camera connected was not measured.
+- **Check:** `t_sf` checks the camera handle, activation, copied handle and status data. `t_svc_memory` checks read-only mapping metadata, physical-map conflicts and unmap/reuse. The Mac windowed run passed the direct service initialization and reached the frame loop with audio.
+- **Found on:** L.A. Noire 1.2 ([NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386)).
+
 ## Software keyboard and applets
 
 ### System applets opened by `Show…` calls

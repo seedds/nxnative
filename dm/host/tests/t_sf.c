@@ -5,10 +5,13 @@
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_sf.c"
+#include "../hle_irs.c"
 
 static int checks, fails, events;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
 uint32_t hle_new_event(uint32_t *write_end) { events++; if (write_end) *write_end = 0x2000 + events; return 0x1000 + events; }
+static const hle_readonly_shmem *shared;
+uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory) { shared = memory; return 0x2001; }
 
 // A CMIF request for command cmd on a non-domain session (HIPC type 4, no special header, no descriptors): the data words from +8, "SFCI" at +0x10
 static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
@@ -37,6 +40,28 @@ int main(void) {
     CHECK(request(h, m, 0) == RES_OK, "olsc:u request");
     CHECK(!(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "olsc:u: success, no special header, SFCO at +0x10");
     CHECK(h_sf_Connect(&h, "chat:u") == 0xe15u, "a service the host does not serve is not registered");
+
+    uint32_t irs = 0;
+    CHECK(h_sf_Connect(&irs, "irs") == RES_OK && irs, "IRS has a direct service session");
+    if (irs) {
+        memset(m, 0, sizeof m);
+        m[0] = 4; m[1] = 9; m[4] = 0x49434653; m[6] = 311; m[8] = 0x20;
+        CHECK(h_sf_Send(irs, m, sizeof m) == RES_OK && m[6] == RES_OK && m[8] == 8, "IRS handheld camera handle selects device eight");
+        CHECK(request(irs, m, 302) == RES_OK && m[6] == RES_OK, "IRS activation succeeds");
+        CHECK(request(irs, m, 304) == RES_OK && m[6] == RES_OK && m[3] == 0x2001 && m[1] >> 31 && m[2] == 2,
+              "IRS returns one copied shared memory handle");
+        CHECK(shared && shared->size == 0x8000, "IRS status manager has its ABI size");
+        if (shared) {
+            const uint32_t *words = shared->bytes;
+            for (size_t camera = 0; camera < 9; ++camera) {
+                size_t at = camera * 0xe30 / sizeof *words;
+                CHECK(words[at] == 2 && words[at + 1] == 0 && words[at + 2] == 0 && words[at + 6] == 0,
+                      "each camera is disconnected, stopped and has no samples");
+            }
+        }
+        CHECK(request(irs, m, 307) == RES_OK && m[6] == RES_OK, "IRS accepts clustering configuration without a camera");
+        h_sf_Close(irs);
+    }
 
     uint32_t mn = 0, unserved = 0;
     CHECK(h_sf_Connect(&mn, "mnpp:app") == RES_OK && mn && mn != h, "mnpp:app is served");

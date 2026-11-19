@@ -80,8 +80,9 @@ scripts/make_lego_hp_app.sh      ->  dmhost 99100d73…, module 6729d1b3…, env
 
 The rebuild is **not** byte-identical to `99100d73…`: this profile (with `present_upscale off` and the recipe's profile path,
 which the generated header names in its first line and `-g` records) links to `ac540e0c…`, and the earlier profile to
-`50cd08a2…`. **Ship the pinned binary**; treat the sha as an artifact pin, not a reproducible build. Its bytes are the same
-in `Lego HP NX GLYPHFIX.app` and in the earlier `Lego HP NX (fixed).app`.
+`50cd08a2…`. **Ship the pinned binary**; treat the sha as an artifact pin, not a reproducible build. `Lego HP NX GLYPHFIX.app` is
+the earlier `Lego HP NX (fixed).app` clone with only the module replaced, so it carries this same host; the script's
+`HOST_SHA` check is what holds that.
 
 `dm/games/game.py` on this branch carries the same parser and `game_profile.h` change as the series (`present_snap` depth,
 `present_upscale`, `fullscreen`, `ui_republish`) so that this profile's `game.tsv` compiles without the patch.

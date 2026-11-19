@@ -107,6 +107,7 @@ void dm_haptics_apple_controller(int player, GCController *controller) { (void)p
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}
 bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
+bool front_ios_hud_enabled_from_saved_choice(void) { return false; }
 
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 1; }

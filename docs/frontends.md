@@ -63,6 +63,8 @@ Settings a player chose in a front end and wants kept, also for a start from Fin
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.
 
+An iOS front end can localize the in-game gear menu with `DM_GAME_MENU_TEXT`. Pass four lines in order: "More settings on the start screen", "Controller layout", "Tap", and "Set in env.txt". For a packaged IPA, join the labels with literal `\n` in the app's `dm/env.txt` so the variable takes one line. A missing or blank label keeps its English text without shifting later labels.
+
 ## Local users and the account selector
 
 The account applet uses `front_user_select()` (`dm/host/front.h`) on the guest thread; the front end presents native UI on its main thread and blocks the caller until a choice or cancellation. The built-in Mac dialog accepts mouse/keyboard input, and the iOS dialog accepts touches. Show the host-supplied users (including their in-use labels), and Add user / Skip only when allowed. Return the user's slot or the named `FRONT_USER_*` action. A front end without an interactive surface returns `FRONT_USER_CANCEL`; it must not guess an account from the number of controllers. The host validates the answer, owns registration and session state, and applies the game's exclusions and permitted automatic selection.

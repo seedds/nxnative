@@ -359,6 +359,34 @@ HLE_FORCE("_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserE
     LOG("[diag] abort at %s: %s (%s:%d) message format %s", fn ? fn : "?", expr ? expr : "?", file ? file : "?", line, fmt ? fmt : "?");
     diag_abort(res ? *(const uint32_t *)res : 0, dm_bigstack_caller(__builtin_return_address(0)));   // VAbortImpl never returns to its caller
 }
+// Module list: the SDK builds it by walking svcQueryMemory blocks (nn::diag::detail::MemoryBlockParser), which finds nothing on the host, so a game that looks for the module holding
+// its own read-only data (Hitman Absolution, SDK 22: "Failed to get our const data section!" then a trap at startup) got none. The host answers from its module table instead:
+// entries of 0x30 bytes, +0 the module name, +8 its base address (the only field the game reads), +0x10 its size; the section range is the module's read-only data.
+HLE_FORCE("_ZN2nn4diag40GetRequiredBufferSizeForGetAllModuleInfoEv", "module list size from the host's module table", uint64_t, h_diag_ModInfoSize, void) {
+    uint64_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro) n++;
+    return n * 0x30;
+}
+HLE_FORCE("_ZN2nn4diag16GetAllModuleInfoEPPNS0_10ModuleInfoEPvm", "module list from the host's module table", int, h_diag_AllModInfo, void **out, void *buf, size_t size) {
+    int n = 0; uint8_t *p = (uint8_t *)buf;
+    if (out) *out = buf;
+    for (int i = 0; i < g_nmod && buf; i++) if (!g_mod[i].nro) {
+        if ((size_t)(n + 1) * 0x30 > size) break;
+        memset(p + n * 0x30, 0, 0x30);
+        *(const char **)(p + n * 0x30) = g_mod[i].name;
+        *(uint64_t *)(p + n * 0x30 + 8) = (uint64_t)(uintptr_t)g_mod[i].base;
+        *(uint64_t *)(p + n * 0x30 + 0x10) = g_mod[i].size;
+        n++;
+    }
+    return n;
+}
+HLE_FORCE("_ZN2nn4diag27GetReadOnlyDataSectionRangeEPmS1_m", "read-only data range of the module at this base address", int, h_diag_RoRange, uint64_t *start, uint64_t *end, uint64_t base) {
+    for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro && (uint64_t)(uintptr_t)g_mod[i].base == base) {
+        if (start) *start = base + g_mod[i].ro_off;
+        if (end) *end = base + g_mod[i].data_off;
+        return 1;
+    }
+    return 0;
+}
 HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "symbol name; the host provides none (empty string)", uint64_t, h_diag_SymName, char *buf, size_t n, uint64_t addr) { (void)addr; if (buf && n) buf[0] = 0; return 0; }
 
 // ---------- settings: language enum <-> language code ----------

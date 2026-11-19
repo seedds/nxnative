@@ -1699,3 +1699,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### A game that looks for its own read-only data section through nn::diag
+
+- **Symptom:** a game aborts at start with `Failed to get our const data section!` and a trap, after `nn::diag abort: Result 0xe15`; the abort's caller is in the SDK's module walk. Hitman Absolution (SDK 22).
+- **Cause:** `nn::diag::GetAllModuleInfo` and `GetReadOnlyDataSectionRange` build the module list by walking `svcQueryMemory` blocks (`nn::diag::detail::MemoryBlockParser`), which finds nothing on the host, so the game gets no module and no section.
+- **Fix:** `hle_sdk16.c` answers `GetRequiredBufferSizeForGetAllModuleInfo`, `GetAllModuleInfo` and `GetReadOnlyDataSectionRange` from the host's module table: entries of 0x30 bytes (+0 name, +8 base, +0x10 size), the section range `ro_off` to `data_off` of the module at that base.
+- **Check:** Hitman Absolution (`010037C022390000`, v131072) on an M4 Pro, macOS 27.2: boots past the abort to the title, menu and New Game intro at 60 fps. Only the three hooks' game was run; no other game was checked.
+- **Found on:** Hitman Absolution.

@@ -1565,43 +1565,92 @@ def pg_sized_shader(d, label):
     return [(f'{label}#PGSO', st, ctl, code)]
 
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
+def _zlib_header(d):
+    return len(d) >= 2 and (d[0] & 0xf) == 8 and (d[0] >> 4) <= 7 and (d[0] * 256 + d[1]) % 31 == 0
+
 def mtarc_members(d, label):
-    """Capcom's MT Framework archive: 'ARC\\0', u16 version 7, u16 entry count, then one entry per file {char path[128 or 64] ('\\\\'-separated, no extension), u32 type hash, u32 stored length,
-    u32 length in the low 29 bits (flags above), u32 offset}: 128 in The Great Ace Attorney Chronicles (447 '.arc' files under nativeNXx64), 64 in Ultra Street Fighter II. The data is a zlib stream, or
-    stored when the stored length equals the length. → (path, data) of each entry"""
+    """Capcom's MT Framework archive: 'ARC\\0', u16 version, u16 entry count, then one entry per file. → (path, data) of each entry.
+    Version 7: {char path[128 or 64] ('\\\\'-separated, no extension), u32 type hash, u32 stored length, u32 length in the low 29 bits (flags above), u32 offset}: 128 in The Great Ace
+    Attorney Chronicles (447 '.arc' files under nativeNXx64), 64 in Ultra Street Fighter II.
+    Version 9 (Resident Evil HD Remaster, 3,899 '.arc' files under nativeNXx64): {char path[64], u32 type hash, u32 stored length, u32 length, u32 flags (2 in every entry), u32 offset}:
+    0x54 bytes, the first member at 0x8000. Every member is a zlib stream there, even when the stream is longer than or equal to the data (a 0x10-byte member stored in 0x18 bytes).
+    The data is a zlib stream bounded to the declared length, or stored when the stored length equals the length and (for v9) it is not a complete zlib stream of that length"""
     import zlib
     ver, n = field(d, '<HH', 4, label)
-    if ver != 7: red(f'{label}: ARC version {ver}: only version 7 is known')
+    if ver not in (7, 9): red(f'{label}: ARC version {ver}: only versions 7 and 9 are known')
     if not n: return
-    # The version does not name the width. Check every member against the end of its candidate directory and the archive;
-    # the last member need not end at EOF. Prefer the established wide layout when both fit.
-    def directory_rank(width):
-        step = width + 16
+    mask = 0x1fffffff if ver == 7 else 0xffffffff
+    # Check every member against the end of its candidate directory and the archive;
+    # the last member need not end at EOF. Version 7 does not name the width: prefer the established wide layout when both fit.
+    def directory_rank(width, extra=0):
+        step = width + 16 + extra
         table_end = 8 + n * step
         if table_end > len(d): return -1
         has_data = False
         for o in range(8, table_end, step):
-            stored, size, offset = struct.unpack_from('<3I', d, o + width + 4)
-            if not stored and not (size & 0x1fffffff) and not offset: continue  # an empty member needs no offset
+            stored, size = struct.unpack_from('<2I', d, o + width + 4)
+            offset, = struct.unpack_from('<I', d, o + width + 12 + extra)
+            if not stored and not (size & mask) and not offset: continue  # an empty member needs no offset
             if offset < table_end or offset + stored > len(d): return -1
             has_data |= stored != 0
         return int(has_data)  # zero-filled padding can look like an all-empty directory
-    wide = directory_rank(128)
-    if wide == 1: width = 128
+    if ver == 9:
+        width, extra = 64, 4
+        if directory_rank(width, extra) < 0: red(f'{label}: ARC v9 has no complete directory with in-bounds members')
     else:
-        short = directory_rank(64)
-        if wide < 0 and short < 0: red(f'{label}: ARC v7 has no complete directory with in-bounds members')
-        width = 128 if wide >= short else 64
+        extra = 0
+        wide = directory_rank(128)
+        if wide == 1: width = 128
+        else:
+            short = directory_rank(64)
+            if wide < 0 and short < 0: red(f'{label}: ARC v7 has no complete directory with in-bounds members')
+            width = 128 if wide >= short else 64
+    step = width + 16 + extra
     for i in range(n):
-        o = 8 + i * (width + 16)
+        o = 8 + i * step
         path = d[o:o + width].split(b'\0')[0].decode('latin-1')
-        csz, usz, off = struct.unpack_from('<3I', d, o + width + 4); usz &= 0x1fffffff
+        csz, usz = struct.unpack_from('<2I', d, o + width + 4); usz &= mask
+        off, = struct.unpack_from('<I', d, o + width + 12 + extra)
         data = d[off:off + csz]
         if csz != usz:
-            try: data = zlib.decompress(data)
+            dec = zlib.decompressobj()
+            try: data = dec.decompress(data, usz + 1)
             except zlib.error as e: red(f'{label}#{path}: invalid ARC zlib stream: {e}')
+            if not dec.eof or len(data) != usz: red(f'{label}#{path}: incomplete ARC zlib stream or {len(data):#x} bytes, the entry says {usz:#x}')
+        elif ver == 9 and _zlib_header(data):
+            dec = zlib.decompressobj()
+            try: inflated = dec.decompress(data, usz + 1)
+            except zlib.error: inflated = None
+            if inflated is not None and dec.eof and not dec.unused_data and len(inflated) == usz: data = inflated
         if len(data) != usz: red(f'{label}#{path}: {len(data):#x} bytes, the entry says {usz:#x}')
         yield path.replace('\\', '/'), data
+
+def mtspk_headed(d, c):   # the 0x20-byte shader header of Resident Evil HD Remaster's packages, directly before the control section at c (mtspk_headed_shaders)
+    if c < 0x28 or c + 0x708 > len(d): return False
+    h, total, _, _, zero, nctl, ncode, nctl2 = struct.unpack_from('<4s7I', d, c - 0x20)
+    return h == d[4:8] and zero == 0 and nctl >= 0x708 and nctl == nctl2 and total == nctl + ncode \
+        and nctl == struct.unpack_from('<I', d, c + 0x20)[0] and ncode == struct.unpack_from('<I', d, c + 0x704)[0]
+
+def mtspk_headed_shaders(d, label):
+    """Resident Evil HD Remaster's shader packages (sc\\NX_64\\root, Title and Game, each the only member of sa/NX_64/<name>.arc, ARC version 9: 1,726, 56 and 17,322 shaders): every shader is a
+    record of variable-length binding data, then a 0x20-byte header {u32 the package hash (SPK +4), u32 control + code length, u32, u32, u32 0, u32 control length, u32 code length, u32 control
+    length}, then the control section (0x850 bytes on SDK 5) and directly after it the code area. The records are not back to back, so each control section is found by its magic and
+    accepted only with that header in front of it; every control magic in the package must belong to one. Paired as single-stage programs (separable_pairs), as the other SPK forms"""
+    out, c, end, n = [], d.find(CTL_MAGIC), 8, d.count(CTL_MAGIC)
+    while c >= 0:
+        if c < end + 0x20 or not mtspk_headed(d, c): red(f'{label} SPK: control section at {c:#x} without a shader header')
+        nctl, ncode = struct.unpack_from('<2I', d, c - 0x0c)
+        g = c + nctl
+        if ncode < 0x34 or g + ncode > len(d) or d[g:g + 4] != GFX_MAGIC: red(f'{label} SPK: no graphics code area after the control at {c:#x}')
+        ctl, code = d[c:g], d[g:g + ncode]
+        st = sph_stage(code)
+        why = check(label, st, ctl, code) if st else 'no stage in the SPH'
+        if why: red(f'{label} SPK @{c:#x}: {why}')
+        out.append((f'{label}#MTSPK@{c:#x}', st, ctl, code))
+        end = g + ncode
+        c = d.find(CTL_MAGIC, end)
+    if len(out) != n: red(f'{label} SPK: {n} control magics, {len(out)} shaders read')
+    return out
 
 def mtspk_shaders(d, label):
     """MT Framework's shader package ('SPK\\0'; The Great Ace Attorney Chronicles keeps its only one, sc\\NX_64\\root, in sa/NX_64/root.arc): after the package's tables the shaders lie back to back to the
@@ -1610,6 +1659,7 @@ def mtspk_shaders(d, label):
     single-stage programs (separable_pairs)"""
     out, end, c = [], None, d.find(CTL_MAGIC)
     if c < 0: red(f'{label} SPK: no shader control section')
+    if mtspk_headed(d, c): return mtspk_headed_shaders(d, label)
     ncode, = field(d, '<I', c + 0x704, f'{label} SPK')
     # In a code-first package the next shader's code also follows this control. Its *own* code comes
     # before it at the declared distance. Once established, keep the order even if a later pair is damaged.

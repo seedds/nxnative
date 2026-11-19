@@ -212,6 +212,25 @@ static void device_shared_refused(void) {
     assert(!resize(0));
 }
 
+// UnmapMemory gives the stack region's whole host pages back: the SDK places each thread's stack at a random address, so pages MapMemory dirtied stayed resident
+// for every thread that ever ran. A second map of the same range reads the new source, not what was there
+static void stack_pages_released(void) {
+    size_t hp = memory_getpagesize(), n = 4 * hp; uintptr_t dst = (stack + hp + hp - 1) & ~(uintptr_t)(hp - 1);
+    assert(!pages(1, alias, n));
+    memset((void *)alias, 0x5a, n);
+    assert(!map(dst, alias, n));
+    assert(*(uint8_t *)(dst + n - 1) == 0x5a);
+    assert(!unmap(dst, alias, n));
+    if (!g_gf_n) {   // the guest in files keeps its pages (hle_svc.c, punch-during-play left alone)
+        char res[4]; assert(!mincore((void *)dst, n, res));
+        for (int i = 0; i < 4; ++i) assert(!(res[i] & MINCORE_INCORE));
+    }
+    memset((void *)alias, 0x6b, n);
+    assert(!map(dst, alias, n) && *(uint8_t *)dst == 0x6b && *(uint8_t *)(dst + n - 1) == 0x6b);
+    assert(!unmap(dst, alias, n));
+    assert(!pages(0, alias, n));
+}
+
 static void ownership(void) {
     assert(!pages(1, alias, 16 * P));
     memset((void *)alias, 0x34, 16 * P);
@@ -610,7 +629,7 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

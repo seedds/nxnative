@@ -892,6 +892,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         dm_guest_write_prepare((void *)src, size);
         memcpy((void *)src, (void *)dst, size);
         map_del(k - 1);
+        // Give the stack region's whole host pages back: stacks land at random addresses, so each thread left its stack's dirty pages resident (up to mem_stack). Edge pages may hold a
+        // neighbour's 4K pages and stay; MapMemory opens the range again with mprotect. Not with the guest in files (g_gf_n), whose punch-during-play path is left alone
+        { uint64_t pg = (uint64_t)getpagesize(), rlo = (dst + pg - 1) & ~(pg - 1), rhi = (dst + size) & ~(pg - 1);
+          if (rhi > rlo && !g_gf_n) (void)guest_release((uintptr_t)rlo, (uintptr_t)rhi, 0); }
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = 0; return 0;
     }

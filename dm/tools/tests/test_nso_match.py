@@ -149,7 +149,7 @@ class Matching(unittest.TestCase):
         init = [0x52800080, RET]
         original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: init})
         parsed = Image(original, 0x2000)
-        clock = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
+        clock: dict[str, object] = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
         with self.assertRaisesRegex(MatchError, '2 matching'):
             parsed.match(dict(clock, name='clock'))
 

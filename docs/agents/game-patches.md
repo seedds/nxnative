@@ -78,6 +78,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](#super-mario-bros-wonder--nintendo-switch-2-edition--meetup-in-bellabel-park) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
@@ -487,6 +488,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.1.4 `main`** `b21e3733…` ([patches.py:7](../../dm/games/010049900F546002/patches.py#L7))
   - cut `+0x151214`: coroutine stack region size: orr w2,wzr,#0x40000000 → mov w2,#0x4000000 (1 GB → 64 MB)
   - cut `+0x151398`: coroutine stack region size, the other start path: 1 GB → 64 MB
+
+### Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park
+
+[Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](../../dm/games/040015100B514001/README.md), `040015100B514001`, [patches.py](../../dm/games/040015100B514001/patches.py).
+
+- **`game`**, frame rate, at goal, checked: v0 main: one function with this size and fingerprint, the site, its free registers and the lack of branches into it read by disassembly (2026-11-18): frame interval from the host's step. The game's interval controller, found by its function's fingerprint on any build that keeps the function
+
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame interval from the host's step: a function of 0x2ac bytes, `+0xc8` in it
 
 ### Super Smash Bros. Ultimate
 

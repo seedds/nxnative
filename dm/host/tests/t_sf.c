@@ -12,6 +12,10 @@ static int checks, fails, events;
 uint32_t hle_new_event(uint32_t *write_end) { events++; if (write_end) *write_end = 0x2000 + events; return 0x1000 + events; }
 static const hle_readonly_shmem *shared;
 uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory) { shared = memory; return 0x2001; }
+static uint8_t irs_work[0x13000];
+void *hle_map_transfer_memory(uint32_t handle, uint64_t size, uint32_t owner_perm) {
+    return handle == 0x2002 && size == sizeof irs_work && owner_perm == 0 ? irs_work : NULL;
+}
 
 // A CMIF request for command cmd on a non-domain session (HIPC type 4, no special header, no descriptors): the data words from +8, "SFCI" at +0x10
 static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
@@ -20,19 +24,79 @@ static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
     m[4] = 0x49434653; m[5] = 0; m[6] = cmd; m[7] = 0;
     return h_sf_Send(h, m, 0x100);
 }
-// RunClusteringProcessor sends a PID, an IR camera handle, the applet resource user ID, and a packed configuration.
-static Result irs_cluster_request(uint32_t h, uint32_t *m, uint32_t camera, uint8_t gain) {
+// Run commands send a PID and packed arguments. The image-transfer modes include one copied handle.
+static Result irs_run_request(uint32_t h, unsigned cmd, uint32_t *m, const uint32_t *body, size_t size, uint32_t copy) {
     memset(m, 0, 0x100);
-    m[0] = 4; m[1] = (3 + 4 + 14) | 1u << 31;   // alignment, CMIF header, 0x38 bytes of arguments
-    m[2] = 1; m[3] = 0x1234;
-    m[8] = 0x49434653; m[10] = 307;
-    m[12] = camera; m[14] = 0x1234;
-    uint32_t *config = m + 16;
+    unsigned align = copy ? 2 : 3;
+    m[0] = 4; m[1] = (align + 4 + (unsigned)(size / 4)) | 1u << 31;
+    m[2] = copy ? 3 : 1; m[3] = DM_APPLET_RESOURCE_USER_ID; m[5] = copy;
+    m[8] = 0x49434653; m[10] = cmd;
+    memcpy(m + 12, body, size);
+    if (h_sf_Send(h, m, 0x100) || m[4] != 0x4f434653) return RES_FAIL;
+    return m[6];
+}
+
+static Result irs_cluster_request(uint32_t h, uint32_t *m, uint32_t camera, uint8_t gain) {
+    uint32_t body[14] = { camera, 0, DM_APPLET_RESOURCE_USER_ID };
+    uint32_t *config = body + 4;
     config[0] = 300000;                          // exposure time
     ((uint8_t *)config)[9] = gain;
     config[5] = 320 | 240u << 16;                // window width and height
     config[7] = 3; config[8] = 76800;           // minimum and maximum pixel count
-    return h_sf_Send(h, m, 0x100);
+    return irs_run_request(h, 307, m, body, sizeof body, 0);
+}
+static void irs_run_checks(uint32_t h, uint32_t *m) {
+    const struct { unsigned cmd, size; } cases[] = {
+        {306, 0x30}, {308, 0x30}, {310, 0x18}, {312, 0x18}, {316, 0x38}, {317, 0x18}
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        unsigned cmd = cases[i].cmd, size = cases[i].size;
+        unsigned transfer = cmd == 308 || cmd == 316;
+        unsigned aruid = size == 0x18 ? 4 : 2;
+        uint32_t body[14] = {0};
+        body[aruid] = DM_APPLET_RESOURCE_USER_ID;
+        uint8_t *config = (uint8_t *)(body + 4);
+        if (size != 0x18) {
+            body[4] = 300000; config[9] = 8;
+        }
+        if (cmd == 306) {
+            body[9] = 320 | 240u << 16; config[0x1c] = 1;
+        } else if (cmd == 312) {
+            body[2] = 320 | 240u << 16;
+        } else if (cmd == 310 || cmd == 317) {
+            body[1] = body[2] = UINT32_MAX;   // opaque until the worker runs
+        }
+        if (transfer) body[cmd == 308 ? 10 : 12] = sizeof irs_work;
+        uint32_t copy = transfer ? 0x2002 : 0;
+        CHECK(irs_run_request(h, cmd, m, body, size, copy) == RES_OK, "valid IRS start succeeds with no camera");
+        CHECK(irs_run_request(h, cmd, m, body, size - 4, copy) == 0x1ce0au, "short IRS start body rejected");
+        body[0] = 9;
+        CHECK(irs_run_request(h, cmd, m, body, size, copy) == 0x198cdu, "invalid camera rejected on each start");
+        body[0] = 0;
+        body[aruid] = DM_APPLET_RESOURCE_USER_ID + 1;
+        CHECK(irs_run_request(h, cmd, m, body, size, copy) == 0x60au, "IRS rejects another applet's ID");
+        body[aruid] = 0;
+        CHECK(irs_run_request(h, cmd, m, body, size, copy) == RES_OK, "IRS accepts ARUID zero for the caller");
+        if (transfer) {
+            CHECK(irs_run_request(h, cmd, m, body, size, 0x2001) == 0x19acdu, "wrong copied handle fails transfer setup");
+            CHECK(irs_run_request(h, cmd, m, body, size, 0) == 0x1ce0au, "missing copied handle is malformed");
+        }
+        if (cmd == 306) {
+            body[9] = 7 | 6u << 16;
+        } else if (cmd == 308) {
+            config[0x14] = 5;
+        } else if (cmd == 312) {
+            body[2] = 240u << 16;
+        } else if (cmd == 316) {
+            config[0x14] = 0x80;
+            CHECK(irs_run_request(h, cmd, m, body, size, copy) == RES_OK, "IRS decodes the original image format like firmware");
+            config[0x14] = 0;
+            config[0x15] = 4;
+            config[0x16] = 301 & 0xff; config[0x17] = 301 >> 8;   // 20 px crop does not fit at x=301
+        }
+        if (cmd != 310 && cmd != 317)
+            CHECK(irs_run_request(h, cmd, m, body, size, copy) == 0x19ccdu, "invalid processor configuration rejected");
+    }
 }
 // The same on a domain session as the SDK's notif:a client sends it: the process ID in a special header when pid, one B descriptor (the buffer buf) when buf, the domain header for
 // object 1 at the first 16-byte boundary after them, then "SFCI"
@@ -65,6 +129,7 @@ int main(void) {
         CHECK(request(irs, m, 304) == RES_OK && m[6] == RES_OK && m[3] == 0x2001 && m[1] >> 31 && m[2] == 2,
               "IRS returns one copied shared memory handle");
         CHECK(shared && shared->size == 0x8000, "IRS status manager has its ABI size");
+        irs_run_checks(irs, m);
         if (shared) {
             const uint32_t *words = shared->bytes;
             for (size_t camera = 0; camera < 9; ++camera) {
@@ -73,13 +138,13 @@ int main(void) {
                       "each camera is disconnected, stopped and has no samples");
             }
         }
-        CHECK(irs_cluster_request(irs, m, 0, 1) == RES_OK && m[6] == RES_OK, "IRS accepts minimum clustering gain without a camera");
-        CHECK(irs_cluster_request(irs, m, 0xffff0008, 16) == RES_OK && m[6] == RES_OK,
+        CHECK(irs_cluster_request(irs, m, 0, 1) == RES_OK, "IRS accepts minimum clustering gain without a camera");
+        CHECK(irs_cluster_request(irs, m, 0xffff0008, 16) == RES_OK,
               "IRS accepts handheld, ignores reserved handle bytes and accepts maximum clustering gain");
-        CHECK(irs_cluster_request(irs, m, 9, 8) == RES_OK && m[6] == 0x198cdu, "IRS rejects an out-of-range clustering player index");
-        CHECK(irs_cluster_request(irs, m, 0x100, 8) == RES_OK && m[6] == 0x198cdu, "IRS rejects a nonzero clustering camera type");
-        CHECK(irs_cluster_request(irs, m, 0, 0) == RES_OK && m[6] == 0x19ccdu, "IRS rejects clustering gain below one");
-        CHECK(irs_cluster_request(irs, m, 0, 17) == RES_OK && m[6] == 0x19ccdu, "IRS rejects clustering gain above sixteen");
+        CHECK(irs_cluster_request(irs, m, 9, 8) == 0x198cdu, "IRS rejects an out-of-range clustering player index");
+        CHECK(irs_cluster_request(irs, m, 0x100, 8) == 0x198cdu, "IRS rejects a nonzero clustering camera type");
+        CHECK(irs_cluster_request(irs, m, 0, 0) == 0x19ccdu, "IRS rejects clustering gain below one");
+        CHECK(irs_cluster_request(irs, m, 0, 17) == 0x19ccdu, "IRS rejects clustering gain above sixteen");
         CHECK(request(irs, m, 307) == RES_OK && m[6] == 0x1ce0au, "IRS rejects a truncated clustering configuration");
         h_sf_Close(irs);
     }

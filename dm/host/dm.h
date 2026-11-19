@@ -175,6 +175,10 @@ uint32_t hle_new_event(uint32_t *write_end);   // hle_thread.c: a new kernel eve
 typedef struct { const void *bytes; size_t size; } hle_readonly_shmem;
 uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory);   // immutable, process-lifetime backing; each returned handle closes independently
 const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle);
+typedef struct { uintptr_t address; size_t size; uint32_t owner_perm; } hle_transfer_memory;
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory);
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory);   // snapshot under the kernel handle lock
+void *hle_map_transfer_memory(uint32_t handle, uint64_t size, uint32_t owner_perm);   // use in-place backing for a synchronous host service request
 uint32_t hle_dup_readable_handle(uint32_t h);   // hle_thread.c: a second read end of a kernel event (the copy a service hands its client), 0 if h is no read end
 int hle_signal_event_handle(uint32_t write_end);   // hle_thread.c: signal a host-made kernel event by its write end (any thread); 0 once that end is closed
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)

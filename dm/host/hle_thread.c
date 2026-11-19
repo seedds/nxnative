@@ -30,7 +30,7 @@
 #define WAITERS_BIT   0x40000000u
 #define H_CUR_THREAD  0xFFFF8000u
 
-enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W, O_READONLY_SHMEM };
+enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W, O_READONLY_SHMEM, O_TRANSFER_MEMORY };
 enum { MAX_SYNC_OBJECTS = 64 };
 typedef struct { void *obj; int type; } sync_ref_t;
 // Service-layer SystemEvent bindings (see hle_bind_system_event): guest SystemEventType address → the write-end handle of its kernel event.
@@ -135,9 +135,14 @@ static pthread_key_t g_keythr;
 static uint64_t g_next_id = 0x51;
 static thr_t *g_wait;          // All waiting threads (lock / condition / address / synchronization)
 
-static uint32_t h_new(int type, void *obj) {     // Caller holds G
+static uint32_t h_try_new(int type, void *obj) {     // Caller holds G
     for (int i = 1; i < MAX_H; i++) if (!g_h[i].type) { g_h[i].type = type; g_h[i].obj = obj; return 0x1000 + i; }
-    die("handle table full");
+    return 0;
+}
+static uint32_t h_new(int type, void *obj) {     // Caller holds G
+    uint32_t h = h_try_new(type, obj);
+    if (!h) die("handle table full");
+    return h;
 }
 static void *h_peek(uint32_t h, int type) {      // Lookup only, no report
     if (h == H_CUR_THREAD && type == O_THREAD) return pthread_getspecific(g_keythr);
@@ -1359,6 +1364,9 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             if (t->exited && !t->refs) thr_free(t);
         } else if (i > 0 && i < MAX_H && g_h[i].type == O_READONLY_SHMEM) {
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
+        } else if (i > 0 && i < MAX_H && g_h[i].type == O_TRANSFER_MEMORY) {
+            free(g_h[i].obj);
+            g_h[i].type = O_FREE; g_h[i].obj = NULL;
         }
         g_unlock();
         regs[0] = 0; return 1;
@@ -1374,6 +1382,24 @@ uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory) {
 const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) {
     g_lock(); const hle_readonly_shmem *memory = h_peek(handle, O_READONLY_SHMEM); g_unlock();
     return memory;
+}
+
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory) {
+    hle_transfer_memory *object = malloc(sizeof *object);
+    if (!object) return 0;
+    *object = memory;
+    g_lock(); uint32_t h = h_try_new(O_TRANSFER_MEMORY, object); g_unlock();
+    if (!h) free(object);
+    return h;
+}
+
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) {
+    g_lock();
+    const hle_transfer_memory *object = h_peek(handle, O_TRANSFER_MEMORY);
+    int found = object != NULL;
+    if (found) *memory = *object;
+    g_unlock();
+    return found;
 }
 
 // ---------- SystemEvent of the service layer ----------

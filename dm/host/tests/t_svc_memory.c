@@ -39,6 +39,13 @@ int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
 static const uint8_t readonly_bytes[0x8000] = { 0x53, [0x7fff] = 0x49 };
 static const hle_readonly_shmem readonly_memory = { readonly_bytes, sizeof readonly_bytes };
 const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { return handle == 0x1042 ? &readonly_memory : NULL; }
+static hle_transfer_memory transfer_memory;
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory) { transfer_memory = memory; return 0x1043; }
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) {
+    if (handle != 0x1043) return 0;
+    *memory = transfer_memory;
+    return 1;
+}
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
@@ -158,6 +165,25 @@ static void readonly_shared_memory(void) {
     assert(!pages(1, addr, size));
     assert(*(uint8_t *)addr == 0 && *(uint8_t *)(addr + size - 1) == 0);
     assert(!pages(0, addr, size));
+}
+static void transfer_memory_setup(void) {
+    uintptr_t addr = alias + 0x10000;
+    size_t size = memory_getpagesize();
+    assert(shared_svc(0x15, 0, addr, size, 0) == BAD);   // unbacked
+    assert(!pages(1, addr, size));
+    assert(shared_svc(0x15, 0, addr + 1, size, 0) == 0xcc01u);
+    assert(shared_svc(0x15, 0, addr, size - 1, 0) == 0xca01u);
+    assert(shared_svc(0x15, 0, addr, size, 2) == 0xd801u);
+    uint64_t regs[31] = {0, addr, size, 0};
+    svc_dispatch(0x15, regs, 0);
+    assert(!regs[0] && regs[1] == 0x1043 && transfer_memory.address == addr);
+    *(uint8_t *)addr = 0x42;
+    assert(hle_map_transfer_memory(0x1043, size, 0) == (void *)addr && *(uint8_t *)addr == 0x42);
+    assert(!hle_map_transfer_memory(0x1042, size, 0));
+    assert(!hle_map_transfer_memory(0x1043, size * 2, 0));
+    assert(!hle_map_transfer_memory(0x1043, size, 1));
+    assert(!pages(0, addr, size));
+    assert(!hle_map_transfer_memory(0x1043, size, 0));
 }
 static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
     fflush(NULL); pid_t pid = fork(); assert(pid >= 0);
@@ -636,7 +662,7 @@ int main(int argc, char **argv) {
 #if !TARGET_OS_IPHONE
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
-    layout_order(); readonly_shared_memory();
+    layout_order(); readonly_shared_memory(); transfer_memory_setup();
     lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();

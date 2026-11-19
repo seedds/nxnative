@@ -40,6 +40,7 @@ class RegisteredUpdate(unittest.TestCase):
         d = self.tmp / 'extract' / ver; nso(d / 'ExeFS/main', bid)
         reg = game.load(f'{PROFILE:016X}'); out = self.tmp / 'derived' / ver
         nsp.derive_profile(reg, out, ver, d, ['main'])
+        self.said.clear()   # deriving reports its own line ("derived profile ...: made again"); the tests read the status lines only
         return reg, game.Game(out)
 
     def test_a_registered_update_is_not_red(self):

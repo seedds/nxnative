@@ -2390,7 +2390,15 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_ACTIVE_UNIFORMS: *v = x->nu; return;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
-        case GL_ACTIVE_ATTRIBUTES: *v = x->si[0] ? x->si[0]->na : 0; return;
+        case GL_ACTIVE_ATTRIBUTES:
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
+            const shinfo *vs = x->linked ? x->si[0] : NULL;
+            int n = vs ? vs->na : 0;
+            if (p == GL_ACTIVE_ATTRIBUTES) { *v = n; return; }
+            *v = 0;
+            for (int i = 0; i < n; i++) *v = (GLint)umax((uint32_t)*v, (uint32_t)strlen(vs->a[i].name) + 1);
+            return;
+        }
         case GL_DELETE_STATUS: *v = x->deleted; return;
     }
     RED1("glGetProgramiv(%#x) not implemented", p); *v = 0;
@@ -2415,6 +2423,19 @@ GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
     prog_t *p = prog_of(pr); if (!p->linked) return -1;
     for (int i = 0; i < p->si[0]->na; i++) if (!strcmp(p->si[0]->a[i].name, name)) return p->amap[p->si[0]->a[i].slot];
     return -1;
+}
+// The enumeration index is the attribute's row in the linked vertex table, independent of its bound location.
+GL(glGetActiveAttrib, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len, GLint *count, GLenum *type, GLchar *name) {
+    if (!SP_CHECK(pr, 1)) return;
+    prog_t *p = prog_of(pr);
+    const shinfo *vs = p->linked ? p->si[0] : NULL;
+    if (size < 0 || !vs || index >= (GLuint)vs->na) { gl_error(GL_INVALID_VALUE); return; }
+    const shattr *a = &vs->a[index];
+    size_t copied = 0;
+    if (name && size > 0) copied = umin((uint32_t)strlcpy(name, a->name, (size_t)size), (uint32_t)size - 1);
+    if (len) *len = (GLsizei)copied;
+    if (count) *count = 1;
+    if (type) *type = g_tenums[a->type];
 }
 GL(glGetProgramInfoLog, void, GLuint pr, GLsizei size, GLsizei *len, GLchar *log) {
     if (len) *len = 0;

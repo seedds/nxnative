@@ -23,6 +23,7 @@ static OSStatus vt_test_create(CFAllocatorRef, CMVideoFormatDescriptionRef, CFDi
 
 static _Atomic int vt_callback_error, vt_refuse_create, vt_refused;
 static _Atomic int vt_double_loss, vt_initial_failed;
+static _Thread_local OSStatus vt_create_status;
 static mavc *vt_callback_avc; static mav1 *vt_callback_av1;
 static OSStatus vt_test_decode(VTDecompressionSessionRef session, CMSampleBufferRef sample, VTDecodeFrameFlags flags, void *source, VTDecodeInfoFlags *info) {
     int second = atomic_load(&vt_double_loss);
@@ -45,7 +46,8 @@ static OSStatus vt_test_create(CFAllocatorRef allocator, CMVideoFormatDescriptio
         *session = NULL; dm_movie_active(0); atomic_store(&vt_refused, 1);
         return kVTVideoDecoderNotAvailableNowErr;
     }
-    return VTDecompressionSessionCreate(allocator, format, specification, attributes, callback, session);
+    vt_create_status = VTDecompressionSessionCreate(allocator, format, specification, attributes, callback, session);
+    return vt_create_status;
 }
 
 uint64_t now_ns(void) { return 1; }
@@ -94,35 +96,52 @@ static const uint8_t vp9[] = {
     0xff,0xff,0xff,0xf2,0x2a,0xc0,0x00,
 };
 
+static bool vt_av1_available(void) {
+    if (!hw_av1()) return false;
+    // A virtual Mac can advertise hardware AV1 but have no decoder for a real session.
+    mav1 a = {0};
+    size_t n = 0;
+    const uint8_t *seq = find_seq(av1, sizeof av1, &n);
+    assert(seq);
+    vt_create_status = noErr;
+    int opened = av1_open(&a, seq, n);
+    av1_close(&a);
+    if (opened == 1) return true;
+    assert(vt_create_status == kVTCouldNotFindVideoDecoderErr);
+    return false;
+}
+
 // Real VideoToolbox sessions invalidated between packets, as can happen while
 // iOS takes the app out of focus. The decoder must still return every picture.
-static void vt_session_lifecycle(void) {
+static void vt_session_lifecycle(bool test_av1) {
     mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts;
-    int avc_pictures = 0, av1_pictures = 3;
+    int avc_pictures = 0;
     for (int i = 0; i < 3; i++) {
         if (i == 1) { assert(c->vs); VTDecompressionSessionInvalidate(c->vs); }
         mavc_decode(c, h264, sizeof h264, i * 1000);
         while (mavc_take(c, 1, nv12, 64, 64, &pts)) avc_pictures++;
     }
     mavc_free(c);
-    if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
-        mav1 *a = mav1_new(NULL); mav1_picture pic; av1_pictures = 0;
+    printf("invalidated VideoToolbox sessions: H.264 %d/3 pictures\n", avc_pictures);
+    assert(avc_pictures == 3);
+    if (test_av1) {
+        mav1 *a = mav1_new(NULL); mav1_picture pic; int av1_pictures = 0;
         for (int i = 0; i < 3; i++) {
             if (i == 1) { assert(a->vs && !a->soft); VTDecompressionSessionInvalidate(a->vs); }
             if (mav1_decode(a, av1, sizeof av1, i * 1000, &pic) == 1) av1_pictures++;
         }
         mav1_free(a);
-    } else puts("VideoToolbox lifecycle: hardware AV1 unavailable; AV1 case skipped");
-    printf("invalidated VideoToolbox sessions: H.264 %d/3 pictures, AV1 %d/3 pictures\n", avc_pictures, av1_pictures);
+        printf("invalidated VideoToolbox sessions: AV1 %d/3 pictures\n", av1_pictures);
+        assert(av1_pictures == 3);
+    }
     fflush(stdout);
-    assert(avc_pictures == 3 && av1_pictures == 3);
 }
 static uint64_t vt_hash(const uint8_t *p, size_t stride, int width, int height) {
     uint64_t hash = 0;
     for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) hash = hash * 31 + p[(size_t)y * stride + x];
     return hash;
 }
-static void vt_reference_recovery(void) {
+static void vt_reference_recovery(bool test_av1) {
     uint64_t expected_avc[36], expected_av1[36];
     for (int loss = -1; loss < 14; loss++) {
         mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts; int got = 0;
@@ -150,7 +169,7 @@ static void vt_reference_recovery(void) {
             got++;
         }
         assert(got == 36); mavc_drop(c); assert(!c->history.count); mavc_free(c);
-        if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (!test_av1) continue;
         mav1 *a = mav1_new(NULL); mav1_picture pic; got = 0;
         for (int loop = 0; loop < 3; loop++) for (int i = 0; i < 12; i++) {
             if ((loss < 12 ? loss : 7) == i && a->vs) {
@@ -178,9 +197,9 @@ static void vt_av1_random_access(void) {
     a.seq[2] |= 8;   // reduced_still_picture_header implies a shown key frame
     assert(av1_key(&a, hidden, sizeof hidden));
 }
-static void vt_worker_lifecycle(void) {
+static void vt_worker_lifecycle(bool test_av1) {
     for (int codec = CV_H264; codec <= CV_AV1; codec++) {
-        if (codec == CV_AV1 && !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (codec == CV_AV1 && !test_av1) continue;
         for (int action = 0; action < 4; action++) {
             _Alignas(16) uint8_t dec[0x400] = {0}; uint64_t id;
             const uint8_t *packet = codec == CV_H264 ? h264 : av1;
@@ -189,6 +208,7 @@ static void vt_worker_lifecycle(void) {
             cv_dec *d = cv_of(dec); vt_callback_avc = d->avc; vt_callback_av1 = d->av1;
             assert(!cv_dec_submit(&id, dec, packet, size, 1000, false)); settle(dec);
             assert(d->nheld == 1 && d->held_ts[0] == 1000);
+            if (codec == CV_AV1) assert(d->av1->vs && !d->av1->soft);
             atomic_store(&vt_callback_error, 1);
             atomic_store(&vt_refused, 0); atomic_store(&vt_refuse_create, 1);
             assert(!cv_dec_submit(&id, dec, packet, size, 2000, false));
@@ -213,10 +233,12 @@ static void vt_worker_lifecycle(void) {
     puts("VideoToolbox workers: callback invalidation, inactive session refusal, resume, Flush, Stop and Finalize");
 }
 int main(void) {
-    vt_session_lifecycle();
-    vt_reference_recovery();
+    bool test_av1 = vt_av1_available();
+    if (!test_av1) puts("VideoToolbox lifecycle: hardware AV1 unavailable; AV1 lifecycle cases skipped");
+    vt_session_lifecycle(test_av1);
+    vt_reference_recovery(test_av1);
     vt_av1_random_access();
-    vt_worker_lifecycle();
+    vt_worker_lifecycle(test_av1);
     _Alignas(16) static uint8_t dec[0x400], pool[3][0x40], spt[0x80], mem[16 * 16 * 4];
     uint64_t size, align, id; uint32_t idx; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts; bool eos;
 

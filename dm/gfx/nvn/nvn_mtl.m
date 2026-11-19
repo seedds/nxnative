@@ -462,8 +462,8 @@ static void rh_wait(id<MTLHeap> heap) {
 - (void)dealloc { rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
 static char g_image_heap_owner_key, g_rh_owner_key;
-// A placement heap of at least `size` bytes: the smallest waiting one up to half as large again, or a new one an eighth larger (its exact size with the switch off). nil if Metal
-// makes none
+// A waiting heap can cover a nearby dynamic-resolution size. For new heaps, cap the extra space so a single large target does not keep tens of MB resident for reuse.
+enum { RH_SLACK = 4u << 20 };
 static id<MTLHeap> rh_heap(uint64_t size, MTLStorageMode sm, MTLCPUCacheMode cm, MTLHazardTrackingMode hm, int *reused) {
     *reused = 0;
     if (!size) return nil;
@@ -483,7 +483,7 @@ static id<MTLHeap> rh_heap(uint64_t size, MTLStorageMode sm, MTLCPUCacheMode cm,
         os_unfair_lock_unlock(&g_rh_lk);
     }
     if (got) { *reused = 1; atomic_fetch_add(&g_rh_reused, 1); return CFBridgingRelease(got); }
-    MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = on ? size + size / 8 : size;
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = on ? size + MIN(size / 8, (uint64_t)RH_SLACK) : size;
     hd.storageMode = sm; hd.cpuCacheMode = cm; hd.hazardTrackingMode = hm;
     id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
     if (h && on) atomic_fetch_add(&g_rh_made, 1);
@@ -3356,6 +3356,17 @@ static unsigned g_up_seq;
 #define UP_SLOT_BLOCK (4u * 1024u * 1024u)
 static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsigned g_up_cur_slot;
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
+static size_t g_up_src_bytes;   // page-rounded bytes of the open batch's zero-copy sources
+static size_t up_src_budget(void) {
+    static size_t bytes = SIZE_MAX;
+    if (bytes == SIZE_MAX) {
+        const char *e = getenv("DM_NVN_UPLOAD_SRC_MB");
+        char *end;
+        long long mb = e ? strtoll(e, &end, 10) : 0;
+        bytes = mb > 0 && (unsigned long long)mb <= (SIZE_MAX >> 20) && !*end ? (size_t)mb << 20 : 0;
+    }
+    return bytes;
+}
 static int up_reuse(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = !e || atoi(e); } return on; }
 static int up_retained(id<MTLBuffer> b, unsigned slot) { return b && (b == g_up_slot_blk[slot] || b == g_up_slot_over[slot]); }
 static size_t up_slot_block_size(size_t demand) {
@@ -3541,7 +3552,7 @@ static void up_begin(void) {
     if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
     up_wait_zero(&g_up_alloc_busy[slot], WS_UPALLOC);
     atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
-    g_up_batch_bytes = 0; g_up_over_used = 0;
+    g_up_batch_bytes = g_up_src_bytes = 0; g_up_over_used = 0;
     [g_up_alloc4[slot] reset];
     g_up_cb = [g_dev newCommandBuffer];
     [g_up_cb beginCommandBufferWithAllocator:g_up_alloc4[slot]];
@@ -3673,7 +3684,7 @@ static void sps_note(uint64_t lo, uint64_t n) {
     if (g_nsps >= SPS_N && g_sps[i].fence > g_done && g_sps[i].fence > g_sps_lost) g_sps_lost = g_sps[i].fence;
     g_sps[i].lo = lo; g_sps[i].hi = lo + n; g_sps[i].fence = f; g_nsps++;
 }
-static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off);
+static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int may_split);
 // A gather reads the physical memory behind a texture once: through zero-copy buffers that the open upload batch holds and retires (up_big_src), not through the pools' own buffers, which
 // mtl_gpu_addr puts into the residency set for good, committed on the spot (pool_res). Resident Evil 4 had 148 pools and 777 MB wired that way by the forest, against 8 and 52 MB with
 // the CPU gather (issue #2350). Its pages lie scattered through the pools: a buffer per run of pages made 193,000 in 5 minutes, residency commits 2.4 s against 0.9 s while it loaded;
@@ -3685,7 +3696,7 @@ static struct { uintptr_t a, b; __unsafe_unretained id<MTLBuffer> buf; } g_sp_sr
 static int sp_src_gpu(uint64_t a, uint64_t len, uint64_t *g) {
     if (g_sp_src_seq != g_up_seq) { g_nsp_src = 0; g_sp_src_seq = g_up_seq; }
     for (int k = 0; k < g_nsp_src; k++) if (a >= g_sp_src[k].a && a + len <= g_sp_src[k].b) { *g = g_sp_src[k].buf.gpuAddress + (a - g_sp_src[k].a); return 1; }
-    uint64_t o; void *b; id<MTLBuffer> u = up_big_src(a, len, &o);
+    uint64_t o; void *b; id<MTLBuffer> u = up_big_src(a, len, &o, 0);   // every source the sparse gather's page table names must stay in this batch
     if (!u) return mtl_gpu_addr(a, len, &b, &o, g);
     if (g_nsp_src < SP_SRC_N) { g_sp_src[g_nsp_src].a = a - o; g_sp_src[g_nsp_src].b = a - o + u.length; g_sp_src[g_nsp_src++].buf = u; }
     *g = u.gpuAddress + o; return 1;
@@ -3833,16 +3844,20 @@ static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t r
 // nil elsewhere (or if it is refused: the caller looks the address up as usual). The GPU only reads it, so it is made over the pages the upload has just protected, not through pool_buf,
 // which would make them writable again and the texture count as written at once
 static uint64_t g_up_src_made;   // source buffers made (t_upload_src)
-static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
+static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int may_split) {
     // Not once the raw memory table holds the whole pool (big_full): the lookup finds that buffer. Ocarina of Time's first scene made 4,664 of these in one batch, 2.1 GB counted against the working set for pages already wired
     pthread_mutex_lock(&g_mu); int k = big_of(addr), in = k >= 0 && !g_big[k].full;
     if (k < 0 && len) { int i = pool_find(addr, len); in = i >= 0 && !g_pools[i].res && !addr_meets(g_pools[i].lo, g_pools[i].hi); }
     pthread_mutex_unlock(&g_mu);
     if (!in || !len) return nil;
     uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)addr & ~(pg - 1), b = ((uintptr_t)addr + len + pg - 1) & ~(pg - 1);
+    // The staging budget does not count guest pages. End the batch only between textures so its completion can release those pages without invalidating a source already being assembled.
+    size_t budget = up_src_budget();
+    if (may_split && budget && g_up_src_bytes && b - a > budget - MIN(g_up_src_bytes, budget)) { up_flush(); up_begin(); }
     id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
     if (!buf) return nil;
     g_up_src_made++;
+    if (budget) g_up_src_bytes += b - a;
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }
@@ -3919,7 +3934,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     void *mb; uint64_t mo;
     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
     id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
-    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
+    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo, 1); src_batch = g_up_seq; if (upsrc) mb = (__bridge void *)upsrc; }
     // A sparse pool's texture is gathered on the GPU through its page table (sp_pages_gpu), but on the CPU for DM_NVN_ZBLOCK, which counts its blocks there
     uint64_t *spt = NULL, spn = 0;
     t_tex_upload_lookup = 1;
@@ -3960,8 +3975,11 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
         // up_alloc may have flushed the batch that held the first source buffer: only then the new batch needs one of its own. Made for every texture, each staged upload from a large pool
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
-        if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }
-        size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
+        if (upsrc && g_up_seq != src_batch) {
+            upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo, 0);
+            mb = (__bridge void *)upsrc;   // if the new buffer was refused, fall back to the CPU instead of using the old batch's address
+        }
+        size_t off = 0; int enc_ok = g_up_ce != nil && mb != NULL, nb0 = g_nup_blits;
         for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
             uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
@@ -3981,7 +3999,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
         g_nup_blits = nb0;   // Roll back the copies already recorded for this texture: the already-encoded deswizzle only writes the staging area and is harmless; this texture takes the CPU path below instead
         if (!g_cb) up_flush();
-        RED_ONCE(41, "GPU deswizzle does not support format %#x target %d; falling back to the CPU", t->d.format, t->d.target);
+        if (mb) RED_ONCE(41, "GPU deswizzle does not support format %#x target %d; falling back to the CPU", t->d.format, t->d.target);
+        else RED_ONCE(40, "could not retain a texture source in the new upload batch; falling back to the CPU");
     }
 
     // A sparse pool's texture is read through a copy gathered from its page table, unmapped pages as 0 (a mip tail at a 4 KB offset has no host alias; reading the alias stopped the host with SIGBUS)
@@ -4435,11 +4454,18 @@ static void tex_zero_fill(id<MTLTexture> mt) {
     NSUInteger slices = mt.arrayLength * (tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1);
     size_t need = (size_t)mt.width * bpp * mt.height * mt.depth;   // level 0, one slice is the largest
     if (need > (64u << 20)) { static int big; if (!big++) MLOG("new-texture zeroing: %lux%lux%lu exceeds 64 MB, not cleared", (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)mt.depth); return; }
-    id<MTLBuffer> zb = zero_buf(need); if (!zb) return;
+    // In pieces of rows, as depth above: a row is at most 256 KB (16384 x 16), so the zero buffer stays at its 4 MB. Copying a whole image grew it to the largest texture zeroed, and
+    // it stayed resident at that size for good: Ocarina of Time's was 64 MB on the iPhone 17
+    id<MTLBuffer> zb = zero_buf((size_t)mt.width * bpp); if (!zb) return;
     up_begin();
     for (NSUInteger l = 0; l < mt.mipmapLevelCount; l++) {
         NSUInteger w = MAX(mt.width >> l, 1u), h = MAX(mt.height >> l, 1u), z = tt == MTLTextureType3D ? MAX(mt.depth >> l, 1u) : 1;
-        for (NSUInteger y = 0; y < slices; y++) up_blit_add(zb, 0, w * bpp, w * bpp * h, MTLSizeMake(w, h, z), mt, y, l);
+        NSUInteger row = w * bpp, rows = MIN(h, zb.length / row);
+        NSUInteger depth = MAX((NSUInteger)1, MIN(z, zb.length / (row * h)));   // copy whole depth slices together when they fit
+        for (NSUInteger slice = 0; slice < slices; slice++) for (NSUInteger d = 0; d < z; d += depth) for (NSUInteger y = 0; y < h; y += rows) {
+            NSUInteger n = MIN(rows, h - y);
+            up_blit_add_at(zb, 0, row, row * n, MTLSizeMake(w, n, MIN(depth, z - d)), mt, slice, l, MTLOriginMake(0, y, d));
+        }
     }
     [g_up_texs addObject:mt];
     if (!g_cb) up_flush();
@@ -6454,14 +6480,16 @@ static int clear_rect_zero(int i) {
     long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
     if (x1 > lw) x1 = lw; if (y1 > lh) y1 = lh;
     if (x1 <= x0 || y1 <= y0) return 1;
-    size_t row = (size_t)(x1 - x0) * bpp, img = row * (size_t)(y1 - y0);
-    id<MTLBuffer> zb = zero_buf(img); if (!zb) return 0;
+    size_t row = (size_t)(x1 - x0) * bpp;
+    id<MTLBuffer> zb = zero_buf(row); if (!zb) return 0;   // in pieces of rows, so the zero buffer stays at its 4 MB (tex_zero_fill)
     lc_land(); rp_flush();   // waiting clears, then a pending full clear on the same attachment, must land first (oldest first), or they would overwrite this one
     // A GPU write as a pass's would be (attach): noted for the sparse and use bookkeeping, a side of a compressed-alias pair filled first and copied into its other side after, the
     // rectangle stored into storage the CPU can read (rt_mirror_flush stores a pass's)
     sparse_gpu_wrote(t); tu_wrote(mt); tex_t pair; int paired = bcp_before(t, mt, &pair);
     NVNcopyRegion rr = {(int)x0, (int)y0, 0, (int)(x1 - x0), (int)(y1 - y0), 1};
-    enc_b_copy_buffer_texture(blit(), zb, 0, row, img, MTLSizeMake((NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0), 1), mt, sl, lv, MTLOriginMake((NSUInteger)x0, (NSUInteger)y0, 0));
+    long step = MAX(1L, MIN(y1 - y0, (long)(zb.length / row)));
+    for (long y = y0; y < y1; y += step) { long n = MIN(step, y1 - y);
+        enc_b_copy_buffer_texture(blit(), zb, 0, row, row * (size_t)n, MTLSizeMake((NSUInteger)(x1 - x0), (NSUInteger)n, 1), mt, sl, lv, MTLOriginMake((NSUInteger)x0, (NSUInteger)y, 0)); }
     { id<MTLTexture> whole = mt; while (whole.parentTexture) whole = whole.parentTexture; gsb_store(t, whole, (unsigned)lv, (unsigned)sl, 1, &rr); }
     if (paired) bcp_after_to(t, &pair, (unsigned)lv, &rr);
     static uint64_t n; if (!n++) MLOG("scissored clear: first case %ldx%ld @%ld,%ld (target %lux%lu level %lu)", x1 - x0, y1 - y0, x0, y0, (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)lv);
@@ -6596,7 +6624,8 @@ static void shmap_read(void) {
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
-    id<MTLFunction> pfn, wlfn; int pfn_state, has_pull;   // wlfn: the wide-line entry of the pulling library (<ventry>_wl, dmsh_pull.py; nvn_wline.inc), nil when it has none
+    NSString *pentry, *wlentry, *vinentry;   // a vertex shader's entry point in its pulling library, that library's wide-line one, and its entry point in the shadow-input library, as the reflection names them (side_entry); nil: ventry's name (a layer entry point)
+    id<MTLFunction> pfn, wlfn; int pfn_state, has_pull;   // wlfn: the wide-line entry of the pulling library (wlentry, dmsh_pull.py; nvn_wline.inc), nil when it has none
     id<MTLLibrary> alib; id<MTLFunction> afn[2]; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
     id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: fn's entry point (a shader without the typed-output one, which holds its own) specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn and fn_d in the side library <key>_bx (alib), (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
@@ -6871,6 +6900,13 @@ static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
     return fn_dev(f);
 }
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e);   // a compute shader's pipeline: from the archive bundled with the app, else built
+// A vertex shader's entry point in one of its side libraries: side is the reflection's "pull" (<key>_bp, dmsh_pull.py) or "vin" (<key>_bv, dmsh_vin.py), which names the entry point
+// under key (entry, entry_z, entry_wl, entry_z_wl). A reflection that names none there means own, the name that entry point has by the shader's own (today both libraries repeat the
+// shader's names, main0 / main0_z; the reflection decides, so a library may name its entry points otherwise). shader_load, pre_desc and pso_offline.py's vertex_entry take it alike
+static NSString *side_entry(id side, NSString *key, NSString *own) {
+    id n = [side isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)side)[key] : nil;
+    return [n isKindOfClass:[NSString class]] && [n length] ? n : own;
+}
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
@@ -6895,10 +6931,10 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (o->rf.dyn && !DM_GAME_TEX_DYN_SLOTS) {   // dynamic texture handles (TEXD / SAMPD) only where the profile says the game picks them from c2's tables, as before otherwise
         // (rf.c1 is freed by dealloc when o goes: freeing it here too was a double free, which aborted FINAL FANTASY RESONANCE at its first such shader)
         MLOG("[RED] shader %s reflection conversion failed: a texture handle the translator could not trace to one slot (profile key tex_dyn_slots off)", pc.UTF8String); return nil; }
-    NSString *entry = j[@"entry"];
+    NSString *entry = j[@"entry"]; int ez = 0;   // ez: a vertex shader's entry is its near = 0 one
     if (stage == 0) {
         atomic_fetch_add(&g_vs_loaded, 1);
-        if (atomic_load(&g_depth_zero)) { if (j[@"entry_z"]) entry = j[@"entry_z"]; else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
+        if (atomic_load(&g_depth_zero)) { if (j[@"entry_z"]) { entry = j[@"entry_z"]; ez = 1; } else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
         if (layer) entry = atomic_load(&g_depth_zero) ? j[@"entry_layer_z"] : j[@"entry_layer"];
     }
     NSDictionary *mst = [j[@"mesh_stage"] isKindOfClass:[NSDictionary class]] ? j[@"mesh_stage"] : nil;
@@ -6927,6 +6963,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
             o->geo_words = (uint32_t)reads.count;
         } }
     o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
+    if (stage == 0 && !layer) {   // the same entry point in the side libraries <key>_bp and <key>_bv (pull_load, vin_fn), by the names the reflection gives them
+        o->pentry = side_entry(j[@"pull"], ez ? @"entry_z" : @"entry", entry);
+        o->wlentry = side_entry(j[@"pull"], ez ? @"entry_z_wl" : @"entry_wl", [entry stringByAppendingString:@"_wl"]);
+        o->vinentry = side_entry(j[@"vin"], ez ? @"entry_z" : @"entry", entry);
+    }
     if (o->mesh_notask && !(o->mesh_obj = j[@"entry_object"] ? fn4_note([lib newFunctionWithName:j[@"entry_object"]], lib, j[@"entry_object"], nil) : nil))
         MLOG("[RED] mesh shader %s: no object entry point (entry_object) in its library: its draws are skipped", pc.UTF8String);
     // writes the layer: its passes are layered and its pipelines get an input class (pso_desc). main0 / main0_z by the reflection's layer_out (dmsh_entry.py layer_out), the layer entry points always
@@ -8586,8 +8627,9 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     if (!vs->vfn_state) {
         vs->vfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
+        NSString *name = vs->vinentry ?: vs->ventry;   // the reflection's name for it in this library (shader_load)
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && name ? fn4_note([lib newFunctionWithName:name], lib, name, nil) : nil;
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->vfn = f; vs->vfn_state = 1; g_vin_loaded++; }
@@ -8597,20 +8639,21 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     os_unfair_lock_unlock(&g_vin_lock);
     return f;
 }
-// The pulling entry point (the same name as the shader's own, main0 or main0_z, in <key>_bp: dmsh_pull.py), loaded on first need; a failure is final for the shader (its draws
-// keep waiting for their pipelines as before)
+// The pulling entry point (in <key>_bp, dmsh_pull.py, under the name the reflection's "pull" gives it: pentry, today the shader's own, main0 or main0_z), loaded on first need; a
+// failure is final for the shader (its draws keep waiting for their pipelines as before)
 static os_unfair_lock g_pull_lock = OS_UNFAIR_LOCK_INIT;
 // Loads the pulling entry into vs (pfn_state 1, or 2 when it is not usable). pull_fn holds g_pull_lock around it; shader_prefetch_rest calls it on a shader no other thread has yet
 static void pull_load(NvShader *vs) {
     {
         vs->pfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
+        NSString *name = vs->pentry ?: vs->ventry;
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && name ? fn4_note([lib newFunctionWithName:name], lib, name, nil) : nil;
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->pfn = f; vs->pfn_state = 1;
-            NSString *wn = [NSString stringWithFormat:@"%@_wl", vs->ventry]; id<MTLFunction> w = fn4_note([lib newFunctionWithName:wn], lib, wn, nil);
+            NSString *wn = vs->wlentry ?: [NSString stringWithFormat:@"%@_wl", vs->ventry]; id<MTLFunction> w = fn4_note([lib newFunctionWithName:wn], lib, wn, nil);
             if (w && w.functionConstantsDictionary.count) w = fn_spec(lib, wn, [MTLFunctionConstantValues new], &e);
             vs->wlfn = w; }
         else { static _Atomic int n; if (n++ < 8) MLOG("[RED] pulling library of %s not usable (%s%s%s): its draws wait for their pipelines", vs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
@@ -11025,6 +11068,7 @@ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int ze
     if (vj[@"mesh_stage"]) return nil;   // a mesh shader's pair (shader_pairs.tsv holds them for its padding): mesh pipelines are built at the draw (nvn_geometry.inc mtk_pso), no base
     NSString *ventry = zero && vj[@"entry_z"] ? vj[@"entry_z"] : vj[@"entry"], *fentry = fj[@"entry"] ?: @"main0";
     int pull = [vj[@"pull"] isKindOfClass:[NSDictionary class]];
+    if (pull) ventry = side_entry(vj[@"pull"], zero && vj[@"entry_z"] ? @"entry_z" : @"entry", ventry);   // its name in the pulling library, as shader_load gives pull_load
     if (!pull && [vj[@"vertex_inputs"] count]) return nil;   // stage inputs and no pulling library: its pipelines need the draw's layout
     if ([vj[@"layer_out"] boolValue]) return nil;   // writes the layer (as shader_load takes it): its pipelines take an input primitive class (pso_desc), no pulling pipeline
     NSDictionary *fr = fj[@"raster"]; if ([fr isKindOfClass:[NSDictionary class]] && [fr[@"primitive_id"] intValue]) return nil;   // reads the primitive ID: its pipelines are built whole (pso_build_ex), no base

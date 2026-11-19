@@ -252,7 +252,7 @@ $(B)/t_net_loopback: t_net_loopback.c ../hle_net.c ../hle_net.h ../hle.h ../dm.h
 
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
-$(B)/t_sf: t_sf.c ../hle_sf.c ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_sf: t_sf.c ../hle_sf.c ../hle_irs.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sf.c
 $(B)/t_audren_sv: t_audren_sv.c ../hle_sf.c ../hle_audren_sv.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_audren_sv.c

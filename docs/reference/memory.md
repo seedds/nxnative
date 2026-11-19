@@ -664,6 +664,30 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `t_serial_owner` (a pool's live object holding a packaged texture and a finalized serial holding the package's texture both lose their entries, each noted, another pool's texture keeps its own, and the object's later Finalize ends nothing; `own_check_locked` checks the pool index against the live texture objects; it fails without the index), `t_rt_recycle` (a 32 MB target whose pool is finalized while its texture object is live is freed, its heap waits in the recycled list, a lookup makes nothing; 3 checks fail without the fix), `t_readback` (`stale_pools`: a live packaged or sparse texture of a finalized pool reads as an empty slot and nothing is uploaded).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([PR #2775](https://github.com/seedds/nxnative/pull/2775), which found the holder with a trace of every texture of 256 MB or more). On the Mac with the iPhone's settings, Kakariko Village to Hyrule Field and back from the 2026-11-13 save (2026-11-15, the PR's version of the fix, which treats this shared target the same way): the old heap was let go about 330 submissions after the pool's Finalize, the set in the field was 3,850 MB against 4,211 MB, and the peak after a commit at the village load 4,142 MB against 4,375 MB. Whether the iPhone 17 now survives the castle-grounds load is **open**: no phone run has had the fix.
 
+### Large render targets over-allocate recycled heaps
+
+- **Symptom:** the Ocarina of Time residency census in [PR #2566](https://github.com/seedds/nxnative/pull/2566) found a 296 MB shadow target in a 333 MB Metal heap.
+- **Cause:** new recycled heaps kept an eighth of each target's size as headroom for reuse. The resident overhead grew with the target.
+- **Fix:** `rh_heap` caps new heap headroom at 4 MiB. Targets up to 32 MiB still get an eighth, and the existing heap selection and retirement rules apply.
+- **Check:** `check_t_rt_recycle` verifies the cap and heap reuse. `check_t_rt_lifetime` exercises rendering before a target can retire. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### A full colour texture grew the shared zero buffer
+
+- **Symptom:** the shared zero buffer stayed at 64 MB in the Ocarina of Time iPhone 17 residency census in [PR #2566](https://github.com/seedds/nxnative/pull/2566).
+- **Cause:** `tex_zero_fill` copied a whole colour image at once. `clear_rect_zero` did the same for a scissored clear. The shared buffer grew to fit the largest copy.
+- **Fix:** both paths copy row bands sized to the shared buffer. They request room for one row, which fits in the 4 MiB buffer at supported widths. The texture-size guard and clear ordering still apply.
+- **Check:** `check_t_zero_colour` reads every byte of poisoned colour textures after filling, including mip levels, array layers and 3D slices. `check_t_lazy_clear_order` reads back a rectangle larger than one band and checks the surrounding pixels. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Guest texture source buffers accumulate within an upload batch
+
+- **Symptom:** Ocarina of Time's field load on iPhone 17 added 732 MB of zero-copy upload sources to Metal residency within a 300-frame window in [PR #2270](https://github.com/seedds/nxnative/pull/2270).
+- **Cause:** the staging budget measures private scratch buffers. It excludes the no-copy buffers that wrap guest pages and stay resident until the upload batch completes.
+- **Fix:** `DM_NVN_UPLOAD_SRC_MB` sets an opt-in budget for page-rounded source bytes. A regular upload can start a fresh batch before it wraps the source, and each batch releases its own buffers on completion. A single large texture or a sparse gather can exceed the budget. When staging splits a batch, the upload resolves its source in the new batch or uses the CPU path if wrapping fails.
+- **Check:** `check_t_upload_src` compares the batch and buffer counts at 0 and 96 MiB and reads back every texel in both runs. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Repeated GPU out-of-memory failures end the game
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.

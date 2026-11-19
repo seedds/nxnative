@@ -30,7 +30,7 @@
 #define WAITERS_BIT   0x40000000u
 #define H_CUR_THREAD  0xFFFF8000u
 
-enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W };
+enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W, O_READONLY_SHMEM };
 enum { MAX_SYNC_OBJECTS = 64 };
 typedef struct { void *obj; int type; } sync_ref_t;
 // Service-layer SystemEvent bindings (see hle_bind_system_event): guest SystemEventType address → the write-end handle of its kernel event.
@@ -1357,12 +1357,23 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             t->closed = 1;
             if (!t->started) pthread_cond_broadcast(&t->cv);   // a thread that never started ends now (thread_main)
             if (t->exited && !t->refs) thr_free(t);
+        } else if (i > 0 && i < MAX_H && g_h[i].type == O_READONLY_SHMEM) {
+            g_h[i].type = O_FREE; g_h[i].obj = NULL;
         }
         g_unlock();
         regs[0] = 0; return 1;
     }
     }
     return 0;
+}
+
+uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory) {
+    g_lock(); uint32_t h = h_new(O_READONLY_SHMEM, (void *)memory); g_unlock();
+    return h;
+}
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) {
+    g_lock(); const hle_readonly_shmem *memory = h_peek(handle, O_READONLY_SHMEM); g_unlock();
+    return memory;
 }
 
 // ---------- SystemEvent of the service layer ----------

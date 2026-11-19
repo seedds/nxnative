@@ -100,6 +100,7 @@ void dm_guest_thread_join(void *tt) {
     assert(((uint8_t *)sdk_work)[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
     joins++;
 }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 uint64_t now_ns(void) { return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open_sink(void) { return NULL; }

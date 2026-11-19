@@ -556,7 +556,7 @@ def io_archive(toc, i, decode, chunk=None):
     # The hashes are 20-byte SHA-1s (FSHAHash, Unreal Engine 5.0 to 5.2: FINAL FANTASY RESONANCE) or 8-byte xxHash64s (Godzilla: Destroy All Monsters Melee Remastered, which keeps Unreal 4.27's
     # layout otherwise): the size is the one for which the tables end exactly at the chunk's end, found by trying each. An 8-byte hash is padded with zeros to the 20 the archive keeps
     for hs in (20, 8):
-        try: r = R(data, what=f'{toc.path}: shader library chunk {i}'); r.take('<I'); mh = r.raw(hs * r.take('<I')); nsh = r.take('<I'); sh = r.raw(hs * nsh); r.raw(12 * r.take('<i')); r.raw(8 * r.take('<i')); r.raw(8 * r.take('<i')); r.raw(16 * r.take('<i')); r.raw(4 * r.take('<i'))
+        try: r = R(data, what=f'{toc.path}: shader library chunk {i}'); r.take('<I'); r.raw(hs * r.take('<I')); nsh = r.take('<I'); r.raw(hs * nsh); r.raw(12 * r.take('<i')); r.raw(8 * r.take('<i')); r.raw(8 * r.take('<i')); r.raw(16 * r.take('<i')); r.raw(4 * r.take('<i'))
         except (ValueError, struct.error, MemoryError, OverflowError): continue
         if r.o == len(data): break
     else: hs = 20

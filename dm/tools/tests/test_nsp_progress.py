@@ -58,6 +58,18 @@ class Json(unittest.TestCase):
         self.assertFalse(es[8]['ok'])
         self.assertIn('Pokémon', self.out.getvalue())   # not escaped
 
+    def test_pipeline_archive_batches(self):   # pso_offline.py's group lines count on the stage's line; compute groups finish in any order
+        self.prog.stage('Pipeline archive', step='applegpu_g16g (metal-tt)')
+        lines = nsp.PsoLines()
+        for line in ('pso_offline: 2 pairs: 2 bases', 'pso_offline: applegpu_g16g: batch 1/3: 1000 bases, compiling or checking cache',
+                     'pso_offline: applegpu_g16g: batch 1/3: ready (compiled)', 'pso_offline: applegpu_g16g: batch 3/3: ready (reused)'):
+            lines(line); self.now += 1
+        lines('pso_offline: applegpu_g16g: merging 3 batches')
+        es = [e for e in self.events() if e['ev'] in ('step', 'progress')]
+        self.assertEqual(es[1]['step'], 'applegpu_g16g: compiling')
+        self.assertEqual([(e['done'], e['total'], e['unit']) for e in es if e['ev'] == 'progress' and e['step'] == 'applegpu_g16g: compiling'][-1], (2, 3, 'batches'))
+        self.assertEqual(es[-1]['step'], 'applegpu_g16g: merging 3 batches (metal-pack)')
+
     def test_count_held_back(self):
         self.prog.stage('rewrite', done=0, total=3, unit='modules')
         self.now += 1; self.prog.set(done=1)
@@ -235,6 +247,25 @@ class HumanModes(unittest.TestCase):
             self.assertIn('⚠ [1/1] archive', out2.getvalue())
             self.assertEqual('\r' in text, mode == 'bar')
             self.assertEqual(ticker is None, mode == 'off')
+
+class PackWatch(unittest.TestCase):   # the count on the shader stage's line while its libraries are packed into one file each (nothing is printed meanwhile)
+    def test_counts_each_part_then_each_finished_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d); mac, ios = d / 'b-mac', d / 'b-ios'
+            for f, n in ((mac, 3000), (ios, 1000)):
+                (f / 'sub').mkdir(parents=True); (f / 'sub/a').write_bytes(b'a' * n)
+            w = nsp.PackWatch([(mac, d / 'mac.img'), (ios, d / 'ios.img'), (d / 'absent', d / 'absent.img')])
+            self.assertEqual(w(), {'done': 0, 'total': 4000, 'unit': 'B', 'est': True})
+            (d / 'mac.img.part').write_bytes(b'p' * 1500)
+            self.assertEqual(w()['done'], 1500)
+            (d / 'mac.img.part').rename(d / 'mac.img'); (d / 'mac.img').write_bytes(b'p' * 3100); nsp.shutil.rmtree(mac)   # written, and its folder gone
+            (d / 'ios.img.part').write_bytes(b'p' * 200)
+            self.assertEqual(w(), {'done': 3300, 'total': 4000, 'unit': 'B', 'est': True})
+
+    def test_nothing_to_pack(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(nsp.PackWatch([(Path(d) / 'x', Path(d) / 'x.img')])(), {'done': 0, 'total': None, 'unit': 'B', 'est': True})
+
 
 if __name__ == '__main__':
     unittest.main()

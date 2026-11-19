@@ -2224,7 +2224,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cause:** the EGL game names `glShaderSource` in a UTF-16LE managed string. The detector only counted ASCII names.
 - **Fix:** the survey and packer both use `gl_name_count` to recognize the two encodings on the existing EGL import path. The Vulkan and NVN precedence checks still apply.
 - **Check:** `test_profile_guess.py` exercises the survey with a managed name. `test_gl_shaders.py` exercises pack-time detection with the same GL loader evidence.
-- **Found on:** [Slay the Spire 1.0](https://github.com/seedds/nxnative/pull/2322).
+- **Found on:** [Slay the Spire 1.0](../../dm/games/010026300BA4A000/README.md).
 
 ### Draws from client memory
 
@@ -2289,7 +2289,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cause:** the files use libGDX's extensions. Other engines also use `.fs` for snippets that they combine with generated code.
 - **Fix:** the packer and translator use `paired_sources` to inspect the extracted files. A directory must contain a text source defining `main` for each stage. The translator keeps the original source bytes through the first NUL so their keys match the runtime inputs. The survey has only a manifest, so it defers the decision to the pack step.
 - **Check:** `test_gl_shaders.py` exercises the packer and translator with valid pairs, snippets, an `.fs`-only directory, and separate directories whose names differ only in case.
-- **Found on:** [Slay the Spire 1.0](https://github.com/seedds/nxnative/pull/2322). Its 14 files yield 11 distinct shaders.
+- **Found on:** [Slay the Spire 1.0](../../dm/games/010026300BA4A000/README.md). Its 14 files yield 11 distinct shaders.
 
 ### A function body closed with `};`
 
@@ -2346,6 +2346,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - Uniforms are CPU copies per stage, set as bytes at a draw after they change; pipelines are cached per program by vertex layout, attachment formats, blend and colour mask; disabled vertex arrays read the attribute's current value (GL's default (0, 0, 0, 1) until `glVertexAttrib4f`) through a constant-step buffer. Without `glBindAttribLocation` the game's attribute index is the Metal one: `glGetAttribLocation` returns the shader's own attribute numbers. With it, the layer maps each Metal input to the game's index at the link.
 - A GLSL `bool` is a `uint` in the SPIR-V block; `gl_shaders.py` keeps the declared type, as LÖVE's `Shader:send` takes only a boolean for a bool.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md) (no `glBindAttribLocation`); [Balatro](../../dm/games/0100CD801CE5E000/README.md): LÖVE binds VertexPosition, VertexTexCoord, VertexColor and ConstantColor to 0–3 with `glBindAttribLocation` before each link, keeps VertexColor and ConstantColor as disabled arrays and sets their values with `glVertexAttrib4f` (the draw colour); it lists uniforms with `glGetActiveUniform` (types as GL enums, arrays as `name[0]`) and reads their initial values back with `glGetUniformfv` / `iv`.
+
+### GL active-attribute reflection
+
+- **Symptom:** a managed loader gets a null `glGetActiveAttrib` delegate, and calling it to enumerate the first linked program's vertex attributes throws `NullReferenceException`.
+- **Cause:** the GL host had attribute locations and reflection metadata but did not expose `glGetActiveAttrib` or `GL_ACTIVE_ATTRIBUTE_MAX_LENGTH`.
+- **Fix:** both queries use the linked program's vertex table. The enumeration index identifies a table row independently of the bound location. The maximum length includes the terminating NUL. Invalid arguments use the host's GL error flag and leave the result buffers untouched.
+- **Check:** `t_gl_imports` calls the registered query after linking and checks count, maximum length, enumeration order, name truncation and errors.
+- **Found on:** [Slay the Spire 1.0](../../dm/games/010026300BA4A000/README.md). libGDX's `ShaderProgram` enumerates attributes through its MonoGame loader.
 
 ### GL sampler objects
 

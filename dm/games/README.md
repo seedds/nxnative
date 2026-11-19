@@ -184,6 +184,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Sid Meier's Civilization VI](010044500C182000/README.md) | `010044500C182000` | 1.2.19 | 8.2.1 | Firaxis, Havok, Wwise | NVN |
 | [Sid Meier's Civilization VII](0100C3601518C000/README.md) | `0100C3601518C000` | 1.5.0.1 (Mac; iOS address space open) | 19.3.11 | Firaxis, Coherent Gameface / V8, Wwise | NVN |
 | [Silver Pines](0100D5B026844000/README.md) | `0100D5B026844000` | 1.0.0 (base) | 21.4.7 | Unity 6000.3.15f1 IL2CPP | NVN |
+| [Slay the Spire](010026300BA4A000/README.md) | `010026300BA4A000` | 1.0 (base) | 7.3.2 | libGDX on MonoGame.Switch (BRUTE) | OpenGL |
 | [Sonic Frontiers Definitive Edition](0400921025B32000/README.md) | `0400921025B32000` | v65536 (Switch 2) | 21.4.1 (Ounce) | Hedgehog Engine 2, CRIWARE | NVN2 |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |

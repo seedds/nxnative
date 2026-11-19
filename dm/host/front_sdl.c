@@ -148,8 +148,10 @@ static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_np
 // motors map onto them as haptics_apple.m drives a DualShock 4 (ds4_apply, the way emulators feed SDL): the strong motor follows the low band, mostly from the left motor, the weak motor
 // the high band, mostly from the right one; DM_RUMBLE_GAIN and DM_RUMBLE_MIN apply as there. What SDL cannot express: the frequencies of the two bands (the Switch's HD rumble plays each
 // at its own; SDL's motors take only an intensity) and Core Haptics' intensity / sharpness envelope (dm_haptics_level). A nonzero state is sent again every RUMBLE_RESEND_MS with
-// RUMBLE_MS of duration, so the motors never stop between two sends while the game holds it; a zero state stops them at once
-enum { RUMBLE_RESEND_MS = 100, RUMBLE_MS = 150 };
+// RUMBLE_MS of duration, so the motors never stop between two sends while the game holds it; a zero state stops them at once. SDL stops an expired effect when it pumps its events
+// (SDL_UpdateJoysticks), so a pass resends before it polls (front_sdl_pump), and the duration leaves the main thread 200 ms of lateness for a wake inside SDL_WaitEventTimeout, which
+// pumps before it returns (with 150 ms, a pass 50 ms late stopped the motors for a moment: t_front_sdl under a loaded machine); it is also how long the motors run on if the host stops
+enum { RUMBLE_RESEND_MS = 100, RUMBLE_MS = 300 };
 static pthread_mutex_t g_rumble_mu = PTHREAD_MUTEX_INITIALIZER;
 static dm_haptic_state g_rumble_in[DM_PLAYERS]; static uint32_t g_rumble_new;   // under g_rumble_mu: the newest state of each player, and which are new
 static _Atomic int g_rumble_posted;
@@ -608,6 +610,7 @@ static void after_events(void) {   // main thread, after each pass over the queu
 // (tests/t_front_sdl.c) drives the front end with this alone
 static void front_sdl_pump(void) {
     SDL_Event e;
+    rumble_tick(SDL_GetTicks());   // before SDL pumps: a late pass refreshes a held rumble's duration before SDL's update finds it expired (RUMBLE_MS)
     while (SDL_PollEvent(&e)) handle(&e);
     after_events();
 }

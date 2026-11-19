@@ -198,8 +198,10 @@ static void t_pads(void) {
     u = (dm_vibration_update){0, 1, {0, 160, 1.f, 320}}; dm_haptics_send(&u, 1); pump();
     CHECK(r1.lo == 27852 && r1.hi == 55705, "the right motor's high band at 1 drives the weak motor at 0.85");
     int stops = r1.stops;
-    for (int i = 0; i < 40; i++) { SDL_Delay(10); front_sdl_pump(); }   // 400 ms, more than twice SDL's 150 ms duration, with the loop's resends
+    for (int i = 0; i < 2 * RUMBLE_MS / 10; i++) { SDL_Delay(10); front_sdl_pump(); }   // twice SDL's duration (RUMBLE_MS), with the loop's resends
     CHECK(r1.lo == 27852 && r1.hi == 55705 && r1.stops == stops, "a held state is sent again before SDL's duration ends: the motors never stop");
+    SDL_Delay(RUMBLE_MS + 50); front_sdl_pump();   // one pass after the duration ended (a main thread held up): it resends before SDL's update would stop the motors
+    CHECK(r1.lo == 27852 && r1.hi == 55705 && r1.stops == stops, "a pass that comes after SDL's duration ended resends first: the motors do not stop");
     u = (dm_vibration_update){0, 0, {0, 160, 0, 320}}; dm_haptics_send(&u, 1); u.motor = 1; dm_haptics_send(&u, 1); pump();
     CHECK(r1.lo == 0 && r1.hi == 0, "a zero state stops the motors");
     u = (dm_vibration_update){0, 0, {1.f, 160, 0, 320}}; dm_haptics_send(&u, 1); pump();

@@ -1,31 +1,36 @@
 #!/bin/bash
-# make_lego_hp_app.sh — LEGO® Harry Potter™ Collection (010052A00B5D2000): the Mac app the Years 5-7 fix ships as.
+# make_lego_hp_app.sh — LEGO® Harry Potter™ Collection (010052A00B5D2000): the Mac app the Years 5-7 GLYPHFIX ships as.
 #
 #   ./scripts/make_lego_hp_app.sh --from "/path/Lego HP NX.app" --host /path/to/dmhost \
-#                                 --out "/path/Lego HP NX (fixed).app"
+#                                 --module /path/nro0.patched.bin --out "/path/Lego HP NX GLYPHFIX.app"
 #
-# The app is its source bundle with exactly two files changed:
+# The app is its source bundle with exactly three files changed:
 #
-#   Contents/MacOS/dmhost              the host built from the pinned source (see dm/games/<id>/host/README.md);
-#                                      sha256 99100d734bea3c12a3d2e68c62699e3e190e4d4b2d8ba815d1cc924f1798d723
-#   Contents/Resources/dm/env.txt      the present-path pins (this profile's env.txt), because the app's settings
-#                                      window exports its own defaults over the profile compiled into the host
+#   Contents/MacOS/dmhost                   the host built from the pinned source (see dm/games/<id>/host/README.md);
+#                                           sha256 99100d734bea3c12a3d2e68c62699e3e190e4d4b2d8ba815d1cc924f1798d723
+#   Contents/Resources/dm/nro0.patched.bin   libharry2.nro (Years 5-7) rewritten with this profile's two stubs — the
+#                                           pass-table publish and the blit guard; sha256 6729d1b3…, 18,762,448 bytes
+#                                           (./scripts/build_lego_hp.sh module builds it)
+#   Contents/Resources/dm/env.txt            the present-path pins (this profile's env.txt), because the app's settings
+#                                           window exports its own defaults over the profile compiled into the host
 #
-# Everything else — romfs.img, the rewritten modules, the shader packages, launcher.json, the icon — is the source
-# bundle's. Nothing here codesigns or re-signs: an unsigned host in a bundle whose signature no longer covers it is
-# what runs, and re-signing it would change the binary the sha above names.
+# Everything else — romfs.img, the other rewritten modules, the shader packages, launcher.json, the icon — is the source
+# bundle's. Nothing here codesigns or re-signs: an unsigned host in a bundle whose signature no longer covers it is what
+# runs, and re-signing it would change the binary the sha above names.
 #
-#   SRC=, HOST=, OUT=   the same three as environment variables
-#   --dry-run           check and report, write nothing
-#   --force             replace OUT when it exists
+#   SRC=, HOST=, MODULE=, OUT=   the same four as environment variables
+#   --dry-run                    check and report, write nothing
+#   --force                      replace OUT when it exists
 #
-# The source bundle must already carry this profile's module: nro0.patched.bin sha256 56f3bf4f… (what
-# `./scripts/build_lego_hp.sh module` produces). A bundle that does not is told so, and left alone.
+# The source bundle must be one this profile was built for: its nro0.patched.bin is the pre-guard module 56f3bf4f… or
+# already the GLYPHFIX one. A bundle that is neither is told so, and left alone.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 ID=010052A00B5D2000
 HOST_SHA=99100d734bea3c12a3d2e68c62699e3e190e4d4b2d8ba815d1cc924f1798d723     # the host the fix was measured with
-MODULE_SHA=56f3bf4fdbb712f3c4f7d1c32d921efd38ec6abde304616ab29df82150ce9820   # nro0.patched.bin (Years 5-7)
+MODULE_SHA=6729d1b3c0857fbb93ed6d94ceb4f4a5105f4fc112f376dcab18527d7c1a2496   # nro0.patched.bin (Years 5-7, both stubs)
+MODULE_BYTES=18762448
+PREV_SHA=56f3bf4fdbb712f3c4f7d1c32d921efd38ec6abde304616ab29df82150ce9820     # the same module before the blit guard
 ENV_SRC=$here/dm/games/$ID/env.txt
 
 dry=0; force=0
@@ -33,6 +38,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --from) SRC=${2:?--from needs a path}; shift 2 ;;
     --host) HOST=${2:?--host needs a path}; shift 2 ;;
+    --module) MODULE=${2:?--module needs a path}; shift 2 ;;
     --out)  OUT=${2:?--out needs a path}; shift 2 ;;
     --dry-run) dry=1; shift ;;
     --force) force=1; shift ;;
@@ -42,14 +48,16 @@ while [ $# -gt 0 ]; do
 done
 SRC=${SRC:?--from the app to change, e.g. --from "/Volumes/Workspace/Lego HP-NX/Lego HP NX.app"}
 HOST=${HOST:?--host the host binary, e.g. --host /Volumes/Workspace/Lego HP-NX/nxnative/dm/host/dmhost}
-OUT=${OUT:?--out the app to write, e.g. --out "/Volumes/Workspace/Lego HP-NX/Lego HP NX (fixed).app"}
+MODULE=${MODULE:?--module the rewritten module, e.g. --module "/Volumes/Workspace/Lego HP-NX/nsp/010052A00B5D2000_build/repro/nro0.patched.bin"}
+OUT=${OUT:?--out the app to write, e.g. --out "/Volumes/Workspace/Lego HP-NX/Lego HP NX GLYPHFIX.app"}
 
 die() { echo "$*" >&2; exit 1; }
 [ -d "$SRC/Contents" ] || die "no bundle at $SRC (expected $SRC/Contents)"
 [ -f "$SRC/Contents/MacOS/dmhost" ] || die "$SRC has no Contents/MacOS/dmhost: not an nxnative app"
 [ -f "$SRC/Contents/Info.plist" ] || die "$SRC has no Contents/Info.plist"
 [ -f "$HOST" ] || die "no host at $HOST (make -C dm/host GAME=$ID)"
-[ -f "$ENV_SRC" ] || die "no $ENV_SRC: this branch's env.txt is the second half of the delta"
+[ -f "$MODULE" ] || die "no module at $MODULE (./scripts/build_lego_hp.sh module)"
+[ -f "$ENV_SRC" ] || die "no $ENV_SRC: this branch's env.txt is the third file of the delta"
 [ ! "$OUT" -ef "$SRC" ] || die "OUT is SRC: this script never writes the source bundle"
 [ ! -e "$OUT" ] || { [ "$force" = 1 ] || die "$OUT exists (--force replaces it)"; }
 
@@ -65,19 +73,25 @@ else
 fi
 [ "$(head -c 4 "$HOST" | xxd -p)" = "cffaedfe" ] || die "$HOST is not a Mach-O arm64 binary"
 
-# The source bundle's module: the delta assumes the fix's module is already in it. Report both before copying 13 GB.
-mod=$SRC/Contents/Resources/dm/nro0.patched.bin
-[ -f "$mod" ] || die "no $mod: this bundle is not for this profile (build the module first)"
-mod_sha=$(shasum -a 256 "$mod" | cut -d' ' -f1)
-if [ "$mod_sha" = "$MODULE_SHA" ]; then
-  echo "module: $mod_sha (nro0.patched.bin, the profile's cut)"
-else
-  echo "module: $mod_sha is NOT $MODULE_SHA — the bundle carries a different Years 5-7 module; the module is" >&2
-  echo "        not part of this delta, so it is left as it is (./scripts/build_lego_hp.sh module rebuilds it)" >&2
-fi
+# The module: the one this branch's patches.py produces. Both hashes and the byte count, before copying 13 GB.
+mod_sha=$(shasum -a 256 "$MODULE" | cut -d' ' -f1)
+[ "$mod_sha" = "$MODULE_SHA" ] || die "module is $mod_sha, not the GLYPHFIX $MODULE_SHA
+  ./scripts/build_lego_hp.sh module rebuilds it from this profile's patches.py"
+[ "$(stat -f %z "$MODULE")" = "$MODULE_BYTES" ] || die "module is $(stat -f %z "$MODULE") bytes, not $MODULE_BYTES"
+echo "module: $mod_sha ($MODULE_BYTES bytes, both stubs)"
+
+# The source bundle must be one this profile rewrites: the pre-guard module or the guarded one.
+srcmod=$SRC/Contents/Resources/dm/nro0.patched.bin
+[ -f "$srcmod" ] || die "no $srcmod: this bundle is not for this profile"
+src_sha=$(shasum -a 256 "$srcmod" | cut -d' ' -f1)
+case $src_sha in
+  "$PREV_SHA") echo "source module: $src_sha (before the blit guard; replaced)" ;;
+  "$MODULE_SHA") echo "source module: $src_sha (already the GLYPHFIX module; replaced byte for byte)" ;;
+  *) die "source bundle carries $src_sha, which is neither $PREV_SHA nor $MODULE_SHA: not this profile's bundle" ;;
+esac
 
 if [ "$dry" = 1 ]; then
-  echo "would copy $SRC -> $OUT (clone), install the host and write Contents/Resources/dm/env.txt:"
+  echo "would copy $SRC -> $OUT (clone), install the host and the module, write Contents/Resources/dm/env.txt:"
   sed 's/^/    /' "$ENV_SRC" | grep -v '^    #' || true
   exit 0
 fi
@@ -90,25 +104,38 @@ if ! ditto --clone "$SRC" "$OUT" 2>/dev/null; then
   ditto "$SRC" "$OUT"
 fi
 [ -d "$OUT/Contents" ] || die "the copy did not produce a bundle at $OUT"
+files_before=$(find "$SRC/Contents" -type f | wc -l | tr -d ' ')
+env_new=0; [ -f "$SRC/Contents/Resources/dm/env.txt" ] || env_new=1   # the original app has no env.txt: this delta adds it
 
 # 2. The host.
 install -m 755 "$HOST" "$OUT/Contents/MacOS/dmhost"
 
-# 3. The env pins, with the reason they are here (the file says it).
+# 3. The module — the guest patch, the only file the glyph fix is in.
+install -m 644 "$MODULE" "$OUT/Contents/Resources/dm/nro0.patched.bin"
+
+# 4. The env pins, with the reason they are here (the file says it).
 mkdir -p "$OUT/Contents/Resources/dm"
 install -m 644 "$ENV_SRC" "$OUT/Contents/Resources/dm/env.txt"
 
-# 4. What the bundle now is. Both files are the delta; the rest is the source bundle's, byte for byte.
+# 5. What the bundle now is. The three files are the delta; the rest is the source bundle's, byte for byte.
 got_host=$(shasum -a 256 "$OUT/Contents/MacOS/dmhost" | cut -d' ' -f1)
 [ "$got_host" = "$( [ "$host_sha" = "$HOST_SHA" ] && echo "$HOST_SHA" || echo "$host_sha" )" ] \
   || die "the installed host is $got_host, not what was copied ($host_sha)"
+got_mod=$(shasum -a 256 "$OUT/Contents/Resources/dm/nro0.patched.bin" | cut -d' ' -f1)
+[ "$got_mod" = "$MODULE_SHA" ] || die "the installed module is $got_mod, not $MODULE_SHA"
 cmp -s "$OUT/Contents/Resources/dm/env.txt" "$ENV_SRC" || die "env.txt did not land as this branch's copy"
-cmp -s "$OUT/Contents/Resources/dm/nro0.patched.bin" "$mod" || die "the module changed: this delta touches two files"
+[ "$((files_before + env_new))" = "$(find "$OUT/Contents" -type f | wc -l | tr -d ' ')" ] \
+  || die "the file count changed: this delta touches three files and adds none but env.txt"
 if [ -f "$SRC/Contents/Resources/dm/env.txt" ]; then
   cmp -s "$SRC/Contents/Resources/dm/env.txt" "$ENV_SRC" || echo "note: the source bundle had an env.txt; it is replaced" >&2
 fi
 echo "wrote $OUT"
-echo "  Contents/MacOS/dmhost            $got_host"
-echo "  Contents/Resources/dm/env.txt    $(wc -c < "$OUT/Contents/Resources/dm/env.txt" | tr -d ' ') bytes, $(grep -c '^DM_' "$OUT/Contents/Resources/dm/env.txt") pins"
-echo "  Contents/Resources/dm/nro0.patched.bin  $mod_sha (unchanged)"
+echo "  Contents/MacOS/dmhost                   $got_host"
+echo "  Contents/Resources/dm/nro0.patched.bin  $got_mod ($(stat -f %z "$OUT/Contents/Resources/dm/nro0.patched.bin") bytes)"
+echo "  Contents/Resources/dm/env.txt           $(wc -c < "$OUT/Contents/Resources/dm/env.txt" | tr -d ' ') bytes, $(grep -c '^DM_' "$OUT/Contents/Resources/dm/env.txt") pins"
+if [ "$env_new" = 1 ]; then
+  echo "three files changed (env.txt added); $files_before files in the source Contents, otherwise the source bundle's"
+else
+  echo "three files changed; $files_before files in Contents, unchanged in count and otherwise the source bundle's"
+fi
 echo "unsigned host inside a signed bundle: expected, and not re-signed (nothing here codesigns)"

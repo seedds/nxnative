@@ -19,7 +19,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | yes |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 12 | 0 | 0 | 0 | 0 | yes |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 3 | 0 | 0 | yes |
-| [LEGO® Harry Potter™ Collection](#lego-harry-potter-collection) | 1 | 0 | 0 | 0 | 1 |  |
+| [LEGO® Harry Potter™ Collection](#lego-harry-potter-collection) | 2 | 0 | 0 | 0 | 1 | yes |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 |  |
 | [Mario + Rabbids Kingdom Battle](#mario--rabbids-kingdom-battle) | 6 | 0 | 0 | 0 | 0 | yes |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 7 | 0 | 0 | 0 | 0 | yes |
@@ -318,8 +318,11 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 
 [LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md), `010052A00B5D2000`, [patches.py](../../dm/games/010052A00B5D2000/patches.py).
 
-- **build** `7e19fa84…` (in this profile's patches.py, not a `build` row) ([patches.py:37](../../dm/games/010052A00B5D2000/patches.py#L37))
+**Generalize?** No: both stubs are this build's own renderer — its pass tables, its UI batch descriptor and its vtable-keyed entity draw. The condition blit_guard tests (a whole-texture blit appended into a run another entity's texture already opened) is the guest's own batch state, which the host does not model; the only general form is the emitter refusing to append a unit-uv quad into a non-empty run, which would change the behaviour of every game that draws through its own UI emitter
+
+- **build** `7e19fa84…` (in this profile's patches.py, not a `build` row) ([patches.py:105](../../dm/games/010052A00B5D2000/patches.py#L105))
   - stub `+0xd3138`: pass-state recorder: publish live[slot] into published[slot] at record time, before the slot count is incremented (the replay reads the record in the same frame, and the records die with the frame; without it the published table is only filled by 0x15f420, which the worker's pass loop can outrun)
+  - stub `+0x6d9f64`: whole-texture blit (nro0+0x6d9810, sole caller) appended into the glyph run: skip it when the open UI run carries another texture — the unit-uv quad would otherwise be drawn by the font atlas and paint the 4096x2048 sheet over the lower 5/7 of the frame for one present
   - host [hle_nullpass.c:41](../../dm/host/hle_nullpass.c#L41): build check
 
 ### Luigi's Mansion 3
@@ -752,7 +755,6 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) |
 | `present_snap 4` | [LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md) |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) |
-| `present_upscale metalfx` | [LEGO® Harry Potter™ Collection](../../dm/games/010052A00B5D2000/README.md) |
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) |
 | `shader_key_skip 0x770+0x78` | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) |
 | `shader_key_skip 0x7d0+0x18` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) |

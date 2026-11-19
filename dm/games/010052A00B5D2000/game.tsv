@@ -11,6 +11,11 @@
 # other sites) — different threads, two locks that do not order them. patches.py publishes the record at the store
 # (nro0+0xd3138); dm/host/hle_nullpass.c reads a load that still faults in the null page as zero for the sites a
 # frame reaches before it fills them (the emulator's recovery, natively).
+# patches.py carries a second stub, blit_guard: the HUD entity's whole-texture blit (nro0+0x6d9810, sole caller
+# nro0+0x6d9f64) is appended into the glyph run, so that run's own draw paints the 4096x2048 font atlas over the lower
+# 5/7 of the frame for one present — the glyph/atlas lattice. The stub skips the append when the open UI run's texture
+# ([0x11539c8+0x30]) is not the blit's own ([0x11b0bb8]); the helper and the emitter are untouched. PATCHES.md has the
+# site, the 52-byte stub and the rebuild; README.md has the artifact, the diagnosis and the two-arm numbers.
 # What this profile does NOT hold: the shader tables. They are the build's own output (the derived profile), and 493
 # of the map's rows come from a run-time dump no split reproduces (docs/reference/shaders.md, "Shaders whose bytes
 # exist only in a run-time dump"). The note says where they are and what each count is.

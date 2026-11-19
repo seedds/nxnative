@@ -4,8 +4,9 @@
 #   ./scripts/build_lego_hp.sh module    # rewrite libharry2.nro (Years 5-7) and verify the sha256 — the recipe
 #   ./scripts/build_lego_hp.sh survey    # what the game is made of; builds nothing
 #
-# The module step is the one this branch exists for: the NSP's nro0 + dm/games/<id>/patches.py +
-# dm/tools/patch_nso.py = nro0.patched.bin, byte for byte (13 s on an M1 Pro).
+# The module step is the one this branch exists for: the NSP's nro0 + dm/games/<id>/patches.py + dm/tools/patch_nso.py =
+# nro0.patched.bin, byte for byte (13 s on an M1 Pro). Two stubs go in — the pass table's publish at record time (the
+# crash on selecting Years 5-7) and the blit guard (the glyph/atlas lattice); PATCHES.md has both sites.
 #
 #   NRO=/path/to/libharry2.nro   a stock NRO (default: the one the NSP script extracted, under WORK_DIR)
 #   OUT=/path                    where the rewritten module and its tables go
@@ -23,7 +24,7 @@ NSP=${NSP:-"/Volumes/T7 Storage1/Assets/Software/1. Switch Roms/Lego Harry Potte
 KEYS=${KEYS:-$HOME/.switch/prod.keys}
 PY=${PYTHON:-/opt/homebrew/bin/python3.14}
 WORK=${WORK_DIR:-"/Volumes/Workspace/Lego HP-NX/nsp/${ID}_build"}   # the build folder this game was brought up in
-EXPECT=56f3bf4fdbb712f3c4f7d1c32d921efd38ec6abde304616ab29df82150ce9820   # nro0.patched.bin the app carries
+EXPECT=6729d1b3c0857fbb93ed6d94ceb4f4a5105f4fc112f376dcab18527d7c1a2496   # nro0.patched.bin the GLYPHFIX app carries (both stubs)
 case ${1:-module} in
   module)
     nro=${NRO:-$WORK/nro_v131072/nro0.nro}

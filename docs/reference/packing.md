@@ -368,6 +368,13 @@
 - **Measured** on Skyward Sword HD, on an external drive, warm cache: 10,017 files to one: copy 3.72 s to 0.18 s, delete 0.40 s to 0.02 s, 150 MB to 131 MB on disk. Reading all 2,470 shaders' reflection and libraries 100 ms to 28 ms. The map must be `MAP_SHARED`: on a file this size a private mapping costs about 80 µs, against 0.9 µs. A cold read has not been measured, as the cache cannot be emptied without an administrator.
 - **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
 
+### A Mac app packed with the library's image names it `b-<chain>.img.img`
+
+- **Symptom:** the Mac app logs `[RED] shader library …/Contents/Resources/msl/b-<chain> (a folder or a .img file) does not exist` and then `failed to load shader`. Its `msl/` holds `b-<chain>.img.img`, and its `Info.plist` records `DMChain` as `<chain>.img`.
+- **Cause:** `pack_app.py` accepts the library's folder path or image path. It used the input filename as the output stem and appended `.img` when it wrote the image. The NSP script passes the folder path.
+- **Fix:** use `shader_lib.name_of` for the output stem in the signed `ShaderLibraries` bundle and in its reuse key, for both the primary program and `--program` entries. The primary stem still takes the explicit `--msl-name` override and supplies `DMChain`. `test_nsp_mac_app.py` checks the signed layout and reuse across both input spellings.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), a Mac app packed by hand from the build's `shader/cache/b-<chain>.img` ([PR #1790](https://github.com/seedds/nxnative/pull/1790)).
+
 ### A shader build leaves a file per shader output while it runs or after a stop
 
 - **Symptom:** a game's build folder holds tens of thousands of small files while its shaders build, and keeps them when the build stops: Octopath Traveler 0's `_build`, stopped in its compile, held 68,230 files (38,376 in `tmp/dmsh_*`, 29,757 in `shader/cache/b-<chain>/`), against 105 once a build finished. Every later build made another `tmp/dmsh_*` beside the old one.

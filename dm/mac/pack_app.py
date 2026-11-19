@@ -465,7 +465,7 @@ def pack(a):
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
-    msl_dst = res / 'msl' / (a.msl_name or msl.name)
+    msl_dst = res / 'msl' / (a.msl_name or shader_lib.name_of(msl))
     old_app = out if out.is_dir() else None
     took = {f[0]: f[1:] for f in inputs['files']}   # what the app's key took of each selected file
     common = [DATA_FORMAT, a.sign, str(codesign), digest(codesign), a.bundle_id or a.title_id]
@@ -485,9 +485,13 @@ def pack(a):
             whole = pool.submit(digest, image) if image else None
             d.mkdir(parents=True); copy_msl(msl, msls, d / msl_dst.name, clone['msl'])
             if whole: read[str(image)] = whole.result()
-        for n, _, pmsl, _, _, pmsls, _ in programs: (d / f'p{n}').mkdir(); copy_msl(pmsl, pmsls, d / f'p{n}' / pmsl.name, can_clone(pmsls[0], res))
+        for n, _, pmsl, _, _, pmsls, _ in programs:
+            program_dir = d / f'p{n}'
+            program_dir.mkdir()
+            copy_msl(pmsl, pmsls, program_dir / shader_lib.name_of(pmsl), can_clone(pmsls[0], res))
     lib_code = [digest(Path(shader_lib.__file__)), digest(Path(rfs.__file__))]   # what writes a chain library's one file
-    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], [(x[0], x[2].name, [took[str(p)] for p in x[5]]) for x in programs]], fill_msl)
+    program_lib_keys = [(n, shader_lib.name_of(pmsl), [took[str(p)] for p in pmsls]) for n, _, pmsl, _, _, pmsls, _ in programs]
+    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], program_lib_keys], fill_msl)
     if aoc: place('AddOnContent', 'aoc', 'add-on content', inventory(aoc), lambda d: copy([aoc], d, clone['aoc']))
     if pso: place('PipelineArchive', 'pso', 'pipeline archive', [took[str(p)] for p in pso], lambda d: (d.mkdir(parents=True), copy(pso, d, clone['pso'])))
     rtop = 'romfs.img' if romfs.is_file() else 'romfs'

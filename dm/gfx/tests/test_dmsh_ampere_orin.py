@@ -41,8 +41,6 @@ KNOWN = {
     # results that differ
     'i2f_s32_rz': 'I2FP.F32.S32.RZ rounds to nearest (PR #1800 has the fix)',
     'fmax_nan': 'FMNMX.NAN: a NaN operand gives the other operand, not NaN (PR #1800 has the fix)', 'fmin_nan': '(as fmax_nan)',
-    'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
-    'i2f_s64': 'I2F.S64 rounds twice (the high and low words apart)',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
     # the translator refuses these
     'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path calls the CUDA driver',
@@ -50,9 +48,8 @@ KNOWN = {
     'dadd': 'DADD (0x229) is not implemented', 'dmul': 'DMUL (0x228) is not implemented',
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
-    'imma_16832_s8': 'IMMA is not implemented', 'dp4a_u32': 'IDP.4A is not implemented', 'dp4a_s32': '(as dp4a_u32)', 'dp4a_su': '(as dp4a_u32)',
-    'dp2a_lo': 'IDP.2A is not implemented', 'dp2a_hi': '(as dp2a_lo)', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
-    'isad': 'VABSDIFF is not implemented', 'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
+    'imma_16832_s8': 'IMMA is not implemented', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
+    'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
     'prmt': 'PRMT modes other than the index form (.F4E .B4E .RC8 .ECL .ECR .RC16) are not implemented',
     'mufu_tanh': 'MUFU.TANH is not implemented', 'mufu_tanh_f16x2': '(as mufu_tanh)',
     # the program calls a routine of the CUDA driver's own (CALL.ABS to a relocation the JIT resolves at load), which a game's shader never does
@@ -80,6 +77,8 @@ def load_fixture():
         w = len(o['ins']) + len(o['outs'])
         o['rows_in'] = [list(words[i:i + len(o['ins'])]) for i in range(0, len(words), w)]
         o['rows_gpu'] = [list(words[i + len(o['ins']):i + w]) for i in range(0, len(words), w)]
+        if o['name'] in ('f2fp_pack_bf16x2', 'f2fp_pack_f16x2_relu'):
+            o['exact_bits'] = True
     # The recorded FMA uses the tensor-pipe opcode. Exercise the ordinary ALU
     # emitter too, independently of HFMA2.MMA support, retaining the Orin oracle.
     for o in list(doc['ops']):
@@ -93,6 +92,10 @@ def load_fixture():
     doc['ops'].extend(hfma_rounding_cases(doc['ops']))
     doc['ops'].extend(minmax_boundaries(doc['ops']))
     doc['ops'].extend(directed_rounding_boundaries(doc['ops']))
+    doc['ops'].extend(i2f64_boundaries(doc['ops']))
+    doc['ops'].extend(f2fp_boundaries(doc['ops']))
+    doc['ops'].extend(idp_constant_buffer_cases(doc['ops']))
+    doc['ops'].extend(vabsdiff_cases(doc['ops']))
     return doc
 
 
@@ -316,6 +319,180 @@ def directed_rounding_boundaries(ops):
         yield case(name, 'ftz', rows, instruction=(offset, lo, hi | 1 << 16))
 
 
+def i2f64_boundaries(ops):
+    """Exact binary32 outputs for zero, rounding ties, word carries and integer limits."""
+    template = next(op for op in ops if op['name'] == 'i2f_s64')
+    ((offset, lo, hi),) = [
+        (i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', template['program']))
+        if lo & 0xfff == 0x312
+    ]
+    # Each row is the input followed by the expected RN, RM, RP and RZ bits.
+    common = [
+        (0,                 0,          0,          0,          0),
+        (1,                 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000),
+        (0x01000001,        0x4b800000, 0x4b800000, 0x4b800001, 0x4b800000),
+        (0x01000003,        0x4b800002, 0x4b800001, 0x4b800002, 0x4b800001),
+        (0xffffffff,        0x4f800000, 0x4f7fffff, 0x4f800000, 0x4f7fffff),
+        (0x1_00000000,      0x4f800000, 0x4f800000, 0x4f800000, 0x4f800000),
+        (0x1_00000001,      0x4f800000, 0x4f800000, 0x4f800001, 0x4f800000),
+        # Set just the low word's sticky bit to move from a tie to above the midpoint.
+        (0x800000_80000000, 0x5b000000, 0x5b000000, 0x5b000001, 0x5b000000),
+        (0x800000_80000001, 0x5b000001, 0x5b000000, 0x5b000001, 0x5b000000),
+    ]
+    signed_cases = [
+        (-1,         0xbf800000, 0xbf800000, 0xbf800000, 0xbf800000),
+        (-2,         0xc0000000, 0xc0000000, 0xc0000000, 0xc0000000),
+        (-0x1000001, 0xcb800000, 0xcb800001, 0xcb800000, 0xcb800000),
+        (-(1 << 31), 0xcf000000, 0xcf000000, 0xcf000000, 0xcf000000),
+        (-(1 << 32), 0xcf800000, 0xcf800000, 0xcf800000, 0xcf800000),
+        (-(1 << 63), 0xdf000000, 0xdf000000, 0xdf000000, 0xdf000000),
+        ((1 << 63) - 1, 0x5f000000, 0x5effffff, 0x5f000000, 0x5effffff),
+    ]
+    unsigned_cases = [
+        (1 << 63,       0x5f000000, 0x5f000000, 0x5f000000, 0x5f000000),
+        ((1 << 63) + 1, 0x5f000000, 0x5f000000, 0x5f000001, 0x5f000000),
+        ((1 << 64) - 1, 0x5f800000, 0x5f7fffff, 0x5f800000, 0x5f7fffff),
+    ]
+    for signed, extra in ((True, signed_cases), (False, unsigned_cases)):
+        rows = common + extra
+        kind = 's64' if signed else 'u64'
+        inputs = [[row[0] & 0xffffffff, (row[0] >> 32) & 0xffffffff] for row in rows]
+        for mode, suffix in enumerate(('rn', 'rm', 'rp', 'rz')):
+            program = bytearray(template['program'])
+            modifiers = (hi & ~((3 << 14) | (1 << 10))) | (mode << 14) | (signed << 10)
+            struct.pack_into('<QQ', program, offset, lo, modifiers)
+            yield dict(template, name=f'i2f_{kind}_boundary_{suffix}', program=bytes(program), cases=len(rows),
+                       rows_in=inputs, rows_gpu=[[row[mode + 1]] for row in rows], exact_bits=True,
+                       oracle='synthetic integer-to-binary32 contract', derived_from=template['name'])
+
+
+def f2fp_boundaries(ops):
+    """Derived PACK_AB forms use exact packed outputs from the conversion contract."""
+    by_name = {o['name']: o for o in ops}
+
+    def case(template, suffix, modifiers, rows):
+        op = by_name[template]
+        return dict(op, name=template + '_' + suffix, program=half_variant(op, 0x03e, modifiers=modifiers),
+                    cases=len(rows), rows_in=[inputs for inputs, _ in rows], rows_gpu=[[packed] for _, packed in rows],
+                    exact_bits=True, oracle='synthetic F2FP packing contract', derived_from=template)
+
+    bf16 = 'f2fp_pack_bf16x2'
+    rz = 3 << 15    # bits 79..80 of the full instruction
+    relu = 1 << 11  # bit 75
+    # Each row has its input pair, nearest-even pack and toward-zero pack.
+    bf16_rows = [
+        ([0x3f808000, 0x3f818000], 0x3f803f82, 0x3f803f81),  # midpoint with even and odd retained bit
+        ([0x3f807fff, 0x3f808001], 0x3f803f81, 0x3f803f80),  # immediately below and above a midpoint
+        ([0xbf818000, 0x00008001], 0xbf820001, 0xbf810000),
+        ([0x007f8000, 0x00008000], 0x00800000, 0x007f0000),  # subnormal rounding at both ends
+        ([0x7f7fffff, 0xff7fffff], 0x7f80ff80, 0x7f7fff7f),
+        ([0x80000000, 0xff800001], 0x80007fff, 0x80007fff),
+    ]
+    bf16_relu_rows = [
+        ([0x3f818000, 0x80000000], 0x3f820000, 0x3f810000),
+        ([0xff800001, 0xff800000], 0x7fff0000, 0x7fff0000),
+        ([0x7f800000, 0xbf800000], 0x7f800000, 0x7f800000),
+        ([0x80008001, 0x00008001], 0x00000001, 0x00000000),
+        ([0x7fc00001, 0x3f808000], 0x7fff3f80, 0x7fff3f80),
+    ]
+    for name, modifier, rows in (('ties', 0, bf16_rows), ('relu', relu, bf16_relu_rows)):
+        yield case(bf16, name + '_rn', modifier, [(values, near) for values, near, _ in rows])
+        yield case(bf16, name + '_rz', modifier | rz, [(values, trunc) for values, _, trunc in rows])
+
+    yield case('f2fp_pack_f16x2', 'boundary_rz', rz, [
+        ([0x3f803000, 0xbf803000], 0x3c01bc01),
+        ([0x33800000, 0xb37fffff], 0x00018000),
+        ([0x387fffff, 0xb8800000], 0x03ff8400),
+        ([0x7f7fffff, 0xc7800000], 0x7bfffbff),
+        ([0x7f800000, 0xff800000], 0x7c00fc00),
+        ([0x00000000, 0x80000000], 0x00008000),
+    ])
+    yield case('f2fp_pack_f16x2_relu', 'boundary_rz', rz, [
+        ([0x3f803000, 0xbf803000], 0x3c010000),
+        ([0xff800001, 0x7fc00001], 0x7fff7fff),
+        ([0x7f800000, 0xff800000], 0x7c000000),
+        ([0x33800000, 0x80000000], 0x00010000),
+    ])
+
+
+def alu_cbuf_variant(op, opcode, source, bank, offset, *, modifiers=0):
+    """Change a register ALU instruction to read its B or C from a fixed constant-buffer offset."""
+    program = bytearray(op['program'])
+    (position, lo, hi), = [(i * 16, lo, hi) for i, (lo, hi) in enumerate(struct.iter_unpack('<QQ', program))
+                           if lo & 0x1ff == opcode]
+    form = 5 if source == 'b' else 3
+    if source == 'c':
+        hi = (hi & ~0xff) | ((lo >> 32) & 0xff)  # B moves into the register field formerly used by C.
+    lo = (lo & 0xffffffff & ~(7 << 9)) | (form << 9) | (bank << 54) | (offset << 38)
+    struct.pack_into('<QQ', program, position, lo, hi | modifiers)
+    return bytes(program)
+
+
+def idp_constant_buffer_cases(ops):
+    """Bind a nonzero word at c[3][5] and exercise its use in either operand slot."""
+    by_name = {op['name']: op for op in ops}
+    bank, offset = 3, 20
+    rows = [[0x80017fff, 0x807f0201, 0xfffffff0],
+            [0xfffffffe, 0xff7f8001, 0x7fffffff],
+            [0x00010002, 0x807ffe01, 0x80000000],
+            [0x80808080, 0x00000000, 0xabcdef02]]
+
+    def expected(row, width, signed_a, signed_b, first_byte):
+        a, b, c = row
+        parts_a = struct.unpack({(1, False): '<4B', (1, True): '<4b', (2, False): '<2H', (2, True): '<2h'}[width, signed_a],
+                                a.to_bytes(4, 'little'))
+        parts_b = struct.unpack('<4b' if signed_b else '<4B', b.to_bytes(4, 'little'))
+        return (c + sum(x * y for x, y in zip(parts_a, parts_b[first_byte:]))) & 0xffffffff
+
+    for name, source, value, width, signed_a, signed_b, first_byte in (
+        ('dp4a_su', 'b', 0x807f02fe, 1, True, False, 0),
+        ('dp4a_s32', 'c', 0x7ffffffe, 1, True, True, 0),
+        ('dp2a_hi', 'b', 0xf18102fe, 2, False, False, 2),
+        ('dp2a_lo', 'c', 0xfffffff0, 2, True, True, 0),
+    ):
+        template = by_name[name]
+        resolved = [row.copy() for row in rows]
+        for row in resolved:
+            row[1 if source == 'b' else 2] = value
+        yield dict(template, name=f'{name}_cbuf_{source}', program=alu_cbuf_variant(template, 0x026, source, bank, offset),
+                   cases=len(rows), rows_in=rows,
+                   rows_gpu=[[expected(row, width, signed_a, signed_b, first_byte)] for row in resolved],
+                   cbuf=(bank, offset, value), exact_bits=True, derived_from=name, oracle='synthetic IDP constant-buffer contract')
+
+
+def vabsdiff_cases(ops):
+    """Compare full-width signed and unsigned distances, including sums that wrap."""
+    template = next(op for op in ops if op['name'] == 'isad')
+    rows = [[0x80000000, 0x7fffffff, 1],
+            [0x7fffffff, 0x80000000, 0],
+            [0xffffffff, 0x00000000, 1],
+            [0x00000000, 0x80000000, 1],
+            [0x80000000, 0xffffffff, 0x80000003],
+            [0xffffffff, 0x7fffffff, 0x80000000],
+            [0x7fffffff, 0x00000001, 0xffffffff],
+            [0xffffffff, 0xffffffff, 0xabcdef01]]
+
+    def case(suffix, program, signed, resolved, **extra):
+        expected = []
+        for a, b, c in resolved:
+            if signed:
+                a, b = struct.unpack('<ii', struct.pack('<II', a, b))
+            expected.append([(abs(a - b) + c) & 0xffffffff])
+        return dict(template, name='isad_' + suffix, program=program, cases=len(rows), rows_in=rows,
+                    rows_gpu=expected, exact_bits=True, derived_from=template['name'], oracle='synthetic VABSDIFF contract', **extra)
+
+    signed_bit = 1 << (73 - 64)
+    yield case('u32_edges', template['program'], False, rows)
+    yield case('s32_edges', half_variant(template, 0x014, modifiers=signed_bit), True, rows)
+    bank, offset = 3, 20
+    for source, value, signed in (('b', 0x7fffffff, True), ('c', 0xffffffff, False)):
+        resolved = [row.copy() for row in rows]
+        for row in resolved:
+            row[1 if source == 'b' else 2] = value
+        program = alu_cbuf_variant(template, 0x014, source, bank, offset, modifiers=signed_bit if signed else 0)
+        yield case('cbuf_' + source, program, signed, resolved, cbuf=(bank, offset, value))
+
+
 def chain_rewrites():
     """the MSL rewrites dmsh_build.py's finish() makes of every shader, in its order: each `src = f(src)` at its top level or in a try there (the ones under a
     stage's `if` are another stage's). The rewrites live in importable modules;
@@ -384,7 +561,7 @@ def harness(msl, w):
 
 RUNNER = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-// run <metallib> <io> <groups>: main0 over <groups> groups of 32 threads, io at buffer 30 (the other slots a zero buffer), written back over io
+// run <metallib> <io> <groups> [cbuf]: main0 over groups of 32 threads, io at buffer 30 and optional constants at argument buffer 0, id 0.
 int main(int argc, char **argv) { @autoreleasepool {
   id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
   if (!d) { fprintf(stderr, "no Metal device\n"); return 1; }
@@ -399,6 +576,18 @@ int main(int argc, char **argv) { @autoreleasepool {
   [ce setComputePipelineState:ps];
   for (int i = 0; i < 30; i++) [ce setBuffer:zero offset:0 atIndex:i];
   [ce setBuffer:b offset:0 atIndex:30];
+  if (argc == 5) {
+    NSData *data = [NSData dataWithContentsOfFile:@(argv[4])];
+    id<MTLArgumentEncoder> args = [f newArgumentEncoderWithBufferIndex:0];
+    if (!data || !args) { fprintf(stderr, "constant buffer layout\n"); return 1; }
+    id<MTLBuffer> constants = [d newBufferWithBytes:data.bytes length:data.length options:MTLResourceStorageModeShared];
+    id<MTLBuffer> table = [d newBufferWithLength:args.encodedLength options:MTLResourceStorageModeShared];
+    if (!constants || !table) { fprintf(stderr, "constant buffer allocation\n"); return 1; }
+    [args setArgumentBuffer:table offset:0];
+    [args setBuffer:constants offset:0 atIndex:0];
+    [ce useResource:constants usage:MTLResourceUsageRead];
+    [ce setBuffer:table offset:0 atIndex:0];
+  }
   [ce dispatchThreadgroups:MTLSizeMake(atoi(argv[3]), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
   [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
   if (cb.error) { fprintf(stderr, "gpu: %s\n", cb.error.description.UTF8String); return 1; }
@@ -444,7 +633,17 @@ def run_op(o, work, runner, steps, xc, env):
     for c, row in enumerate(o['rows_in']):
         io[c * w:c * w + len(row)] = array.array('I', row)
     (d / 'io.bin').write_bytes(io.tobytes())
-    r = subprocess.run([str(runner), str(d / 'k.metallib'), str(d / 'io.bin'), str(groups)], capture_output=True, text=True, timeout=120)
+    args = [str(runner), str(d / 'k.metallib'), str(d / 'io.bin'), str(groups)]
+    if 'cbuf' in o:
+        bank, offset, value = o['cbuf']
+        cbufs = json.loads((d / 'k.res.json').read_text())['cbufs']
+        if [(c['slot'], c.get('fixed')) for c in cbufs] != [(bank, offset + 4)]:
+            return 'reflection', f'expected c[{bank}] through byte {offset + 4}, got {cbufs}'
+        data = bytearray(65536)
+        struct.pack_into('<I', data, offset, value)
+        (d / 'cbuf.bin').write_bytes(data)
+        args.append(str(d / 'cbuf.bin'))
+    r = subprocess.run(args, capture_output=True, text=True, timeout=120)
     if r.returncode:
         return 'Metal run', r.stderr.strip()[-300:]
     out = array.array('I')

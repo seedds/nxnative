@@ -8,7 +8,7 @@
 static int test_clock_gettime(clockid_t clock, struct timespec *t);
 static dispatch_time_t test_dispatch_time(dispatch_time_t when, int64_t delta);
 static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, dispatch_block_t block);
-static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match, io_iterator_t *it);
+static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match CF_RELEASES_ARGUMENT, io_iterator_t *it);
 static io_object_t test_iterator_next(io_iterator_t it);
 static kern_return_t test_object_release(io_object_t o);
 static kern_return_t test_entry_id(io_registry_entry_t s, uint64_t *id);

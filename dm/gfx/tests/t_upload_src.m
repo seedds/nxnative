@@ -119,8 +119,13 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < 3; i++) make(&big[i], mem, &pool, (size_t)(16 + 72 * i) << 20, 4096, 4096, 100 + i);
     upload_all(big, 3, &made, &batches);
     printf("big: %llu source buffers for 3 textures, %u batches\n", (unsigned long long)made, batches);
-    CHECK("staging splits the batches", batches >= 2);
-    CHECK("a second source buffer only for a texture whose staging flushed its batch", made == 3 + (batches - 1));
+    if (up_src_budget()) {
+        CHECK("the source budget splits before each 64 MiB texture", batches == 3);
+        CHECK("each texture needs only the source buffer in its own batch", made == 3);
+    } else {
+        CHECK("staging splits the batches", batches >= 2);
+        CHECK("a second source buffer only for a texture whose staging flushed its batch", made == 3 + (batches - 1));
+    }
 
     for (int i = 0; i < 8; i++) { mtl_tex_release(&small[i].t); free(small[i].ref); }
     for (int i = 0; i < 3; i++) { mtl_tex_release(&big[i].t); free(big[i].ref); }

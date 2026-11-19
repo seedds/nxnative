@@ -27,7 +27,6 @@ void dm_thread_service_connect(void);   // an HLE call that stands for connectin
 void dm_thread_service_request(void);   // an HLE call that is a blocking service request on Horizon: the caller gives up its core (hle_thread.c)
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
-void dm_guest_clock_advanced(void);
 uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
 void guest_clock_freeze(int on);
 void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation

@@ -76,6 +76,7 @@ General host changes first needed here; each applies to every game:
 - [The alpha test through a library of its own](../../../docs/reference/rendering.md#the-alpha-test-through-a-library-of-its-own): the island map's corruption (issue #73) improved with an alpha test in a downstream runtime (PR #430).
 - **Touch samples on a 4 ms grid, with a history** (`touch_read` in `hle_hid.c`): the name-entry keyboard highlighted tapped letters but entered none, since its reader and the input manager read the touch screen in the same frame and the first used up the Start and End (issue #2567): [Touch samples on a 4 ms grid, with a history](../../../docs/reference/services.md#touch-samples-on-a-4-ms-grid-with-a-history).
 - **The game's view in the shape the game presents** (`front_picture_shape`; with `DM_SCREEN_ASPECT=1.43` the 1920x1344 picture was fitted into a 16:9 view on the phone): [The picture laid out in the shape the game presents](../../../docs/reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents).
+- [Burst renders when a device callback releases multiple blocks](../../../docs/reference/audio.md#burst-renders-when-a-device-callback-releases-multiple-blocks) explains the villager dialogue crackle and the Bluetooth retest from issue #2981.
 
 ## Open
 

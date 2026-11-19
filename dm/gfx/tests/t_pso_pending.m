@@ -48,6 +48,7 @@ static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
     pthread_cond_t _cv;
     int _entered, _released, _block_through, _nil_call;
     int _sync_calls, _async_calls;
+    int _texture_allocations;
     pthread_t _submitter;
     NSMutableArray *_results;
     BOOL _submitter_call[1024];
@@ -63,6 +64,7 @@ static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 - (int)entered;
 - (int)syncCalls;
 - (int)asyncCalls;
+- (int)textureAllocations;
 - (BOOL)callWasOnSubmitter:(int)call;
 - (void)expectAbsentPendingKey:(const pso_key *)key onSubmitterCall:(int)call;
 - (BOOL)submitterCallObservedKeyAbsent:(int)call;
@@ -79,6 +81,12 @@ static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
     return self;
 }
 - (void)dealloc { pthread_cond_destroy(&_cv); pthread_mutex_destroy(&_mu); }
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
+    (void)descriptor;
+    _texture_allocations++;
+    return nil;
+}
+- (int)textureAllocations { return _texture_allocations; }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
     (void)descriptor;
     pthread_mutex_lock(&_mu);
@@ -480,6 +488,37 @@ static void test_prediction_restores_scissor(void) {
     g_exec_next = NULL;
 }
 
+static void test_prediction_only_reads_existing_targets(void) {
+    reset_queue(); reset_pso_cache(); state_reset();
+    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:0 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    NvProg *program = [NvProg new]; program->sh[0] = test_vs; program->sh[1] = test_fs;
+    prog_t control = {.magic = MAGIC('P', 'R', 'O', 'G'), .nstage = 2, .serial = 0x7f010003};
+    serial_put(control.serial, program);
+    tex_t cold = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 0x7f010004,
+                  .d = {.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 16, .height = 16, .depth = 1, .levels = 1, .samples = 1}};
+    tex_t ready = cold; ready.serial++;
+    // For a target without a view, the descriptor supplies the format and sample count a texture would report.
+    tex_put(ready.serial, tex_desc(&ready, 0));
+    p_set_rt cold_pass = {.n = 1, .color = {&cold}}, ready_pass = {.n = 1, .color = {&ready}};
+    p_bind_program bind = {&control, 3};
+    p_draw draw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1};
+    uint8_t stream[2048] = {0}; size_t used = 0;
+    append_op(stream, &used, OP_BIND_PROGRAM, &bind, sizeof bind);
+    append_op(stream, &used, OP_SET_RT, &cold_pass, sizeof cold_pass);
+    append_op(stream, &used, OP_DRAW, &draw, sizeof draw);
+    append_op(stream, &used, OP_SET_RT, &ready_pass, sizeof ready_pass);
+    append_op(stream, &used, OP_DRAW, &draw, sizeof draw);
+    append_op(stream, &used, OP_END, NULL, 0);
+
+    g_exec_next = stream; pso_predict_rest(); g_exec_next = NULL;
+    EXPECT_TRUE("prediction reaches the later pass with a realized target", [dev waitForEntered:1 timeoutMs:5000]);
+    EXPECT_TRUE("target prediction drains its compiler work", drain_queue(5000));
+    EXPECT_EQ("prediction only compiles for known attachments", 1, [dev entered]);
+    EXPECT_EQ("prediction does not allocate future textures", 0, [dev textureAllocations]);
+    tex_put(ready.serial, nil); serial_del(control.serial);
+    reset_queue(); reset_pso_cache();
+}
+
 // The prediction runs once per submission, at its first new miss: a draw whose own build is already under way drew in an earlier frame and does not start it (issue #2438)
 static void test_prediction_at_first_new_miss(void) {
     g_sub_serial = 100; g_pp_submit_mark = 0;
@@ -504,6 +543,7 @@ int main(void) {
         test_completed_slot_kept_for_waiting_draw();
         test_nil_prediction_falls_back_then_predicts();
         test_prediction_restores_scissor();
+        test_prediction_only_reads_existing_targets();
         test_prediction_at_first_new_miss();
         test_inflight_counter_snapshot();
         printf("== %d PSO pending checks, %d failed ==\n", g_checks, g_failed);

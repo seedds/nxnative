@@ -2975,7 +2975,7 @@ def ue_legacy_jobs(files, parts=64, mains=()):
     and the update's *_0_P.pak) and version 11 paks without shader code archives (OCTOPATH TRAVELER II: Majesty-Switch.pak, 3.3 GB). The engine mounts them all as one view, and a patch pak
     (name ending in _P.pak) wins over the others for the same path. Only the newest copy of each path is scanned. With IoStore on (Mario & Luigi: Brothership) the cooked packages are the export bundles
     of the containers beside such a pak, the pak holding only the global shader cache of the shaders: those chunks are scanned too, the newest copy of each chunk ID (uepak.mount_order).
-    A v9 pak can supply a global shader cache and shared shader archives together. Only the inline files go to this scan, and a v9 pak can also lead to inline IoStore bundles with an empty index.
+    A short v8 or v9 pak can supply a global shader cache and shared shader archives together. Only the inline files go to this scan, and either can lead to inline IoStore bundles with an empty index.
     A pak whose index is encrypted (Little Nightmares II: Helios-Switch.pak, version 8, every entry encrypted too) is opened with the AES key from mains, the ExeFS main of every version
     (uepak.Keys), and its jobs carry the key: (UE_LEGACY, names, key). An encrypted container (DRAGON BALL Sparking! ZERO: every pakchunk*-Switch.utoc, the index of the pak beside each
     encrypted too) is read with the key that opens that pak, else the first key found, and its jobs carry it: (UE_IO, chunks, key).
@@ -2984,19 +2984,21 @@ def ue_legacy_jobs(files, parts=64, mains=()):
     def key(p):
         try: return key_of(p)
         except (OSError, ValueError, struct.error): return None
-    def inline(p):
-        try: return uepak.inline_shaders(p, key(p)) is True
-        except (OSError, ValueError, struct.error): return False
-    paks = [(p, r) for p, r in files if p.endswith('.pak') and inline(p)]
+    paks = []
+    for p, r in files:
+        if not p.endswith('.pak'): continue
+        try: inline, archives = uepak.pak_shader_sources(p, key(p))
+        except (OSError, ValueError, struct.error): continue
+        if inline: paks.append((p, r, archives))
     if not paks: return [], set()
     view, keys = {}, {}
-    for p, r in sorted(paks, key=lambda x: (x[1].endswith('_P.pak'), x[1])):   # patch paks last, so they replace; one view per pak folder (one per version given)
+    for p, r, archives in sorted(paks, key=lambda x: (x[1].endswith('_P.pak'), x[1])):   # patch paks last, so they replace; one view per pak folder (one per version given)
         try:   # all of a pak's names or none: a patch pak read halfway would still replace the base pak's files
             keys[p] = key_of(p); pk = uepak.Pak(p, keys[p])
             view.update({(os.path.dirname(p), os.path.normpath(pk.mount + name)): (p, r, name, pk.entry(name)['raw']) for name in pk.files
-                         if pk.version != 9 or not name.endswith('.ushaderbytecode')})   # a mixed v9 pak's archives go through uepak.job
+                         if not (archives and name.endswith('.ushaderbytecode'))})   # shared archives routed through uepak.job
         except (OSError, ValueError) as e: print(f'[RED] /{r}: the pak cannot be read ({e}); its shaders are left out', flush=True)
-    chunks, taken, folders = {}, {p for p, _ in paks}, {os.path.dirname(p) for p, _ in paks}
+    chunks, taken, folders = {}, {p for p, _, _ in paks}, {os.path.dirname(p) for p, _, _ in paks}
     for p, r in sorted(((p, r) for p, r in files if p.endswith('.utoc') and os.path.dirname(p) in folders), key=lambda x: uepak.mount_order(x[0])):
         try: t = uepak.Toc(p)
         except (OSError, ValueError, struct.error) as e: print(f'[RED] /{r}: the container cannot be read ({e}); its shaders are left out', flush=True); continue

@@ -622,6 +622,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
 - **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
 
+### Unreal Engine short version 8 paks and version 1 shader archives
+
+- **Symptom:** the shader split finds no Unreal shaders on a game whose paks hold shared shader archives. The footer reader skips these version 8 paks with `no pak footer`.
+- **Cause:** the short version 8 footer has four compression method slots, putting its magic `0xac` bytes from the end. Each entry uses one byte for the method and has a 50-byte stored header. The version 1 shader archive stores a flat table of SHA-1 hashes, offsets, sizes and frequencies followed by stored or Zlib-compressed LSLG records.
+- **Fix:** `uepak.py` selects the entry layout from the footer and routes shared archives to the decode step. A pak can also supply inline shaders, so `shader_split.py` scans its inline files and takes the shared shaders from the decode step. The version 1 reader bounds each record and normalizes it to a decoded version 2 archive with no shader maps.
+- **Found on:** Minecraft Dungeons (`01006C100EC08000`). All 5 base pak indexes and all 46 update pak indexes parse to their declared end. The base game's two archives contain 8,398 records and the full split writes 7,853 unique shaders. For v1769472 the two archives contain 15,596 records and the full split with local DLC writes 14,903 unique shaders. Bloodstained: Ritual of the Night's PR reports 33,767 archive records. Its full split with the combined reader is open. [Minecraft Dungeons PR #1270](https://github.com/seedds/nxnative/pull/1270) · [Bloodstained PR #2652](https://github.com/seedds/nxnative/pull/2652)
+
 ### Unreal Engine frozen pak indices (version 9)
 
 - **Symptom:** the shader split finds no shaders although the RomFS contains Unreal `.pak`, `.utoc` and `.ucas` files; `uepak.footer` reports `no pak footer` on paks whose footer version is 9.

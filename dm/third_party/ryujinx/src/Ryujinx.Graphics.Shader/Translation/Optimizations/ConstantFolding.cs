@@ -162,9 +162,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         {
                             int vecIndex = operation.GetSource(2).Value;
                             int elemIndex = operation.GetSource(3).Value;
-                            int cbufOffset = vecIndex * 4 + elemIndex;
+                            long cbufOffset = (long)(uint)vecIndex * 4 + (uint)elemIndex;
 
-                            operation.TurnIntoCopy(Cbuf(cbufSlot, cbufOffset));
+                            // nxnative: a word past the 64 KiB bank reads 0, as a read past the size the game bound does (the uniform bounds zero it there).
+                            // Packed as it was, its high bits ran into the operand's slot field, and the read stretched another slot to hundreds of MB
+                            operation.TurnIntoCopy(cbufOffset < Constants.ConstantBufferSize / 4 ? Cbuf(cbufSlot, (int)cbufOffset) : Const(0));
                         }
                     }
 

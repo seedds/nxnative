@@ -33,6 +33,8 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 
 `python3 scripts/build_ipa_from_nsp.py <folder> --platform mac` builds the Mac shaders and the host and prints the run command. Headless, through `DM_CTL`: the title is up about 40 s after boot and `A` starts the game. The prologue cinematic follows, about 4 minutes on every run (a save holds no progress yet, and skipping it was not tried), then the tutorial's first question, about 300 s after boot: `LDown`, `A` answers no. Shots of the swap chain hold the picture in their top-left quarter. A `shot` takes about 165 ms: a hitch every few seconds in a run that takes them is the shot's.
 
+DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_KEYS=30:A`, 75 seconds, screenshots at 60 and 68 seconds. The title only creates and resizes the network on this build; the prologue evaluates MetalFX at 960x540 to 960x540, sRGB RGBA8 colour into RGBA16F with an R8 reactive mask. This exposed the [alpha pass taking the original builder's size](../../../docs/reference/rendering.md#metalfxs-dlss-stand-in-preserves-alpha). With its extent matched to RGB, the candidate reached frame 3042 with no new red-line kinds and both screenshots within the harness thresholds against main `233e68b8`. The harness reports PASS with a known baseline issue: profile depth `gl` disagrees with observed `zero`, so this is not clean archive/profile validation. Both runs were marked busy; their frame-time numbers are not a performance comparison. The temporary regression route was not retained.
+
 ## Found on this game
 
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
@@ -43,6 +45,7 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 - [A GPU copy into a texture uploaded from its storage uploaded all of it again](../../../docs/reference/nvn-objects.md#a-gpu-copy-into-a-texture-uploaded-from-its-storage-uploaded-all-of-it-again): 7.6 s and 10 s frames at the prologue's scene changes; measured on a build of our fork, not on `main`.
 - [The graphics scale does not follow the operation mode](../../../docs/reference/services.md#the-graphics-scale-does-not-follow-the-operation-mode): the 768x432 scene docked; measured on a build of the PR author's fork, not on `main`.
 - [The DLSS network resized](../../../docs/reference/rendering.md#the-dlss-network-resized): `nvnDlssNetworkResize`.
+- [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx): its DLSS bias mask, which only a red line reported, reaches MetalFX as its reactive mask. Resolved; no visible change in the prologue. DLSS here is 960x540 to 960x540, and the mask (R8, 0 or 255) marks a band at the top and the bottom of the cinematic's frame and the near cockpit edges that cross it, never the characters: the fur trails pull request #1904 put down to the mask were not seen with or without it.
 - [TXD through a uniform register kept no handle](../../../docs/reference/shaders.md#txd-through-a-uniform-register-kept-no-handle): 281 pixel shaders, the fur shells among them.
 - [A handle pair ORed sampler word first](../../../docs/reference/shaders.md#a-handle-pair-ored-sampler-word-first): 62 pixel shaders.
 - [NVN2 compute's separate handles in c\[0\]](../../../docs/reference/shaders.md#nvn2-computes-separate-handles-in-c0): `1002069a331ceded`, dispatched in the prologue.
@@ -53,7 +56,6 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 ## Open
 
 - [The picture](#the-picture): the 3D stayed at 768x432 docked because the host answered graphics scale tier 1 there; the host now answers tier 0, which gives 960x540 (measured on a build of the PR author's fork, not on `main`). Whether a console renders above that is not known.
-- `[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on`.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
 - A `pso_manifest.tsv` has not been recorded; the later levels and combat, and iOS, not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.

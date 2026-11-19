@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RyuProjects>$(MSBuildThisFileDirectory)../../../third_party/ryujinx/src</RyuProjects>
+    <RyuSrc Condition="'$(RyuSrc)' == ''">$(RyuProjects)/Ryujinx.Graphics.Shader</RyuSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RyuSrc)/**/*.cs" Exclude="$(RyuSrc)/obj/**;$(RyuSrc)/bin/**" />
+    <ProjectReference Include="$(RyuProjects)/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="$(RyuProjects)/Spv.Generator/Spv.Generator.csproj" />
+    <EmbeddedResource Include="$(RyuSrc)/CodeGen/Glsl/HelperFunctions/*.glsl">
+      <LogicalName>Ryujinx.Graphics.Shader.CodeGen.Glsl.HelperFunctions.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

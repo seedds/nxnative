@@ -25,6 +25,8 @@ A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 
 
 All 16,888 translate (current). One shader has 10 texture handles the translator cannot resolve (`Failed to find handle source for bindless access of type "texture2D"`) and one logs `Invalid reduction type: F32FtzRn`; neither has been traced to anything visible (open).
 
+- **Resolved: duplicate representative labels (2026-11-17, [issue #2946](https://github.com/seedds/nxnative/issues/2946)).** Since `8d62601f` the split of the registered 1.0 (dump) files stopped at the shader split. A fresh full split keeps all 16,888 map rows with the same multiset of package, stage and key, and every key the profile registered; only 36 rows move, all in two `main` BNSH blocks. Five rows change at `0x2183000` and 31 at `0x218a000`. Overall, 6 change only their `#var` source label and 30 change their package index (16 of those with their label). Every other row, `shader_facts.tsv`, `shader_pairs.tsv` and `pso_pairs.tsv` (where the profile has one) are unchanged. The refreshed map is the split's, byte for byte, and passes the packer's strict comparison. The registered v131072 executable yields 96 embedded occurrences across 40 keys. The full control sections and code are byte-identical within all 22 duplicate-key groups. The PR author packed the registered build on an Apple M2 Pro with macOS 27.2.1 and Xcode 27.2, then let it boot into a 3D scene with no input. One sync wait timed out during loading in that run. Gameplay and iPhone validation remain open for this refresh. Shared mechanism: [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
+
 ## Rendering
 
 - The battle map renders at 1024x576 and DLSS, on MetalFX here, takes it to 2048x1152 ([NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx)), which is scaled to the 3840x2160 window. The network's size follows the display ([The display's largest buffer](../../../docs/reference/services.md#the-displays-largest-buffer)).
@@ -54,12 +56,13 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 
 - Nothing past the first map has been played on this build.
 - `stage 1 cb4 has no uniform buffer bound`, once a run, with no effect seen.
-- MetalFX's jitter sign and DLSS's bias mask are unchecked; the bias mask is only logged. No ghosting has been seen so far.
+- MetalFX's jitter sign is unchecked, and what this game's DLSS bias mask holds has not been looked at (it reaches MetalFX as its reactive mask: [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx)). No ghosting has been seen so far.
 - An IPA: the 16 GB alias region is over iOS's limit, as for [Splatoon Raiders](../0400380020056000/README.md).
 - `dm/games/profile_guess.py` does not recognise the SDK's `Generic` version name.
 
 ## Found on this game
 
+- [The Switch 2's order inside a GOB](../../../docs/reference/nvn-objects.md#the-switch-2s-order-inside-a-gob): its native SDK 22.2.0 driver confirms the owning-device layout flag; its main initializes device flags `0x400` (offline evidence, not a gameplay retest).
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses) and [IMAD.HI adds a register pair, and IMAD.X its carry](../../../docs/reference/shaders.md#imadhi-adds-a-register-pair-and-imadx-its-carry): the dark map.
 - [Pending clears land before a compute dispatch](../../../docs/reference/rendering.md#pending-clears-land-before-a-compute-dispatch): battles and scene changes blown white.
 - [NVN2 compute reads its workgroup counts at c0 + 4](../../../docs/reference/shaders.md#nvn2-compute-reads-its-workgroup-counts-at-c0--4).

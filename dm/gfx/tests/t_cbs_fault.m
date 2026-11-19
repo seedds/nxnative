@@ -48,6 +48,31 @@ int main(void) { @autoreleasepool {
     cbs_feedback(many, error(FAULT), "many");
     for (int i = 0; i < CBS_REPORTS + 4; i++) { cbs_note(a); cbs_feedback(cbs_take(), error(FAULT), "repeat"); }
     CHECK(g_cbs_failures == 6 + CBS_REPORTS + 4 && tally("aaaa_b")->failed == 2 + CBS_REPORTS + 4, "failures go on being counted after the reports stop");
+    // Zero GPU addresses (za_check): each command buffer keeps those handed to Metal while it was encoded, its failure prints them, and the next one starts with none
+    za_shader((__bridge const void *)a, "aaaa_b"); za_check(0x10000060000ull, "fragment table slot", 3); l = cbs_take();
+    CHECK(l && l->nz == 0, "a real allocation's address is not noted"); free(l);
+    uint64_t za0 = g_za_total;
+    za_check(0, "fragment table slot", 3); za_check(64, "index buffer", -1); l = cbs_take();
+    CHECK(l && l->nz == 2 && strstr(l->z[0], "fragment table slot 3 = 0 (") && strstr(l->z[0], "last game shader aaaa_b") && strstr(l->z[1], "index buffer -1 = 0x40") && g_za_total == za0 + 2,
+          "a zero address and a small one are noted with the slot and the last game shader");
+    cbs_feedback(l, error(FAULT), "zero addresses");
+    l = cbs_take(); CHECK(l && l->nz == 0, "the next command buffer starts with none"); free(l);
+    for (int i = 0; i < ZA_SHOW + 3; i++) za_check(0, "compute table slot", i);
+    l = cbs_take(); CHECK(l && l->nz == ZA_SHOW + 3 && strstr(l->z[ZA_SHOW - 1], "compute table slot 3 = 0"), "past ZA_SHOW they are counted, the first kept"); free(l);
+    {   // Mesh borrows compute reflection: only vb_info remains device-backed among the geometry helpers.
+        nvn_refl rf = {.nb = 6}; uint64_t slots[6] = {0};
+        for (int i = 0; i < 5; i++) rf.b[i] = (nvn_rbind){.kind = NVN_RB_GEOMETRY, .reg = i, .aid = i};
+        rf.b[5] = (nvn_rbind){.kind = NVN_RB_SBUFP, .aid = 5};
+        g_args_mesh = GEO_MESH_GS_SLOT; za0 = g_za_total;
+        args_check_addresses(&rf, slots, sizeof slots, 2); l = cbs_take();
+        CHECK(g_za_total == za0 + 2 && l && l->nz == 2 && strstr(l->z[0], "slot 3 = 0") && strstr(l->z[1], "slot 5 = 0"),
+              "mesh still reports missing vb_info and guest storage, not its local scratch"); free(l);
+        slots[3] = slots[5] = 0x10000060000ull; za0 = g_za_total;
+        args_check_addresses(&rf, slots, sizeof slots, 2);
+        CHECK(g_za_total == za0, "valid mesh bindings need no compute scratch addresses");
+        g_args_mesh = 0; args_check_addresses(&rf, slots, sizeof slots, 2);
+        CHECK(g_za_total == za0 + 4, "compute still reports every missing geometry scratch address"); free(cbs_take());
+    }
     // DM_RES_CHECK: an object retired behind an earlier fence than a binding's goes while that binding is on the GPU
     mtl_init(); g_res_check_on = 1;
     id<MTLBuffer> early = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared], fine = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]; res_add(early); res_add(fine);

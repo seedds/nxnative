@@ -157,8 +157,12 @@ else:
 def stat(path, **kwargs):
     resolved = _resolve(path)
     if not resolved: return _os.stat(path, **kwargs)
-    image, relative = resolved; k = image.find(relative)
-    a, b, _, _, t, _ = image.entry(k); s = image.stat
+    image, relative = resolved
+    return _entry_stat(image, image.find(relative))
+
+
+def _entry_stat(image, k):
+    _, b, _, _, t, _ = image.entry(k); s = image.stat
     return SimpleNamespace(st_mode=(_stat.S_IFREG | 0o444) if t else (_stat.S_IFDIR | 0o555), st_size=b if t else 0,
                            st_ino=k + 1, st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
                            st_ctime=s.st_ctime, st_ctime_ns=s.st_ctime_ns, st_atime=s.st_atime, st_atime_ns=s.st_atime_ns)
@@ -175,13 +179,13 @@ def isfile(path):
     except OSError: return False
 
 
-class _Entry:
-    def __init__(self, parent, name): self.name, self.path = name, _os.path.join(parent, name)
-    def stat(self, **kwargs): return stat(self.path)
-    def is_dir(self, **kwargs): return isdir(self.path)
-    def is_file(self, **kwargs): return isfile(self.path)
+class _Entry:   # an image entry as the scan that listed it found it: its type, size and inode come from that image's index, not from the path resolved again
+    def __init__(self, parent, name, image, k): self.name, self.path, self._image, self._k = name, _os.path.join(parent, name), image, k
+    def stat(self, **kwargs): return _entry_stat(self._image, self._k)
+    def is_dir(self, **kwargs): return not self._image.entry(self._k)[4]
+    def is_file(self, **kwargs): return bool(self._image.entry(self._k)[4])
     def is_symlink(self): return False
-    def inode(self): return self.stat().st_ino
+    def inode(self): return self._k + 1
     def __fspath__(self): return self.path
 
 
@@ -198,7 +202,7 @@ def scandir(path):
     resolved = _resolve(path)
     if not resolved: return _os.scandir(path)
     image, relative = resolved
-    return _Scan(_Entry(path, name) for name, _ in image.children(image.find(relative)))
+    return _Scan(_Entry(path, name, image, k) for name, k in image.children(image.find(relative)))
 
 
 def walk(top, topdown=True, onerror=None, followlinks=False):

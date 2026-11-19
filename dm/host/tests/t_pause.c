@@ -30,7 +30,7 @@ static int finish(cs_t *c) {
     return !c->failed;
 }
 
-enum { M_GUEST, M_SVC_FIRST, M_HOST_FIRST };
+enum { M_GUEST, M_SVC_FIRST, M_HOST_FIRST, M_HOST_EXIT };
 typedef struct {
     thr_t t; pthread_t th; int mode;
     _Atomic uint64_t progress;
@@ -49,6 +49,10 @@ static void *worker_main(void *p) {
     pthread_setspecific(g_keythr, &w->t);
     w->t.mport = pthread_mach_thread_np(pthread_self());
     atomic_store(&w->ready, 1);
+    if (w->mode == M_HOST_EXIT) {   // host code until released, then ExitThread (thread_exit frees a closed object nobody holds)
+        while (!atomic_load(&w->release)) atomic_store_explicit(&w->progress, atomic_load_explicit(&w->progress, memory_order_relaxed) + 1, memory_order_relaxed);
+        thread_exit(&w->t);
+    }
     if (w->mode == M_HOST_FIRST) {   // host code: the handler declines to stop it
         while (!atomic_load(&w->enter_go) && !atomic_load(&w->stop)) atomic_store_explicit(&w->progress, atomic_load_explicit(&w->progress, memory_order_relaxed) + 1, memory_order_relaxed);
     }
@@ -67,9 +71,9 @@ static wk_t *worker_start(int mode) {
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     t->started = 1; t->prio = 44; t->core = 1; t->mask = 2;
     w->regs[99] = 0x7fff0000;   // the gate block's sp
-    pthread_mutex_lock(&G);
+    g_lock();
     t->handle = h_new(O_THREAD, t); t->all = g_all; g_all = t;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     if (pthread_create(&w->th, NULL, worker_main, w)) { perror("pthread_create"); exit(2); }
     t->pt = w->th;
     if (!WAIT_UNTIL(atomic_load(&w->ready), 2000)) { fprintf(stderr, "worker did not start\n"); exit(2); }
@@ -79,10 +83,10 @@ static void worker_end(wk_t *w) {
     atomic_store(&w->stop, 1);
     pthread_join(w->th, NULL);
     thr_t *t = &w->t;
-    pthread_mutex_lock(&G);
+    g_lock();
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
     g_h[t->handle - 0x1000].type = O_FREE; g_h[t->handle - 0x1000].obj = NULL;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv);
     free(w);
 }
@@ -112,7 +116,7 @@ static int pause_end(req_t *q, int ms, int64_t *rc) {
     int ok = WAIT_UNTIL(atomic_load(&q->done), ms);
     if (!ok) {
         activity(q->w, 0);
-        pthread_mutex_lock(&G); q->w->t.paused = 1; pthread_cond_broadcast(&q->w->t.pcv); pthread_mutex_unlock(&G);
+        g_lock(); q->w->t.paused = 1; pthread_cond_broadcast(&q->w->t.pcv); g_unlock();
         WAIT_UNTIL(atomic_load(&q->done), 2000);
     }
     pthread_join(q->th, NULL);
@@ -228,6 +232,25 @@ static int resume_then_pause_while_handler_parked(void) {
     return finish(&c);
 }
 
+// 5. The target exits and its handle is closed while a pause waits for it (the requester lets go of G to signal and wait): the requester holds a reference,
+//    so the object outlives the loop and is freed when it ends. Before, thread_exit freed it under the requester (ASan: heap-use-after-free in svc_thread_impl)
+static int exit_and_close_during_pause(void) {
+    cs_t c = {.name = "exit_and_close_during_pause"};
+    wk_t *w = worker_start(M_HOST_EXIT); thr_t *t = &w->t; pthread_t th = w->th;
+    if (!advances(w, 2000)) fail(&c, "worker never ran");
+    req_t *q = pause_begin(w);
+    WAIT_UNTIL(atomic_load(&t->pause_req), 2000);
+    usleep(2000);   // the requester is in its loop: the handler declines host code
+    uint64_t r[32] = {t->handle}; svc_thread(0x16, r);
+    atomic_store(&w->release, 1);   // the worker exits; w (t is its first member) may be freed from here on
+    if (!WAIT_UNTIL(atomic_load(&q->done), 2000)) fail(&c, "pause did not return after the target exited");
+    else if (q->rc) fail(&c, "pause returned %#llx", (unsigned long long)q->rc);
+    pthread_join(q->th, NULL); pthread_join(th, NULL);
+    g_lock(); for (thr_t *u = g_all; u; u = u->all) if (u == t) fail(&c, "the exited, closed thread was not freed"); g_unlock();
+    pthread_cond_destroy(&q->t.cv); pthread_cond_destroy(&q->t.pcv); free(q);
+    return finish(&c);
+}
+
 int main(void) {
     alarm(120);   // a bug in the test must not hang the run
     setenv("DM_PREEMPT", "0", 1);
@@ -239,6 +262,7 @@ int main(void) {
     ok &= stale_after_svc_pause();
     ok &= stale_after_svc_enter_pause();
     ok &= resume_then_pause_while_handler_parked();
+    ok &= exit_and_close_during_pause();
     printf("%s\n", ok ? "all pause tests passed" : "pause tests FAILED");
     return ok ? 0 : 1;
 }

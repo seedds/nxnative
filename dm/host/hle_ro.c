@@ -63,7 +63,8 @@ static void capture_nro(const uint8_t *h, uint32_t n, const uint8_t sha[32]) {
     fflush(NULL); _exit(0);
 }
 
-HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten offline (loader.c): found by the image's SHA-256, relocated against the loaded modules, its init called",
+// LoadModule and UnloadModule run the module's init / fini, the game's own code: on the caller's stack (hle.h HLE_FORCE_DIRECT)
+HLE_FORCE_DIRECT("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten offline (loader.c): found by the image's SHA-256, relocated against the loaded modules, its init called",
           Result, h_ro_LoadModule, void *mod, const void *image, void *buf, size_t size, int flag) {
     const uint8_t *h = image;
     if (!h || memcmp(h + 0x10, "NRO0", 4)) return RO_NOT_NRO;
@@ -91,13 +92,13 @@ HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten o
 }
 
 // SDK 19 adds a bool after the bind flag (Hades II imports only this form, for its Epic Online Services NRO)
-HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmib", "load an NRO rewritten offline (as the form without the bool)", Result, h_ro_LoadModule2, void *m, const void *image, void *buf, size_t size, int flag, int b) {
+HLE_FORCE_DIRECT("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmib", "load an NRO rewritten offline (as the form without the bool)", Result, h_ro_LoadModule2, void *m, const void *image, void *buf, size_t size, int flag, int b) {
     (void)b; return h_ro_LoadModule(m, image, buf, size, flag);
 }
 
 HLE_FORCE("_ZN2nn2ro8FinalizeEv", "Initialize opened no ldr:ro session", void, h_ro_Finalize, void) { }
 
-HLE_FORCE("_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE", "unload an NRO: its fini, then out of the symbol lookups", void, h_ro_UnloadModule, void *mod) {
+HLE_FORCE_DIRECT("_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE", "unload an NRO: its fini, then out of the symbol lookups", void, h_ro_UnloadModule, void *mod) {
     module_t *m = module_from(mod);
     if (!m || !m->loaded) { LOG("[RED] ro::UnloadModule: not a loaded module (%p)", mod); return; }
     if (m->fini) ((void (*)(void))(m->base + m->fini))();   // as RoModule::CallFini

@@ -5,6 +5,7 @@ import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 EXIT = (0x000fea0003800000, 0x000000000000794d)   # hi, lo: EXIT
 # SUATOM.ADD.U32 R12, [R3], R12 on the 1D image whose handle is word 12 of c0 (AMapC0: image slot 1), as the game encodes it but unpredicated (PT)
 SUATOM = (0x002ea200001ee000, 0x00000c0c030c7593)
@@ -27,11 +28,8 @@ class Translated(unittest.TestCase):
             self.res = json.loads((work / 'k.res.json').read_text())   # the translator's own report of the shader
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            xc = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
-            if atomics:   # as dmsh_build runs it for image atomics: MSL 3.1 and the native-atomic checks and rewrites (dmsh_atomic.py)
-                import dmsh_atomic
-                xc = dmsh_atomic.cross_args(xc, str(work / 'k.spv'))
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *xc, str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *dmsh_chain.CROSS_MSL, str(work / 'k.spv')], capture_output=True, text=True)
+            import dmsh_atomic   # with image atomics: the native-atomic checks and rewrites, as dmsh_build makes them (dmsh_atomic.py)
             self.assertEqual(r.returncode, 0, r.stderr)
             return dmsh_atomic.check_msl(r.stdout) if atomics else r.stdout
 
@@ -140,6 +138,20 @@ class Suatom(Translated):
         self.assertIn('cp_i_cb3_C_r32ui', msl)
         self.assertIn('atomic_fetch_add', msl)
 
+    # The register forms (0x394, 0x396, 0x3a0; SULD / SUST 0x998..0x99e): the handle in Rc (64..72), read here from c[3][0] by a MOV as Orbitals' (Unreal Engine 5.6) global
+    # compute shaders read their ShaderPrint counter's (45389d82b79dbf0c +0x1850, its handle register R20 there). The handle names the binding as the bound form's word would
+    MOV_R12_C3 = (0x003fde0000000f00, 0x00c00000000c7a02)   # MOV R12, c[3][0]
+
+    def test_handle_in_a_register(self):   # SUATOM.ADD.U32 R12, [R12], R24 on a 1D buffer image, as the game encodes it with its handle in R12
+        msl = self.translate(inst(*self.MOV_R12_C3) + inst(0x00321e00001ee00c, 0x200000180c0c7394) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('cp_i_cb3_', msl)   # bank 3, word 0: the binding the bound form names
+
+    def test_reduction_with_its_handle_in_a_register(self):   # SURED.OR.U32 above with its handle in R12 (0x3a0)
+        msl = self.translate(inst(*self.MOV_R12_C3) + inst(0x000fe2000310e00c, 0xa00000010800759f - 0x59f + 0x3a0) + inst(*EXIT))
+        self.assertIn('atomic_fetch_or', msl)
+        self.assertIn('cp_i_cb3_', msl)
+
     def test_sured_takes_its_operation(self):   # SURED.OR.U32 as Yoshi and the Mysterious Book's compute shaders encode it, in bank 3
         self.assertIn('atomic_fetch_or', self.translate(inst(0x000fe2000310e000, 0xa0c002010800759f) + inst(*EXIT)))
 
@@ -207,7 +219,7 @@ class PixelCovered(unittest.TestCase):
             if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(m.returncode, 0, m.stderr)
             return m.stdout, r.stdout + r.stderr
 
@@ -344,6 +356,28 @@ class StageMemory(Translated):
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
 
+    def test_subword_inputs_are_unsigned_and_keep_the_byte_offset(self):
+        # Fast Fusion reads packed U16 entries with mode 0x34. The high half of word 12 must stay unsigned, as must an U8 input at its own byte within the word.
+        for mode, offset, bits in ((0x34, 0x22, 16), (0x30, 0x23, 8)):
+            read = (self.INPUT[0] & ~0xff00 | mode << 8, self.INPUT[1] & ~(0xffffff << 40) | offset << 40)
+            src = self.msl(read, self.KEEP_R19)
+            self.assertIn('[12]', src)
+            self.assertRegex(src, rf'uint\(as_type<int>\(\w+\)\) >> uint\({(offset & 3) * 8}\)')
+            self.assertIn(f'& {(1 << bits) - 1};', src)
+
+    def test_subword_payload_stores_use_their_width(self):
+        for mode, bits in ((0xb4, 16), (0xb0, 8)):
+            write = (self.PAYLOAD[0] & ~0xff00 | mode << 8, self.PAYLOAD[1])
+            self.assertRegex(self.msl(write), rf'void dmsh_shared_store{bits}_\d+\(')
+
+    def test_subword_vertex_records_keep_the_offset_within_the_word(self):
+        # A U16 output read at byte 0x202 must read the high half of its remapped SoA word, not its low half.
+        read = (self.READBACK[0] & ~0xff00 | 0xb400, self.READBACK[1] & ~(0xffffff << 40) | 0x202 << 40)
+        src = self.translate(inst(*read) + inst(*self.KEEP_R8) + inst(*EXIT), stage_memory=[0, 0x10, 0x120, 0x400, 0x200, 6, 128 * 24], shared=0x800)
+        self.assertIn('[72]', src)
+        self.assertIn('>> uint(16)', src)
+        self.assertIn('& 65535;', src)
+
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
 
@@ -390,6 +424,16 @@ class BarrierMoves(Translated):
         plain = self.translate(inst(*SUATOM) + inst(*EXIT))
         moved = self.translate(inst(*self.SAVE) + inst(*self.RESTORE) + inst(*SUATOM) + inst(*self.RESTORE_PLAIN) + inst(*EXIT))
         self.assertEqual(moved, plain)
+
+
+class Yield(Translated):
+    """YIELD (0x946) in Resident Evil 4's encoding, as its 21 compute shaders with it have it (after MEMBAR; ERRBAR, before a branch): per thread it does nothing"""
+    YIELD = (0x000fde0003800000, 0x0000000000007946)
+
+    def test_no_effect_on_the_shader(self):
+        plain = self.translate(inst(*SUATOM) + inst(*EXIT))
+        yielded = self.translate(inst(*SUATOM) + inst(*self.YIELD) + inst(*EXIT))
+        self.assertEqual(yielded, plain)
 
 
 class LdcIndexedBank(Translated):
@@ -593,13 +637,13 @@ class Pokopia(Translated):
         msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_NH1)
         negated = re.search(rf'float (_\d+) = -{b_hi};', msl)
         self.assertTrue(negated, msl)
-        self.assertIn(f'fma({a_lo}, {negated.group(1)}, 0.0)', msl)   # low lane: A.lo * -B.hi
-        self.assertIn(f'fma({a_hi}, {b_lo}, 0.0)', msl)               # high lane: A.hi * B.lo
+        self.assertIn(f'fma(half({a_lo}), half({negated.group(1)}), half(0.0))', msl)   # low lane: A.lo * -B.hi
+        self.assertIn(f'fma(half({a_hi}), half({b_lo}), half(0.0))', msl)               # high lane: A.hi * B.lo
 
     def test_hfma2_without_nh1_keeps_the_lanes(self):
         msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_PLAIN)
-        self.assertIn(f'fma({a_lo}, {b_lo}, 0.0)', msl)
-        self.assertIn(f'fma({a_hi}, {b_hi}, 0.0)', msl)
+        self.assertIn(f'fma(half({a_lo}), half({b_lo}), half(0.0))', msl)
+        self.assertIn(f'fma(half({a_hi}), half({b_hi}), half(0.0))', msl)
 
     # FSEL keeps each operand's modifiers (161,748 of the game's register forms negate B): "x or -x" from one register is how its character and prop lighting picks a sign
     FSEL_NEG_B = (0x000fe40000000000, 0x8000000c0c0c7208)   # FSEL R12, P0, R12, -R12

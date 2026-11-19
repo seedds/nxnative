@@ -1,6 +1,6 @@
 # Catherine: Full Body (`0100BF00112C0000`)
 
-Update 1.0.1a (v131072) over the base game, SDK 8.2.1. Atlus's GFD engine (the game's code name xrd758) on NVN, with CRI middleware. Modules `main`, `subsdk0` (GLSLC, the run-time shader compiler; the same build as Link's Awakening's, [01006BB00C6F0000](../01006BB00C6F0000/README.md)), `subsdk1` (the SDK's movie library) and `sdk`; `sdk` and the movie module are the builds Super Smash Bros. Ultimate runs ([01006A800016E000](../01006A800016E000/README.md)). Plays on the iPhone; 30 fps, as on the Switch. The README lists its IPA at about 14 GB.
+Update 1.0.1a (v131072) over the base game, SDK 8.2.1. Atlus's GFD engine (the game's code name xrd758) on NVN, with CRI middleware. Modules `main`, `subsdk0` (GLSLC, the run-time shader compiler; the same build as Link's Awakening's, [01006BB00C6F0000](../01006BB00C6F0000/README.md)), `subsdk1` (the SDK's movie library) and `sdk`; `sdk` and the movie module are the builds Super Smash Bros. Ultimate runs ([01006A800016E000](../01006A800016E000/README.md)). The Mac build runs at 60 fps. The earlier iPhone build was tested at the Switch's 30 fps. The README lists its IPA at about 14 GB.
 
 Brought up on the Mac: the ATLUS logo, the title, the puzzle type choice, the Golden Playhouse intro, the anime opening (CRI movies with sound) and the first Nightmare stage with Vincent under control, no red line in a 6-minute run.
 
@@ -12,10 +12,13 @@ Brought up on the Mac: the ATLUS logo, the title, the puzzle type choice, the Go
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the block of the other games without virtual address memory: 256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region |
 | Node area cut and 2 MB alignment for regions of 4 MB and more (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `5fd4f531…` | made for Super Smash Bros. Ultimate on the same build, now from the SDK-wide rules; this game has no virtual address memory and never makes an address region |
 | The 2 shaders it compiles at boot | captured on the Mac (`hle_glslc.c`) | compiled at run time by its own GLSLC from GLSL sources in `main`, captured on the Mac as Three Houses' are ([010055D009F78000](../010055D009F78000/README.md)) |
+| GFD startup rate and game timing at 60 fps | [`patches.py`](patches.py) | see [Frame rate](#frame-rate) |
 
 ## Frame rate
 
-- 30 fps, as on the Switch (present interval 2). GPU p50 4.7 ms, CPU about a fifth of a core on the Mac.
+- Stock 1.0.1a runs at 30 fps with present interval 2. `nnMain` supplies 30 to GFD at `main+0x9f304`. GFD's initializer (`main+0x304ca0`) stores the rate for animation and selects interval 1 for 60, or 2 otherwise. The game also reads its own timing flag (`main+0xf6320`): the tick callback (`main+0x9c900`) chooses one or two ticks per frame and the sequencer (`main+0x92f90`) chooses a step of 1/60 or 1/30 seconds. Other readers halve per-frame animation steps and double frame-based durations in 60 Hz mode. Forcing interval 1 alone leaves those readers in 30 Hz mode. [Published interval-only mod and timing notes](https://github.com/ChanseyIsTheBest/NX-60FPS-RES-GFX-Cheats/tree/main/titles/0100BF00112C0000)
+- The rewriter sets the startup rate to 60 and selects the game's 60 Hz timing branch together. The startup function and tick callback match by fingerprint, and the callback's direct call identifies the short flag getter. These settings are game-bound. The host already paces interval 1, and the SDK has no control over the game's fixed steps. The 1.0.1a code matches and produces identical output with a different NSO build ID. A match failure leaves the stock timing in place and prints a red line.
+- Matched 1.0.1a runs on an M6 Mac mini (macOS 27.2.1, Xcode 27.2, shader chain `690a7f403c92`) reached the first Nightmare on fresh saves. The probe after the tick store (`main+0x9c93c`) read two ticks per frame at 30 fps and one at 60, with the clock around tick 1,800 in both runs at 31.7 s. Across the first Nightmare samples at 120–150 seconds of presents, median frame time went from 33.34 to 16.67 ms, GPU time per frame from 6.82 to 5.42 ms, and CPU use from 40% to 52% of one core (median of the host's samples). A separate 60 fps run let the anime opening finish and reached Golden Playhouse. The matched runs shared the damaged RomFS warning and the same rendering artifacts. The 60 fps mode has yet to be tested on iPhone.
 
 ## Memory
 
@@ -58,6 +61,7 @@ Brought up on the Mac: the ATLUS logo, the title, the puzzle type choice, the Go
 
 - From a fresh save, `DM_KEYS="5:A*25/2,60:Plus*14/4,61:Y*14/4,62:A*14/4"` skips the intro scenes into the first Nightmare stage (about frame 3,300); `120:LUp~0.4*40/1.5` then climbs.
 - `smoke.tsv` uses only `DM_KEYS="5:A*25/2"`, then waits through the entire anime intro. Golden Playhouse is visible by frame 3,600; a host that flags the last picture stays black.
+- [PR #2872](https://github.com/seedds/nxnative/pull/2872) ran that fresh-save route on 1.0.1a with an M6 Mac mini, macOS 27.2 and Xcode 27.2. Main `f15d6585`, CV only, and CV with a 20 µs spin used the same modules, shaders and prebuilt pipelines. Across frames 4800–6000 the mean per waited handoff was 60.5, 56.3, and 8.2 µs respectively. The two busier intervals ending at frames 5700 and 6000 recorded 4,302–4,432, 2,760–2,856, and 2,416–2,559 wakeups/s, with CPU power of 0.47–0.48, 0.43–0.44, and 0.47–0.48 W. All three held 30 fps with a frame-time p99 of about 33.4 ms. The spin improved latency but took CPU power back to main's range, so the host uses CV only. The local build accounted for a different capture address for the same shader and flagged one corrupt movie (`mov429.usm`). None of the runs opened it.
 
 ## Found on this game
 
@@ -69,6 +73,7 @@ General host changes first needed here; each applies to every game:
 - **`nv12-uv-stride` in the movie decoder's output format** (`md_format` in `hle_movie.c`): [Output format keys (`md_format`)](../../../docs/reference/movies.md#output-format-keys-md_format).
 - **The end-of-stream flag on an output without a picture, and no reorder queue for H.264 POC type 2** (`md_pump` in `hle_movie.c`, `hle_movie_avc.c`): [No picture carries the end-of-stream flag](../../../docs/reference/movies.md#no-picture-carries-the-end-of-stream-flag).
 - **`nn::settings::GetAvailableLanguageCodeCount`** (`hle_sdk16.c`): same section.
+- **A same-core handoff waits without a timer per handoff** ([host scheduler](../../../docs/reference/threads.md#a-same-core-handoff-waits-without-a-timer-per-handoff)). NX18 found that `main thread` and `job_update_0` (both pinned to core 0) trade a lock 5,000–6,200 times a second in some scenes. On its iPhone 18 Pro Max, CPU power rose from 0.03–0.05 to 0.47 W at 30 fps when the storm occurred. On its Mac (frames 5100–6000), the change reduced wakeups from about 5,670 to 600/s. These are measurements of the fork.
 
 ## Open
 

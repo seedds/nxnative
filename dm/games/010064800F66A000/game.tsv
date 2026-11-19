@@ -36,6 +36,9 @@ sys_resource	0x0
 # The game selects near-zero NVN depth at run time (the packaged run's own line: "this run needs … depth near=0"), so the offline
 # pipeline archive must be built with main0_z vertex entries; without the key it was made for near=-w and matched none of the run's bases.
 depth_mode	zero
+# The game steps by elapsed time. Its interval of two display ticks is the effective cap below 60 fps.
+present_interval	display
+fps_target	60
 
 # ---- Shader split ----
 shader_groups	/WillowGame/=willowgame

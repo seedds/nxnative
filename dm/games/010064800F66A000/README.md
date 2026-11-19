@@ -1,17 +1,16 @@
 # Borderlands: Game of the Year Edition (`010064800F66A000`)
 
-1.0.2 (v131072). SDK 9.3.0. Gearbox's Unreal Engine 3 (package version 595) on NVN, with FMOD for sound. Played through the first Fyrestone checkpoint on the Mac, then saved and returned to a lobby that read the character from disk. The game runs at its 30 fps cap. iOS is untested.
+1.0.2 (v131072). SDK 9.3.0. Gearbox's Unreal Engine 3 (package version 595) on NVN, with FMOD for sound. Played through the first Fyrestone checkpoint on the Mac, then saved and returned to a lobby that read the character from disk. Gameplay targets 60 fps by default. iOS is untested.
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
 | `depth_mode zero` | [`game.tsv`](game.tsv) | the game selects near-zero NVN depth, so the offline pipeline archive must be built with `main0_z` vertex entries |
+| `present_interval display`, `fps_target 60` | [`game.tsv`](game.tsv) | display pacing raises gameplay to 60 fps and keeps the player's 30 fps choice available |
 | A package's chunk chain ends at a zero tail | `shader_split.py` `ue3_body` | all 922 cooked packages are padded to 32 KB and failed with `no compressed chunk at 0x…`; see [Files and shaders](#files-and-shaders) |
 | Part B's location from control +0x748, and c1 from +0x700 | `dmsh_build.py` `vertex_ab` | the old placement check aborted on the first record with c1 before B; see [Files and shaders](#files-and-shaders) |
 | `ListOpenUsers` reports only users with an open handle | `hle_account.c` | the game reads its player's user id once, 20 ms after it maps a gamepad; see [Saves](#saves) |
-
-No frame-rate key: the game asks for present interval 2 on a 60 Hz tick and runs at 30 fps, as on the Switch.
 
 ## Files and shaders
 
@@ -40,8 +39,9 @@ No frame-rate key: the game asks for present interval 2 on a 60 Hz tick and runs
 
 ## Frame rate
 
-- The original headless M1 Max run measured p50 33.4 / p95 39.3 ms about a minute into the app bundle's payload. The game uses present interval 2 on a 60 Hz tick.
-- No `fps_target` row: above 30 the engine's own limiter paces it, and nothing here was measured above 30.
+- The stock game asks for NVN present interval 2 on a 60 Hz tick. `UGameEngine::GetMaxTickRate` allows 62 fps in Fyrestone, so the present interval sets the effective 30 fps ceiling. `appUpdateTimeAndHandleMaxTickRate` computes `GDeltaTime` from elapsed time during gameplay. The profile uses the [existing display-paced frame cap](../../../docs/reference/frame-rate.md#a-present-interval-that-is-the-games-only-limit-in-display-mode) to present once per tick. `DM_FPS_TARGET=30` selects the two-tick cap. The profile names no executable addresses.
+- Mac check on Apple M6, macOS 27.2.1, with the same save and a 19-second sample of the in-engine Fyrestone intro. Stock averaged 27.7 fps including a 0.94-second stall, with 33.37 ms median frame time. The profile default averaged 59.6 fps at 16.66 ms median, with the world clock advancing 19.93 seconds in 19.96 seconds of real time. The 30 fps override averaged 30.0 fps at 33.37 ms median. All three runs loaded the same save and logged no `[RED]` lines.
+- After the ECHO tutorial handed control to the player, a separate stationary first-person run averaged 59.9 fps (16.67 ms median and 17.16 ms p95). The world advanced 19.97 seconds in 19.98 real seconds, with no `[RED]` lines.
 
 ## Mac routes
 

@@ -20,6 +20,7 @@
 // Environment: DM_GL_LOG=1 logs object creation and the deletion of shaders and programs; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/sampler_aniso.h"
 #include "../nvn/host_msl.h"
 #include "gl_aliases.h"
 #import <Metal/Metal.h>
@@ -650,13 +651,18 @@ static MTLTextureSwizzleChannels tex_swz(const tex_t *t) {
 }
 // The Metal sampler for parameters p sampling texture t: sampler states are shared, one per distinct set (the texture's level count and target are part of it)
 static id<MTLSamplerState> samp_state(const samp_p *p, const tex_t *t) {
-    typedef struct { GLint minf, magf, ws, wt, wr, cmp; float lo, hi, aniso, b, bias; } skey;
+    typedef struct { GLint minf, magf, ws, wt, wr, cmp; float lo, hi, aniso, b, bias; unsigned af; } skey;   // af: the anisotropy given to Metal (DM_ANISO, below)
     static struct { skey k; __strong id<MTLSamplerState> s; } cache[256]; static int n;
     int mips = t->levels > 1;
     float top = mips ? (float)umin((uint32_t)t->maxlv, (uint32_t)t->levels - 1) : 0;
     skey k = {p->minf, p->magf, p->ws, p->wt, t->target == GL_TEXTURE_CUBE_MAP ? GL_CLAMP_TO_EDGE : p->wr, p->cmode ? p->cfunc : 0,
               mips ? fmaxf(0, fminf(top, p->minlod)) : 0, mips ? fmaxf(0, fminf(top, p->maxlod)) : 0, p->aniso,
               p->border[3] > 0.5f ? (p->border[0] > 0.5f ? 2.f : 1.f) : 0.f, fmaxf(-15, fminf(15, p->lodbias))};   // GL clamps the bias to GL_MAX_TEXTURE_LOD_BIAS
+    // DM_ANISO (sampler_aniso.h): raised only for a 2D or 2D-array texture sampled at more than one level (its levels and GL_TEXTURE_MAX_LEVEL), as in the NVN and Vulkan
+    // layers; otherwise the game's value. One state per parameter set (the texture's own or a bound sampler object's) and texture: the raised value is in the cache key
+    int mip = !mips || k.minf == GL_NEAREST || k.minf == GL_LINEAR ? ANISO_MIP_NONE : k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_LINEAR_MIPMAP_NEAREST ? ANISO_MIP_NEAREST : ANISO_MIP_LINEAR;
+    int min_linear = !(k.minf == GL_NEAREST || k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_NEAREST_MIPMAP_LINEAR);
+    k.af = aniso_tex_ok(t->target == GL_TEXTURE_2D || t->target == GL_TEXTURE_2D_ARRAY, mips ? (unsigned)top + 1 : 1) ? aniso_for(k.aniso, min_linear, k.magf != GL_NEAREST, mip, k.lo, k.hi, k.cmp) : aniso_clamp(k.aniso);
     for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) return cache[i].s;
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.supportArgumentBuffers = YES;
@@ -668,7 +674,7 @@ static id<MTLSamplerState> samp_state(const samp_p *p, const tex_t *t) {
     d.lodMinClamp = k.lo; d.lodMaxClamp = k.hi;   // GL_TEXTURE_MIN_LOD / MAX_LOD within the levels the texture has
     d.sAddressMode = wrap_of(k.ws); d.tAddressMode = wrap_of(k.wt); d.rAddressMode = wrap_of(k.wr);
     d.borderColor = k.b == 2.f ? MTLSamplerBorderColorOpaqueWhite : k.b == 1.f ? MTLSamplerBorderColorOpaqueBlack : MTLSamplerBorderColorTransparentBlack;
-    d.maxAnisotropy = (NSUInteger)fmaxf(1, fminf(16, k.aniso));
+    d.maxAnisotropy = k.af;
     d.lodBias = k.bias;   // added to the level of detail a sample computes, as GL adds the texture's (Metal 4: macOS and iOS 26, the host's minimum)
     if (k.cmp) d.compareFunction = (MTLCompareFunction)(k.cmp - GL_NEVER);
     id<MTLSamplerState> s = [g_dev newSamplerStateWithDescriptor:d];

@@ -1,7 +1,7 @@
 // Block-linear textures deswizzled on the GPU (nvn_deswizzle_gpu.m)
 #include <metal_stdlib>
 using namespace metal;
-struct P { ulong src_off, dst_off, base, pitch; uint row_bytes, rows, slices, th, td, gobs_x, gob2; };   // gob2: the Switch 2's order inside a GOB (nvn_gob_switch2)
+struct P { ulong src_off, dst_off, base, pitch; uint row_bytes, rows, slices, th, td, gobs_x, gob2; };   // gob2: the Switch 2's order inside a GOB (the texture's captured GOB order)
 kernel void deswz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]], constant P& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {
  uint bh = 1u << p.th, bd = 1u << p.td, gobs_x = p.gobs_x, blocks_y = (p.rows + (8u * bh) - 1u) >> (3u + p.th);
  uint tid = id.x & 31u, gob_x = id.x >> 5, gob_y = id.y, z = id.z; uint xseg = p.gob2 ? ((tid >> 4) << 1) | ((tid >> 2) & 1u) : ((tid >> 4) << 1) | ((tid >> 1) & 1u), y = (gob_y << 3) | (p.gob2 ? (((tid >> 3) & 1u) << 2) | (tid & 3u) : (((tid >> 2) & 3u) << 1) | (tid & 1u)), x = (gob_x << 6) | (xseg << 4);

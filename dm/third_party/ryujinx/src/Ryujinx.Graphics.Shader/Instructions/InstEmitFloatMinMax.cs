@@ -93,10 +93,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             srcA = context.FPAbsNeg(srcA, absoluteA, negateA, fpType);
             srcB = context.FPAbsNeg(srcB, absoluteB, negateB, fpType);
 
-            Operand resMin = context.FPMinimum(srcA, srcB, fpType);
-            Operand resMax = context.FPMaximum(srcA, srcB, fpType);
-
-            Operand res = context.ConditionalSelect(srcPred, resMin, resMax);
+            // nxnative: FMNMX orders -0 below +0 (InstEmitAluHelper.FPMinMax); DMNMX keeps the plain fmin / fmax
+            Operand res = isFP64
+                ? context.ConditionalSelect(srcPred, context.FPMinimum(srcA, srcB, fpType), context.FPMaximum(srcA, srcB, fpType))
+                : FPMinMax(context, srcPred, srcA, srcB);
 
             SetDest(context, res, rd, isFP64);
 

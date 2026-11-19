@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-# The shader build's compile cache as one file, cas.db, read and written in place. It was a folder of a few files per shader (Metroid Dread: 84,541 files), kept as a tar between builds and unpacked
+# The shader build's compile cache, one file per translation chain version (a generation): <cache folder>/cas-<chain>.db, read and written in place. It was a folder of a few files per shader (Metroid Dread: 84,541 files), kept as a tar between builds and unpacked
 # for each build that ran. Nothing is unpacked now: an entry goes in and comes out by its name, and a file a tool needs is written only then.
 # SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection (its worker processes use that one too, through this process: Served). Regression builds share their own per-game file, with read-only reuse of the player's cache.
+# Generations: a chain's build writes only its own file. Its per-shader entries never hit another chain's (their digests cover the chain), and the Metal compiles it reuses from an older generation
+# (keyed by the MSL, the convention and the compiler alone) are copied into its file when it takes them (for_chain). After a successful build the NSP script removes the other generations whole
+# (drop_generations): an old chain, a stopped build of one, or a development build of another chain is one file, removed or deleted by hand without a vacuum. cas.db, the one file from before
+# generations, holding every chain's entries, is the oldest generation and goes the same way.
 # Two tables: entry (name, the blob it names, when it was written) and blob (the bytes, once each). A library kept under its MSL's digest and under its shader's digest was one APFS clone of the other; inside
 # one file it would be two copies, so bytes are stored by their hash. A file removed from the cache gives its pages back at the next prune (incremental vacuum), with no copy of the file.
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
@@ -15,44 +19,66 @@ SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNI
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
+DBMOVED = 1032   # SQLITE_READONLY_DBMOVED, an error's sqlite_errorcode (Python 3.11+)
 READ_ONLY = None   # set only by --run: the harness supplies this module to older SQLite-based builders too
+GENERATION = re.compile(r'cas-([0-9a-f]{12})\.db')   # a chain's file in a cache folder
+LEGACY = 'cas.db'   # the one file of every chain, from before generations
+TARGETS = ('mac', 'ios')   # metallib/<target>/
+
+
+def generations(folder):
+    """The compile cache files of a cache folder, newest first (by when each was last written): cas-<chain>.db, then cas.db"""
+    folder = os.fspath(folder)
+    try: names = os.listdir(folder)
+    except OSError: return []
+    def when(p):
+        try: return max(os.path.getmtime(p + s) for s in ('', '-wal') if os.path.exists(p + s))
+        except (OSError, ValueError): return 0
+    gens = sorted((os.path.join(folder, n) for n in names if GENERATION.fullmatch(n)), key=when, reverse=True)
+    return gens + ([os.path.join(folder, LEGACY)] if LEGACY in names else [])
 
 
 class _ReadOnly:
-    """A live SQLite reader: mode=ro sees a normal build's committed WAL, never migrates, repairs or writes its database. Mutable index/stage bookkeeping is local to each build."""
-    def __init__(self, path, say):
-        self.db, self.say, self.path, self.lock = None, say, os.fspath(path), threading.RLock()
-        if not os.path.isfile(self.path): return
-        try: self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
-        except sqlite3.Error as e: self._failed(e)
+    """Live SQLite readers of other compile cache files, asked in order: mode=ro sees a writer's committed WAL, never migrates, repairs or writes them. Mutable index/stage bookkeeping is local to each build.
+    prefixes: the names they serve (an older generation serves only its Metal compiles: a per-shader entry of another chain never hits)"""
+    def __init__(self, paths, say, prefixes=('shader/', 'variant/', 'metallib/')):
+        self.say, self.lock, self.prefixes, self.dbs = say, threading.RLock(), prefixes, []
+        for p in map(os.fspath, paths):
+            if not os.path.isfile(p): continue
+            try: self.dbs.append((p, sqlite3.connect(Path(p).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)))
+            except sqlite3.Error as e: self.say(f'[RED] the read-only shader cache {p} cannot be read and is ignored: {e}')
 
-    def _failed(self, e):
-        self.say(f'[RED] the read-only shader cache {self.path} cannot be read and is ignored: {e}')
-        self.close()
+    def _failed(self, i, e):
+        p, db = self.dbs.pop(i)
+        self.say(f'[RED] the read-only shader cache {p} cannot be read and is ignored: {e}')
+        with contextlib.suppress(sqlite3.Error): db.close()
 
-    @staticmethod
-    def shared(name): return name.startswith(('shader/', 'variant/', 'metallib/')) and name != 'metallib/filled.json'
+    def shared(self, name): return name.startswith(self.prefixes) and name != 'metallib/filled.json'
 
-    def run(self, sql, *args):
+    def _each(self, sql, *args):   # each file's rows, in order
         with self.lock:
-            if self.db is None: return []
-            try: return self.db.execute(sql, args).fetchall()
-            except sqlite3.Error as e: self._failed(e); return []
+            i = 0
+            while i < len(self.dbs):
+                try: rows = self.dbs[i][1].execute(sql, args).fetchall()
+                except sqlite3.Error as e: self._failed(i, e); continue
+                i += 1; yield rows
 
     def get(self, name):
-        rows = self.run('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', name) if self.shared(name) else []
-        return bytes(rows[0][0]) if rows else None
+        if self.shared(name):
+            for rows in self._each('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', name):
+                if rows: return bytes(rows[0][0])
+        return None
 
-    def has(self, name): return self.shared(name) and bool(self.run('SELECT 1 FROM entry WHERE name=?', name))
+    def has(self, name): return self.shared(name) and any(rows for rows in self._each('SELECT 1 FROM entry WHERE name=?', name))
 
     def names(self, prefix):
-        return {n for n, in self.run('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff') if self.shared(n)}
+        return {n for rows in self._each('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff') for n, in rows if self.shared(n)}
 
     def close(self):
         with self.lock:
-            if self.db is not None:
-                with contextlib.suppress(sqlite3.Error): self.db.close()
-                self.db = None
+            for _, db in self.dbs:
+                with contextlib.suppress(sqlite3.Error): db.close()
+            self.dbs = []
 
 
 class _Files:   # an entry from or to a file, by get and put
@@ -72,9 +98,12 @@ class _Files:   # an entry from or to a file, by get and put
 
 
 class Store(_Files):
-    def __init__(self, path, say=print, *, readonly=None):
+    def __init__(self, path, say=print, *, readonly=None, older=()):
+        """readonly: another cache (a file, or a cache folder's generations) whose shared entries are read, never copied (regress.py's fallback to the player's).
+        older: the files of earlier generations of this one (for_chain), whose Metal compiles are copied into this file when they are read"""
         self.path, self.say = os.fspath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
+        self.readers, self.wal, self.opener = {}, False, threading.get_ident()   # each other thread's own connection for get, read-only (_reader), where the file's log lets a reader stand beside the writer
         self.full = False   # set by the first write that fails (a full drive): no later write is tried, and the batch it was part of is rolled back
         self.outer = False   # inside the outermost batch: SQLite may end the transaction itself on a failed write, so its own flag cannot tell
         source = readonly if readonly is not None else READ_ONLY
@@ -85,24 +114,41 @@ class Store(_Files):
             os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
             self.use_lock = open(self.path + '.lock', 'a')
             fcntl.flock(self.use_lock, fcntl.LOCK_SH)
-        self.readonly = _ReadOnly(source, say) if source else None
+        own = os.path.realpath(self.path)
+        sources = generations(source) if source and os.path.isdir(source) else [source] if source else []
+        self.readonly = _ReadOnly([p for p in sources if os.path.realpath(p) != own], say) if source else None
+        older = [p for p in map(os.fspath, older) if os.path.realpath(p) != own]
+        self.older = _ReadOnly(older, say, ('metallib/',)) if older else None
         self._open()
+
+    def _connect(self): return sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
 
     def _open(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
+        self.db = self._connect()
         try:
-            self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
-            # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
-            if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
-            else: self.db.execute('PRAGMA synchronous=OFF')
-            for s in SCHEMA: self.db.execute(s)
+            try: self._prepare()
+            except sqlite3.OperationalError as e:
+                # SQLite notes the file's inode when it opens it and refuses a write once the path names another (SQLITE_READONLY_DBMOVED, "attempt to write a readonly database").
+                # A new file on an exFAT drive under macOS 26.6.2 took another inode at SQLite's first write, past SQLite's own guard for such drives (a byte written at open; why it missed is open,
+                # docs/reference/packing.md). The file is opened again, once, so that SQLite notes the number it now keeps. A file that moves again fails as before
+                if getattr(e, 'sqlite_errorcode', None) != DBMOVED: raise
+                with contextlib.suppress(sqlite3.Error): self.db.close()
+                self.db = self._connect(); self._prepare()
         except sqlite3.DatabaseError as e:
             if not self._damage(e): raise
+
+    def _prepare(self):   # the file's settings and tables; each step does nothing to a file that has them, so a reopened file takes it again
+        self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
+        # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
+        self.wal = self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        self.db.execute('PRAGMA synchronous=NORMAL' if self.wal else 'PRAGMA synchronous=OFF')
+        for s in SCHEMA: self.db.execute(s)
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False
         self.say(f'[RED] the shader compile cache {self.path} is damaged, and is made anew: {e}')
+        self._close_readers()
         with contextlib.suppress(sqlite3.Error): self.db.close()
         for suffix in ('', '-wal', '-shm', '-journal'):
             with contextlib.suppress(FileNotFoundError): os.unlink(self.path + suffix)
@@ -116,15 +162,47 @@ class Store(_Files):
                 if not self._damage(e): raise
                 return []
 
-    def has(self, name): return bool(self._run('SELECT 1 FROM entry WHERE name=?', name)) or bool(self.readonly and self.readonly.has(name))
+    def has(self, name):
+        return bool(self._run('SELECT 1 FROM entry WHERE name=?', name)) or any(r is not None and r.has(name) for r in (self.older, self.readonly))
 
-    def get(self, name):   # an entry's bytes, None when there is none
-        rows = self._run('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', name)
-        return bytes(rows[0][0]) if rows else self.readonly.get(name) if self.readonly else None
+    @contextlib.contextmanager
+    def _reader(self):
+        """This thread's own read-only connection, or None when the read belongs on the one connection: in the thread that opened the store (a store used by one thread opens no
+        other connection), inside a batch (the lock is then this thread's, and its writes are not yet the file's), or on a file without the write-ahead log. The lock is taken to
+        ask, so a batch under way in another thread is over first, as the read waited for it before: what the connection then reads is everything written up to here. Entries read
+        one after the other on the one connection come out at 190 MB/s (a library's bytes lie on a chain of pages, read one by one), eight threads with a connection each read
+        780 MB/s: the library image's write (shader_lib.py write) reads its 300,000 files so"""
+        me, reader = threading.get_ident(), None
+        with self.lock:
+            if me != self.opener and self.wal and not self.outer and not self.db.in_transaction:
+                reader = self.readers.get(me)
+                if reader is None:
+                    try: db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+                    except sqlite3.Error: pass
+                    else: reader = self.readers[me] = (db, threading.RLock())
+                if reader: reader[1].acquire()   # reserve under the registry lock: recovery cannot retire it before the query begins
+        try: yield reader[0] if reader else None
+        finally:
+            if reader: reader[1].release()   # before a failed query takes self.lock again through _run
+
+    def get(self, name):
+        """An entry's bytes, None when there is none. One an older generation holds is copied into this file first, so that it stays when that generation goes"""
+        sql, rows = 'SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', None
+        with self._reader() as db:
+            if db is not None:
+                try: rows = db.execute(sql, (name,)).fetchall()
+                except sqlite3.Error: pass   # asked again below, on the one connection, which also finds a damaged file
+        if rows is None: rows = self._run(sql, name)
+        if rows: return bytes(rows[0][0])
+        if self.older and (data := self.older.get(name)) is not None:
+            self.put(name, data); return data
+        return self.readonly.get(name) if self.readonly else None
 
     def names(self, prefix):   # the set of names starting with prefix
         local = {r[0] for r in self._run('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff')}
-        return local | self.readonly.names(prefix) if self.readonly else local
+        for r in (self.older, self.readonly):
+            if r is not None: local |= r.names(prefix)
+        return local
 
     def put(self, name, data, when=None):
         """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it, and the batch this write was part of is rolled back"""
@@ -170,15 +248,20 @@ class Store(_Files):
     def prune_shaders(self, keep, since):
         """Remove the shader/<64 hex digits>/ entries not in keep and all written before since, and the bytes nothing names any more, giving their pages back. Other names stay.
         Returns (shaders removed, bytes of their sources and reflection: their libraries are shared with metallib/)"""
-        rows = self._run("SELECT e.name, e.mtime, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>='shader/' AND e.name<'shader0'")
-        newest, size, names = {}, {}, {}
-        for name, mtime, n in rows:
+        # The names and times first, from the entry table alone: reading each entry's size with them walked the blob table too, 13 s of every build of Ocarina of Time (an 11.5 GB
+        # file, 128,544 such entries) that had nothing to remove, the builds that reuse every shader included. The sizes are read for what goes
+        rows = self._run("SELECT name, mtime FROM entry WHERE name>='shader/' AND name<'shader0'")
+        newest, names = {}, {}
+        for name, mtime in rows:
             m = SHADER_ENTRY.match(name)
             if not m: continue
             d = m.group(1); newest[d] = max(newest.get(d, 0), mtime); names.setdefault(d, []).append(name)
-            if not name.endswith('.metallib'): size[d] = size.get(d, 0) + n
         gone = [d for d in newest if d not in keep and newest[d] < since]
         if not gone: return 0, 0
+        size = {}
+        for d in gone:
+            size[d] = sum(n for name, n in self._run('SELECT e.name, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>=? AND e.name<?', f'shader/{d}/', f'shader/{d}0')
+                          if not name.endswith('.metallib'))
         with self.lock, self.batch():
             self.db.executemany('DELETE FROM entry WHERE name=?', ((n,) for d in gone for n in names[d]))
             self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
@@ -196,9 +279,36 @@ class Store(_Files):
                 if not self._damage(e): raise
         self._run('PRAGMA incremental_vacuum')
 
+    def holds(self, prefix): return bool(self._run('SELECT 1 FROM entry WHERE name>=? AND name<? LIMIT 1', prefix, prefix + '\U0010ffff'))
+
+    def take(self, path, prefix):
+        """Copy the entries of the cache file path whose names start with prefix into this one, as they are (bytes, names, times); an entry this file holds stays. Returns the number taken"""
+        hi = prefix + '\U0010ffff'
+        with self.lock:
+            self.db.execute('ATTACH DATABASE ? AS old', (os.fspath(path),))
+            try:
+                with self.batch():
+                    self.db.execute('INSERT OR IGNORE INTO main.blob(hash, data) SELECT b.hash, b.data FROM old.entry e JOIN old.blob b ON b.id=e.blob WHERE e.name>=? AND e.name<?', (prefix, hi))
+                    n = self.db.execute('INSERT OR IGNORE INTO main.entry(name, blob, mtime) SELECT e.name, m.id, e.mtime FROM old.entry e JOIN old.blob b ON b.id=e.blob JOIN main.blob m ON m.hash=b.hash '
+                                        'WHERE e.name>=? AND e.name<?', (prefix, hi)).rowcount
+            finally: self.db.execute('DETACH DATABASE old')
+        return 0 if self.full else n
+
+    def _close_readers(self, thread=None):   # every thread's connection, or one thread's
+        with self.lock:
+            readers = [self.readers.pop(thread)] if thread in self.readers else [] if thread is not None else list(self.readers.values())
+            if thread is None: self.readers = {}
+            for db, reading in readers:   # keep the registry locked while retiring: no connection to the old file may be published during recovery
+                with reading, contextlib.suppress(sqlite3.Error): db.close()   # an active execute/fetchall finishes before its connection is closed
+
+    def forget(self): self._close_readers(threading.get_ident())   # a thread that reads no more (Served's, when its worker is gone)
+
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
-        with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
-        if self.readonly: self.readonly.close()
+        with self.lock:
+            self._close_readers()   # first: the last connection to close is the one that folds the log
+            with contextlib.suppress(sqlite3.Error): self.db.close()
+        for r in (self.readonly, self.older):
+            if r: r.close()
         if self.use_lock:
             self.use_lock.close(); self.use_lock = None
 
@@ -292,7 +402,9 @@ class Served:
         return Remote(self.pipes[i][1])
 
     def _serve(self, conn):
-        with contextlib.suppress(_Gone, EOFError, OSError): self._calls(conn, False)
+        try:
+            with contextlib.suppress(_Gone, EOFError, OSError): self._calls(conn, False)
+        finally: self.store.forget()
 
     def _calls(self, conn, inside):   # answers a worker's calls: until its end closes, or inside its batch until the batch ends
         s = self.store
@@ -396,6 +508,54 @@ def adopt(old, path, say=print):
 
 
 def exists(path): return os.path.isfile(os.fspath(path))
+
+
+def chain_file(folder, chain): return os.path.join(os.fspath(folder), f'cas-{chain}.db')
+
+
+def for_chain(folder, chain, say=print, **kw):
+    """The cache of chain's build in a cache folder: its own file, cas-<chain>.db, over the folder's other generations (their Metal compiles, copied in when read)"""
+    return Store(chain_file(folder, chain), say, older=generations(folder), **kw)
+
+
+def _file_size(p): return sum(os.path.getsize(p + s) for s in ('', '-wal') if os.path.isfile(p + s))
+
+
+def drop_generations(folder, chain, say=print, remove=None):
+    """After a successful build of chain: remove the cache folder's other generations whole, the files of older chains and cas.db (the one file from before generations).
+    The build copied in every Metal compile it reused; a target it compiled nothing for (iOS after a Mac-only build, the Mac after an iPhone-only one) first takes the compiles of the newest
+    other generation that holds some, the work its next build of that target can reuse. Nothing goes without the chain's own file, or when copying fails (a full drive).
+    remove: what takes a file away (the NSP script's: into the build folder's obsolete/), else it is deleted. Returns the names of the files removed"""
+    cur = chain_file(folder, chain)
+    others = [p for p in generations(folder) if os.path.realpath(p) != os.path.realpath(cur)]
+    if not others or not os.path.isfile(cur): return []
+    store = Store(cur, say)
+    try:
+        for t in TARGETS:
+            prefix = f'metallib/{t}/'
+            if store.holds(prefix): continue
+            for p in others:
+                src = _ReadOnly([p], say)
+                try: has = bool(next(src._each('SELECT 1 FROM entry WHERE name>=? AND name<? LIMIT 1', prefix, prefix + '\U0010ffff'), None))
+                finally: src.close()
+                if has:
+                    n = store.take(p, prefix)
+                    if n: say(f'kept {n:,} {t} Metal compiles of {os.path.basename(p)}: this build compiled none for {t}')
+                    break
+        if store.full: return []
+    finally: store.close()
+    gone, size = [], 0
+    for p in others:
+        n = _file_size(p)
+        try:
+            for s in ('', '-wal'):
+                if os.path.exists(p + s): (remove or os.unlink)(p + s)
+            for s in ('-shm', '-journal', '.lock'):
+                with contextlib.suppress(FileNotFoundError): os.unlink(p + s)
+        except OSError as e: say(f'[RED] could not remove the old shader compile cache {p}: {e}'); continue
+        gone.append(os.path.basename(p)); size += n
+    if gone: say(f'removed old shader compile caches {", ".join(gone)} ({size / 1e9:.2f} GB){" to obsolete/" if remove else ""}')
+    return gone
 
 
 def main():

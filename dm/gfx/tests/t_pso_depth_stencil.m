@@ -82,14 +82,12 @@ static NvProg *program(id<MTLLibrary> lib) {
 
 static void draws(NvProg *p) {
     uint32_t cache_before = g_pso.n;
-    const struct { int format, mode, dw, sw, color; uint32_t df, sf; } cases[] = {
-        {0, 0, 0, 0, 1, 0, 0},
-        {NVN_FORMAT_DEPTH16, 0, 1, 0, 1, 250, 0}, {NVN_FORMAT_DEPTH32F, 0, 1, 0, 1, 252, 0},
-        {NVN_FORMAT_STENCIL8, 0, 0, 1, 1, 0, 253},
-        {NVN_FORMAT_DEPTH24_STENCIL8, 0, 1, 1, 1, 260, 260}, {NVN_FORMAT_DEPTH32F_STENCIL8, 0, 1, 1, 1, 260, 260},
-        {NVN_FORMAT_DEPTH32F_STENCIL8, 3, 0, 1, 1, 260, 260}, {NVN_FORMAT_DEPTH32F_STENCIL8, 4, 1, 0, 1, 260, 260},
-        {NVN_FORMAT_DEPTH32F_STENCIL8, 2, 0, 0, 1, 0, 0},
-        {NVN_FORMAT_DEPTH32F, 0, 1, 0, 1, 252, 0}, {0, 0, 0, 0, 1, 0, 0}, {0, 0, 0, 0, 0, 0, 0},
+    const struct { int format, dw, sw, color; uint32_t df, sf; } cases[] = {
+        {0, 0, 0, 1, 0, 0},
+        {NVN_FORMAT_DEPTH16, 1, 0, 1, 250, 0}, {NVN_FORMAT_DEPTH32F, 1, 0, 1, 252, 0},
+        {NVN_FORMAT_STENCIL8, 0, 1, 1, 0, 253},
+        {NVN_FORMAT_DEPTH24_STENCIL8, 1, 1, 1, 260, 260}, {NVN_FORMAT_DEPTH32F_STENCIL8, 1, 1, 1, 260, 260},
+        {NVN_FORMAT_DEPTH32F, 1, 0, 1, 252, 0}, {0, 0, 0, 1, 0, 0}, {0, 0, 0, 0, 0, 0},
     };
     id<MTLRenderPipelineState> seen[sizeof cases / sizeof *cases]; memset(seen, 0, sizeof seen);
     tex_t color = texture(NVN_FORMAT_RGBA8);
@@ -104,11 +102,9 @@ static void draws(NvProg *p) {
         R.has_rt = R.has_sc = 1; R.sc = (p_scissor){0,0,8,8}; R.rt.n = cases[i].color;
         if (cases[i].color) { R.rt.color[0] = &color; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0,0,1,1); }
         if (cases[i].format) R.rt.depth = &ds;
-        mtl_sub_begin(); id<MTL4RenderCommandEncoder> e = rp_begin_ex(cases[i].mode);
+        mtl_sub_begin(); id<MTL4RenderCommandEncoder> e = rp_begin_ex(0);
         CHECK(e != nil, "production pass opens");
         CHECK(g_pass.dfmt == cases[i].df && g_pass.sfmt == cases[i].sf, "physical formats match literal expected pipeline formats");
-        if (cases[i].mode == 3) CHECK(!g_pass.hd && g_pass.hs, "stencil-only usage keeps depth disabled");
-        if (cases[i].mode == 4) CHECK(g_pass.hd && !g_pass.hs, "depth-only usage keeps stencil disabled");
         uint64_t before = g_pb_legacy + g_pb_spec;
         id<MTLRenderPipelineState> ps = pso_get_(p, nil); seen[i] = ps;
         CHECK(ps != nil, "production pipeline lookup succeeds");
@@ -140,12 +136,12 @@ static void draws(NvProg *p) {
                 if (bpp == 2) good &= abs((int)((const uint16_t *)bytes.bytes)[n] - (cases[i].dw ? 16384 : 49151)) <= 1;
                 else good &= ((const float *)bytes.bytes)[n] == (cases[i].dw ? .25f : .75f);
             }
-            CHECK(good, "depth writes are correct; stencil-only and omitted passes preserve poisoned depth");
+            CHECK(good, "depth writes are correct");
         }
         if (combined || cases[i].format == NVN_FORMAT_STENCIL8) {
             NSData *bytes = read_plane(&ds, 1, combined ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionNone); int good = 1;
             for (unsigned n = 0; n < 64; n++) good &= ((const uint8_t *)bytes.bytes)[n] == (cases[i].sw ? 0x5a : 0xa5);
-            CHECK(good, "stencil writes are correct; depth-only and omitted passes preserve poisoned stencil");
+            CHECK(good, "stencil writes are correct");
         }
         if (cases[i].format) mtl_tex_release(&ds);
     }

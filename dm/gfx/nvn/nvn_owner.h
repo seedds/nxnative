@@ -8,11 +8,14 @@
 //           submission) in a list from least to most recently used. Past NGHOST entries, the least recently used goes once it is idle (unused for GHOST_IDLE frames or
 //           GHOST_IDLE_SUBS submissions): on a put, and at each submission's commit (own_ghost_trim); an entry in use stays however many there are. A stale view's entry goes
 //           with its place in the list (own_view_drop_stale)
-//   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost
+//   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost; and the live serials of each memory pool
+//               (the pool recorded at initialization), whose entries the pool's Finalize ends (own_pool_finalize_locked)
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
 //   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
 //   sharing     alias_key (pool, offset, description) → the texture that holds those bytes (own_alias_*): NVN textures over the same storage with the same description are one
-//               texture. Kept resident by the table; an entry goes when its pool is finalized (own_alias_drop_pool_locked) or a new texture takes its bytes over (own_alias_publish).
+//               texture. Kept resident by the table; an entry goes when its pool is finalized (own_pool_finalize_locked), a new texture takes its bytes over (own_alias_publish)
+//               or another texture drew over them and it has not been used since (own_alias_dead_locked). The first and the last take the serial entries that name the
+//               texture with it: its storage is gone, or another texture's.
 //               With it: an index by pool and 64 KB cell (the takeover's candidates, the image families' lookup), the submission of each key's last lookup, and the set of its textures
 //   waiting     retired objects an entry still holds (own_retire_locked), retained until the last entry lets them go
 // Every live entry and every texture pin counts its object, and each parent of a view, in the live held count; every ghost entry in the ghost held count. The sharing table holds its
@@ -65,8 +68,6 @@ enum { NGHOST = 512,             // ghost entries kept once idle
 // Lookups (borrowed, see above)
 const void *own_live_ref(uint64_t k);       // the live entry
 const void *own_resolve_ref(uint64_t k);    // live, then ghost (a use of the ghost entry), then a texture pin
-int own_ghost_has(uint64_t k);               // takes g_smu: k has a ghost entry (a look, not a use: its place in the list stays). The replay layer's view cache (vc_set_for)
-int own_ghost_has_locked(uint64_t k);        // the same, g_smu held (vc_ghost_sweep)
 static inline id serial_get(uint64_t k) { return (__bridge id)own_live_ref(k); }
 static inline id tex_get(uint64_t k) { return (__bridge id)own_resolve_ref(k); }
 
@@ -94,18 +95,37 @@ int own_view_drop_stale(uint64_t k, id view);        // a view no longer valid: 
 // An upgrade (a texture made again with more usage): every name of `from`, the serial tables, the pins and the sharing table, moves to `to` in place (a new epoch); then `put` (when not
 // nil) is published under serial unless the rename already named it there (an sRGB / linear twin passes its view made again on `to`). One hold of g_smu. → whether serial was one of from's names
 int own_upgrade(id from, id to, uint64_t serial, id put);
+// Shared textures another one drew over (nvn_mtl.m's tu_pass, nvn_owner.m says why). The replay layer keeps two stamps of a texture it covers, in its own clock (0: none)
+typedef struct { uint32_t use, wr; } own_use;   // its last use (a read or a write) and its last write by the GPU
+typedef int (*own_use_fn)(id o, own_use *u);    // o's stamps: 1; 0 for a texture the release does not cover (it is never released, and its writes count for nothing)
+typedef struct { uint32_t n, serials, pinned; uint64_t bytes; } own_dead_stats;   // released, serial entries (live and ghost) they took with them, candidates a pin kept
+// Each entry use_of covers whose last use is `idle` or more before `now`, that no lookup found in the last ALIAS_IDLE submissions and no pin holds, and whose bytes another
+// covered entry of its pool wrote after that last use, goes, max of them at most: from every serial entry that names it or a view of it (each a note), then from the sharing table
+// (retired). use_of is asked of every entry. *serials (malloc'ed, the caller frees it; NULL when none) lists the serials whose entries went, *nserials of them. Caller holds g_smu
+own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use_of, uint32_t max, uint64_t **serials, uint32_t *nserials);
 // Caller holds g_smu
-uint32_t own_alias_drop_pool_locked(const void *pool);        // a pool's Finalize: its entries go (retired, own_hook_drop; a new epoch). → how many
+// A pool's Finalize: its sharing-table entries go (retired, own_hook_drop; a new epoch), so do the entries of its live texture objects, whatever they hold, and every serial entry,
+// live or ghost, that names one of those textures, one of `also` (may be NULL) or a part of one (own_hook_parts), or a view of one (each a note). → how many sharing-table entries
+uint32_t own_pool_finalize_locked(const void *pool, CFSetRef also);
 void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_key *k, id o));   // the entries that start at off in the pool (its cell of the index)
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
-typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total
+typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken, pool_entries, looks; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total, serial entries that went with their pools, entries takeovers looked at
 own_alias_stats own_alias_stats_locked(void);
-uint32_t own_alias_unref_locked(void);                        // entries no live or ghost entry resolves to (a walk: the memory report)
+// The entries only the sharing table keeps: no live or finalized serial, view or pin holds their texture (entry_holds, tex_object_pinned). Bytes count each texture once
+// (allocatedSize, several keys can name one); writable_bytes is the part made to be drawn into or written by shaders, whose content the pool may not have; oldest_idle is the
+// longest any of them has gone without a lookup, in submissions (issue #2629: how much of a long session's memory growth they are). A walk: the memory report
+typedef struct { uint32_t entries; uint64_t bytes, writable_bytes, oldest_idle; } own_alias_unheld;
+own_alias_unheld own_alias_unheld_locked(void);
 
 // Retirement eligibility (see above). Caller holds g_smu
 int own_retire_locked(id o);    // a retired resource whose fence has passed: 1, it may leave the residency set; 0, an entry holds it: the owner keeps it (the caller drops only its reference)
 int own_keeps_locked(id o);     // o stays resident whatever its entries do: pinned or shared
 int own_object_free(id o);      // takes g_smu: no entry, pin or view's entry holds o (the replay layer may write it over: a package's spare texture)
+int own_holds_locked(const void *o);   // an entry, a pin or the sharing table holds the object at o (or a view of it); by address alone. Caller holds g_smu
+// The objects that left their last holder (entry, pin, view's entry or the sharing table) since the last take, for the replay layer's texture view cache, which keeps views of an
+// object while the owner holds it (vc_commit). An object may be listed again or held again since: the caller checks own_holds_locked. → 1 when more went than the list holds (the
+// caller checks all it keeps); *n the count, *list valid while g_smu stays held. Caller holds g_smu
+int own_gone_take_locked(const void *const **list, unsigned *n);
 
 // Live texture objects. Caller holds g_smu
 void own_tex_live_put_locked(const tex_t *t);   // mtl_tex_init
@@ -135,6 +155,7 @@ void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost));
 void own_hook_drop(id o, int keep_resident);   // an object the owner lets go: released after the submission in flight (keep_resident: it stays in the residency set, as something else holds it)
 uint64_t own_hook_submission(void);            // the submission being encoded (g_fence + 1): a lookup's mark, which ALIAS_IDLE and GHOST_IDLE_SUBS count from
 uint64_t own_hook_frame(void);                 // the frame being replayed (presents so far): a ghost entry's use, which GHOST_IDLE counts from
+void own_hook_parts(id o, void (^add)(id part));   // the textures an entry's object stands for besides itself (a packaged texture's), which entries may hold directly
 
 // ---- Queries and seams for the tests (t_serial_owner links the owner alone; the replay layer does not call these). Caller holds g_smu
 const void *own_live_ref_locked(uint64_t k);

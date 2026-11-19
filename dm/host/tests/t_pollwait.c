@@ -1,7 +1,10 @@
 // Short timed waits as polls, through real thread SVCs on one guest thread.
 // Drive the run/gap clock explicitly: a CI deschedule longer than SPIN_GAP_NS
 // legitimately resets the run, so 20 ms of wall time need not include a backoff.
-// Host wait deadlines still use the real clock and pthread timed waits.
+// Host condition waits still use the real clock and pthread timed waits. Sleep
+// requests are observed without waiting: the frozen poll clock would otherwise
+// make sleep_precise repeat each real sleep until its iteration limit, which
+// exhausted the watchdog on CI.
 #include "../dm.h"
 #include <assert.h>
 #include <stdatomic.h>
@@ -10,6 +13,13 @@
 
 static _Atomic uint64_t poll_clock;
 static uint64_t test_now_ns(void) { return atomic_load(&poll_clock); }
+static unsigned sleep_requests;
+static int test_nanosleep(const struct timespec *request, struct timespec *remaining) {
+    (void)remaining;
+    assert(request->tv_sec == 0 && request->tv_nsec > 0 && request->tv_nsec < 1000000000);
+    sleep_requests++;
+    return 0;
+}
 static _Thread_local struct timespec wait_start;
 static int test_clock_gettime(clockid_t clock, struct timespec *ts) {
     int r = clock_gettime(clock, ts);
@@ -31,10 +41,12 @@ static int test_timedwait(pthread_cond_t *cv, pthread_mutex_t *mutex, const stru
 #define now_ns test_now_ns
 #define clock_gettime test_clock_gettime
 #define pthread_cond_timedwait test_timedwait
+#define nanosleep test_nanosleep
 #include "../hle_thread.c"
 #undef now_ns
 #undef clock_gettime
 #undef pthread_cond_timedwait
+#undef nanosleep
 
 static _Atomic uint32_t mutex_word, condition_key;
 static uint32_t me_handle;
@@ -71,19 +83,23 @@ static void sleep_run(int64_t ns, int steps, int expect_backoff) {
     atomic_fetch_add(&poll_clock, 30000);   // guest work ends the previous run
     uint64_t b0 = backoffs();
     for (int i = 0; i < steps; i++) {
+        unsigned s0 = sleep_requests;
         uint64_t r[32] = {(uint64_t)ns}; svc_thread(0x0B, r);
         assert(backoffs() == b0);
+        assert(sleep_requests > s0);
         atomic_fetch_add(&poll_clock, 10000);
     }
+    unsigned s0 = sleep_requests;
     uint64_t r[32] = {(uint64_t)ns}; svc_thread(0x0B, r);   // a short sleep becomes the back-off's
     assert(backoffs() == b0 + (expect_backoff ? 1 : 0));
+    assert(sleep_requests > s0);
 }
 static void *signaller(void *unused) {
     (void)unused;
-    pthread_mutex_lock(&G);
-    while (!waiter_ready) pthread_cond_wait(&ready_cv, &G);
+    g_lock();
+    while (!waiter_ready) g_cond_wait(&ready_cv, NULL);
     assert(g_wait && g_wait->wkind == 2 && g_wait->wkey == (uint64_t)&condition_key);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     uint64_t r[32] = {(uint64_t)&condition_key, 1}; svc_thread(0x1D, r);
     return NULL;
 }

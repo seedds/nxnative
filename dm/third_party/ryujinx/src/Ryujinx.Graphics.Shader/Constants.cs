@@ -18,6 +18,11 @@ namespace Ryujinx.Graphics.Shader
         public const int NxUniformSlots = 14;
         public const int NxUniformSizesBank = 25;
 
+        // nxnative: compute's canonical c[0] uniform descriptors (dmsh_abi.h DMSH_C0_CS_UBO / C0_ROW / C0_CS_UBO_SLOTS).
+        public const int NxComputeUniformBase = 528;
+        public const int NxComputeUniformStride = 16;
+        public const int NxComputeUniformSlots = 16;
+
         // nxnative: buffer texture offsets (TranslationFlags.MetalBufferImageBias). Metal creates a buffer texture only at an aligned offset of its buffer, and an Apple GPU
         // addresses a view below that alignment from the aligned boundary below its offset, so each buffer texture's view starts at that boundary and each access adds
         // the elements in between, a u32 the host puts in the table of bank 26 (dm/gfx/nvn/dmsh_abi.h DMSH_TBIAS_BANK, kind DMSH_KIND_TBIAS), in uint4s: one entry for
@@ -25,5 +30,11 @@ namespace Ryujinx.Graphics.Shader
         // entries. Those past NxBufferImageBiases are accessed unchanged
         public const int NxBufferImageBiasBank = 26;
         public const int NxBufferImageBiases = 512;
+
+        // nxnative: storage bounds (TranslationFlags.MetalStorageBounds). A storage buffer whose address the shader takes from a game uniform slot or the push constants
+        // (c[3] and up) is bounded by the memory the host bound there, two u32 a storage buffer slot in the table of bank 27 (dm/gfx/nvn/dmsh_abi.h DMSH_SBLEN_BANK, kind
+        // DMSH_KIND_SBLEN), in uint4s: the words readable before the address, then that count plus the words from the address on. Slot s is at u32 2s and 2s + 1
+        public const int NxStorageLengthsBank = 27;
+        public const int NxStorageLengthSlots = 32;
     }
 }

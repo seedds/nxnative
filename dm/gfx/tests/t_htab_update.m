@@ -91,7 +91,7 @@ static void compute_case(NvShader *cs, id<MTLComputePipelineState> pso, int reve
     CHECK(p[4]==(reverse?1:0)&&p[5]==(reverse?0:1)&&p[6]==0&&p[7]==1,"second dispatch reads the new handle after inline update");
 }
 int main(void) { @autoreleasepool {
-    alarm(45);setenv("DM_NVN_TBDR","0",1);setenv("DM_PSO_ARCHIVE","off",1);setenv("DM_PSO_PREBUILD","0",1);setenv("DM_PSO_MANIFEST","off",1);setenv("DM_PSO_USER","/dev/null",1);setenv("DM_PSO_RECORD","/dev/null",1);
+    alarm(45);setenv("DM_PSO_ARCHIVE","off",1);setenv("DM_PSO_PREBUILD","0",1);setenv("DM_PSO_MANIFEST","off",1);setenv("DM_PSO_USER","/dev/null",1);setenv("DM_PSO_RECORD","/dev/null",1);
     mtl_init();NSError *error=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct TP {uint n;ulong seen;array<texture2d<float>,1> e;};struct SP {uint n;ulong seen;array<sampler,1> e;};\n"

@@ -120,6 +120,34 @@ class States(Base):
         self.assertEqual(os.listdir(self.root), [])
 
 
+class Write(Base):   # dmsh_build.py writes the image from functions that read its outputs out of the shader cache: called ahead of the writer on a few threads, taken in order
+    def test_functions_are_called_ahead_and_written_in_order(self):
+        import threading
+        data = {f'{i:04x}_b.metallib': os.urandom(1 + i % 97) for i in range(300)}
+        threads, calls, lock = set(), [], threading.Lock()
+        def source(name):
+            def read():
+                with lock: threads.add(threading.get_ident()); calls.append(name)
+                return data[name]
+            return read
+        files: dict = {n: source(n) for n in data}
+        files['path.json'] = str(self.root / 'on-disk'); (self.root / 'on-disk').write_bytes(b'from a path'); files['bytes.tsv'] = b'given'
+        shader_lib.write(files, str(self.image))
+        self.assertEqual(sorted(calls), sorted(data))   # each once
+        self.assertNotIn(threading.get_ident(), threads); self.assertGreater(len(threads), 1)
+        got = {p.name: p.read_bytes() for p in romfs.Path(str(self.image)).iterdir()}
+        self.assertEqual(got, {**data, 'path.json': b'from a path', 'bytes.tsv': b'given'})
+        plain = self.root / 'plain.img'; shader_lib.write({**data, 'path.json': b'from a path', 'bytes.tsv': b'given'}, str(plain))   # the bytes themselves, on no thread
+        self.assertEqual(plain.read_bytes(), self.image.read_bytes())
+
+    def test_a_function_that_fails_or_has_no_bytes_leaves_no_image(self):
+        def gone(): raise OSError('the cache lost it')
+        for bad, error in ((gone, 'the cache lost it'), (lambda: None, 'no bytes to write')):
+            with self.subTest(error=error), self.assertRaisesRegex(OSError, error):
+                shader_lib.write({'a_b.metallib': b'lib', 'b_b.metallib': bad, **{f'c{i}_b.metallib': (lambda: b'x') for i in range(100)}}, str(self.image))
+            self.assertFalse(self.image.exists())
+
+
 class LeaveOutPulling(Base):
     def names(self): return sorted(p.name for p in shader_lib.view(self.lib).iterdir())
 

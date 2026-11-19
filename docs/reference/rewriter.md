@@ -478,6 +478,14 @@ To enroll a cut for any game's own module:
 
 ## Stack and system registers
 
+### An x18 scratch spill overwrites a live stack temporary
+
+- **Symptom:** crackle in Super Mario Sunshine's 3D file-select menu and gameplay, with both stereo and six-channel output. The crackle is already in the PCM Hagi submits to AudioOut.
+- **Cause:** Hagi's pitch resampler restores `sp` while the tail of its 80-entry phase table is still live below it. The plain x18 stub for `csel x11,x11,x18,gt` saves two registers at `[sp-16, sp)` and overwrites entries 72–79 before Hagi reads them.
+- **Fix:** a conditional select with one x18 source can branch on the original flags. The x18 arm loads `K18` using the destination and one temporary without spilling to the guest stack. The rewriter uses this form only when every path in the unwind function overwrites the temporary before reading it or returns normally. It keeps the existing lowering when it cannot prove that a temporary is dead.
+- **Check:** on Sunshine 1.1.4, 24 of 30 synthetic resampler cases differed from the original with the old rewrite. All 30 match the original PCM and final state with the new rewrite, and all returns restore `sp`. `test_x18_select.py` checks both source positions and widths with an unmapped guest stack, and checks that live registers are rejected.
+- **Found on:** [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) ([issue #2623](https://github.com/seedds/nxnative/issues/2623#issuecomment-6949393946)).
+
 ### Stack pointer writes through x18
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py`, in a Unity / IL2CPP `main`, at an `alloca` (`mov sp, x18`).

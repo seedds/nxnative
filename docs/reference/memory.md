@@ -680,6 +680,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `check_t_zero_colour` reads every byte of poisoned colour textures after filling, including mip levels, array layers and 3D slices. `check_t_lazy_clear_order` reads back a rectangle larger than one band and checks the surrounding pixels. An isolated iPhone comparison is open.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### Guest texture source buffers accumulate within an upload batch
+
+- **Symptom:** Ocarina of Time's field load on iPhone 17 added 732 MB of zero-copy upload sources to Metal residency within a 300-frame window in [PR #2270](https://github.com/seedds/nxnative/pull/2270).
+- **Cause:** the staging budget measures private scratch buffers. It excludes the no-copy buffers that wrap guest pages and stay resident until the upload batch completes.
+- **Fix:** `DM_NVN_UPLOAD_SRC_MB` sets an opt-in budget for page-rounded source bytes. A regular upload can start a fresh batch before it wraps the source, and each batch releases its own buffers on completion. A single large texture or a sparse gather can exceed the budget. When staging splits a batch, the upload resolves its source in the new batch or uses the CPU path if wrapping fails.
+- **Check:** `check_t_upload_src` compares the batch and buffer counts at 0 and 96 MiB and reads back every texel in both runs. An isolated iPhone comparison is open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Repeated GPU out-of-memory failures end the game
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.

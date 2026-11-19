@@ -683,3 +683,11 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+
+### Unreal 4.27 shaders with 8-byte hashes, an untagged record or a version 12 pak
+
+- **Symptom:** the shader split for an Unreal 4.27 game finds no shaders or stops on the shader library: `shader library chunk … does not parse`, `pak version 12, only … are read`, or `not an LSLG record`.
+- **Cause:** Godzilla: Destroy All Monsters Melee Remastered keeps Unreal 4.27's layout with three differences: its shader library names shaders with 8-byte xxHash64 values, not the 20-byte SHA-1s of Unreal 5.0 to 5.2; its Switch shader records have no `LSLG` and stage tag in front (the code area and control section follow the same lengths as an LSLG record); its pak footer is version 12.
+- **Fix:** `uepak.py` reads a library with the hash size for which the tables end at the chunk's end (20, then 8; an 8-byte hash is padded to the 20 the archive keeps), reads a version 12 footer like 11, and `raw_record` finds an untagged record by its control magic and checked lengths. `shader_split.ue_shaders` falls back to `raw_record`, taking the stage from the archive's frequency. A record whose lengths disagree is still refused.
+- **Check:** `test_uepak_iostore.py` (library with 8-byte hashes, version 12 footer, untagged record, its refused variant, an archive of untagged records); the five new tests fail on the code before. In the game: 6,878 Mac shaders built for update 131072.
+- **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`).

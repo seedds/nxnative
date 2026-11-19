@@ -190,7 +190,7 @@ def footer(f):
     if ver == 4:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver not in (8, 9, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    elif ver not in (8, 9, 11, 12): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))}, 11 and 12 are read')
     else:
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
@@ -552,9 +552,18 @@ def io_archive(toc, i, decode, chunk=None):
     shader indices (u32): each a u32 count and its elements. Each group is one ShaderCode chunk holding its shaders end to end, Oodle-compressed as a whole when its stored size is below its raw
     size (FINAL FANTASY RESONANCE: 5,919 groups of 74,244 shaders); a shader runs to the next shader's offset in its group, or to the group's end. chunk(chunk ID) → (container, index) looks a
     group up in every container under the RomFS: a patch container's library lists the groups it did not change from the base container's"""
-    r = R(toc.read(i, decode), what=f'{toc.path}: shader library chunk {i}')
+    data = toc.read(i, decode)
+    # The hashes are 20-byte SHA-1s (FSHAHash, Unreal Engine 5.0 to 5.2: FINAL FANTASY RESONANCE) or 8-byte xxHash64s (Godzilla: Destroy All Monsters Melee Remastered, which keeps Unreal 4.27's
+    # layout otherwise): the size is the one for which the tables end exactly at the chunk's end, found by trying each. An 8-byte hash is padded with zeros to the 20 the archive keeps
+    for hs in (20, 8):
+        try: r = R(data, what=f'{toc.path}: shader library chunk {i}'); r.take('<I'); mh = r.raw(hs * r.take('<I')); nsh = r.take('<I'); sh = r.raw(hs * nsh); r.raw(12 * r.take('<i')); r.raw(8 * r.take('<i')); r.raw(8 * r.take('<i')); r.raw(16 * r.take('<i')); r.raw(4 * r.take('<i'))
+        except (ValueError, struct.error, MemoryError, OverflowError): continue
+        if r.o == len(data): break
+    else: hs = 20
+    r = R(data, what=f'{toc.path}: shader library chunk {i}')
     if r.take('<I') != 1: raise ValueError(f'{toc.path}: shader library chunk {i} is not version 1')
-    maph = r.raw(20 * r.take('<I')); nsh = r.take('<I'); shh = r.raw(20 * nsh)
+    pad = lambda b: b if hs == 20 else b''.join(b[k:k + hs] + bytes(20 - hs) for k in range(0, len(b), hs))
+    maph = pad(r.raw(hs * r.take('<I'))); nsh = r.take('<I'); shh = pad(r.raw(hs * nsh))
     gids = [r.raw(12) for _ in range(r.take('<I'))]
     maps = [r.take('<II') for _ in range(r.take('<I'))]
     n = r.take('<I'); ents = r.array('Q', n)
@@ -735,6 +744,16 @@ def lslg(s):
     c = k - 4 - ncode
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+
+def raw_record(s):
+    """A decoded Switch shader with no LSLG tag (Godzilla: Destroy All Monsters Melee Remastered, Unreal 4.27's IoStore libraries): the LSLG layout minus the 'LSLG' + stage tag prefix (a header, u32 code
+    length, the code area, u32 control length, the control section of 0x880 bytes, a tail), so the stage is the archive entry's frequency. → (control section, code area), or None if the layout differs"""
+    k = s.find(b'\x34\x12\x76\x98')
+    if k < 8 or k + 0x708 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
+    c = k - 4 - ncode
+    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
+    return s[k:k + nctl], s[c:c + ncode]
 
 CTL_NVN2 = b'\x34\x12\x76\x98\xc9\0\0\0'
 def sage_record(s):

@@ -3563,7 +3563,16 @@ def ue_shaders(d, label):
         rec = uepak.lslg(s)
         if not rec:
             sage = uepak.sage_record(s)
-            if not sage: red(f'{label}: shader {i} is neither an LSLG record nor an NVN2 one')
+            if not sage:
+                raw = uepak.raw_record(s)   # no tag at all (Godzilla's 4.27 IoStore libraries): the stage is the frequency's
+                if raw:
+                    ctl, code = raw; st = uepak.FREQ.get(fr)
+                    if not st: red(f'{label}: shader {i} has frequency {fr}')
+                    why = check(label, st, ctl, code)
+                    if why: red(f'{label}: shader {i} ({st}): {why}')
+                    out.append((f'{label}#UE{i}', st, bytes(ctl), bytes(code)))
+                    continue
+                red(f'{label}: shader {i} is neither an LSLG record, an NVN2 one nor an untagged one')
             _, ctl, code = sage; st = nvn2_stage(ctl, code)
             if st not in {0: ('vs',), 1: ('ms',), 2: ('ts',), 3: ('ps',), 4: ('gs',), 5: ('cs',)}.get(fr, ()): red(f'{label}: shader {i} is a {st} shader but has frequency {fr}')
             why = check(label, st, ctl, code)

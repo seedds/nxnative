@@ -1782,9 +1782,13 @@ void front_run(void (*guest)(void)) {
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        // Black until the game's first present (which clears the drawable to black around the picture): a layer with no drawable yet shows the window's background,
+        // windowBackgroundColor, white in the light appearance, over the whole screen when startup goes straight to full screen or the panel around the notch
+        win.backgroundColor = NSColor.blackColor;
         NSView *v = win.contentView = [[DmGameView alloc] initWithFrame:r];
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
+        g_layer.backgroundColor = NSColor.blackColor.CGColor;
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;

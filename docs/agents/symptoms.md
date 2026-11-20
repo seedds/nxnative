@@ -1171,6 +1171,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- `[RED] the shader split found no shaders in main or the RomFS`, with `shaders: 0`, on a Telltale Tool game whose RomFS is `.ttarch2` archives and whose `main` names `*.t3fxpack`. No BNSH, BAHS or control-section magic appears in the compressed files. → [Telltale effect packs in ttarch2 archives](../reference/shaders.md#telltale-effect-packs-in-ttarch2-archives)
 - the packer finds no loose SPIR-V files, although the game creates its modules from assets it ships. → [RenderDragon material shaders](../reference/shaders.md#renderdragon-material-shaders)
 - the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials. → [L.A. Noire WAD and VFP shader arrays](../reference/shaders.md#la-noire-wad-and-vfp-shader-arrays)
 - the shader split stops with no shaders in `main` or RomFS, and the host reports missing programs while presenting a black picture. → [Firaxis CIVBSF shader libraries](../reference/shaders.md#firaxis-civbsf-shader-libraries)

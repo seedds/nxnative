@@ -25,6 +25,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 | Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |
 |---|---|---|---|---|---|---|---|
+| `build` → `engine` | check_savedata_version lookup default 1 -> 0 | runtime | gap | checked: v131072: old bytes match at main+0xdf9238; with both cuts the loaded scene plays and autosaves on the Mac host (run 2026-11-20); with the b.lt cut alone the slot buttons stay dead | 1 | [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md) | the lookup is smash::fw::config's; the default only bites when the engine's config registry never filled, which is a host-environment difference rather than this game's code (an engine-wide rule keyed on the empty registry could serve every Fuzz game) |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
@@ -33,6 +34,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
+| `build` → `game` | savedata version gate: its branch to the slot skip | runtime | gap | checked: 1.0.2 v131072 both regions (the JP and US NSPs share the build ID): the cut's old bytes match at main+0xdf87b4; with the branch removed a real 1.0.2 save renders in all slots on the Mac host (docs/investigations/fate-ha-save-20261117.md) | 1 | [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md) | the gate is the game's own KAG script compiled into main; a function-matched rule could carry it over the game's updates (the function is small and its prologue distinctive) |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
@@ -62,6 +64,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Fate/hollow ataraxia REMASTERED](#fatehollow-ataraxia-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game`, `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
@@ -299,6 +302,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.8d.310c `main`** `a48c0de3…`
   - host [hle_fpslock.c:54](../../dm/host/hle_fpslock.c#L54): engine frame limit set to fps_target: FIFA frame regulator
+
+### Fate/hollow ataraxia REMASTERED
+
+[Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md), `010070E022546000`, [patches.py](../../dm/games/010070E022546000/patches.py).
+
+- **`build` → `game`**, runtime, gap, checked: 1.0.2 v131072 both regions (the JP and US NSPs share the build ID): the cut's old bytes match at main+0xdf87b4; with the branch removed a real 1.0.2 save renders in all slots on the Mac host (docs/investigations/fate-ha-save-20261117.md): savedata version gate: its branch to the slot skip. The gate is the game's own KAG script compiled into main; a function-matched rule could carry it over the game's updates (the function is small and its prologue distinctive)
+- **`build` → `engine`**, runtime, gap, checked: v131072: old bytes match at main+0xdf9238; with both cuts the loaded scene plays and autosaves on the Mac host (run 2026-11-20); with the b.lt cut alone the slot buttons stay dead: check_savedata_version lookup default 1 -> 0. The lookup is smash::fw::config's; the default only bites when the engine's config registry never filled, which is a host-environment difference rather than this game's code (an engine-wide rule keyed on the empty registry could serve every Fuzz game)
+
+- **1.0.2 `main`** `6c16aa06…` ([patches.py:12](../../dm/games/010070E022546000/patches.py#L12))
+  - cut `+0xdf87b4`: savedata version gate: b.lt the skip -> nop (the field holds "2", the console data has no 438 migration)
+  - cut `+0xdf9238`: check_savedata_version default: mov w3,#1 -> mov w3,#0 (no config registry on the host: hollow marking would freeze the slot buttons)
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 

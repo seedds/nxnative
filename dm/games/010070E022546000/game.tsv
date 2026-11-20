@@ -1,0 +1,39 @@
+# Fate/hollow ataraxia REMASTERED (TYPE-MOON's Fuzz engine, smash::fw, on Nintendo's OpenGL ES, SDK 16), update 1.0.2 (v131072); the US and JP NSPs share main's build ID
+# Values from the NSP script's provisional profile (survey 010070E022546000_survey/survey.md), checked on the Mac host: boot, title, Entrance, a 1.0.2 save loaded and autosaved (README.md)
+
+# ---- Identity ----
+title_id	010070E022546000
+program_id	010070E022546000
+
+# ---- App ----
+name	Fate/hollow ataraxia REMASTERED
+ipa	FateHollowAtaraxiaRemastered.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=6c16aa06a25504cee9cf0f4f7b5e615c	subsdk3=220d36873cbb6d5dc39a9a37127ea80d	sdk=a5cb2175cad2ca2afdd4c13577dbd079
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_OpenGL), subsdk1 (GLSLC), subsdk2 (NintendoSDK_Vulkan)
+modules	main subsdk3 sdk
+romfs_marker	obb/pack11d.bin
+zip_store	.bin:.dat:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 12 MB of bss (counted as used memory): a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/obb/=obb /data/=data
+shader_note	Fate/hollow ataraxia REMASTERED shaders
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x8df4000

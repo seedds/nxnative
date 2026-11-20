@@ -2809,7 +2809,7 @@ GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
 GL(glGetShaderInfoLog, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *log) { (void)sh; if (len) *len = 0; if (log && size > 0) log[0] = 0; }
 GL(glGetShaderSource, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *src) {   // the source glShaderSource kept (Fate/hollow ataraxia REMASTERED reads it back after compiling; its null made the game jump to 0)
     shader_t *s = shader_of(sh); if (len) *len = 0; if (src && size > 0) src[0] = 0;
-    if (!s || !s->src || size <= 0) return;
+    if (!s || !s->src || !src || size <= 0) return;   // a NULL src (a length-only query) gets its 0 back, not a memcpy into NULL
     GLsizei n = (GLsizei)strnlen(s->src, s->len); GLsizei c = n < size - 1 ? n : size - 1;
     memcpy(src, s->src, c); src[c] = 0; if (len) *len = c; }
 static void shader_free(GLuint sh) { shader_t *s = &g_sps[sh]->s; free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL; }

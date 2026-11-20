@@ -58,7 +58,7 @@ static id<MTLBuffer> readback(VkCommandBuffer cb, VkImage im) {
     id<MTLBuffer> out = [g_dev newBufferWithLength:row * extent options:MTLResourceStorageModeShared];
     assert(out);
     id<MTLBlitCommandEncoder> be = [rs.cb blitCommandEncoder];
-    [be copyFromTexture:im->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+    [be copyFromTexture:im->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)   // NOLINT(clang-analyzer-nullability.NullablePassedToNonnull) the test's device allocations are assumed to succeed; a nil would fail the test before it reaches here
               sourceSize:MTLSizeMake(extent, extent, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:0];
     [be endEncoding]; [rs.cb commit]; [rs.cb waitUntilCompleted];
     assert(rs.cb.status == MTLCommandBufferStatusCompleted);

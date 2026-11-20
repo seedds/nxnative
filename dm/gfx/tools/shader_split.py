@@ -63,7 +63,7 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
@@ -1030,6 +1030,23 @@ def rpf_shaders(path, rel, key, ents, out):
     z = zstd_mod()
     with open(path, 'rb') as f:
         for e in ents: scan_blob(r.read(f, e, z), f'/{rel}/{e[0]}', out)
+
+EA_ARCHIVE = b'EAARCHIVE'
+
+def ea_jobs(files, romfs, mains):
+    """EA archives in the normal worker/error path, with each version's own main for key discovery. DLC uses the newest main."""
+    from easf.reader import recognizes
+    roots = [(os.path.abspath(r).rstrip('/') + '/', m) for r, m in zip(romfs, mains)]
+    jobs = []
+    for path, rel in files:
+        try:
+            with open(path, 'rb') as f: head = f.read(8)
+        except OSError: continue   # scan_file reports unreadable loose files through the normal path
+        if not recognizes(head): continue
+        full = os.path.abspath(path)
+        module = next((m for r, m in roots if full.startswith(r)), mains[-1])
+        jobs.append((path, rel, (EA_ARCHIVE, module)))
+    return jobs, {p for p, _, _ in jobs}
 
 def rgxd_shaders(d, label):
     """A RAGE effect ('rgxd', Red Dead Redemption's .nvn files in shaders.rpf: 131 effects, 3,413 shaders, 2,089 vertex and 1,324 pixel): after the effect's parameter names, each shader is a
@@ -2807,6 +2824,52 @@ def raw_shaders(d, label, known=()):
         if why: print(f'[RED] {label} control section @{c:#x}: {why}; left out', flush=True)
     return out
 
+TTCZ, TTCN = b'ZCTT', b'NCTT'
+def ttcz_chunks(d, at=0):
+    """A Telltale 'ZCTT' block (a .ttarch2, or an entry of an 'NCTT' one): 'ZCTT', u32 version 0x10000, u32 chunk count n, then n + 1 u64 chunk offsets from the block's start (the first is the
+    header's own length, 12 + 8 (n + 1)); each chunk is a raw deflate stream of 64 KB (the last one less). → the offsets, or None when the bytes at `at` are not such a block"""
+    if d[at:at + 4] != TTCZ or d[at + 4:at + 8] != b'\0\0\1\0' or at + 12 > len(d): return None
+    n = struct.unpack_from('<I', d, at + 8)[0]
+    if not 0 < n < 1 << 20 or at + 12 + 8 * (n + 1) > len(d): return None
+    offs = struct.unpack_from(f'<{n + 1}Q', d, at + 12)
+    if offs[0] != 12 + 8 * (n + 1) or any(a >= b for a, b in zip(offs, offs[1:])) or at + offs[-1] > len(d): return None
+    return offs
+
+def ttcz_inflate(d, at, offs, first=None):
+    return b''.join(zlib.decompress(d[at + offs[i]:at + offs[i + 1]], -15) for i in range(len(offs) - 1 if first is None else min(first, len(offs) - 1)))
+
+def ttarch2_shaders(d, label):
+    """Telltale's .ttarch2 archives (Sam & Max: The Devil's Playhouse, Switch, SDK 17): 'NCTT' (entries stored one after the other, each a 'ZCTT' block) or 'ZCTT' (the whole archive one block), inside
+    it the archive proper ('4ATT', an entry table with the names). The effect pack (`SM3_nx_Shaders_mem.t3fxpack`, 42 MB deflated, 155 MB inflated; `ShadersPatch` is another) holds GLSLC shaders as bare
+    records, in no BNSH and not aligned: [code area (control +0x704 bytes, magic 0x12345678 first, or headerless for a compute shader)] [u32 = the control section's length] [control section].
+    Only archives whose entry table names a .t3fxpack are inflated: the others (textures, meshes, scripts) are ~1.5 GB of data with no shader in it"""
+    ZPK = b'.t3fxpack'
+    blocks = []
+    if d[:4] == TTCZ:
+        offs = ttcz_chunks(d)
+        if offs: blocks = [(0, offs)]
+    elif d[:4] == TTCN:
+        at = 0
+        while (at := d.find(TTCZ + b'\0\0\1\0', at)) >= 0:
+            offs = ttcz_chunks(d, at)
+            if offs: blocks.append((at, offs)); at += offs[-1]
+            else: at += 4
+    out = []
+    head = d[:0x400] if d[:4] == TTCN else (ttcz_inflate(d, *blocks[0], first=1) if blocks else b'')
+    if ZPK not in head and not (d[:4] == TTCN and any(ZPK in ttcz_inflate(d, a, o, first=1) for a, o in blocks[:1])): return out
+    for at, offs in blocks:
+        data = ttcz_inflate(d, at, offs)
+        if d[:4] == TTCN and CTL_MAGIC not in data: continue
+        for m in re.finditer(re.escape(CTL_MAGIC), data):
+            c = m.start()
+            if c < 8 or c + 0x708 > len(data): continue
+            nctl, n = struct.unpack_from('<I', data, c + 0x20)[0], struct.unpack_from('<I', data, c + 0x704)[0]
+            if struct.unpack_from('<I', data, c - 4)[0] != nctl or c - 4 < n or c + nctl > len(data): continue
+            ctl, code = data[c:c + nctl], data[c - 4 - n:c - 4]
+            st = glslc_stage(ctl, code)
+            if st and not check(label, st, ctl, code): out.append((f'{label}#TTFX@{at:#x}+{c:#x}', st, ctl, code))
+    return out
+
 ONEPACK = b'ONEPACK\0'
 def fb_field(d, t, i):
     """FlatBuffers: absolute offset of field i of the table at t, None when the field is absent"""
@@ -3652,6 +3715,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
+    if d[:4] == SHARC: out.extend(sharc_shaders(d, label)); return
     if d[:8] == SHAD: out.extend(shad_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
@@ -3710,7 +3774,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -3771,6 +3835,59 @@ def bnd2_shaders(d, label):
     found = []
     for rid, typ, k, r in bnd2_resources(d, label):
         if b'\x91\x68\x86\x19' in r: found += glslc_shaders(r, f'{label}/{rid:016x}.{typ:x}.{k}', need=False)
+    return found
+
+SHARC = b'RAHS'
+
+def sharc_shaders(d, label):
+    """GIANTS Engine SHARC v11 (Farming Simulator 26's shared/shader_switch.sharc).
+    A 0x2c-byte header gives the sizes of three entry tables (24, 32 and 20 bytes per entry). The data follows the tables:
+    metadata blocks, then the shader members with their property records, side records and length-prefixed names.
+    Each shader member starts with five LZMA1 property bytes and decodes to one GLSLC output. The game omits LZMA end markers,
+    so the GLSLC header's output length and the section checks establish whether the shader is complete."""
+    if len(d) < 0x2c: red(f'{label}: truncated SHARC header')
+    version, _, _, header_size, metadata_count, shader_count, hierarchy_count = struct.unpack_from('<7I', d, 4)
+    if version != 11 or header_size < 0x2c:
+        red(f'{label}: SHARC version {version}, header size {header_size:#x}: layout this reader does not know')
+    shader_table = header_size + 24 * metadata_count
+    pos = shader_table + 32 * shader_count + 20 * hierarchy_count
+    if pos > len(d): red(f'{label}: SHARC entry tables end at {pos:#x}, past the file size {len(d):#x}')
+
+    for i in range(metadata_count):
+        size, properties = struct.unpack_from('<IH', d, header_size + 24 * i)
+        pos += size + 5 * properties
+        if pos > len(d): red(f'{label}: SHARC metadata {i} runs past the file')
+
+    found = []
+    output_limit = 10_000_000
+    for i in range(shader_count):
+        size, properties, side_records, _, _, _, _, names = struct.unpack_from('<8I', d, shader_table + 32 * i)
+        where = f'{label}#{i}'
+        chunk = span(d, pos, size, f'{where}: SHARC compressed member')
+        if len(chunk) <= 5: red(f'{where}: short SHARC LZMA member')
+        pos += size + 5 * properties + 16 * side_records
+        if pos > len(d): red(f'{where}: SHARC property or side records run past the file')
+        for _ in range(names):
+            _, length = field(d, '<BB', pos, f'{where}: SHARC name header')
+            pos += 2 + length
+            if pos > len(d): red(f'{where}: SHARC name runs past the file')
+
+        props = chunk[0]
+        dict_size = int.from_bytes(chunk[1:5], 'little')
+        try:
+            dec = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=[{
+                'id': lzma.FILTER_LZMA1,
+                'dict_size': min(dict_size, output_limit),   # a member cannot refer back further than the bytes it has decoded
+                'lc': props % 9, 'lp': props // 9 % 5, 'pb': props // 45,
+            }])
+            raw = dec.decompress(chunk[5:], max_length=output_limit + 1)
+        except (lzma.LZMAError, ValueError) as e:
+            red(f'{where}: damaged SHARC LZMA stream ({e})')
+        if len(raw) > output_limit: red(f'{where}: SHARC member exceeds the {output_limit:,}-byte decode limit')
+        expected, _, _, _ = glslc_layout(raw, 0)
+        if raw[:4] != GLSLC_MAGIC or not 0 < expected <= len(raw):
+            red(f'{where}: incomplete SHARC GLSLC output ({len(raw)} bytes decoded, {expected} declared)')
+        found.extend(glslc_shaders(raw[:expected], where, offsets=(0,)))
     return found
 
 HEAPS_CACHE = 'shaders.cache.nx'
@@ -3931,6 +4048,10 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if len(args) > 2 and args[2][0] == EA_ARCHIVE:
+        from easf import reader
+        found = reader.scan(path, args[2][1], label=rel) or []
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == TTDAT:
         if args[2][1] is None: red(args[2][2])
         ttdat_shaders(path, rel, args[2][1], found)
@@ -3951,6 +4072,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == NLG_DICT:
         nlg_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] in (TTCZ, TTCN):   # a Telltale .ttarch2 (ttarch2_shaders): only its effect pack holds shaders
+        with open(path, 'rb') as f: found += ttarch2_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if path.endswith('.pkdswitch') and os.path.exists(path[:-len('.pkdswitch')] + '.pkiswitch'):   # Double Eleven's resource pack, read through its index (d11_pack_shaders)
         d11_pack_shaders(path, '/' + rel, found)
@@ -4016,6 +4140,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == SHARC:   # GIANTS Engine shader archive
+        with open(path, 'rb') as f: found = sharc_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:3] == b'PAK':   # a Heaps PAK archive (Dead Cells): only its shader cache is read, not its 2 GB of other files (heaps_pak_files, heaps_shaders)
         with open(path, 'rb') as f:
@@ -4221,11 +4348,12 @@ def main():
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
+    ea_work, ea_paths = ea_jobs(files, romfs_v, main_v)   # EA BIG4 / EASF / NXSHADER archives; keys come from their own version's main
     ls_jobs, lsps = lspk_jobs(files)   # Larian's packages: indexed BSHD programs, without reading unrelated assets
     kt_jobs, kits = kit_jobs(files)   # Unravel TWO's KIT shards: chained LZ4 resources and Phyre effects
     tt_jobs, ttdats = ttdat_jobs(files)   # TT Games' DATs: only indexed .nnx_shaders, Oodle through the game's own decoder
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs + kt_jobs + tt_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps and p not in kits and p not in ttdats]
+    big += ea_work + pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs + kt_jobs + tt_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps and p not in kits and p not in ttdats and p not in ea_paths]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
@@ -4276,7 +4404,8 @@ def main():
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
                                             ('Larian BSHD', any('#BSHD#' in r[4] for r in rows)),
                                             ('Needle', any('#NEEDLE@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)),
+                                            ('Telltale effect packs', any('#TTFX@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')

@@ -153,7 +153,7 @@ You can customize the WebRTC server behavior via environment variables:
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `DM_WEBRTC_PORT` | `8888` | HTTP web server & signaling port |
-| `DM_WEBRTC_SSL_PORT` | `8443` | HTTPS web server & signaling port |
+| `DM_WEBRTC_RES` | `480p` | Stream resolution (`480p` or `720p`) |
 | `DM_WEBRTC_WEB` | `NULL` (auto-detect) | Path to custom static web directory |
 
 ---

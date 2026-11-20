@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[2]
 TABLE = REPO / 'docs/env_switches.tsv'
 HEAD = 'name\tclass\tmeaning\n'
 CLASSES = ('player', 'path', 'switch', 'diagnostic', 'test')
-CODE = ('.c', '.m', '.h', '.inc', '.swift', '.py', '.sh', '.S')
+CODE = ('.c', '.m', '.h', '.inc', '.swift', '.py', '.sh', '.S', '.cpp', '.mm')
 NAME = r'DM_[A-Z0-9_]*[A-Z0-9]'
 READ = r'(?:getenv\(|environ(?:\.get\(|\[))\s*["\'](' + NAME + r')["\']'   # a literal name in getenv(…), os.environ.get(…) or os.environ[…]
 

@@ -1,0 +1,176 @@
+date: 2026-11-20T05:38:33Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_guest.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (0 slots), stub page 0x1000002000 (4096 slots)
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 0 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_t2hgu8/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_t2hgu8/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+the test's modules pass the layer's SPIR-V checks                                                              ✓
+vkGetInstanceProcAddr is an entry of the import table                                                          ✓
+[dm] [vk] lookup vkCreateInstance → host implementation
+[dm] [vk] lookup vkEnumerateInstanceExtensionProperties → host implementation
+[dm] [vk] lookup vkEnumerateInstanceVersion → host implementation
+vkEnumerateInstanceVersion: Vulkan 1.1                                                                         ✓
+instance extensions: VK_KHR_surface and VK_NN_vi_surface                                                       ✓
+[dm] [vk] CreateInstance: application t_vk_guest, engine t_vk_guest, API 1.1; extensions VK_KHR_surface VK_NN_vi_surface; 0 layers
+[dm] [vk] guest Vulkan on the backend's device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe), Vulkan 1.4, level A: the game's calls go to its driver
+[dm] [vk] lookup vkEnumeratePhysicalDevices → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceProperties → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceFeatures → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceMemoryProperties → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceQueueFamilyProperties → host implementation
+[dm] [vk] lookup vkEnumerateDeviceExtensionProperties → host implementation
+[dm] [vk] lookup vkCreateDevice → host implementation
+[dm] [vk] lookup vkGetDeviceProcAddr → host implementation
+[dm] [vk] lookup vkCreateViSurfaceNN → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceSurfaceCapabilitiesKHR → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceSurfaceFormatsKHR → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceSurfaceSupportKHR → host implementation
+[dm] [vk] lookup vkDestroySurfaceKHR → host implementation
+[dm] [vk] lookup vkDestroyInstance → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceFormatProperties → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceProperties2KHR → host implementation
+[dm] [vk] lookup vkGetPhysicalDeviceProperties2 → host implementation
+[dm] [vk] lookup vkBindBufferMemory2KHR → host implementation
+the KHR name of a promoted function finds the core one                                                         ✓
+[dm] [vk] lookup vkCreateDebugUtilsMessengerEXT → none (returns null)
+a function the layer does not implement is null                                                                ✓
+one physical device                                                                                            ✓
+properties: API 1.1, vendor 0x10de device 0x92ba 'NVIDIA Tegra X1 (nvgpu)'                                     ✓
+limits: uniform offset alignment 256 (Tegra 256, host 16), push constants 256, sets 8, viewports 1, colour attachments 8 ✓
+limits: the host's timestamp period, the shape's dual-source attachments, the host's where the shape gives none (geometry output vertices) ✓
+[dm] [vk] [RED] features of the Tegra shape the shared device does not have, offered as absent: robustBufferAccess, textureCompressionASTC_LDR
+features: dualSrcBlend 1 geometryShader 1 textureCompressionBC 1, robustBufferAccess 0 (not on the shared device), ASTC 0 (host 0) ✓
+memory: three types on one heap (device-local; host-visible coherent; and cached)                              ✓
+one queue family: graphics, compute and transfer                                                               ✓
+device extensions: VK_KHR_swapchain                                                                            ✓
+formats: the host's answer (RGBA8 renders)                                                                     ✓
+[dm] [vk] CreateDevice: 1 queues; extensions VK_KHR_swapchain
+[dm] [vk] lookup vkGetDeviceQueue → host implementation
+[dm] [vk] lookup vkAllocateMemory → host implementation
+[dm] [vk] lookup vkFreeMemory → host implementation
+[dm] [vk] lookup vkMapMemory → host implementation
+[dm] [vk] lookup vkUnmapMemory → host implementation
+[dm] [vk] lookup vkCreateBuffer → host implementation
+[dm] [vk] lookup vkDestroyBuffer → host implementation
+[dm] [vk] lookup vkGetBufferMemoryRequirements → host implementation
+[dm] [vk] lookup vkBindBufferMemory → host implementation
+[dm] [vk] lookup vkCreateImage → host implementation
+[dm] [vk] lookup vkDestroyImage → host implementation
+[dm] [vk] lookup vkGetImageMemoryRequirements → host implementation
+[dm] [vk] lookup vkBindImageMemory → host implementation
+[dm] [vk] lookup vkGetImageSubresourceLayout → host implementation
+[dm] [vk] lookup vkCreateImageView → host implementation
+[dm] [vk] lookup vkDestroyImageView → host implementation
+[dm] [vk] lookup vkCreateRenderPass → host implementation
+[dm] [vk] lookup vkDestroyRenderPass → host implementation
+[dm] [vk] lookup vkCreateFramebuffer → host implementation
+[dm] [vk] lookup vkDestroyFramebuffer → host implementation
+[dm] [vk] lookup vkCreateShaderModule → host implementation
+[dm] [vk] lookup vkDestroyShaderModule → host implementation
+[dm] [vk] lookup vkCreatePipelineCache → host implementation
+[dm] [vk] lookup vkDestroyPipelineCache → host implementation
+[dm] [vk] lookup vkGetPipelineCacheData → host implementation
+[dm] [vk] lookup vkCreatePipelineLayout → host implementation
+[dm] [vk] lookup vkDestroyPipelineLayout → host implementation
+[dm] [vk] lookup vkCreateDescriptorSetLayout → host implementation
+[dm] [vk] lookup vkDestroyDescriptorSetLayout → host implementation
+[dm] [vk] lookup vkCreateDescriptorPool → host implementation
+[dm] [vk] lookup vkDestroyDescriptorPool → host implementation
+[dm] [vk] lookup vkAllocateDescriptorSets → host implementation
+[dm] [vk] lookup vkUpdateDescriptorSets → host implementation
+[dm] [vk] lookup vkCreateGraphicsPipelines → host implementation
+[dm] [vk] lookup vkDestroyPipeline → host implementation
+[dm] [vk] lookup vkCreateCommandPool → host implementation
+[dm] [vk] lookup vkDestroyCommandPool → host implementation
+[dm] [vk] lookup vkAllocateCommandBuffers → host implementation
+[dm] [vk] lookup vkBeginCommandBuffer → host implementation
+[dm] [vk] lookup vkEndCommandBuffer → host implementation
+[dm] [vk] lookup vkResetCommandBuffer → host implementation
+[dm] [vk] lookup vkCmdBeginRenderPass → host implementation
+[dm] [vk] lookup vkCmdEndRenderPass → host implementation
+[dm] [vk] lookup vkCmdBindPipeline → host implementation
+[dm] [vk] lookup vkCmdBindVertexBuffers → host implementation
+[dm] [vk] lookup vkCmdBindDescriptorSets → host implementation
+[dm] [vk] lookup vkCmdSetViewport → host implementation
+[dm] [vk] lookup vkCmdSetScissor → host implementation
+[dm] [vk] lookup vkCmdDraw → host implementation
+[dm] [vk] lookup vkCmdCopyImageToBuffer → host implementation
+[dm] [vk] lookup vkCmdPipelineBarrier → host implementation
+[dm] [vk] lookup vkCmdResetQueryPool → host implementation
+[dm] [vk] lookup vkCmdBeginQuery → host implementation
+[dm] [vk] lookup vkCmdEndQuery → host implementation
+[dm] [vk] lookup vkCmdWriteTimestamp → host implementation
+[dm] [vk] lookup vkCreateQueryPool → host implementation
+[dm] [vk] lookup vkDestroyQueryPool → host implementation
+[dm] [vk] lookup vkGetQueryPoolResults → host implementation
+[dm] [vk] lookup vkCreateFence → host implementation
+[dm] [vk] lookup vkDestroyFence → host implementation
+[dm] [vk] lookup vkWaitForFences → host implementation
+[dm] [vk] lookup vkResetFences → host implementation
+[dm] [vk] lookup vkCreateSemaphore → host implementation
+[dm] [vk] lookup vkDestroySemaphore → host implementation
+[dm] [vk] lookup vkQueueSubmit → host implementation
+[dm] [vk] lookup vkDeviceWaitIdle → host implementation
+[dm] [vk] lookup vkCreateSwapchainKHR → host implementation
+[dm] [vk] lookup vkDestroySwapchainKHR → host implementation
+[dm] [vk] lookup vkGetSwapchainImagesKHR → host implementation
+[dm] [vk] lookup vkAcquireNextImageKHR → host implementation
+[dm] [vk] lookup vkQueuePresentKHR → host implementation
+[dm] [vk] lookup vkDestroyDevice → host implementation
+every function the test calls comes from the layer's vkGet*ProcAddr (0 missing)                                ✓
+00fc:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+00fc:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+00fc:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+buffer requirements: every guest type                                                                          ✓
+00fc:fixme:vulkan:win32u_vkCreateImage Unsupported handle types 0x80
+image requirements: an optimal image takes any guest type, a linear one host-visible types                     ✓
+[dm] [vk] [RED] the game maps memory of type 0, which is not host-visible: refused
+type 0 is not host-visible: mapping it is refused                                                              ✓
+the host-visible types map                                                                                     ✓
+the mappings lie in the x86-64 engine's arena below 2^39 (arena pages imported with VK_EXT_external_memory_host) ✓
+[dm] [vk] shader capture → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_t2hgu8/capture
+[dm] [vk] shader e4c09001402604d0: 1 member ArrayStride decorations moved onto 1 array types
+DM_VK_CAPTURE: the module in Galaxy's form is written as the game gave it                                      ✓
+DM_VK_CAPTURE: the dual-source fragment shader is written as the game gave it                                  ✓
+three pipelines made (plain, dual-source from Location 1, uniform array in Galaxy's form)                      ✓
+pipelines through the backend's disk cache: 3 creations counted, cache on                                      ✓
+the game's pipeline cache holds nothing                                                                        ✓
+[dm] [vk] query pool 000055558C37FB10: type 0, 1 queries
+[dm] [vk] query pool 000055558C28CBF0: type 2, 2 queries
+plain draw: red at (8, 8) 255 0 0 255                                                                          ✓
+dual source: the second source (written at Location 1) multiplies the first at (24, 8): 64 128 191 255 (64 128 191 255) ✓
+member ArrayStride moved: element 2 of the uniform array at (40, 8): 0 128 255 255 (0 128 255 255)             ✓
+every pixel outside the three quads is the clear colour                                                        ✓
+linear image: the texels the CPU wrote through the mapping are its texels (it aliases the game's memory)       ✓
+occlusion query: 256 samples passed (a 16x16 quad: 256)                                                        ✓
+timestamp queries: available, 68033754 ticks apart                                                             ✓
+[dm] [vk] CreateViSurfaceNN window 0000000000001000
+surface: 1280x720 in handheld mode, INHERIT among its transforms, family 0 presents                            ✓
+surface formats: BGRA8 first                                                                                   ✓
+[dm] [vk] swap chain 320x180 format 44, 3 images (at least 3 requested), present mode 2
+swapchain: three images                                                                                        ✓
+[dm] vi::SetLayerCrop 32,16 160x90
+[dm] [vk] frame 1: draws 4, passes 2, submits 2 (since the last record, 1 frames); pipelines so far 4, shaders 4, memory 0.7 MB
+[dm] [vk] frame 2: draws 1, passes 1, submits 1 (since the last record, 1 frames); pipelines so far 4, shaders 4, memory 0.7 MB
+[dm] [vk] frame 3: draws 1, passes 1, submits 1 (since the last record, 1 frames); pipelines so far 4, shaders 4, memory 0.7 MB
+present 2: the presenter shows 160x90 at (32, 16), format 44, after 3 presents                                 ✓
+present 2: clear colour (B G R A 0 153 0 255, G 153) and the red quad (0 0 255 255)                            ✓
+[dm] vi::SetLayerCrop 0,0 0x0
+present 3: the presenter shows 320x180 at (0, 0), format 44, after 4 presents                                  ✓
+present 3: clear colour (B G R A 0 204 0 255, G 204) and the red quad (0 0 255 255)                            ✓
+four acquires in turn over the three images, four presents that succeed                                        ✓
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] pipeline cache written (shutdown): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_t2hgu8/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.9 MiB in use: waste 63.1 MiB (99 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 8 made, 8 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_guest: 41 checks, 0 failed ==
+
+exit: 0 (0 s)

@@ -1,0 +1,36 @@
+date: 2026-11-20T05:36:42Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_nro.exe
+
+[dm] test0: undefined weak late bound to 0
+[dm] test0: undefined weak absent bound to 0
+[dm] test0: reloc relative=0 relr=0 abs/glob=3 jump=0
+[dm] test2: undefined weak late bound to 0
+[dm] test2: undefined weak absent bound to 0
+[dm] test2: reloc relative=0 relr=0 abs/glob=3 jump=0
+[dm] NRO test2 loaded (load 1, base 0000000140030910): 1 imports of the modules loaded before bound to it
+[dm] ro::LoadModule test2 (SHA-256 e95ee2b60a320b04…, 128 bytes, buffer 0x20, bind now): init called
+[dm] test1: shared bound to an earlier module's definition (test2)
+[dm] test1: undefined weak absent bound to 0
+[dm] test1: reloc relative=0 relr=0 abs/glob=3 jump=0 (some bound to an earlier module's definition)
+[dm] NRO test1 loaded (load 1, base 00000001400307F0): 2 imports of the modules loaded before bound to it
+[dm] ro::LoadModule test1 (SHA-256 77ff99dd746a6444…, 128 bytes, buffer 0x20, bind now): init called
+[dm] [RED] ro::LoadModule: test1 (77ff99dd746a6444…) is loaded already
+[dm] NRO test2 unloaded: 2 imports that pointed into it bound again
+[dm] [RED] ro::LookupModuleSymbol shared: not a loaded module
+[dm] test2: shared bound to an earlier module's definition (test1)
+[dm] test2: undefined weak absent bound to 0
+[dm] NRO test2 loaded (load 2, base 0000000140030910): 0 imports of the modules loaded before bound to it
+[dm] ro::LoadModule test2 (SHA-256 e95ee2b60a320b04…, 128 bytes, buffer 0x20, bind now): init called
+[dm] NRO test1 unloaded: 4 imports that pointed into it bound again
+[dm] NRO test2 unloaded: 1 imports that pointed into it bound again
+[dm] test2: undefined weak late bound to 0
+[dm] test2: undefined weak absent bound to 0
+[dm] NRO test2 loaded (load 3, base 0000000140030910): 1 imports of the modules loaded before bound to it
+[dm] ro::LoadModule test2 (SHA-256 e95ee2b60a320b04…, 128 bytes, buffer 0x20, bind now): init called
+[dm] NRO test2 unloaded: 1 imports that pointed into it bound again
+[dm] ro::RegisterModuleInfo: refused an NRR that registers only online SDKs (1 hashes), as before NROs were loaded; the game plays offline
+[dm] ro::LoadModule: refused 77ff99dd746a6444… (128 bytes): an online SDK (Epic Online Services), not loaded; the game plays offline
+NRO relocation, load order, lifecycle, weak symbols and refusal: OK
+
+exit: 0 (0 s)

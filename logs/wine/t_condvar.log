@@ -1,0 +1,8 @@
+date: 2026-11-20T05:36:46Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_condvar.exe
+
+✓ current order: W woken returned 0, lock word 0x1001 (expected W tag 0x1001), condvar key 0 (expected 0), R state 3
+all passed: 1/1
+
+exit: 0 (0 s)

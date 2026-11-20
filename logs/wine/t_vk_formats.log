@@ -1,0 +1,580 @@
+date: 2026-11-20T05:38:02Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_formats.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 0 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_s06hsd/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_s06hsd/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+0760:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+pass 1: the formats the device has
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x1 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+[dm] [hostvk] pipeline prewarm off (DM_PSO_MANIFEST=off)
+[dm] [hostvk] pipeline prewarm done: 0 lines (0 render pipeline rows, 0 shader rows, 0 compute rows), 0 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.00 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_s06hsd/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+R8 (device pass, VkFormat 9, its own): the image holds the texels as the path says, bit for bit                ✓
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_s06hsd/shader_map.tsv: 6 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_s06hsd/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+R8 (device pass): a shader reads what NVN gives for every texel (float)                                        ✓
+R8 (device pass): drawn into a texture of the same format, the texels written back bit for bit                 ✓
+  R8             device     VkFormat 9    its own          raw, sampled (max error 3.7e-08), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x2 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+[dm] [nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=5)
+R8SN (device pass, VkFormat 10, its own): the image holds the texels as the path says, bit for bit             ✓
+R8SN (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+R8SN (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  R8SN           device     VkFormat 10   its own          raw, sampled (max error 2e-08), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x3 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R8UI (device pass, VkFormat 13, its own): the image holds the texels as the path says, bit for bit             ✓
+R8UI (device pass): a shader reads what NVN gives for every texel (uint)                                       ✓
+R8UI (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  R8UI           device     VkFormat 13   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x4 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R8I (device pass, VkFormat 14, its own): the image holds the texels as the path says, bit for bit              ✓
+R8I (device pass): a shader reads what NVN gives for every texel (int)                                         ✓
+R8I (device pass): drawn into a texture of the same format, the texels written back bit for bit                ✓
+  R8I            device     VkFormat 14   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x5 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R16F (device pass, VkFormat 76, its own): the image holds the texels as the path says, bit for bit             ✓
+R16F (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+R16F (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  R16F           device     VkFormat 76   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x6 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R16 (device pass, VkFormat 70, its own): the image holds the texels as the path says, bit for bit              ✓
+R16 (device pass): a shader reads what NVN gives for every texel (float)                                       ✓
+R16 (device pass): drawn into a texture of the same format, the texels written back bit for bit                ✓
+  R16            device     VkFormat 70   its own          raw, sampled (max error 2.6e-08), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x7 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R16SN (device pass, VkFormat 71, its own): the image holds the texels as the path says, bit for bit            ✓
+R16SN (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+R16SN (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  R16SN          device     VkFormat 71   its own          raw, sampled (max error 2.7e-08), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x8 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R16UI (device pass, VkFormat 74, its own): the image holds the texels as the path says, bit for bit            ✓
+R16UI (device pass): a shader reads what NVN gives for every texel (uint)                                      ✓
+R16UI (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  R16UI          device     VkFormat 74   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x9 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R16I (device pass, VkFormat 75, its own): the image holds the texels as the path says, bit for bit             ✓
+R16I (device pass): a shader reads what NVN gives for every texel (int)                                        ✓
+R16I (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  R16I           device     VkFormat 75   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0xa target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R32F (device pass, VkFormat 100, its own): the image holds the texels as the path says, bit for bit            ✓
+R32F (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+R32F (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  R32F           device     VkFormat 100  its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0xb target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R32UI (device pass, VkFormat 98, its own): the image holds the texels as the path says, bit for bit            ✓
+R32UI (device pass): a shader reads what NVN gives for every texel (uint)                                      ✓
+R32UI (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  R32UI          device     VkFormat 98   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0xc target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+R32I (device pass, VkFormat 99, its own): the image holds the texels as the path says, bit for bit             ✓
+R32I (device pass): a shader reads what NVN gives for every texel (int)                                        ✓
+R32I (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  R32I           device     VkFormat 99   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0xd target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+RG8 (device pass, VkFormat 16, its own): the image holds the texels as the path says, bit for bit              ✓
+RG8 (device pass): a shader reads what NVN gives for every texel (float)                                       ✓
+RG8 (device pass): drawn into a texture of the same format, the texels written back bit for bit                ✓
+  RG8            device     VkFormat 16   its own          raw, sampled (max error 7e-08), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0xe target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+RG8SN (device pass, VkFormat 17, its own): the image holds the texels as the path says, bit for bit            ✓
+RG8SN (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+RG8SN (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RG8SN          device     VkFormat 17   its own          raw, sampled (max error 2.5e-08), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0xf target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+RG8UI (device pass, VkFormat 20, its own): the image holds the texels as the path says, bit for bit            ✓
+RG8UI (device pass): a shader reads what NVN gives for every texel (uint)                                      ✓
+RG8UI (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RG8UI          device     VkFormat 20   its own          raw, sampled (max error 0), drawn
+[dm] [nvn] packaged texture 4x2x1 levels 1 format 0x10 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+RG8I (device pass, VkFormat 21, its own): the image holds the texels as the path says, bit for bit             ✓
+RG8I (device pass): a shader reads what NVN gives for every texel (int)                                        ✓
+RG8I (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  RG8I           device     VkFormat 21   its own          raw, sampled (max error 0), drawn
+RG16F (device pass, VkFormat 83, its own): the image holds the texels as the path says, bit for bit            ✓
+RG16F (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+RG16F (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RG16F          device     VkFormat 83   its own          raw, sampled (max error 0), drawn
+RG16 (device pass, VkFormat 77, its own): the image holds the texels as the path says, bit for bit             ✓
+RG16 (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+RG16 (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  RG16           device     VkFormat 77   its own          raw, sampled (max error 2.9e-08), drawn
+RG16SN (device pass, VkFormat 78, its own): the image holds the texels as the path says, bit for bit           ✓
+RG16SN (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+RG16SN (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RG16SN         device     VkFormat 78   its own          raw, sampled (max error 2.5e-08), drawn
+RG16UI (device pass, VkFormat 81, its own): the image holds the texels as the path says, bit for bit           ✓
+RG16UI (device pass): a shader reads what NVN gives for every texel (uint)                                     ✓
+RG16UI (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RG16UI         device     VkFormat 81   its own          raw, sampled (max error 0), drawn
+RG16I (device pass, VkFormat 82, its own): the image holds the texels as the path says, bit for bit            ✓
+RG16I (device pass): a shader reads what NVN gives for every texel (int)                                       ✓
+RG16I (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RG16I          device     VkFormat 82   its own          raw, sampled (max error 0), drawn
+RG32F (device pass, VkFormat 103, its own): the image holds the texels as the path says, bit for bit           ✓
+RG32F (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+RG32F (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RG32F          device     VkFormat 103  its own          raw, sampled (max error 0), drawn
+RG32UI (device pass, VkFormat 101, its own): the image holds the texels as the path says, bit for bit          ✓
+RG32UI (device pass): a shader reads what NVN gives for every texel (uint)                                     ✓
+RG32UI (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RG32UI         device     VkFormat 101  its own          raw, sampled (max error 0), drawn
+RG32I (device pass, VkFormat 102, its own): the image holds the texels as the path says, bit for bit           ✓
+RG32I (device pass): a shader reads what NVN gives for every texel (int)                                       ✓
+RG32I (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RG32I          device     VkFormat 102  its own          raw, sampled (max error 0), drawn
+[dm] [hostvk] texture format substitute (first case: NVN RGB8 → VkFormat 37 instead of 23: three components: vk where the device samples it with optimal tiling (rarely), else alt with each texel expanded to four at upload on the CPU; alpha reads one either way)
+RGB8 (device pass, VkFormat 37, alt, expanded): the image holds the texels as the path says, bit for bit       ✓
+RGB8 (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+  RGB8           device     VkFormat 37   alt, expanded    raw, sampled (max error 7.1e-08), drawn: declared (substitute)
+RGB8SN (device pass, VkFormat 38, alt, expanded): the image holds the texels as the path says, bit for bit     ✓
+RGB8SN (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+  RGB8SN         device     VkFormat 38   alt, expanded    raw, sampled (max error 3e-08), drawn: declared (substitute)
+RGB8UI (device pass, VkFormat 41, alt, expanded): the image holds the texels as the path says, bit for bit     ✓
+RGB8UI (device pass): a shader reads what NVN gives for every texel (uint)                                     ✓
+  RGB8UI         device     VkFormat 41   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB8I (device pass, VkFormat 42, alt, expanded): the image holds the texels as the path says, bit for bit      ✓
+RGB8I (device pass): a shader reads what NVN gives for every texel (int)                                       ✓
+  RGB8I          device     VkFormat 42   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB16F (device pass, VkFormat 97, alt, expanded): the image holds the texels as the path says, bit for bit     ✓
+RGB16F (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+  RGB16F         device     VkFormat 97   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB16 (device pass, VkFormat 91, alt, expanded): the image holds the texels as the path says, bit for bit      ✓
+RGB16 (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+  RGB16          device     VkFormat 91   alt, expanded    raw, sampled (max error 2.9e-08), drawn: declared (substitute)
+RGB16SN (device pass, VkFormat 92, alt, expanded): the image holds the texels as the path says, bit for bit    ✓
+RGB16SN (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+  RGB16SN        device     VkFormat 92   alt, expanded    raw, sampled (max error 3e-08), drawn: declared (substitute)
+RGB16UI (device pass, VkFormat 95, alt, expanded): the image holds the texels as the path says, bit for bit    ✓
+RGB16UI (device pass): a shader reads what NVN gives for every texel (uint)                                    ✓
+  RGB16UI        device     VkFormat 95   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB16I (device pass, VkFormat 96, alt, expanded): the image holds the texels as the path says, bit for bit     ✓
+RGB16I (device pass): a shader reads what NVN gives for every texel (int)                                      ✓
+  RGB16I         device     VkFormat 96   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB32F (device pass, VkFormat 106, its own): the image holds the texels as the path says, bit for bit          ✓
+RGB32F (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+RGB32F (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGB32F         device     VkFormat 106  its own          raw, sampled (max error 0), drawn
+RGB32UI (device pass, VkFormat 104, its own): the image holds the texels as the path says, bit for bit         ✓
+RGB32UI (device pass): a shader reads what NVN gives for every texel (uint)                                    ✓
+RGB32UI (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGB32UI        device     VkFormat 104  its own          raw, sampled (max error 0), drawn
+RGB32I (device pass, VkFormat 105, its own): the image holds the texels as the path says, bit for bit          ✓
+RGB32I (device pass): a shader reads what NVN gives for every texel (int)                                      ✓
+RGB32I (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGB32I         device     VkFormat 105  its own          raw, sampled (max error 0), drawn
+RGBA8 (device pass, VkFormat 37, its own): the image holds the texels as the path says, bit for bit            ✓
+RGBA8 (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+RGBA8 (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RGBA8          device     VkFormat 37   its own          raw, sampled (max error 7.3e-08), drawn
+RGBA8SN (device pass, VkFormat 38, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBA8SN (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGBA8SN (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBA8SN        device     VkFormat 38   its own          raw, sampled (max error 3.3e-08), drawn
+RGBA8UI (device pass, VkFormat 41, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBA8UI (device pass): a shader reads what NVN gives for every texel (uint)                                    ✓
+RGBA8UI (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBA8UI        device     VkFormat 41   its own          raw, sampled (max error 0), drawn
+RGBA8I (device pass, VkFormat 42, its own): the image holds the texels as the path says, bit for bit           ✓
+RGBA8I (device pass): a shader reads what NVN gives for every texel (int)                                      ✓
+RGBA8I (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGBA8I         device     VkFormat 42   its own          raw, sampled (max error 0), drawn
+RGBA16F (device pass, VkFormat 97, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBA16F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGBA16F (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBA16F        device     VkFormat 97   its own          raw, sampled (max error 0), drawn
+RGBA16 (device pass, VkFormat 91, its own): the image holds the texels as the path says, bit for bit           ✓
+RGBA16 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+RGBA16 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGBA16         device     VkFormat 91   its own          raw, sampled (max error 2.9e-08), drawn
+RGBA16SN (device pass, VkFormat 92, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBA16SN (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+RGBA16SN (device pass): drawn into a texture of the same format, the texels written back bit for bit           ✓
+  RGBA16SN       device     VkFormat 92   its own          raw, sampled (max error 2.9e-08), drawn
+RGBA16UI (device pass, VkFormat 95, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBA16UI (device pass): a shader reads what NVN gives for every texel (uint)                                   ✓
+RGBA16UI (device pass): drawn into a texture of the same format, the texels written back bit for bit           ✓
+  RGBA16UI       device     VkFormat 95   its own          raw, sampled (max error 0), drawn
+RGBA16I (device pass, VkFormat 96, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBA16I (device pass): a shader reads what NVN gives for every texel (int)                                     ✓
+RGBA16I (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBA16I        device     VkFormat 96   its own          raw, sampled (max error 0), drawn
+RGBA32F (device pass, VkFormat 109, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBA32F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGBA32F (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBA32F        device     VkFormat 109  its own          raw, sampled (max error 0), drawn
+RGBA32UI (device pass, VkFormat 107, its own): the image holds the texels as the path says, bit for bit        ✓
+RGBA32UI (device pass): a shader reads what NVN gives for every texel (uint)                                   ✓
+RGBA32UI (device pass): drawn into a texture of the same format, the texels written back bit for bit           ✓
+  RGBA32UI       device     VkFormat 107  its own          raw, sampled (max error 0), drawn
+RGBA32I (device pass, VkFormat 108, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBA32I (device pass): a shader reads what NVN gives for every texel (int)                                     ✓
+RGBA32I (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBA32I        device     VkFormat 108  its own          raw, sampled (max error 0), drawn
+RGBX8_SRGB (device pass, VkFormat 43, its own): the image holds the texels as the path says, bit for bit       ✓
+RGBX8_SRGB (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+RGBX8_SRGB (device pass): drawn into a texture of the same format, the texels written back bit for bit         ✓
+  RGBX8_SRGB     device     VkFormat 43   its own          raw, sampled (max error 0.0012), drawn
+RGBA8_SRGB (device pass, VkFormat 43, its own): the image holds the texels as the path says, bit for bit       ✓
+RGBA8_SRGB (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+RGBA8_SRGB (device pass): drawn into a texture of the same format, the texels written back bit for bit         ✓
+  RGBA8_SRGB     device     VkFormat 43   its own          raw, sampled (max error 0.0012), drawn
+RGBA4 (device pass, VkFormat 1000340001, its own): the image holds the texels as the path says, bit for bit    ✓
+RGBA4 (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+RGBA4 (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RGBA4          device     VkFormat 1000340001 its own          raw, sampled (max error 7.2e-08), drawn
+RGB5 (device pass, VkFormat 1000470000, its own): the image holds the texels as the path says, bit for bit     ✓
+RGB5 (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+RGB5 (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  RGB5           device     VkFormat 1000470000 its own          raw, sampled (max error 5.8e-08), drawn
+RGB5A1 (device pass, VkFormat 1000470000, its own): the image holds the texels as the path says, bit for bit   ✓
+RGB5A1 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+RGB5A1 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGB5A1         device     VkFormat 1000470000 its own          raw, sampled (max error 5.8e-08), drawn
+RGB565 (device pass, VkFormat 5, its own): the image holds the texels as the path says, bit for bit            ✓
+RGB565 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+RGB565 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGB565         device     VkFormat 5    its own          raw, sampled (max error 7.2e-08), drawn
+RGB10A2 (device pass, VkFormat 64, its own): the image holds the texels as the path says, bit for bit          ✓
+RGB10A2 (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGB10A2 (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGB10A2        device     VkFormat 64   its own          raw, sampled (max error 2.8e-08), drawn
+RGB10A2UI (device pass, VkFormat 68, its own): the image holds the texels as the path says, bit for bit        ✓
+RGB10A2UI (device pass): a shader reads what NVN gives for every texel (uint)                                  ✓
+RGB10A2UI (device pass): drawn into a texture of the same format, the texels written back bit for bit          ✓
+  RGB10A2UI      device     VkFormat 68   its own          raw, sampled (max error 0), drawn
+R11G11B10F (device pass, VkFormat 122, its own): the image holds the texels as the path says, bit for bit      ✓
+R11G11B10F (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+R11G11B10F (device pass): drawn into a texture of the same format, the texels written back bit for bit         ✓
+  R11G11B10F     device     VkFormat 122  its own          raw, sampled (max error 0), drawn
+RGB9E5F (device pass, VkFormat 123, its own): the image holds the texels as the path says, bit for bit         ✓
+RGB9E5F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+  RGB9E5F        device     VkFormat 123  its own          raw, sampled (max error 0), drawn: not a render target on this device
+RGB_DXT1 (device pass, VkFormat 131, its own): the image holds the texels as the path says, bit for bit        ✓
+  RGB_DXT1       device     VkFormat 131  its own          raw
+RGBA_DXT1 (device pass, VkFormat 133, its own): the image holds the texels as the path says, bit for bit       ✓
+  RGBA_DXT1      device     VkFormat 133  its own          raw
+RGBA_DXT3 (device pass, VkFormat 135, its own): the image holds the texels as the path says, bit for bit       ✓
+  RGBA_DXT3      device     VkFormat 135  its own          raw
+RGBA_DXT5 (device pass, VkFormat 137, its own): the image holds the texels as the path says, bit for bit       ✓
+  RGBA_DXT5      device     VkFormat 137  its own          raw
+RGB_DXT1_SRGB (device pass, VkFormat 132, its own): the image holds the texels as the path says, bit for bit   ✓
+  RGB_DXT1_SRGB  device     VkFormat 132  its own          raw
+RGBA_DXT1_SRGB (device pass, VkFormat 134, its own): the image holds the texels as the path says, bit for bit  ✓
+  RGBA_DXT1_SRGB device     VkFormat 134  its own          raw
+RGBA_DXT3_SRGB (device pass, VkFormat 136, its own): the image holds the texels as the path says, bit for bit  ✓
+  RGBA_DXT3_SRGB device     VkFormat 136  its own          raw
+RGBA_DXT5_SRGB (device pass, VkFormat 138, its own): the image holds the texels as the path says, bit for bit  ✓
+  RGBA_DXT5_SRGB device     VkFormat 138  its own          raw
+RGTC1_UNORM (device pass, VkFormat 139, its own): the image holds the texels as the path says, bit for bit     ✓
+  RGTC1_UNORM    device     VkFormat 139  its own          raw
+RGTC1_SNORM (device pass, VkFormat 140, its own): the image holds the texels as the path says, bit for bit     ✓
+  RGTC1_SNORM    device     VkFormat 140  its own          raw
+RGTC2_UNORM (device pass, VkFormat 141, its own): the image holds the texels as the path says, bit for bit     ✓
+  RGTC2_UNORM    device     VkFormat 141  its own          raw
+RGTC2_SNORM (device pass, VkFormat 142, its own): the image holds the texels as the path says, bit for bit     ✓
+  RGTC2_SNORM    device     VkFormat 142  its own          raw
+BPTC_UNORM (device pass, VkFormat 145, its own): the image holds the texels as the path says, bit for bit      ✓
+  BPTC_UNORM     device     VkFormat 145  its own          raw
+BPTC_UNORM_SRGB (device pass, VkFormat 146, its own): the image holds the texels as the path says, bit for bit ✓
+  BPTC_UNORM_SRGB device     VkFormat 146  its own          raw
+BPTC_SFLOAT (device pass, VkFormat 144, its own): the image holds the texels as the path says, bit for bit     ✓
+  BPTC_SFLOAT    device     VkFormat 144  its own          raw
+BPTC_UFLOAT (device pass, VkFormat 143, its own): the image holds the texels as the path says, bit for bit     ✓
+  BPTC_UFLOAT    device     VkFormat 143  its own          raw
+[dm] [hostvk] texture format converted at upload (first case: NVN R8_UI2F → VkFormat 100: integers read as float: the USCALED / SSCALED vertex format; as a texture, vk where the device samples it (rarely), else conv with each integer converted at upload on the CPU to the float it reads as)
+R8_UI2F (device pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R8_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+  R8_UI2F        device     VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R8_I2F (device pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit  ✓
+R8_I2F (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+  R8_I2F         device     VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R16_UI2F (device pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R16_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  R16_UI2F       device     VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R16_I2F (device pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R16_I2F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+  R16_I2F        device     VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R32_UI2F (device pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R32_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  R32_UI2F       device     VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R32_I2F (device pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R32_I2F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+  R32_I2F        device     VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG8_UI2F (device pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG8_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  RG8_UI2F       device     VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG8_I2F (device pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG8_I2F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+  RG8_I2F        device     VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG16_UI2F (device pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG16_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RG16_UI2F      device     VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG16_I2F (device pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG16_I2F (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  RG16_I2F       device     VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG32_UI2F (device pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG32_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RG32_UI2F      device     VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG32_I2F (device pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG32_I2F (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  RG32_I2F       device     VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB8_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB8_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGB8_UI2F      device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB8_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB8_I2F (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  RGB8_I2F       device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB16_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB16_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB16_UI2F     device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB16_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB16_I2F (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGB16_I2F      device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB32_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB32_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB32_UI2F     device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB32_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB32_I2F (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGB32_I2F      device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA8_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA8_UI2F (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGBA8_UI2F     device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA8_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA8_I2F (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGBA8_I2F      device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA16_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA16_UI2F (device pass): a shader reads what NVN gives for every texel (float)                               ✓
+  RGBA16_UI2F    device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA16_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA16_I2F (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGBA16_I2F     device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA32_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA32_UI2F (device pass): a shader reads what NVN gives for every texel (float)                               ✓
+  RGBA32_UI2F    device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA32_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA32_I2F (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGBA32_I2F     device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB10A2SN (device pass, VkFormat 65, its own): the image holds the texels as the path says, bit for bit        ✓
+RGB10A2SN (device pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGB10A2SN drawn: texel 1 30 0b e3 12, written 31 0b e3 d2
+  finding (lavapipe): RGB10A2SN drawn does not round-trip: lavapipe's float to A2B10G10R10_SNORM conversion (one 10-bit component one unit off, the 2-bit alpha -1 stored as 0); not counted
+  RGB10A2SN      device     VkFormat 65   its own          raw, sampled (max error 2.7e-08), drawn: lavapipe's conversion differs (finding)
+RGB10A2I (device pass, VkFormat 96, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2I (device pass): a shader reads what NVN gives for every texel (int)                                    ✓
+  RGB10A2I       device     VkFormat 96   conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB10A2_UI2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2_UI2F (device pass): a shader reads what NVN gives for every texel (float)                              ✓
+  RGB10A2_UI2F   device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB10A2_I2F (device pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2_I2F (device pass): a shader reads what NVN gives for every texel (float)                               ✓
+  RGB10A2_I2F    device     VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBX8 (device pass, VkFormat 37, its own): the image holds the texels as the path says, bit for bit            ✓
+RGBX8 (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+RGBX8 (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  RGBX8          device     VkFormat 37   its own          raw, sampled (max error 7.4e-08), drawn
+RGBX8SN (device pass, VkFormat 38, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBX8SN (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGBX8SN (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBX8SN        device     VkFormat 38   its own          raw, sampled (max error 2.8e-08), drawn
+RGBX8UI (device pass, VkFormat 41, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBX8UI (device pass): a shader reads what NVN gives for every texel (uint)                                    ✓
+RGBX8UI (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBX8UI        device     VkFormat 41   its own          raw, sampled (max error 0), drawn
+RGBX8I (device pass, VkFormat 42, its own): the image holds the texels as the path says, bit for bit           ✓
+RGBX8I (device pass): a shader reads what NVN gives for every texel (int)                                      ✓
+RGBX8I (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGBX8I         device     VkFormat 42   its own          raw, sampled (max error 0), drawn
+RGBX16F (device pass, VkFormat 97, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBX16F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGBX16F (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBX16F        device     VkFormat 97   its own          raw, sampled (max error 0), drawn
+RGBX16 (device pass, VkFormat 91, its own): the image holds the texels as the path says, bit for bit           ✓
+RGBX16 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+RGBX16 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  RGBX16         device     VkFormat 91   its own          raw, sampled (max error 2.5e-08), drawn
+RGBX16SN (device pass, VkFormat 92, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBX16SN (device pass): a shader reads what NVN gives for every texel (float)                                  ✓
+RGBX16SN (device pass): drawn into a texture of the same format, the texels written back bit for bit           ✓
+  RGBX16SN       device     VkFormat 92   its own          raw, sampled (max error 2.8e-08), drawn
+RGBX16UI (device pass, VkFormat 95, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBX16UI (device pass): a shader reads what NVN gives for every texel (uint)                                   ✓
+RGBX16UI (device pass): drawn into a texture of the same format, the texels written back bit for bit           ✓
+  RGBX16UI       device     VkFormat 95   its own          raw, sampled (max error 0), drawn
+RGBX16I (device pass, VkFormat 96, its own): the image holds the texels as the path says, bit for bit          ✓
+RGBX16I (device pass): a shader reads what NVN gives for every texel (int)                                     ✓
+RGBX16I (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBX16I        device     VkFormat 96   its own          raw, sampled (max error 0), drawn
+RGBX32F (device pass, VkFormat 109, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBX32F (device pass): a shader reads what NVN gives for every texel (float)                                   ✓
+RGBX32F (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBX32F        device     VkFormat 109  its own          raw, sampled (max error 0), drawn
+RGBX32UI (device pass, VkFormat 107, its own): the image holds the texels as the path says, bit for bit        ✓
+RGBX32UI (device pass): a shader reads what NVN gives for every texel (uint)                                   ✓
+RGBX32UI (device pass): drawn into a texture of the same format, the texels written back bit for bit           ✓
+  RGBX32UI       device     VkFormat 107  its own          raw, sampled (max error 0), drawn
+RGBX32I (device pass, VkFormat 108, its own): the image holds the texels as the path says, bit for bit         ✓
+RGBX32I (device pass): a shader reads what NVN gives for every texel (int)                                     ✓
+RGBX32I (device pass): drawn into a texture of the same format, the texels written back bit for bit            ✓
+  RGBX32I        device     VkFormat 108  its own          raw, sampled (max error 0), drawn
+BGR565 (device pass, VkFormat 4, its own): the image holds the texels as the path says, bit for bit            ✓
+BGR565 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+BGR565 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  BGR565         device     VkFormat 4    its own          raw, sampled (max error 7.2e-08), drawn
+BGR5 (device pass, VkFormat 8, its own): the image holds the texels as the path says, bit for bit              ✓
+BGR5 (device pass): a shader reads what NVN gives for every texel (float)                                      ✓
+BGR5 (device pass): drawn into a texture of the same format, the texels written back bit for bit               ✓
+  BGR5           device     VkFormat 8    its own          raw, sampled (max error 5.4e-08), drawn
+BGR5A1 (device pass, VkFormat 8, its own): the image holds the texels as the path says, bit for bit            ✓
+BGR5A1 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+BGR5A1 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  BGR5A1         device     VkFormat 8    its own          raw, sampled (max error 5.4e-08), drawn
+A1BGR5 (device pass, VkFormat 6, its own): the image holds the texels as the path says, bit for bit            ✓
+A1BGR5 (device pass): a shader reads what NVN gives for every texel (float)                                    ✓
+A1BGR5 (device pass): drawn into a texture of the same format, the texels written back bit for bit             ✓
+  A1BGR5         device     VkFormat 6    its own          raw, sampled (max error 5.4e-08), drawn
+BGRX8 (device pass, VkFormat 44, its own): the image holds the texels as the path says, bit for bit            ✓
+BGRX8 (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+BGRX8 (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  BGRX8          device     VkFormat 44   its own          raw, sampled (max error 7.4e-08), drawn
+BGRA8 (device pass, VkFormat 44, its own): the image holds the texels as the path says, bit for bit            ✓
+BGRA8 (device pass): a shader reads what NVN gives for every texel (float)                                     ✓
+BGRA8 (device pass): drawn into a texture of the same format, the texels written back bit for bit              ✓
+  BGRA8          device     VkFormat 44   its own          raw, sampled (max error 7.2e-08), drawn
+BGRX8_SRGB (device pass, VkFormat 50, its own): the image holds the texels as the path says, bit for bit       ✓
+BGRX8_SRGB (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+BGRX8_SRGB (device pass): drawn into a texture of the same format, the texels written back bit for bit         ✓
+  BGRX8_SRGB     device     VkFormat 50   its own          raw, sampled (max error 0.0012), drawn
+BGRA8_SRGB (device pass, VkFormat 50, its own): the image holds the texels as the path says, bit for bit       ✓
+BGRA8_SRGB (device pass): a shader reads what NVN gives for every texel (float)                                ✓
+BGRA8_SRGB (device pass): drawn into a texture of the same format, the texels written back bit for bit         ✓
+  BGRA8_SRGB     device     VkFormat 50   its own          raw, sampled (max error 0.0012), drawn
+pass 2: every row that may need a device feature, on its substitute
+RGB8 (substitute pass, VkFormat 37, alt, expanded): the image holds the texels as the path says, bit for bit   ✓
+RGB8 (substitute pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  RGB8           substitute VkFormat 37   alt, expanded    raw, sampled (max error 7.1e-08), drawn: declared (substitute)
+RGB8SN (substitute pass, VkFormat 38, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB8SN (substitute pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB8SN         substitute VkFormat 38   alt, expanded    raw, sampled (max error 2.9e-08), drawn: declared (substitute)
+RGB8UI (substitute pass, VkFormat 41, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB8UI (substitute pass): a shader reads what NVN gives for every texel (uint)                                 ✓
+  RGB8UI         substitute VkFormat 41   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB8I (substitute pass, VkFormat 42, alt, expanded): the image holds the texels as the path says, bit for bit  ✓
+RGB8I (substitute pass): a shader reads what NVN gives for every texel (int)                                   ✓
+  RGB8I          substitute VkFormat 42   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB16F (substitute pass, VkFormat 97, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB16F (substitute pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB16F         substitute VkFormat 97   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB16 (substitute pass, VkFormat 91, alt, expanded): the image holds the texels as the path says, bit for bit  ✓
+RGB16 (substitute pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGB16          substitute VkFormat 91   alt, expanded    raw, sampled (max error 3e-08), drawn: declared (substitute)
+RGB16SN (substitute pass, VkFormat 92, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB16SN (substitute pass): a shader reads what NVN gives for every texel (float)                               ✓
+  RGB16SN        substitute VkFormat 92   alt, expanded    raw, sampled (max error 2.9e-08), drawn: declared (substitute)
+RGB16UI (substitute pass, VkFormat 95, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB16UI (substitute pass): a shader reads what NVN gives for every texel (uint)                                ✓
+  RGB16UI        substitute VkFormat 95   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB16I (substitute pass, VkFormat 96, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB16I (substitute pass): a shader reads what NVN gives for every texel (int)                                  ✓
+  RGB16I         substitute VkFormat 96   alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB32F (substitute pass, VkFormat 109, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB32F (substitute pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB32F         substitute VkFormat 109  alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB32UI (substitute pass, VkFormat 107, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB32UI (substitute pass): a shader reads what NVN gives for every texel (uint)                                ✓
+  RGB32UI        substitute VkFormat 107  alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGB32I (substitute pass, VkFormat 108, alt, expanded): the image holds the texels as the path says, bit for bit ✓
+RGB32I (substitute pass): a shader reads what NVN gives for every texel (int)                                  ✓
+  RGB32I         substitute VkFormat 108  alt, expanded    raw, sampled (max error 0), drawn: declared (substitute)
+RGBA4 (substitute pass, VkFormat 3, alt, mapped): the image holds the texels as the path says, bit for bit     ✓
+RGBA4 (substitute pass): a shader reads what NVN gives for every texel (float)                                 ✓
+  RGBA4          substitute VkFormat 3    alt, mapped      raw, sampled (max error 7.2e-08), drawn: declared (substitute)
+RGB5 (substitute pass, VkFormat 8, alt, mapped): the image holds the texels as the path says, bit for bit      ✓
+RGB5 (substitute pass): a shader reads what NVN gives for every texel (float)                                  ✓
+  RGB5           substitute VkFormat 8    alt, mapped      raw, sampled (max error 5.4e-08), drawn: declared (substitute)
+RGB5A1 (substitute pass, VkFormat 8, alt, mapped): the image holds the texels as the path says, bit for bit    ✓
+RGB5A1 (substitute pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB5A1         substitute VkFormat 8    alt, mapped      raw, sampled (max error 4.6e-08), drawn: declared (substitute)
+RGB565 (substitute pass, VkFormat 4, alt, mapped): the image holds the texels as the path says, bit for bit    ✓
+RGB565 (substitute pass): a shader reads what NVN gives for every texel (float)                                ✓
+  RGB565         substitute VkFormat 4    alt, mapped      raw, sampled (max error 5.4e-08), drawn: declared (substitute)
+R8_UI2F (substitute pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R8_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                               ✓
+  R8_UI2F        substitute VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R8_I2F (substitute pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R8_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                                ✓
+  R8_I2F         substitute VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R16_UI2F (substitute pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R16_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                              ✓
+  R16_UI2F       substitute VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+R16_I2F (substitute pass, VkFormat 100, conv, converted): the image holds the texels as the path says, bit for bit ✓
+R16_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                               ✓
+  R16_I2F        substitute VkFormat 100  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG8_UI2F (substitute pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG8_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                              ✓
+  RG8_UI2F       substitute VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG8_I2F (substitute pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG8_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                               ✓
+  RG8_I2F        substitute VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG16_UI2F (substitute pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG16_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                             ✓
+  RG16_UI2F      substitute VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RG16_I2F (substitute pass, VkFormat 103, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RG16_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                              ✓
+  RG16_I2F       substitute VkFormat 103  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB8_UI2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB8_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                             ✓
+  RGB8_UI2F      substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB8_I2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB8_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                              ✓
+  RGB8_I2F       substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB16_UI2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB16_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                            ✓
+  RGB16_UI2F     substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB16_I2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB16_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                             ✓
+  RGB16_I2F      substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA8_UI2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA8_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                            ✓
+  RGBA8_UI2F     substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA8_I2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA8_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                             ✓
+  RGBA8_I2F      substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA16_UI2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA16_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                           ✓
+  RGBA16_UI2F    substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGBA16_I2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGBA16_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                            ✓
+  RGBA16_I2F     substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB10A2SN (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2SN (substitute pass): a shader reads what NVN gives for every texel (float)                             ✓
+  RGB10A2SN      substitute VkFormat 109  conv, converted  raw, sampled (max error 3e-08), drawn: declared (substitute)
+RGB10A2I (substitute pass, VkFormat 96, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2I (substitute pass): a shader reads what NVN gives for every texel (int)                                ✓
+  RGB10A2I       substitute VkFormat 96   conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB10A2_UI2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2_UI2F (substitute pass): a shader reads what NVN gives for every texel (float)                          ✓
+  RGB10A2_UI2F   substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+RGB10A2_I2F (substitute pass, VkFormat 109, conv, converted): the image holds the texels as the path says, bit for bit ✓
+RGB10A2_I2F (substitute pass): a shader reads what NVN gives for every texel (float)                           ✓
+  RGB10A2_I2F    substitute VkFormat 109  conv, converted  raw, sampled (max error 0), drawn: declared (substitute)
+format rows: 122 on the device's formats, 36 on their substitutes (the depth and stencil rows: t_vk_depth24; ASTC: t_vk_astc)
+[dm] [hostvk] prediction: 52 walks of the rest of a submission after a draw waited (52 records, 0.23 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.040 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 17.7 MiB in use: waste 46.3 MiB (72 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 379 made, 379 given back; live allocations peak 3 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_formats: 368 checks, 0 failed ==
+
+exit: 0 (3 s)

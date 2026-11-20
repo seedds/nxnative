@@ -1,0 +1,79 @@
+date: 2026-11-20T05:38:37Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_aot_host.exe  --corpus Z:/home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/tools/aot/corpus
+
+0218:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF8A8): stub!
+t_aot_host: packs Z:/srv/nxnative-games/lead-build/verify/packs/win64, corpus Z:/home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/tools/aot/corpus, JIT fallback built in (NXHOST_JIT)
+nro            run       ok    st        ms  lines  note
+log-lines      race      ok     0     0.000  20000  20002 log lines from one thread, guest lines from another
+int_ops-gcc    plain     ok     0    50.184     45  1228 bytes of lines as expected
+int_ops-gcc    dirty     ok     0    71.137     45  46 write faults resumed by the hook: 46 stores of compiled code, 0 elsewhere (the JIT's code, the host), 0 in the JIT's callbacks
+int_ops-gcc    positions FAIL   0   640.328     45  0 rows, 0 samples (0 of 0 in compiled code at an instruction); ref_crc [0x2240, 0x227c) 0: 0 in its loops [0x2248, 0x2274], 0 at its entry, 0 offsets, the hottest of 69 functions (not the hottest); 61072 code bytes of 69 functions: 41976 at an instruction, 19096 at none, 0 outside their function (0 read otherwise by the host); 0 of 0 sampled functions with a row inside them; function lines: 0 for 0 sampled functions, 0 of 0 rows inside the function of the line before them, 0 lines with the sampler's samples and their rows' count; [RED] aot: DM_AOT_PROFILE: no handle or CPU time for a guest thread (error 120): it is not sampled
+                              ref_crc's rows with the most samples:
+0514:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF8A8): stub!
+int_ops-gcc    roundtrip note: no nxaot (--nxaot, NXAOT): the profile's round trip through nxaot build --profile is not checked here
+switch-gcc     plain     ok     0     5.828     13  337 bytes of lines as expected
+fnptr-gcc      plain     ok     0    35.796     18  563 bytes of lines as expected
+fnptr-gcc      host-call ok     0    21.375     18  hidden_ptr -> the host: 1 calls of the host function, 1 host calls
+fp-gcc         plain     ok     0   189.697    170  5069 bytes of lines as expected
+fp-gcc         jit-start ok     0   191.518    170  ready before the run 1: 1 made ahead, 1 taken, 0 made on first use, 0 waits, first use 0.976 ms; plain run: 0 made on first use; [RED] aot: msr fpcr left the FPCR the module was compiled for at fp-gcc+0x1824 runs in the JIT fallback (design section 11)
+simd-gcc       plain     ok     0    23.898     20  587 bytes of lines as expected
+sjlj-gcc       plain     ok     0    20.656     11  294 bytes of lines as expected
+excl-gcc       plain     ok     0   146.790     35  1072 bytes of lines as expected
+excl-gcc       threads   ok     0   121.673     35  4 threads, 55 SVCs
+excl-gcc       threads   ok     0   132.092     35  4 threads, 59 SVCs
+excl-gcc       threads   ok     0   153.325     35  4 threads, 59 SVCs
+excl-gcc       threads   ok     0   146.169     35  4 threads, 55 SVCs
+excl-gcc       threads   ok     0   131.210     35  4 threads, 69 SVCs
+excl-gcc       pause     ok     0   406.407     35  seed 1: 78 pauses (50 threaded), 47 at polls, 47 invariant checks, 0 inconsistent
+excl-gcc       pause     ok     0   180.656     35  seed 2: 84 pauses (50 threaded), 48 at polls, 48 invariant checks, 0 inconsistent
+excl-gcc       pause     ok     0   274.833     35  seed 3: 101 pauses (50 threaded), 49 at polls, 48 invariant checks, 0 inconsistent
+excl-gcc       pauses    ok   over 3 seeds: 144 stops at polls, 143 register-invariant checks
+excl-gcc       dirty     ok     0   134.521     35  46 write faults resumed by the hook: 46 stores of compiled code, 0 elsewhere (the JIT's code, the host), 0 in the JIT's callbacks
+except-gcc     plain     ok     0    49.131     20  628 bytes of lines as expected
+fiber-gcc      plain     ok     0    81.082      9  277 bytes of lines as expected
+fiber-gcc      dirty     ok     0    41.111      9  25 write faults resumed by the hook: 18 stores of compiled code, 7 elsewhere (the JIT's code, the host), 0 in the JIT's callbacks; [RED] aot: a non-local transfer to a continuation with no native frame at fiber-gcc+0x174 runs in the JIT fallback (design section 11)
+int_ops-clang  plain     ok     0    44.930     45  1228 bytes of lines as expected
+int_ops-clang  dirty     ok     0    67.060     45  46 write faults resumed by the hook: 46 stores of compiled code, 0 elsewhere (the JIT's code, the host), 0 in the JIT's callbacks
+int_ops-clang  positions FAIL   0   667.799     45  0 rows, 0 samples (0 of 0 in compiled code at an instruction); ref_crc [0x26f0, 0x2780) 0: 0 in its loops [0x2700, 0x2778], 0 at its entry, 0 offsets, the hottest of 68 functions (not the hottest); 61072 code bytes of 68 functions: 42354 at an instruction, 18718 at none, 0 outside their function (0 read otherwise by the host); 0 of 0 sampled functions with a row inside them; function lines: 0 for 0 sampled functions, 0 of 0 rows inside the function of the line before them, 0 lines with the sampler's samples and their rows' count; [RED] aot: DM_AOT_PROFILE: no handle or CPU time for a guest thread (error 120): it is not sampled
+                              ref_crc's rows with the most samples:
+int_ops-clang  roundtrip note: no nxaot (--nxaot, NXAOT): the profile's round trip through nxaot build --profile is not checked here
+switch-clang   plain     ok     0    18.169     13  337 bytes of lines as expected
+fnptr-clang    plain     ok     0    21.769     18  563 bytes of lines as expected
+fnptr-clang    host-call ok     0    25.165     18  hidden_ptr -> the host: 1 calls of the host function, 1 host calls
+fp-clang       plain     ok     0   245.449    170  5069 bytes of lines as expected
+fp-clang       jit-start ok     0   202.736    170  ready before the run 1: 1 made ahead, 1 taken, 0 made on first use, 0 waits, first use 0.829 ms; plain run: 0 made on first use; [RED] aot: msr fpcr left the FPCR the module was compiled for at fp-clang+0x1c20 runs in the JIT fallback (design section 11)
+simd-clang     plain     ok     0    27.454     20  587 bytes of lines as expected
+sjlj-clang     plain     ok     0    27.071     11  294 bytes of lines as expected
+excl-clang     plain     ok     0   131.431     35  1072 bytes of lines as expected
+excl-clang     threads   ok     0   108.682     35  4 threads, 55 SVCs
+excl-clang     threads   ok     0   122.888     35  4 threads, 808 SVCs
+excl-clang     threads   ok     0   116.375     35  4 threads, 69 SVCs
+excl-clang     threads   ok     0   112.602     35  4 threads, 55 SVCs
+excl-clang     threads   ok     0   117.210     35  4 threads, 71 SVCs
+excl-clang     pause     ok     0   184.850     35  seed 1: 98 pauses (50 threaded), 48 at polls, 48 invariant checks, 0 inconsistent
+excl-clang     pause     ok     0   322.242     35  seed 2: 96 pauses (50 threaded), 48 at polls, 48 invariant checks, 0 inconsistent
+excl-clang     pause     ok     0   421.217     35  seed 3: 81 pauses (50 threaded), 48 at polls, 48 invariant checks, 0 inconsistent
+excl-clang     pauses    ok   over 3 seeds: 144 stops at polls, 144 register-invariant checks
+excl-clang     dirty     ok     0   166.019     35  55 write faults resumed by the hook: 54 stores of compiled code, 1 elsewhere (the JIT's code, the host), 0 in the JIT's callbacks
+except-clang   plain     ok     0    36.649     20  628 bytes of lines as expected
+fiber-clang    plain     ok     0   110.379      9  277 bytes of lines as expected
+fiber-clang    dirty     ok     0   133.221      9  98 write faults resumed by the hook: 68 stores of compiled code, 30 elsewhere (the JIT's code, the host), 0 in the JIT's callbacks; [RED] aot: a non-local transfer to a continuation with no native frame at fiber-clang+0x124c runs in the JIT fallback (design section 11)
+lrtail         jit       note: no nxaot (--nxaot, NXAOT): lrtail is not packed here
+spkeep         sp        note: no nxaot (--nxaot, NXAOT): spkeep is not packed here
+fpret          fpcr      note: no nxaot (--nxaot, NXAOT): fpret is not packed here
+fpresume       fpcr      note: no nxaot (--nxaot, NXAOT): fpresume is not packed here
+pollkeep       poll      note: no nxaot (--nxaot, NXAOT): pollkeep is not packed here
+exclspin       excl      note: no nxaot (--nxaot, NXAOT): exclspin is not packed here
+sample         poll      note: no nxaot (--nxaot, NXAOT): sample is not packed here
+bindstub       bind      note: no nxaot (--nxaot, NXAOT): bindstub is not packed here
+guestbt        bt        note: no nxaot (--nxaot, NXAOT): guestbt is not packed here
+polls          latency   note: no nxaot (--nxaot, NXAOT): polls is not packed here
+cutcall        cut       note: no nxaot (--nxaot, NXAOT): cutcall and noret are not packed here
+casecall       first     note: no nxaot (--nxaot, NXAOT)
+guesscase      first     note: no nxaot (--nxaot, NXAOT)
+fpframe        own-ret   note: no nxaot (--nxaot, NXAOT): fpframe is not packed here
+fzsec          native    note: no nxaot (--nxaot, NXAOT): fzsec is not packed here
+t_aot_host: 49 checks, 2 failed
+
+exit: 1 (79 s)

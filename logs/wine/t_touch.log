@@ -1,0 +1,20 @@
+date: 2026-11-20T05:36:27Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_touch.exe
+
+✓ press reports Start (640, 180)
+✓ move attribute 0 (960, 360), delta_time is the interval between two reads
+✓ lift reports End (960, 360)
+✓ 0 touch points after End
+✓ short-press latch: Start first (128, 72)
+✓ short-press latch: then End
+✓ empty after the short-press latch
+✓ coordinates clamped to [0,1279]×[0,719]
+✓ empty after both Ends
+✓ multiple fingers in ascending id order (1:(640,540) 5:(320,360))
+✓ before the re-press: Start (320, 180)
+✓ re-press: the old End first (320, 180)
+✓ re-press: then the new Start (640, 360)
+== 13 checks, 0 failed ==
+
+exit: 0 (0 s)

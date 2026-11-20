@@ -1,0 +1,124 @@
+date: 2026-11-20T05:37:02Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_pipe.exe
+
+a vertex-only description writes the documented P row, character for character                       ok
+... and reads back to the same description                                                           ok
+a G-buffer-like description writes the documented P row                                              ok
+... and reads back byte for byte                                                                     ok
+a trailing CR LF is ignored                                                                          ok
+to_key: RGBA8 -> RGBA8Unorm (70), R11G11B10F -> RG11B10Float (92), DEPTH32F_STENCIL8 -> Depth32Float_Stencil8 (260) in both slots ok
+to_key: keys, stages, samples, enables and masks carried                                             ok
+to_key: blend, attributes and streams carried                                                        ok
+from_key(to_key(d)) == d, with the ambiguous formats marked                                          ok
+to_key normalises: absent targets lose their enable and mask, a target without blending its factors  ok
+to_key refuses an attachment whose NVN format has no Metal format                                    ok
+the rasterizer and depth-stencil state are written                                                   ok
+... and read back byte for byte                                                                      ok
+the state beyond the key does not change the Metal key                                               ok
+write: a buffer too small is refused                                                                 ok
+write: a shader key with a space is refused                                                          ok
+write: a shader key with bytes after its end is refused                                              ok
+write: a reserved byte set is refused                                                                ok
+write: state beyond the key without xstate is refused                                                ok
+write: blend bits outside NVN's fields are refused                                                   ok
+from_key: a merged pass is not representable                                                         ok
+from_key: a merged-pass map is not representable                                                     ok
+from_key: a readable-tile variant is not representable                                               ok
+from_key: Metal format 1 has no NVN source                                                           ok
+... and the description is left zeroed                                                               ok
+from_key: a live key (pointers set) is not representable                                             ok
+from_key: a shader key with bytes after its end is not representable                                 ok
+from_key: blend enables beyond 8 targets are out of range                                            ok
+from_key: blend bits outside NVN's fields are not representable                                      ok
+from_key: a padding byte set is not representable                                                    ok
+from_key: BGRA8Unorm (80) and Depth32Float (252) decode to BGRA8 (0x9A) and DEPTH32F (0x34), marked as guesses ok
+from_key: RG11B10Float (92) and Depth16Unorm (250) have one source each, no guess                    ok
+from_key: a stencil-only pass keeps STENCIL8 (0x31) in the stencil slot only                         ok
+malformed P row refused: an unknown version                                                          ok
+malformed P row refused: no version                                                                  ok
+malformed P row refused: a field name changed                                                        ok
+malformed P row refused: a colour list one short                                                     ok
+malformed P row refused: a colour list one long                                                      ok
+malformed P row refused: a format beyond 16 bits                                                     ok
+malformed P row refused: a negative number                                                           ok
+malformed P row refused: a blend target beyond 3 bits                                                ok
+malformed P row refused: a blend entry one number short                                              ok
+malformed P row refused: an attribute offset beyond 19 bits                                          ok
+malformed P row refused: an attribute stream beyond 5 bits                                           ok
+malformed P row refused: a shader key with '='                                                       ok
+malformed P row refused: a shader key of 25 characters                                               ok
+malformed P row refused: no stage                                                                    ok
+malformed P row refused: a guess mask beyond 10 bits                                                 ok
+malformed P row refused: rasterizer state one number short                                           ok
+malformed P row refused: depth-stencil state cut off                                                 ok
+malformed P row refused: spaces for tabs                                                             ok
+malformed P row refused: hex digits after decimal ones                                               ok
+malformed P row refused: an extra field                                                              ok
+malformed P row refused: rast=- with a depth-stencil state                                           ok
+a v2 row is refused naming the version                                                               ok
+malformed R row refused: too short                                                                   ok
+malformed R row refused: a character that is not a hex digit                                         ok
+an all-zero R row is a pipeline without shaders or attachments                                       ok
+an S row is not a pipeline row                                                                       ok
+a C row is not a pipeline row                                                                        ok
+a comment is not a pipeline row                                                                      ok
+a blank line is not a pipeline row                                                                   ok
+no row at all is refused                                                                             ok
+from_state -> to_key equals the Metal builder's key (400 / 400 draw states)                          ok
+from_state's P rows read back byte for byte (400 / 400)                                              ok
+its key decodes and encodes again to the same key (400 / 400)                                        ok
+the state beyond the key comes from S (400 / 400)                                                    ok
+from_state keeps NVN's blend fields only: a stray high bit of the game's object is the only difference ok
+from_state: samples beyond 255 are refused                                                           ok
+repository: Z:/home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15
+010013C00E930000: rows 57, round-tripped 57, not representable 0
+0100152000022000: rows 776, round-tripped 776, not representable 0
+010020D01AD24000: rows 36, round-tripped 36, not representable 0
+01002B30028F6000: rows 18, round-tripped 18, not representable 0
+0100346017304000: rows 9, round-tripped 9, not representable 0
+010036E00FB20000: rows 86, round-tripped 86, not representable 0
+010038B015560000: rows 56, round-tripped 56, not representable 0
+010040801A4C8000: rows 87, round-tripped 87, not representable 0
+01004A4010FEA000: rows 275, round-tripped 275, not representable 0
+010056B015FE8000: rows 141, round-tripped 141, not representable 0
+0100620012D6E000: rows 76, round-tripped 76, not representable 0
+0100698009C6E000: rows 19, round-tripped 19, not representable 0
+010069C01AB82000: rows 363, round-tripped 363, not representable 0
+01006BB00C6F0000: rows 85, round-tripped 85, not representable 0
+01006F8002326000: rows 546, round-tripped 546, not representable 0
+0100713016CCC000: rows 99, round-tripped 99, not representable 0
+010076F0049A2000: rows 300, round-tripped 300, not representable 0
+01007960049A0000: rows 531, round-tripped 531, not representable 0
+01007EF00011E000: rows 960, round-tripped 960, not representable 0
+010086A022444000: rows 123, round-tripped 123, not representable 0
+010089B00D09C000: rows 115, round-tripped 115, not representable 0
+01008BC024FDE000: rows 12, round-tripped 12, not representable 0
+01008CF01BAAC000: rows 129, round-tripped 129, not representable 0
+01008DB008C2C000: rows 1512, round-tripped 1512, not representable 0
+01009BF0072D4000: rows 266, round-tripped 266, not representable 0
+01009D901BC56000: rows 110, round-tripped 110, not representable 0
+0100A3501946E000: rows 377, round-tripped 377, not representable 0
+0100A5C00D162000: rows 34, round-tripped 34, not representable 0
+0100A6301214E000: rows 548, round-tripped 548, not representable 0
+0100A83022A22000: rows 28, round-tripped 28, not representable 0
+0100ABF008968000: rows 1512, round-tripped 1512, not representable 0
+0100B7C00933A000: rows 362, round-tripped 362, not representable 0
+0100B99019412000: rows 256, round-tripped 256, not representable 0
+0100BF00112C0000: rows 267, round-tripped 267, not representable 0
+0100C2A01A730000: rows 232, round-tripped 232, not representable 0
+0100E44016C22000: rows 4, round-tripped 4, not representable 0
+0100E65002BB8000: rows 4, round-tripped 4, not representable 0
+0100ECD018EBE000: rows 389, round-tripped 389, not representable 0
+0100F2C0115B6000: rows 2512, round-tripped 2512, not representable 0
+0100F5D01DA3A000: rows 7, round-tripped 7, not representable 0
+89 profiles with a pso_manifest.tsv, 49 without R rows
+not representable, by reason: none
+attachments decoded from an ambiguous Metal format (nvn_fmt_from_mtl's first candidate): c0: 5605 c1: 2130 c2: 645 c3: 1867 c4: 201 c5: 165 c6: 9 depth0: 11133 stencil0: 6287
+longest P row: 500 bytes (NVN_PIPE_ROW_MAX 1024)
+the manifests hold R rows                                                                            ok
+every representable R row round-trips, every other one has an expected reason (0 rows failed)        ok
+(69 checks before the manifests, 0 failed)
+== t_pipe: 71 checks, 0 failed; R rows: 13319 round-tripped, 0 not representable ==
+
+exit: 0 (0 s)

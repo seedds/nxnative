@@ -1,0 +1,157 @@
+date: 2026-11-20T05:37:54Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_predict.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 0 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_dyc8xv/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_dyc8xv/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+06c4:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+device level A, pipeline libraries usable: levels A, B, C and D; 2 background workers' queue for the look-ahead first
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] pipeline prewarm off (DM_PSO_MANIFEST=off)
+[dm] [hostvk] pipeline prewarm done: 0 lines (0 render pipeline rows, 0 shader rows, 0 compute rows), 0 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.00 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_dyc8xv/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_dyc8xv/shader_map.tsv: 16 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_dyc8xv/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [RED] [hostvk] a fragment shader reads an input without perspective (NoPerspective; first case cb55d5ea183e4342) on lavapipe, whose clipper gives such an input a wrong value over a clipped triangle whose vertices' w differ (Mesa's draw_pipe_clip.c interp): pictures made from it (a screen position: wipes, full-screen backgrounds) can be wrong on this driver
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+[dm] [hostvk] pipeline prediction: 7 draws ahead in this submission, 7 pipelines queued on the background workers (15 records walked in 7.936 ms, 3.344 ms of them loading programs and layouts)
+level A, list: the device's list holds a P row for each of the 8 pipelines of the submission (8), the 7 the look-ahead made included ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+level A, off: every pipeline waited for at its first draw (16 waits, 16 keys), no walk                         ✓
+off: the targets read back                                                                                     ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: 20 draws ahead in this submission, 15 pipelines queued on the background workers (65 records walked in 0.452 ms, 0.007 ms of them loading programs and layouts)
+level A, sync: one walk (65 records, 0.452 ms), 20 keys made, 15 pipelines queued: the 15 keys of the draws ahead, each once ✓
+level A, sync: the draws ahead found their pipeline ready (15, off 0) and one draw waited (1, off 16)          ✓
+sync: the same pictures as off, bit for bit                                                                    ✓
+level A: a submission whose pipelines are all made waits 0 times and is not walked (0, 0)                      ✓
+[dm] [hostvk] pipeline prediction: 15 draws ahead in this submission, 7 pipelines queued on the background workers (44 records walked in 0.370 ms, 0.004 ms of them loading programs and layouts)
+level A: of 15 draws ahead, the 7 whose pipelines are not made were queued (7), the made ones not              ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: 20 draws ahead in this submission, 15 pipelines queued on the background workers (65 records walked in 0.320 ms, 0.006 ms of them loading programs and layouts)
+level A, held: 15 queued, each made by its draw (15), none by a worker (0); the draws waited as off (16)       ✓
+held: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: 20 draws ahead in this submission, 15 pipelines queued on the background workers (65 records walked in 0.288 ms, 0.007 ms of them loading programs and layouts)
+level A, free: 15 queued, at their draw 13 ready, 1 still being made, 1 made by the draw (3 draws waited, off 16) ✓
+free: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: 6 draws ahead in this submission, 6 pipelines queued on the background workers (19 records walked in 0.258 ms, 0.003 ms of them loading programs and layouts)
+level A, calls (the miss before the calls): the 6 keys ahead, through called lists, a jump, the second handle, queued (6) and ready (6) ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: 3 draws ahead in this submission, 3 pipelines queued on the background workers (9 records walked in 0.454 ms, 0.001 ms of them loading programs and layouts)
+level A, calls (the miss inside a called list): the 3 keys ahead, through called lists, a jump, the return into the caller, the second handle, queued (3) and ready (3) ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (12 records in 0.221 ms, 0.002 ms of them loading programs and layouts, which the budget leaves out; the budget 12 records, 60000.0 ms) after 6 draws, 6 pipelines queued; the draws past it make their own
+level A, a budget of 12 records: the walk stopped (12 records, 6 queued) and walked once though 10 draws waited ✓
+budget: the same pictures as off, bit for bit                                                                  ✓
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (0 records in 0.006 ms, 0.000 ms of them loading programs and layouts, which the budget leaves out; the budget 200000 records, 0.0 ms) after 0 draws, 0 pipelines queued; the draws past it make their own
+level A, a budget of 1 ns: the walk stopped (0 records, 0 queued) and walked once though 16 draws waited       ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+level B, off: every pipeline waited for at its first draw (18 waits, 18 keys), no walk                         ✓
+off: the targets read back                                                                                     ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+[dm] [hostvk] pipeline prediction: 20 draws ahead in this submission, 17 pipelines queued on the background workers (65 records walked in 0.261 ms, 0.006 ms of them loading programs and layouts)
+level B, sync: one walk (65 records, 0.261 ms), 20 keys made, 17 pipelines queued: the 17 keys of the draws ahead, each once ✓
+level B, sync: the draws ahead found their pipeline ready (17, off 0) and one draw waited (1, off 18)          ✓
+sync: the same pictures as off, bit for bit                                                                    ✓
+level B: a submission whose pipelines are all made waits 0 times and is not walked (0, 0)                      ✓
+level B: of 15 draws ahead, the 7 whose pipelines are not made were queued (7), the made ones not              ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+level B, held: 17 queued, each made by its draw (17), none by a worker (0); the draws waited as off (18)       ✓
+held: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+level B, free: 17 queued, at their draw 13 ready, 0 still being made, 4 made by the draw (5 draws waited, off 18) ✓
+free: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+[dm] [hostvk] pipelines made for level B from now on (test)
+level B, calls (the miss before the calls): the 6 keys ahead, through called lists, a jump, the second handle, queued (6) and ready (6) ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+[dm] [hostvk] pipelines made for level B from now on (test)
+level B, calls (the miss inside a called list): the 3 keys ahead, through called lists, a jump, the return into the caller, the second handle, queued (3) and ready (3) ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (12 records in 0.353 ms, 0.002 ms of them loading programs and layouts, which the budget leaves out; the budget 12 records, 60000.0 ms) after 6 draws, 6 pipelines queued; the draws past it make their own
+level B, a budget of 12 records: the walk stopped (12 records, 6 queued) and walked once though 12 draws waited ✓
+budget: the same pictures as off, bit for bit                                                                  ✓
+[dm] [hostvk] pipelines made for level B from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (0 records in 0.006 ms, 0.000 ms of them loading programs and layouts, which the budget leaves out; the budget 200000 records, 0.0 ms) after 0 draws, 0 pipelines queued; the draws past it make their own
+level B, a budget of 1 ns: the walk stopped (0 records, 0 queued) and walked once though 18 draws waited       ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+level C, off: every pipeline waited for at its first draw (16 waits, 16 keys), no walk                         ✓
+off: the targets read back                                                                                     ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+level C, sync: one walk (65 records, 0.379 ms), 20 keys made, 15 pipelines queued: the 15 keys of the draws ahead, each once ✓
+level C, sync: the draws ahead found their pipeline ready (15, off 0) and one draw waited (1, off 16)          ✓
+sync: the same pictures as off, bit for bit                                                                    ✓
+level C: a submission whose pipelines are all made waits 0 times and is not walked (0, 0)                      ✓
+level C: of 15 draws ahead, the 7 whose pipelines are not made were queued (7), the made ones not              ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+level C, held: 15 queued, each made by its draw (15), none by a worker (0); the draws waited as off (16)       ✓
+held: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+level C, free: 15 queued, at their draw 8 ready, 5 still being made, 2 made by the draw (8 draws waited, off 16) ✓
+free: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+[dm] [hostvk] pipelines made for level C from now on (test)
+level C, calls (the miss before the calls): the 6 keys ahead, through called lists, a jump, the second handle, queued (6) and ready (6) ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+[dm] [hostvk] pipelines made for level C from now on (test)
+level C, calls (the miss inside a called list): the 3 keys ahead, through called lists, a jump, the return into the caller, the second handle, queued (3) and ready (3) ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (12 records in 0.334 ms, 0.002 ms of them loading programs and layouts, which the budget leaves out; the budget 12 records, 60000.0 ms) after 6 draws, 6 pipelines queued; the draws past it make their own
+level C, a budget of 12 records: the walk stopped (12 records, 6 queued) and walked once though 10 draws waited ✓
+budget: the same pictures as off, bit for bit                                                                  ✓
+[dm] [hostvk] pipelines made for level C from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (0 records in 0.006 ms, 0.000 ms of them loading programs and layouts, which the budget leaves out; the budget 200000 records, 0.0 ms) after 0 draws, 0 pipelines queued; the draws past it make their own
+level C, a budget of 1 ns: the walk stopped (0 records, 0 queued) and walked once though 16 draws waited       ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+level D, off: every pipeline waited for at its first draw (19 waits, 19 keys), no walk                         ✓
+off: the targets read back                                                                                     ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+level D, sync: one walk (65 records, 0.397 ms), 20 keys made, 18 pipelines queued: the 18 keys of the draws ahead, each once ✓
+level D, sync: the draws ahead found their pipeline ready (18, off 0) and one draw waited (1, off 19)          ✓
+sync: the same pictures as off, bit for bit                                                                    ✓
+level D: a submission whose pipelines are all made waits 0 times and is not walked (0, 0)                      ✓
+level D: of 15 draws ahead, the 7 whose pipelines are not made were queued (7), the made ones not              ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+level D, held: 18 queued, each made by its draw (18), none by a worker (0); the draws waited as off (19)       ✓
+held: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+level D, free: 18 queued, at their draw 11 ready, 6 still being made, 1 made by the draw (8 draws waited, off 19) ✓
+free: the same pictures as off, bit for bit                                                                    ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+[dm] [hostvk] pipelines made for level D from now on (test)
+level D, calls (the miss before the calls): the 6 keys ahead, through called lists, a jump, the second handle, queued (6) and ready (6) ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+[dm] [hostvk] pipelines made for level D from now on (test)
+level D, calls (the miss inside a called list): the 3 keys ahead, through called lists, a jump, the return into the caller, the second handle, queued (3) and ready (3) ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (12 records in 0.383 ms, 0.002 ms of them loading programs and layouts, which the budget leaves out; the budget 12 records, 60000.0 ms) after 6 draws, 6 pipelines queued; the draws past it make their own
+level D, a budget of 12 records: the walk stopped (12 records, 6 queued) and walked once though 13 draws waited ✓
+budget: the same pictures as off, bit for bit                                                                  ✓
+[dm] [hostvk] pipelines made for level D from now on (test)
+[dm] [hostvk] pipeline prediction: the walk of the rest of the submission stopped at its budget (0 records in 0.006 ms, 0.000 ms of them loading programs and layouts, which the budget leaves out; the budget 200000 records, 0.0 ms) after 0 draws, 0 pipelines queued; the draws past it make their own
+level D, a budget of 1 ns: the walk stopped (0 records, 0 queued) and walked once though 19 draws waited       ✓
+measured: 33 walks, 1131 records in 17.317 ms (15310.9 ns a record), the longest 7.936 ms; 290 pipelines queued, 217 made by the workers
+be_pso_line (the log's pipeline line): on the submit thread pipelines 134.4 ms, shader libraries 25.2 ms, predictions 33 / 17.3 ms; all threads (level D): pipeline libraries 190 / 30.0 ms, fast links 272 / 2.2 ms, optimized links 0 / 0.0 ms (swapped in 0, dropped 0), monolithic 270 / 158.2 ms, driver cache hits 0 of 732 creations; background builds done 0, failed 0, made by the draw 325, in flight 0; look-ahead pipelines queued 290 (at their draw ready 205, still being made 12, made by the draw 73), speculative from the rows 0; draws that waited: fast link 82 / 3.9 ms, library compile 79 / 25.2 ms, monolithic compile 163 / 94.3 ms, build under way on a worker 13 / 11.1 ms, longest 1.59 ms, over 2 ms 0
+[dm] [hostvk] pipelines made for level A from now on (test)
+[dm] [hostvk] prediction: 33 walks of the rest of a submission after a draw waited (1131 records, 17.32 ms on the submit thread of which 3.46 ms loading programs and layouts, the longest 7.936 ms; 8 stopped at the budget, 0 at a call deeper than the return stack), 367 draws walked, 367 keys made; 290 pipelines queued: 217 made ahead by the workers (0 found made already, 0 failed); at their draw 205 ready in time, 12 still being made (the draw waited for the rest), 73 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 25.7 MiB in use: waste 38.3 MiB (60 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 15 made, 15 given back; live allocations peak 3 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_predict: 65 checks, 0 failed ==
+
+exit: 0 (1 s)

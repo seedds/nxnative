@@ -1,0 +1,61 @@
+date: 2026-11-20T05:37:01Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_replay.exe
+
+straight list: reset, list start, each record's pre then its function          ✓
+the first replay resets the state: its mask (pipeline and depth-stencil) to be_state_dirty ✓
+pre and the function get the record, its header and payload                    ✓
+records in order: clear, draw, end                                             ✓
+every record of the list carries the list's value                              ✓
+outside a call: depth 0 at the end                                             ✓
+a second replay: no reset (the state is set)                                   ✓
+jump: draw, the jump's pre, then the target block, one list start              ✓
+jump: records walked are the draw, the jump, the target's dispatch and end     ✓
+jump: the target's records keep the list's value                               ✓
+jump: the record after the jump is not reached                                 ✓
+call: draw, the call's pre, the sub-list (its own start) to its end, then the caller ✓
+call: in the sub-list depth 1, the return record is the one after the CALL     ✓
+call: the sub-list's END is seen at depth 1 (pre and be_end)                   ✓
+call: back in the caller at depth 0                                            ✓
+call: the sub-list has its own list value, the caller's comes back after       ✓
+call: the draw before it at depth 0                                            ✓
+16 nested calls: the innermost draw at depth 16                                ✓
+16 nested calls: the first 16 return records stored, outermost first           ✓
+16 nested calls: every list starts and ends once, depth 0 after                ✓
+16 nested calls: the outermost END at depth 0                                  ✓
+17 nested calls: the innermost draw at depth 17                                ✓
+17 nested calls: the first 16 return records stored, outermost first           ✓
+17 deep: the 17th caller's return is not stored (slot 15 keeps the 16th's)     ✓
+17 deep: back in the 17th caller, depth 16 and the stored records unchanged    ✓
+17 nested calls: every list starts and ends once, depth 0 after                ✓
+17 nested calls: the outermost END at depth 0                                  ✓
+consumed draw, state, call and end: only their pre; the walk goes on           ✓
+consumed: each next record is the consumed one + its size                      ✓
+consumed state record: not applied (no dirty, S unchanged)                     ✓
+consumed call: no sub-list started                                             ✓
+the walk ends at the END that is not consumed                                  ✓
+the opcode list covers all 51 opcodes (with END, JUMP, CALL above)             ✓
+every opcode: its pre, then exactly its backend calls, in order                ✓
+every opcode: the list ends at its END                                         ✓
+state applied: scissor, viewport, depth range                                  ✓
+state applied: program, depth-stencil, vertex input                            ✓
+state applied: uniform, storage, texture, sampler, image binds                 ✓
+state applied: stencil, polygon offset, clamp, swizzle, blend colour, stride   ✓
+state applied: pools, feedback, primitive restart, rasterizer discard          ✓
+mask: scissor applied, nothing dirty                                           ✓
+mask: a new program dirties the pipeline and every stage's arguments           ✓
+mask: depth-stencil state                                                      ✓
+mask: a uniform bind dirties its stage (2)                                     ✓
+mask: a texture pool with a new base dirties every stage's arguments           ✓
+mask: rasterizer discard dirties the pipeline                                  ✓
+mask: stencil masks dirty the depth-stencil state                              ✓
+mask: transform feedback state, nothing dirty                                  ✓
+BIND_PROGRAM: applied first; be_bind_program sees the new program              ✓
+TF_BIND: be_tf_bind first (buffer 0 not yet bound), then the apply             ✓
+TF_STATE: the note before the apply (feedback off)                             ✓
+TF_STATE: be_tf_state after the apply (feedback on)                            ✓
+RAST_DISCARD: be_rast_discard before the apply (discard off), then the mask    ✓
+an unknown opcode and OP_BEGIN: their pre only, the walk goes on               ✓
+== t_replay: 54 checks, 0 failed ==
+
+exit: 0 (1 s)

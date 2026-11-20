@@ -1,0 +1,9 @@
+date: 2026-11-20T05:36:58Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_notify_sched.exe
+
+[dm] oe focus state → 2
+[dm] oe notification popped by the game: 15
+real thread registration, deferred QoS, start/exit, native wait and notification delivery passed
+
+exit: 0 (0 s)

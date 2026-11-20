@@ -1,0 +1,73 @@
+date: 2026-11-20T05:40:41Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_launcher_window.exe
+
+080c:fixme:setupapi:CM_Get_Parent 00007FFFFE1FEBD4 0x00000000 0x00000000 stub
+080c:fixme:setupapi:CM_Get_Parent 00007FFFFE1FEBD4 0x00000001 0x00000000 stub
+---- nxlauncher window: status 0
+nxlauncher: Alpha Game: Profile recorded: a better pack is possible (2 files in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work\profile; Repack with profile): 1 sampled function the packs were made without; the packs were made before the launch file recorded what they took
+nxlauncher: 3 games in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games (renderer software)
+nxlauncher: 1 frame drawn, 3 games listed
+---- nxlauncher repack: status 5
+nxlauncher: Alpha Game (0100AAAA00000000): the packer started for the max pack, its output in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run\repack.txt
+nxlauncher: the packer exited with status 5
+---- nxlauncher repack-none: status 1
+[RED] nxlauncher: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\Beta NSPs\0100BBBB00000000_build\launch-windows.tsv names no package folder, packer or Python to pack Beta Game again with (a pack made before those rows): pack it once more with scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform windows, which writes them
+---- nxlauncher show-off: status 5
+nxlauncher: no window ("Show this window at launch" is off): Alpha Game starts at once with the saved choices
+nxlauncher: Alpha Game (0100AAAA00000000), the balanced pack: nxhost-run started, its output in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run\log.txt
+nxlauncher: nxhost-run exited with status 5
+00f8:fixme:setupapi:CM_Get_Parent 00007FFFFE1FEBD4 0x00000000 0x00000000 stub
+00f8:fixme:setupapi:CM_Get_Parent 00007FFFFE1FEBD4 0x00000001 0x00000000 stub
+---- nxlauncher show-off-window: status 0
+nxlauncher: --window
+nxlauncher: Alpha Game: Profile recorded: a better pack is possible (2 files in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work\profile; Repack with profile): 1 sampled function the packs were made without; the packs were made before the launch file recorded what they took
+nxlauncher: 3 games in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games (renderer software)
+nxlauncher: 2 frames drawn, 3 games listed
+---- nxlauncher dm-launcher: status 5
+nxlauncher: no window (DM_LAUNCHER=0): Alpha Game starts at once with the saved choices
+nxlauncher: Alpha Game (0100AAAA00000000), the balanced pack: nxhost-run started, its output in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run\log.txt
+nxlauncher: nxhost-run exited with status 5
+---- nxlauncher command: status 0
+# Alpha Game (0100AAAA00000000), the max pack
+# cwd Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run
+# log Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run\log.txt
+DM_OPMODE=0
+DM_PRESENT_UPSCALE=metalfx
+DM_DEBUG_LOG=1
+DM_RENDER_SCALE=0.75
+DM_MOTION=0
+DM_ROOT=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000_build
+DM_ROMFS=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000_build\extract/v131072/RomFS.img
+DM_SAVE=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run\save
+DM_TEMP=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work/run\temp
+DM_MSL_DIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000_build\shader/cache
+DM_LANG=en-US
+DM_WINDOW=1
+DM_AUDIO=1
+DM_AOT_PROFILE=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000-work\profile
+
+Z:\srv\nxnative-games\agent-build\winecheck\win64\t_launcher_window.exe
+--profile
+Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000_build\game-profile-windows.tsv
+Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000_build\aot_v131072\max
+nxlauncher: Alpha Game: Profile recorded: a better pack is possible: 1 sampled function the packs were made without; the packs were made before the launch file recorded what they took
+---- nxlauncher list: status 0
+nxlauncher: 3 games in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games
+# title_id	title	version	packs	last_played	folder	problem	better_pack
+0100AAAA00000000	Alpha Game	1.2.0	balanced,max	2026-11-20 05:40	Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100AAAA00000000_build	-	1 sampled function the packs were made without; the packs were made before the launch file recorded what they took
+0100BBBB00000000	Beta Game	1.2.0	balanced	never	Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\Beta NSPs\0100BBBB00000000_build	-	-
+0100CCCC00000000	Gamma Game	1.2.0	none	never	Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100CCCC00000000_build	the packs in Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games\0100CCCC00000000_build\aot_v0/max are incomplete: pack the game again	-
+---- nxlauncher unknown: status 1
+[RED] nxlauncher: no game 0100EEEE00000000 in the games folder (Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_window\games)
+---- nxlauncher usage: status 2
+nxlauncher: unknown or incomplete option --bogus
+usage: nxlauncher [--games <folder>] [--window] [--frames <n> [--shot <file.bmp>]]   the window (or the last game at once: "Show this window at launch" off, DM_LAUNCHER=0);
+                                                                 --frames: draw n frames and exit, --shot: the last one as a BMP
+       nxlauncher --list <games folder>                         the games packed there, as TSV (better_pack: why a repack with the profile would be better, or -)
+       nxlauncher [--games <folder>] [--pack balanced|max] --command <title ID or folder>   what it would start: KEY=value lines, a blank line, the argv
+       nxlauncher [--games <folder>] [--pack balanced|max] --play <title ID or folder>      start it without the window and wait (its output in its log.txt)
+       nxlauncher [--games <folder>] [--pack balanced|max] --repack <title ID or folder>    pack it again with what its sessions recorded (the packer's output in repack.txt)
+t_launcher_window: 21 checks, 0 failed
+
+exit: 0 (4 s)

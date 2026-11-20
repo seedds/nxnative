@@ -1,0 +1,9 @@
+date: 2026-11-20T05:37:00Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_movie_avc.exe
+
+[dm] [RED] movie: no H.264 decoder (Media Foundation taken as absent (test)): black pictures at the movie's times instead of its video; on a Windows N edition, install the Media Feature Pack
+[dm] [RED] movie: unrecognized avcC record (6 bytes, version 1)
+t_movie_avc: 22 checks, 0 failed
+
+exit: 0 (0 s)

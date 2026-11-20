@@ -1,0 +1,256 @@
+date: 2026-11-20T05:37:44Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_pipeline_cache.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+---- start: write ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 0 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_7oybf6/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+0578:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_7oybf6/pso_manifest.tsv: 0 lines
+[dm] [hostvk] pipeline prewarm: this device's list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/pso_user_vk.tsv does not exist yet
+[dm] [hostvk] pipeline prewarm done: 0 lines (0 render pipeline rows, 0 shader rows, 0 compute rows), 0 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.01 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_7oybf6/shader_map.tsv: 4 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_7oybf6/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [RED] [hostvk] a fragment shader reads an input without perspective (NoPerspective; first case df9ce0106acdb7f6) on lavapipe, whose clipper gives such an input a wrong value over a clipped triangle whose vertices' w differ (Mesa's draw_pipe_clip.c interp): pictures made from it (a screen position: wipes, full-screen backgrounds) can be wrong on this driver
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+[dm] [hostvk] pipeline prediction: 11 draws ahead in this submission, 11 pipelines queued on the background workers (53 records walked in 1.705 ms, 1.428 ms of them loading programs and layouts)
+write: the 12 draws waited 2 times and made 1 pipelines, the look-ahead 11 (10 ready at their draw) (a first start: each once) ✓
+write: cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 0 bytes of driver data read; the prewarm's and the draws' creations 35, answered from the driver's cache 0; device list rows appended 12
+[dm] [hostvk] prediction: 1 walks of the rest of a submission after a draw waited (53 records, 1.70 ms on the submit thread of which 1.43 ms loading programs and layouts, the longest 1.705 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 11 draws walked, 11 keys made; 11 pipelines queued: 11 made ahead by the workers (0 found made already, 0 failed); at their draw 10 ready in time, 1 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 5.6 MiB in use: waste 58.4 MiB (91 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 13 made, 13 given back; live allocations peak 2 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache write: 1 checks, 0 failed ==
+write: one cache file for this device, framed and hashed as written (Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin) ✓
+write: the device's list holds the 12 pipelines the draws built on the spot, as P rows (12)                    ✓
+---- start: reload ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 4 entries, removed 2 (0.0 MiB): 2 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 32 bytes of driver data read
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_ivkk7b/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+0584:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_ivkk7b/pso_manifest.tsv: 0 lines
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/pso_user_vk.tsv: 12 lines
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_ivkk7b/shader_map.tsv: 4 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_ivkk7b/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [hostvk] pipeline prewarm done: 12 lines (12 render pipeline rows, 0 shader rows, 0 compute rows), 12 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.02 s; shader keys not in the shader map (another game version) 0
+[dm] [RED] [hostvk] a fragment shader reads an input without perspective (NoPerspective; first case df9ce0106acdb7f6) on lavapipe, whose clipper gives such an input a wrong value over a clipped triangle whose vertices' w differ (Mesa's draw_pipe_clip.c interp): pictures made from it (a screen position: wipes, full-screen backgrounds) can be wrong on this driver
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+reload: the 12 draws waited 0 times and made 0 pipelines, the look-ahead 0 (0 ready at their draw) (the device's list prewarmed them: none) ✓
+reload: the prewarm built the 12 pipelines of the device's list (12 rows, 12 built)                            ✓
+reload: cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 32 bytes of driver data read; the prewarm's and the draws' creations 35, answered from the driver's cache 0; device list rows appended 0
+note: this driver's cache data is 32 bytes, its header alone: it keeps no pipeline in it, so a second start compiles again (lavapipe)
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 5.6 MiB in use: waste 58.4 MiB (91 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 13 made, 13 given back; live allocations peak 2 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache reload: 2 checks, 0 failed ==
+reload: the driver data of the file was read (32 bytes, the file holds 32)                                     ✓
+reload: this device's file of another chain version was deleted at start                                       ✓
+reload: another device's file of this chain version was kept                                                   ✓
+reload: another device's file of another chain version was deleted at start (the cleanup, on by default)       ✓
+reload: the index lists the folder's 2 entries with their sizes                                                ✓
+reload: no red line about the cache                                                                            ✓
+corrupt: the planted change makes the file invalid                                                             ✓
+---- start: corrupt ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 2 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [RED] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: its SHA-256 does not match (corrupt): ignored, a new one is written
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_iwsbnt/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+05a4:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_iwsbnt/pso_manifest.tsv: 0 lines
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/pso_user_vk.tsv: 12 lines
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_iwsbnt/shader_map.tsv: 4 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_iwsbnt/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [hostvk] pipeline prewarm done: 12 lines (12 render pipeline rows, 0 shader rows, 0 compute rows), 12 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.02 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+[dm] [RED] [hostvk] a fragment shader reads an input without perspective (NoPerspective; first case df9ce0106acdb7f6) on lavapipe, whose clipper gives such an input a wrong value over a clipped triangle whose vertices' w differ (Mesa's draw_pipe_clip.c interp): pictures made from it (a screen position: wipes, full-screen backgrounds) can be wrong on this driver
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+corrupt: the 12 draws waited 0 times and made 0 pipelines, the look-ahead 0 (0 ready at their draw) (the device's list prewarmed them: none) ✓
+corrupt: the prewarm built the 12 pipelines of the device's list (12 rows, 12 built)                           ✓
+corrupt: cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 0 bytes of driver data read; the prewarm's and the draws' creations 23, answered from the driver's cache 0; device list rows appended 0
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 5.6 MiB in use: waste 58.4 MiB (91 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 13 made, 13 given back; live allocations peak 2 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache corrupt: 2 checks, 0 failed ==
+corrupt: exactly one red line about the cache (1)                                                              ✓
+corrupt: no driver data was read from it                                                                       ✓
+corrupt: a valid file was written at the end                                                                   ✓
+---- start: invalid ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 2 entries, removed 1 (0.0 MiB): 1 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_l5xfof/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+0178:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_l5xfof/pso_manifest.tsv: 0 lines
+[dm] [hostvk] pipeline prewarm list Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/pso_user_vk.tsv: 12 lines
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_l5xfof/shader_map.tsv: 4 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_l5xfof/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [hostvk] pipeline prewarm done: 12 lines (12 render pipeline rows, 0 shader rows, 0 compute rows), 12 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.02 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+[dm] [RED] [hostvk] a fragment shader reads an input without perspective (NoPerspective; first case df9ce0106acdb7f6) on lavapipe, whose clipper gives such an input a wrong value over a clipped triangle whose vertices' w differ (Mesa's draw_pipe_clip.c interp): pictures made from it (a screen position: wipes, full-screen backgrounds) can be wrong on this driver
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+invalid: the 12 draws waited 0 times and made 0 pipelines, the look-ahead 0 (0 ready at their draw) (the device's list prewarmed them: none) ✓
+invalid: the prewarm built the 12 pipelines of the device's list (12 rows, 12 built)                           ✓
+invalid: cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 0 bytes of driver data read; the prewarm's and the draws' creations 23, answered from the driver's cache 0; device list rows appended 0
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 5.6 MiB in use: waste 58.4 MiB (91 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 13 made, 13 given back; live allocations peak 2 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache invalid: 2 checks, 0 failed ==
+invalid: the file of the other key was deleted at start                                                        ✓
+invalid: no driver data was read                                                                               ✓
+invalid: a new file was written for the current key                                                            ✓
+---- start: stale-off ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup off (DM_VK_PSO_CACHE_CLEANUP=0): 5 entries kept, those of other drivers and versions too
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 32 bytes of driver data read
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_vgxqyy/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.0 MiB in use: waste 64.0 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 2 made, 2 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache stale-off: 0 checks, 0 failed ==
+stale-off: another chain version's, the 100-day-old and another driver's entries all kept                      ✓
+stale-off: one cleanup line, no limit line, no red line (1, 0, 0)                                              ✓
+stale-off: the index consistent (5 entries)                                                                    ✓
+---- start: stale-on ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 5 entries, removed 3 (0.0 MiB): 2 of another driver, chain or backend version, 1 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 32 bytes of driver data read
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_nklg8c/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.0 MiB in use: waste 64.0 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 2 made, 2 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache stale-on: 0 checks, 0 failed ==
+stale-on: another chain version's, the 100-day-old and another driver's entries removed                        ✓
+stale-on: this game's entry and another device's current one kept                                              ✓
+stale-on: one cleanup line (1)                                                                                 ✓
+stale-on: the index consistent (2 entries)                                                                     ✓
+---- start: limit ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup off (DM_VK_PSO_CACHE_CLEANUP=0): 5 entries kept, those of other drivers and versions too
+[dm] [hostvk] pipeline cache: 5 entries, 1.6 MiB over 1 MiB: removed 2 (0.8 MiB)
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 32 bytes of driver data read
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_w2r3bh/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.0 MiB in use: waste 64.0 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 2 made, 2 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache limit: 0 checks, 0 failed ==
+limit: 1.6 MiB over 1 MiB: another chain version's entry removed first, then the least recently used           ✓
+limit: the two more recently used and this game's entry kept                                                   ✓
+limit: one limit line (1)                                                                                      ✓
+limit: the index consistent (3 entries)                                                                        ✓
+---- start: nolimit ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup off (DM_VK_PSO_CACHE_CLEANUP=0): 3 entries kept, those of other drivers and versions too
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: 32 bytes of driver data read
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_rv3o2v/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.0 MiB in use: waste 64.0 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 2 made, 2 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache nolimit: 0 checks, 0 failed ==
+nolimit: DM_VK_PSO_CACHE_LIMIT=0: 1.6 MiB of entries all kept                                                  ✓
+nolimit: no limit line (0)                                                                                     ✓
+nolimit: the index consistent (3 entries)                                                                      ✓
+---- start: afterwrite ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 2 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_nmht6q/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] pipeline cache written (shutdown): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_pcache_tja8ma/cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+[dm] [hostvk] pipeline cache: 3 entries, 1.0 MiB over 1 MiB: removed 1 (0.6 MiB)
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.0 MiB in use: waste 64.0 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 2 made, 2 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache afterwrite: 0 checks, 0 failed ==
+afterwrite: the shutdown's write took the folder over 1 MiB: the least recently used entry removed, the other kept ✓
+afterwrite: this game's file written                                                                           ✓
+afterwrite: one limit line, after the write (1)                                                                ✓
+afterwrite: the index consistent (2 entries)                                                                   ✓
+---- start: off ----
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache on disk off (DM_VK_PSO_CACHE=off)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_rsp2ff/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.0 MiB in use: waste 64.0 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 2 made, 2 given back; live allocations peak 1 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_pipeline_cache off: 0 checks, 0 failed ==
+off: DM_VK_PSO_CACHE=off: no cache, no data read                                                               ✓
+off: the folder and its index untouched                                                                        ✓
+---- the starts ----
+start     waits   made  creations cache hits  bytes
+write         2      1         35          0      0
+reload        0      0         35          0     32
+corrupt       0      0         23          0      0
+invalid       0      0         23          0      0
+reload: 35 creations, 0 answered from the driver's cache
+== t_vk_pipeline_cache: 35 checks, 0 failed ==
+
+exit: 0 (4 s)

@@ -1,0 +1,32 @@
+date: 2026-11-20T05:36:36Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_front_sdl.exe
+
+[dm] front end: save data write failed errno=28, telling the player
+05ec:err:ole:start_rpcss Failed to start RpcSs service
+[dm] front end: SDL 3.4.14, video driver dummy
+[dm] front end: no Vulkan window (Vulkan support is either not configured in SDL or not available in current SDL video driver (dummy) or platform): a plain window instead (SDL's dummy video driver has no Vulkan)
+[dm] front end: each controller is a player of its own, the keyboard plays with player 1
+[dm] controller 'Virtual Pad 1' connected: player 1 (npad 0), with motion (gyro)
+05e4:fixme:sync:SetWaitableTimerEx (00000000000000CC, 00007FFFFE1FFCC0, 0, 0000000000000000, 0000000000000000, 0000000000000000, 0) semi-stub
+[dm] front end: save data write failed errno=5, telling the player
+[dm] controller 'Virtual Pad 2' connected: player 2 (npad 1), with motion (gyro)
+[dm] controller 'Virtual Pad 1' disconnected: player 1 (npad 0) is free
+[dm] controller 'Virtual Pad 1' connected: player 1 (npad 0), with motion (gyro)
+[dm] controller 'Virtual Pad 1' disconnected: player 1 (npad 0) is free
+[dm] controller 'Virtual Pad 2' disconnected: player 2 (npad 1) is free
+[dm] controller 'Virtual Pad 2' connected: player 2 (npad 1), with motion (gyro)
+[dm] controller 'Virtual Pad 1' connected: player 1 (npad 0), with motion (gyro)
+[dm] controller 'Virtual Pad 1' disconnected: player 1 (npad 0) is free
+[dm] controller 'Virtual Pad 2' disconnected: player 2 (npad 1) is free
+[dm] controller connected: Virtual Pad 1, with motion (gyro)
+[dm] controller connected: Virtual Pad 2, with motion (gyro)
+[dm] controller disconnected: Virtual Pad 1
+[dm] controller disconnected: Virtual Pad 2
+[dm] front end: save data write failed errno=28, telling the player
+[dm] front end: save data write failed errno=5, telling the player
+[dm] [RED] front end: text input asked on the main thread, which has to run the box: treated as no window
+== front_sdl: 83 checks, 0 failed ==
+
+exit: 0 (6 s)
+05ec:err:ole:start_rpcss Failed to start RpcSs service

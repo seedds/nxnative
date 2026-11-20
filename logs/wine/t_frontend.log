@@ -1,0 +1,34 @@
+date: 2026-11-20T05:38:35Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_frontend.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+NVN implementations registered: 413
+[dm] [RED] null graphics backend: be_set_origin_lower_left called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_set_depth_zero called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_pool_add called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [RED] null graphics backend: be_queue_activate called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_set_queue_origin_lower_left called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_sub_begin called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_sub_index called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_exec_rest called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_exec called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_list_begin called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_rec_pre called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_state_dirty called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_clear_color called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_draw called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_signal_event called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_end called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_sub_commit called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_last_fence called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_wait called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_pool_del called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: nvn_pool_hook_del called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_alias_drop_pool called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+[dm] [RED] null graphics backend: be_queue_forget called, and no GPU work is done for it (no GPU backend on this platform yet; the Vulkan backend is step M7)
+null backend: 23 functions reached (one [RED] line each), 47 calls
+== t_frontend: 42 checks, 0 failed ==
+
+exit: 0 (1 s)

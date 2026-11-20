@@ -1,0 +1,50 @@
+date: 2026-11-20T05:36:27Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_gesture.exe
+
+✓ no touch yet: no entries
+✓ tap: Touch (640,360), IsNewTouch
+✓ tap: a read with nothing changed adds no entry
+✓ tap: Tap (640,360)
+✓ tap: entries newest first (Tap, then Touch)
+✓ tap: Complete
+✓ tap: Idle, next context
+✓ tap: nothing more after Idle
+✓ double tap: Touch
+✓ double tap: Tap with IsDoubleTap
+✓ double tap: Complete, then Idle
+✓ slop: Touch (320,180)
+✓ slop: a 5 px move adds no entry
+✓ slop: Tap at the down point (320,180), not a double tap (0.9 s later)
+✓ slop: Complete, then Idle
+✓ slow pan: Touch
+✓ slow pan: Pan (660,360) delta (20,0)
+✓ slow pan: velocity 200 px/s
+✓ slow pan: released at 100 px/s → Complete
+✓ slow pan: Idle
+✓ swipe: Touch
+✓ swipe: Pan (560,360) delta (-80,0)
+✓ swipe: Swipe left (560,360) delta (-80,0)
+✓ swipe: velocity -2500 px/s
+✓ swipe: Complete, then Idle
+✓ 16 entries kept, newest first
+✓ press: Touch
+✓ press: not yet at 0.4 s
+✓ press: Press after 0.5 s
+✓ press: released → Complete, no Tap
+✓ press: Idle
+✓ count change: Touch of one finger (320,360)
+✓ count change: Cancel
+✓ count change: Touch of two fingers, mid point (640,360), no IsNewTouch after Cancel
+✓ count change: points in finger id order
+✓ count change: released → Cancel, no Tap
+✓ count change: Idle
+✓ pinch: Touch of two fingers
+✓ pinch: Pinch (640,360)
+✓ pinch: scale 2
+✓ pinch: released → Complete
+✓ between reads: Touch
+✓ between reads: Tap
+== 43 checks, 0 failed ==
+
+exit: 0 (1 s)

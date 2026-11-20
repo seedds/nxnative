@@ -1,0 +1,39 @@
+date: 2026-11-20T05:37:00Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_movie_mf.exe
+
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000000.
+[dm] [movie] AVC: Media Foundation's H.264 decoder, 64×48 (coded 64×48, output 64×48), profile 77, BT.709 video range
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000001.
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000000, param 0000000000000000 stub!
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000003, param 0000000000000000 stub!
+[dm] [movie] AAC: Media Foundation's AAC decoder, 2 channels 48000 Hz, AudioSpecificConfig 2 bytes (object type 2)
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000001, param 0000000000000000 stub!
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000000.
+[dm] [movie] AVC: Media Foundation's H.264 decoder, 96×60 (coded 96×64, output 96×64), profile 66, BT.601 video range
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000001.
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000000.
+[dm] [movie] AVC: Media Foundation's H.264 decoder, 64×48 (coded 64×48, output 64×48), profile 77, BT.709 video range
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000001.
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000000.
+[dm] [movie] AVC: Media Foundation's H.264 decoder, 64×48 (coded 64×48, output 64×48), profile 77, BT.709 video range
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000001.
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000000.
+[dm] [movie] AVC: Media Foundation's H.264 decoder, 96×60 (coded 96×64, output 96×64), profile 66, BT.601 video range
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000001.
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000000.
+[dm] [movie] AVC: Media Foundation's H.264 decoder, 64×48 (coded 64×48, output 64×48), profile 77, BT.709 video range
+0270:fixme:mfplat:transform_ProcessMessage Ignoring message 0x10000001.
+[dm] [RED] movie: no H.264 decoder (Media Foundation taken as absent (test)): black pictures at the movie's times instead of its video; on a Windows N edition, install the Media Feature Pack
+[dm] [RED] movie: no AAC decoder (Media Foundation taken as absent (test)), outputting silence; on a Windows N edition, install the Media Feature Pack
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000000, param 0000000000000000 stub!
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000003, param 0000000000000000 stub!
+[dm] [movie] AAC: Media Foundation's AAC decoder, 2 channels 48000 Hz, AudioSpecificConfig 2 bytes (object type 2)
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000001, param 0000000000000000 stub!
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000000, param 0000000000000000 stub!
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000003, param 0000000000000000 stub!
+[dm] [movie] AAC: Media Foundation's AAC decoder, 1 channels 44100 Hz, AudioSpecificConfig 2 bytes (object type 2)
+0270:fixme:mfplat:transform_ProcessMessage iface 00007FFFFE772300, message 0x10000001, param 0000000000000000 stub!
+t_movie_mf: 94 checks, 0 failed (under Wine)
+
+exit: 0 (1 s)

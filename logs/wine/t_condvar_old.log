@@ -1,0 +1,8 @@
+date: 2026-11-20T05:36:46Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_condvar_old.exe
+
+✓ old-order negative control: W not woken in 10 s, R state 3 (expected: W not woken, R finishes without sending 0x1D)
+all passed: 1/1
+
+exit: 0 (10 s)

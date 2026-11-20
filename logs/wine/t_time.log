@@ -1,0 +1,10 @@
+date: 2026-11-20T05:36:30Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_time.exe
+
+[dm] DM_FIXED_TIME=1700000000: the user clock returns a fixed value
+[dm] ToCalendarTime: first conversion 1700000000 → 2023-11-14 22:13 (time zone ?, offset 0 s)
+FAIL: adjustable snapshot carries the host time zone
+time: 28 checks, 1 failed
+
+exit: 1 (0 s)

@@ -1,0 +1,94 @@
+date: 2026-11-20T05:37:03Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_refl_c.exe
+
+atomic image                                                     ok
+PC chain reflection (no route = B) rejected                      ok
+array of 32 handles in uniform slot 11                           ok
+unknown kind                                                     ok
+texture without a resolved slot                                  ok
+every binding kind                                               ok
+every texture type prefix and pixel class                        ok
+array<...> forms                                                 ok
+texture array of 33 handles                                      ok
+sampler array of 40 handles, no name                             ok
+dynamic sampler array of 33                                      ok
+dynamic array of 0                                               ok
+dynamic array of buffers                                         ok
+driver-table texture array that is no array                      ok
+driver-table sampler array of 33                                 ok
+storage buffer write flag                                        ok
+c1 segment                                                       ok
+c1 bytes strtoul reads oddly                                     ok
+c1 empty                                                         ok
+c1 absent                                                        ok
+c1 of an odd hex length                                          ok
+c1 freed by a later failure                                      ok
+defaults of a bare document                                      ok
+numbers and strings as Foundation reads them                     ok
+slot given as a string                                           ok
+negative slot                                                    ok
+storage buffer without a slot                                    ok
+image without a slot                                             ok
+uniform-buffer texture without a slot                            ok
+constant sampler without a slot                                  ok
+compute uniform pointer without a slot                           ok
+route A                                                          ok
+route b (case)                                                   ok
+key Route (case)                                                 ok
+route as an array                                                ok
+route as a number                                                ok
+bindings missing                                                 ok
+bindings as a dictionary                                         ok
+kind and name missing                                            ok
+geometry helper slot 5                                           ok
+geometry helper without a slot                                   ok
+geometry helper slot 4                                           ok
+argument indices at the replay's limit                           ok
+vertex inputs and shadow attributes                              ok
+shadow list missing                                              ok
+vertex input at location 32                                      ok
+vertex input at location -1                                      ok
+shadow of a float input                                          ok
+shadow of a missing input                                        ok
+shadow attribute 15                                              ok
+shadow attribute 31                                              ok
+shadow attribute used twice                                      ok
+shadow of the input's own type                                   ok
+raster facts of a fragment shader                                ok
+raster facts of a vertex shader                                  ok
+raster facts out of range                                        ok
+raster facts as strings                                          ok
+fetch tables                                                     ok
+fetch call table not contiguous                                  ok
+fetch call slot 256                                              ok
+five fetch outputs                                               ok
+thread group size                                                ok
+thread group of two                                              ok
+thread group null                                                ok
+thread group over 16 bits                                        ok
+driver reads of c0                                               ok
+driver reads as a string                                         ok
+driver reads with a null                                         ok
+driver locations the replay cannot fill                          ok
+no unfillable driver locations                                   ok
+white space around the document                                  ok
+numbers with zeros that are not leading                          ok
+an escaped backslash before u0000 is no NUL                      ok
+an escaped quote keeps the string open                           ok
+a non-NUL escape and DEL inside a string                         ok
+96 bindings (NVN_REFL_MAXB)                                      ok
+97 bindings                                                      ok
+32 vertex inputs (NVN_REFL_MAXV)                                 ok
+33 vertex inputs                                                 ok
+c1 of 65535 bytes                                                ok
+c1 of 65536 bytes                                                ok
+32 fetch calls                                                   ok
+33 fetch calls                                                   ok
+error buffer, NULL text, length-bounded text                     ok
+SKIP: no reflection sample ./dm-work/build/cache/metal_shader_cache/b-157e1b96c8da/5c1ca4e7c3e4657c_b.json (the samples are translated shaders of Super Mario Bros. Wonder in the NSP script's build cache; DM_ROOT or ~/dm-work/build/cache/metal_shader_cache), the checks on it do not run
+SKIP: no reflection sample ./dm-work/build/cache/metal_shader_cache/b-157e1b96c8da/54f730a6c0efc118_b.json (the samples are translated shaders of Super Mario Bros. Wonder in the NSP script's build cache; DM_ROOT or ~/dm-work/build/cache/metal_shader_cache), the checks on it do not run
+2 reflection sample files missing (those checks skipped)
+== t_refl_c: 607 checks, 0 failed ==
+
+exit: 0 (0 s)

@@ -1,0 +1,41 @@
+date: 2026-11-20T05:37:02Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_tex.exe
+
+D differential copy checks
+  D 1029 layouts: both directions equal byte-address oracle, including pitch padding and tails
+L linear render targets without the separate LINEAR flag
+A round trip (random data, non-power-of-2 sizes)
+  A 2D 100×37 R8 4 levels             layers 1 × levels 4, round trip 4873 bytes identical
+  A 2D 100×37 RG8 4 levels            layers 1 × levels 4, round trip 9746 bytes identical
+  A 2D 100×37 RGBA8 4 levels          layers 1 × levels 4, round trip 19492 bytes identical
+  A 2D 100×37 RGBA16F 4 levels        layers 1 × levels 4, round trip 38984 bytes identical
+  A 2D 100×37 RGBA32F 4 levels        layers 1 × levels 4, round trip 77968 bytes identical
+  A 2D 100×37 BC3(16B/block) 4 levels layers 1 × levels 4, round trip 5424 bytes identical
+  A 2D 300×300 BC1(8B/block) 5 levels layers 1 × levels 5, round trip 60440 bytes identical
+  A 2D array 100×37×3 layers RGBA8 3 levels layers 3 × levels 3, round trip 57900 bytes identical
+  A 2D array 64×64×2 layers BC3 4 levels layers 2 × levels 4, round trip 10880 bytes identical
+  A 3D 100×37×5 RGBA8 3 levels       layers 1 × levels 3, round trip 82100 bytes identical
+  A 3D 64×64×20 R8 4 levels          layers 1 × levels 4, round trip 93568 bytes identical
+  A 3D 40×30×9 RGBA32F 3 levels      layers 1 × levels 3, round trip 194240 bytes identical
+B address formula (expected values hand-calculated from the public GOB 64B×8-row layout)
+  B0 (0,0,0) → 0 ✓  origin
+  B1 (17,3,0) → 113 ✓  within GOB: (3/2)·64 + (17%32/16)·32 + (3%2)·16 + 17%16 = 64+32+16+1
+  B2 (70,9,0) → 1558 ✓  block height 2: block column 1 1024 + GOB 1 within the block 512 + within GOB (9%2)·16 + 6 = 22
+  B3 (0,0,1) → 512 ✓  block depth 2: GOB 1 within the block (z%2·block height 1) = 512
+  B4 (0,0,2) → 1024 ✓  block depth 2: block layer 1 = 1 column × 1 row × 1024
+  B5 (200,40,0) → 14856 ✓  block height 4: block row 8192 + block column 6144 + GOB within block 512 + within GOB 8
+R row form of the address (nvn_bl_row_of / nvn_bl_row_at against nvn_bl_offset)
+  R 8530344 addresses, 0 differ
+E hand-built 3D block-linear (markers at hand-calculated addresses, landing points checked after deswizzle)
+  E ( 0, 0, 0) ← storage     0 ✓  origin
+  E (20,11, 3) ← storage 26224 ✓  block row 1·2·8192=16384 + block column (80/64=1)·8192 + GOB within block z%16=3·512=1536 + within GOB (x80%64=16,y3) 64+32+16 = 112
+  E (31,15,17) ← storage 58364 ✓  depth block 1·32768 + block row 16384 + block column 8192 + GOB within block 1·512 + within GOB (x60,y7) 256+192+32+16+12 = 508
+  E ( 5, 2,19) ← storage 34404 ✓  depth block 32768 + GOB within block 3·512=1536 + within GOB (x20,y2) 64+32+4 = 100
+  E 32³ RGBA16F (the shape of a 32³ color lookup table) block height/depth 0/4, storage 262144 (expected 0/4, 262144)
+E packaged 3D block dimensions and mip reductions
+S sparse layout (64 KB tiles: tiled levels padded to whole tiles, then the mip tail)
+  S 1024×1024 ASTC 6×6 sparse: levels at 0, 0x90000, 0xd0000 …, storage 0xe0000 (expected 0x90000, 0xd0000, 0xe0000)
+all passed: 5335/5335 checks passed
+
+exit: 0 (1 s)

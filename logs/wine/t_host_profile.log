@@ -1,0 +1,53 @@
+date: 2026-11-20T05:40:45Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 python3 /home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/host/tests/t_host_profile.py --build /srv/nxnative-games/agent-build/winecheck/win64 --packs ""
+
+t_host_profile: /srv/nxnative-games/agent-build/winecheck/win64/nxhost-run.exe, default 010015100B514000 (Super Mario Bros. Wonder)
+      [dm] [RED] --game 0123456789ABCDEF: no such game profile among the 89 built into this program (dm/games; game.py list names them); a profile outside dm/games runs from its file: game.py runtime <id> <file>, then --profile <file>
+ok    an unknown title ID: refused with a [RED] line naming it, status 2 (2), no module read
+      [dm] [RED] game profile file /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/unknown.tsv (--profile): unknown key 'bogus_key' (line 39)
+ok    a file with an unknown key: refused with a [RED] line naming it, status 2 (2), no module read
+      [dm] [RED] game profile file /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/missing.tsv (--profile): missing key 'mem_alias' (the file must give every constant: game.py runtime writes them all)
+ok    a file without a key: refused with a [RED] line naming it, status 2 (2), no module read
+      [dm] [RED] game profile file /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/malformed.tsv (--profile): key 'mem_reserve' (line 38): malformed value: a number: 0x<hex> or decimal digits, below 2^64 expected
+ok    a malformed number: refused with a [RED] line naming it, status 2 (2), no module read
+      [dm] [RED] --game 010015100B514000 and the profile file /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/default.tsv (DM_GAME_PROFILE) both name the game profile: give one
+ok    --game and a file together: refused with a [RED] line naming it, status 2 (2), no module read
+      [dm] game profile 010015100B514000 (Super Mario Bros. Wonder): the default the program was configured with (cmake -DGAME)
+      [dm] guest AS 0000001000A00000 +0x140000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+      [dm] main: frame step as the game sets it (game profile fps_target)
+ok    the default: the synthetic module ran to its end, status 0
+ok    the default: the profile line names 010015100B514000 (Super Mario Bros. Wonder) and its source
+ok    the default: the guest address block is its mem_reserve, 0x140000000
+ok    the default: the frame step follows its fps_target, 0
+      [dm] game profile 01002B00111A2000 (Hyrule Warriors: Age of Calamity): the table built into the program (--game)
+      [dm] guest AS 0000001000A00000 +0x100000000  heap 0000001030A00000 alias 0000001010A00000 stack 0000001020A00000
+      [dm] main: frame step in whole vsyncs decided by the host, capped at 60 fps (game profile fps_target)
+ok    --game 01002b00111a2000: the synthetic module ran to its end, status 0
+ok    --game 01002b00111a2000: the profile line names 01002B00111A2000 (Hyrule Warriors: Age of Calamity) and its source
+ok    --game 01002b00111a2000: the guest address block is its mem_reserve, 0x100000000
+ok    --game 01002b00111a2000: the frame step follows its fps_target, 60
+ok    game.py runtime 0100AA0800000000 with DM_GAMES_DIR=/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/profiles writes the profile file
+      [dm] game profile 0100AA0800000000 (A profile through DM_GAMES_DIR): the file /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/0100AA0800000000.tsv (--profile)
+      [dm] guest AS 0000001000A00000 +0x150000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+      [dm] main: frame step in whole vsyncs decided by the host, capped at 30 fps (game profile fps_target)
+ok    a DM_GAMES_DIR profile through --profile: the synthetic module ran to its end, status 0
+ok    a DM_GAMES_DIR profile through --profile: the profile line names 0100AA0800000000 (A profile through DM_GAMES_DIR) and its source
+ok    a DM_GAMES_DIR profile through --profile: the guest address block is its mem_reserve, 0x150000000
+ok    a DM_GAMES_DIR profile through --profile: the frame step follows its fps_target, 30
+ok    a DM_GAMES_DIR profile through --profile: its module list (main) loaded with no module named
+      [dm] game arguments from the game profile: -t_host_profile=1
+ok    a DM_GAMES_DIR profile through --profile: its game_args
+      [dm] game profile 0100AA0800000000 (A profile through DM_GAMES_DIR): the file /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_host_profile.tcaim79j/0100AA0800000000.tsv (DM_GAME_PROFILE)
+      [dm] guest AS 0000001000A00000 +0x150000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+      [dm] main: frame step in whole vsyncs decided by the host, capped at 30 fps (game profile fps_target)
+ok    a DM_GAMES_DIR profile through DM_GAME_PROFILE: the synthetic module ran to its end, status 0
+ok    a DM_GAMES_DIR profile through DM_GAME_PROFILE: the profile line names 0100AA0800000000 (A profile through DM_GAMES_DIR) and its source
+ok    a DM_GAMES_DIR profile through DM_GAME_PROFILE: the guest address block is its mem_reserve, 0x150000000
+ok    a DM_GAMES_DIR profile through DM_GAME_PROFILE: the frame step follows its fps_target, 30
+ok    a DM_GAMES_DIR profile through DM_GAME_PROFILE: its module list (main) loaded with no module named
+      [dm] game arguments from the game profile: -t_host_profile=1
+ok    a DM_GAMES_DIR profile through DM_GAME_PROFILE: its game_args
+t_host_profile: 26 checks, 0 failed
+
+exit: 0 (4 s)

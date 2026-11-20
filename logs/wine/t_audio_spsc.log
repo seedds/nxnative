@@ -1,0 +1,16 @@
+date: 2026-11-20T05:36:31Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_audio_spsc.exe
+
+[dm] audio #0 OpenAudioOut (default) channels 2 silent sink (call site host)
+[dm] audio #0 Stop (call site host)
+[dm] audio #0 Stop (already stopped) (call site host)
+[dm] audio #0 Stop (already stopped) (call site host)
+[dm] audio #0 Stop (call site host)
+[dm] audio #0 Close (call site host)
+[dm] audio #1 OpenAudioOut (default) channels 2 silent sink (call site host)
+[dm] audio #1 Close (call site host)
+Stop releases partial/pending buffers in order, signals and preserves pre-start buffers: PASS
+SPSC: appended/released 100000/100000, events 5447, signaled after last release=1, failed=0
+
+exit: 0 (3 s)

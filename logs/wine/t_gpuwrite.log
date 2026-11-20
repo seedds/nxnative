@@ -1,0 +1,57 @@
+date: 2026-11-20T05:37:01Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_gpuwrite.exe
+
+empty submission: nothing queued                                           ✓
+a copy queued: index 0, its range and kind                                 ✓
+a read inside it hits                                                      ✓
+reads just before and just after it do not                                 ✓
+a read across its start hits                                               ✓
+the newest write over a range is told                                      ✓
+a write over 16 pages (wide list) is found from any of its pages           ✓
+a lookup over many pages scans every entry                                 ✓
+writes over a range, newest first                                          ✓
+writes over a range since index 1                                          ✓
+writes over two pages, the wide one among them, each once                  ✓
+300 writes in a submission (more than the old limit of 256) each told      ✓
+the list full: still exact                                                 ✓
+one write more: overflow, every address counts as written                  ✓
+overflow: the writes over a range cannot be told                           ✓
+a new submission: no write, no overflow                                    ✓
+an inline update keeps its bytes (index + 1 into the ring list)            ✓
+a read it covers: its bytes                                                ✓
+a read past its end: not known, written by an update                       ✓
+a read before it: nothing queued there                                     ✓
+two updates: a read the newer covers takes the newer's bytes               ✓
+two updates: a read only the older covers takes the older's                ✓
+two updates: a read across both is not known (newest does not cover it)    ✓
+the newer update's end: its last bytes                                     ✓
+a copy queued after the updates: not known, written by a copy              ✓
+beside the copy the update still reads                                     ✓
+the next submission: the updates are gone                                  ✓
+each submission takes a new generation                                     ✓
+a shader write: noted, generation bumped                                   ✓
+another page: not written                                                  ✓
+a counter report: not a write this submission's reads see                  ✓
+a shader write across two pages: both                                      ✓
+no overflow so far                                                         ✓
+a shader write too large to keep: overflow                                 ✓
+the next submission: the set and its overflow are gone                     ✓
+a shader write of unknown size: overflow                                   ✓
+no earlier writes: nothing live                                            ✓
+committed with fence 5: its queued write live while fence 4 is done        ✓
+its shader write's page live                                               ✓
+its counter report's page live for later submissions                       ✓
+another page: not live                                                     ✓
+fence 5 completed: nothing live                                            ✓
+the next submission: queued list empty, earlier writes still live          ✓
+two live pages in one slot: both live until the later fence                ✓
+the shared slot: nothing live once fence 8 is done                         ✓
+a page over a completed one in its slot takes the slot alone               ✓
+a write over 4096 pages: kept page by page                                 ✓
+a write over 4097 pages: every page live until its fence                   ✓
+a submission whose writes could not all be listed: everything live         ✓
+an empty range is not recorded                                             ✓
+== t_gpuwrite: 50 checks, 0 failed ==
+
+exit: 0 (0 s)

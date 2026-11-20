@@ -1,0 +1,10 @@
+date: 2026-11-20T05:36:28Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_thread_leak.exe
+
+bytes requested by 200 threads (200 × 9744)   expected 1948800  → got 1948800  ✓
+blocks still not freed after all exited        expected 0        → got 0        ✓
+free calls (3 blocks per thread)               expected 600      → got 600      ✓
+t_thread_leak: 3 checks, 0 failed
+
+exit: 0 (0 s)

@@ -1,0 +1,71 @@
+date: 2026-11-20T05:39:56Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_aot_targets.exe  --corpus Z:/home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/tools/aot/corpus
+
+0808:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CFAD8): stub!
+0094:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CFAD8): stub!
+00fc:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CFAD8): stub!
+0148:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CFAD8): stub!
+t_aot_targets: packs Z:/srv/nxnative-games/lead-build/verify/packs/win64, corpus Z:/home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/tools/aot/corpus, nxaot none
+fnptr-gcc    once      ok   26 rows, 40 binds (the child's dispatcher misses: 40), header names the image; aot: targets: this session 26 (site, target) pairs bound 40 times in their own module's code, 1 files; not written: 0 misses bound to another pack's code, 0 handed to another pack of another signature, 0 to host functions, 0 to addresses with no compiled entry (the misses file)
+                            0x434 0x1840 1   (main -> hidden_target)
+                            0x1598 0xe0 1   (rt_init -> ctor_first)
+                            0x1598 0x100 1   (rt_init -> ctor_second)
+                            0x1598 0x120 1   (rt_init -> ctor_plain)
+                            0x1608 0x1ae0 1   (rt_exit -> dtor_plain)
+                            0x1904 0x17a0 1   (fold.constprop.0 -> cb_sum)
+                            0x1904 0x17b0 1   (fold.constprop.0 -> cb_xor_rot)
+                            0x1904 0x17c0 1   (fold.constprop.0 -> cb_max)
+                            0x1984 0x1690 2   (shape_total -> rect_area)
+                            0x1984 0x16d0 1   (shape_total -> tri_area)
+                            0x1984 0x1720 2   (shape_total -> sq_area)
+                            0x1998 0x16a0 2   (shape_total -> rect_perimeter)
+                            0x1998 0x16e0 1   (shape_total -> tri_perimeter)
+                            0x1998 0x1730 2   (shape_total -> sq_perimeter)
+                            0x19bc 0x16b0 2   (shape_total -> rect_scale)
+                            0x19bc 0x1700 1   (shape_total -> tri_scale)
+                            0x19bc 0x1740 2   (shape_total -> sq_scale)
+                            0x1a2c 0x1760 2   (apply_op -> op_inc)
+                            0x1a2c 0x1770 2   (apply_op -> op_dbl)
+                            0x1a2c 0x1780 3   (apply_op -> op_sq)
+                            0x1a2c 0x1790 2   (apply_op -> op_neg)
+                            0x1a2c 0x1860 3   (apply_op -> op_pop)
+                            0x1a2c 0x1880 2   (apply_op -> op_rev)
+                            0x1a64 0x1820 1   (with_cleanup -> work)
+                            0x1a7c 0x1820 1   (with_cleanup -> work)
+                            0x1a90 0x1820 1   (with_cleanup -> work)
+fnptr-gcc    merged    ok   every row's binds doubled; # 11 sites, 26 targets, 80 binds; 11 of the sites this session, the rest from earlier sessions of this image; aot: targets: t_aot_targets.tmp/fnptr-gcc/once/fnptr-gcc.targets.tsv: 11 sites, 26 targets, 80 binds, 11 of the sites this session (fnptr-gcc; merged with an earlier session's)
+fnptr-gcc    host      ok   1 calls of the host function; main's site: 0 rows; 25 rows (the plain run's less one); aot: targets: this session 25 (site, target) pairs bound 39 times in their own module's code, 1 files; not written: 0 misses bound to another pack's code, 0 handed to another pack of another signature, 1 to host functions, 0 to addresses with no compiled entry (the misses file)
+fnptr-gcc    roundtrip note: no nxaot (--nxaot, NXAOT): the targets' round trip through nxaot build --profile is not checked here
+fnptr-clang  once      ok   23 rows, 37 binds (the child's dispatcher misses: 37), header names the image; aot: targets: this session 23 (site, target) pairs bound 37 times in their own module's code, 1 files; not written: 0 misses bound to another pack's code, 0 handed to another pack of another signature, 0 to host functions, 0 to addresses with no compiled entry (the misses file)
+                            0x1114 0x12d0 1   (rt_init -> ctor_first)
+                            0x1114 0x12f0 1   (rt_init -> ctor_second)
+                            0x1114 0x1310 1   (rt_init -> ctor_plain)
+                            0x1164 0x1330 1   (rt_exit -> dtor_plain)
+                            0x120c 0x1870 2   (shape_total -> rect_area)
+                            0x120c 0x18b0 1   (shape_total -> tri_are015c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CFAD8): stub!
+01ac:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CFAD8): stub!
+a)
+                            0x120c 0x1900 2   (shape_total -> sq_area)
+                            0x1220 0x1880 2   (shape_total -> rect_perimeter)
+                            0x1220 0x18c0 1   (shape_total -> tri_perimeter)
+                            0x1220 0x1910 2   (shape_total -> sq_perimeter)
+                            0x1240 0x1890 2   (shape_total -> rect_scale)
+                            0x1240 0x18e0 1   (shape_total -> tri_scale)
+                            0x1240 0x1920 2   (shape_total -> sq_scale)
+                            0x12a8 0x17e0 2   (apply_op -> op_inc)
+                            0x12a8 0x17f0 2   (apply_op -> op_dbl)
+                            0x12a8 0x1800 3   (apply_op -> op_sq)
+                            0x12a8 0x1810 2   (apply_op -> op_neg)
+                            0x12a8 0x1820 2   (apply_op -> op_rev)
+                            0x12a8 0x1830 3   (apply_op -> op_pop)
+                            0x1368 0x1850 1   (with_cleanup -> work)
+                            0x1380 0x1850 1   (with_cleanup -> work)
+                            0x1394 0x1850 1   (with_cleanup -> work)
+                            0x1730 0x1410 1   (main -> hidden_target)
+fnptr-clang  merged    ok   every row's binds doubled; # 10 sites, 23 targets, 74 binds; 10 of the sites this session, the rest from earlier sessions of this image; aot: targets: t_aot_targets.tmp/fnptr-clang/once/fnptr-clang.targets.tsv: 10 sites, 23 targets, 74 binds, 10 of the sites this session (fnptr-clang; merged with an earlier session's)
+fnptr-clang  host      ok   1 calls of the host function; main's site: 0 rows; 22 rows (the plain run's less one); aot: targets: this session 22 (site, target) pairs bound 36 times in their own module's code, 1 files; not written: 0 misses bound to another pack's code, 0 handed to another pack of another signature, 1 to host functions, 0 to addresses with no compiled entry (the misses file)
+fnptr-clang  roundtrip note: no nxaot (--nxaot, NXAOT): the targets' round trip through nxaot build --profile is not checked here
+t_aot_targets: 6 checks, 0 failed
+
+exit: 0 (5 s)

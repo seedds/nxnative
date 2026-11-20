@@ -1,0 +1,11 @@
+date: 2026-11-20T05:37:00Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_movie_vpx.exe
+
+[dm] [movie] libvpx v1.17.0: VP9 decoder, 4 threads
+[dm] [movie] libvpx v1.17.0: VP8 decoder, 4 threads
+[dm] [movie] libvpx v1.17.0: VP9 decoder, 4 threads
+[dm] [movie] libvpx v1.17.0: VP8 decoder, 4 threads
+VP8 and VP9 key frames: NV12 and RGBA pixels match
+
+exit: 0 (0 s)

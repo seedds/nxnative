@@ -1,0 +1,95 @@
+date: 2026-11-20T05:40:28Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_aot_hostfn.exe
+
+t_aot_hostfn: module Z:/srv/nxnative-games/lead-build/verify/packs/win64/hostfn
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (92 slots), stub page 0x1000002000 (4096 slots)
+[dm] main: base 0000001000020000 size 0x43000 (behaviour image 0x3000, bss 0x40000; build aa08aa08aa08aa08aa08aa08aa08aa08; 2 data blocks, 0 cuts, 0 oracle rows; x86-64 engine)
+[dm] main: reloc relative=1 relr=0 abs/glob=22 jump=1
+[dm] force: 3 entries hit, 7 not referenced by this game
+[dm] aot: Z:/srv/nxnative-games/lead-build/verify/packs/win64/hostfn/nro.tsv lists 1 NROs (mapped from the game's image at their first ro::LoadModule, each with its pack <name>.aot.dll), 0 refused
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/hostfn/main.aot.dll for main at 0000001000020000: 17 functions, 64 lookup slots, 98 line entries, 316 positions, 35 returns, 0 gate sites, code 0x6fffff201000..0x6fffff207000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] aot: 1 modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/hostfn mapped, relocated and their packs loaded in 210.1 ms
+check ok   the module's symbols (hf_got, results, hf_vt, hf_vt2, nro_image)
+check ok   GOT: strlen and sqrtf at the slots of the passthrough's libc_strlen and libc_sqrtf (0x1000001380, 0x1000001300)
+check ok   GOT: the test's entries at their slots
+check ok   GOT: gmtime_r at the slot of the passthrough's libc_gmtime_r (0x1000001190)
+check ok   GOT: nn::ro's forced take-overs (hle_ro.c) at their slots
+check ok   GOT: sub_value, which no loaded module defines yet, at stub slot 0
+check ok   sub.nro read (12288 bytes)
+check ok   main's pack is loaded
+[dm] [RED] aot: the host hands the guest the host function at 00000001400034D0 (no symbol), which has no host-call thunk (gen_hle_thunks.py: an import-table entry or an HLE_LINKAGE function): the guest gets a stub that answers 0
+[dm] UNIMPL host function ? (x0=0x9 x1=0x17 x2=0)
+[dm] guest AS 0000001000A00000 +0x140000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+[dm] t_aot_hostfn: the host-created guest thread 0x1002 (the caller 0x1001) computed 42
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/hostfn/sub.aot.dll for sub at 0000001140A10000: 5 functions, 16 lookup slots, 13 line entries, 36 positions, 2 returns, 0 gate sites, code 0x6fffff1d1000..0x6fffff1d4000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] NRO sub mapped from the game's image at 0000001140A10000 (12288 bytes, bss 0x1000; x86-64 engine)
+[dm] sub: reloc relative=0 relr=0 abs/glob=1 jump=0
+[dm] NRO sub loaded (load 1, base 0000001140A10000): 1 imports of the modules loaded before bound to it
+[dm] ro::LoadModule sub (SHA-256 2d10f790432d4da8…, 12288 bytes, buffer 0, bind lazy): init called
+[dm] NRO sub unloaded: 1 imports that pointed into it bound again
+[dm] UNIMPL sub_value (x0=0x10000222c0 x1=0xe x2=0x1000021e48)
+[dm] [RED] aot: guest code (main+0x434) called from a host thread that is no guest thread: it runs on a state block, a 1 MiB guest stack and a TLS block of its own, without an SDK thread (nn::os's current thread and the thread SVCs fail there)
+[guest] hostfn module: done
+check ok   the run ended with ExitProcess (status 0)
+check ok   results[0] = 0x13 (expected 0x13): strlen through the GOT (the C library passthrough)
+check ok   results[1] = 0x40200000 (expected 0x40200000): sqrtf(6.25f) through the GOT, the float's bits
+check ok   results[2] = 0x406 (expected 0x406): the host function t_hf_get returned, called with blr
+check ok   results[3] = 0x420 (expected 0x420): the same, from the module's table hf_vt[1]
+check ok   results[4] = 0x7b (expected 0x7b): hf_vt2[0], written by the host through dm_guest_fnptr (t_hf_add)
+check ok   results[5] = 0 (expected 0): hf_vt2[1], a host function with no thunk: its stub answers 0
+check ok   results[6] = 0x2a (expected 0x2a): t_hf_spawn: a guest thread made through hle_guestthread.c ran synth_triple(14)
+check ok   results[7] = 0 (expected 0): nn::ro::LoadModule of sub.nro
+check ok   results[8] = 0 (expected 0): nn::ro::LookupModuleSymbol(sub_fn)
+check ok   results[9] = 0xfd0 (expected 0xfd0): sub_fn(5) in the NRO's pack, four passes of the cross-pack loop: 4 x (5 + strlen + the flag its DT_INIT set)
+check ok   results[10] = 0x4d (expected 0x4d): sub_value through main's GOT, bound to the NRO at its load
+check ok   results[11] = 0 (expected 0): sub_value through main's GOT after UnloadModule: the stub again
+check ok   t_hf_get's thunk handed over t_hf_mul's slot 0x1000001500 (the guest kept 0x1000001500 in hf_vt[1])
+check ok   dm_guest_fnptr: hf_vt2[0] the slot of t_hf_add, hf_vt2[1] a stub slot (1) for the function with no thunk
+check ok   the host functions ran: t_hf_mul 2 times, t_hf_add 1, the thread's body 1
+check ok   the NRO sub: an NRO module in the arena at 0000001140A10000, loaded once and unloaded
+check ok   the NRO's pack sub.aot.so is loaded, its strlen import at the passthrough's slot, its DT_INIT ran (sub_flag 1000)
+check ok   GOT: sub_value at its stub slot again after UnloadModule
+check ok   results[20] = 0x58 (expected 0x58): sub_call(synth_triple, 7) four times: the NRO's pack calls main's synth_triple back, 4 x (21 + 1)
+check ok   results[21] = 0 (expected 0): nn::ro::LookupModuleSymbol(sub_call)
+check ok   main's and sub's packs record the same standard-entry signature (x0..x7, v0..v7 in host registers, rv 0)
+check ok   the cross-pack loop: its 3 call sites bound in the first pass (3 cross-pack bindings), then 0 dispatcher misses over the other 3 passes (9 calls between the packs), 0 hand-overs through jit_entry, 0 JIT addresses
+check ok   after the loop, sub_value through main's GOT: one more call site bound to the NRO's pack (4 in all), still no hand-over (0)
+check ok   results[13] = 0x415 (expected 0x415): t_re_fire(1): hf_cb(data, 1, 2..9) called by the host inside that host call, on main's thread (nested re-entry, two stacked arguments)
+check ok   results[14] = 0x1234 (expected 0x1234): x22 across t_re_fire's nested guest call (callee-saved)
+check ok   results[15] = 0x74 (expected 0x74): t_re_deep(5): host, hf_deep, host (t_re_leaf), synth_triple: 15 + 100 + 1
+check ok   results[16] = 0x41e (expected 0x41e): t_re_thread(10): hf_cb from a guest thread the host created (hle_guestthread.c)
+check ok   results[17] = 0x428 (expected 0x428): t_re_hostthread(20): hf_cb from a host thread that is no guest thread (a guest context of its own)
+check ok   results[19] = 0 (expected 0): svcWaitSynchronization(timeout 0) on the readable handle of the event t_re_bind bound and signalled
+check ok   t_re_bind: hle_bind_system_event made the event through main's CreateSystemEvent and GetWritableHandleOfSystemEvent (nested guest calls), binding 1, signalled through it 1
+check ok   nesting depth seen by the host functions: t_re_fire 1 (expected 1), t_re_leaf 2 (expected 2)
+check ok   t_re_thread's callback ran on another guest thread than main's
+check ok   t_re_hostthread: the host thread had no state block before its call (1) and a host thread's context after it (1)
+check ok   t_re_stop: its nested guest call ended the process and returned 0 to it (left 2, depth 1, stop status 0), and the host function ran on to its end
+check ok   t_re_stop's lock was released: no host frame was skipped when guest code left
+check ok   the module's ga_results
+check ok   t_ga_buf: a garena buffer at 0x1140a20000, in the arena below 2^39; main read the host's word from it (0x1122334455667788)
+check ok   t_ga_str: an arena copy of the literal at 0x1000870000; strlen through the GOT 12, its first byte read by main 0x67
+check ok   t_ga_local: the scoped array at 0x1140a30000 (in the arena) passed to main's hf_sum2, which read 11 + 44 (55)
+check ok   t_ga_outside: host memory on purpose, outside the arena: main read the host stack array (5 + 6 = 11) and strlen of the host string (7)
+check ok   gmtime_r through the GOT: main's struct tm at 0x1000022480, tm_year 101; Windows' struct tm has no tm_zone, so the guest's stays 0 (0)
+t_aot_hostfn: run status 0, 50 checks, 0 failed; 14 SVCs, 37 host calls, 4 dispatcher misses (0 after the cross-pack loop's warm-up), 4 cross-pack calls bound in inline caches, 0 cross-pack hand-overs, 0 JIT addresses, 4 threads
+ok    the run: every check of the child passed and the module ended with ExitProcess
+ok    the module's OutputDebugString line
+ok    the host function with no thunk: a [RED] line when handed over, an UNIMPL line when called
+ok    the NRO: mapped from the game's image, loaded and unloaded through hle_ro.c
+ok    sub_value after the unload: its stub (an UNIMPL line)
+ok    the host-created guest thread's line
+ok    the host thread with no guest thread: one [RED] line naming the guest function and what it lacks
+ok    the arena guard off: no arena check line
+      3 arena check lines:
+      [RED] aot: arena check: guest call argument 1 at /home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/host/tests/t_aot_hostfn_entries.c:169 is 0x7fffff6cecf0, outside the arena 0x1000000000..0x5000000000: host memory handed to the guest (aot.h, "Host memory the guest sees")
+      [RED] aot: arena check: t_ga_outside returns the guest an address outside the arena 0x1000000000..0x5000000000: 0x140365e30 (dm/host/aot.h, "Host memory the guest sees")
+      [RED] aot: arena check: the guest passes libc_strlen an address outside the arena 0x1000000000..0x5000000000 in argument 1: 0x140365e30 (host memory it was handed: dm/host/aot.h, "Host memory the guest sees")
+ok    the run with DM_AOT_ARENA_CHECK=1: every check of the child passed
+ok    the guard: exactly the three host addresses handed over on purpose, each once (a guest call's argument, a thunk's result, a thunk's argument)
+      [RED] ro::LoadModule: t_aot_hostfn.tmp/nopack/sub.aot.dll: LoadLibrary failed (error 126) (nxaot build <the NRO file, sub.nro> -o <object> --shared t_aot_hostfn.tmp/nopack/sub.aot.dll makes the pack of this NRO)
+ok    sub's pack missing: ro::LoadModule fails with a [RED] line naming the pack and how to make it, and the run stops
+t_aot_hostfn: 11 checks, 0 failed
+
+exit: 0 (3 s)

@@ -1,0 +1,16 @@
+date: 2026-11-20T05:36:27Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_vorbis_divides.exe
+
+type 0, 1 channels, 1 submap(s): heap/arena pull/push passed
+type 0, 2 channels, 1 submap(s): heap/arena pull/push passed
+type 1, 1 channels, 1 submap(s): heap/arena pull/push passed
+type 1, 2 channels, 1 submap(s): heap/arena pull/push passed
+type 2, 1 channels, 1 submap(s): heap/arena pull/push passed
+type 2, 2 channels, 1 submap(s): heap/arena pull/push passed
+type 2, 3 channels, 1 submap(s): heap/arena pull/push passed
+type 2, 6 channels, 1 submap(s): heap/arena pull/push passed
+type 2, 8 channels, 1 submap(s): heap/arena pull/push passed
+type 2, 6 channels, 2 submap(s): heap/arena pull/push passed
+
+exit: 0 (0 s)

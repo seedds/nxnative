@@ -1,0 +1,7 @@
+date: 2026-11-20T05:36:26Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_motion_pro.exe
+
+t_motion_pro: passed
+
+exit: 0 (0 s)

@@ -1,0 +1,143 @@
+date: 2026-11-20T05:36:42Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_fs.exe
+
+[dm] fs mount rom: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/rom (read-only) (overlay first)
+  ✓ mount RomFS with two layers (base + overlay)
+  ✓ the overlay file wins
+  ✓ falls back to the base when the overlay lacks the file
+[dm] fs write to a read-only mount: /srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/overlay/data/same
+  ✓ the two-layer mount refuses writes
+[dm] fs RomFS image Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/rom.img: 5 entries
+[dm] fs mount rom: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/rom.img (read-only)
+RomFS image
+  ✓ mount the image
+  ✓ reads a file
+  ✓ reads the next file, through ..
+  ✓ a read stops at the end of the file (got 2)
+  ✓ size 5, open for reading
+  ✓ a missing file is not found
+  ✓ names are case-sensitive
+  ✓ a directory does not open as a file
+[dm] fs write to a read-only mount: rom:/data/a
+  ✓ refuses writes; create answers "exists"
+  ✓ entry types
+  ✓ a directory of 3 entries (3)
+  ✓ lists a, b, c
+  ✓ the file filter hides directories
+  ✓ an empty directory
+[dm] fs RomFS image Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/rom.img: 5 entries
+[dm] fs mount rom: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/rom.img (read-only) (overlay first)
+  ✓ mount the image with an overlay folder
+  ✓ the overlay file wins over the image
+  ✓ image files and overlay-only files both read
+  ✓ the listing merges both, once each (4)
+  ✓ with the right types and sizes
+  ✓ stage a DLC image
+[dm] fs RomFS image Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/2.img: 5 entries
+  ✓ DLC image reports Horizon table size (176, got 176)
+[dm] fs RomFS image Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/2.img: 5 entries
+[dm] fs mount aoc: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/2.img (read-only)
+  ✓ DLC mounts and reads directly from its image
+[dm] [RED] fs RomFS image Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/rom.img is not a complete image (copied in part? errno=22)
+  ✓ a cut-off image is refused
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EAEF8, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work (transactional save: work directory, swapped in atomically on Commit)
+  ✓ mount the save
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+① pwrite returns 0
+  ✓ WriteFile returns failure 0x2A2
+  ✓ pwrite called only once (actually 1 times; it used to retry forever)
+② pwrite writes in pieces
+  ✓ WriteFile succeeds
+  ✓ pwrite called twice (3 bytes + 4 bytes; actually 2)
+  ✓ the work directory holds the complete abcdefg
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+③ transaction
+  ✓ the Commit of the transaction holding ①② is refused, front end notified once errno=ENOSPC (actually 1 times errno=28)
+  ✓ work directory discarded, back to the committed version old
+  ✓ next transaction: write new
+  ✓ before Commit the committed directory is still old
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] save commit #1: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save (3 save writes so far) (clone + swap 8000 us, since this transaction's first write 9000 us)
+  ✓ Commit
+  ✓ after Commit the committed directory is new
+  ✓ the swapped-out old version is deleted (no .new left)
+④ DM_TEST_FS_FAIL=write:5:28
+  ✓ (b does not exist: open fails, not counted as a write)
+  ✓ 4th write succeeds
+[dm] DM_TEST_FS_FAIL: save write #5 returns failure errno=28
+[dm] fs pwrite (injected) fd failed errno=28
+  ✓ 5th write fails errno=28 (actually errno=28)
+  ✓ 6th write succeeds
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+  ✓ that transaction's Commit is refused, front end notified errno=28 (2 times in total)
+  ✓ committed directory unchanged (no b)
+  ✓ work directory discarded (no b)
+  ✓ committed directory a is still new
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] save commit #2: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save (7 save writes so far) (clone + swap 9000 us, since this transaction's first write 9000 us)
+  ✓ next transaction: write b=7, Commit succeeds
+  ✓ final committed b = 7 (the next transaction's content)
+  ✓ a successful transaction sends no notification (still 2 times in total)
+⑤ remounting discards uncommitted content
+  ✓ write a=v9 without committing
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EAEF8, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work (transactional save: work directory, swapped in atomically on Commit)
+  ✓ remount
+  ✓ work directory a is back to the committed version new
+  ✓ work directory b = the committed 7
+⑥ failed writes are handled without exiting (DM_TEST_FS_FAILAT)
+  ✓ write a=bad
+[dm] DM_TEST_FS_FAILAT: reclone fails with ENOSPC (#1)
+[dm] [RED] save transaction: recloning the work directory failed errno=28 -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory could not be recloned (see the previous line)
+  ✓ this transaction is refused (injected reclone failure), the process is still alive, front end notified once
+  ✓ committed directory a is still new
+  ✓ work directory not deleted (a is still bad)
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+  ✓ still tainted: the next commit is refused too
+  ✓ this time the reclone works: work directory a is back to new
+  ✓ no .re left
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] save commit #3: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save (10 save writes so far) (clone + swap 8000 us, since this transaction's first write 9000 us)
+  ✓ next transaction writes a=good, commit succeeds
+  ✓ committed a = good
+  ✓ write c
+[dm] DM_TEST_FS_FAILAT: guestname fails with ENOSPC (#1)
+[dm] DM_TEST_FS_FAILAT: renameback fails with ENOSPC (#1)
+[dm] [RED] fs rename: writing the name metadata failed and so did the rollback errno=28: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work/d stays at the new path, the affected save commit(s) will be refused
+[dm] fs rename name Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work/d failed errno=28
+  ✓ rename c → d returns failure (both steps injected to fail), the process is still alive
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+  ✓ this transaction's commit is refused
+  ✓ committed directory has no c
+  ✓ committed directory has no d
+  ✓ committed a is still good
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] save commit #4: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save (12 save writes so far) (clone + swap 11000 us, since this transaction's first write 11000 us)
+  ✓ the next transaction commits as usual
+Can't recognize 'rm -rf 'Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work'' as an internal or external command, or batch script.
+[dm] DM_TEST_FS_FAILAT: mountclone fails with ENOSPC (#1)
+[dm] [RED] save transaction: cloning the work directory failed (Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work, errno=28) -- mounting the committed directory Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save read-only instead: saves cannot be written this session, the committed version is unchanged
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save (read-only)
+  ✓ mount returns success, front end notified once (actually 1 times)
+  ✓ the read-only mount reads the committed a=ok2 (read ok2)
+[dm] fs write to a read-only mount: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save/a
+  ✓ writes fail
+  ✓ commit is a no-op
+  ✓ committed a is still ok2
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save", 0, 00007FFFFE1EAEF8, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work (transactional save: work directory, swapped in atomically on Commit)
+0638:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work", 0, 00007FFFFE1EADB8, 0): stub!
+[dm] save commit #5: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69/save (13 save writes so far) (clone + swap 10000 us, since this transaction's first write 12000 us)
+  ✓ remount without injection: transactional as usual, writing a=ok3 and committing succeed
+  ✓ committed a = ok3
+Can't recognize 'rm -rf 'Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_fs.hl4k69'' as an internal or external command, or batch script.
+== 78 checks, 0 failed ==
+
+exit: 0 (2 s)

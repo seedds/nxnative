@@ -1,0 +1,197 @@
+date: 2026-11-20T05:40:01Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_aot_module.exe
+
+t_aot_module: module Z:/srv/nxnative-games/lead-build/verify/packs/win64/module
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (1 slots), stub page 0x1000002000 (4096 slots)
+[dm] main: base 0000001000020000 size 0x11000 (behaviour image 0x10018, bss 0; build aa07aa07aa07aa07aa07aa07aa07aa07; 2 data blocks, 2 cuts, 3 oracle rows, frame step state page; x86-64 engine)
+[dm] main: reloc relative=1 relr=0 abs/glob=1 jump=1
+[dm] force: 0 entries hit, 0 not referenced by this game
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/module/main.aot.dll for main at 0000001000020000: 10 functions, 32 lookup slots, 33 line entries, 145 positions, 13 returns, 2 gate sites, code 0x6fffff201000..0x6fffff204000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] [RED] aot: main's manifest has an observation gate at main+0x210 that its pack does not call (no compiled code holds it: see nxaot build's log): served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code
+[dm] aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not
+[dm] aot: 1 modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module mapped, relocated and their packs loaded in 202.0 ms
+check ok   the module's symbols (synth_got, synth_fnptr, results, synth_observed, synth_spin)
+check ok   GOT[0], the import t_aot_mod_combine: 0x1000001000, the host function's slot in the host-function page (t_aot_mod_combine)
+check ok   GOT[1], the import t_aot_mod_missing: 0x1000002000, stub slot 0
+check ok   the relocated pointer (R_AARCH64_RELATIVE): 0x10000201dc = synth_observed
+check ok   the image at 0x1000020000 (+0x11000) in the arena: text readable only (1), data writable and not executable (3)
+check ok   the build ID from the manifest: aa07aa07aa07aa07aa07aa07aa07aa07
+check ok   the frame step's state page at +0xc000 (the aux row)
+check ok   the observation gate at synth_observed: observer 23 with the block's registers and parameter 5
+check ok   the spin wait's back-edge at synth_spin+4: the back-off ran and returned
+check ok   the module's pack is loaded
+check ok   the pack's gate sites (descriptor, ABI 3): the observation gate at synth_observed (number 23, parameter 5) and the spin wait's back-edge at synth_spin+4 (head synth_spin)
+check ok   the module's probes: synth_flag, synth_faultptr, the call of synth_observed (returns to main+0xac), the fault probe's load (main+0xc8)
+t_aot_module: timing (compiled): a guest call from the host of synth_cut 44 ns, of synth_spin through its untaken back-edge gate 59 ns (+15), of synth_observed through its observation gate 72 ns (+28); the JIT's stop lookup 16.6 ns per translated instruction (0)
+t_aot_module: timing (compiled): a host call through its guest-visible slot from the host 43 ns; the dispatcher's miss lookups 5.7 ns per target (206800 found)
+check ok   the timing calls returned
+check ok   the hidden function at main+0x210 (no symbol, no FDE), called from main+0xfc through synth_hidden (0 in the image)
+[dm] UNIMPL t_aot_mod_missing (x0=0x55 x1=0x3 x2=0)
+[dm] guest AS 0000001000A00000 +0x140000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+[dm] [mem] heap 0.00 GB (heap region 1.62 GB)
+[dm] aot: the JIT fallback's guest code: 2 ranges: main+0 (0x2000 bytes), main+0x10000 (0x18 bytes)
+[dm] [RED] aot: an indirect branch to an address with no compiled entry at main+0x210 runs in the JIT fallback (design section 11)
+[guest] aot module: done
+check ok   the run ended with ExitProcess (status 0)
+check ok   results[0] = 0x1b5b (expected 0x1b5b)
+check ok   results[1] = 0 (expected 0)
+check ok   results[2] = 0 (expected 0)
+check ok   results[4] = 0x1234 (expected 0x1234)
+check ok   results[5] = 0x1e (expected 0x1e)
+check ok   results[6] = 0x190 (expected 0x190)
+check ok   results[7] = 0x2 (expected 0x2)
+check ok   results[8] = 0x9 (expected 0x9)
+check ok   results[9] = 0x412 (expected 0x412)
+check ok   results[10] = 0x2 (expected 0x2)
+check ok   results[11] = 0x3ea (expected 0x3ea)
+check ok   results[12] = 0x5 (expected 0x5)
+check ok   the pack's observation gate, at both calls of synth_observed, before its add: x0 41 and 1 (the guest's 41 and 1), x19 = &results (0x1000023040), x30 at the direct call its return address main+0xac (0x10000200ac), parameter 5; the observer's x0 + 1000 is what the add read (results[9] 1042, results[11] 1002)
+check ok   the spin wait's back-edge reached the host's back-off 4022 times before the flag was set (4022 in all; released by the gates: 1); 3 observation gate calls (3)
+check ok   the hidden function's gate, which no pack serves, served by the JIT fallback: 1 call, x0 7, x19 = &results, x30 main+0x100 (expected main+0x100); the observer's x0 + 1000 is what its add read (results[13] 1009)
+check ok   the frame step's function through its stub in the aux region: 5, and the stub's pass counted at the state page's +0x30 (1)
+check ok   SetHeapSize (2 MiB at 0x10d8a00000) reached be_guest_map(0x10d8a00000, 0x200000): 1 calls, 0 be_guest_unmap
+check ok   the host function ran once (1)
+t_aot_module: run status 0, 33 checks, 0 failed; 3 SVCs, 20102 host calls, 1 dispatcher misses, 1 JIT addresses, 20103 observation gate calls, 4022 spin gate calls
+ok    the run: every check of the child passed and the module ended with ExitProcess
+ok    the module's OutputDebugString line
+ok    the unimplemented import answered by its stub (an UNIMPL line)
+      [RED] aot: main's manifest has an observation gate at main+0x210 that its pack does not call (no compiled code holds it: see nxaot build's log): served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code
+ok    the loader: every gate row of the manifest is a gate site the pack's code calls but the hidden function's, which no compiled code holds (design 1.1)
+      [RED] aot: SIGSEGV at address 0x1000000008 in guest code (host pc 0x6fffff201921, in the function at main+0x10, guest instruction main+0xc8)
+ok    a fault in compiled code: the report names the probe's load (the line table: native address -> guest instruction, exactly)
+      [RED] aot: t_aot_module.tmp/image/main.image.bin does not match t_aot_module.tmp/image/main.aot.tsv (its SHA-256 is not the manifest's): image 65560 bytes, SHA-256 5ff0648880d6de79584824e54d22523c3fe4cd6be046ece811f53e117f0575c4; manifest image_size 65560, SHA-256 8a4f158891d6b189a4da394b61afceebd62dfbb4120cc7c9fe912425917c32db. Rewrite the module again with patch_nso.py --aot
+ok    an image that is not its manifest's: refused with a [RED] line naming both SHA-256s, nothing run
+      [RED] aot: t_aot_module.tmp/pack/main.aot.dll: it was compiled from another image than main: the pack's SHA-256 8a4f158891d6b189a4da394b61afceebd62dfbb4120cc7c9fe912425917c32db, the image's 5ff0648880d6de79584824e54d22523c3fe4cd6be046ece811f53e117f0575c4 (image 0x10018 / 0x10018 bytes, text 0x2000 / 0x2000, bss 0 / 0) (nxaot build t_aot_module.tmp/pack/main.aot.tsv -o <object> --shared t_aot_module.tmp/pack/main.aot.dll makes the pack of this image)
+ok    the pack of another image: refused with a [RED] line naming both SHA-256s, nothing run
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (1 slots), stub page 0x1000002000 (4096 slots)
+[dm] main: base 0000001000020000 size 0x11000 (behaviour image 0x10018, bss 0; build aa07aa07aa07aa07aa07aa07aa07aa07; 2 data blocks, 2 cuts, 3 oracle rows, frame step state page; x86-64 engine)
+[dm] main: reloc relative=1 relr=0 abs/glob=1 jump=1
+[dm] force: 0 entries hit, 0 not referenced by this game
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/module/main.aot.dll for main at 0000001000020000: 10 functions, 32 lookup slots, 33 line entries, 145 positions, 13 returns, 2 gate sites, code 0x6fffff201000..0x6fffff204000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] [RED] aot: main's manifest has an observation gate at main+0x210 that its pack does not call (no compiled code holds it: see nxaot build's log): served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code
+[dm] aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not
+[dm] aot: 1 modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module mapped, relocated and their packs loaded in 211.1 ms
+check ok   the module's symbols (synth_got, synth_fnptr, results, synth_observed, synth_spin)
+check ok   GOT[0], the import t_aot_mod_combine: 0x1000001000, the host function's slot in the host-function page (t_aot_mod_combine)
+check ok   GOT[1], the import t_aot_mod_missing: 0x1000002000, stub slot 0
+check ok   the relocated pointer (R_AARCH64_RELATIVE): 0x10000201dc = synth_observed
+check ok   the image at 0x1000020000 (+0x11000) in the arena: text readable only (1), data writable and not executable (3)
+check ok   the build ID from the manifest: aa07aa07aa07aa07aa07aa07aa07aa07
+check ok   the frame step's state page at +0xc000 (the aux row)
+check ok   the observation gate at synth_observed: observer 23 with the block's registers and parameter 5
+check ok   the spin wait's back-edge at synth_spin+4: the back-off ran and returned
+check ok   the module's pack is loaded
+check ok   the pack's gate sites (descriptor, ABI 3): the observation gate at synth_observed (number 23, parameter 5) and the spin wait's back-edge at synth_spin+4 (head synth_spin)
+check ok   the module's probes: synth_flag, synth_faultptr, the call of synth_observed (returns to main+0xac), the fault probe's load (main+0xc8)
+[dm] aot: DM_AOT_JIT_ALL: every guest instruction runs in the JIT fallback, compiled code is not entered
+[dm] aot: the JIT fallback's guest code: 2 ranges: main+0 (0x2000 bytes), main+0x10000 (0x18 bytes)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0x1e4 runs in the JIT fallback (design section 11)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0x1cc runs in the JIT fallback (design section 11)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0x1d4 runs in the JIT fallback (design section 11)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0x1dc runs in the JIT fallback (design section 11)
+t_aot_module: timing (JIT-forced): a guest call from the host of synth_cut 400 ns, of synth_spin through its untaken back-edge gate 1452 ns (+1052), of synth_observed through its observation gate 476 ns (+76); the JIT's stop lookup 6.4 ns per translated instruction (0)
+t_aot_module: timing (JIT-forced): a host call through its guest-visible slot from the host 54 ns; the dispatcher's miss lookups 6.3 ns per target (206800 found)
+check ok   the timing calls returned
+check ok   the hidden function at main+0x210 (no symbol, no FDE), called from main+0xfc through synth_hidden (0 in the image)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0 runs in the JIT fallback (design section 11)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0x34 runs in the JIT fallback (design section 11)
+[dm] UNIMPL t_aot_mod_missing (x0=0x55 x1=0x3 x2=0)
+[dm] [RED] aot: the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL) at main+0x48 runs in the JIT fallback (design section 11)
+[dm] guest AS 0000001000A00000 +0x140000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+[dm] [mem] heap 0.00 GB (heap region 1.62 GB)
+[guest] aot module: done
+check ok   the run ended with ExitProcess (status 0)
+check ok   results[0] = 0x1b5b (expected 0x1b5b)
+check ok   results[1] = 0 (expected 0)
+check ok   results[2] = 0 (expected 0)
+check ok   results[4] = 0x1234 (expected 0x1234)
+check ok   results[5] = 0x1e (expected 0x1e)
+check ok   results[6] = 0x190 (expected 0x190)
+check ok   results[7] = 0x2 (expected 0x2)
+check ok   results[8] = 0x9 (expected 0x9)
+che022c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+ck ok   results[9] = 0x412 (expected 0x412)
+check ok   results[10] = 0x2 (expected 0x2)
+check ok   results[11] = 0x3ea (expected 0x3ea)
+check ok   results[12] = 0x5 (expected 0x5)
+check ok   the pack's observation gate, at both calls of synth_observed, before its add: x0 41 and 1 (the guest's 41 and 1), x19 = &results (0x1000023040), x30 at the direct call its return address main+0xac (0x10000200ac), parameter 5; the observer's x0 + 1000 is what the add read (results[9] 1042, results[11] 1002)
+check ok   the spin wait's back-edge reached the host's back-off 1519 times before the flag was set (1519 in all; released by the gates: 1); 3 observation gate calls (3)
+check ok   the hidden function's gate, which no pack serves, served by the JIT fallback: 1 call, x0 7, x19 = &results, x30 main+0x100 (expected main+0x100); the observer's x0 + 1000 is what its add read (results[13] 1009)
+check ok   JIT-forced: no compiled code ran (0 dispatcher misses); 81923 JIT runs at 7 addresses, 41723 gate stops, 41723 single steps, 0 memory aborts
+check ok   the frame step's function through its stub in the aux region: 5, and the stub's pass counted at the state page's +0x30 (1)
+check ok   SetHeapSize (2 MiB at 0x10d8a00000) reached be_guest_map(0x10d8a00000, 0x200000): 1 calls, 0 be_guest_unmap
+check ok   the host function ran once (1)
+t_aot_module: run status 0, 34 checks, 0 failed; 3 SVCs, 20102 host calls, 0 dispatcher misses, 7 JIT addresses, 20103 observation gate calls, 1519 spin gate calls
+ok    the JIT-forced run (DM_AOT_JIT_ALL=1): every check of the child passed, the same results, gates and stub as compiled code's, its OutputDebugString and UNIMPL lines
+      [RED] aot: SIGSEGV at address 0x1000000008 in guest code (a memory access of the JIT fallback, in the function at main+0x10, guest instruction main+0xc8)
+ok    a fault in the JIT fallback (DM_AOT_JIT_ALL=1): the report names the probe's load exactly (the JIT's memory abort)
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (1 slots), stub page 0x1000002000 (4096 slots)
+[dm] aot: DM_AOT_PROFILE: every guest thread sampled 1000 times per second of its CPU time; the profile goes to t_aot_module.tmp/profile/<module>.tsv at exit (nxaot build --profile)
+[dm] [RED] aot: DM_AOT_PROFILE: no handle or CPU time for a guest thread (error 120): it is not sampled
+[dm] main: base 0000001000020000 size 0x11000 (behaviour image 0x10018, bss 0; build aa07aa07aa07aa07aa07aa07aa07aa07; 2 data blocks, 2 cuts, 3 oracle rows, frame step state page; x86-64 engine)
+[dm] main: reloc relative=1 relr=0 abs/glob=1 jump=1
+[dm] force: 0 entries hit, 0 not referenced by this game
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/module/main.aot.dll for main at 0000001000020000: 10 functions, 32 lookup slots, 33 line entries, 145 positions, 13 returns, 2 gate sites, code 0x6fffff201000..0x6fffff204000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] [RED] aot: main's manifest has an observation gate at main+0x210 that its pack does not call (no compiled code holds it: see nxaot build's log): served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code
+[dm] aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not
+[dm] aot: 1 modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module mapped, relocated and their packs loaded in 241.4 ms
+check ok   the module's synth_hot and synth_cut
+check ok   the sampler is on (DM_AOT_PROFILE t_aot_module.tmp/profile)
+t_aot_profile: synth_hot at main+0x1f4, synth_cut at main+0x1e4: 176 calls of synth_hot (4194304 passes each, 0.5433 ns per pass), 1015000 calls of synth_cut
+t_aot_profile: synth_hot's guest code main+0x1f4 to main+0x20c, the pack has positions
+check ok   synth_hot's sums (n (n + 1) / 2 for n = 4194304, 176 calls)
+[dm] aot: profile mark t_aot_module.tmp/profile/mark.tsv: 0 threads, 0 samples in the host, 0 host pcs holding 0
+check ok0290:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+06f8:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0320:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0348:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0364:fixme:thread:QueryThreadCycleTime (0000000000000178,00007DEB9D8FF368): stub!
+038c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+03a0:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+03e0:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+02f4:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0418:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+02ec:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0410:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+049c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+04b0:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+04c8:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+04ec:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+004c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+04f0:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+056c:fixme:thread:QueryThreadCycleTime (0000000000000188,00007FFFFF6CF368): stub!
+058c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0594:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+061c:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+0628:fixme:thread:QueryThreadCycleTime (0000000000000178,00007FFFFF6CF368): stub!
+   the sampler (DM_AOT_PROFILE): the mark written to t_aot_module.tmp/profile/mark.tsv
+check FAIL the sampler (DM_AOT_PROFILE): the mark's thread rows (0, 0 samples)
+check ok   the sampler (DM_AOT_PROFILE): the mark's host samples by pc: 0 at 0 pcs (0 of them in this program) and 0 lost, against the threads' 0 in the host
+t_aot_module: run status 0, 6 checks, 1 failed; 0 SVCs, 0 host calls, 0 dispatcher misses, 0 JIT addresses, 0 observation gate calls, 0 spin gate calls
+[dm] aot: profile: 1000 Hz of each guest thread's CPU time, 0 of 0 threads sampled; all modules: 0 samples, 0 in compiled code (0 at a guest instruction, 0 at one outside their function: not counted there), 0 in host calls and SVCs of compiled functions, 0 in the JIT fallback, 0 elsewhere in the host
+[dm] aot: profile: the JIT fallback: 0 runs, 0.000 s of CPU time (0.00 % of the 0.000 s the samples count); 0 runs, 0.000 s (0.00 %) begun under another FPCR than the packs' 0; 0 stretches under another FPCR, 0.000 s
+[dm] aot: profile: no samples in any pack's code: nothing written to t_aot_module.tmp/profile
+[dm] aot: misses: the JIT fallback ran for no pack this session: no misses file written to t_aot_module.tmp/profile
+      0 rows, 0 samples; the most at main+0 (0), synth_hot [main+0x1f4, main+0x20c) 0 at 0 rows
+      0 function lines, 0 with their rows' count, samples at least their rows' and no row below their entry; 0 rows before the first; synth_hot's line 0, its rows in its code no
+FAIL  the sampler (DM_AOT_PROFILE): the profile written at exit names the module, its build ID and image, every line is <offset> <samples>, and synth_hot has the most, in its loop (the pack's positions); each sampled function's rows follow its function line (synth_hot's in its code)
+ok    without DM_AOT_PROFILE: the sampler is off and no profile is written
+t_aot_module: the sampler's cost on compiled code: synth_hot 0.5433 ns per pass with DM_AOT_PROFILE (1000 Hz), 0.5488 without (-1.00 %)
+      | # nxaot misses: guest addresses the x86-64 engine's JIT fallback ran because the pack had no compiled code there (dm/host/aot_run.c, DM_AOT_PROFILE); nxaot build --misses <this file>
+      | # module main, build ID aa07aa07aa07aa07aa07aa07aa07aa07, image SHA-256 8a4f158891d6b189a4da394b61afceebd62dfbb4120cc7c9fe912425917c32db
+      | # pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/module/main.aot.dll
+      | # 1 addresses, 1 entries into the JIT fallback; 1 of the addresses this session, the rest from earlier sessions of this image
+      | # <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, noreturn, other (no pack serves them)
+      | 0x210 indirect 1
+      pass 1: 1 rows, the hidden function main+0x210: 1 entries
+ok    the JIT fallback's misses (DM_AOT_PROFILE): main.misses.tsv names the module, its build ID and image, and has one row, the hidden function's: indirect, 1 entry
+      pass 2: 1 rows, the hidden function main+0x210: 2 entries
+ok    a second run: its entry added to the same row (2), the file of the same image merged
+      pass 3: 1 rows, the hidden function main+0x210: 1 entries
+ok    a file of another image (its header's SHA-256 changed, a row of its own): replaced, only this run's row (1)
+      20 of 20 runs exited 0 after the sampler wrote its files, 0 killed by a signal, 20 with JIT runs
+ok    a recorded session with JIT entries ending with exit() on its guest thread (DM_AOT_PROFILE, 1000 Hz): every run exits 0 after the sampler wrote its files
+t_aot_module: 15 checks, 1 failed
+
+exit: 1 (27 s)

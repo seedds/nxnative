@@ -1,0 +1,39 @@
+date: 2026-11-20T05:40:37Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_guest_map.exe
+
+[dm] guest AS 00007A3388410000 +0x14400000  heap 00007A339B810000 alias 00007A3398410000 stack 00007A339A410000
+[dm] [mem] heap 0.00 GB (heap region 0.02 GB)
+[dm] SVC 0x2c outside the alias region 00007A3398410003+0x1000
+[dm] SetHeapSize OOM: req 0x10000000000 > cap 0x1000000
+ok   SetHeapSize 2 MiB
+ok     grows: be_guest_map(heap, 2 MiB) after the pages are open
+ok   SetHeapSize 2 MiB again
+ok     no change: no call
+ok   SetHeapSize 1 MiB
+ok     shrinks: be_guest_unmap(heap + 1 MiB, 1 MiB) while the pages are still readable
+ok     and then decommitted, the rest still open
+ok   MapPhysicalMemory alias +4 pages, 4 pages
+ok     commits: be_guest_map of the 4 pages, open
+ok   MapPhysicalMemory the same pages again
+ok     nothing new: no call
+ok   MapPhysicalMemory alias +6 pages, 4 pages (2 already mapped)
+ok     commits: be_guest_map of the request's pages
+ok   UnmapPhysicalMemory alias +5 pages, 1 page
+ok     decommits: be_guest_unmap of the page while it is readable
+ok     and then that page alone is closed
+ok   UnmapPhysicalMemory the same page again
+ok     nothing to decommit: no call
+ok   MapMemory stack <- heap, 2 pages
+ok     commits the destination: be_guest_map(stack, 2 pages), open
+ok   UnmapMemory stack <- heap, 2 pages
+ok     leaves the pages open: no call
+ok   refused requests (unaligned, larger than the heap region)
+ok     no call
+ok   UnmapPhysicalMemory alias +4 pages, 6 pages (5 mapped)
+ok     decommits: be_guest_unmap of the request's pages
+ok   SetHeapSize 0
+ok     shrinks to nothing: be_guest_unmap(heap, 1 MiB) while readable
+t_guest_map: 28 checks, 0 failed
+
+exit: 0 (0 s)

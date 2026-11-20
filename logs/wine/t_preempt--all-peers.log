@@ -1,0 +1,29 @@
+date: 2026-11-20T05:36:57Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_preempt.exe --all-peers
+
+PASS: condition waiters selected by priority, then FIFO; mutex reacquired before return
+PASS: native mutex wait releases the signaller, then the worker finishes after unlock
+PASS: native join releases the signaller, returns the helper result and preserves nested host work
+PASS: wait kind 0, dispatch delay 1000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 1, dispatch delay 1000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 1, dispatch delay 20000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 2, dispatch delay 1000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 2, dispatch delay 20000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 4, dispatch delay 1000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 0, payload before signaller returns 1
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 1, payload before signaller returns 0
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 1, payload before signaller returns 0
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 2, payload before signaller returns 0
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 2, payload before signaller returns 0
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 3, payload before signaller returns 0
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 3, payload before signaller returns 0
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 4, payload before signaller returns 0
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 4, payload before signaller returns 0
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 5, payload before signaller returns 0
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 5, payload before signaller returns 0
+PASS: wait kind 0, dispatch delay 20000 us, exclusion 6, payload before signaller returns 0
+PASS: wait kind 4, dispatch delay 20000 us, exclusion 6, payload before signaller returns 0
+
+exit: 0 (1 s)

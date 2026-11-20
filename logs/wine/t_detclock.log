@@ -1,0 +1,33 @@
+date: 2026-11-20T05:36:58Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_detclock.exe
+
+[dm] DM_DETCLOCK_TRACE: the guest clock's events go to Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_detclock_408.dtrace
+[dm] DM_DETCLOCK: the guest clock is virtual time from 60 s: NVN's acquire waits for the display on it and vi's vsync event comes every 16666667 ns, another layer's present moves it to at least the previous present's value plus that step, and when no game thread can run it jumps to the earliest guest-clock deadline
+[dm] DM_DETCLOCK: thread 0x1001 presents
+[dm] DM_DETCLOCK: thread 0x101f presents
+[dm] DM_DETCLOCK: thread 0x1021 presents
+[dm] DM_DETCLOCK: thread 0x1023 presents
+5, before the first present: the clock starts at 60 s, sleeps of 5 and 3 ms end at the kernel's deadlines from it
+timer waits: 625 phases, 3 periods each, one timed wait a period, 10000.391 ms of guest time
+frame 0: worker 0, 5000104, 8000208, 9000312 ns; present 16666667 ns
+frame 1: worker 16666667, 21666771, 25666875, 26666979 ns; present 33333334 ns
+frame 2: worker 33333334, 63333437, 66333542, 67333646 ns; present 67333646 ns
+frame 3: worker 67333646, 72333750, 76333854, 77333958 ns; present 84000313 ns
+frame 4: worker 84000313, 89000417, 92000521, 93000625 ns; present 100666980 ns
+frame 5: worker 100666980, 130667083, 134667187, 135667292 ns; present 135667292 ns
+frame 6: worker 135667292, 140667396, 143667500, 144667604 ns; present 152333959 ns
+frame 7: worker 152333959, 157334062, 161334167, 162334271 ns; present 169000626 ns
+frame 8: worker 169000626, 199000729, 202000833, 203000937 ns; present 203000937 ns
+frames on a host-signalled event: the clock one step on at each of 6 presents, worker 2 read each present's value
+4a, the acquire waits for the display, interval 1: 2 runs of 8 frames, 1 step(s) apart, the CPU span 19202 ticks (the job's 1 ms) where a step is 320000, the presents moved nothing, the same values in each run
+4a, interval 2: 2 runs of 8 frames, 2 step(s) apart, the CPU span 19202 ticks (the job's 1 ms) where a step is 320000, the presents moved nothing, the same values in each run
+4b, the main thread waits on vi's vsync event: 2 runs of 8 frames, 1 step(s) apart, the CPU span 19202 ticks (the job's 1 ms) where a step is 320000, the presents moved nothing, the same values in each run
+6, the audio renderer: 2 runs, the game's audio thread woke at each 5 ms of guest time while the render thread worked at a random wall-clock pace
+7, the movie decoder's deferred event: 8 events, each 2 ms of guest time after it was asked for, its thread signalling at a random wall-clock pace
+8, a host lock: the clock held while a game thread waited 8 times for a host thread's 1 to 4 ms of wall time
+9, frame-counted input: 6 changes, each read in the frame after its frame's present, at the same guest time in two runs
+the trace: 2856 idle jumps, 109 presents, 3130 blocks, 28 thread starts, 8 host signals and 6 host wakes (the host threads of scenarios 2 and 9)
+the deterministic guest clock: virtual time from its origin; sleeps and timeouts on it end where Horizon's kernel ends them, run on while the presenting thread waits for them, at exact virtual times; the display's pace is a wait on it; the host's threads that feed the game (the audio renderer, the movie decoder's deferred events) run on it, and a wait for a host lock holds it; no jump while a thread runs or the presenting thread waits for a host-signalled event
+
+exit: 0 (2 s)

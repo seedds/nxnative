@@ -1,0 +1,91 @@
+date: 2026-11-20T05:36:45Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_fs_case.exe
+
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save", 0, 00007FFFFE1EE348, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work (transactional save: work directory, swapped in atomically on Commit)
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work", 0, 00007FFFFE1EE208, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work\\.dm-case-2", 0, 00007FFFFE1E7CC8, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work\\Dir", 0, 00007FFFFE1E7CC8, 0): stub!
+[dm] save commit #1: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save (3 save writes so far) (clone + swap 21000 us, since this transaction's first write 90000 us)
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save", 0, 00007FFFFE1EE348, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save\\.dm-case-2", 0, 00007FFFFE1E7E08, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save\\Dir", 0, 00007FFFFE1E7E08, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work (transactional save: work directory, swapped in atomically on Commit)
+[dm] fs mount rom: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save (read-only)
+[dm] fs create Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work/.dm-case-2 failed errno=28
+[dm] fs mkdir name Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work/.dm-case-2 failed errno=28
+[dm] fs rename name Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work/.dm-case-2 failed errno=28
+[dm] fs create Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work/.dm-case-2 failed errno=22
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work", 0, 00007FFFFE1EE208, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work\\Dir", 0, 00007FFFFE1E7CC8, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work\\Trail", 0, 00007FFFFE1E7CC8, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work\\\00d1and\00fa", 0, 00007FFFFE1E7CC8, 0): stub!
+[dm] save commit #2: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save (9 save writes so far) (clone + swap 35000 us, since this transaction's first write 180000 us)
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save", 0, 00007FFFFE1EE348, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save\\Dir", 0, 00007FFFFE1E7E08, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save\\Trail", 0, 00007FFFFE1E7E08, 0): stub!
+068c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save\\\00d1and\00fa", 0, 00007FFFFE1E7E08, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/case.lq74c5/save.work (transactional save: work directory, swapped in atomically on Commit)
+✓ mount the existing save
+✓ the existing name with its case is readable
+✓ wrong case OpenFile → PathNotFound
+✓ wrong case GetEntryType → PathNotFound
+✓ wrong case DeleteFile → PathNotFound
+✓ deleting by the wrong name leaves the original file alone
+✓ Legacy and legacy can coexist
+✓ write legacy
+✓ the two names read back separate content old/lower
+✓ creating the exact same name again → PathExists
+✓ directory listing keeps Legacy/legacy
+✓ create Dir
+✓ creation through an intermediate directory with the wrong case is refused
+✓ Dir and dir can coexist
+✓ Dir/X has its own content upper
+✓ dir/X has its own content lower
+✓ reads do not mix up intermediate directories by case
+✓ wrong case OpenDirectory → PathNotFound
+✓ wrong case recursive delete → PathNotFound
+✓ directory listing keeps Dir/dir
+✓ rename onto an existing exact name → PathExists
+✓ rename from a wrong source name → PathNotFound
+✓ a rename that only changes case succeeds
+✓ the rename does not overwrite the other guest file
+✓ the old guest name is gone
+✓ commit both case variants of the files and directories
+✓ remount the committed save
+✓ commit + remount keeps the separate names/content
+✓ commit + remount keeps the separate directories
+✓ after commit + remount the listing misses no mapped name
+✓ deleting a mapped file leaves the other name alone
+✓ deleting a mapped directory leaves the other directory alone
+✓ a file of the same name can be created again after deletion
+✓ a mapped file renamed to an ordinary name is readable
+✓ rename updates the listing, the old name is gone
+✓ a read-only mount reads mapped names
+✓ a read-only mount also looks up by exact case
+✓ a trailing slash on create directory does not become an empty name
+✓ a real guest name with the alias prefix can be created
+✓ a physical alias does not pose as a real guest name
+✓ a real guest name with the alias prefix is listed under its own name
+✓ creating an ordinary name twice is still refused
+✓ disk full on alias metadata: create file returns failure
+✓ a failed create leaves no file or guest name behind
+✓ alias directory metadata fails: the new directory is removed
+✓ rename metadata failure returns failure
+✓ a failed rename fully restores the original name and content
+✓ a failed size set on an alias file leaves no physical name without metadata
+✓ non-ASCII case variants coexist too
+✓ non-ASCII names have separate content
+✓ concurrent creates of both case variants each publish separately
+✓ a file in a non-ASCII directory is written and read back
+✓ the non-ASCII directory is listed under its exact UTF-8 name, with its file
+✓ the platform layer finds the non-ASCII directory and its file under the same names
+✓ a name outside code page 1252 is created, listed and read back exactly
+✓ the platform layer finds the name outside code page 1252 under the same name
+✓ commit the non-ASCII names
+✓ remount after committing the non-ASCII names
+✓ commit + remount keeps the non-ASCII directory, its file and the name outside code page 1252
+== case: 59 checks, 0 failed ==
+
+exit: 0 (1 s)

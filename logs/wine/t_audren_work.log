@@ -1,0 +1,29 @@
+date: 2026-11-20T05:36:42Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_audren_work.exe
+
+[dm] audren: work buffer guest 0x61d000, local CPU/manual renderer 0x760000
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x61d000
+[dm] audren: host backs local renderer work buffer 00007FFFFEF01000+0x760000
+[dm] audren: OpenAudioRenderer rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x61d000
+[dm] audren: host backs local renderer work buffer 00007FFFFEF01000+0x760000
+[dm] audren: OpenAudioRenderer rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x61d000
+[dm] audren: host backs local renderer work buffer 00007FFFFEF01000+0x760000
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x61d000
+[dm] audren: host backs local renderer work buffer 00007FFFFEF01000+0x760000
+[dm] [RED] audren: SDK OpenAudioRenderer failed 0x2a2
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x61d000
+[dm] [RED] audren: cannot allocate local renderer work buffer 0x760000
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 0000000000000000+0x1000
+[dm] [RED] audren: SDK OpenAudioRenderer failed 0x2a2
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791001+0x1000
+[dm] [RED] audren: SDK OpenAudioRenderer failed 0x2a2
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0xfff
+[dm] [RED] audren: SDK OpenAudioRenderer failed 0x2a2
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x61c000
+[dm] [RED] audren: work buffer 0x61c000 is smaller than the service requirement 0x61d000
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 0 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x760000
+[dm] audren: OpenAudioRenderer (no event) rate 48000 samples per frame 240 mix buffers 132 submixes 19 voices 138 sinks 1 effects 16 splitters 85 (original device 1 mode 0 → CPU / manual) work buffer 00007FFFFE791000+0x760000
+audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed
+
+exit: 0 (0 s)

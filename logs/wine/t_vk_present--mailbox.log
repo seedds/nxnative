@@ -1,0 +1,37 @@
+date: 2026-11-20T05:38:35Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_present.exe --mailbox
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+loader: VK_EXT_headless_surface absent
+note: the loader has no VK_EXT_headless_surface: the window presenter's swapchain parts are not run, only the headless presenter
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache on disk off (DM_VK_PSO_CACHE=off)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library C:\users\ubuntu\AppData\Roaming/dm-work/build/cache/metal_shader_cache/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe), validation off; present wait 0, display timing 0
+D12 rule, surface 2..8 with MAILBOX (as NVIDIA's Windows driver reports, not measured here): 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: 3F 3F 3F 4F 8F | 2F 2F 3M 3M ok
+D12 rule, surface 3..any with MAILBOX (Mesa's X11 surfaces): 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: 3F 3F 3F 4F 8F | 3M 3F 3M 3M ok
+D12 rule, surface 3..any, FIFO only: 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: 3F 3F 3F 4F 8F | 3F 3F 3F 3F ok
+D12 rule, surface 2..3, FIFO only (a tight maximum): 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: 3F 3F 3F 3F 3F | 2F 2F 2F 3F ok
+D12 rule, surface 4..any with MAILBOX (lavapipe's headless surface, read below): 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: 4F 4F 4F 4F 8F | 4M 4F 4M 4M ok
+D12 rule, surface 1..any with MAILBOX (a surface that allows one): 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: 3F 3F 3F 4F 8F | 2F 2F 3M 3M ok
+the device was made without a swapchain (no window, or DM_VK_HEADLESS=1)                                                 ok
+the frame: an R8G8B8A8_SRGB image of a known picture on the backend's device                                             ok
+the headless presenter: the crop's region, every byte as stored                                                          ok
+DM_CTL shot: the call returns before its frame, nothing written yet                                                      ok
+[dm] [hostvk] DM_CTL shot: frame 2 (240x135, VkFormat 43) -> t_vk_present.shot.png
+DM_CTL shot: the next frame's present writes it before it returns, and not the shot of the frame after                   ok
+[dm] [hostvk] DM_CTL shot: frame 3 (240x135, VkFormat 43) -> t_vk_present.shot.png.2
+DM_CTL shot: a shot of the second frame from the call is written by that frame's present                                 ok
+DM_CTL shot without a window: the next frame as a PNG, the crop's region, its RGB as stored                              ok
+no window and no vsync source: be_has_window 0, be_vsync_active 0, be_vsync_wait returns 0 at once                       ok
+note: not run here: the swapchain, the scaling, the letterbox, the flip in the window, the vsync source (no VK_EXT_headless_surface)
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 1 blocks 64.0 MiB with 0.1 MiB in use: waste 63.9 MiB (100 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 3 made, 3 given back; live allocations peak 2 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_present --mailbox: 14 checks, 0 failed ==
+
+exit: 0 (0 s)

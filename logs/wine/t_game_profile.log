@@ -1,0 +1,57 @@
+date: 2026-11-20T05:40:36Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_game_profile.exe
+
+ok    dm_game starts as the default's row, 010015100B514000 (Super Mario Bros. Wonder)
+ok    every profile of dm/games: 89 of 89 files read, 89 equal to their table row field by field (game.py runtime --all, game.py table)
+ok    the default's file as written: read
+ok    an unknown key: refused: unknown key 'bogus_key' (line 39)
+ok    a missing key: refused: missing key 'mem_reserve' (the file must give every constant: game.py runtime writes them all)
+ok    two missing keys: refused: missing keys 'mem_reserve', 'opmode' (the file must give every constant: game.py runtime writes them all)
+ok    a key given twice: refused: key 'name' given twice (lines 4 and 39)
+ok    a row without a tab: refused: line 39 has no tab: the rows are key<TAB>value
+ok    a malformed number: refused: key 'mem_reserve' (line 8): malformed value: a number: 0x<hex> or decimal digits, below 2^64 expected
+ok    a number with a sign: refused: key 'app_pool' (line 11): malformed value: a number: 0x<hex> or decimal digits, below 2^64 expected
+ok    a number beyond 64 bits: refused: key 'mem_alias' (line 9): malformed value: a number: 0x<hex> or decimal digits, below 2^64 expected
+ok    an empty number: refused: key 'mem_stack' (line 10): malformed value: a number: 0x<hex> or decimal digits, below 2^64 expected
+ok    a decimal number: read
+ok    a flag of 2: refused: key 'mem_map_limit' (line 16): malformed value: 0 or 1 expected
+ok    fps_target 45: refused: key 'fps_target' (line 22): malformed value: 0, 30 or 60 expected
+ok    pad_layout 3: refused: key 'pad_layout' (line 27): malformed value: 0, 1 or 2 (simple, full, touch) expected
+ok    shared_font_ttf 2: refused: key 'shared_font_ttf' (line 26): malformed value: 0, 1 or - (not set) expected
+ok    shared_font_ttf 1: read
+ok    nvn_api_major set and nvn_api_minor not: refused: key 'nvn_api_minor': nvn_api_major and nvn_api_minor are both set or both -
+ok    nvn_api 53.313: read
+ok    no module: refused: key 'modules' (line 6): malformed value: one module name or more, separated by spaces expected
+ok    17 modules: refused: key 'modules' (line 6): malformed value: at most 16 module names (game.py MAX_MODULES) expected
+ok    16 modules: read
+ok    33 build rows: refused: key 'display_versions' (line 18): malformed value: at most 32 <main build ID>=<display version> pairs (game.py MAX_VERSIONS) expected
+ok    a build row without its display version: refused: key 'display_versions' (line 18): malformed value: <main build ID>=<display version> pairs, separated by spaces expected
+ok    no build row: read
+ok    an id that is no title ID: refused: key 'id': malformed value 'mario': the base game's title ID, 16 hex digits, expected
+ok    tex_dirty_upload without tex_flush_upload: refused: key 'tex_dirty_upload': 1 needs tex_flush_upload 1
+ok    pad_layout touch in console mode: refused: key 'pad_layout': 2 (touch) needs opmode 0 (handheld: the touch screen reaches the game only then)
+ok    CR line ends: read
+ok    a changed file's values as written: A changed profile, 0x150000000
+ok    dm_game is still the default's after the reader's cases
+[dm] game profile 010015100B514000 (Super Mario Bros. Wonder): the default the program was configured with (cmake -DGAME)
+ok    no option: the default, the arguments untouched
+[dm] game profile 0100000000010000 (Super Mario Odyssey): the table built into the program (--game)
+ok    --game 0100000000010000 (lower case): that row, the options taken off the arguments
+[dm] [RED] --game 0000000000000000: no such game profile among the 89 built into this program (dm/games; game.py list names them); a profile outside dm/games runs from its file: game.py runtime <id> <file>, then --profile <file>
+ok    --game of an unknown title ID: refused
+[dm] game profile 010015100B514000 (Selected from a file): the file Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/good.tsv (--profile)
+ok    --profile <file>: the file's profile (Selected from a file)
+[dm] game profile 010015100B514000 (Selected from a file): the file Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/good.tsv (DM_GAME_PROFILE)
+ok    DM_GAME_PROFILE=<file>: the file's profile
+[dm] [RED] --game 0100000000010000 and the profile file Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/good.tsv (DM_GAME_PROFILE) both name the game profile: give one
+ok    DM_GAME_PROFILE and --game together: refused
+[dm] [RED] --profile needs a value: --profile <file> (game.py runtime writes it) or --game <title ID>
+ok    --profile without its file: refused
+[dm] [RED] --game given twice: 0100000000010000 and 0100000000010000
+ok    --game given twice: refused
+[dm] [RED] game profile file Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/bad.tsv (--profile): unknown key 'bogus_key' (line 39)
+ok    --profile of a file with an unknown key: refused
+t_game_profile: 41 checks, 0 failed
+
+exit: 0 (1 s)

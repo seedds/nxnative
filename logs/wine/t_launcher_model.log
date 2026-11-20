@@ -1,0 +1,8 @@
+date: 2026-11-20T05:40:37Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_launcher_model.exe
+
+nxlauncher: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp\t_launcher_model\games\0100AAAA00000000-work\profile\main.weights.tsv: ignored: the profile folder holds the host's <module>.tsv, <module>.misses.tsv, <module>.targets.tsv and <module>.bind.tsv, and this is none of them
+t_launcher_model: 228 checks, 0 failed
+
+exit: 0 (4 s)

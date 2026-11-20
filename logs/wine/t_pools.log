@@ -1,0 +1,45 @@
+date: 2026-11-20T05:37:01Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_pools.exe
+
+an empty table: no pool, nothing cached                                          ✓
+the generation starts at 1                                                       ✓
+added: one pool, the generation bumped                                           ✓
+a lookup inside it: its record                                                   ✓
+the use hook saw it once: flags and key as given, the mark clear                 ✓
+the GPU address of an address: gpu + (addr - base)                               ✓
+a second lookup: the hook again, the mark it set kept (the record is the table's) ✓
+a lookup ending at the pool's end: found                                         ✓
+one byte past the end: not found                                                 ✓
+starting at the end, or one byte before the start: not found                     ✓
+a zero-length lookup at the end address: found (as today)                        ✓
+after a lookup the thread's cache holds the pool                                 ✓
+another page of it: from the recent list                                         ✓
+an address outside: not cached                                                   ✓
+a cache hit does not call the use hook                                           ✓
+another pool: the generation bumped, the caches no longer used                   ✓
+a pool whose base is below its start: its start's offset is 0x123                ✓
+its page below its start is not the pool's                                       ✓
+adjacent pools: each found alone                                                 ✓
+a range across both: in no pool                                                  ✓
+204 pools                                                                        ✓
+each of the 200 found, from its last to its first                                ✓
+a gap between two of them: in no pool                                            ✓
+the first pools still found after the table grew                                 ✓
+a pool inside another, fresh index: the inner one (the last start at or below)   ✓
+past the inner pool: the outer one, through the full scan                        ✓
+the inner range again: the outer one, the last hit, holds it                     ✓
+deleted: the hook saw its handle and mark, one pool less, the generation bumped  ✓
+after deletion: in no pool, not cached                                           ✓
+its neighbour still found                                                        ✓
+deleting an unknown key: nothing                                                 ✓
+the first pool deleted (the last takes its place): its flags to the hook         ✓
+every other pool still found                                                     ✓
+the deleted first pool: in no pool                                               ✓
+a new pool at a deleted one's address: the new handle, flags, the mark clear again ✓
+this thread's cache holds the pool                                               ✓
+another thread's cache starts empty, and fills from its own lookup               ✓
+this thread's cache is unchanged by the other's                                  ✓
+== t_pools: 38 checks, 0 failed ==
+
+exit: 0 (0 s)

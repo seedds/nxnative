@@ -1,0 +1,89 @@
+date: 2026-11-20T05:37:01Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_state.exe
+
+[dm] [nvn-mtl] combined program taken again after a state restore: its ring slot had been reused (1 times so far)
+[dm] [nvn-mtl] combined program taken again after a state restore: its ring slot had been reused (2 times so far)
+reset: pipeline and depth-stencil dirty                                        ✓
+reset: blend target i, ONE / ZERO, ADD                                         ✓
+reset: colour COPY / ALWAYS, all channels written                              ✓
+reset: no culling, CCW front, filled                                           ✓
+reset: depth write LESS, stencil off ALWAYS / KEEP                             ✓
+reset: stencil masks 0xff, depth range 0..1, the rest zero                     ✓
+reset leaves R as it is                                                        ✓
+not a state record: 0 (draw, clear, end)                                       ✓
+scissor: into R, nothing dirty                                                 ✓
+texture pool: its base, every stage's arguments                                ✓
+texture pool again: nothing dirty                                              ✓
+sampler pool: its own base                                                     ✓
+another texture pool: its base                                                 ✓
+graphics program on vertex | fragment: S.prog, pipeline                        ✓
+the same program again: nothing dirty                                          ✓
+compute bind: S.cprog, arguments only                                          ✓
+compute bind keeps the graphics program (Hyrule Warriors)                      ✓
+graphics bind keeps the compute program                                        ✓
+compute unbound by a null compute bind                                         ✓
+vertex A + fragment B: a combined program                                      ✓
+combined: the backend made it from the bound stages                            ✓
+the same combination again: the same object, not made again                    ✓
+vertex | fragment of one program again: that program                           ✓
+null fragment bind: a vertex-only combined program (Metroid Dread)             ✓
+null vertex bind: no program                                                   ✓
+A + B again: the combination's ring slot                                       ✓
+resolve with S.prog current: nothing                                           ✓
+resolve after a stale S.prog: the combination again, pipeline                  ✓
+ring full: A + B still cached                                                  ✓
+65th combination reuses slot 0 and drops its object                            ✓
+restore under a reused slot: A + B made again elsewhere (AI: THE SOMNIUM FILES) ✓
+blend state: its target's slot, pipeline                                       ✓
+the same blend state again: nothing dirty                                      ✓
+depth-stencil state: depth-stencil dirty only                                  ✓
+colour state: pipeline                                                         ✓
+channel mask state: pipeline                                                   ✓
+polygon state: pipeline                                                        ✓
+multisample state: pipeline                                                    ✓
+stencil value mask on both faces: depth-stencil dirty                          ✓
+stencil write mask on the back face                                            ✓
+stencil reference: nothing dirty (encoder state)                               ✓
+polygon offset                                                                 ✓
+viewports 1 and 2: x y w h of each                                             ✓
+depth range and depth clamp                                                    ✓
+viewport swizzle and blend colour                                              ✓
+copy row and image strides                                                     ✓
+primitive restart; rasterizer discard: pipeline                                ✓
+transform feedback buffer 2; index 4 ignored                                   ✓
+transform feedback begin / pause / resume                                      ✓
+vertex attributes: pipeline                                                    ✓
+the same attributes again: nothing dirty                                       ✓
+vertex streams: pipeline                                                       ✓
+vertex buffers (full and compact records): nothing dirty                       ✓
+uniform buffer stage 1: stage 1's arguments only                               ✓
+the same uniform buffer again: nothing dirty                                   ✓
+compact uniform record stage 4: as a full one                                  ✓
+uniform buffer of stage 6: ignored                                             ✓
+storage buffer stage 5: stage 5's arguments                                    ✓
+textures stage 0 slots 2-3: stage 0's arguments, the bind hook first           ✓
+single texture record: IDs plus the pools' bases                               ✓
+deferred textures: the handles the hook read again                             ✓
+texture record with count 33: reported, skipped                                ✓
+samplers stage 2 slots 126-127                                                 ✓
+samplers past slot 127: ignored                                                ✓
+images stage 3 slots 30-31                                                     ✓
+images past slot 31: reported, skipped                                         ✓
+update inside stage 1's uniform block: stage 1 only                            ✓
+update over stage 4's block: stage 4 only                                      ✓
+update just past stage 1's block: none                                         ✓
+update over both blocks: stages 1 and 4                                        ✓
+storage buffers do not count                                                   ✓
+save, change, restore: S and R as saved                                        ✓
+first queue: every dirty bit, defaults, R cleared                              ✓
+another queue: independent defaults                                            ✓
+the active queue again: nothing                                                ✓
+back to the first queue: its state restored                                    ✓
+forgetting an inactive queue: nothing dirty, state kept                        ✓
+forgetting an unknown queue: nothing                                           ✓
+forgetting the active queue: defaults, every dirty bit                         ✓
+a forgotten queue starts again from the defaults                               ✓
+== t_state: 80 checks, 0 failed ==
+
+exit: 0 (0 s)

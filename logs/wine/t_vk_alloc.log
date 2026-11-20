@@ -1,0 +1,100 @@
+date: 2026-11-20T05:38:12Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_alloc.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 65536 (a test's), nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] DM_VK_MAX_ALLOCATIONS=64: the backend keeps under 64 live allocations instead of the device's 4294967295 (a test switch: a limited driver on this device)
+[dm] [hostvk] pipeline cache cleanup: 0 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_r9m7m6/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_r9m7m6/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+the allocation limit lowered to 64 (the device's maxMemoryAllocationCount 4294967295)                          ✓
+bufferImageGranularity 64 (the allocator's 65536), nonCoherentAtomSize 64; 1 memory types, type 0 block 64 MiB; 1 allocations live after bring-up
+the allocator keeps linear and optimal ranges 64 KiB apart (the test's granularity)                            ✓
+driver: a 1920x1080 RGBA8 render target needs 8294400 bytes aligned to 64, prefers / requires its own allocation 0 / 0; a 64 MiB storage buffer 0 / 0
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_r9m7m6/shader_map.tsv: 300 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_r9m7m6/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [RED] [hostvk] c1_full_vk.tsv is stale or missing (Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_r9m7m6/c1_full_vk.tsv: its header must name this library's chain vk-997e9319871e and inputs test; a full dmsh_build_vk.py run makes it): every c1 gets its own 64 KiB
+300 shaders loaded by key with the limit at 64: 300 with a 64 KiB constant buffer, 0 of them an allocation of its own ✓
+their constant buffers in 1 blocks; 1 allocations live (1 before them); the constants where the reflection put them, zeros after: 300 of 300 ✓
+400 buffers and 200 images made with the limit at 64: 0 refused, 0 with an allocation of their own             ✓
+the live allocations never above the limit (at most 1 of 64)                                                   ✓
+600 resources in 1 blocks                                                                                      ✓
+600 ranges: none overlapping, 0 offsets not a multiple of their alignment                                      ✓
+80000 pairs of a buffer and an optimal image in one block: 0 on a shared 64 KiB page                           ✓
+a host-visible source and destination and an optimal image made, ranges of blocks                              ✓
+written through the range's pointer, copied into an image and back by the GPU: the same bytes                  ✓
+the source's pointer is its block's at offset 26322176 (a range, not offset 0 of its own memory)               ✓
+a flush of bytes 3 to 8 of the range covers [26322176, 26322240) of its memory: multiples of nonCoherentAtomSize 64 around them ✓
+a range given back between two others (memory 00005555666AD3C0 offset 30936384) is the next one of its size: the same bytes ✓
+5 buffers of 8 MiB: the last in a new block (2 blocks, 1 before)                                               ✓
+given back, the new block is empty and kept (2 blocks, 1 empty)                                                ✓
+[dm] [hostvk] pipeline prewarm off (DM_PSO_MANIFEST=off)
+[dm] [hostvk] pipeline prewarm done: 0 lines (0 render pipeline rows, 0 shader rows, 0 compute rows), 0 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.00 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_r9m7m6/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+after 7 submissions it is still there (2 blocks)                                                               ✓
+after 8 it went back to the driver (1 blocks, 1 allocations live, 1 before)                                    ✓
+a buffer of half a block and 4 KiB (33558528 bytes) gets an allocation of its own                              ✓
+an image asked for with HVK_MEM_OWN gets one too                                                               ✓
+both given back: the live allocations as before                                                                ✓
+[dm] [RED] [hostvk] device memory: a buffer's own allocation of 4096 bytes refused: 64 of 64 allocations live (maxMemoryAllocationCount 4294967295, lowered by DM_VK_MAX_ALLOCATIONS): 1 blocks, 63 own allocations, 0 pool imports (0 shared by 0 pools), 0 other
+own allocations up to the limit: 63 made, the next refused for the count (VkResult -10), 64 live of 64         ✓
+given back: the live allocations as before                                                                     ✓
+everything of the test given back: 1 blocks left (18.8 MiB in use: the backend's own)                          ✓
+192 MiB of guest memory committed                                                                              ✓
+[dm] [nvn] window origin upper left (as D3D / Metal)
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+300 pools made (1 allocations live before them, 35 after): 31 own imports, 3 shared by 269 pools               ✓
+the live allocations never above the limit (at most 64 of 64)                                                  ✓
+shared imports: the GPU fills a word in each of the 300 pools through its import: 0 without a buffer, 0 words wrong ✓
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+008c:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+536 KiB between pools 280 and 281 decommitted: their shared import replaced (serial 34, then 35), the first pool's own kept; 269 of 269 pools still shared, 36 allocations live ✓
+after the decommit: the GPU fills a word in each of the 300 pools through its import: 0 without a buffer, 0 words wrong ✓
+every pool finalized: 0 own imports, 0 shared, 0 pools on them; 1 allocations live (1 before the pools)        ✓
+allocator: blocks 1 (64.0 MiB, 18.8 MiB in use, 0 empty), peak 2 blocks 128.0 MiB with 69.3 MiB in use: waste 58.7 MiB (46 %); own allocations 0 (0.0 MiB), peak 63 (32.3 MiB); 979 made, 677 given back; live allocations peak 64 of 64; pool imports 0 own, 0 shared by 0 pools; refused for the count 1
+the statistics: peak 2 blocks, 979 ranges and own allocations made, 677 given back, 1 refused for the count    ✓
+[dm] [hostvk] prediction: 0 walks of the rest of a submission after a draw waited (0 records, 0.00 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.000 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 0 draws walked, 0 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 300 with 64 KiB of their own (19660800 bytes); 230400 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 0 (0.0 MiB, 0.0 MiB in use, 0 empty), peak 2 blocks 128.0 MiB with 69.3 MiB in use: waste 58.7 MiB (46 %); own allocations 0 (0.0 MiB), peak 63 (32.3 MiB); 979 made, 979 given back; live allocations peak 64 of 64; pool imports 0 own, 0 shared by 0 pools; refused for the count 1
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_alloc: 32 checks, 0 failed ==
+
+exit: 0 (1 s)

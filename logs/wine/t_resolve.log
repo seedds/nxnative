@@ -1,0 +1,84 @@
+date: 2026-11-20T05:37:01Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_resolve.exe
+
+combined slot 0: its texture                                                     ✓
+combined slot 31: its texture (images are not consulted below 32)                ✓
+combined slot 32 with image 0 bound: the image                                   ✓
+combined slot 33, image 1 unbound: the texture                                   ✓
+combined slot 39: image 7, the last shared slot                                  ✓
+combined slot 40: past the 8 shared slots, the texture (not image 8)             ✓
+combined slot 5, nothing bound: 0                                                ✓
+separate texture 0 (slot 128) and 127 (slot 255)                                 ✓
+slots 256 and 1000: past the table, 0                                            ✓
+c2 0x20: combined slot 0                                                         ✓
+c2 0x118: combined slot 31                                                       ✓
+c2 0x120: slot 32, the image table's first word: image 0                         ✓
+c2 0x128: slot 33, image unbound: the texture                                    ✓
+c2 0x160: slot 40, the last combined slot                                        ✓
+c2 0x168 and 0x560: separate textures 0 and 127                                  ✓
+c2 0x568 and 0x570: the sampler table gives no handle                            ✓
+c2 0x24 and 0x16c: not on an 8-byte word, 0                                      ✓
+c2 below the tables (0, 0x18): 0                                                 ✓
+c2 of another stage, nothing bound: 0                                            ✓
+handle 0: no texture, no sampler                                                 ✓
+texture 5, sampler 7 with bases 100 / 200: 105, 207                              ✓
+a sampler-only handle: no texture                                                ✓
+after binding a texture pool (base 1000): texture 5 is 1005                      ✓
+deferred: the handles read again from src                                        ✓
+not deferred: the recorded handles stay                                          ✓
+deferred without a source: the recorded handles stay                             ✓
+deferred with count 0 or 33: nothing read                                        ✓
+deferred with count 32: all 32 read                                              ✓
+a deferred texture bind record: the bound handles are src's, the record updated  ✓
+the same record replayed after the game rewrote src: the new handle              ✓
+stage 6, slot 16, stage -1: 0, no hook asked                                     ✓
+an unbound slot: 0, no hook asked                                                ✓
+a read past the binding's size (62 + 4 > 64): 0, no hook asked                   ✓
+memory: the word at +8, the backend's copy asked first at the same address       ✓
+an 8-byte read (a storage buffer address, SBUFU)                                 ✓
+the last word of the binding (+60)                                               ✓
+the backend's copy answers: its bytes, memory not read                           ✓
+an inline update queued over the read: its bytes, memory not read                ✓
+its second word                                                                  ✓
+a read the update covers in part: reported (kind 1), memory read                 ✓
+a read beside the update: memory, nothing reported                               ✓
+a newer update over the first word: the newer bytes                              ✓
+the second word: the older update, the newest over it                            ✓
+a buffer copy queued after the updates: reported (kind 2), memory read           ✓
+a fill queued over the read: reported (kind 3)                                   ✓
+the next submission: memory again, nothing reported                              ✓
+an address in no pool: 0                                                         ✓
+c0 vertex: filled                                                                ✓
+c0 vertex: storage buffer 0 at 0x110 (address, size)                             ✓
+c0 vertex: storage buffer 15 at 0x200, its size cut to 32 bits                   ✓
+c0 vertex: point size 2047 at 0x610, base instance at 0x644                      ✓
+c0 vertex: every other byte 0                                                    ✓
+c0 pixel: the table at 0x510 (slot 2 at 0x530)                                   ✓
+c0 geometry: the table at 0x410 (slot 1 at 0x420)                                ✓
+c0 compute: the table at 0x310 (slot 3 at 0x340)                                 ✓
+c0 compute: the dispatch size at 0x200                                           ✓
+c0 compute: uniform buffer 7 at 0x280 (Link's Awakening's light parameters)      ✓
+c0 compute: no point size, no base instance, the rest 0                          ✓
+c0 hull: base never measured (0), no table, point size and base instance still written ✓
+c0 domain: base never measured (0)                                               ✓
+c2: filled                                                                       ✓
+c2: images 0 and 7 at 0x120 and 0x158, image 8 not in the table                  ✓
+c2: combined slots 0, 2 and 31 at 0x20 + 8 r                                     ✓
+c2: only a handle's low 32 bits (slot 1), the word's upper half 0                ✓
+c2: slot 32 with image 0 bound: the image's word                                 ✓
+c2: slot 33, image 1 unbound: the texture; slot 34 unbound: 0                    ✓
+c2: slot 40 at 0x160                                                             ✓
+c2: separate textures 0 and 127 at 0x168 and 0x560                               ✓
+c2: samplers 0 and 127 at 0x568 and 0x960                                        ✓
+c2: every other byte 0                                                           ✓
+c2: every handle word is what nvn_c2_handle gives for its byte                   ✓
+c2 dynamic: slot 0 is index 0 (its sampler bits give 0 << 20)                    ✓
+c2 dynamic: slot 31 with a sampler: 31 | 31 << 20; slot 2 without: 2             ✓
+c2 dynamic: slot 1's high handle bits count as a sampler                         ✓
+c2 dynamic: the image table keeps the handles; slot 33: 33 | 33 << 20            ✓
+c2 dynamic: separate textures 0 and 127 by index, an unbound one 0               ✓
+c2 dynamic: sampler 127 is 127 << 20, sampler 0 is 0, an unbound one 0           ✓
+== t_resolve: 77 checks, 0 failed ==
+
+exit: 0 (0 s)

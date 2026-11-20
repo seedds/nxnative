@@ -1,0 +1,81 @@
+date: 2026-11-20T05:36:44Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_fs_commit_list.exe
+
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFE1EDCC8, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work (transactional save: work directory, swapped in atomically on Commit)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB58, 0): stub!
+[dm] save commit #1: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (8 save writes so far) (clone + swap 7000 us, since this transaction's first write 21000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFE1EDCC8, 0): stub!
+[dm] fs mount save: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work (transactional save: work directory, swapped in atomically on Commit)
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFE1EDB58, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB58, 0): stub!
+[dm] save commit #2: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (10 save writes so far) (clone + swap 9000 us, since this transaction's first write 9000 us)
+[dm] fs mount alias: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work (transactional save: work directory, swapped in atomically on Commit)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB58, 0): stub!
+[dm] save commit #3: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (12 save writes so far) (clone + swap 6000 us, since this transaction's first write 10000 us)
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #4: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (14 save writes so far) (clone + swap 6000 us, since this transaction's first write 6000 us)
+[dm] fs mount rom: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws (read-only)
+[dm] fs mount cache: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/temp_cache0
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB58, 0): stub!
+[dm] save commit #5: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (16 save writes so far) (clone + swap 7000 us, since this transaction's first write 13000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other", 0, 00007FFFFE1EDCC8, 0): stub!
+[dm] fs mount other: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work (transactional save: work directory, swapped in atomically on Commit)
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #6: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other (18 save writes so far) (clone + swap 7000 us, since this transaction's first write 7000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #7: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (20 save writes so far) (clone + swap 8000 us, since this transaction's first write 8000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+[dm] DM_TEST_FS_FAILAT: guestname fails with ENOSPC (#1)
+[dm] DM_TEST_FS_FAILAT: renameback fails with ENOSPC (#1)
+[dm] [RED] fs rename: writing the name metadata failed and so did the rollback errno=28: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work/rename-target stays at the new path, the affected save commit(s) will be refused
+[dm] fs rename name Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work/rename-target failed errno=28
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #8: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (20 save writes so far) (clone + swap 6000 us, since this transaction's first write 0 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+[dm] [RED] Commit mount list spans independent host saves; refused without a partial commit
+[dm] fs mount other-alias: → Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work (transactional save: work directory, swapped in atomically on Commit)
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+[dm] fs ftruncate fd failed errno=22
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #9: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (22 save writes so far) (clone + swap 9000 us, since this transaction's first write 10000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #10: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other (23 save writes so far) (clone + swap 6000 us, since this transaction's first write 6000 us)
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+[dm] DM_TEST_FS_FAILAT: reclone fails with ENOSPC (#1)
+[dm] [RED] save transaction: recloning the work directory failed errno=28 -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory could not be recloned (see the previous line)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #11: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other (25 save writes so far) (clone + swap 6000 us, since this transaction's first write 6000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #12: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save (26 save writes so far) (clone + swap 8000 us, since this transaction's first write 8000 us)
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #13: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other (28 save writes so far) (clone + swap 8000 us, since this transaction's first write 8000 us)
+[dm] fs pwrite (wrote 0 bytes) fd failed errno=28
+067c:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFF1BF368, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version; [RED] save files are still open
+0650:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work", 0, 00007FFFFE1EDB88, 0): stub!
+[dm] save commit #14: Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other.work swapped atomically into Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/other (29 save writes so far) (clone + swap 7000 us, since this transaction's first write 7000 us)
+[dm] fs ftruncate fd failed errno=28
+0684:fixme:file:FindFirstStreamW (L"Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/list-commit.vg40ws/save", 0, 00007FFFFEFBF398, 0): stub!
+[dm] [RED] save commit refused: a save write failed in this transaction errno=28 (0-byte files in the work directory: none); the committed version is unchanged, the work directory was recloned from the committed version; [RED] save files are still open
+SKIP permission failure injection when running as root
+list Commit: 95 checks, 0 failed
+
+exit: 0 (1 s)

@@ -1,0 +1,46 @@
+date: 2026-11-20T05:36:30Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_hid.exe
+
+[dm] hid: controller applet (call 1): the game asks for 1 to 4 players; answered 2, npad 0 selected
+[dm] hid: controller applet (call 2): the game asks for 1 to 1 players; answered 1, npad 0 selected
+[dm] hid supported controller ids 0x101 (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+[dm] hid: player 2's controller feeds player 1: the game supports one player (no npad 1)
+[dm] hid: controller applet (call 3): the game asks for -1 to -1 players; answered 1, npad 0 selected
+[dm] hid supported controller ids 0x10f (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+[dm] hid: player 5's controller is not used: the game supports no npad 4
+[dm] hid: controller applet (call 4): the game asks for -1 to -1 players; answered 4, npad 0 selected
+[dm] hid supported controller ids 0x103 (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+[dm] hid: the game disconnected npad 0 (DisconnectNpad): no controller there until a button is pressed on it or the controller applet connects it
+[dm] hid: npad 0 has its controller again (a button pressed on it)
+[dm] hid: the game disconnected npad 0 (DisconnectNpad): no controller there until a button is pressed on it or the controller applet connects it
+[dm] hid: npad 0 has its controller again (a button pressed on it)
+[dm] hid: the game disconnected npad 0 (DisconnectNpad): no controller there until a button is pressed on it or the controller applet connects it
+[dm] hid: the game disconnected npad 1 (DisconnectNpad): no controller there until a button is pressed on it or the controller applet connects it
+[dm] hid: npad 0 has its controller again (the controller applet)
+[dm] hid: npad 1 has its controller again (the controller applet)
+[dm] hid: the game disconnected npad 1 (DisconnectNpad): no controller there until a button is pressed on it or the controller applet connects it
+[dm] hid: npad 1 has its controller again (the controller applet)
+[dm] DM_KEYS: 0.00 press 0x8000000000000001 (hold 0.15 s)
+[dm] DM_KEYS: 0.00 press 0x8 (hold 0.00 s)
+[dm] DM_KEYS: frame 700.00 press 0x1 (hold 4 frames from frame 700)
+[dm] DM_KEYS: frame 700.00 press 0x1 (hold 0.15 s)
+[dm] rumble: game asked for vibration handles of npad 0 style 0x1: none (connected style 0x1, rumble off)
+[dm] rumble: game asked for vibration handles of npad 0 style 0x1: 2, first 0x3
+[dm] rumble: 1 values sent, 1 with no output, peak amplitude 0.50, handle 0x3
+[dm] rumble: game asked for vibration handles of npad 0 style 0x1: 2, first 0x3
+[dm] rumble: game asked for vibration handles of npad 0 style 0x2: none (connected style 0x1, rumble on)
+[dm] rumble: game asked for vibration handles of npad 2 style 0x1: none (connected style 0, rumble on)
+[dm] rumble: game asked for vibration handles of npad 0 style 0x1: 1, first 0x3
+[dm] hid supported controller ids 0x101 (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+[dm] hid: player 2's controller feeds player 1: the game supports one player (no npad 1)
+[dm] rumble: game asked for vibration handles of npad 0 style 0x1: 2, first 0x3
+[dm] rumble: game asked for vibration handles of npad 32 style 0x2: 2, first 0x2004
+[dm] rumble: game asked for vibration handles of npad 32 style 0x2: none (connected style 0x2, rumble off)
+[dm] hid supported controller ids 0x1 (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+[dm] hid: player 2's controller feeds player 1: the game supports one player (no npad 1)
+[dm] hid supported controller ids 0x101 (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+[dm] hid supported controller ids 0x103 (bit n: No n+1, bit 8 Handheld, bit 9 Other)
+hid players: 147 checks, 0 failed
+
+exit: 0 (1 s)

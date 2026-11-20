@@ -1,0 +1,8 @@
+date: 2026-11-20T05:37:58Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_astc.exe
+
+L 5600 random blocks (4550 normal, 350 void-extent, 350 illegal, 350 with an HDR partition), 333200 texels: per-texel decode = block decode
+== t_astc: 107 checks, 0 failed ==
+
+exit: 0 (0 s)

@@ -1,0 +1,85 @@
+date: 2026-11-20T05:38:05Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_depth24.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+[dm] [hostvk] device memory: maxMemoryAllocationCount 4294967295; blocks per memory type (D device-local, V host-visible, C coherent, H cached): 0 DVCH (heap 0, 11523 MiB) 64 MiB; an allocation of its own above half a block or where the driver prefers one; bufferImageGranularity 64, nonCoherentAtomSize 64; an empty block goes back after 8 submissions
+[dm] [hostvk] pipeline cache cleanup: 0 entries, removed 0 (0.0 MiB): 0 of another driver, chain or backend version, 0 unused for 90 days
+[dm] [hostvk] pipeline cache Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_44x0dr/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin: none yet (a first start on this driver and chain)
+[dm] [hostvk] pipelines: level A, libraries with a fast link and an optimized relink in the background; one pipeline draws every topology class
+[dm] [hostvk] NVN backend on Vulkan: library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_44x0dr/vk-997e9319871e, validation on (DM_VK_VALIDATION)
+device 'llvmpipe (LLVM 20.1.2, 256 bits)' (llvmpipe Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)), level A, validation off
+[dm] [nvn] window origin lower left (GL)
+0778:fixme:vulkan:win32u_vkCreateBuffer Unsupported handle types 0x80
+device format D24_UNORM_S8_UINT    depth-stencil attachment yes, sampled yes
+device format X8_D24_UNORM_PACK32  depth-stencil attachment yes, sampled yes
+device format D32_SFLOAT_S8_UINT   depth-stencil attachment yes, sampled yes
+device format D32_SFLOAT           depth-stencil attachment yes, sampled yes
+device format S8_UINT              depth-stencil attachment yes, sampled yes
+device format D16_UNORM_S8_UINT    depth-stencil attachment no, sampled no
+VK_EXT_depth_bias_control: enabled (float representation yes, force unorm yes, exact yes)
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x35 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+[dm] [hostvk] pipeline prewarm off (DM_PSO_MANIFEST=off)
+[dm] [hostvk] pipeline prewarm done: 0 lines (0 render pipeline rows, 0 shader rows, 0 compute rows), 0 built, 0 failed, 0 skipped, 0 built ahead by a prediction, in 0.00 s; shader keys not in the shader map (another game version) 0
+[dm] [hostvk] pipeline cache written (after the prewarm): 32 bytes of driver data, Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_44x0dr/vk_pipeline_cache/10005-0000-06402008-32352e322e382d307562756e7475302e-997e9319871e-v1.bin
+as D24, DEPTH24_STENCIL8: an upload of DEPTH24_STENCIL8 holds its depth and stencil (VkFormat 129)             ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x33 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as D24, DEPTH24 (top byte ignored): an upload of DEPTH24 (top byte ignored) holds its depth and stencil (VkFormat 125) ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x36 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as D24, DEPTH32F_STENCIL8 (eight bytes a texel): an upload of DEPTH32F_STENCIL8 (eight bytes a texel) holds its depth and stencil (VkFormat 130) ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x31 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as D24, STENCIL8: an upload of STENCIL8 holds its depth and stencil (VkFormat 127)                             ✓
+[dm] note: Apple only: NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform
+[dm] [hostvk] shader map Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_44x0dr/shader_map.tsv: 4 shaders; library Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp/t_vk_lib_44x0dr/vk-997e9319871e
+[dm] [hostvk] shader library stamp: game test, inputs test
+[dm] [hostvk] index conversions on the GPU (shaders/index_expand.comp, index_restart.comp; in the submission's prologue, or before the draw's pass for indices the GPU writes earlier in the submission); native: triangle fans yes, 8-bit indices yes, restart on strips and fans at the all-ones index, restart on lists yes (VK_EXT_primitive_topology_list_restart); the CPU converts past 16777216 bytes of indices a draw
+[dm] [hostvk] pipeline workers: 2 background, 1 optimizing (16 hardware threads)
+as D24: depth 0.6 and stencil 0x5a drawn, copied out as the guest packs them (0x5a999999, expected 0x5a999999) ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x35 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as D24: ReadTexels of a drawn DEPTH24_STENCIL8 texture gives the guest's packing                               ✓
+as D24: guest words copied into a DEPTH24_STENCIL8 texture and back out are the same words                     ✓
+as D24: DEPTH32F_STENCIL8 texels copied in and back out keep depth and stencil                                 ✓
+as D24: a texture clear of a 2x2 region changes that region's depth and stencil only                           ✓
+as D24: a stencil-mode view read with an unsigned integer declaration gives the stencil drawn (90)             ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x35 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+[dm] [hostvk] texture format substitute (first case: NVN DEPTH24_STENCIL8 → VkFormat 130 instead of 129: D24_UNORM_S8_UINT where supported (not on AMD), else D32_SFLOAT_S8_UINT; the guest's depth in the low 24 bits and stencil in the top byte (assumed, not checked with real data) split into the two aspects at upload and joined in copies; on the substitute the constant depth bias in 24-bit units through VK_EXT_depth_bias_control (decision D10))
+[dm] [hostvk] NVN DEPTH24_STENCIL8 held in VkFormat 130 (decision D10): the constant depth bias in 24-bit units through VK_EXT_depth_bias_control
+as 32-bit float, DEPTH24_STENCIL8: an upload of DEPTH24_STENCIL8 holds its depth and stencil (VkFormat 130)    ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x33 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as 32-bit float, DEPTH24 (top byte ignored): an upload of DEPTH24 (top byte ignored) holds its depth and stencil (VkFormat 126) ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x36 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as 32-bit float, DEPTH32F_STENCIL8 (eight bytes a texel): an upload of DEPTH32F_STENCIL8 (eight bytes a texel) holds its depth and stencil (VkFormat 130) ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x31 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as 32-bit float, STENCIL8: an upload of STENCIL8 holds its depth and stencil (VkFormat 127)                    ✓
+as 32-bit float: depth 0.6 and stencil 0x5a drawn, copied out as the guest packs them (0x5a999999, expected 0x5a999999) ✓
+as 32-bit float: the words copied out equal those of the D24 mode                                              ✓
+[dm] [nvn] packaged texture 4x4x1 levels 1 format 0x35 target 1 layout bytes 0000000000000000 → block height log2=0 (from layout byte 0) size 0x200
+as 32-bit float: ReadTexels of a drawn DEPTH24_STENCIL8 texture gives the guest's packing                      ✓
+as 32-bit float: guest words copied into a DEPTH24_STENCIL8 texture and back out are the same words            ✓
+as 32-bit float: DEPTH32F_STENCIL8 texels copied in and back out keep depth and stencil                        ✓
+as 32-bit float: a texture clear of a 2x2 region changes that region's depth and stencil only                  ✓
+as 32-bit float: a stencil-mode view read with an unsigned integer declaration gives the stencil drawn (90)    ✓
+constant depth bias of 16 units, D24: 17 steps of 2^-24 at depth 0.7, 17 at depth 0.3
+bias on D24: 17 and 17 steps at depths 0.7 and 0.3 (expected 16 and 16, within one)                            ✓
+[dm] [RED] [hostvk] texture ser=5369961296: NVN format 0x4003470e (?) has no Vulkan format this device supports: not an NVN format
+[dm] [RED] [hostvk] depth target (ser=5369961296) has no attachment view: not attached
+slope-scaled depth bias, factor 1 at a slope of 2^-14 a pixel, D24: 1024 steps of 2^-24
+slope bias on D24: 1024 steps (expected 1024, within one)                                                      ✓
+constant depth bias of 16 units, 32-bit float, VK_EXT_depth_bias_control's float representation: 16 steps of 2^-24 at depth 0.7, 16 at depth 0.3
+bias on 32-bit float, VK_EXT_depth_bias_control's float representation: 16 and 16 steps at depths 0.7 and 0.3 (expected 16 and 16, within one) ✓
+slope-scaled depth bias, factor 1 at a slope of 2^-14 a pixel, 32-bit float, VK_EXT_depth_bias_control's float representation: 1024 steps of 2^-24
+slope bias on 32-bit float, VK_EXT_depth_bias_control's float representation: 1024 steps (expected 1024, within one) ✓
+[dm] [RED] [hostvk] constant depth bias on NVN depth 24 held in a 32-bit float format without VK_EXT_depth_bias_control's float representation (decision D10): given as it is, which is one 2^-24 unit only where the primitive's largest depth is in [0.5, 1), half that in [0.25, 0.5) and so on (smaller depths: possible shadow acne)
+constant depth bias of 16 units, 32-bit float without depth bias control: 16 steps of 2^-24 at depth 0.7, 8 at depth 0.3
+bias on 32-bit float without depth bias control: 16 and 8 steps at depths 0.7 and 0.3 (expected 16 and 8, within one) ✓
+slope-scaled depth bias, factor 1 at a slope of 2^-14 a pixel, 32-bit float without depth bias control: 1024 steps of 2^-24
+slope bias on 32-bit float without depth bias control: 1024 steps (expected 1024, within one)                  ✓
+[dm] [hostvk] prediction: 5 walks of the rest of a submission after a draw waited (29 records, 0.03 ms on the submit thread of which 0.00 ms loading programs and layouts, the longest 0.012 ms; 0 stopped at the budget, 0 at a call deeper than the return stack), 2 draws walked, 2 keys made; 0 pipelines queued: 0 made ahead by the workers (0 found made already, 0 failed); at their draw 0 ready in time, 0 still being made (the draw waited for the rest), 0 not started (made by the draw), 0 made ahead and not drawn
+[dm] [hostvk] c1 banks: 0 shaders packed in 0 banks (0 bytes), 0 with 64 KiB of their own (0 bytes); 0 bytes of constants; c1_full_vk.tsv not taken
+[dm] [hostvk] device memory at shutdown: blocks 1 (64.0 MiB, 0.0 MiB in use, 1 empty), peak 1 blocks 64.0 MiB with 33.6 MiB in use: waste 30.4 MiB (47 %); own allocations 0 (0.0 MiB), peak 0 (0.0 MiB); 54 made, 54 given back; live allocations peak 3 of 4294967295; pool imports 0 own, 0 shared by 0 pools; refused for the count 0
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked
+== t_vk_depth24: 27 checks, 0 failed ==
+
+exit: 0 (1 s)

@@ -1,0 +1,82 @@
+date: 2026-11-20T05:40:31Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_host_program.exe
+
+t_host_program: Z:\srv\nxnative-games\agent-build\winecheck\win64/nxhost-run.exe
+      usage: nxhost-run <dir> [module...] [-- game arguments...]
+ok    no arguments: the usage, status 2
+ok    --help: the usage, status 0 (status 0)
+ok    -h: the usage, status 0 (status 0)
+0718:fixme:setupapi:CM_Get_Parent 000070BB2BF3F9A4 0x00000000 0x00000000 stub
+0718:fixme:setupapi:CM_Get_Parent 000070BB2BF3F9A4 0x00000001 0x00000000 stub
+0718:fixme:sync:SetWaitableTimerEx (000000000000019C, 000070BB2BF3FB90, 0, 0000000000000000, 0000000000000000, 0000000000000000, 0) semi-stub
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] game profile 010015100B514000 (Super Mario Bros. Wonder): the default the program was configured with (cmake -DGAME)
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (1734 slots), stub page 0x1000008000 (4096 slots)
+[dm] nxhost-run: modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module; x86-64 engine with the JIT fallback (dynarmic) for guest code without a compiled entry
+[dm] main: base 0000001000020000 size 0x11000 (behaviour image 0x10018, bss 0; build aa07aa07aa07aa07aa07aa07aa07aa07; 2 data blocks, 2 cuts, 3 oracle rows, frame step state page; x86-64 engine)
+[dm] main: reloc relative=1 relr=0 abs/glob=1 jump=1
+[dm] force: 0 entries hit, 901 not referenced by this game
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/module/main.aot.dll for main at 0000001000020000: 10 functions, 32 lookup slots, 33 line entries, 145 positions, 13 returns, 2 gate sites, code 0x6fffff201000..0x6fffff204000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] [RED] aot: main's manifest has an observation gate at main+0x210 that its pack does not call (no compiled code holds it: see nxaot build's log): served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code
+[dm] aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not
+[dm] aot: 1 modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module mapped, relocated and their packs loaded in 268.2 ms
+[dm] [RED] sdk: no SDK version string in the sdk module; SDK-dependent behaviour takes the newer SDKs' side
+[dm] stubs=2
+[dm] main: frame step as the game sets it (game profile fps_target)
+[dm] front end: SDL 3.4.14, video driver dummy
+[dm] front end: no Vulkan window (Vulkan support is either not configured in SDL or not available in current SDL video driver (dummy) or platform): a plain window instead (SDL's dummy video driver has no Vulkan)
+[dm] front end: each controller is a player of its own, the keyboard plays with player 1
+[dm] >>> entry main+0 (DM_AOT_RAW=1: the module's own entry, no SDK start)
+[dm] UNIMPL t_aot_mod_combine (x0=0x7 x1=0x3 x2=0)
+[dm] UNIMPL t_aot_mod_missing (x0=0x55 x1=0x3 x2=0)
+[dm] guest AS 0000001000A00000 +0x140000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+[dm] [mem] heap 0.00 GB (heap region 1.62 GB)
+[guest] aot module: done
+[dm] guest code ended: status 0 (the process ended); 3 SVCs, 2 host calls, 1 dispatcher misses, 0 JIT addresses, 1 threads
+ok    DM_WINDOW=1: the synthetic module ran to ExitProcess and the program exited with its status 0 (status 0)
+ok    the start line (nxhost-run: modules from ..., the engine without or with the JIT fallback)
+ok    the module mapped by the loader's game-module path and its pack loaded
+ok    the module's own entry (DM_AOT_RAW=1)
+ok    the module's two imports answered by named stubs (UNIMPL lines)
+ok    the module's OutputDebugString line ([guest], DM_DBG=1)
+ok    the end line: status 0, the process ended
+ok    the SDL3 front end opened on the dummy driver (a window without Vulkan)
+      [dm] guest code ended: status 0 (the process ended); 3 SVCs, 2 host calls, 1 dispatcher misses, 0 JIT addresses, 1 threads
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+[dm] game profile 010015100B514000 (Super Mario Bros. Wonder): the default the program was configured with (cmake -DGAME)
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (1734 slots), stub page 0x1000008000 (4096 slots)
+[dm] nxhost-run: modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module; x86-64 engine with the JIT fallback (dynarmic) for guest code without a compiled entry
+[dm] main: base 0000001000020000 size 0x11000 (behaviour image 0x10018, bss 0; build aa07aa07aa07aa07aa07aa07aa07aa07; 2 data blocks, 2 cuts, 3 oracle rows, frame step state page; x86-64 engine)
+[dm] main: reloc relative=1 relr=0 abs/glob=1 jump=1
+[dm] force: 0 entries hit, 901 not referenced by this game
+[dm] aot: pack Z:/srv/nxnative-games/lead-build/verify/packs/win64/module/main.aot.dll for main at 0000001000020000: 10 functions, 32 lookup slots, 33 line entries, 145 positions, 13 returns, 2 gate sites, code 0x6fffff201000..0x6fffff204000; nxaot llvm 18.1.3 dynarmic a46601580d5512d324104f985b5f0209dc980ddc cc swifttail tier W mode balanced cpu alderlake
+[dm] [RED] aot: main's manifest has an observation gate at main+0x210 that its pack does not call (no compiled code holds it: see nxaot build's log): served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code
+[dm] aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not
+[dm] aot: 1 modules from Z:/srv/nxnative-games/lead-build/verify/packs/win64/module mapped, relocated and their packs loaded in 202.1 ms
+[dm] [RED] sdk: no SDK version string in the sdk module; SDK-dependent behaviour takes the newer SDKs' side
+[dm] stubs=2
+[dm] main: frame step as the game sets it (game profile fps_target)
+[dm] >>> entry main+0 (DM_AOT_RAW=1: the module's own entry, no SDK start)
+[dm] UNIMPL t_aot_mod_combine (x0=0x7 x1=0x3 x2=0)
+[dm] UNIMPL t_aot_mod_missing (x0=0x55 x1=0x3 x2=0)
+[dm] guest AS 0000001000A00000 +0x140000000  heap 00000010D8A00000 alias 0000001010A00000 stack 00000010C8A00000
+[dm] [mem] heap 0.00 GB (heap region 1.62 GB)
+[guest] aot module: done
+[dm] guest code ended: status 0 (the process ended); 3 SVCs, 2 host calls, 1 dispatcher misses, 0 JIT addresses, 1 threads
+ok    no window: the synthetic module ran to ExitProcess and the program exited with its status 0 (status 0)
+ok    the start line (nxhost-run: modules from ..., the engine without or with the JIT fallback)
+ok    the module mapped by the loader's game-module path and its pack loaded
+ok    the module's own entry (DM_AOT_RAW=1)
+ok    the module's two imports answered by named stubs (UNIMPL lines)
+ok    the module's OutputDebugString line ([guest], DM_DBG=1)
+ok    the end line: status 0, the process ended
+      [dm] guest code ended: status 0 (the process ended); 3 SVCs, 2 host calls, 1 dispatcher misses, 0 JIT addresses, 1 threads
+      [dm] FATAL [RED] missing symbol nnMain: no module of main defines it (the game's sdk module missing from the list?); DM_AOT_RAW=1 runs a module without the SDK from its own entry
+ok    without DM_AOT_RAW: the SDK start refuses a module set without nnMain ([RED] line naming the switch), no guest code ran, nonzero status
+      [dm] [RED] aot: Z:\srv\nxnative-games\agent-build\winecheck\win64/t_host_program.refused/main.aot.dll: it was compiled from another image than main: the pack's SHA-256 8a4f158891d6b189a4da394b61afceebd62dfbb4120cc7c9fe912425917c32db, the image's a03e7a0d9103097d48b3850895e720a1cca867dc0cca22b21c5ffbcebfb15b96 (image 0x10018 / 0x10018 bytes, text 0x2000 / 0x2000, bss 0 / 0) (nxaot build Z:\srv\nxnative-games\agent-build\winecheck\win64/t_host_program.refused/main.aot.tsv -o <object> --shared Z:\srv\nxnative-games\agent-build\winecheck\win64/t_host_program.refused/main.aot.dll makes the pack of
+      [dm] [RED] aot: this host refuses the game's pack: pack the game again with this bundle (the launcher's Repack, or scripts/build_ipa_from_nsp.py); nxhost-run exits with status 8 (DM_AOT_REPACK)
+ok    a pack of another image: the reason's [RED] line, the repack line and status 8 (DM_AOT_REPACK), no guest code ran
+t_host_program: 20 checks, 0 failed
+
+exit: 0 (5 s)

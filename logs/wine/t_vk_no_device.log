@@ -1,0 +1,10 @@
+date: 2026-11-20T05:37:33Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && TMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp WINETMPDIR=Z:/srv/nxnative-games/agent-build/winecheck/win64/tmp timeout 120 wine ./t_vk_no_device.exe
+
+[dm] [nvn] null device: 537 names, 427 implemented (413 semantic + 14 empty, 0 of them on the large host stack), the other 110 go to the red-reporting stub
+ok    the game program's path without a device: one [RED] line and exit status 9 (status 9)
+ok    without the request (a test, a headless run): the null forms answer and the program goes on (status 0)
+== t_vk_no_device: 2 checks, 0 failed ==
+
+exit: 0 (1 s)

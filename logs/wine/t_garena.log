@@ -1,0 +1,43 @@
+date: 2026-11-20T05:38:36Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_garena.exe
+
+[dm] aot: arena 0x1000000000..0x5000000000 (256 GiB, below 2^39), host-function page 0x1000001000 (0 slots), stub page 0x1000002000 (4096 slots)
+ok    98 small allocations (1 to 16384 bytes, alignments 16 to 16384): each aligned as asked
+ok    each in the arena below 2^39
+ok    each zero, over its whole usable size
+ok    dm_garena_size: at least the size asked, a class of at most 16 KiB
+ok    dm_garena_size of an address inside a block, or of host memory: 0
+ok    a freed block is the next one of its class, zero again (00000010000C0000)
+ok    dm_garena_malloc: a block in the arena (not zeroed: the Unreal heap's form)
+ok    100000 bytes: whole pages (102400), page-aligned, zero, in the arena
+ok    the map hook was told of its pages (0x10001a0000 + 0x19000)
+ok    alignments 64 KiB and 1 MiB: 00000010001C0000, 0000001000200000
+ok    a freed block of up to 1 MiB is kept for its size: the next one is the same pages, zero again
+ok    a freed block above 1 MiB is decommitted: the unmap hook was told of it before
+ok    dm_garena_realloc from a small block to a large one keeps the data
+ok    dm_garena_realloc to 0 frees
+ok    dm_garena_literal: one arena copy per host string (0000001000020050), found again by its address
+ok    a string already in the arena (and null) is returned as it is
+ok    dm_garena_strdup
+ok    dm_garena_static: made once (a copy of its initial value), the same object after
+ok    dm_gscope_alloc: 16-byte steps, zero, in the arena
+ok    a released mark gives its space back: the next buffer is the same, zero again
+ok    the outer mark released: back to where it began
+ok    DM_GLOCAL: 16 zero words in the arena at 000000100020A000
+ok    DM_GLOCAL's block ended: its space was released (cleanup attribute)
+ok    another host thread has a region of its own (0x100021a000)
+[dm] [RED] aot: a scoped guest buffer of 100000 bytes does not fit in this thread's 64 KiB region (65472 bytes in use): taken from the garena instead, and from now on for every such buffer of this thread (aot.h DM_GSCOPE_SIZE)
+ok    a buffer that does not fit is taken from the garena, zero, in the arena
+ok    exhaustion: one [RED] line for the thread, naming the size
+ok    the overflow buffer went back with the mark (no block starts at 00000010001A0000 any more)
+ok    ranges given back are taken again before fresh space, by dm_guest_alloc and dm_guest_reserve alike
+ok    and read as zero again
+[dm] [RED] aot: arena check: guest call argument 2 at /home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/host/tests/t_garena.c:186 is 0x7ffffe1ffeb4, outside the arena 0x1000000000..0x5000000000: host memory handed to the guest (aot.h, "Host memory the guest sees")
+[dm] [RED] aot: arena check: guest call argument 3 at /home/jb/Documentos/nxnative/.claude/worktrees/agent-ae739f767709fbd15/dm/host/tests/t_garena.c:187 is 0x14001b140, outside the arena 0x1000000000..0x5000000000: host memory handed to the guest (aot.h, "Host memory the guest sees")
+ok    DM_GC_A passes every value on unchanged
+ok    the guard: a [RED] line for the host stack pointer and one for the host array, once per site; none for an arena pointer, an integer or null
+ok    the line names the call site's file and line
+t_garena: 32 checks, 0 failed
+
+exit: 0 (1 s)

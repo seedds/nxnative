@@ -1,0 +1,57 @@
+date: 2026-11-20T05:37:03Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_vk_device.exe
+
+02d4:err:ole:start_rpcss Failed to start RpcSs service
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+hostvk_init picks a device that meets the baseline (rc 0)                                        ✓
+device 0 'llvmpipe (LLVM 20.1.2, 256 bits)' (type 4, vendor 0x10005), Vulkan 1.4.318 used at 1.3, driver 'llvmpipe' 'Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)'
+loader 1.3.275; queue family 0, transfer-only family none
+level A: gpl 1 eds3_blend 1 eds3_raster 1 vertex_input_dynamic 1 cond_render 1 xfb 1 geometry 1 tessellation 1 astc_ldr 0 logic_op 1 unified_memory 1
+max_samples 4 max_point_size 256 max_vertex_attribs 32 timeline 1 buffer_device_address 1
+min_import_alignment 4096 max_buffer_size 4294967295 max_allocations 4294967295 import_type_bits 0x1 import_type 0 host_coherent_import 1
+optional (design 9.1) missing: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+dynamic states of level A missing: none
+memory type 0: heap 0 flags 0xf (host memory can be imported as it)
+instance, device and queue made                                                                  ✓
+the device is used at Vulkan 1.3 or later                                                        ✓
+level is one of A-D (A)                                                                          ✓
+level follows the rules of vk_device.h                                                           ✓
+baseline capabilities set: geometry, tessellation, logic_op, xfb, timeline                       ✓
+min_import_alignment is a power of two                                                           ✓
+max_allocations, max_buffer_size, max_vertex_attribs (>= 16), max_point_size, max_samples set    ✓
+host memory can be imported as some memory type, the preferred one among them                    ✓
+host_coherent_import matches the preferred type's flags                                          ✓
+missing lists agree with the bits                                                                ✓
+no swapchain without a surface                                                                   ✓
+no allocation live after init                                                                    ✓
+destroy releases the handles                                                                     ✓
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked (first device)
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+re-created after destroy                                                                         ✓
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked (re-created)
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+device_index of the first device picks it                                                        ✓
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked (device_index)
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+device_index 4096: rc -4: device_index 4096 is out of range: the loader lists 1 device
+device_index out of range fails with HOSTVK_E_INDEX and a reason                                 ✓
+and leaves no Vulkan object                                                                      ✓
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked (device_index out of range)
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+[dm] [hostvk] device 'llvmpipe (LLVM 20.1.2, 256 bits)' driver 25.2.8 (llvmpipe: Mesa 25.2.8-0ubuntu0.24.04.5 (LLVM 20.1.2)) Vulkan 1.4.318 level A: Vulkan 1.4 (the loader is 1.3.275), VK_KHR_present_id, VK_KHR_present_wait, VK_EXT_conservative_rasterization, VK_EXT_sample_locations, VK_EXT_blend_operation_advanced, VK_KHR_pipeline_binary, textureCompressionASTC_LDR
+want_surface with VK_KHR_surface: init (rc 0), VK_KHR_swapchain enabled                          ✓
+note: VK_LAYER_KHRONOS_validation is not installed: validation not checked (want_surface)
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+want_surface without a Vulkan window: rc -5: a surface was asked for, but the front end has no Vulkan window (front_vk_instance_extensions gave no extension)
+want_surface without a Vulkan window fails cleanly                                               ✓
+[dm] [RED] [hostvk] validation was asked for, but VK_LAYER_KHRONOS_validation is not installed: running without it
+want_surface with an unknown extension: rc -5: the instance extension VK_KHR_no_such_surface is not present
+an unknown front-end extension fails cleanly                                                     ✓
+== t_vk_device: 21 checks, 0 failed ==
+
+exit: 0 (4 s)
+02d4:err:ole:start_rpcss Failed to start RpcSs service

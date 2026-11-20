@@ -1,0 +1,36 @@
+date: 2026-11-20T05:36:34Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_audio_sdl.exe
+
+[dm] audio #0 OpenAudioOut (default) channels 2 real output (call site host)
+[dm] audio: SDL 3.4.14, audio driver dummy
+[dm] audio device buffer: 240 frames at 48000 Hz (requested 240; System audio playback device, 2 channels)
+058c:fixme:sync:SetWaitableTimerEx (0000000000000090, 00007FFFFF1CFE00, 0, 0000000000000000, 0000000000000000, 0000000000000000, 0) semi-stub
+[dm] audio #0 Start (call site host)
+[dm] audio suspended (background / interruption)
+[dm] audio resumed (foreground / interruption ended)
+[dm] audio #0 Stop (call site host)
+[dm] audio #0 Close (call site host)
+[dm] audio #1 OpenAudioOut (default) channels 6 real output (call site host)
+[dm] audio device buffer: 240 frames at 48000 Hz (requested 240; System audio playback device, 2 channels)
+[dm] audio #1 Start (call site host)
+[dm] audio suspended (background / interruption)
+[dm] audio resumed (foreground / interruption ended)
+[dm] audio #1 Stop (call site host)
+[dm] audio #1 Close (call site host)
+[dm] audio #2 OpenAudioOut (default) channels 2 real output (call site host)
+[dm] audio device buffer: 240 frames at 48000 Hz (requested 240; System audio playback device, 2 channels)
+[dm] audio #2 Start (call site host)
+[dm] audio suspended (background / interruption)
+[dm] audio resumed (foreground / interruption ended)
+[dm] audio #2 Stop (call site host)
+[dm] audio #2 Close (call site host)
+[dm] audio #3 OpenAudioOut (default) channels 2 silent sink (call site host)
+[dm] audio #3 Start (call site host)
+[dm] audio #3 Stop (call site host)
+[dm] audio #3 Close (call site host)
+note: thread counting is Linux-only; the leak check did not run here
+threads: -1 at start, -1 after the first output (), -1 after two more
+== audio_sdl: 44 checks, 0 failed ==
+
+exit: 0 (2 s)

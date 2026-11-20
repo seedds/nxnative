@@ -1,0 +1,21 @@
+date: 2026-11-20T05:36:30Z
+commit: 413f5939ef4c810737f4f2032e659e69191f34af
+command: cd Z:/srv/nxnative-games/agent-build/winecheck/win64 && timeout 120 wine ./t_swkbd.exe
+
+[dm] swkbd: title '起名' initial 'Hero' limit 16 min 0 → OK 'Ünï名'
+[dm] swkbd: title '起名' initial 'Hero' limit 16 min 0 → cancel
+[dm] swkbd: title '起名' initial 'Hero' limit 16 min 0 → no window, treated as cancel
+[dm] swkbd: title '起名' initial '' limit 16 min 0 → OK 'A名'
+[dm] swkbd: title '起名' initial 'Hero' limit 3 min 0 → OK 'ABCDE'
+[dm] swkbd: title '起名' initial 'Hero' limit 2 min 0 → OK 'a😀'
+[dm] swkbd: title '起名' initial 'Hero' limit 16 min 0 → OK 'Kbd'
+1 OK, UTF-8 output (what the game actually uses)
+2 cancel → 0x29F, buffer untouched
+3 no window (input returns -1) → treated as cancel 0x29F
+4 UTF-16 output (isUseUtf8 = 0)
+5 maximum length truncation (3 characters)
+6 truncation does not split a surrogate pair (limit 2 units, a + U+1F600 needs 3 units)
+7 DM_KBD gives the text directly: input box not called
+all passed: 17/17
+
+exit: 0 (0 s)

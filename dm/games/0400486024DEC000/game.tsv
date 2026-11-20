@@ -13,7 +13,7 @@ app_category	public.app-category.adventure-games
 pad_layout	full
 
 # ---- Versions ----
-build	v131072	v131072	main=e0f3ccfaf50065ae4ea01eb5aeb13b1a	subsdk0=b0110087a7b339ef74588d3bd0b4dd5d	sdk=1643a838814f9c10c696f930ed681e7f
+build	v131072	1.1.1	main=e0f3ccfaf50065ae4ea01eb5aeb13b1a	subsdk0=b0110087a7b339ef74588d3bd0b4dd5d	sdk=1643a838814f9c10c696f930ed681e7f
 package	v131072
 shader_versions	v131072
 

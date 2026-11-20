@@ -187,7 +187,7 @@ class Read(Base):
     def test_standalone_updates_keep_identity_and_version_checks(self):
         for packages, error in (([(1, TID, 0, version(), b'')], 'update of version 0'),
                                 ([(1, TID, VER, version(), b'')] * 2, 'two updates of version'),
-                                ([(1, TID, VER, version(), b''), (1, TID + 0x2000, VER + 1, version(tid=TID + 0x2000), b'')], 'different program IDs')):
+                                ([(1, TID, VER, version(), b''), (1, TID + 0x2000, VER + 1, version(tid=TID + 0x2000), b'')], 'different applications')):
             with self.subTest(error=error):
                 write_nup(self.path, packages, update_flags=pack_nup.STANDALONE)
                 with pack_nup.Nup(self.path) as n, self.assertRaisesRegex(pack_nup.Error, error): pack_nup.scan(n)
@@ -353,6 +353,19 @@ class ImageReuse(Base):
 
 
 class Pack(Base):
+    def test_display_label_is_numeric_and_belongs_to_the_package(self):
+        labels = [(b'1.1.1', '1.1.1'), (b'v1.8.0', '1.8.0'), (b'2.1', '2.1'), (b'4', '4'),
+                  (b'', ''), (b'1.8.0 beta', ''), (b'1.2.3.4', ''), ('١.٢.٣'.encode(), ''),
+                  (b'1.2\0', ''), (b'1' * 16, ''), (f'v{VER + 10}'.encode(), '')]
+        packages = [(0, TID, 0, version(), tlv([(pack_nup.T_DISPLAY, b'9.9.9')]))]
+        packages += [(1, TID, VER + i, version(), tlv([(pack_nup.T_DISPLAY, raw)]) if raw else b'')
+                     for i, (raw, _) in enumerate(labels)]
+        write_nup(self.path, packages)
+        _, _, updates, _ = pack_nup.scan(self.open())
+        for i, (raw, expected) in enumerate(labels):
+            with self.subTest(raw=raw):
+                self.assertEqual(pack_nup.display_label(updates[VER + i]), expected)
+
     def out(self): return self.dir / 'out'
 
     def test_standalone_updates_keep_their_versions_and_dlc(self):
@@ -439,9 +452,24 @@ class Pack(Base):
         self.assertIn('dir/base', romfs_image.read_index(self.out() / 'RomFS.img'))
         self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'updated')
 
+    def test_update_without_an_icon_takes_its_base_games(self):   # a build may pack only the update: Ocarina of Time's NUP has the icon on its base record, and the Mac app had none
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        u = self.out() / 'u'; pack_nup.pack_version(n, vers[VER], base, app, u, say=lambda s: None)
+        self.assertEqual((u / 'icon.jpg').read_bytes(), b'\xff\xd8 icon')
+        self.assertFalse((u / 'control.nacp').exists())   # the NACP stays the package's own: its display version and languages are that version's
+        self.assertEqual(nsp.app_icon(None, None, u, u), (u / 'icon.jpg', False))   # what the script reads when no folder holds the base game alone
+        licons = lambda d: b''.join(bytes([len(t)]) + t.encode() + struct.pack('<I', len(b)) + b for t, b in d.items())   # the localized icons record (SPEC 0x000A)
+        for base_meta, own, want in ((META, tlv([(pack_nup.T_ICON, b'new icon')]), b'new icon'),                                                  # the update's own icon stays
+                                     (tlv([(pack_nup.T_LICONS, licons({'ja': b'ja icon', 'en-US': b'en icon'}))]), b'', b'en icon'),                # the base game's localized icons
+                                     (b'', b'', None)):                                                                                             # none anywhere: none written, an earlier one goes
+            write_nup(self.path, [(0, TID, 0, version(), base_meta), (1, TID, VER, version(), own)])
+            n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+            pack_nup.pack_version(n, vers[VER], base, app, u, say=lambda s: None)
+            self.assertEqual((u / 'icon.jpg').read_bytes() if (u / 'icon.jpg').exists() else None, want)
+
     def test_mismatched_program_ids_refused(self):
         write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
-        with self.assertRaisesRegex(pack_nup.Error, 'different program IDs'): pack_nup.scan(self.open())
+        with self.assertRaisesRegex(pack_nup.Error, 'different applications'): pack_nup.scan(self.open())
 
     def test_update_packed_on_its_own_with_control_data(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
@@ -538,6 +566,110 @@ class Pack(Base):
 class Stop(Exception): pass
 
 
+S1, S2 = 0x0100F00000010000, 0x0400F00000010001   # a Switch 2 Edition of a Switch 1 game: the Switch 1 program (index 0) and the Switch 2 program (index 1) of application S1
+
+
+def program_nacp(owner=S1, aoc=S1 + 0x1000):   # a Switch 2 program's NACP: its application (SaveDataOwnerId) and add-on content base, as Super Mario Bros. Wonder's names them
+    b = bytearray(control_nacp('Test Game S2', 'テス', '1.2.1')); struct.pack_into('<QQ', b, pack_nup.NACP_AOC_BASE, aoc, owner)
+    return tlv([(pack_nup.T_NACP, bytes(b))])
+
+
+def edition(s1_updates=(), s2_updates=(), nacp=None):
+    """The packages of a Switch 2 Edition NUP (PR #2692's layout): the Switch 1 program with all the game data, the Switch 2 program whose RomFS holds one file of its own, the upgrade add-on.
+    sN_updates: (version, marker) of updates"""
+    def prog(tid, marker, main): return {'exefs': {'main': main, 'main.npdm': npdm(tid)}, 'romfs': {f'data/{marker}': b'data' * 100, 'System/RegionLangMask.txt': marker.encode()}}
+    s2 = prog(S2, 's2', b'switch 2 code'); s2['romfs'] = {'System/RegionLangMask.txt': b'own'}
+    return ([(0, S1, 0, prog(S1, 's1', b'switch 1 code'), META), (0, S2, 0, s2, program_nacp() if nacp is None else nacp)]
+            + [(1, S1 + 0x800, v, prog(S1, m, b'switch 1 ' + m.encode()), b'') for v, m in s1_updates]
+            + [(1, S2 + 0x800, v, prog(S2, m, b'switch 2 ' + m.encode()), b'') for v, m in s2_updates]
+            + [(2, S1 + 0x1001, 0, {'romfs': {'System/AocUpgradeVersion.txt': b'1', 'data/upgrade': b'u'}}, b'')])
+
+
+class Programs(Base):
+    """One application of several programs (issue/PR #2692): the program packed runs on its own RomFS, the others' RomFS go beside it as romfs_programs/<index>.img (the game mounts them by
+    program index, nn::fs::MountRom(name, index, ...)), and the add-on is DLC only, indexed from the NACP's AddOnContentBaseId"""
+    def out(self): return self.dir / 'out'
+
+    def names(self, img): return set(romfs_image.read_index(img))
+
+    def test_switch_2_program_by_default_with_the_other_beside_it(self):
+        write_nup(self.path, edition())
+        n = self.open(); app, base, vers, dlc = pack_nup.scan(n)
+        self.assertEqual((app, n.application, n.aoc_base, sorted(n.siblings), vers), (S2, S1, S1 + 0x1000, [0], {}))
+        pack_nup.pack_version(n, base, base, app, self.out(), say=lambda s: None)
+        self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'switch 2 code')
+        own, s1 = self.names(self.out() / 'RomFS.img'), self.names(self.out() / 'romfs_programs/0.img')
+        self.assertIn('System/RegionLangMask.txt', own); self.assertNotIn('data/s1', own)   # its own files only
+        self.assertIn('data/s1', s1); self.assertNotIn('data/upgrade', s1 | own)   # the add-on is laid over nothing: the game mounts it itself
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Test Game S2')
+        pack_nup.pack_dlc(n, app, dlc, self.out() / 'aoc', say=lambda s: None)
+        self.assertIn('data/upgrade', self.names(self.out() / 'aoc/1.img'))   # index 1 from S1 + 0x1000, not from the Switch 2 program's ID
+
+    def test_program_picks_the_other(self):
+        write_nup(self.path, edition())
+        n = self.open(); app, base, _, _ = pack_nup.scan(n, 0)
+        self.assertEqual((app, sorted(n.siblings)), (S1, [1]))
+        pack_nup.pack_version(n, base, base, app, self.out(), say=lambda s: None)
+        self.assertIn('data/s1', self.names(self.out() / 'RomFS.img'))
+        self.assertEqual(self.names(self.out() / 'romfs_programs/1.img'), {'System', 'System/RegionLangMask.txt'})
+        with self.assertRaisesRegex(pack_nup.Error, r'no program 5; it holds 0 \(0100F00000010000\), 1 \(0400F00000010001\)'): pack_nup.scan(self.open(), 5)
+
+    def test_both_programs_with_updates(self):   # updates of one version for both programs, as Horizon patches an application's programs together; the other program at its newest no higher
+        write_nup(self.path, edition(s1_updates=[(VER - 1, 's1old'), (VER, 's1new')], s2_updates=[(VER, 's2new'), (VER + 1, 's2newest')]))
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        self.assertEqual((app, sorted(vers)), (S2, [VER, VER + 1]))
+        for k, want in ((base, 'data/s1'), (vers[VER], 'data/s1new'), (vers[VER + 1], 'data/s1new')):
+            with self.subTest(version=k.version):
+                out = self.out() / f'v{k.version}'
+                pack_nup.pack_version(n, k, base, app, out, say=lambda s: None)
+                self.assertIn(want, self.names(out / 'romfs_programs/0.img'))
+        self.assertEqual((self.out() / f'v{VER}/ExeFS/main').read_bytes(), b'switch 2 s2new')
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n, 0)
+        self.assertEqual((app, sorted(vers)), (S1, [VER - 1, VER]))
+        pack_nup.pack_version(n, vers[VER - 1], base, app, self.out() / 's1', say=lambda s: None)
+        self.assertEqual(self.names(self.out() / 's1/romfs_programs/1.img'), {'System', 'System/RegionLangMask.txt'})   # the Switch 2 program's base: it has no update of VER − 1 or lower
+
+    def test_one_switch_2_program_alone(self):   # the layout of a NUP whose packer laid the add-on over the Switch 2 program's RomFS itself: one base, program index 1, DLC from its NACP
+        tree = {'exefs': {'main': b'switch 2 code', 'main.npdm': npdm(S2)}, 'romfs': {'data/merged': b'm'}}
+        write_nup(self.path, [(0, S2, 0, tree, program_nacp()), (2, S1 + 0x1001, 0, {'romfs': {'data/upgrade': b'u'}}, b'')])
+        n = self.open(); app, base, vers, dlc = pack_nup.scan(n)
+        self.assertEqual((app, n.application, n.siblings, sorted(dlc)), (S2, S1, {}, [S1 + 0x1001]))
+        (self.out() / 'romfs_programs').mkdir(parents=True); (self.out() / 'romfs_programs/0.img').write_bytes(b'stale')
+        pack_nup.pack_version(n, base, base, app, self.out(), say=lambda s: None)
+        self.assertFalse((self.out() / 'romfs_programs').exists())   # a sibling of an earlier pack goes
+
+    def test_refusals(self):
+        other = edition(nacp=program_nacp(owner=0x0100F00000020000))
+        two = edition() + [(0, S2, 0, {'exefs': {'main': b'x', 'main.npdm': npdm(S2)}, 'romfs': {'a': b'a'}}, b'')]
+        dlc = edition(nacp=program_nacp(aoc=S1 + 0x5000))
+        for packages, error in ((other, 'packages of different applications'), (two, '2 base packages of program 0400F00000010001'), (dlc, 'is not a DLC of 0100F00000010000')):
+            with self.subTest(error=error):
+                write_nup(self.path, packages)
+                with pack_nup.Nup(self.path) as n, self.assertRaisesRegex(pack_nup.Error, error): pack_nup.scan(n)
+
+    def test_script_reads_the_program_and_its_siblings(self):   # --program, --title-id (the program's or the application's), the survey's manifest, the disk estimate, the format check
+        write_nup(self.path, edition(s1_updates=[(VER, 's1new')]))
+        for program, want, app in ((None, S2, S2), (0, S1, S1), (None, S1, S2)):
+            with self.subTest(program=program, want=want):
+                got, fam = nsp.scan_nup(self.path, want, program); self.addCleanup(fam['nup'].close)
+                self.assertEqual(got, app)
+        with self.assertRaisesRegex(nsp.BuildError, 'no game'): nsp.scan_nup(self.path, 0x0100F00000020000)
+        got, fam = nsp.scan_nup(self.path); n = fam['nup']; self.addCleanup(n.close)
+        out = self.dir / 'survey'
+        self.assertEqual(nsp.survey_nup(n, fam['base'], fam['base'], out), 2)
+        rows = (out / 'romfs_manifest.tsv').read_text().splitlines()[1:]
+        self.assertIn(f'/System/RegionLangMask.txt\t3\t{b"own".hex()}', rows)   # its own file wins over the other program's of that path
+        self.assertTrue(any(r.startswith('/data/s1\t') for r in rows))
+        self.assertEqual(pack_nup.romfs_bytes(n, fam['base'], fam['base']), 3 + 400 + 2)
+        with mock.patch.object(nsp, 'PROG', mock.Mock()):
+            d = nsp.extract_nup(self.dir / 'ex', 'v0', fam['base'], fam['base'], got, n)
+            self.assertTrue((d / 'romfs_programs/0.img').is_file())
+            bad = edition(); bad[0][3]['romfs']['data/x.zs'] = b'\0' * 64
+            write_nup(self.path, bad); got, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
+            nsp.extract_nup(self.dir / 'ex', 'v0', fam['base'], fam['base'], got, fam['nup'])
+            with mock.patch.object(nsp, 'ALLOW_DAMAGED', False), self.assertRaisesRegex(nsp.BuildError, r'v0 program 0: 1 file'): nsp.check_formats({'v0': d})
+
+
 class StandaloneCLI(Base):
     def test_default_and_explicit_versions_and_missing_base(self):
         write_nup(self.path, [(1, TID, VER, version(), META),
@@ -557,6 +689,33 @@ class StandaloneCLI(Base):
 
 
 class Main(Base):
+    def test_app_version_from_a_nup_when_only_the_update_is_extracted(self):
+        tid, ver = 0x0400486024DEC000, 131072
+        from game import Game
+        row = Game(REPO / 'dm/games' / f'{tid:016X}').builds()[f'v{ver}']
+        update = version(tid=tid)
+        for module, bid in row.items():
+            if module != 'display': update['exefs'][module] = b'NSO0' + bytes(0x3c) + bytes.fromhex(bid)
+        npdm64 = bytearray(update['exefs']['main.npdm']); npdm64[0xc] = 1
+        update['exefs']['main.npdm'] = bytes(npdm64)
+        label = tlv([(pack_nup.T_DISPLAY, b'v1.1.1')])
+        base_label = tlv([(pack_nup.T_DISPLAY, b'1.0.0')])
+        update_nacp = tlv([(pack_nup.T_NACP, control_nacp('Test Game', '', '2.3.4'))])
+        sources = {'graphics': ('gl', 'test'), 'gl_capture': (False, '')}
+        registered = row['display']
+        for expected, display, base_meta, update_meta in (('1.1.1', '?', base_label, label), ('1.0', '?', base_label, b''),
+                                                          ('1.2.3', '?', META, label), ('1.1.1', registered, META, label),
+                                                          ('1.1.1', registered, b'', b''), ('2.3.4', registered, META, label + update_nacp)):
+            with self.subTest(expected=expected, display=display):
+                write_nup(self.path, [(0, tid, 0, version(tid=tid), base_meta), (1, tid, ver, update, update_meta)])
+                with mock.patch.object(Game, 'builds', return_value={f'v{ver}': {**row, 'display': display}}), \
+                     mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+                     mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'build_sources', return_value=sources), \
+                     mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'say_game', side_effect=Stop) as app:
+                    with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--platform', 'ios']))
+                self.assertEqual(app.call_args.args[2], expected)
+                self.assertFalse((self.dir / f'{tid:016X}_build/extract/v0').exists())
+
     def run_main(self, target, *, extract=False, package=None):
         seen, said = {}, []
         def stop(env, *a):

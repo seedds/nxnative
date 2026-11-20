@@ -2278,7 +2278,6 @@ c20268fd5d33f387	{"local":[4,4,4],"shared":0}
 c2189824d55676f3	{"local":[8,8,1],"shared":0}
 c23c5397230b9df1	{"local":[64,1,1],"shared":352}
 c24159f4455fa6d3	{"local":[64,1,1],"shared":352}
-c254eaa40e0c4f1e	{"fout":{"0":"uint"}}
 c2579035a8be76f7	{"local":[8,8,1],"shared":1792}
 c260e09f67857ce8	{"local":[64,1,1],"shared":352}
 c2a0b3c192186bed	{"local":[64,1,1],"shared":352}

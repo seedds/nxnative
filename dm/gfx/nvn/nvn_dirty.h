@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-void nvn_dirty_add_range(const void *mem, size_t size);           // Register a memory pool as a tracked range (the first call registers the page-fault hook and the host pre-write hook)
+void nvn_dirty_add_range(const void *mem, size_t size);           // Register a memory pool as a tracked range (the page-fault hook and the host pre-write hook are registered when the host loads)
 void nvn_dirty_stat(int *live, int *peak, int *cap);                // number of registered memory pools, peak, tracking table capacity (for the memory readout line)
 void nvn_dirty_remove_range(const void *mem);                     // Pool destruction: restore protected pages to writable and mark invalid
 void nvn_dirty_open(const void *addr, size_t len);                 // Make the covered protected pages writable, not counted as written, and hold off protection until nvn_dirty_close: around making a zero-copy buffer the GPU writes through
@@ -14,7 +14,8 @@ void nvn_dirty_protect(const void *addr, size_t len);              // Set the co
 void nvn_dirty_protect_sparse(const void *addr, size_t len);       // The same, for the pages behind a placement sparse tile: a later write to one moves nvn_dirty_sparse_writes
 uint64_t nvn_dirty_sparse_writes(void);                            // Writes so far to pages protected that way
 void nvn_dirty_own_thread(void);                                   // The calling thread is the one that replays submissions
-uint64_t nvn_dirty_own_writes(void);                               // Writes to protected pages by that thread so far (faults and host writes): the ones in order with what it replays
+uint64_t nvn_dirty_own_writes(void);                               // CPU and GPU writes noted by the replay thread: the ones in order with what it replays
+void nvn_dirty_gpu_written(uintptr_t addr, size_t len);             // Replayed or completed buffer writes bypass CPU page protection
 void nvn_dirty_touch(void);                                        // Moves the generation as a write does, with no page written: whoever remembers "nothing written since" by it asks its pages again
 uint64_t nvn_dirty_now(void);                                      // Current generation: take the content's stamp before nvn_dirty_protect and before reading it
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp); // Covered pages were written after the stamp -> 1

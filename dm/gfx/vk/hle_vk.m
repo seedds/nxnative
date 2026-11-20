@@ -190,7 +190,7 @@ static id<MTLSamplerState> ab_sampler_fail(void) {
 // p is the push-constant block; U / B / T / S are members of a set's argument buffer at buffer slot `slot`, with a separate Metal ID (+ element);
 // o is a dynamic offset's index in q, and q is the slot of that offset buffer
 typedef struct { char kind; uint8_t set, slot; uint16_t count, binding, arg_id; } shres;
-typedef struct { char key[17]; int frag, comp, nres, bone_index, geom_vp; uint16_t wg[3]; shres res[24]; } shinfo;   // geom_vp: location + 1, zero for shaders without viewport lowering
+typedef struct { char key[17]; int frag, comp, nres, geom_vp; uint16_t wg[3]; shres res[24]; } shinfo;   // geom_vp: location + 1, zero for shaders without viewport lowering
 enum { ST_VERT, ST_FRAG, ST_COMP };
 static int is_arg(char k) { return k && strchr("UBTS", k); }
 static shinfo *g_sh; static int g_nsh;
@@ -227,9 +227,6 @@ static void sh_load(void) {
                 LOG("[vk] [RED] shader table %s: compute stage without a local size (%s)", s->key, stage); s->comp = 0;
             }
         }
-        s->bone_index = -1;
-        char *extra = rest ? strchr(rest, '\t') : NULL;
-        if (!strcmp(stage, "vert") && extra) sscanf(extra + 1, "%d", &s->bone_index);
         if (!strncmp(stage, "geomvp:", 7)) {
             unsigned loc;
             if (sscanf(stage + 7, "%u", &loc) == 1 && loc < 32) s->geom_vp = (int)loc + 1;
@@ -283,7 +280,7 @@ struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; Vk
                   int swap; };   // one of a swap chain's images: the swap chain owns it
 struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; };
 struct VkSampler_T { __strong id<MTLSamplerState> s; __strong VkSamplerMetal *ref; };
-struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d, fn_u; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
+struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
 struct VkPipelineCache_T { int unused; };
 // A result is valid once the Metal command buffer that wrote it has completed (g_done >= ticket).
 // Timestamps use that command buffer's completion time in ns (timestampPeriod 1).
@@ -1098,14 +1095,13 @@ VKB(vkCreateShaderModule, VkResult, VkDevice d, const VkShaderModuleCreateInfo *
     @autoreleasepool {
         if (m->si && !m->si->geom_vp && g_lib) {
             m->fn = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s", m->key]];
-            if (m->si->bone_index >= 0) m->fn_u = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_u", m->key]];
         }
     }
     if (!m->fn && !(m->si && m->si->geom_vp)) LOG("[vk] [RED] shader %s (%zu bytes of SPIR-V) is not in the library", m->key, ci->codeSize);
     else OLOG("CreateShaderModule %s", m->key);
     *out = m; return VK_SUCCESS;
 }
-VKB(vkDestroyShaderModule, void, VkDevice d, VkShaderModule m, const VkAllocationCallbacks *a) { (void)d; (void)a; if (m) { m->fn = m->fn_d = m->fn_u = nil; free(m); } }
+VKB(vkDestroyShaderModule, void, VkDevice d, VkShaderModule m, const VkAllocationCallbacks *a) { (void)d; (void)a; if (m) { m->fn = m->fn_d = nil; free(m); } }
 // Pipeline caches hold nothing: the game's initial data is NVIDIA's binary cache (Super Mario Galaxy's data/database/vulkan/*.cache), and Metal keeps its own
 VK(vkCreatePipelineCache, VkResult, VkDevice d, const VkPipelineCacheCreateInfo *ci, const VkAllocationCallbacks *a, VkPipelineCache *out) {
     (void)d; (void)ci; (void)a; *out = zalloc(sizeof **out); return VK_SUCCESS;
@@ -1165,15 +1161,6 @@ static void pipe_layout_hold(VkPipeline p, VkPipelineLayout layout) {
     p->pc_size = layout->pc_size; p->nset = layout->nset;
     for (uint32_t i = 0; i < p->nset; i++) if ((p->set[i] = layout->set[i])) atomic_fetch_add(&p->set[i]->refs, 1);
 }
-static id<MTLFunction> vertex_function(VkShaderModule m, const VkPipelineVertexInputStateCreateInfo *vi) {
-    if (m->fn_u && vi) {
-        for (uint32_t i = 0; i < vi->vertexAttributeDescriptionCount; i++) {
-            const VkVertexInputAttributeDescription *a = &vi->pVertexAttributeDescriptions[i];
-            if (a->location == (uint32_t)m->si->bone_index && a->format == VK_FORMAT_R16_UINT) return m->fn_u;
-        }
-    }
-    return m->fn;
-}
 static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
     VkPipeline p = zalloc(sizeof *p);
     pipe_layout_hold(p, ci->layout);
@@ -1189,11 +1176,10 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         for (uint32_t s = 0; s < ci->stageCount; s++) {
             const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s]; VkShaderModule m = st->module;
             if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) {
-                id<MTLFunction> fn = vertex_function(m, ci->pVertexInputState);
+                id<MTLFunction> fn = m->fn;
                 if (geom_vp) {
-                    const char *suffix = fn && fn == m->fn_u ? "_u" : "";
                     fn = fn && topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && max_viewports() > 1
-                        ? [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s%s_vp%d", m->key, suffix, geom_vp - 1]] : nil;
+                        ? [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_vp%d", m->key, geom_vp - 1]] : nil;
                     if (!fn) LOG("[vk] [RED] geometry viewport lowering unavailable for vertex shader %s at location %d (topology %d)", m->key, geom_vp - 1, topology);
                 }
                 pd.vertexFunction = spec_fn(fn, st->pSpecializationInfo); p->vs = m->si;

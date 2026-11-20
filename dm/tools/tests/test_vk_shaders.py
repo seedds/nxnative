@@ -173,7 +173,7 @@ class VkShaders(unittest.TestCase):
         out = self.tmp / 'out'; out.mkdir(exist_ok=True)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', ResourceWarning)   # the tool leaves its files to be closed at collection
-            key, stage, res, msls, _, _ = translate_file(spv, str(out))
+            key, stage, res, msls, _ = translate_file(spv, str(out))
         self.assertEqual(key, hashlib.sha256(spv.read_bytes()).hexdigest()[:16])
         return key, stage, res, [Path(m).read_text() for m in msls]
 
@@ -200,10 +200,9 @@ class VkShaders(unittest.TestCase):
                           '%pos = OpCompositeConstruct %vec %x %zero %zero %one\nOpStore %position %pos')
         data = self.assemble(asm).read_bytes()
         key = hashlib.sha256(data).hexdigest()[:16]
-        _, _, _, msls, _, info = vs.one((key, '/synthetic.material.bin@0x0', data), str(self.tmp))
-        self.assertEqual(info, '2')
-        self.assertEqual(len(msls), 4)
-        combined = (self.tmp / f'{key}_u_vp1.metal').read_text()
+        _, _, _, msls, _ = vs.one((key, '/synthetic.material.bin@0x0', data), str(self.tmp))
+        self.assertEqual(len(msls), 2)
+        combined = (self.tmp / f'{key}_vp1.metal').read_text()
         self.assertIn('uint a_indices [[attribute(2)]]', combined)
         self.assertIn('int(in.a_indices)', combined)
         self.assertIn('[[viewport_array_index]]', combined)

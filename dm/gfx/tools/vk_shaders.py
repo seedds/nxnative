@@ -24,7 +24,7 @@
 # Table rows: key <TAB> stage (vert / frag / comp:x,y,z / geomvp:location) <TAB> resources, space-separated kind:set.binding=slot[*count]; lower-case u/b/t/s/c/p bind discrete buffers, textures, samplers and push constants;
 #   upper-case U/B/T/S are argument-buffer members, with @id after the slot and count for the first element's Metal ID;
 #   o maps a dynamic buffer's set.binding to an offset index, and q gives that offset buffer's Metal slot
-#   a RenderDragon vertex shader with an unsigned bone-index variant vk_<key>_u adds the input location in column 5
+# RenderDragon material bone-index inputs are repaired in SPIR-V before translation; keys still identify the game's original words.
 # Usage: vk_shaders.py <SPIR-V dir | NSO>... <out dir> [--ios <dir>]
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 from typing import NoReturn
@@ -153,16 +153,65 @@ def fix_strides(words):
     if not add: return words
     return words[:at] + [w for t, s in add.items() for w in ((4 << 16) | OP_DECORATE, t, DEC_ARRAY_STRIDE, s)] + words[at:]
 
-def unsigned_bone_indices(src):
-    """RenderDragon's scalar a_indices as an unsigned fetch, widened to int before the shader uses it."""
-    attribute = re.search(r'\bint(\s+a_indices\s*\[\[attribute\((\d+)\)\]\];)', src)
-    stage_in = re.search(r'\b(\w+)\s*\[\[stage_in\]\]', src)
-    if not attribute or not stage_in: return None
-    value = re.escape(stage_in[1]) + r'\.a_indices\b'
-    src = src[:attribute.start()] + 'uint' + src[attribute.start() + 3:]
-    variant, uses = re.subn(r'\b' + value, lambda m: f'int({m[0]})', src)
-    if not uses: return None
-    return attribute[2], variant
+def unsigned_bone_indices(words):
+    """Repair RenderDragon's R16_UINT bone input, preserving signed values/arithmetic after each load.
+
+    Its material compiler declares scalar a_indices as int. The engine's bone layout supplies an unsigned
+    short (the binary trace and the other layout paths are recorded in Minecraft's game note).
+    """
+    instructions, names, ints, pointers, variables, models = [], set(), {}, {}, {}, []
+    locations, interface = set(), set()
+    i = 5
+    while i < len(words):
+        n, op = words[i] >> 16, words[i] & 0xffff
+        if not n: red('SPIR-V instruction length 0')
+        ins = words[i:i + n]; instructions.append(ins)
+        if op == 5 and struct.pack(f'<{n - 2}I', *ins[2:]).split(b'\0', 1)[0] == b'a_indices': names.add(ins[1])   # OpName
+        elif op == 15:   # OpEntryPoint: interfaces follow the nul-terminated entry name
+            models.append(ins[1])
+            end = next(j for j in range(3, n) if b'\0' in struct.pack('<I', ins[j]))
+            interface.update(ins[end + 1:])
+        elif op == 21: ints[ins[1]] = tuple(ins[2:])   # OpTypeInt
+        elif op == 32: pointers[ins[1]] = tuple(ins[2:])   # OpTypePointer
+        elif op == 59: variables[ins[2]] = (ins[1], ins[3])   # OpVariable
+        elif op == OP_DECORATE and n >= 4 and ins[2] == 30: locations.add(ins[1])   # Location
+        i += n
+    if models != [0]: return words   # vertex entry point only
+    targets = {v for v in names & locations & interface if v in variables and variables[v][1] == 1
+               and pointers.get(variables[v][0], ())[:1] == (1,)
+               and ints.get(pointers[variables[v][0]][1]) == (32, 1)}
+    if not targets: return words
+    # Only direct loads occur in this asset contract. Reject a changed pointer-use shape before changing its type.
+    in_function = False
+    for ins in instructions:
+        op = ins[0] & 0xffff
+        if op == 54: in_function = True   # OpFunction
+        if op in (8, 317): continue   # OpLine / OpNoLine contain debug literals, not input-pointer uses
+        if in_function and targets.intersection(ins[1:]) and not (op == 61 and ins[3] in targets):
+            red('RenderDragon a_indices input has a use other than OpLoad')
+    targets &= {ins[3] for ins in instructions if ins[0] & 0xffff == 61}   # ignore declared but unread inputs
+    if not targets: return words
+    bound = words[3]
+    uint = next((t for t, shape in ints.items() if shape == (32, 0)), None)
+    if uint is None: uint, bound = bound, bound + 1
+    pointer = next((t for t, shape in pointers.items() if shape == (1, uint)), None)
+    if pointer is None: pointer, bound = bound, bound + 1
+    # Put the unsigned scalar/pointer declarations before the first integer type. Moving existing definitions
+    # earlier also handles a module whose uint type was originally declared after its signed input variable.
+    out, inserted = list(words[:5]), False
+    for ins in instructions:
+        op = ins[0] & 0xffff
+        if op == 21 and not inserted:
+            out += [(4 << 16) | 21, uint, 32, 0, (4 << 16) | 32, pointer, 1, uint]
+            inserted = True
+        if op in (21, 32) and ins[1] in (uint, pointer): continue
+        if op == 59 and ins[2] in targets: ins = [ins[0], pointer, *ins[2:]]
+        if op == 61 and ins[3] in targets:   # OpLoad, then OpBitcast under the original signed result ID
+            out += [ins[0], uint, bound, *ins[3:], (4 << 16) | 124, ins[1], ins[2], bound]
+            bound += 1
+        else: out += ins
+    out[3] = bound
+    return out
 
 
 def entry_args(src, key, path):
@@ -347,6 +396,7 @@ def one(source, tmp):
     key, path, data = source
     if len(data) % 4: red(f'{path}: SPIR-V length {len(data)} is not a multiple of 4')
     words = fix_strides(list(struct.unpack(f'<{len(data) // 4}I', data)))
+    if '.material.bin@' in path: words = unsigned_bone_indices(words)
     src_spv = os.path.join(tmp, key + '.in.spv')
     with open(src_spv, 'wb') as f: f.write(struct.pack(f'<{len(words)}I', *words))
     refl = json.loads(subprocess.run([SPIRV_CROSS, src_spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
@@ -355,7 +405,7 @@ def one(source, tmp):
     stage = eps[0]['mode']
     if stage == 'geom':
         location = geometry_viewport(words)
-        if location is not None: return key, f'geomvp:{location}', [], [], path, ''
+        if location is not None: return key, f'geomvp:{location}', [], [], path
     if stage not in ('vert', 'frag', 'comp'): return stage   # skipped (main counts them)
     field = stage
     if stage == 'comp':
@@ -495,7 +545,6 @@ def one(source, tmp):
     src = PRECISE.sub(r'precise::\1(', src)
     with open(msl, 'w') as f: f.write(src)
     msls = [msl]
-    bone_index = ''
     if stage == 'frag':
         # Metal requires two outputs of the same type for the dual-source variant.
         outs = {int(i): t for t, i in re.findall(r'(\w+)\s+\w+\s+\[\[color\((\d+)\)\]\]', src)}
@@ -503,21 +552,12 @@ def one(source, tmp):
             msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
             with open(msl_d, 'w') as f: f.write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
     elif stage == 'vert':
-        vertex_sources = [(key, src)]
-        if '.material.bin@' in path and (unsigned := unsigned_bone_indices(src)):
-            bone_index, variant = unsigned
-            name = f'{key}_u'
-            variant = variant.replace(f'vk_{key}', f'vk_{name}')
-            msl_u = os.path.join(tmp, name + '.metal'); msls.append(msl_u)
-            with open(msl_u, 'w') as f: f.write(variant)
-            vertex_sources.append((name, variant))
         for location in instance_locations(words):
-            for name, vertex_source in vertex_sources:
-                variant = viewport_variant(vertex_source, name, location)
-                if variant is None: continue
-                msl_vp = os.path.join(tmp, f'{name}_vp{location}.metal'); msls.append(msl_vp)
-                with open(msl_vp, 'w') as f: f.write(variant)
-    return key, field, res, msls, path, bone_index
+            variant = viewport_variant(src, key, location)
+            if variant is None: continue
+            msl_vp = os.path.join(tmp, f'{key}_vp{location}.metal'); msls.append(msl_vp)
+            with open(msl_vp, 'w') as f: f.write(variant)
+    return key, field, res, msls, path
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
@@ -548,15 +588,14 @@ def main():
         seen, skipped = {}, {}
         for row in rows:
             if isinstance(row, str): skipped[row] = skipped.get(row, 0) + 1; continue
-            key, stage, res, msl, src, info = row
-            seen[key] = (stage, res, msl, src, info)
+            key, stage, res, msl, src = row
+            seen[key] = (stage, res, msl, src)
         if skipped: print('[RED] skipped unsupported shader stages: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
         viewport_suffixes = {f'_vp{v[0].split(":")[1]}.metal' for v in seen.values() if v[0].startswith('geomvp:')}
         msls = [m for v in seen.values() for m in v[2] if '_vp' not in os.path.basename(m) or any(m.endswith(s) for s in viewport_suffixes)]
         tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; stage vert/frag/comp:x,y,z/geomvp:location; resource kinds u/b/t/s/c/p and argument-buffer U/B/T/S/o/q',
                '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
-        tsv += [f'{k}\t{stage}\t{" ".join(res)}\t{src}' + (f'\t{info}' if info else '')
-                for k, (stage, res, _, src, info) in sorted(seen.items())]
+        tsv += [f'{k}\t{stage}\t{" ".join(res)}\t{src}' for k, (stage, res, _, src) in sorted(seen.items())]
         dirs = [(os.path.join(out, 'vk'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above

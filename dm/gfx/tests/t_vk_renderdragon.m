@@ -106,20 +106,13 @@ static void check_bone_index(uint16_t index) {
     NSError *err = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:msl options:nil error:&err];
     assert(lib);
-    shinfo info = {.bone_index = 0};
-    struct VkShaderModule_T vert = {.si = &info, .fn_u = [lib newFunctionWithName:@"bone"]};
+    struct VkShaderModule_T vert = {.fn = [lib newFunctionWithName:@"bone"]};
     struct VkShaderModule_T frag = {.fn = [lib newFunctionWithName:@"result"]};
     VkPipelineShaderStageCreateInfo stages[] = {{.stage = VK_SHADER_STAGE_VERTEX_BIT, .module = &vert}, {.stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = &frag}};
     VkVertexInputAttributeDescription attr = {0, 0, VK_FORMAT_R16_UINT, 0};
     VkVertexInputBindingDescription bind = {0, 4, VK_VERTEX_INPUT_RATE_VERTEX};
     VkPipelineVertexInputStateCreateInfo vi = {.vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &bind,
         .vertexAttributeDescriptionCount = 1, .pVertexAttributeDescriptions = &attr};
-    attr.location = 1;
-    assert(vertex_function(&vert, &vi) == vert.fn);
-    attr.location = 0;
-    attr.format = VK_FORMAT_R16_SINT;
-    assert(vertex_function(&vert, &vi) == vert.fn);
-    attr.format = VK_FORMAT_R16_UINT;
     struct VkRenderPass_T rp = {.natt = 1, .ncol = 1, .depth = -1, .col = {0}, .res = {-1},
         .att = {{.fmt = VK_FORMAT_R32_UINT, .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE}}};
     VkGraphicsPipelineCreateInfo gi = {.stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .renderPass = &rp};

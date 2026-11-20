@@ -8,6 +8,7 @@
 __attribute__((weak)) dm_net_mode_t dm_net_mode(void) { return DM_NET_OFFLINE; }
 __attribute__((weak)) uint64_t hle_system_event_binding(void *g) { (void)g; return 0; }
 __attribute__((weak)) void *guest_sym(const char *name) { (void)name; return NULL; }
+__attribute__((weak)) void dm_hle_wait_enter(void) { abort(); }   // the HLE_FORCE_WAIT gate's entry (entry.S); no wait hook is called here
 __attribute__((weak)) uint32_t dm_friends_history_key(void *out, const void *uid, unsigned flag) { (void)out; (void)uid; (void)flag; return RES_FAIL; }
 __attribute__((weak)) uint32_t dm_nextendo_async_attach(void *o, uint64_t l, uint64_t e) { (void)o; (void)l; (void)e; return RES_FAIL; }
 __attribute__((weak)) uint32_t dm_nextendo_async_cancel(void *o) { (void)o; return RES_FAIL; }

@@ -2156,6 +2156,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galax
 - **Check:** `test_vk_shaders.py` checks the workgroup size and texel-buffer type. `t_vk_compute` reads back dispatches, stage-specific push constants, producer-consumer work, and storage images.
 - **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), [PR #1539](https://github.com/seedds/nxnative/pull/1539).
 
+### Vulkan shader resource tables truncated
+
+- **Symptom:** the shader-table loader reports resource entries it cannot parse, and affected draws use missing or stale sampler state. Shadows, reflections or other texture samples can be wrong even though the shader compiled.
+- **Cause:** the host kept only the first 24 resource entries of each shader and continued with that partial list. Buffers, textures and samplers have separate Metal argument tables; their combined metadata count is not a device limit. The draw loop therefore never bound the omitted entries.
+- **Fix:** size each shader's resource list to its complete table row and keep it for the table's lifetime. Read complete lines with `getline`. Validate the resource syntax and the host's per-kind slot, set, binding and array ranges; reject an invalid row completely so shader lookup cannot build a pipeline with partial bindings. The generated table format and shaders stay unchanged.
+- **Check:** `t_vk_argbuf` covers 24–29 entries, a 96-entry row over 4 KB, old and explicit argument-buffer IDs, arrays and dynamic offsets, and rejection without retaining a valid prefix. Its 25-resource GPU draw reads back the final sampler's linear filtering after seeding stale nearest-filter state.
+- **Found on:** [Minecraft](../../dm/games/0100D71004694000/README.md#resource-bindings) 1.26.62; a synthetic GPU A/B reproduced incorrect pixels under Metal validation on Apple M6.
+
 ### Vulkan descriptor arrays over Metal's direct limits
 
 - **Symptom:** shaders with large descriptor arrays exceed Metal's direct slots. An argument buffer with a texture array at Vulkan binding 0 and a sampler at binding 1 can fail Metal compilation with overlapping IDs.

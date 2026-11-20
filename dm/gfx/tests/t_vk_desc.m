@@ -64,7 +64,8 @@ int main(void) {
         td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
         MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         rpd.colorAttachments[0].texture = [g_dev newTextureWithDescriptor:td]; rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-        shinfo si = {.key = "t_vk_desc", .frag = 1, .nres = 2, .res = {{'c', 0, 0, 8, 0}, {'u', 0, 0, 1, 1}}};
+        static shres si_res[] = {{'c', 0, 0, 8, 0}, {'u', 0, 0, 1, 1}};
+        shinfo si = {.key = "t_vk_desc", .frag = 1, .nres = 2, .res = si_res};
         rs_t s = {0}; s.cb = [g_q commandBuffer]; s.re = [s.cb renderCommandEncoderWithDescriptor:rpd]; s.set[0].s = ds;
         bind_res(&s, NULL, &si, ST_FRAG);
         [s.re endEncoding]; s.re = nil; [s.cb commit]; [s.cb waitUntilCompleted];

@@ -17,6 +17,7 @@ The Mac brings up the title panorama, the first-run dialog and a local world. Pr
 
 - [Vulkan functions looked up by name](../../../docs/reference/rendering.md#vulkan-functions-looked-up-by-name) and [RenderDragon material shaders](../../../docs/reference/shaders.md#renderdragon-material-shaders).
 - [RenderDragon's unsigned bone indices](../../../docs/reference/rendering.md#renderdragons-unsigned-bone-indices).
+- [Vulkan shader resource tables truncated](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated).
 - [Distributing branch hops between patch areas](../../../docs/reference/rewriter.md#distributing-branch-hops-between-patch-areas).
 
 ## Bone-index layout
@@ -27,8 +28,10 @@ The other layout paths were traced before replacing the Metal variant. Three def
 
 The [shader repair](../../../docs/reference/rendering.md#renderdragons-unsigned-bone-indices) therefore corrects the unsigned input before translation and keeps the original signed consumers. No per-build addresses enter the repair. SPIR-V validation covers all 133 repaired modules; synthetic cases cover shared signed pointer types, repeated loads and existing unsigned declarations. The Mac GPU test checks unsigned widening at `0x8000` and `0xffff`. Gameplay was not repeated for this change at the user's request.
 
+## Resource bindings
+
+Resolved: 198 ForwardPBR fragment shaders have 25–29 resource entries, and the host's old 24-entry storage dropped 522 samplers. All omitted samplers have shader-body uses: previous-frame luminance, caustics, scattering, shadow cascades and specular IBL. A representative 29-entry shader uses 5 buffers, 12 textures and 12 samplers, within the separate Metal argument-table limits. The [general loader fix](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated) retains the full list without changing shader assets. A synthetic 25-resource GPU readback verifies the binding failure and its correction; the affected ForwardPBR modes have not been checked in gameplay.
+
 ## Open
 
 Online services and graphics modes beyond the default renderer remain unverified. Clear rectangles smaller than an attachment still report unsupported operations.
-
-The complete shader-table load reports 198 ForwardPBR shader rows with more than the host's 24 resource entries. The rows are unchanged by the bone-index repair; this existing limit remains separate from the default-renderer gameplay result.

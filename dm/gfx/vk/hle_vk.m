@@ -190,22 +190,74 @@ static id<MTLSamplerState> ab_sampler_fail(void) {
 // p is the push-constant block; U / B / T / S are members of a set's argument buffer at buffer slot `slot`, with a separate Metal ID (+ element);
 // o is a dynamic offset's index in q, and q is the slot of that offset buffer
 typedef struct { char kind; uint8_t set, slot; uint16_t count, binding, arg_id; } shres;
-typedef struct { char key[17]; int frag, comp, nres, geom_vp; uint16_t wg[3]; shres res[24]; } shinfo;   // geom_vp: location + 1, zero for shaders without viewport lowering
+typedef struct { char key[17]; int frag, comp, nres, geom_vp; uint16_t wg[3]; shres *res; } shinfo;   // res: owned for the loaded table's lifetime; geom_vp: location + 1
 enum { ST_VERT, ST_FRAG, ST_COMP };
 static int is_arg(char k) { return k && strchr("UBTS", k); }
 static shinfo *g_sh; static int g_nsh;
 static id<MTLLibrary> g_lib;
 static int sh_cmp(const void *a, const void *b) { return memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); }
-static void sh_read_resources(shinfo *s, char *res) {
-    for (char *t = res ? strtok(res, " ") : NULL; t; t = strtok(NULL, " ")) {
-        char k; unsigned st, b, sl, n = 1;
-        int got = sscanf(t, "%c:%u.%u=%u*%u", &k, &st, &b, &sl, &n), ab = got >= 1 && k && strchr("UBTSoq", k);
-        unsigned id = got >= 3 ? b : 0;   // older argument-buffer tables used a binding as the ID
-        const char *at = strchr(t, '@');
-        int id_ok = !at || (got >= 4 && is_arg(k) && sscanf(at + 1, "%u", &id) == 1 && id <= UINT16_MAX);
-        if (got < 4 || !id_ok || !n || n > 4096 || (!ab && sl + n > 31) || s->nres == 24) { LOG("[vk] [RED] cannot parse a resource entry of shader table %s: %s", s->key, t); continue; }
-        s->res[s->nres++] = (shres){k, (uint8_t)st, (uint8_t)sl, (uint16_t)n, (uint16_t)b, (uint16_t)id};
+static int sh_number(const char **p, unsigned *out) {
+    if (**p < '0' || **p > '9') return 0;
+    char *end; unsigned long value = strtoul(*p, &end, 10);
+    if (value > UINT16_MAX) return 0;   // every numeric table field fits in the metadata's uint16_t
+    *p = end; *out = (unsigned)value; return 1;
+}
+static int sh_read_resources(shinfo *s, char *res) {
+    size_t count = 0;
+    for (const char *p = res ? res : ""; *p;) {
+        p += strspn(p, " \r"); if (!*p) break;
+        count++; p += strcspn(p, " \r");
     }
+    if (count > INT32_MAX) die("[vk] shader resource table is too large");
+    s->nres = 0; s->res = NULL;
+    if (!count) return 1;
+    shres *entries = calloc(count, sizeof *entries);
+    if (!entries) die("[vk] out of memory for shader resources");
+    char *save = NULL;
+    for (char *t = res ? strtok_r(res, " \r", &save) : NULL; t; t = strtok_r(NULL, " \r", &save)) {
+        char k = t[0]; const char *p = t + 1; unsigned st, b, sl, n = 1, id;
+        if (!strchr("ubtscpUBTSoq", k) || *p++ != ':' || !sh_number(&p, &st) || *p++ != '.' || !sh_number(&p, &b) ||
+            *p++ != '=' || !sh_number(&p, &sl)) goto invalid;
+        id = b;   // older argument-buffer tables used a binding as the ID
+        if (*p == '*') { p++; if (!sh_number(&p, &n)) goto invalid; }
+        if (*p == '@') { p++; if (!is_arg(k) || !sh_number(&p, &id)) goto invalid; }
+        unsigned limit = k == 'o' ? 32 : k == 's' || k == 'c' ? 16 : 31;
+        if (*p || st >= 8 || b >= 128 || !n || n > 4096 || sl >= limit || (size_t)s->nres >= count ||
+            (!is_arg(k) && n > limit - sl) || (strchr("poq", k) && n != 1)) goto invalid;
+        entries[s->nres++] = (shres){k, (uint8_t)st, (uint8_t)sl, (uint16_t)n, (uint16_t)b, (uint16_t)id};
+        continue;
+    invalid:
+        LOG("[vk] [RED] shader table %s: invalid resource %s; shader refused", s->key, t);
+        free(entries); s->nres = 0; return 0;
+    }
+    s->res = entries; return 1;
+}
+static void sh_read_table(FILE *f) {
+    char *line = NULL; size_t length = 0; int cap = 0;
+    while (getline(&line, &length, f) >= 0) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");   // strsep keeps the empty resource field of a shader without resources
+        if (!key || !stage || !res || strlen(key) != 16) { LOG("[vk] [RED] malformed shader table row; shader refused"); continue; }
+        shinfo s = {0}; memcpy(s.key, key, 16); s.frag = !strcmp(stage, "frag");
+        if (!strncmp(stage, "comp:", 5)) {
+            const char *p = stage + 5; unsigned x, y, z;
+            if (!sh_number(&p, &x) || *p++ != ',' || !sh_number(&p, &y) || *p++ != ',' || !sh_number(&p, &z) || *p || !x || !y || !z) goto invalid_stage;
+            s.comp = 1; s.wg[0] = (uint16_t)x; s.wg[1] = (uint16_t)y; s.wg[2] = (uint16_t)z;
+        } else if (!strncmp(stage, "geomvp:", 7)) {
+            const char *p = stage + 7; unsigned loc;
+            if (!sh_number(&p, &loc) || *p || loc >= 32) goto invalid_stage;
+            s.geom_vp = (int)loc + 1;
+        } else if (strcmp(stage, "vert") && !s.frag) goto invalid_stage;
+        if (!sh_read_resources(&s, res)) continue;
+        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; shinfo *q = realloc(g_sh, cap * sizeof *g_sh); if (!q) die("[vk] out of memory for the shader table"); g_sh = q; }
+        g_sh[g_nsh++] = s;
+        continue;
+    invalid_stage:
+        LOG("[vk] [RED] shader table %s: invalid stage %s; shader refused", key, stage);
+    }
+    free(line);
+    if (ferror(f)) die("[vk] cannot read the shader table");
+    qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);   // looked up by key (Super Mario Galaxy creates over 3,000 modules at boot)
 }
 static void sh_load(void) {
     const char *d = getenv("DM_MSL_DIR"); char p[1024];
@@ -213,28 +265,7 @@ static void sh_load(void) {
     snprintf(p, sizeof p, "%s/vk/vk_shaders.tsv", d);
     FILE *f = fopen(p, "r");
     if (!f) { LOG("[vk] [RED] cannot open %s (run dm/gfx/tools/vk_shaders.py first)", p); return; }
-    char line[4096]; int cap = 0;
-    while (fgets(line, sizeof line, f)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-        char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");   // strsep keeps the empty resource field of a shader without resources
-        if (!key || !stage || strlen(key) != 16) continue;
-        if (g_nsh == cap) { cap = cap ? cap * 2 : 128; shinfo *q = realloc(g_sh, cap * sizeof *g_sh); if (!q) die("[vk] out of memory for the shader table"); g_sh = q; }
-        shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
-        memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag");
-        if (!strncmp(stage, "comp", 4)) {
-            s->comp = 1;
-            if (sscanf(stage + 4, ":%hu,%hu,%hu", &s->wg[0], &s->wg[1], &s->wg[2]) != 3 || !s->wg[0] || !s->wg[1] || !s->wg[2]) {
-                LOG("[vk] [RED] shader table %s: compute stage without a local size (%s)", s->key, stage); s->comp = 0;
-            }
-        }
-        if (!strncmp(stage, "geomvp:", 7)) {
-            unsigned loc;
-            if (sscanf(stage + 7, "%u", &loc) == 1 && loc < 32) s->geom_vp = (int)loc + 1;
-        }
-        sh_read_resources(s, res);
-    }
-    fclose(f);
-    qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);   // looked up by key (Super Mario Galaxy creates over 3,000 modules at boot)
+    sh_read_table(f); fclose(f);
     snprintf(p, sizeof p, "%s/vk/vk_shaders.metallib", d);
     NSError *err = nil;
     g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];

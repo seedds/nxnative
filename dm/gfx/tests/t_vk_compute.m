@@ -148,7 +148,8 @@ static void test_t1(void) {
     VkDescriptorSetLayout sl = new_set_layout(&b, 1); VkPipelineLayout pl = new_pl(&sl, 1, 0, 0);
     VkBuffer out = new_buf(32 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0xCC); VkDescriptorSet ds = new_set(sl);
     write_buffer(ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, out, 0, out->size);
-    static const shinfo si = {.key = "0000000000000001", .comp = 1, .nres = 1, .wg = {8, 1, 1}, .res = {{'b', 0, 0, 1, 0}}};
+    static shres si_res[] = {{'b', 0, 0, 1, 0}};
+    static const shinfo si = {.key = "0000000000000001", .comp = 1, .nres = 1, .wg = {8, 1, 1}, .res = si_res};
     VkPipeline p = compute_pipe(pl, module("k_gid", si.key, &si)); uint64_t before = g_n_disp;
     VkCommandBuffer cb = new_cb(); h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     h_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL); h_vkCmdDispatch(cb, 4, 1, 1); run(cb);
@@ -163,7 +164,8 @@ static void test_t2(void) {
     VkDescriptorSetLayout sl = new_set_layout(&b, 1); VkPipelineLayout pl = new_pl(&sl, 1, 16, VK_SHADER_STAGE_COMPUTE_BIT);
     VkBuffer out = new_buf(64 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0xA5); VkDescriptorSet ds = new_set(sl);
     write_buffer(ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, out, 0, out->size);
-    static const shinfo si = {.key = "0000000000000002", .comp = 1, .nres = 2, .wg = {8, 1, 1}, .res = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}}};
+    static shres si_res[] = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}};
+    static const shinfo si = {.key = "0000000000000002", .comp = 1, .nres = 2, .wg = {8, 1, 1}, .res = si_res};
     VkPipeline p = compute_pipe(pl, module("k_limit", si.key, &si));
     uint32_t bound = 35;
     VkCommandBuffer cb = new_cb(); h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
@@ -192,7 +194,8 @@ static void test_t3(void) {
 static void test_tier1_refusal(void) {
     // A Tier1 device cannot build an argument-buffer pipeline; its dispatch must be refused and counted.
     VkPipelineLayout pl = new_pl(NULL, 0, 0, 0);
-    static const shinfo si = {.key = "0000000000000020", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = {{'B', 0, 0, 1, 0, 0}}};
+    static shres si_res[] = {{'B', 0, 0, 1, 0, 0}};
+    static const shinfo si = {.key = "0000000000000020", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = si_res};
     VkShaderModule sm = module("k_tier1_arg", si.key, &si); MTLArgumentBuffersTier tier = g_ab_tier;
     g_ab_tier = MTLArgumentBuffersTier1; VkPipeline p = compute_pipe(pl, sm); g_ab_tier = tier;
     uint64_t skipped = g_n_skip_disp;
@@ -211,8 +214,10 @@ static void test_t4(void) {
         .pushConstantRangeCount = 1, .pPushConstantRanges = &pc}; VkPipelineLayout pl = NULL; h_vkCreatePipelineLayout(dev, &plci, NULL, &pl);
     VkBuffer vertices = new_buf(3 * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0); VkDescriptorSet ds = new_set(sl);
     write_buffer(ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vertices, 0, vertices->size);
-    static const shinfo csi = {.key = "0000000000000004", .comp = 1, .nres = 2, .wg = {1, 1, 1}, .res = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}}};
-    static const shinfo vsi = {.key = "0000000000000005", .nres = 1, .res = {{'b', 0, 0, 1, 0}}};
+    static shres csi_res[] = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}};
+    static const shinfo csi = {.key = "0000000000000004", .comp = 1, .nres = 2, .wg = {1, 1, 1}, .res = csi_res};
+    static shres vsi_res[] = {{'b', 0, 0, 1, 0}};
+    static const shinfo vsi = {.key = "0000000000000005", .nres = 1, .res = vsi_res};
     static const shinfo fsi = {.key = "0000000000000006", .frag = 1};
     VkPipeline cp = compute_pipe(pl, module("k_t4_comp", csi.key, &csi));
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 1,
@@ -243,8 +248,10 @@ static void test_t5(void) {
     VkPipelineLayout pl = new_pl(&sl, 1, 32, VK_SHADER_STAGE_VERTEX_BIT);
     VkBuffer colors = new_buf(2 * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0); VkDescriptorSet ds = new_set(sl);
     write_buffer(ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, colors, 0, colors->size);
-    static const shinfo csi = {.key = "0000000000000007", .comp = 1, .nres = 2, .wg = {1, 1, 1}, .res = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}}};
-    static const shinfo vsi = {.key = "0000000000000008", .nres = 2, .res = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}}};
+    static shres csi_res[] = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}};
+    static const shinfo csi = {.key = "0000000000000007", .comp = 1, .nres = 2, .wg = {1, 1, 1}, .res = csi_res};
+    static shres vsi_res[] = {{'b', 0, 0, 1, 0}, {'p', 0, 1, 1, 0}};
+    static const shinfo vsi = {.key = "0000000000000008", .nres = 2, .res = vsi_res};
     static const shinfo fsi = {.key = "0000000000000009", .frag = 1};
     VkPipeline cp = compute_pipe(cl, module("k_t5_comp", csi.key, &csi));
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 12, 4, 1,
@@ -279,8 +286,10 @@ static void test_t6(void) {
     VkDescriptorSetLayout sl = new_set_layout(&b, 1); VkPipelineLayout pl = new_pl(&sl, 1, 0, 0);
     VkBuffer data = new_buf(sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0); VkDescriptorSet ds = new_set(sl);
     write_buffer(ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, data, 0, data->size);
-    static const shinfo asi = {.key = "0000000000000010", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = {{'b', 0, 0, 1, 0}}};
-    static const shinfo bsi = {.key = "0000000000000011", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = {{'b', 0, 0, 1, 0}}};
+    static shres asi_res[] = {{'b', 0, 0, 1, 0}};
+    static const shinfo asi = {.key = "0000000000000010", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = asi_res};
+    static shres bsi_res[] = {{'b', 0, 0, 1, 0}};
+    static const shinfo bsi = {.key = "0000000000000011", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = bsi_res};
     VkPipeline a = compute_pipe(pl, module("k_t6_a", asi.key, &asi)), bpipe = compute_pipe(pl, module("k_t6_b", bsi.key, &bsi));
     uint64_t encoders = g_n_comp_enc;
     VkCommandBuffer cb = new_cb(); h_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
@@ -301,7 +310,8 @@ static void test_t7(void) {
     write_buffer(gset, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, gdata, 0, gdata->size);
     static const shinfo csi = {.key = "0000000000000012", .comp = 1, .wg = {1, 1, 1}};
     static const shinfo vsi = {.key = "0000000000000013"};
-    static const shinfo fsi = {.key = "0000000000000014", .frag = 1, .nres = 1, .res = {{'b', 3, 0, 1, 0}}};
+    static shres fsi_res[] = {{'b', 3, 0, 1, 0}};
+    static const shinfo fsi = {.key = "0000000000000014", .frag = 1, .nres = 1, .res = fsi_res};
     VkPipeline cp = compute_pipe(pl, module("k_noop", csi.key, &csi));
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 1,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
@@ -353,7 +363,8 @@ static void test_t8(void) {
         {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, .pTexelBufferView = &texel},
     };
     h_vkUpdateDescriptorSets(dev, 2, w, 0, NULL);
-    static const shinfo si = {.key = "0000000000000015", .comp = 1, .nres = 2, .wg = {1, 1, 1}, .res = {{'t', 0, 0, 1, 0}, {'t', 0, 1, 1, 1}}};
+    static shres si_res[] = {{'t', 0, 0, 1, 0}, {'t', 0, 1, 1, 1}};
+    static const shinfo si = {.key = "0000000000000015", .comp = 1, .nres = 2, .wg = {1, 1, 1}, .res = si_res};
     VkPipeline p = compute_pipe(pl, module("k_cluster", si.key, &si)); VkCommandBuffer cb = new_cb();
     h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p); h_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
     VkBuffer readback = new_buf(8 * 8 * 4 * 16, 0, 0xEE);
@@ -379,9 +390,11 @@ static void test_t9(void) {
     VkDescriptorImageInfo ii = {NULL, iv, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii}; h_vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
-    static const shinfo csi = {.key = "0000000000000016", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = {{'t', 0, 0, 1, 0}}};
+    static shres csi_res[] = {{'t', 0, 0, 1, 0}};
+    static const shinfo csi = {.key = "0000000000000016", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = csi_res};
     static const shinfo vsi = {.key = "0000000000000017"};
-    static const shinfo fsi = {.key = "0000000000000018", .frag = 1, .nres = 1, .res = {{'t', 0, 0, 1, 0}}};
+    static shres fsi_res[] = {{'t', 0, 0, 1, 0}};
+    static const shinfo fsi = {.key = "0000000000000018", .frag = 1, .nres = 1, .res = fsi_res};
     VkPipeline cp = compute_pipe(pl, module("k_smaa_comp", csi.key, &csi));
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 1,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
@@ -405,7 +418,8 @@ static void test_t10(void) {
     VkBuffer out = new_buf(8 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 0xA5); VkDescriptorSet ds = new_set(sl);
     write_buffer(ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, out, 0, out->size);
     VkBuffer args = new_buf(32, 0, 0x5A); uint32_t groups[3] = {2, 3, 1}; memcpy(bytes(args) + 16, groups, sizeof groups);
-    static const shinfo si = {.key = "0000000000000019", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = {{'b', 0, 0, 1, 0}}};
+    static shres si_res[] = {{'b', 0, 0, 1, 0}};
+    static const shinfo si = {.key = "0000000000000019", .comp = 1, .nres = 1, .wg = {1, 1, 1}, .res = si_res};
     VkPipeline p = compute_pipe(pl, module("k_gid3", si.key, &si)); uint64_t before = g_n_disp;
     VkCommandBuffer cb = new_cb(); h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     h_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);

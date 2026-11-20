@@ -183,7 +183,7 @@ static void test_t11(void) {
     static const shinfo vsi = {.key = "1000000000000001"};
     shinfo fsi = {.key = "1000000000000002", .frag = 1};
     char resources[] = "T:0.4=0*40@0 S:0.5=0*20@40 U:0.6=0@60";
-    sh_read_resources(&fsi, resources);
+    CHECK(sh_read_resources(&fsi, resources), "argument-buffer resource row parses");
     CHECK(fsi.nres == 3 && fsi.res[1].binding == 5 && fsi.res[1].arg_id == 40,
           "the resource table keeps the Vulkan sampler binding and Metal ID independent");
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 12, 4,
@@ -198,6 +198,7 @@ static void test_t11(void) {
     CHECK(unused->ref.argumentState == nil, "a sampler never used in an argument set stays plain");
     h_vkDestroySampler(dev, unused, NULL);
     h_vkDestroyBuffer(dev, index_buffer, NULL);
+    h_vkDestroyPipeline(dev, gp, NULL); free(fsi.res);
 }
 
 static void test_t12(void) {
@@ -209,7 +210,8 @@ static void test_t12(void) {
     VkBuffer index_buffer = new_buf(sizeof indices, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 0); memcpy(bytes(index_buffer), &indices, sizeof indices);
     VkDescriptorSet set = new_set(sl); write_arrays(set, 0, 40, textures, samplers); write_indices(set, 60, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, index_buffer);
     static const shinfo vsi = {.key = "1000000000000003"};
-    static const shinfo fsi = {.key = "1000000000000004", .frag = 1, .nres = 3, .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'U', 0, 0, 1, 60, 60}}};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'U', 0, 0, 1, 60, 60}};
+    static const shinfo fsi = {.key = "1000000000000004", .frag = 1, .nres = 3, .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkFramebuffer fb = new_fb(rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 4, 4);
@@ -234,7 +236,8 @@ static void test_t13(void) {
     VkBuffer index_buffer = new_buf(sizeof indices, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 0); memcpy(bytes(index_buffer), &indices, sizeof indices);
     VkDescriptorSet old = new_set(sl); write_arrays(old, 0, 40, textures, samplers); write_indices(old, 60, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, index_buffer);
     static const shinfo vsi = {.key = "1000000000000005"};
-    static const shinfo fsi = {.key = "1000000000000006", .frag = 1, .nres = 3, .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'U', 0, 0, 1, 60, 60}}};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'U', 0, 0, 1, 60, 60}};
+    static const shinfo fsi = {.key = "1000000000000006", .frag = 1, .nres = 3, .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkFramebuffer fb = new_fb(rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 4, 4);
@@ -261,8 +264,9 @@ static void test_t14(void) {
     VkImageView ta[40], tb[40]; VkSampler sa[20], sb[20]; fill_arrays(ta, sa, red, sampler); fill_arrays(tb, sb, blue, sampler);
     VkDescriptorSet a = new_set(sl), b = new_set(sl); write_arrays(a, 0, 40, ta, sa); write_arrays(b, 0, 40, tb, sb);
     static const shinfo vsi = {.key = "1000000000000007"};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'p', 0, 1, 1, 0}};
     static const shinfo fsi = {.key = "1000000000000008", .frag = 1, .nres = 3,
-        .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'p', 0, 1, 1, 0}}};
+        .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 12, 4,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkFramebuffer fb = new_fb(rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 12, 4);
@@ -295,7 +299,8 @@ static void test_t15(void) {
     VkImageView textures[40]; VkSampler samplers[20]; VkSampler sampler = new_sampler(); fill_arrays(textures, samplers, source_view, sampler);
     VkDescriptorSet set = new_set(sl); write_arrays(set, 0, 40, textures, samplers);
     static const shinfo vsi = {.key = "1000000000000009"};
-    static const shinfo fsi = {.key = "1000000000000010", .frag = 1, .nres = 2, .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}}};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}};
+    static const shinfo fsi = {.key = "1000000000000010", .frag = 1, .nres = 2, .res = fsi_res};
     VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkRenderPass dst_rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkFramebuffer dst_fb = new_fb(dst_rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 4, 4);
     VkPipelineLayout plain = new_pl(NULL, 0, 0); static const shinfo solid_vs = {.key = "1000000000000011"}, solid_fs = {.key = "1000000000000012", .frag = 1};
@@ -318,8 +323,9 @@ static void test_t16(void) {
     VkBuffer data = new_buf(512, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 0); ((uint32_t *)bytes(data))[0] = 17; ((uint32_t *)bytes(data))[64] = 23;
     VkDescriptorSet ds = new_set(sl); write_arrays(ds, 0, 40, textures, samplers); write_indices(ds, 60, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, data);
     static const shinfo vsi = {.key = "1000000000000013"};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'U', 0, 0, 1, 60, 60}, {'q', 0, 1, 1, 0}, {'o', 0, 0, 1, 60}};
     static const shinfo fsi = {.key = "1000000000000014", .frag = 1, .nres = 5,
-        .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}, {'U', 0, 0, 1, 60, 60}, {'q', 0, 1, 1, 0}, {'o', 0, 0, 1, 60}}};
+        .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage targets[2] = {
         new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT),
         new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)};
@@ -350,8 +356,10 @@ static void test_t17(void) {
     VkBuffer allow = new_buf(sizeof(uint32_t), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 0); *(uint32_t *)bytes(allow) = 7;
     write_buffer(set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, allow);
     write_arrays(set, 1, 41, textures, samplers);
-    static const shinfo vsi = {.key = "1000000000000015", .nres = 1, .res = {{'u', 0, 0, 1, 0}}};
-    static const shinfo fsi = {.key = "1000000000000016", .frag = 1, .nres = 2, .res = {{'T', 0, 0, 40, 1, 1}, {'S', 0, 0, 20, 41, 41}}};
+    static shres vsi_res[] = {{'u', 0, 0, 1, 0}};
+    static const shinfo vsi = {.key = "1000000000000015", .nres = 1, .res = vsi_res};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 1, 1}, {'S', 0, 0, 20, 41, 41}};
+    static const shinfo fsi = {.key = "1000000000000016", .frag = 1, .nres = 2, .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkFramebuffer fb = new_fb(rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 4, 4);
@@ -371,7 +379,8 @@ static void test_t18(void) {
     VkImageView textures[40]; VkSampler samplers[20]; fill_arrays(textures, samplers, view, sampler);
     VkDescriptorSet set = new_set(sl); write_arrays(set, 0, 40, textures, samplers);
     static const shinfo vsi = {.key = "1000000000000017"};
-    static const shinfo fsi = {.key = "1000000000000018", .frag = 1, .nres = 2, .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}}};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}};
+    static const shinfo fsi = {.key = "1000000000000018", .frag = 1, .nres = 2, .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM); VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkFramebuffer fb = new_fb(rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 4, 4);
@@ -421,7 +430,8 @@ static void test_descriptor_generations(void) {
 static void test_tier1_refusal(void) {
     // A graphics pipeline with an argument-buffer set must be refused on Tier1 and its draw counted as skipped.
     VkPipelineLayout pl = new_pl(NULL, 0, 0); static const shinfo vsi = {.key = "1000000000000020"};
-    static const shinfo fsi = {.key = "1000000000000021", .frag = 1, .nres = 2, .res = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}}};
+    static shres fsi_res[] = {{'T', 0, 0, 40, 0, 0}, {'S', 0, 0, 20, 40, 40}};
+    static const shinfo fsi = {.key = "1000000000000021", .frag = 1, .nres = 2, .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM);
     VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 4, 4, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VkFramebuffer fb = new_fb(rp, new_view(target, VK_FORMAT_R8G8B8A8_UNORM), 4, 4);
@@ -441,11 +451,121 @@ static void test_ab_init_refusal(void) {
     VkPipelineLayoutCreateInfo plci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 3, .pSetLayouts = sets};
     VkPipelineLayout pl = NULL; CHECK(h_vkCreatePipelineLayout(dev, &plci, NULL, &pl) == VK_SUCCESS, "three-set pipeline layout created");
     static const shinfo vsi = {.key = "1000000000000022"};
+    static shres fsi_res[] = {{'T', 0, 0, 1, 0, 0}, {'T', 1, 1, 1, 0, 0}, {'T', 2, 2, 1, 0, 0}};
     static const shinfo fsi = {.key = "1000000000000023", .frag = 1, .nres = 3,
-        .res = {{'T', 0, 0, 1, 0, 0}, {'T', 1, 1, 1, 0, 0}, {'T', 2, 2, 1, 0, 0}}};
+        .res = fsi_res};
     VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM);
     VkPipeline p = graphics_pipe(rp, pl, module("k_fullscreen_vs", vsi.key, &vsi), module("k_arg_three_fs", fsi.key, &fsi), 4, 4);
     CHECK(p->pso == nil, "a pipeline requiring three argument buffers is refused");
+}
+
+static void test_resource_table(void) {
+    shinfo info = {.key = "3000000000000001"};
+    char empty[] = "  ";
+    CHECK(sh_read_resources(&info, empty) && !info.nres && !info.res, "a shader without resources needs no allocation");
+    for (int count = 24; count <= 29; count++) {
+        char resources[1024] = "";
+        for (int i = 0; i < count; i++) { char entry[32]; snprintf(entry, sizeof entry, "t:0.%d=%d ", i, i); strlcat(resources, entry, sizeof resources); }
+        CHECK(sh_read_resources(&info, resources) && info.nres == count && info.res[count - 1].binding == count - 1,
+              "all %d resources survive the former 24-entry limit", count);
+        free(info.res);
+    }
+    char legacy[] = "T:0.4=0*40 S:0.5=0*20@40 U:0.6=0@60 q:0.0=1 o:0.6=0 p:0.0=2";
+    CHECK(sh_read_resources(&info, legacy) && info.nres == 6 && info.res[0].arg_id == 4 && info.res[0].count == 40 && info.res[1].arg_id == 40,
+          "legacy IDs, explicit IDs, arrays, dynamic offsets and push constants retain their meanings");
+    free(info.res);
+    const char *bad[] = {"t:0.1=0*0", "t:0.1=0*", "t:0.1=0junk", "x:0.1=0", "t:-1.1=0", "t:8.1=0", "t:0.128=0",
+        "t:0.1=31", "t:0.1=0*32", "s:0.1=16", "c:0.1=15*2", "T:0.1=31", "T:0.1=0*4097", "T:0.1=0@65536",
+        "t:0.1=0@1", "T:0.1=0@", "u:0.1=4294967296", "u:0.1=18446744073709551616", "q:0.0=0*2", "o:0.1=32"};
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        char resources[256]; snprintf(resources, sizeof resources, "u:0.0=0 %s t:0.2=1", bad[i]);
+        CHECK(!sh_read_resources(&info, resources) && !info.nres && !info.res, "invalid entry %s refuses the entire resource row", bad[i]);
+    }
+    FILE *file = tmpfile(); CHECK(file != NULL, "temporary shader table created"); if (!file) return;
+    fputs("# synthetic table\n3000000000000002\tfrag\t", file);
+    for (int i = 0; i < 96; i++) {
+        fprintf(file, "T:%d.%d=%d@%d ", i / 48, i % 48, i / 48, i % 48);
+        if (i == 24) for (int pad = 0; pad < 5000; pad++) fputc(' ', file);
+    }
+    fputs("\t/synthetic.frag\n3000000000000003\tfrag\tu:0.0=0 s:0.1=16\n", file);
+    fputs("3000000000000004\tcomp:0,1,1\t\n3000000000000005\tgeomvp:32\t\n", file);
+    fputs("3000000000000006\tcomp:65537,1,1\t\n3000000000000007\tvert\n", file);
+    fputs("3000000000000008\tcomp:8,4,1\t\n3000000000000009\tgeomvp:1\t\n", file);
+    fputs("3000000000000001\tvert\t", file);   // an empty resource field without a final newline
+    CHECK(fseek(file, 0, SEEK_SET) == 0, "shader table rewound for loading");
+    shinfo *previous = g_sh; int previous_count = g_nsh; g_sh = NULL; g_nsh = 0;
+    sh_read_table(file); fclose(file);
+    CHECK(g_nsh == 4 && !sh_find("3000000000000003") && !sh_find("3000000000000007"), "invalid rows never enter shader lookup");
+    const shinfo *large = sh_find("3000000000000002"), *zero = sh_find("3000000000000001");
+    CHECK(large && large->nres == 96 && large->res[95].set == 1 && large->res[95].arg_id == 47,
+          "a row over 4 KB retains 96 resources through sorting and line-buffer reuse");
+    CHECK(zero && !zero->res && !zero->nres, "the following empty row survives complete-line framing");
+    const shinfo *compute = sh_find("3000000000000008"), *geometry = sh_find("3000000000000009");
+    CHECK(compute && compute->comp && compute->wg[0] == 8 && compute->wg[1] == 4 && compute->wg[2] == 1 && geometry && geometry->geom_vp == 2,
+          "complete compute and geometry stage metadata survives loading");
+    for (int i = 0; i < g_nsh; i++) free(g_sh[i].res);
+    free(g_sh); g_sh = previous; g_nsh = previous_count;
+}
+
+static void test_resource_25_sampler(void) {
+    NSMutableString *source = [NSMutableString stringWithString:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 many_vs(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\n"
+        "fragment float4 many_fs(constant float& factor [[buffer(0)]]"];
+    for (int i = 0; i < 12; i++) [source appendFormat:@", texture2d<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", i, i, i, i];
+    [source appendString:@") { float4 result=0;"];
+    for (int i = 0; i < 12; i++) [source appendFormat:@"result += t%d.sample(s%d,float2(%s,0.5));", i, i, i == 11 ? "0.5" : "0.25"];
+    [source appendString:@"return result * (factor / 12.0); }"];
+    NSError *error = nil; id<MTLLibrary> previous = lib;
+    lib = [g_dev newLibraryWithSource:source options:nil error:&error];
+    CHECK(lib != nil, "25-resource shader compiles: %s", error.localizedDescription.UTF8String);
+    if (!lib) { lib = previous; return; }
+    VkDescriptorSetLayoutBinding bindings[25] = {{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    char resources[1024] = "u:0.0=0";
+    for (int i = 0; i < 12; i++) {
+        bindings[1 + i] = (VkDescriptorSetLayoutBinding){1 + i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        bindings[13 + i] = (VkDescriptorSetLayoutBinding){13 + i, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        char entry[32]; snprintf(entry, sizeof entry, " t:0.%d=%d", 1 + i, i); strlcat(resources, entry, sizeof resources);
+    }
+    for (int i = 0; i < 12; i++) { char entry[32]; snprintf(entry, sizeof entry, " s:0.%d=%d", 13 + i, i); strlcat(resources, entry, sizeof resources); }
+    shinfo fsi = {.key = "3000000000000025", .frag = 1}, vsi = {.key = "3000000000000026"};
+    CHECK(sh_read_resources(&fsi, resources) && fsi.nres == 25, "the final sampler is retained as resource 25");
+    VkDescriptorSetLayout sl = new_layout(bindings, 25); VkDescriptorSet set = new_set(sl); VkPipelineLayout pl = new_pl(sl, 0, 0);
+    VkBuffer factor = new_buf(16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 0); *(float *)bytes(factor) = 1;
+    write_buffer(set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, factor);
+    VkImage texture = new_img(VK_FORMAT_R8G8B8A8_UNORM, 2, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    VkImageView view = new_view(texture, VK_FORMAT_R8G8B8A8_UNORM);
+    VkBuffer upload = new_buf(8, 0, 0); const uint8_t colors[] = {255, 0, 0, 255, 0, 255, 0, 255}; memcpy(bytes(upload), colors, sizeof colors);
+    VkBufferImageCopy copy = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {2, 1, 1}};
+    VkCommandBuffer cb = new_cb(); h_vkCmdCopyBufferToImage(cb, upload, texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy); run(cb);
+    VkSampler stale = new_sampler(), linear = NULL;
+    VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+    h_vkCreateSampler(dev, &sci, NULL, &linear);
+    VkDescriptorImageInfo ti = {.imageView = view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, si = {.sampler = linear};
+    for (int i = 0; i < 12; i++) {
+        VkWriteDescriptorSet writes[] = {
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1 + i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &ti},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 13 + i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .pImageInfo = &si}};
+        h_vkUpdateDescriptorSets(dev, 2, writes, 0, NULL);
+    }
+    VkImage target = new_img(VK_FORMAT_R8G8B8A8_UNORM, 1, 1, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    VkRenderPass rp = color_pass(VK_FORMAT_R8G8B8A8_UNORM);
+    VkShaderModule vs = module("many_vs", vsi.key, &vsi), fs = module("many_fs", fsi.key, &fsi);
+    VkPipeline p = graphics_pipe(rp, pl, vs, fs, 1, 1); CHECK(p->pso != nil, "25-resource pipeline builds");
+    if (p->pso) {
+        MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        rpd.colorAttachments[0].texture = target->tex; rpd.colorAttachments[0].loadAction = MTLLoadActionClear; rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> gpu = [g_q commandBuffer]; id<MTLRenderCommandEncoder> enc = [gpu renderCommandEncoderWithDescriptor:rpd];
+        [enc setRenderPipelineState:p->pso]; [enc setViewport:(MTLViewport){0, 0, 1, 1, 0, 1}];
+        [enc setFragmentSamplerState:stale->s atIndex:11];   // the state left by a previous draw must be overwritten
+        rs_t state = {.re = enc, .pipe = p}; state.set[0].s = set; bind_res(&state, p, &fsi, ST_FRAG);
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding]; [gpu commit]; [gpu waitUntilCompleted];
+        CHECK(gpu.status == MTLCommandBufferStatusCompleted, "25-resource GPU draw completes");
+        uint8_t pixels[4]; read_image(target, 1, 1, pixels);
+        CHECK(color_at(pixels, 1, 0, 0, 244, 11, 0), "resource 25 supplies the correct linear sampler instead of stale nearest filtering");
+    }
+    h_vkDestroyPipeline(dev, p, NULL); h_vkDestroyShaderModule(dev, vs, NULL); h_vkDestroyShaderModule(dev, fs, NULL);
+    free(fsi.res); lib = previous;
 }
 
 int main(void) {
@@ -475,6 +595,7 @@ int main(void) {
         VkDescriptorPoolCreateInfo dpci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 128}; h_vkCreateDescriptorPool(dev, &dpci, NULL, &desc_pool);
         test_t11(); test_t12(); test_t13(); test_t14(); test_t15(); test_t16(); test_t17(); test_t18();
         test_descriptor_generations(); test_tier1_refusal(); test_ab_init_refusal();
+        test_resource_table(); test_resource_25_sampler();
     }
     printf("Vulkan argument buffers: %d checks, %d failed\n", checks, fails);
     return fails != 0;

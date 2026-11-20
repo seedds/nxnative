@@ -4,7 +4,9 @@
 // Skipped, so no controller is read twice: GameController's synthetic devices, and a device GameController lists itself. +[GCController supportsHIDDevice:] is only a hint for
 // that: it answers YES for the 8BitDo Ultimate 2C (2dc8:301b), which GameController then never lists (GitHub issue #965). So a device it says YES for waits HIDPAD_GC_WAIT
 // seconds for a GCController of its name; without one it is read as HID, and given back if that GCController connects later. Microsoft's, Sony's and Nintendo's pads
-// (hidpad_gc_native) are trusted without the wait: GameController supports them itself, under names that need not be their HID product strings. DM_HID_PADS=0 turns this off.
+// (hidpad_gc_native) are trusted without the wait only for physical devices: GameController supports them itself, under names that need not be their HID product strings.
+// A virtual device can reuse those vendors without GameController publishing it (Steam Link, GitHub issue #2465), so it needs the same usable-controller check and wait.
+// DM_HID_PADS=0 turns this off.
 // Identical pads (GitHub issue #1218): GameController can list fewer pads of one model than IOKit has; two Switch Pro Controllers over USB are listed as one (their USB serial
 // numbers match, which may be why; over Bluetooth both are listed). So a device GameController reads is kept, unread, in g_hidpads_gc, to count each model's pads. When IOKit
 // has at least two pads of a model and more than GameController lists, after HIDPAD_TWIN_WAIT for a pad not listed yet (pad_dupes_want), every pad of that model is read here,
@@ -79,8 +81,9 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
         int a = pad_hid_axis_of(page, usage); if (a < 0) return;
+        a = pad_hid_axis_for(d->st.layout, a);
         float n = pad_hid_norm(x, min, max);
-        d->st.axis[a] = d->st.raw ? pad_hid_raw_axis(&d->st, a, n) : n;
+        d->st.axis[a] = d->st.layout == PAD_HID_NINTENDO ? pad_hid_raw_axis(&d->st, a, n) : n;
     }
     hidpad_read(d);
 }
@@ -259,8 +262,8 @@ static hid_pad *hidpad_unlink(hid_pad **list, IOHIDDeviceRef hid) {
     while (*list && (*list)->hid != hid) list = &(*list)->next;
     hid_pad *d = *list; if (d) *list = d->next; return d;
 }
-// Whether GameController lists a controller of this name (its vendorName is the HID product string). A second pad of the same model counts as listed with the first
-static int hidpad_gc_listed(const char *name) { for (GCController *c in GCController.controllers) if (c.vendorName && !strcmp(c.vendorName.UTF8String, name)) return 1; return 0; }
+// Whether GameController lists a controller of this name with the profile front_mac.m reads (vendorName is the HID product string). A second pad of the same model counts as listed with the first
+static int hidpad_gc_listed(const char *name) { for (GCController *c in GCController.controllers) if (c.extendedGamepad && c.vendorName && !strcmp(c.vendorName.UTF8String, name)) return 1; return 0; }
 // The vendors whose pads GameController supports itself (Xbox, PlayStation, Switch controllers). The name match cannot vouch for them: a DualShock 4's HID product string is
 // "Wireless Controller", and combined Joy-Cons are one GCController for two HID devices, so each would also be read as HID after the wait and take a player of its own
 static int hidpad_gc_native(int vid) { return vid == 0x045e || vid == 0x054c || vid == 0x057e; }
@@ -293,9 +296,11 @@ static void hidpad_use(hid_pad *d) {
     if (d->proto) hidpad_nin_ask(d);
     else hidpad_lights(d, hidpad_player(d));
     // HID has no standard button numbering: the default map is 8BitDo's, so another vendor's pad may have its buttons in other places
-    if (d->nin & PAD_NIN_SIMPLE) {
+    if (d->st.layout == PAD_HID_NINTENDO) {
         if (!d->proto) LOG("controller '%s' (HID, %04x:%04x): buttons in Nintendo's report 0x3F: read with its numbering", d->name, d->vid, d->pid);
-    } else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
+    } else if (d->st.layout == PAD_HID_X360)
+        LOG("controller '%s' (HID, %04x:%04x): Xbox 360 layout (Z / Rz triggers, Rx / Ry right stick)", d->name, d->vid, d->pid);
+    else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
 // The device's I/O Registry entry: IOHIDManager hands one device over once per matching dictionary it meets (a Pro Controller meets both the GamePad usage
@@ -322,11 +327,14 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
         int a = pad_hid_axis_of(page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
         d->nin |= pad_hid_nin_bit(IOHIDElementGetType(e) == kIOHIDElementTypeOutput, IOHIDElementGetReportID(e), page);
     }
-    pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->nin & PAD_NIN_SIMPLE); memcpy(d->st.has, has, sizeof has);
+    enum pad_hid_layout layout = pad_hid_layout_for(d->nin, d->vid, d->pid, has);
+    pad_hid_init(&d->st, getenv("DM_HID_MAP"), layout);
+    for (int a = 0; a < PH_AXES; a++) if (has[a]) d->st.has[pad_hid_axis_for(layout, a)] = 1;
     d->hid = (IOHIDDeviceRef)CFRetain(hid);
     d->gc_hint = [GCController supportsHIDDevice:hid];   // once per device: the call is not cheap
     if (!d->gc_hint) { hidpad_use(d); return; }
-    if (hidpad_gc_native(d->vid) || hidpad_gc_listed(d->name)) { hidpad_keep_gc(d); hidpad_models_changed(); return; }   // front_mac.m reads it through its GCController
+    NSNumber *virt = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVirtualHIDevice));
+    if ((!virt.intValue && hidpad_gc_native(d->vid)) || hidpad_gc_listed(d->name)) { hidpad_keep_gc(d); hidpad_models_changed(); return; }   // front_mac.m reads it through its GCController
     d->next = g_hidpads_waiting; g_hidpads_waiting = d;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HIDPAD_GC_WAIT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         hid_pad *w = hidpad_unlink(&g_hidpads_waiting, hid); if (!w) return;   // removed meanwhile
@@ -347,6 +355,7 @@ static void hidpad_removed(void *ctx, IOReturn result, void *sender, IOHIDDevice
 // ponytail: matched by name, so two pads of one model that both fell back to HID are both given back when GameController lists one; a per-device link would need an API
 // GameController does not give. Twins stay: hidpad_twins_eval decides for them
 static void hidpad_gc_connected(GCController *c) {
+    if (!c.extendedGamepad) return;   // front_mac.m cannot read this controller yet
     const char *name = c.vendorName.UTF8String; if (!name) return;
     for (hid_pad **link = &g_hidpads; *link;) {
         hid_pad *d = *link; if (!d->gc_hint || d->twin || strcmp(d->name, name)) { link = &d->next; continue; }
@@ -450,7 +459,7 @@ static void hidpad_twins_take(GCController *gone) {
             IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
         } else {
             uint8_t has[PH_AXES]; memcpy(has, d->st.has, sizeof has);   // the axes hidpad_found saw
-            pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->nin & PAD_NIN_SIMPLE); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
+            pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->st.layout); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
             IOHIDDeviceRegisterInputValueCallback(d->hid, hidpad_value, d);
         }
         hidpad_attach(d);

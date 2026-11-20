@@ -47,6 +47,14 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 // 0: closed (B, Escape); -1 with no window: nothing shown, the caller answers as the player closing it
 int front_ctrl_support(int min, int max);
 
+// Account applet: choices are already filtered by the host's selection settings.
+// Return a displayed user's slot, FRONT_USER_CREATE, FRONT_USER_SKIP, or FRONT_USER_CANCEL.
+// Synchronous on the guest thread, native UI on the main thread. No window: cancel,
+// never infer a user from controllers. Creation/skip actions appear only when allowed.
+typedef struct { int slot, open; char nickname[33]; } front_user;
+enum { FRONT_USER_CANCEL = -1, FRONT_USER_CREATE = -2, FRONT_USER_SKIP = -3 };
+int front_user_select(const front_user *users, int count, int allow_create, int allow_skip);
+
 // Early start of host loading (main.c): reading the NSO / relocation / forced takeover / prefetch start are moved to a background thread, in parallel with the front end (UIKit launch chain, Metal view);
 // the dm_main / main called afterwards waits for it to finish. For call timing and preconditions see the comments in main.c (set DM_ROMFS and the other environment variables and the cwd first; arguments identical item by item to those of the later main).
 void dm_host_preload_start(int argc, char **argv);

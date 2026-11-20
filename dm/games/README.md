@@ -40,7 +40,7 @@ Defaults may use `<ios>|<mac>` to select the platform's value before resolving a
 
 ## Games
 
-One row per profile; the notes are each profile's `README.md`.
+One row per profile; the notes are each profile's `README.md`. Entries marked provisional have a successful Mac playtest, with the remaining validation stated in their notes.
 
 | Game | Title ID | Build | SDK | Engine | Graphics |
 |---|---|---|---|---|---|
@@ -68,6 +68,10 @@ One row per profile; the notes are each profile's `README.md`.
 | [Big Brain Academy: Brain vs. Brain](0100620012D6E000/README.md) | `0100620012D6E000` | 1.2.0 | 11.4.3 | NintendoWare Bezel Engine 1.56 | NVN |
 | [Blasphemous](0100698009C6E000/README.md) | `0100698009C6E000` | 1.0.8 | 8.3.1 | Unity 2017.4.28f1 IL2CPP, FMOD | NVN |
 | [Blasphemous 2](010040801A4C8000/README.md) | `010040801A4C8000` | 1.0.8 | 15.3.2 | Unity 2021.3.20f1 IL2CPP, FMOD | NVN |
+| [Bloodstained: Curse of the Moon](01004B800AF5A000/README.md) | `01004B800AF5A000` | 1.1.1 | 4.5.0 | Inti Creates' engine | NVN |
+| [Bloodstained: Curse of the Moon 2](01004680124E6000/README.md) | `01004680124E6000` | 1.3.2 | 10.6.0 | Inti Creates' engine | NVN |
+| [Bloodstained: Ritual of the Night](0100BF500207C000/README.md) | `0100BF500207C000` | 1.60 | 7.6.0 | Unreal Engine 4, CRIWARE | NVN |
+| [Borderlands: Game of the Year Edition](010064800F66A000/README.md) | `010064800F66A000` | 1.0.2 | 9.3.0 | Unreal Engine 3 (package version 595), FMOD | NVN |
 | [Brain Memory Training Academy](0100F5D01DA3A000/README.md) | `0100F5D01DA3A000` | 1.0.0 (base) | 16.2.4 | Unity 2022.3.5f1 IL2CPP | NVN |
 | [Burnout Paradise Remastered](0100DBF01000A000/README.md) | `0100DBF01000A000` | 1.0.0 (base) | 9.3.0 | Criterion's engine | NVN |
 | [Captain Toad: Treasure Tracker](01009BF0072D4000/README.md) | `01009BF0072D4000` | 1.4.2 | 8.2.0 | Nintendo EPD Tokyo (`al` over sead / agl) | NVN |
@@ -75,6 +79,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Catherine: Full Body](0100BF00112C0000/README.md) | `0100BF00112C0000` | 1.0.1a | 8.2.1 | Atlus GFD (CRI middleware) | NVN |
 | [Celeste](01002B30028F6000/README.md) | `01002B30028F6000` | 1.4.1.1 | 15.3.2 | MonoGame (C# → C++ by BRUTE) | NVN |
 | [Chained Echoes](0100C510166F0000/README.md) | `0100C510166F0000` | 1.1.1 | 14.3.0 | Unity 2020.3.36f1 IL2CPP, NintendoSDK_movie | NVN |
+| [Cozy Land](0100777022394000/README.md) | `0100777022394000` | 1.0.0 (base) | 17.5.8 | Unity 2023.2.20f1 IL2CPP | NVN |
 | [Cult of the Lamb](01002E7016C46000/README.md) | `01002E7016C46000` | 1.5.28 | 19.3.14 | Unity 2022.3.62f3 IL2CPP, FMOD | NVN |
 | [Cuphead](0100A5C00D162000/README.md) | `0100A5C00D162000` | 1.3.7 | 5.5.0 | Unity 2017.4.9f1 IL2CPP | NVN |
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN |
@@ -97,6 +102,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [DRAGON QUEST VII Reimagined](0100A9D01C446000/README.md) | `0100A9D01C446000` | 1.2.0 | 19.3.1 | Unreal Engine 4.27 | NVN |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](01006C300E9F0000/README.md) | `01006C300E9F0000` | 1.0.4 | 7.3.2 | Unreal Engine 4.18 | NVN |
 | [EA SPORTS FC 27](0100C49025D3E000/README.md) | `0100C49025D3E000` | 1.8d.310c | 22.2.0 | Frostbite 2025.1.2 (its NVN renderer in an NRO) | NVN |
+| [Farming Simulator 26: Nintendo Switch Edition](0100D440269E8000/README.md) | `0100D440269E8000` | 1.0.1.0 | 20.5.4 | GIANTS Engine | NVN |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](0100CE4010AAC000/README.md) | `0100CE4010AAC000` | 1.0.3 | 8.2.1 | Unity 2018.4.2f1 IL2CPP, FMOD | NVN |
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
@@ -106,6 +112,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [FINAL FANTASY X/X-2 HD Remaster](0100BC300CB48000/README.md) | `0100BC300CB48000` | 1.0.0 (base) | 5.4.0 | PhyreEngine (Virtuos) | NVN |
 | [FINAL FANTASY XII THE ZODIAC AGE](0100EB100AB42000/README.md) | `0100EB100AB42000` | 1.1.0 | 6.4.0 | PhyreEngine | NVN |
 | [Fast Fusion](040041E0212AE000/README.md) | `040041E0212AE000` | v262144 (Switch 2) | 20.5.13 (Ounce) | Shin'en's engine | NVN2 |
+| [FIFA 23 Legacy Edition](01001C8016B4E000/README.md) | `01001C8016B4E000` | 1.0.0, 1.0.3 | 13.3.5 | EA proprietary engine | NVN |
 | [Fire Emblem Engage](0100A6301214E000/README.md) | `0100A6301214E000` | 2.0.0 | 12.3.7 | Unity 2020.3.18f1 IL2CPP, Wwise | NVN |
 | [Fire Emblem Fortune's Weave](04007EF01F8AE000/README.md) | `04007EF01F8AE000` | v131072 (Switch 2) | 22.2.0 (Ounce) | Intelligent Systems' engine, NintendoWare | NVN2 |
 | [Fire Emblem: Three Houses](010055D009F78000/README.md) | `010055D009F78000` | 1.2.0 | 6.5.0 | Koei Tecmo's KTGL | NVN |
@@ -119,7 +126,10 @@ One row per profile; the notes are each profile's `README.md`.
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN |
 | [Kirby Air Riders](040077201BE50000/README.md) | `040077201BE50000` | v458752 (Switch 2) | 20.5.26 (Ounce) | Its own engine (`phx`, `Aurora`) | NVN2 |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
+| [Kirby's Dream Buffet](0100A8E016236000/README.md) | `0100A8E016236000` | 1.0.0 | 13.3.0 | HAL Laboratory's engine (Basil, NintendoWare) | NVN |
 | [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN |
+| [L.A. Noire](0100830004FB6000/README.md) | `0100830004FB6000` | 1.2 | 1.3.1 | Team Bondi's engine (Havok, FMOD) | NVN |
+| [LEGO Star Wars: The Skywalker Saga](010042D00D900000/README.md) | `010042D00D900000` | 1.10.0 | 12.3.6 | Traveller's Tales' engine | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
 | [Mario & Luigi: Brothership](01006D0017F7A000/README.md) | `01006D0017F7A000` | 1.0.0 | 12.3.2 | Unreal Engine 4.27.2, Wwise | NVN |
 | [Mario Golf: Super Rush](0100C9C00E25C000/README.md) | `0100C9C00E25C000` | 4.0.0 | 11.4.0 | Camelot's engine, NintendoWare | NVN |
@@ -136,11 +146,13 @@ One row per profile; the notes are each profile's `README.md`.
 | [Metroid Prime 4: Beyond](010019A01E2F2000/README.md) | `010019A01E2F2000` | 1.1.0 | 19.3.15 | Retro Studios' engine | NVN |
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN |
 | [Minecraft Dungeons II](0100A7C01B792000/README.md) | `0100A7C01B792000` | 1.1.3.0 | 20.5.15 | Unreal Engine 5, Wwise, Havok | NVN |
+| [Minecraft for Nintendo Switch](0100D71004694000/README.md) | `0100D71004694000` | 1.26.62 | 20.5.14 | RenderDragon, FMOD | Vulkan |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN |
 | [Need for Speed: Hot Pursuit Remastered](010029B0118E8000/README.md) | `010029B0118E8000` | 1.0.3 | 10.4.1 | Criterion's engine (Stellar Entertainment port) | NVN |
 | [NieR:Automata The End of YoRHa Edition](010056B015FE8000/README.md) | `010056B015FE8000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN |
 | [NieR:Automata The End of YoRHa Edition, Asian release](0100B8E016F76000/README.md) | `0100B8E016F76000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN |
+| [Nintendo Switch 2 Welcome Tour](040057C02159A000/README.md) | `040057C02159A000` | v262144 (Switch 2) | 20.5.29 (Ounce) | NintendoWare Bezel Engine 2.16.0 | NVN2 |
 | [Nintendo Switch Sports Resort](04008E001F098000/README.md) | `04008E001F098000` | v65536 (Switch 2) | 22.2.10 (Ounce) | sead / agl / gsys, Havok | NVN2 |
 | [OCTOPATH TRAVELER](010057D006492000/README.md) | `010057D006492000` | 1.0.5 | 3.5.1 | Unreal Engine 4.18 | NVN |
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN |
@@ -155,6 +167,8 @@ One row per profile; the notes are each profile's `README.md`.
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |
 | [Persona 4 Golden](010062B01525C000/README.md) | `010062B01525C000` | 1.0.2 | 14.3.0 | Atlus in-house (CRI middleware) | NVN |
 | [Persona 5 Royal](01005CA01580E000/README.md) | `01005CA01580E000` | 1.0.2 | 13.3.2 | Atlus GFD / Needle (CRI middleware) | NVN |
+| [Persona 5 Strikers](0100801011C3E000/README.md) | `0100801011C3E000` | 1.0.0 (base) | 8.3.2 | Koei Tecmo's KTGL | NVN |
+| [Persona 5 Tactica](010087701B092000/README.md) | `010087701B092000` | 1.1.0 | 16.2.0 | Unity 2021.3.23f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [Pikmin 4](0100B7C00933A000/README.md) | `0100B7C00933A000` | 1.1.1 | 10.4.8 | Unreal Engine 4.26.2 | NVN |
 | [Pokémon Brilliant Diamond](0100000011D90000/README.md) | `0100000011D90000` | 1.3.0 | 11.4.3 | Unity 2019.4.27f1 IL2CPP | NVN |
 | [Pokémon Legends: Arceus](01001F5010DFA000/README.md) | `01001F5010DFA000` | 1.1.1 | 11.4.0 | Game Freak's engine (between Sword's and Trinity) | NVN |
@@ -170,17 +184,21 @@ One row per profile; the notes are each profile's `README.md`.
 | [Princess Peach: Showtime!](01007A3009184000/README.md) | `01007A3009184000` | 1.0.0 | 15.3.2 | Unreal Engine 4.27 (Good-Feel), Wwise | NVN |
 | [Raging Loop](010020400E1C2000/README.md) | `010020400E1C2000` | 1.0.0 (base) | 7.3.2 | Unity 2018.3.10f1 IL2CPP | NVN |
 | [Rayman Legends: Definitive Edition](01005FF002E2A000/README.md) | `01005FF002E2A000` | 1.2 | 1.3.1 | Ubisoft's UbiArt Framework | NVN |
+| [Re:ZERO -Starting Life in Another World- The Prophecy of the Throne](0100D800117F4000/README.md) | `0100D800117F4000` | 1.0.2 | 9.5.0 | The Forge renderer | Vulkan |
 | [Red Dead Redemption](01007820196A6000/README.md) | `01007820196A6000` | 1.0.7 | 15.3.2 | Rockstar's RAGE (Double Eleven port) | NVN |
+| [Resident Evil](010050F00BC1A000/README.md) | `010050F00BC1A000` | 1.0.0 (base) | 5.4.0 | Capcom's MT Framework | NVN |
 | [Resident Evil 4](0400569027BF4000/README.md) | `0400569027BF4000` | v131072 (Switch 2) | 21.4.3 (Ounce) | RE Engine, Havok, Wwise | NVN2 |
 | [Return of the Obra Dinn](010032E00E6E2000/README.md) | `010032E00E6E2000` | 1.0.1 | 8.2.0 | Unity 2017.4.28f1 IL2CPP | NVN |
 | [Rhythm Heaven Groove](0100D9F01D474000/README.md) | `0100D9F01D474000` | 1.0.0 (base) | 21.4.0 | Nintendo's own 2D engine | NVN |
 | [ROMANCE OF THE THREE KINGDOMS 8 REMAKE](0100C2A01A730000/README.md) | `0100C2A01A730000` | 1.1.3 | 17.5.3 | Koei Tecmo's KTGL | NVN |
 | [ROMANCE OF THE THREE KINGDOMS XIV: Diplomacy and Strategy Expansion Pack](0100ED7012DB2000/README.md) | `0100ED7012DB2000` | 1.0.10 | 10.4.1 | Koei Tecmo's KTGL | NVN |
+| [Sam & Max: The Devil's Playhouse](0100D5501857E000/README.md) | `0100D5501857E000` | 1.8.0 (provisional Mac profile) | 17.5.6 | Telltale Tool, FMOD | NVN |
 | [Sea of Stars](01008C0016544000/README.md) | `01008C0016544000` | 2.0.59001 | 16.2.0 | Unity 2021.3.25f1 IL2CPP | NVN |
 | [SHIN MEGAMI TENSEI V: Vengeance](010069C01AB82000/README.md) | `010069C01AB82000` | 1.0.3 | 15.3.2 | Unreal Engine 4.27 | NVN |
 | [Sid Meier's Civilization VI](010044500C182000/README.md) | `010044500C182000` | 1.2.19 | 8.2.1 | Firaxis, Havok, Wwise | NVN |
 | [Sid Meier's Civilization VII](0100C3601518C000/README.md) | `0100C3601518C000` | 1.5.0.1 (Mac; iOS address space open) | 19.3.11 | Firaxis, Coherent Gameface / V8, Wwise | NVN |
 | [Silver Pines](0100D5B026844000/README.md) | `0100D5B026844000` | 1.0.0 (base) | 21.4.7 | Unity 6000.3.15f1 IL2CPP | NVN |
+| [Slay the Spire](010026300BA4A000/README.md) | `010026300BA4A000` | 1.0 (base) | 7.3.2 | libGDX on MonoGame.Switch (BRUTE) | OpenGL |
 | [Sonic Frontiers Definitive Edition](0400921025B32000/README.md) | `0400921025B32000` | v65536 (Switch 2) | 21.4.1 (Ounce) | Hedgehog Engine 2, CRIWARE | NVN2 |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
@@ -195,12 +213,14 @@ One row per profile; the notes are each profile's `README.md`.
 | [Super Mario 3D All-Stars](010049900F546000/README.md) | `010049900F546000` | 1.1.4 | 10.8.1, 9.5.1 | a launcher (sead / agl), [Super Mario 64](010049900F546001/README.md) (Nintendo's N64 layer), [Super Mario Sunshine](010049900F546002/README.md) (NERD's Hagi); Galaxy is 32-bit ARM | NVN, Vulkan |
 | [Super Mario 3D World + Bowser's Fury](010028600EBDA000/README.md) | `010028600EBDA000` | 1.2.2 | 10.4.0 | Nintendo EPD (sead / agl, NintendoWare) | NVN |
 | [Super Mario Bros. Wonder](010015100B514000/README.md) | `010015100B514000` | 1.2.1 (and 1.0.0) | 16.2.12 (1.0.0: 16.2.0) | Nintendo EPD (sead / agl) | NVN |
+| [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](040015100B514001/README.md) | `040015100B514001` | 1.2.1 (Switch 2) | 21.4.1 (Ounce) | Nintendo EPD (sead / agl) | NVN2 |
 | [Super Mario Galaxy](010099C022B96000/README.md) | `010099C022B96000` | 1.3.1 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
 | [Super Mario Galaxy 2](0100FD8022DAA000/README.md) | `0100FD8022DAA000` | 1.4.0 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
 | [Super Mario Odyssey](0100000000010000/README.md) | `0100000000010000` | 1.4.1 | 7.3.2 | Nintendo EPD (sead / agl, NintendoWare) | NVN |
 | [Super Mario Party Jamboree](0100965017338000/README.md) | `0100965017338000` | 2.3.0 | 17.5.9 | NintendoWare Bezel Engine 2.9 | NVN |
 | [Super Mario RPG](0100BC0018138000/README.md) | `0100BC0018138000` | 1.0.1 | 14.3.1 | Unity 2021.3.15f1 IL2CPP, CRIWARE | NVN |
 | [Super Monkey Ball Banana Rumble](010031F019294000/README.md) | `010031F019294000` | 2.20 | 17.5.8 | Unity 2022.3.30f1 IL2CPP, CRIWARE, FMOD | NVN |
+| [Super Nintendo Entertainment System – Nintendo Classics](01008D300C50C000/README.md) | `01008D300C50C000` | 6.0.0 | 20.5.21 | Nintendo's own SNES emulator (Lua UI) | NVN |
 | [SUPER ROBOT WARS Y](010063301BD50000/README.md) | `010063301BD50000` | 1.4.1 | 18.3.5 | Unity 2022.3.44f1 IL2CPP, CRIWARE | NVN |
 | [Super Smash Bros. Ultimate](01006A800016E000/README.md) | `01006A800016E000` | 13.0.5 | 8.2.1 | Bandai Namco / Sora's engine | NVN |
 | [Taiko Risshiden V DX](0100346017304000/README.md) | `0100346017304000` | 1.1.1 | 12.3.3 | Koei Tecmo's KTGL | NVN |
@@ -213,11 +233,15 @@ One row per profile; the notes are each profile's `README.md`.
 | [The Legend of Zelda: Skyward Sword HD](01002DA013484000/README.md) | `01002DA013484000` | 1.0.1 | 11.4.0 | Nintendo's Wii-era engine, ported by Tantalus | NVN |
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN |
 | [The Rogue Prince of Persia](01008D9022462000/README.md) | `01008D9022462000` | 1.1.0 | 20.5.29 | Unity 6000.0.64f1 IL2CPP, FMOD | NVN |
+| [The Witcher 3: Wild Hunt — Complete Edition](0100A0800E9C4000/README.md) | `0100A0800E9C4000` | 4.04b | 15.3.0 | CD PROJEKT RED's REDengine 3 (Saber Interactive port) | NVN |
 | [Trails in the Sky 2nd Chapter](01007A2027548000/README.md) | `01007A2027548000` | 1.0.4 | 21.4.4 | Nihon Falcom's engine | NVN |
 | [TRIANGLE STRATEGY](0100CC80140F8000/README.md) | `0100CC80140F8000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
+| [TSUKIHIME A piece of blue glass moon](010057A01E4D4000/README.md) | `010057A01E4D4000` | 1.0.2 | 17.5.4 | its own (not named) | NVN |
 | [TUNIC](0100DA801624E000/README.md) | `0100DA801624E000` | 1.0.3 | 14.3.0 | Unity 2020.3.36f1 IL2CPP, FMOD | NVN |
+| [Twelve Minutes](0100CD701434C000/README.md) | `0100CD701434C000` | 1.0.1 (base) | 12.3.7 | Unity 2019.4.31f1 IL2CPP, FMOD | NVN |
 | [Unicorn Overlord](010069401ADB8000/README.md) | `010069401ADB8000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN |
 | [Unicorn Overlord, Asian release](010054B01AD92000/README.md) | `010054B01AD92000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN |
+| [UnMetal](01008F4014A74000/README.md) | `01008F4014A74000` | 1.2.0 | 14.3.0 | Unepic Fran's own engine (`arcadix`) | OpenGL |
 | [Warhammer Survivors](0100CAA026246000/README.md) | `0100CAA026246000` | 1.0.0 (base) | 21.4.7 | Unity 6000.0.74f1 IL2CPP, FMOD | NVN |
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN |
@@ -283,7 +307,7 @@ One row per profile; the notes are each profile's `README.md`.
 
 These are not profile keys: the tools read them from the game files each time, by rules checked against every profile (`dm/games/profile_guess.py` `shader_sources`).
 
-- **Graphics API.** A game whose `main` imports Vulkan functions and not `nvnBootstrapLoader` renders with Vulkan, which the host implements on Metal (`dm/gfx/vk/hle_vk.m`; Hades, Super Mario Galaxy). Its shaders are its SPIR-V files, translated by `dm/gfx/tools/vk_shaders.py <RomFS> <shader dir> [--ios <dir>]` into `<dir>/vk/`, and `build_ipa.sh` ships `$MSL_IOS/vk` instead of the NVN chain libraries (`GFXAPI`, which the NSP script passes; by hand the shader libraries there tell). The NVN shader tables stay empty.
+- **Graphics API.** Vulkan games import the API directly (Hades, Super Mario Galaxy) or [resolve it by name](../../docs/reference/rendering.md#vulkan-functions-looked-up-by-name) (Minecraft). The host implements Vulkan on Metal. `dm/gfx/tools/vk_shaders.py <RomFS> <ExeFS/main> <shader dir> [--ios <dir>]` writes the Vulkan library and tables to `<dir>/vk/`, and `build_ipa.sh` ships `$MSL_IOS/vk` for the Vulkan API. The NVN shader tables stay empty.
 - **SPIR-V generated at run time.** A Vulkan game without SPIR-V files in its RomFS generates its shaders at run time (Super Mario Galaxy: Hagi's GX shaders, 3,089 modules created from its pipeline database while it shows "Initializing system..."). The NSP script captures them on the Mac with `DM_VK_CAPTURE=<dir>` (`dm/gfx/vk/hle_vk.m`), booting the game in the Mac host until every key the profile's `vk_capture.tsv` lists is there, and `vk_shaders.py` translates the capture folder with the RomFS. An OpenGL game with no GLSL source in its RomFS or `main` (Balatro: LÖVE puts its shaders together in Lua) is captured the same way with `DM_GL_CAPTURE=<dir>` (`dm/gfx/gl/hle_gl.m`) until every file in `gl_capture.tsv` is there, and `gl_shaders.py` translates the capture.
 - **Shaders compiled at run time.** A game that calls `glslcCompile` in a module it loads, with GLSL sources in `main` (Fire Emblem: Three Houses: 9 built-in KTGL shaders at boot) or, with none there, `.vert` / `.frag` files of plain text in its RomFS (Turrican Anthology; Skyward Sword HD's are encrypted and compiled only for a program its archive lacks, [so they do not count](../../docs/reference/shaders.md#encrypted-vert-and-frag-files-are-no-run-time-glsl)), compiles some shaders at run time with its own GLSLC, so no game file holds them. The NSP script captures them on the Mac with `DM_GLSLC_CAPTURE=<dir>` (`dm/host/hle_glslc.c`), booting the game in the Mac host until every capture file the profile's `shader_map.tsv` names is there, and `shader_split.py` reads `<version dir>/glslc_capture/*.glslc` (beside that version's `RomFS`) or `$DM_GLSLC_CAPTURE`. A build that needs captured files fails if they are missing. When the profile names no captures, see [Offline coverage after an empty GLSLC capture](../../docs/reference/shaders.md#offline-coverage-after-an-empty-glslc-capture).
 - **Unreal paks.** An Unreal Engine game keeps its shaders in the shader code archives of its paks (`*.ushaderbytecode`; a pak is Unreal's when its footer has Unreal's magic, `uepak.py` `unreal_paks`), each shader Oodle-compressed, which only the game's own Oodle decodes. The NSP script (`decode_ue_shaders`) takes the archives out of the paks with `dm/gfx/tools/uepak.py` (the pak index is AES-encrypted with a key it finds in `main`), boots the game in the Mac host with `DM_OODLE_JOB` (`dm/host/hle_oodle.c`: the game's `OodleLZ_Decompress`, found as the one function that references the library's own name string, decodes every shader right before `nnMain`, then the host exits) and writes the decoded archives to `<version dir>/ue_shaders`, where `shader_split.py` reads them (`DM_UE_SHADERS` overrides; without them it stops). Octopath Traveler 0: 10,596 shaders in 2 s. Unreal Engine 4.26 and later compress shaders with LZ4 unless the project picks another format (DRAGON QUEST VII Reimagined, 4.27: 64,949 shaders, its packages in IoStore containers beside the pak); `uepak.py` decodes those itself (`lz4_shaders`) and the NSP script skips the host run. A pak whose index lists cooked packages and no `.ushaderbytecode` (`uepak.py` `inline_shaders`: legacy version 4 paks, and OCTOPATH TRAVELER II's version 11 pak with `bShareMaterialShaderCode` off) keeps its shaders inline in the packages; `shader_split.py` reads those file by file (`ue_legacy_jobs`) and the NSP script decodes no archive. With IoStore on, the packages are the export bundles of the containers beside the pak (Mario & Luigi: Brothership), unless those containers hold shader libraries, which the NSP script decodes (FINAL FANTASY RESONANCE), and Unreal Engine 5.4 for the Switch 2 (Yoshi and the Mysterious Book) compresses each shader with Oodle and writes an NVN2 record (`uepak.py` `shader_map_entries`, `sage_record`).
@@ -304,7 +328,7 @@ These are not profile keys: the tools read them from the game files each time, b
 
    `python3 dm/games/profile_guess.py --check` runs these rules on every profile in `dm/games` (with the extractions under `/Volumes/T7/nsp`) and lists the keys where the guess differs.
 
-   After the rewrite, a game with a system resource that sets a heap gets a **heap check**: it boots in the Mac host (headless, no shader libraries) until its first heap request, or 5 s into `nnMain` without one, at most 30 s (`HEAP_CHECK_SECS`). A request the heap region cannot hold (`SetHeapSize OOM`) sets the alias / heap split (Tears of the Kingdom asks for 0x86000000, which gives its hand-made 0x98000000 alias region; Wonder's 1.44 GB gives 0xc0000000). A boot that resized the heap region is followed by another on the new layout (up to 3, `HEAP_CHECK_ROUNDS`), since the pool check behind the request runs only once the request fits ([memory.md](../../docs/reference/memory.md#the-heap-check-stopped-before-the-app-pool-check)). A run with no heap set whose alias region is used up to within 0.25 GB of its end sets a 1 GB pool: `nninitStartup` handed pool − used to StandardAllocator as one address region and the game reserves regions of its own beside it (Unity 2020 and 2022: AI: THE SOMNIUM FILES - nirvanA Initiative reached +4.26 GB of 4.38 in 5 s with the hardware pool; Unity 2018.3's Raging Loop maps only inside StandardAllocator's region and keeps it). The 1 GB is a starting point, not a measurement: Advance Wars 1+2: Re-Boot Camp (Unity 2020.2) ran its malloc dry at its first loading screen with it and needs 2 GB. The profile gets a `# heap check:` line, and later runs keep its keys (delete the line to check again; `--no-heap-check` / `HEAP_CHECK = False` skips it). Other games skip the check, so it costs nothing for them and a few seconds plus a Mac host build for the rest.
+   After the rewrite, a game with a system resource that sets a heap gets a **heap check**: it boots in the Mac host (headless, no shader libraries) until its first heap request, or 5 s into `nnMain` without one, at most 30 s (`HEAP_CHECK_SECS`). A request the heap region cannot hold (`SetHeapSize OOM`) sets the alias / heap split (Tears of the Kingdom asks for 0x86000000, which gives its hand-made 0x98000000 alias region; Wonder's 1.44 GB gives 0xc0000000). A boot that resized the heap region is followed by another on the new layout (up to 3, `HEAP_CHECK_ROUNDS`), since the pool check behind the request runs only once the request fits ([memory.md](../../docs/reference/memory.md#the-heap-check-stopped-before-the-app-pool-check)). A run with no heap set whose alias region is used up to within 0.25 GB of its end sets `stdalloc_cap` to 1 GB: `nninitStartup` handed pool − used to StandardAllocator as one address region and the game reserves regions of its own beside it (Unity 2020 and 2022: AI: THE SOMNIUM FILES - nirvanA Initiative reached +4.26 GB of 4.38 in 5 s with the hardware pool; Unity 2018.3's Raging Loop maps only inside StandardAllocator's region and keeps it). The pool stays the hardware's, since games read it as the machine's memory (a 1 GB pool, which the check set until GitHub issue #2830, made Pokémon Friends pick its Low graphics: [memory.md](../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)). The 1 GB is a starting point, not a measurement: Advance Wars 1+2: Re-Boot Camp (Unity 2020.2) ran its malloc dry at its first loading screen with a 1 GB pool and needs 2 GB. The profile gets a `# heap check:` line, and later runs keep its keys (delete the line to check again; `--no-heap-check` / `HEAP_CHECK = False` skips it). Other games skip the check, so it costs nothing for them and a few seconds plus a Mac host build for the rest.
 
    No short run decides `tex_flush_upload`, `tex_dirty_upload`, `core_preempt`, `vconv_range` or `present_interval`, nor `op_mode` / `pad_layout` outside the presets: they keep their defaults for a developer. A minute's boot without input saw Breath of the Wild flush 32 CPU-filled textures with data (it needs no `tex_flush_upload`) and Age of Calamity none (its movie frames come later), and the old host's Metroid Dread movie crash showed in about half the runs (now resolved by [shared wake handoffs](../../docs/reference/threads.md#same-core-wake-handoffs)). On the iPhone, `Documents/env.txt` can still set `DM_OPMODE`, `DM_NVN_GPU_TS` and `DM_NVN_FB_SNAP`, and the pad layout switches in game.
 

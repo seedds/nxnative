@@ -198,6 +198,26 @@ class Regress(unittest.TestCase):
             with patch.object(regress.time, 'sleep'), patch.object(regress.subprocess, 'run', side_effect=OSError):
                 self.assertIsNone(regress.hang_evidence(NS(pid=4242), cwd))
 
+    def test_gl_frames_progress_while_display_link_messages_stop(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            now = [0.0]; log = Path(td) / 'log.txt'
+            child = NS(pid=4242, returncode=0, poll=lambda: 0 if now[0] >= 1.5 else None, send_signal=lambda _: None, wait=lambda _: None)
+            cafe = NS(poll=lambda: 0)
+            def popen(cmd, **kw):
+                if cmd[0] == 'caffeinate': return cafe
+                kw['stdout'].write('[dm] [nvn-mtl] presents 1\n'); kw['stdout'].flush(); return child
+            def sleep(secs):
+                now[0] += secs
+                with log.open('a') as f: f.write(f'[dm] [gl] frame {int(now[0] * 1200)}: draws 10\n')
+            for name, value in (('check_disk', None), ('wait_idle', True), ('take_lock', None), ('footprint', None), ('hang_evidence', None)):
+                stack.enter_context(patch.object(regress, name, return_value=value))
+            stack.enter_context(patch.object(regress.subprocess, 'Popen', side_effect=popen))
+            stack.enter_context(patch.object(regress.time, 'monotonic', side_effect=lambda: now[0]))
+            stack.enter_context(patch.object(regress.time, 'sleep', side_effect=sleep))
+            r = regress.run_watched(['host'], {}, Path(td), log, NS(min_free_gb=0, wait_idle=0, lock=None), limit=2, hang=0.5, kind='gl', what='synthetic')
+            self.assertIsNone(r['hang_at_s'])
+            self.assertGreaterEqual(r['max_frame'], 1200)
+
     def test_routes(self):   # every profile's smoke.tsv reads
         for f in (REPO / 'dm/games').glob('*/smoke.tsv'):
             r = regress.read_route(f)

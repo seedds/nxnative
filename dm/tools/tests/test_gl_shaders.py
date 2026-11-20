@@ -5,10 +5,13 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(REPO / 'dm/tools'), str(REPO / 'dm/gfx/tools')]
+sys.path[:0] = [str(REPO / 'dm/tools'), str(REPO / 'dm/gfx/tools'), str(REPO / 'dm/games')]
 import gl_shaders   # noqa: E402
+import profile_guess as pg   # noqa: E402
+import romfs_image   # noqa: E402
 
 PREFIX = ('#version 150\n#define PC\n'
           'vec4 tex2D( sampler2D sampler, vec2 texcoord ) { return texture( sampler, texcoord.xy ); }\n'
@@ -75,6 +78,36 @@ class GameNames(unittest.TestCase):
 
 
 class Sources(unittest.TestCase):
+    def test_packer_and_translator_use_the_same_standalone_pairs(self):
+        vertex = b'attribute vec4 p;\nvoid main() { gl_Position = p; }\n'
+        fragment = b'precision mediump float;\nvoid /* entry */ main (void) { gl_FragColor = vec4(1.0); }\n'
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'ExeFS').mkdir()
+            image = root / 'RomFS.img'
+            # These are distinct RomFS directories even on a case-insensitive Mac volume.
+            entries = [[b'', None, True, 1, 5],
+                       [b'Effect', None, True, 6, 1], [b'effect', None, True, 7, 1],
+                       [b'love', None, True, 8, 1], [b'snippets', None, True, 9, 2], [b'standalone', None, True, 11, 0],
+                       [b'vertex.vs', vertex, False, 0, 0], [b'frag.fs', fragment, False, 0, 0], [b'CRT.fs', fragment, False, 0, 0],
+                       [b'frag.fs', b'// void main() {}\nvoid main();\n', False, 0, 0], [b'vertex.vs', vertex, False, 0, 0]]
+            managed = 'glShaderSource'.encode('utf-16-le')
+            imports = [('eglCreateWindowSurface', False, 1)]
+            with mock.patch.object(pg, 'nso', return_value=(managed, '', [0, 0, 0], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', return_value=imports):
+                Path(romfs_image.write(entries, str(image), lambda data, out: out.write(data))).replace(image)
+                romfs = pg.source(root)
+                capture = pg.build_sources(root / 'ExeFS', romfs, ['main'])
+                self.assertEqual(capture['graphics'][0], 'gl')
+                self.assertTrue(capture['gl_capture'][0])
+                self.assertEqual(list(gl_shaders.sources([romfs])), [])
+
+                entries[5][4] = 2
+                entries.extend([[b'fragShader.FS', fragment + b'\0', False, 0, 0], [b'vertexShader.vs', vertex, False, 0, 0]])
+                Path(romfs_image.write(entries, str(image), lambda data, out: out.write(data))).replace(image)
+                offline = pg.build_sources(root / 'ExeFS', romfs, ['main'])
+                self.assertFalse(offline['gl_capture'][0])
+                self.assertEqual(list(gl_shaders.sources([romfs])), [(fragment, 'frag', '/standalone/fragShader.FS'), (vertex, 'vert', '/standalone/vertexShader.vs')])
+
     def test_glsl_files_are_read_with_no_stage(self):   # Mega Man Legacy Collection: shaders/nx/*.glsl, whose names say nothing of the stage
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'shaders').mkdir()
@@ -86,13 +119,29 @@ class Sources(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
+    def test_many_samplers_and_uniforms_have_independent_argument_ids(self):
+        for count in (16, 17, 32):
+            src = ('#version 320 es\nprecision highp float;\n'
+                   + ''.join(f'uniform sampler2D tex{i};\n' for i in range(count))
+                   + 'uniform vec4 weight;\nout vec4 color;\nvoid main() { color = weight * ('
+                   + ' + '.join(f'texture(tex{i}, vec2(0.5))' for i in range(count)) + '); }\n').encode()
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as tmp:
+                r = gl_shaders.translate(src, 'frag', '9' * 16, tmp)
+                self.assertIsInstance(r, tuple, r)
+                args = [int(x) for f in r[1] if f.startswith('t:') for x in f.split('=')[1].split(':')[:2]]
+                args += [int(f.split(':')[1]) for f in r[1] if f.startswith('b:')]
+                self.assertEqual(len(args), 2 * count + 1)
+                self.assertEqual(len(set(args)), len(args))
+                self.assertIn(f'r:0:{len(args)}', r[1])
+                self.assertNotIn('[[sampler(', Path(r[0]).read_text())
+
     def test_original_names_that_resemble_rewrite_names(self):
         src = (b'#version 320 es\nprecision highp float;\nuniform sampler2D dm_texture;\nuniform float gm_sample;\n'
                b'out vec4 color;\nvoid main() { color = texture(dm_texture, vec2(0.5)) * gm_sample; }\n')
         with tempfile.TemporaryDirectory() as tmp:
             r = gl_shaders.translate(src, 'frag', '0' * 16, tmp)
             self.assertIsInstance(r, tuple, r)
-            self.assertIn('t:dm_texture=0:sampler2D', r[1])
+            self.assertIn('t:dm_texture=0:1:sampler2D', r[1])
             self.assertTrue(any(x.startswith('u:gm_sample=') for x in r[1]), r[1])
 
     def test_rewritten_names_do_not_collide_with_original_names(self):
@@ -118,8 +167,8 @@ class Translate(unittest.TestCase):
             f = gl_shaders.translate(FRAG.encode(), 'frag', 'f' * 16, tmp)
             self.assertIsInstance(v, tuple, v); self.assertIsInstance(f, tuple, f)
             rows = v[1]
-            self.assertIn('n:matrices_ubo=1:6528', rows)   # 408 vec4s, the default block in slot 0
-            self.assertTrue(any(r.startswith('b:0:') for r in rows))
+            self.assertIn('n:matrices_ubo=0:6528', rows)   # 408 vec4s; IDs come from the Metal argument layout, independent of the GLSL bindings
+            self.assertTrue(any(r.startswith('b:1:') for r in rows))
             self.assertIn('o:dm_FragColor=0', f[1])
             # the colour pair is one varying, matched by name between the stages
             self.assertIn('[[user(dm_Color)]]', Path(v[0]).read_text()); self.assertIn('[[user(dm_Color)]]', Path(f[0]).read_text())
@@ -130,15 +179,42 @@ class Translate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             r = gl_shaders.translate(src, 'frag', 'a' * 16, tmp)
             self.assertIsInstance(r, tuple, r)
-            self.assertEqual([x for x in r[1] if x.startswith('t:')], ['t:T0=0:sampler2D'])
+            self.assertEqual([x for x in r[1] if x.startswith('t:')], ['t:T0=0:1:sampler2D'])
+
+    def test_texture_query_keeps_its_resource_arguments(self):
+        src = b'#version 320 es\nprecision highp float;\nuniform sampler2D tex;\nout vec4 c;\nvoid main() { c = vec4(textureSize(tex, 0), 0, 1); }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', 'b' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:tex=0:1:sampler2D', r[1])
+
+    def test_resource_names_do_not_collide_with_generated_names(self):
+        src = (b'#version 320 es\nprecision highp float;\nuniform sampler2D dm_gl_resource_21;\nuniform sampler2D dm_gl_resource_21Smplr;\n'
+               b'out vec4 c;\nvoid main() { c = texture(dm_gl_resource_21, vec2(0.5)) + texture(dm_gl_resource_21Smplr, vec2(0.5)); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', 'c' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertEqual({x.split('=')[0] for x in r[1] if x.startswith('t:')}, {'t:dm_gl_resource_21', 't:dm_gl_resource_21Smplr'})
 
 
     def test_es100_sampler_named_texture(self):   # Fate/hollow ataraxia REMASTERED: 16 of its 78 fragment shaders failed with `'texture' : redefinition`
         with tempfile.TemporaryDirectory() as tmp:
             r = gl_shaders.translate(ES100_FRAG, 'frag', 'e' * 16, tmp)
             self.assertIsInstance(r, tuple, r)
-            self.assertIn('t:texture=0:sampler2D', r[1])
+            self.assertIn('t:texture=0:1:sampler2D', r[1])
             self.assertTrue(any(x.startswith('u:sample=') for x in r[1]), r[1])
+
+    def test_legacy_desktop_varyings_link_after_macro_expansion(self):
+        vert = b'#version 120\nattribute vec4 p;\n#define COLOR gl_FrontColor\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_Position = p; COLOR = p; TEX(0) = p; }\n'
+        frag = b'#version 110\n#define COLOR gl_Color\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_FragData[0] = COLOR * TEX(0); }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            for source, stage in ((vert, 'vert'), (frag, 'frag')):
+                r = gl_shaders.translate(source, stage, '1864' + stage, tmp)
+                self.assertIsInstance(r, tuple, r)
+                msl = Path(r[0]).read_text()
+                self.assertIn('[[user(dm_LegacyColor)]]', msl)
+                self.assertIn('[[user(dm_LegacyTexCoord0)]]', msl)
+                if stage == 'frag': self.assertIn('[[color(0)]]', msl)
 
 
 class MainStrings(unittest.TestCase):
@@ -147,5 +223,20 @@ class MainStrings(unittest.TestCase):
         self.assertIsNotNone(gl_shaders.GL_ENTRY.search(VERT.encode()))
 
 
+def gpu_fixture(out):
+    """Original GLSL → table and metallib → GL imports and GPU pixels in t_gl_imports.m."""
+    out = Path(out); out.mkdir(exist_ok=True)
+    vert = ('#version 320 es\nprecision highp float;\nlayout(location=15) in vec4 position;\nout vec2 uv;\n'
+            'uniform vec4 shift;\nuniform sampler2D tex0;\nuniform Block { vec4 factors; };\n'
+            'void main() { gl_Position = position + shift + vec4(factors.x, 0, 0, 0); uv = vec2(0.75 + texture(tex0, vec2(0.25, 0.5)).g, shift.y + factors.z); }\n')
+    frag = ('#version 320 es\nprecision highp float;\nin vec2 uv;\nout vec4 color;\nuniform vec4 weight;\nuniform Block { vec4 factors; };\n'
+            + ''.join(f'uniform sampler2D tex{i};\n' for i in range(17))
+            + 'void main() { int i = int(gl_FragCoord.x) % 17; color = vec4(0);\n'
+            + ''.join(f'if (i == {i}) color = texture(tex{i}, uv) * weight * factors.y;\n' for i in range(17)) + 'color.g = uv.y * factors.y; }\n')
+    (out / 'resource.vert').write_text(vert); (out / 'resource.frag').write_text(frag)
+    sys.argv = ['gl_shaders.py', str(out), str(out)]; gl_shaders.main()
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] == '--fixture': gpu_fixture(sys.argv[2])
+    else: unittest.main()

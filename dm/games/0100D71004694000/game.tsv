@@ -1,0 +1,23 @@
+# Minecraft for Nintendo Switch, 1.26.62, Nintendo SDK 20.5.14.
+title_id	0100D71004694000
+program_id	0100D71004694000
+name	Minecraft for Nintendo Switch
+ipa	MinecraftForNintendoSwitch.ipa
+app_category	public.app-category.games
+
+build	v10747904	1.26.62	main=84306c1f3543e39becef959079766644	sdk=14113deb20490afc27a1ed12d6930d8b
+package	v10747904
+shader_versions	v10747904
+
+# RenderDragon looks up Vulkan functions by name. The host supplies them in place of subsdk0.
+modules	main sdk
+romfs_marker	resource_packs/vanilla/__brarchive/font/smooth.brarchive
+zip_store	.bin:.dat:.fsb:.hdr:.ldb:.nro:.ogg:.otf:.png:.metallib
+
+# The NPDM declares a 16 MiB system resource. The game maps memory in the alias region.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+shader_note	RenderDragon SPIR-V goes through the Vulkan layer (vk_shaders.py)

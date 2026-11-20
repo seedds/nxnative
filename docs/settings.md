@@ -95,6 +95,8 @@ Shows the frames per second at the top left.
 
 ## Controls
 
+**Microphone (Mac).** Apps that support microphone input have this switch off by default. Turn it on and press Play to grant macOS access. The first enabled launch can ask even if the settings window is hidden. Choose an input device while the switch is on. Microphone gain is under Advanced settings.
+
 ### Touch controls
 
 iPhone and iPad. **Automatic**, the default, hides the on-screen controls while a controller is connected and shows them again when it is disconnected. **On** keeps them on screen with a controller connected too: both play, the touch controls as player 1 beside the controller. **Off** hides them, so every touch goes to the game's touch screen (in games that read it). The gear stays in every mode, and the choice also changes in the [in-game menu](#in-game-menu), at once.
@@ -217,7 +219,7 @@ flowchart LR
 
 ### Performance HUD
 
-Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
+Apple's performance overlay shows frame rate, frame and GPU times, and memory. It helps compare settings. Leave it off for play. On iPhone and iPad, switch it on, press **Play** to save the choice, then quit and reopen the app. The saved choice enables the HUD at launch. Switching it off before **Play** hides it for that session and saves the off choice.
 
 ### Reset to tested defaults
 

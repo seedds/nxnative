@@ -28,7 +28,7 @@ static void fill(id<MTLTexture> t, MTLClearColor c, int depth) {
     else { rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = c; }
     [[cb renderCommandEncoderWithDescriptor:rp] endEncoding]; [cb commit]; [cb waitUntilCompleted];
 }
-static int flat(id<MTLTexture> t, const float want[3]) {   // the middle half of the picture (the scaler's edges may differ), within HDR rounding
+static int flat(id<MTLTexture> t, const float want[4]) {   // the middle half of the picture (the scaler's edges may differ), within HDR rounding
     NSUInteger n = t.width * t.height; id<MTLBuffer> b = [g_dev newBufferWithLength:n * 8 options:MTLResourceStorageModeShared];
     if (!b) { fprintf(stderr, "readback buffer did not allocate\n"); return 0; }
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
@@ -36,7 +36,7 @@ static int flat(id<MTLTexture> t, const float want[3]) {   // the middle half of
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
     const __fp16 *p = b.contents;
     for (NSUInteger y = t.height / 4; y < t.height * 3 / 4; y++) for (NSUInteger x = t.width / 4; x < t.width * 3 / 4; x++)
-        for (int c = 0; c < 3; c++) if (!(fabsf((float)p[4 * (y * t.width + x) + c] - want[c]) <= 0.03f)) {
+        for (int c = 0; c < 4; c++) if (!(fabsf((float)p[4 * (y * t.width + x) + c] - want[c]) <= 0.03f)) {
             fprintf(stderr, "texel %lu,%lu channel %d: %g, expected %g\n", (unsigned long)x, (unsigned long)y, c, (float)p[4 * (y * t.width + x) + c], want[c]); return 0; }
     return 1;
 }
@@ -55,6 +55,23 @@ static float *readback(id<MTLTexture> t) {   // RGBA16F as floats, the caller fr
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
     float *f = malloc(n * 4 * sizeof *f); const __fp16 *p = b.contents; for (NSUInteger i = 0; i < n * 4; i++) f[i] = (float)p[i];
     return f;
+}
+// A dynamic input occupies only part of its texture. Give the padding a different alpha so a bilinear tap outside the content cannot pass unnoticed.
+static void fill_alpha_rect(id<MTLTexture> t, const float c[4], unsigned sx, unsigned sy, unsigned w, unsigned h) {
+    __fp16 *p = malloc(t.width * t.height * 8);
+    for (NSUInteger y = 0; y < t.height; y++) for (NSUInteger x = 0; x < t.width; x++) {
+        for (int ch = 0; ch < 3; ch++) p[4 * (y * t.width + x) + ch] = c[ch];
+        p[4 * (y * t.width + x) + 3] = x >= sx && x < sx + w && y >= sy && y < sy + h ? c[3] : 1;
+    }
+    upload(t, p, 8); free(p);
+}
+static int alpha_flat(id<MTLTexture> t, float want) {   // every pixel, including the edges and corners the temporal RGB checks leave out
+    float *p = readback(t); int ok = 1;
+    // NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult) -- Metal texture dimensions are immutable; readback fills every RGBA value before returning.
+    for (NSUInteger y = 0; y < t.height && ok; y++) for (NSUInteger x = 0; x < t.width; x++) if (!(fabsf(p[4 * (y * t.width + x) + 3] - want) <= 0.001f)) {
+        fprintf(stderr, "alpha at %lu,%lu: %g, expected %g\n", (unsigned long)x, (unsigned long)y, p[4 * (y * t.width + x) + 3], want); ok = 0; break;
+    }
+    free(p); return ok;
 }
 static float mean_diff(const float *x, const float *y, NSUInteger w, NSUInteger h) {   // over the middle half, RGB
     double d = 0; NSUInteger k = 0;
@@ -92,8 +109,8 @@ int main(void) { @autoreleasepool {
           mot = texture(93, 960, 540, NVN_FORMAT_RG16F), out = texture(94, 1920, 1080, NVN_FORMAT_RGBA16F), out2 = texture(95, 1920, 1080, NVN_FORMAT_RGBA16F),
           bias = texture(89, 960, 540, NVN_FORMAT_R8);
     mtl_tex_init(&col); mtl_tex_init(&col2); mtl_tex_init(&dep); mtl_tex_init(&mot); mtl_tex_init(&out); mtl_tex_init(&out2); mtl_tex_init(&bias);
-    const float a[3] = {0.5f, 0.25f, 0.75f}, b[3] = {0.125f, 0.625f, 0.25f};
-    fill(tex_mtl(&col), MTLClearColorMake(a[0], a[1], a[2], 1), 0); fill(tex_mtl(&col2), MTLClearColorMake(b[0], b[1], b[2], 1), 0);
+    const float a[4] = {0.5f, 0.25f, 0.75f, 0.25f}, b[4] = {0.125f, 0.625f, 0.25f, 0.75f};
+    fill(tex_mtl(&col), MTLClearColorMake(a[0], a[1], a[2], a[3]), 0); fill(tex_mtl(&col2), MTLClearColorMake(b[0], b[1], b[2], b[3]), 0);
     fill(tex_mtl(&dep), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot), MTLClearColorMake(0, 0, 0, 0), 0);
     fill(tex_mtl(&bias), MTLClearColorMake(0, 0, 0, 0), 0);
     p_dlss c = {.tex = {&col, &dep, &mot, &out, &bias}, .net = 1, .iw = 960, .ih = 540, .ow = 1920, .oh = 1080, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_DEPTH_INVERTED, .reset = 1};
@@ -108,7 +125,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_dlss[0].sc.reactiveMaskTexture == tex_mtl(&bias), "the evaluation hands the bias mask's texture to the scaler");
     tex_t col3 = texture(96, 960, 486, NVN_FORMAT_RGBA16F), dep3 = texture(97, 960, 486, NVN_FORMAT_DEPTH32F), mot3 = texture(98, 960, 486, NVN_FORMAT_RG16F), out3 = texture(99, 1920, 972, NVN_FORMAT_RGBA16F);
     mtl_tex_init(&col3); mtl_tex_init(&dep3); mtl_tex_init(&mot3); mtl_tex_init(&out3);
-    fill(tex_mtl(&col3), MTLClearColorMake(b[0], b[1], b[2], 1), 0); fill(tex_mtl(&dep3), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot3), MTLClearColorMake(0, 0, 0, 0), 0);
+    fill(tex_mtl(&col3), MTLClearColorMake(b[0], b[1], b[2], b[3]), 0); fill(tex_mtl(&dep3), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot3), MTLClearColorMake(0, 0, 0, 0), 0);
     p_dlss c3 = c; c3.net = c.net = 2; c.reset = 1; c3.tex[DLSS_COLOR] = &col3; c3.tex[DLSS_DEPTH] = &dep3; c3.tex[DLSS_MOTION] = &mot3; c3.tex[DLSS_OUTPUT] = &out3; c3.iw = 960; c3.ih = 486; c3.ow = 1920; c3.oh = 972;
     // A new network evaluated at 1920x1080, then at 1920x972 (Fast Fusion's second size) in the same submission: its first scaler is replaced before its first commit. The
     // encoding thread has made the first evaluation's calls by then (rec_drain, as a game's frame of records hands them over in pieces), so the recording holds the scaler no longer
@@ -121,7 +138,7 @@ int main(void) { @autoreleasepool {
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
     tex_t col4 = texture(100, 1024, 576, NVN_FORMAT_RGBA16F), dep4 = texture(101, 1024, 576, NVN_FORMAT_DEPTH32F), mot4 = texture(102, 1024, 576, NVN_FORMAT_RG16F), out4 = texture(103, 1536, 864, NVN_FORMAT_RGBA16F);
     mtl_tex_init(&col4); mtl_tex_init(&dep4); mtl_tex_init(&mot4); mtl_tex_init(&out4);
-    fill(tex_mtl(&col4), MTLClearColorMake(a[0], a[1], a[2], 1), 0); fill(tex_mtl(&dep4), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot4), MTLClearColorMake(0, 0, 0, 0), 0);
+    fill(tex_mtl(&col4), MTLClearColorMake(a[0], a[1], a[2], a[3]), 0); fill(tex_mtl(&dep4), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot4), MTLClearColorMake(0, 0, 0, 0), 0);
     p_dlss c4 = {.tex = {&col4, &dep4, &mot4, &out4}, .net = 3, .iw = 1024, .ih = 576, .ow = 1536, .oh = 864, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_DEPTH_INVERTED, .reset = 1};
     for (int frame = 0; frame < 4; frame++) {
         mtl_sub_begin(); dlss_eval(&c4);
@@ -133,7 +150,7 @@ int main(void) { @autoreleasepool {
     CHECK(flat(tex_mtl(&out4), a), "the 1.5x evaluation fills its output");
     // The same network at 768x432 in the same textures, as a dynamic resolution renders: no new scaler, and the output is whole (MetalFX scales the content, not the textures)
     const void *sc4 = s4 ? (__bridge void *)s4->sc : NULL;
-    fill(tex_mtl(&col4), MTLClearColorMake(b[0], b[1], b[2], 1), 0);
+    fill_alpha_rect(tex_mtl(&col4), b, 0, 0, 768, 432);
     c4.iw = 768; c4.ih = 432; c4.reset = 1;
     for (int frame = 0; frame < 4; frame++) {
         mtl_sub_begin(); dlss_eval(&c4);
@@ -142,6 +159,19 @@ int main(void) { @autoreleasepool {
     }
     CHECK(s4 && sc4 && (__bridge void *)s4->sc == sc4, "a smaller input in the same textures keeps the network's scaler");
     CHECK(flat(tex_mtl(&out4), b), "the 2x evaluation in the same textures fills its output");
+    CHECK(alpha_flat(tex_mtl(&out4), b[3]), "dynamic input alpha clamps to its content at every output edge and corner");
+    if (@available(macOS 27.0, iOS 27.0, *)) {
+        fill_alpha_rect(tex_mtl(&col4), b, 17, 9, 768, 432);
+        c4.base[DLSS_COLOR][0] = 17; c4.base[DLSS_COLOR][1] = 9; c4.reset = 1;
+        mtl_sub_begin(); dlss_eval(&c4);
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the offset input submission completes");
+        CHECK(alpha_flat(tex_mtl(&out4), b[3]), "offset input alpha clamps to all four content edges");
+    }
+    // NetworkResize leaves the original builder size in the record; RGB follows the actual output texture (Star Fox's 1920x1080 network resized to 960x540).
+    c4.ow = 3072; c4.oh = 1728; c4.reset = 1;
+    mtl_sub_begin(); dlss_eval(&c4);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with the original builder size completes");
+    CHECK(alpha_flat(tex_mtl(&out4), b[3]), "alpha follows the scaler's output extent rather than the original builder size");
     // The scaler after the work before it, and the next pass after the scaler (mfx_order). Before: a slow pass writes the colour just before each evaluation and ends with no
     // barrier, as a scaler's own encoders end (the passes the host ends carry barriers of their own); behind an encoder of barriers alone the scaler read the colour before it in
     // most rounds. After: a draw pass copies the output right after the evaluation; with DM_NVN_BARRIER=game (a run of the Makefile's) it skipped its consumer barrier and read the

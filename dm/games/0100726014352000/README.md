@@ -31,6 +31,8 @@ On the Mac (2026-11-12, from a fresh save): the Blizzard logo movie, the title, 
 
 General tool changes first needed here; each applies to every game:
 
+- **Truncated PFS0 payloads** (resolved, package validation): [PFS0 files extend beyond a truncated package](../../../docs/reference/packing.md#pfs0-files-extend-beyond-a-truncated-package).
+
 - **Blizzard's CASC storage and SHAD containers** (`dm/gfx/tools/casc.py`, `casc_jobs` / `casc_shaders` / `shad_shaders` in `shader_split.py`, and `raw_shaders`'s records in `main`): [Blizzard's CASC storage and SHAD containers](../../../docs/reference/shaders.md#blizzards-casc-storage-and-shad-containers).
 
 Game behaviour:

@@ -778,6 +778,9 @@ check_t_vk_clear_int: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_vk_cmds: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_vk_compute: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
 check_t_vk_argbuf: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
+t_vk_renderdragon: t_vk_renderdragon.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_renderdragon.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_renderdragon: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

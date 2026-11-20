@@ -267,7 +267,10 @@ int main(void) {
         cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
         h_vkCmdBlitImage(cb, bs, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, bd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &scaled, VK_FILTER_LINEAR); run(cb);
         download(bd, 4, 4, px);
-        CHECK(all_near(px, 16, 0, 0, 0, 0), "a scaled blit is skipped (reported), not copied at the wrong size");
+        ok = 1;
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+            ok &= near(px + 4 * (y * 4 + x), 11 + (x >= 2), 21 + (y >= 2), 30, 255);
+        CHECK(ok, "a scaled linear blit fills the entire destination with interpolated source texels");
 
         // ---- Indirect draws ----
         VkBuffer args = new_buf(64, 0);

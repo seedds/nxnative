@@ -1890,6 +1890,20 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galaxy exposed gaps in graphics replay, and Re:ZERO exercised compute dispatch and larger descriptor sets.
 
+### Vulkan functions looked up by name
+
+- **Symptom:** the packer selects NVN and finds no shaders. After selecting Vulkan, `ro::LookupSymbol` cannot find `vkGetInstanceProcAddr`, or renderer initialization stops at a missing Vulkan entry point.
+- **Cause:** RenderDragon looks up the loader through `nn::ro::LookupSymbol` and checks the core device functions it loads. In 1.26.62 it also directly calls the extended image-format and surface queries, `vkGetDeviceQueue2` and `vkCmdPipelineBarrier2`.
+- **Fix:** the packer recognizes the lookup import and the loader, instance and device names. The host searches guest definitions first and falls back to Vulkan definitions it registers. The extended queries share the core query data. Synchronization2 dependencies end the active Metal encoder so later encoders see writes to tracked resources. Blits and resolves honor transfer usage and the requested subresources. A partial non-integer resolve uses a temporary Metal resolve target and copies only the requested rectangle. Full attachment clears use load actions.
+- **Found on:** [Minecraft for Nintendo Switch](../../dm/games/0100D71004694000/README.md) 1.26.62.
+
+### RenderDragon's unsigned bone indices
+
+- **Symptom:** Metal rejects a pipeline with `Vertex attribute a_indices(1) of type int cannot be read using MTLAttributeFormatUShort`. The title can continue drawing while an actor's pipeline is missing.
+- **Cause:** RenderDragon's skinning shaders declare a scalar `int` input which the game supplies as `R16_UINT`. The Switch driver accepts that pairing. Reading the bytes as `Short` would sign-extend values with bit 15 set.
+- **Fix:** material vertex shaders that use `a_indices` also get a variant with an unsigned stage input and an explicit conversion to `int` at its uses. The Vulkan layer chooses it only when that location is bound as `R16_UINT`. `t_vk_renderdragon` reads back 32-bit values for inputs `0x8000` and `0xffff` under Metal validation.
+- **Found on:** [Minecraft for Nintendo Switch](../../dm/games/0100D71004694000/README.md) 1.26.62.
+
 ### Vulkan triangle fans
 
 - **Symptom:** `[RED] primitive topology 5 not implemented`; a fan draws disconnected triangles or omits its later wedges.
@@ -2111,8 +2125,8 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galax
 
 - **Symptom:** Vulkan command lookup returns null for recorded commands. A pipeline requesting a missing fragment shader runs as depth-only and leaves the picture black.
 - **Cause:** the command recorder lacked several operations, and Metal accepts a graphics pipeline without a fragment function.
-- **Fix:** replay indirect draws, buffer fills and updates, whole-level resolves, same-size blits, secondary buffers, event set and reset, dynamic blend constants and depth bias, and [query copies](#vulkan-query-copies-consumed-by-the-gpu). Refuse to draw a pipeline whose requested fragment shader is missing and count its skipped draws. Explicit depth-only pipelines still work.
-- **Limits:** scaled or mirrored blits, partial resolves, subpass advancement, and clear-attachments commands are reported and skipped. Queue submission is serial. GPU waits on events and barriers between draws in one render pass remain unsupported.
+- **Fix:** replay indirect draws, buffer fills and updates, resolves, blits, secondary buffers, event set and reset, dynamic blend constants and depth bias, and [query copies](#vulkan-query-copies-consumed-by-the-gpu). Refuse to draw a pipeline whose requested fragment shader is missing and count its skipped draws. Explicit depth-only pipelines still work. The [RenderDragon port](#vulkan-functions-looked-up-by-name) adds 2D scaled blits and partial resolves.
+- **Limits:** subpass advancement and partial attachment clears are reported and skipped. Queue submission is serial. GPU waits on events remain unsupported.
 - **Check:** `t_vk_cmds` reads results back under Metal validation and distinguishes a missing fragment function from an intentional depth-only pipeline.
 - **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), [PR #1371](https://github.com/seedds/nxnative/pull/1371).
 

@@ -290,9 +290,11 @@ class Game:
 
     def shader_roots(self):
         roots = [self.romfs()]
+        main = self.build / 'extract' / self.ver / 'ExeFS/main'
+        if self.kind == 'vk' and main.is_file(): roots.append(main)
         capture = self.build / 'extract' / self.ver / ('gl_capture' if self.kind == 'gl' else 'vk_capture')
         if capture.is_dir(): roots.append(capture)
-        if self.kind == 'gl': roots.append(self.build / 'extract' / self.ver / 'ExeFS/main')
+        if self.kind == 'gl': roots.append(main)
         return roots
 
 

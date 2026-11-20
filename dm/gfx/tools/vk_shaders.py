@@ -24,16 +24,21 @@
 # Table rows: key <TAB> stage (vert / frag / comp:x,y,z) <TAB> resources, space-separated kind:set.binding=slot[*count]; lower-case u/b/t/s/c/p bind discrete buffers, textures, samplers and push constants;
 #   upper-case U/B/T/S are argument-buffer members, with @id after the slot and count for the first element's Metal ID;
 #   o maps a dynamic buffer's set.binding to an offset index, and q gives that offset buffer's Metal slot
-# Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
+#   a RenderDragon vertex shader with an unsigned bone-index variant vk_<key>_u adds the input location in column 5
+# Usage: vk_shaders.py <SPIR-V dir | NSO>... <out dir> [--ios <dir>]
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
+import nso
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
 MAGIC = 0x07230203
+SPIRV_MAGIC = struct.pack('<I', MAGIC)
+MATERIAL_MAGIC = struct.pack('<Q', 0x0A11DA1A)
+BGFX_SHADER = re.compile(rb'[VF]SH\x05|CSH\x03')
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
 DEC_ARRAY_STRIDE, DEC_BINDING, DEC_SET = 6, 33, 34
 KINDS = {'ubos': 'u', 'ssbos': 'b', 'separate_images': 't', 'images': 't', 'separate_samplers': 's', 'textures': 'c'}
@@ -48,12 +53,71 @@ PRECISE = re.compile(r'\bfast::(min|max|clamp)\(')
 
 def red(msg: str) -> NoReturn: sys.exit('[RED] ' + msg)
 
-def spirv_files(root):
+def whole_module(data, start, end):
+    if end > len(data) or end - start < 24 or (end - start) % 4: return False
+    if data[start:start + 4] != SPIRV_MAGIC or struct.unpack_from('<I', data, start + 16)[0]: return False
+    pos = start + 20
+    while pos < end:
+        words = struct.unpack_from('<I', data, pos)[0] >> 16
+        if not words: return False
+        pos += words * 4
+    return pos == end
+
+
+def bgfx_modules(data):
+    """Read the size-delimited SPIR-V payload of a bgfx v5 graphics or v3 compute shader."""
+    for match in BGFX_SHADER.finditer(data):
+        pos = match.end() + 4   # shader I/O hash
+        if pos + 2 > len(data): break
+        uniforms = struct.unpack_from('<H', data, pos)[0]; pos += 2
+        for _ in range(uniforms):
+            if pos >= len(data): break
+            pos += 7 + data[pos]   # name length, name, type, element count, register index and count
+        if pos + 4 > len(data): continue
+        size = struct.unpack_from('<I', data, pos)[0]
+        start, end = pos + 4, pos + 4 + size
+        if whole_module(data, start, end): yield start, bytes(data[start:end])
+
+
+def shader_inputs(root):
+    if os.path.isfile(root):   # explicit ExeFS input for built-in shaders
+        with open(root, 'rb') as f:
+            if f.read(4) == b'NSO0': yield root, 'nso'
+        return
     for d, _, fs in os.walk(root):
         for f in sorted(fs):
             p = os.path.join(d, f)
-            with open(p, 'rb') as fh: head = fh.read(4)
-            if len(head) == 4 and struct.unpack('<I', head)[0] == MAGIC: yield p
+            with open(p, 'rb') as fh: head = fh.read(8)
+            if head.startswith(SPIRV_MAGIC): yield p, 'spirv'
+            elif head == MATERIAL_MAGIC: yield p, 'material'
+
+
+def embedded_modules(path, kind):
+    with open(path, 'rb') as f: data = f.read()
+    if kind == 'nso': data = nso.load(data, path).image
+    yield from bgfx_modules(data)
+
+
+def spirv_files(root):
+    for path, kind in shader_inputs(root):
+        if kind == 'spirv' or next(embedded_modules(path, kind), None) is not None: yield path
+
+
+def spirv_sources(roots):
+    seen = set()
+    for root in roots:
+        if not os.path.exists(root): red(f'{root}: no such file or folder')
+        for path, kind in shader_inputs(root):
+            name = os.path.basename(path) if kind == 'nso' else '/' + os.path.relpath(path, root)
+            if kind == 'spirv':
+                with open(path, 'rb') as f: modules = [(None, f.read())]
+            else:
+                modules = embedded_modules(path, kind)
+            for offset, data in modules:
+                key = hashlib.sha256(data).hexdigest()[:16]   # of the game's words, which the host hashes
+                if key in seen: continue
+                seen.add(key)
+                yield key, name if offset is None else f'{name}@{offset:#x}', data
 
 def decorations(words):
     """variable id → {'set': n, 'binding': n, 'binding_at': word index of the binding value}"""
@@ -87,16 +151,27 @@ def fix_strides(words):
     if not add: return words
     return words[:at] + [w for t, s in add.items() for w in ((4 << 16) | OP_DECORATE, t, DEC_ARRAY_STRIDE, s)] + words[at:]
 
+def unsigned_bone_indices(src):
+    """RenderDragon's scalar a_indices as an unsigned fetch, widened to int before the shader uses it."""
+    attribute = re.search(r'\bint(\s+a_indices\s*\[\[attribute\((\d+)\)\]\];)', src)
+    stage_in = re.search(r'\b(\w+)\s*\[\[stage_in\]\]', src)
+    if not attribute or not stage_in: return None
+    value = re.escape(stage_in[1]) + r'\.a_indices\b'
+    src = src[:attribute.start()] + 'uint' + src[attribute.start() + 3:]
+    variant, uses = re.subn(r'\b' + value, lambda m: f'int({m[0]})', src)
+    if not uses: return None
+    return attribute[2], variant
+
+
 def entry_args(src, key, path):
     """Find the translated entry point with its argument list in group 1."""
     m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
     if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
     return m
 
-def one(path, tmp, root):
-    with open(path, 'rb') as f: data = f.read()
+def one(source, tmp):
+    key, path, data = source
     if len(data) % 4: red(f'{path}: SPIR-V length {len(data)} is not a multiple of 4')
-    key = hashlib.sha256(data).hexdigest()[:16]   # of the game's words, which the host hashes
     words = fix_strides(list(struct.unpack(f'<{len(data) // 4}I', data)))
     src_spv = os.path.join(tmp, key + '.in.spv')
     with open(src_spv, 'wb') as f: f.write(struct.pack(f'<{len(words)}I', *words))
@@ -243,13 +318,18 @@ def one(path, tmp, root):
     src = PRECISE.sub(r'precise::\1(', src)
     with open(msl, 'w') as f: f.write(src)
     msls = [msl]
+    bone_index = ''
     if stage == 'frag':
         # Metal requires two outputs of the same type for the dual-source variant.
         outs = {int(i): t for t, i in re.findall(r'(\w+)\s+\w+\s+\[\[color\((\d+)\)\]\]', src)}
         if outs.keys() == {0, 1} and outs[0] == outs[1]:
             msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
             with open(msl_d, 'w') as f: f.write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
-    return key, field, res, msls, '/' + os.path.relpath(path, root)
+    if stage == 'vert' and '.material.bin@' in path and (unsigned := unsigned_bone_indices(src)):
+        bone_index, variant = unsigned
+        msl_u = os.path.join(tmp, key + '_u.metal'); msls.append(msl_u)
+        open(msl_u, 'w').write(variant.replace(f'vk_{key}', f'vk_{key}_u'))
+    return key, field, res, msls, path, bone_index
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
@@ -271,23 +351,23 @@ def main():
     a = sys.argv[1:]
     ios = None
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
-    if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]')
+    if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir | NSO>... <out dir> [--ios <dir>]')
     roots, out = a[:-1], a[-1]
-    files = [(p, r) for r in roots for p in spirv_files(r)]
+    files = list(spirv_sources(roots))
     if not files: red(f'no SPIR-V files in {" ".join(roots)}')
     with tempfile.TemporaryDirectory() as tmp:
-        with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda pr: one(pr[0], tmp, pr[1]), files))
+        with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda src: one(src, tmp), files))
         seen, skipped = {}, {}
         for row in rows:
             if isinstance(row, str): skipped[row] = skipped.get(row, 0) + 1; continue
-            key, stage, res, msl, src = row
-            if key in seen: continue
-            seen[key] = (stage, res, msl, src)
-        if skipped: print('[RED] skipped shader stages Metal does not have: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
+            key, stage, res, msl, src, info = row
+            seen[key] = (stage, res, msl, src, info)
+        if skipped: print('[RED] skipped unsupported shader stages: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
         msls = [m for v in seen.values() for m in v[2]]
         tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; stage vert/frag/comp:x,y,z; resource kinds u/b/t/s/c/p and argument-buffer U/B/T/S/o/q',
                '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
-        tsv += [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
+        tsv += [f'{k}\t{stage}\t{" ".join(res)}\t{src}' + (f'\t{info}' if info else '')
+                for k, (stage, res, _, src, info) in sorted(seen.items())]
         dirs = [(os.path.join(out, 'vk'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
@@ -297,4 +377,6 @@ def main():
             open(os.path.join(d, 'vk_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders → {lib}')
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    try: main()
+    except nso.Error as e: red(str(e))

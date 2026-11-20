@@ -4,6 +4,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### RenderDragon material shaders
+
+- **Symptom:** the packer finds no loose SPIR-V files, although the game creates its modules from assets it ships.
+- **Cause:** RenderDragon places bgfx vertex and fragment v5 and compute v3 shader records in `renderer/materials/*.material.bin`. Its built-in graphics shader records are in the main NSO. Each record has a uniform table and a length-prefixed SPIR-V payload.
+- **Fix:** `vk_shaders.py` checks the material and bgfx headers, bounds-checks the uniform records and shader length, and requires the SPIR-V instruction stream to occupy that length exactly. It deduplicates by the same hash of the payload that the runtime uses. Compute rows include their workgroup size. Fragment shaders with three or more color outputs keep their normal MRT layout, which Metal cannot compile as dual-source blending.
+- **Found on:** [Minecraft for Nintendo Switch](../../dm/games/0100D71004694000/README.md) 1.26.62, with 1,784 unique graphics and 44 compute modules, including 11 built-in modules in `main`.
+
 ### L.A. Noire WAD and VFP shader arrays
 
 - **Symptom:** the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials.

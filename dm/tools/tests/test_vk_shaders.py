@@ -63,6 +63,12 @@ def spirv_with_bindings(bindings):
     return struct.pack(f'<{len(words)}I', *words)
 
 
+def translate_file(path, tmp):
+    data = Path(path).read_bytes()
+    key = hashlib.sha256(data).hexdigest()[:16]
+    return vs.one((key, '/' + Path(path).name, data), tmp)
+
+
 class VkShaders(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(shutil.which('spirv-as'), 'spirv-as required to assemble the test shaders')
@@ -76,7 +82,7 @@ class VkShaders(unittest.TestCase):
         out = self.tmp / 'out'; out.mkdir(exist_ok=True)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', ResourceWarning)   # the tool leaves its files to be closed at collection
-            key, stage, res, msls, _ = vs.one(str(spv), str(out), str(self.tmp))
+            key, stage, res, msls, _, _ = translate_file(spv, str(out))
         self.assertEqual(key, hashlib.sha256(spv.read_bytes()).hexdigest()[:16])
         return key, stage, res, [Path(m).read_text() for m in msls]
 
@@ -270,7 +276,7 @@ class ShaderTable(unittest.TestCase):
                 return SimpleNamespace(stdout='', stderr='', returncode=0)
 
             with patch.object(vs.subprocess, 'run', side_effect=cross) as run:
-                row = vs.one(str(path), td, td)
+                row = translate_file(path, td)
 
         self.assertEqual(row[1], 'frag')
         self.assertEqual(set(row[2]), {
@@ -308,8 +314,8 @@ class ShaderTable(unittest.TestCase):
                 return SimpleNamespace(stdout='', stderr='', returncode=0)
 
             with patch.object(vs.subprocess, 'run', side_effect=cross) as run:
-                row = vs.one(str(fixed), td, td)
-                skipped = vs.one(str(specialized), td, td)
+                row = translate_file(fixed, td)
+                skipped = translate_file(specialized, td)
 
         self.assertEqual(row[1], 'comp:8,8,1')
         self.assertEqual(skipped, 'comp with a local size from specialization constants')

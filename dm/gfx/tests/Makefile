@@ -165,6 +165,8 @@ t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_D
 	clang $(CFLAGS) -fobjc-arc -o $@ t_counter_clock.m ../../host/hle_os.c $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
+t_ndve_picture: t_ndve_picture.c ../nvn/nvn_ndve_picture.h
+	clang -O1 -Wall -o $@ t_ndve_picture.c
 t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
 	clang -O1 -Wall -o $@ t_thread_rt.c
 t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h ../nvn/nvn_link_latch.h

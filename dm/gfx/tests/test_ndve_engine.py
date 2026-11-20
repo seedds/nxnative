@@ -2,7 +2,8 @@
 on this Mac's GPU, every kernel the host runs on random inputs and weights at the network's sizes, bit for bit against reference kernels that compute each HMMA.16816 through
 dmsh_build.py's own helper (test_dmsh_hmma's helper rewritten by hmma_msl, the HMMA_BODY every translated shader gets), in PTX mma.m16n8k16's fragment layout, with the flags
 TensorPass gives a chain (C = 0 and the accumulator slot on its first call, the slot on the others), in the order the game's code runs them (taps, then 16-channel blocks).
-On the CPU: the kernels the host binds are in the source, and the packing of the input picture."""
+The picture DM_NDVE_PICTURE=decoded writes (out_decoded) against the last layer's with zero weights and biases. On the CPU: the kernels the host binds are in the source,
+and the packing of the input picture."""
 import os
 from pathlib import Path
 import re
@@ -281,6 +282,24 @@ int main(int argc, char **argv) {
             [oe getBytes:pa bytesPerRow:1920 * 4 fromRegion:MTLRegionMake2D(0, 0, 1920, 1080) mipmapLevel:0]; [orf getBytes:pb bytesPerRow:1920 * 4 fromRegion:MTLRegionMake2D(0, 0, 1920, 1080) mipmapLevel:0];
             same("out_16 (960x540x16 + RGBA8 1920x1080 -> RGB10A2)", pa, pb, 1920 * 1080, 4); free(pa); free(pb);
         }
+        // DM_NDVE_PICTURE=decoded: the picture into RGB10A2 as out_16 writes it when the network's correction is zero (all weights and biases 0)
+        {
+            id<MTLBuffer> in = tensor(960, 540, 16, 1), w = [dev newBufferWithLength:9 * 16 * 16 * 2 options:MTLResourceStorageModeShared], b = [dev newBufferWithLength:16 * 2 options:MTLResourceStorageModeShared];
+            memset(w.contents, 0, w.length); memset(b.contents, 0, b.length);
+            id<MTLTexture> rgba = tex(MTLPixelFormatRGBA8Unorm, 1920, 1080), oz = tex(MTLPixelFormatRGB10A2Unorm, 1920, 1080), od = tex(MTLPixelFormatRGB10A2Unorm, 1920, 1080);
+            fill_tex(rgba, 0);
+            LayerArgs a = {960, 540, 120, 135};
+            run(^(id<MTLComputeCommandEncoder> ce) {
+                [ce setComputePipelineState:pso(eng, @"out_16")]; [ce setBuffer:in offset:0 atIndex:0]; [ce setBuffer:w offset:0 atIndex:2]; [ce setBuffer:b offset:0 atIndex:3]; [ce setBytes:&a length:sizeof a atIndex:4];
+                [ce setTexture:rgba atIndex:0]; [ce setTexture:oz atIndex:1];
+                [ce dispatchThreadgroups:MTLSizeMake((a.tiles_x * a.tiles_y + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [ce setComputePipelineState:pso(eng, @"out_decoded")]; [ce setTexture:rgba atIndex:0]; [ce setTexture:od atIndex:1];   // as nvn_ndve.inc ndve_decoded encodes it
+                [ce dispatchThreadgroups:MTLSizeMake(60, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+            });
+            uint32_t *pa = malloc(1920 * 1080 * 4), *pb = malloc(1920 * 1080 * 4);
+            [od getBytes:pa bytesPerRow:1920 * 4 fromRegion:MTLRegionMake2D(0, 0, 1920, 1080) mipmapLevel:0]; [oz getBytes:pb bytesPerRow:1920 * 4 fromRegion:MTLRegionMake2D(0, 0, 1920, 1080) mipmapLevel:0];
+            same("out_decoded (RGBA8 1920x1080 -> RGB10A2) against out_16 with zero weights and biases", pa, pb, 1920 * 1080, 4); free(pa); free(pb);
+        }
         // the input packing: f16 of the RGBA8 read's float, c / 255 correctly rounded
         {
             id<MTLTexture> rgba = tex(MTLPixelFormatRGBA8Unorm, 1920, 1080); fill_tex(rgba, 0);
@@ -333,7 +352,7 @@ class EngineSource(unittest.TestCase):
         src = ENGINE.read_text()
         defined = set(re.findall(r'\bkernel void (\w+)\(', src)) | set(re.findall(r'^(?:CONV|CONV3S|UP)\((\w+),', src, re.M))
         bound = kernels_bound()
-        self.assertEqual(len(bound), 12)
+        self.assertEqual(len(bound), 13)
         self.assertEqual(sorted(set(bound) - defined), [])
 
     def test_weight_offsets_follow_from_the_layers(self):

@@ -198,6 +198,13 @@ kernel void out_16(device const half *in [[buffer(0)]], device const half *w [[b
     }
 }
 
+// DM_NDVE_PICTURE=decoded: the network's output with its correction taken as zero, the picture alone: out_16's (rgba(c) + D[n]) + bias[n] with D and bias 0 is rgba(c)
+// exactly (a texture read's float is never -0), written as the same float4 into the RGB10A2 picture. One thread a pixel
+kernel void out_decoded(texture2d<float, access::read> rgba [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]], uint2 g [[thread_position_in_grid]]) {
+    if (g.x >= dst.get_width() || g.y >= dst.get_height()) return;
+    dst.write(rgba.read(g), g);
+}
+
 // The network's input: the converted movie frame (RGBA8, 2W x 2H) packed 2x2 into 16 channels, channel 4 (2 sy + sx) + c = pixel (2x + sx, 2y + sy) channel c,
 // each the texture read's float rounded to f16 (as the game's first convolution loads it)
 kernel void pack_input(texture2d<float, access::read> img [[texture(0)]], device half *out [[buffer(1)]], constant LayerArgs &a [[buffer(4)]], uint2 g [[thread_position_in_grid]]) {

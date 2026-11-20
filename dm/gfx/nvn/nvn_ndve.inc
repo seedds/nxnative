@@ -8,6 +8,8 @@
 // an RGB10A2 image) and the resampler 4f41ccf2 (the model's 4/3, to 2560x1440). The host skips the eleven, computes the whole network at 5a7d69b0 from the picture the first
 // of them read, with the weights and biases the game bound, into the image 5a7d69b0 writes, and runs its own resampler at 4f41ccf2. 49dff010 stays the game's. The kernels
 // do the translated shaders' arithmetic in their order (each HMMA as dmsh_rewrite.py's HMMA_BODY does it), so the output bits are theirs (dm/gfx/tests/test_ndve_engine.py).
+// DM_NDVE_PICTURE=decoded writes that image from the picture alone, the network's correction taken as zero (ndve_decoded), for a GPU too slow for it;
+// auto (the default) does so for the rest of a movie once the network's GPU time is what makes its frames late (ndve_auto).
 // Recognition: the keys in order, the weights and biases each dispatch binds at the offsets the graph gives from the first layer's, the picture and image sizes and formats,
 // the resampler's constants. Anything else (another model, the archive's second network, other bindings or sizes, a dispatch out of order, no library) leaves the game's
 // dispatches running, logged once; a deviation after some dispatches were skipped turns the host's network off for the rest of the run, and that frame's movie picture is
@@ -21,11 +23,11 @@ static const char k_ndve_keys[NDVE_N][17] = {"49dff010b9832251", "ba079f68ae288d
 typedef struct { uint32_t W, H, tiles_x, tiles_y; } ndve_args;
 enum { NT_X0, NT_A, NT_S16, NT_B32, NT_S32, NT_E32, NT_C64, NT_D64, NT_N };
 static const int k_ndve_t[NT_N][3] = {{960, 540, 16}, {960, 540, 16}, {960, 540, 16}, {480, 270, 32}, {480, 270, 32}, {480, 270, 32}, {240, 135, 64}, {240, 135, 64}};
-enum { NK_PACK, NK_C16, NK_C32, NK_C64, NK_D16, NK_D32, NK_U64, NK_U32, NK_OUT, NK_LUMA, NK_RS, NK_CMP, NK_N };
-static const char *k_ndve_kern[NK_N] = {"pack_input", "conv3s_16_16", "conv3s_32_32", "conv3s_64_64", "down_16_32", "down_32_64", "up_64_32", "up_32_16", "out_16", "rs_luma", "resample", "cmp_img"};
-static const int k_ndve_ry[NK_N] = {0, 4, 2, 1, 2, 1, 1, 2, 4, 0, 0, 0};
+enum { NK_PACK, NK_C16, NK_C32, NK_C64, NK_D16, NK_D32, NK_U64, NK_U32, NK_OUT, NK_LUMA, NK_RS, NK_CMP, NK_DEC, NK_N };
+static const char *k_ndve_kern[NK_N] = {"pack_input", "conv3s_16_16", "conv3s_32_32", "conv3s_64_64", "down_16_32", "down_32_64", "up_64_32", "up_32_16", "out_16", "rs_luma", "resample", "cmp_img", "out_decoded"};
+static const int k_ndve_ry[NK_N] = {0, 4, 2, 1, 2, 1, 1, 2, 4, 0, 0, 0, 0};
 // each kernel's weights: taps, input channels, output channels (w[tap][k][n] halves), then N biases
-static const int k_ndve_shape[NK_N][3] = {{0, 0, 0}, {9, 16, 16}, {9, 32, 32}, {9, 64, 64}, {4, 16, 32}, {4, 32, 64}, {4, 64, 32}, {4, 32, 16}, {9, 16, 16}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+static const int k_ndve_shape[NK_N][3] = {{0, 0, 0}, {9, 16, 16}, {9, 32, 32}, {9, 64, 64}, {4, 16, 32}, {4, 32, 64}, {4, 64, 32}, {4, 32, 16}, {9, 16, 16}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 typedef struct { int k, in, out, skip, layer; } ndve_layer;   // layer: the game's dispatch it stands for (its position in k_ndve_keys)
 static const ndve_layer k_ndve_l[] = {
     {NK_PACK, -1, NT_X0, -1, 0}, {NK_C16, NT_X0, NT_A, -1, 1}, {NK_C16, NT_A, NT_S16, -1, 2}, {NK_D16, NT_S16, NT_B32, -1, 3}, {NK_C32, NT_B32, NT_S32, -1, 4},
@@ -63,6 +65,78 @@ static struct {
 static int ndve_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NDVE_ENGINE", 1); return m; }   // on by default; 0 off, ab (DM_AB phases)
 // DM_NDVE_ENGINE=check: the game's dispatches run, and the engine computes the same frame beside them into images of its own, compared with the game's (logged every 300 frames)
 static int ndve_check(void) { static int c = -1; if (c < 0) { const char *e = getenv("DM_NDVE_ENGINE"); c = e && !strcmp(e, "check"); if (c) MLOG("DM_NDVE_ENGINE=check: the game's movie network runs, and the host's beside it, compared"); } return c; }
+// DM_NDVE_PICTURE: auto (default) the network's picture while the GPU keeps up with it (ndve_auto), network always, decoded the colour conversion's
+// picture alone, the network's correction taken as zero (out_decoded): the eleven layers and the last one's convolution do not run, what the game sees (the image, its size and
+// format, the resampler) stays. Where the host's network runs only: DM_NDVE_ENGINE=0, an ab phase off or check runs the network
+enum { NP_NETWORK, NP_DECODED, NP_AUTO };
+static int ndve_picture_mode(void) {
+    static int v = -1;
+    if (v >= 0) return v;
+    const char *e = getenv("DM_NDVE_PICTURE"); v = NP_AUTO;
+    if (e && !strcmp(e, "network")) v = NP_NETWORK; else if (e && !strcmp(e, "decoded")) v = NP_DECODED;
+    else if (e && *e && strcmp(e, "auto")) MLOG("[RED] DM_NDVE_PICTURE=%s: auto, network or decoded; keeping auto", e);
+    if (v == NP_DECODED) MLOG("movie picture (DM_NDVE_PICTURE): decoded, nn::ndve's movie network is not run; the colour conversion's picture goes to the resampler as it is");
+    if (v == NP_AUTO) MLOG("movie picture (DM_NDVE_PICTURE): auto, each movie starts with nn::ndve's movie network and drops it when the GPU's time for it makes the movie's frames late");
+    return v;
+}
+// DM_NDVE_PICTURE=auto: the decision per movie is nvn_ndve_picture.h's; here, its measurements: the network's GPU time (precise timestamps around its encoder, a ring of
+// NA_RING) and its frame's GPU span (mtl_gpu_span). A frame is read once the frame after it has completed (its encoder may sit in a submission tagged with the next frame)
+#include "nvn_ndve_picture.h"
+int dm_movie_hz(void);   // hle_movie.c
+enum { NA_RING = 8 };
+static struct {
+    id<MTL4CounterHeap> heap; int no_heap;
+    double tick_s;                    // seconds a timestamp tick
+    ndve_movie movie;                 // the movie's picture, decided from g_cur_frame's network frames
+    uint64_t frame[NA_RING]; int used[NA_RING]; int next;   // the frame each slot's timestamps belong to
+} g_na;
+static void ndve_auto_classify(double span, double net, double period) {
+    if (ndve_movie_picture(&g_na.movie, span, net, period) == NA_DECODED)
+        MLOG("movie picture (auto): decoded for the rest of this movie, the network makes its frames late: frame GPU span %.2f ms, network %.2f ms, picture period %.2f ms", span * 1e3, net * 1e3, period * 1e3);
+    else if (g_na.movie.picture == NA_NETWORK)
+        MLOG("movie picture (auto): the network for the rest of this movie, its frames fit: frame GPU span %.2f ms, network %.2f ms, picture period %.2f ms", span * 1e3, net * 1e3, period * 1e3);
+}
+// The timed frames whose GPU work has completed, read in frame order
+static void ndve_auto_read(uint64_t cur) {
+    for (;;) {
+        int k = -1;
+        for (int i = 0; i < NA_RING; i++) if (g_na.used[i] && (k < 0 || g_na.frame[i] < g_na.frame[k])) k = i;
+        if (k < 0) return;
+        const uint64_t f = g_na.frame[k]; uint64_t t0 = 0, t1 = 0, n0 = 0, n1 = 0;
+        if (f + 2 > cur || !mtl_gpu_span(f + 1, &n0, &n1)) { if (f + NA_GAP < cur) { g_na.used[k] = 0; continue; } return; }   // not completed yet; given up when long gone
+        g_na.used[k] = 0;
+        if (!mtl_gpu_span(f, &t0, &t1)) continue;
+        NSData *r = [g_na.heap resolveCounterRange:NSMakeRange(2 * (NSUInteger)k, 2)]; const uint64_t *ts = r.bytes;
+        if (!ts || r.length < 16 || ts[1] <= ts[0]) { static int once; if (!once++) MLOG("[RED] movie picture (auto): the network's timestamps read no time; that frame is not counted (logged once)"); continue; }
+        const int hz = dm_movie_hz();   // no movie rate known yet (period 0): not counted
+        ndve_auto_classify((double)(t1 - t0) * 1e-9, (double)(ts[1] - ts[0]) * g_na.tick_s, hz > 0 ? 1.0 / hz : 0);
+        if (g_na.movie.picture != NA_MEASURING) return;
+    }
+}
+// Under auto: 1 when this network frame takes the decoded picture; *slot the heap slot to time the network into, else -1
+static int ndve_auto(int *slot) {
+    *slot = -1;
+    const uint64_t cur = atomic_load(&g_cur_frame);
+    if (ndve_movie_start(&g_na.movie, cur)) memset(g_na.used, 0, sizeof g_na.used);
+    if (g_na.movie.picture != NA_MEASURING) return g_na.movie.picture == NA_DECODED;
+    if (!g_na.heap && !g_na.no_heap) {
+        MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = 2 * NA_RING; NSError *err = nil;
+        g_na.heap = [g_dev newCounterHeapWithDescriptor:hd error:&err];
+        if (!g_na.heap) { g_na.no_heap = 1; MLOG("[RED] movie picture (auto): no timestamp heap (%s); the network runs, untimed", err.description.UTF8String); }
+        else { uint64_t hz = [g_dev queryTimestampFrequency]; g_na.tick_s = hz ? 1.0 / (double)hz : 1e-9; }
+    }
+    if (!g_na.heap) return 0;
+    ndve_auto_read(cur);
+    if (g_na.movie.picture != NA_MEASURING) return g_na.movie.picture == NA_DECODED;
+    const int k = g_na.next; if (g_na.used[k]) return 0;   // the ring is full of frames not completed yet: this one untimed
+    g_na.next = (k + 1) % NA_RING; g_na.used[k] = 1; g_na.frame[k] = cur; *slot = k;
+    return 0;
+}
+// The picture this network frame takes: 1 decoded, 0 the network; *slot as ndve_auto
+static int ndve_picture_decoded(int *slot) {
+    *slot = -1;
+    switch (ndve_picture_mode()) { case NP_DECODED: return 1; case NP_AUTO: return ndve_auto(slot); default: return 0; }
+}
 static int ndve_index(NvShader *cs, int from) { for (int i = from; i < NDVE_N; i++) if (!strncmp(cs->key, k_ndve_keys[i], 16)) return i; return -1; }
 // Pipelines and tensors, made once in the background; the game's dispatches run until they are ready
 static void ndve_build(void) {
@@ -123,10 +197,12 @@ static id<MTLTexture> ndve_tex_id(NvShader *cs, int kind, int reg, int *id_out) 
 }
 static id<MTLTexture> ndve_tex(NvShader *cs, int kind, int reg) { return ndve_tex_id(cs, kind, reg, NULL); }
 // The network: 13 kernels in one compute encoder, ordered by barriers; input = the picture 5a7d69b0 reads, output = the image it writes
-static void ndve_encode(id<MTLTexture> rgba, id<MTLTexture> out, uint64_t wgpu) {
+// slot >= 0: precise timestamps before and after it into g_na.heap (2 slot, 2 slot + 1)
+static void ndve_encode(id<MTLTexture> rgba, id<MTLTexture> out, uint64_t wgpu, int slot) {
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);   // waits for the work before it (queue barrier)
     [ce setArgumentTable:g_nd.at];
+    if (slot >= 0) [ce writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:g_na.heap atIndex:2 * (NSUInteger)slot];
     id<MTL4ArgumentTable> at = g_nd.at;
     for (int i = 0; i < NDVE_NL; i++) {
         const ndve_layer *L = &k_ndve_l[i];
@@ -148,7 +224,19 @@ static void ndve_encode(id<MTLTexture> rgba, id<MTLTexture> out, uint64_t wgpu) 
         uint32_t groups = staged ? (a->W + 31) / 32 * a->tiles_y : (a->tiles_x * a->tiles_y + 3) / 4;
         [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     }
+    if (slot >= 0) [ce writeTimestampWithGranularity:MTL4TimestampGranularityPrecise intoHeap:g_na.heap atIndex:2 * (NSUInteger)slot + 1];
     [ce barrierAfterStages:MTLStageDispatch | MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // what follows (4f41ccf2) waits for the image
+    enc_c_end(ce);
+    args_dirty_all();
+}
+// DM_NDVE_PICTURE=decoded: the picture into the image 5a7d69b0 writes, as the network's last layer writes it with no correction
+static void ndve_decoded(id<MTLTexture> rgba, id<MTLTexture> out) {
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
+    id<MTL4ArgumentTable> at = g_nd.at; [ce setArgumentTable:at];
+    [ce setComputePipelineState:g_nd.ps[NK_DEC]]; [at setTexture:rgba.gpuResourceID atIndex:0]; [at setTexture:out.gpuResourceID atIndex:1];
+    [ce dispatchThreadgroups:MTLSizeMake(60, 135, 1) threadsPerThreadgroup:MTLSizeMake(32, 8, 1)];
+    [ce barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // what follows (4f41ccf2) waits for the image
     enc_c_end(ce);
     args_dirty_all();
 }
@@ -247,9 +335,11 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
     if (rgba_id != g_nd.pic) return ndve_fail(cs, "the picture added to the network's output is not the one its first layer read");
     if (!mtl_gpu_addr(g_nd.w0, NDVE_WBYTES, &wb, &wo, &wgpu)) return ndve_fail(cs, "the weight table is in no memory pool");
     if (chk && !g_nd.shadow) g_nd.shadow = ndve_shadow(out);
-    ndve_encode(rgba, chk ? g_nd.shadow : out, wgpu);
+    int slot = -1; const int dec = !chk && ndve_picture_decoded(&slot);
+    if (dec) ndve_decoded(rgba, out);
+    else ndve_encode(rgba, chk ? g_nd.shadow : out, wgpu, slot);
     if (chk) g_nd.game_out = out;   // compared once the game's 5a7d69b0 has written it, at 4f41ccf2
     g_nd.pos = 13;   // the resampler next
-    if (!g_nd.frames++) MLOG("NDVE engine: first movie frame by the engine (%llu dispatches skipped)", (unsigned long long)g_nd.skipped);
+    if (!g_nd.frames++) MLOG("NDVE engine: first movie frame by the engine%s (%llu dispatches skipped)", dec ? ", the decoded picture without the network" : "", (unsigned long long)g_nd.skipped);
     (void)dp; return !chk;
 }

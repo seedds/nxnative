@@ -20,7 +20,26 @@ The profile's memory and module values come from the NSP survey. No game-specifi
 - **Checked on November 20, 2026:** all 41 archives from the merged v524288 NSP extraction: 27 `ZCTT`, 14 `NCTT`. The pre-integration splitter finds zero keys. The reader finds 24,243 unique shaders: 21,914 pixel, 2,305 vertex and 24 compute. Every control/code pair passes `check()` and the key set exactly matches the original PR.
 - `SM3_nx_Shaders_mem.ttarch2` supplies all 24,243 keys. `SM3_nx_ShadersPatch.ttarch2` supplies 2,213; their keys and shader bytes are already in the base pack. No other archive supplies a shader.
 - **Checked on November 20, 2026:** all 24,243 Mac libraries build with chain `0724088d3779` on an Apple M6 (`Mac18,5`), macOS 27.2.1 (`26B131`), Xcode 27.2 (`27B52`). The build reports zero undecoded binding slots, zero unrecognized binding kinds, zero unfillable driver-segment reads and nothing lost without failing. All 24 regenerated compute-fact rows equal the PR's rows.
-- **Open:** the shipped pipeline manifest and vertex/pixel pair tables are empty. The Mac playtest recorded 274 render-pipeline rows and two compute rows locally, but that recording has not been checked as a shipped prewarm list and stays outside the repository. The author observed first-use frames of 0.3–1 s.
+- **Checked on November 20, 2026:** the shipped prewarm list covers 277 render pipelines and two compute pipelines from the opening Mac playtest, including three demanded pipelines present only in the device-user log. Every shader reference/stage matches the shader map; the native key decoder accepts every render row and all pipelines compile with zero failures. The vertex/pixel pair tables remain empty. See [Prewarm validation](#prewarm-validation).
+
+## Prewarm validation
+
+The recording held 14,860 shader-only rows as well as its pipelines. The seed keeps render/compute rows in first-seen order and leaves shader-only rows out: the existing prewarmer loads each pipeline's shader dependencies itself. This avoids loading thousands of additional libraries before the first frame. No host or shader-chain change is needed; the shader-input digest remains `efe52859c6fc`.
+
+On the M6/macOS/Xcode combination above, the native prebuild compiles all 277 render pipelines and two compute pipelines at `depth_mode zero`, with no rejected rows, stale shader keys or failures. Five short title runs use visible windows with the HUD, isolated empty saves, no pipeline archive and explicit manifests that exclude the device-user list. The system Metal cache is shared and was left intact. No new episode or save behavior was tested.
+
+Two alternating A/B pairs tested the initial 274-render/two-compute candidate against an empty seed. The first 299 measured frames after the first frame show:
+
+| Metric | Empty seed, run 1 | Seed, run 1 | Empty seed, run 2 | Seed, run 2 |
+|---|---:|---:|---:|---:|
+| Submit-thread pipeline waits | 315.2 ms | 0 ms | 5.7 ms | 0 ms |
+| Longest frame | 238.65 ms | 35.33 ms | 33.67 ms | 33.45 ms |
+| Prewarm before first frame | none | 794 ms | none | 21 ms |
+| Footprint at frame 300 | 720 MiB | 739 MiB | 714 MiB | 744 MiB |
+
+The repeat's empty-seed run already benefits from the system compiler cache. These results show the first-use work moving before the first frame; they do not establish a steady frame-rate gain. The final seed adds the three device-user demand rows and was checked separately: all 279 lines prepare in 78 ms with the system cache warm, zero submit-thread pipeline/shader-load waits, a 32.92 ms longest title frame, 741 MiB at frame 300 and no `[RED]` lines. Title screenshots were inspected; the animated background differs in phase between runs.
+
+The list covers the recorded opening route only. Pipelines first encountered elsewhere still compile on demand; the existing device-user list records them for the next start. iPhone preparation time and memory are unmeasured.
 
 ## Mac validation
 
@@ -41,7 +60,7 @@ Build with `--platform mac`, then use the printed run command with `DM_WINDOW=1 
 ## Open
 
 - Validate episode progression through completion and save/reload before removing the provisional label.
-- Check rendering and first-use stalls during that playtest; record a reproducible smoke route and pipelines where useful.
+- Check rendering and first-use stalls beyond the recorded opening route; record a reproducible smoke route and additional pipelines where useful.
 - Diagnose the reported no-window stall if it remains on current main.
 - Only merged update v524288 has been extracted here; base-only play and other builds remain untested.
 - Not tried on the iPhone.

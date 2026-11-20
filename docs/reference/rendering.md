@@ -168,6 +168,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** an image slot the shader declares as uint / int now gets a view of the same texel size in that class (`img_fit` in `nvn_mtl.m`). The format-view usage costs lossless compression, so a texture gets it only when a shader needs such a view: it is upgraded (copied into a texture with the usage) before the next draw pass opens, as the copy cannot run inside the draw's own pass; until then that one draw reads it as before.
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the last passes have no render target; fragment shaders composite each UI layer into the window texture with image stores, blending in software (`uirender.tec`, `4cf1975ed1e36590`).
 
+### Float views for integer buffer images
+
+- **Symptom:** a buffer image appears in both integer atomic and float load/store arguments. The float argument's format differs from the shader declaration.
+- **Cause:** `img_binding` adapted only slots declared as integers. Metal leaves reads and writes through a mismatched texture declaration undefined. The game uses the same histogram bytes through `texture_buffer<uint>` atomics and `texture_buffer<float>` loads and stores.
+- **Fix:** `img_fit` takes a same-width float view of 32-bit integer buffer images using `tbuf_view_format`. The view shares the storage and the original coordinate bias. `check_t_buffer_image_bias` verifies the format, the offset and the original bits through both views under Metal validation.
+- **Found on:** [LEGO Star Wars: The Skywalker Saga](../../dm/games/010042D00D900000/README.md). Clear `9a6b21facc9b346d`, accumulation `fd31a0e4ff650684`, and reduction `823aeb9661fb80eb` share the 36-word R32Uint histogram.
+
 ### Image views of the type a shader declares
 
 - **Symptom:** a compute pass's image stores are lost with no red line: the levels or layers it writes stay as they were. With `DM_NVN_PASSDUMP`, its `W` lines read `target=3 shader wants target 2` (a 2D array in a slot the shader declares 2D).
@@ -1006,6 +1013,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Xenoblade Chronicles 2](../../dm/games/0100E95004038000/README.md#rendering): the probe-list writers, `shd_lgt.wishp` var3 (`ef07fd3d5046164f`, `aa9a0923524b7e46`, `2717a0aa47361bbd`, `d95874c161deb77d`, `f24b58784a33adea`), read by the indirect-lighting pass `93d0e7a7c14cdfb0` (GitHub issue #643). Normalized targets: [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md#rendering), `f11c15a99b0c1790` (GitHub issue #928; the cause and the approach were first reported by Zatteo in issue #497).
 
 - **Typed-output binding regression (2026-11-17):** `c75f0126` moved the operation into `main0_u`, whose generated reflection has `entry_u_logic` without the legacy `logic` dictionary. Pipeline selection accepted `u_logic`, but drawing bound buffer 29 only for `has_logic` (the dictionary), leaving the operation and masks unbound. Draws now bind for either capability. `t_logic` loads reflection and libraries made by the production build finisher through `shader_load`, then reads back all 16 operations on unsigned and normalized targets; it previously set `has_logic` by hand and hid the missing bind. Skyward Sword HD's reported return of the dark cinematic cast bisects to this change, but a matching pass capture and gameplay retest are still needed to confirm that connection.
+
+### Source-only blending on floating-point targets
+
+- **Symptom:** the title background and gameplay render black while the HUD and text remain visible. A pass dump shows the scene and its color lookup table rendered before tone mapping, but the bloom input holds positive infinity.
+- **Cause:** the bloom blur `f9895ce248715e99` enables ADD with source ONE and destination ZERO for both color and alpha. This state replaces the destination. On an M4 Pro with macOS 27.2.1, the enabled Metal blend state produced infinity in all 90,400 texels of the R11G11B10F target. The input RGBA8 texture and blur weights were finite. Tone mapping then sampled outside its color lookup table. An isolated Metal draw using the same fragment code and captured input with controlled vertices produced finite values with either blend state, so the lower-level trigger in the live pipeline remains open.
+- **Fix:** `pso_desc` implements source replacement by leaving blending disabled on float attachments for this exact state. Blends that use the destination or alter the source retain their blend factors and operations. `check_t_blend_zero` covers the pipeline descriptors and the existing float blend results.
+- **Found on:** [LEGO Star Wars: The Skywalker Saga](../../dm/games/010042D00D900000/README.md). With the source-only state represented directly, all 90,400 bloom texels were finite and the “Boarding Party” corridor rendered on the same Mac.
 
 ### Advanced blend modes as Porter-Duff factors
 

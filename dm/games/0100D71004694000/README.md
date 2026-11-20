@@ -32,10 +32,18 @@ The [shader repair](../../../docs/reference/rendering.md#renderdragons-unsigned-
 
 Resolved: 198 ForwardPBR fragment shaders have 25–29 resource entries, and the host's old 24-entry storage dropped 522 samplers. All omitted samplers have shader-body uses: previous-frame luminance, caustics, scattering, shadow cascades and specular IBL. A representative 29-entry shader uses 5 buffers, 12 textures and 12 samplers, within the separate Metal argument-table limits. The [general loader fix](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated) retains the full list without changing shader assets. A synthetic 25-resource GPU readback verifies the binding failure and its correction.
 
-On main build `84306c1f3543e39becef959079766644`, these affected actor ForwardPBR materials are unreachable through the normal shipped settings and material paths. The actor selector (`main+0xe1cbb70`, called at `+0xe438568` and `+0xe43efe8`) chooses them only for blended materials in backend mode 1, the ray-traced path. The hardware constructor and client refresh unconditionally clear `RayTracingHardwareOptions` byte `+0x19` at `+0x5e34d5c` and `+0x427acf4`. The client renderer update (`+0x422e5a0`) checks that capability and replaces a requested mode 1 with mode 0 before passing it to the framebuilder. A saved mode-1 setting cannot bypass this check. Deferred/Vibrant Visuals uses separate backend mode 2, which does not enter this selector branch. This is a static binary trace, not a physical Switch runtime observation.
+On main build `84306c1f3543e39becef959079766644`, these affected actor ForwardPBR materials are unreachable through the normal shipped settings and material paths. The actor selector (`main+0xe1cbb70`, called at `+0xe438568` and `+0xe43efe8`) chooses them only for blended materials in backend mode 1, the deferred/Vibrant Visuals path. The game's [graphics-mode gates](#graphics-modes) reject that mode before passing it to the framebuilder. Backend mode 2 is RTX/ray tracing and does not enter this selector branch.
 
 No additional Minecraft gameplay validation is pending for this loader fix on this build: normal world play cannot exercise the rejected path. Complete-table, sanitizer and synthetic GPU checks cover the loader contract, and the full Hades regression passed. The general host fix remains valid independently of this build's unused shader assets.
 
+## Graphics modes
+
+Resolved on main build `84306c1f3543e39becef959079766644` (1.26.62): backend mode 1 is deferred/Vibrant Visuals, and mode 2 is RTX/ray tracing. The renderer selection at `main+0xe401b60` constructs `VibrantVisualsFrameRenderer` for mode 1 and `RTXMinecraftFrameRenderer` for mode 2, confirmed by the constructed objects' RTTI.
+
+Neither advanced mode is available through this build's normal settings. Mode 1 requires `RayTracingHardwareOptions` byte `+0x19`, which the hardware constructor and client refresh unconditionally clear at `+0x5e34d5c` and `+0x427acf4`. Mode 2 uses the separate hardware byte `+0x18`, populated from the framebuilder's capability query (`+0xe40c2a4`). That query reads the `Ray_Tracing` capability, bit 31 of the graphics caps' low word, through `+0xe8be910`; neither shipped Vulkan backend advertises that bit.
+
+The client renderer update (`+0x422e5a0`) checks the corresponding capability and replaces either unsupported request with mode 0 before passing it to the framebuilder. Saved settings cannot bypass these checks. This is a static trace of the original NSO, corroborated by focused Ghidra decompilation and Capstone inspection, not a physical Switch runtime observation. It does not establish availability in a separate native Switch 2 executable.
+
 ## Open
 
-Online services remain unverified. Availability and rendering of the separate deferred/Vibrant Visuals mode have not been established for this build. Clear rectangles smaller than an attachment still report unsupported operations.
+Online services remain unverified. Clear rectangles smaller than an attachment still report unsupported operations.

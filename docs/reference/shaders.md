@@ -1094,7 +1094,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Integer textures and images through float declarations keep their bits
 
-- Integer textures and images read and written through float declarations (an `RGBA8_UINT` texture read by `texture3d<float>` and bit-cast, `R16_UINT` / `R32_UINT` buffers through `texture_buffer<float>`, integer stores into a float-declared `texture3d` image) were checked on an Apple GPU: all keep the integer bits, so they need no facts.
+- These accesses kept their integer bits on the Apple GPU used in the original check. Metal leaves a mismatch between texture format and shader type undefined. The host adapts supported 32-bit integer buffer image formats to matching float views. See [Float views for integer buffer images](rendering.md#float-views-for-integer-buffer-images).
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the volumetric lightmap's indirection texture, the light grid buffers).
 
 ### Integer-typed vertex inputs fed normalized formats

@@ -37,6 +37,8 @@ int main(void) {
     uint64_t f1 = atomic_load(&g_faults); page[9] = 2;
     EXPECT("so the writer's next store does not fault", 0, atomic_load(&g_faults) - f1);
     EXPECT("and the reader sees that store (its stamp counts the page as written)", 1, nvn_dirty_since((const void *)page, 16, st));
+    { uint64_t a = nvn_dirty_now(), b = nvn_dirty_now();   // readers skip their check while the clock stands (nvn_mtl.m's look cache): a write that does not fault must not leave it standing
+      EXPECT("while a page is write-pending the clock moves at each look", 1, b > a); }
     nvn_dirty_frame();
     nvn_dirty_protect((const void *)page, pg);
     EXPECT("one frame later (not a whole frame since the write) still writable", 1, kernel_writable((const void *)page));
@@ -50,6 +52,7 @@ int main(void) {
     EXPECT("a stamp taken after that sees it clean", 0, nvn_dirty_since((const void *)page, 16, st2));
     nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)page, pg);
     EXPECT("quiet frames bring no more re-reads", 0, nvn_dirty_since((const void *)page, 16, st2));
+    { uint64_t a = nvn_dirty_now(), b = nvn_dirty_now(); EXPECT("with no page write-pending the clock stands", 1, a == b); }
     page[10] = 3;
     EXPECT("a later write faults and is seen", 1, nvn_dirty_since((const void *)page, 16, st2));
     EXPECT("pages made write-pending so far (two faulting writes)", 2, atomic_load(&g_pends));

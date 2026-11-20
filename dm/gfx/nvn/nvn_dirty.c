@@ -193,6 +193,11 @@ static range_t *pin_span(range_t *kept, uintptr_t a, size_t len) {
 static int g_pend_on = 1;
 static _Atomic uint32_t g_dframe;   // frames presented (nvn_dirty_frame)
 static _Atomic uint64_t g_pends, g_pend_skips;
+// Pages whose generation is GEN_HOT now. A write to one does not fault, so it does not move the clock, and readers skip their check while the clock stands still (nvn_mtl.m: a
+// packaged texture is looked at again only when nvn_dirty_now() moved since its last look; t_nvn's re-upload checks read stale contents). While any is held, nvn_dirty_now()
+// ticks at each call, so every look reads the pages again
+static _Atomic int64_t g_hot_pages;
+static void hot_set(range_t *r, uintptr_t p) { if (atomic_exchange(&r->gen[p], GEN_HOT) != GEN_HOT) atomic_fetch_add(&g_hot_pages, 1); }
 void nvn_dirty_frame(void) { atomic_fetch_add_explicit(&g_dframe, 1, memory_order_relaxed); }
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
@@ -220,7 +225,9 @@ static int pending(range_t *r, uintptr_t p) {
     uint32_t f = atomic_load(&r->pend[p]); if (!f) return 0;
     if (atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1 - f < 2) return 1;
     atomic_store(&r->pend[p], 0);
-    if (atomic_load(&r->gen[p]) == GEN_HOT) stamp_page(r, p);   // written at will while pending: every stamp from before now counts it as written
+    // Written at will while pending: every stamp from before now counts it as written. The generation is the clock as it stands, not a tick past it: the protecting caller took
+    // its stamp just before this protection and reads after it, so it must see the page clean (a tick here re-read every quiet page once more); every earlier stamp is lower
+    if (atomic_load(&r->gen[p]) == GEN_HOT) { atomic_store(&r->gen[p], atomic_load(&g_now)); atomic_fetch_sub(&g_hot_pages, 1); }
     return 0;
 }
 static void unprotect_page(range_t *r, uintptr_t p) {   // The caller has already changed the state from PROT to BUSY
@@ -368,6 +375,8 @@ void nvn_dirty_remove_range(const void *mem) {
         prep_write((void *)rb(r), re(r) - rb(r));
         atomic_store(&r->live, 0);   // seq_cst: against pin (the reuse in add_range reads the pin count)
         atomic_fetch_sub(&g_live, 1);
+        { int64_t hot = 0; for (uintptr_t p = 0, np = (re(r) - rb(r)) >> g_shift; p < np; p++) hot += atomic_load(&r->gen[p]) == GEN_HOT;   // its write-pending pages go with it (a dead range is never protected
+          if (hot) atomic_fetch_sub(&g_hot_pages, hot); }                                                                               // again, and add_range clears its arrays on reuse)
         atomic_fetch_add(&g_range_epoch, 1);
     }
     pthread_mutex_unlock(&g_slot_mu);
@@ -467,7 +476,7 @@ static size_t dirty_protect(const void *addr, size_t len) {
     for (uintptr_t i = p; i <= q + 1; i++) {
         uint8_t st = PG_NONE;
         if (i <= q && pending(r, i)) {
-            if (atomic_load(&r->state[i]) == PG_NONE) { atomic_store(&r->gen[i], GEN_HOT); skipped++; }
+            if (atomic_load(&r->state[i]) == PG_NONE) { hot_set(r, i); skipped++; }
             st = PG_PROT;   // not taken, not waited on: ends the run like a protected page
         }
         int took = i <= q && st == PG_NONE && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
@@ -495,7 +504,7 @@ void nvn_dirty_protect_sparse(const void *addr, size_t len) {
     pthread_mutex_unlock(&g_slot_mu);
 }
 uint64_t nvn_dirty_sparse_writes(void) { return atomic_load(&g_sparse_writes); }
-uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
+uint64_t nvn_dirty_now(void) { return atomic_load_explicit(&g_hot_pages, memory_order_relaxed) > 0 ? atomic_fetch_add(&g_now, 1) + 1 : atomic_load(&g_now); }   // ticks while a page is write-pending (g_hot_pages)
 // A GPU blit does not fault on CPU page protection. Keep the protection in place for the next CPU write.
 void nvn_dirty_gpu_written(uintptr_t addr, size_t len) {
     if (!len) return;

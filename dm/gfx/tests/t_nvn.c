@@ -1485,8 +1485,16 @@ int main(void) {
         nvn_dirty_stats(&fa, &pr); EXPECT("game write triggers ≥ 1 page fault (caught by the hook, no crash)", 1, fa - fa0 >= 1);
         GPU_READ_EQ(1, "after re-upload: GPU-side contents = version 1");
         mtl_pkg_stats(&up, &re); EXPECT("pool contents changed: re-uploads +1", 1, re - re0);
+        // Write-pending (T-141, nvn_dirty.c): the written page stays writable, and is read again at each look, until a whole frame has passed since the write; the look after
+        // that reads it once more (anything written while it was writable) and protects it again; from then on unchanged contents cost nothing
+        GPU_READ_EQ(1, "reuse in the frame of the write: still version 1");
+        mtl_pkg_stats(&up, &re); EXPECT("in the frame of the write: read again at the look (re-uploads 2)", 2, re - re0);
+        nvn_dirty_frame(); nvn_dirty_frame();
+        GPU_READ_EQ(1, "a whole frame later: still version 1, protected again");
+        mtl_pkg_stats(&up, &re); EXPECT("a whole frame later: read once more (re-uploads 3)", 3, re - re0);
+        nvn_dirty_stats(&fa, &pr);
         uint64_t fa1 = fa; GPU_READ_EQ(1, "reuse with unchanged contents: still version 1");
-        nvn_dirty_stats(&fa, &pr); mtl_pkg_stats(&up, &re); EXPECT("unchanged contents: page faults +0", 0, fa - fa1); EXPECT("unchanged contents: re-uploads still 1", 1, re - re0);
+        nvn_dirty_stats(&fa, &pr); mtl_pkg_stats(&up, &re); EXPECT("unchanged contents: page faults +0", 0, fa - fa1); EXPECT("unchanged contents: re-uploads still 3", 3, re - re0);
         // Pitfall 1: host read() writing directly into protected pages. Without prepare the kernel returns EFAULT (no page fault); after prepare the read succeeds, the pages are marked dirty and re-uploaded next time
         char path[1024]; snprintf(path, sizeof path, "%s/t_nvn_rd_XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "."); int fd = mkstemp(path);   // per-user temp directory, do not write to /tmp
         FILLPAT(2); uint8_t tmpst[sizeof lin * 4]; memset(tmpst, 0, sizeof tmpst);
@@ -1499,7 +1507,7 @@ int main(void) {
         EXPECT("read() succeeds after prepare", (long long)((tex_t *)&tw)->L.size, r1);
         close(fd); unlink(path);
         GPU_READ_EQ(2, "re-upload after host write: GPU-side contents = version 2");
-        mtl_pkg_stats(&up, &re); EXPECT("host write triggers a re-upload, 2 in total", 2, re - re0);
+        mtl_pkg_stats(&up, &re); EXPECT("host write triggers a re-upload, 4 in total", 4, re - re0);
         P(nvnMemoryPoolFinalize)(&wp);
     }
     // 6c1. Writes beside a texture (pkg_edges_clean): the texture starts 4 KB into a host page whose first 4 KB hold other data (Pokémon Sword: the pool's object). A write there dirties the

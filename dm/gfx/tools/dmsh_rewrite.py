@@ -738,6 +738,16 @@ def raw_noinline(msl, stage='cs'):
     attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
     return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
+# The same compiler defect without any call left: a native mesh stage whose translated functions are all forced into its two entry points (spirv-cross's always_inline, dm_stage_body's)
+# crashed the M2 Pro's mesh compiler at -O1 (applegpu_g14s, macOS 27.0.1: Ocarina of Time's task a7f22b4a795ff4d1 / mesh ac2f3feb11427426, SIGBUS in MachineOperand::setReg), and the
+# compiler service took every compile it held down with it (13 of the prewarm list's 164 mesh pipelines failed, one of them the cause). Its AIR held main0 and main0_z alone.
+# dm_stage_body alone as a function of its own moved the crash to mesh f85bb2e8d78b864c. Here the stage body and spirv-cross's functions lose the attribute and the compiler decides;
+# the search above keeps it, and so do the one-line helpers (dm_*, spvMulExtended). Measured on that Mac, all 164 pipelines in one process, three runs: 0 failed, no compiler report,
+# 64 s against 70 s. Not measured: other GPU families, the GPU time of the stages
+MESH_FORCED = re.compile(r'\nstatic inline __attribute__\(\(always_inline\)\)(\n(?!\w+ dmsh_raw_find\w*\()| (?=void dm_stage_body\())')
+def mesh_unforce(msl):
+    return MESH_FORCED.sub(lambda m: '\nstatic' + m.group(1), msl)
+
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 
 def gather_offsets(msl):

@@ -13,7 +13,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
-from dmsh_rewrite import raw_noinline   # noqa: E402
+from dmsh_rewrite import mesh_unforce, raw_noinline   # noqa: E402
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -97,6 +97,19 @@ class RawNoinline(unittest.TestCase):
         plain = HEAD + OTHER + helper('_71', '_70') + MAIN
         self.assertEqual(raw_noinline(plain), plain)
         self.assertEqual(raw_noinline(raw_noinline(SRC)), raw_noinline(SRC))
+
+    def test_mesh_unforce(self):
+        body = '\nstatic inline __attribute__((always_inline)) void dm_stage_body(uint a)\n{\n}\n'
+        one_line = '\nstatic inline __attribute__((always_inline)) float dm_zsnap(float z) { return z; }\n'
+        src = raw_noinline(SRC, stage='ms') + one_line + body
+        out = mesh_unforce(src)
+        self.assertEqual(attribute(out, 'dmsh_raw_find'), INLINE)   # the search stays forced inline
+        for name in ('_63', '_64', '_71', '_70'):
+            self.assertEqual(attribute(out, name), 'static', name)
+        self.assertIn('\nstatic void dm_stage_body(uint a)\n', out)
+        self.assertIn(one_line, out)   # a one-line helper keeps its attribute
+        self.assertEqual(mesh_unforce(out), out)
+        self.assertEqual(out.replace('\nstatic\n', '\n' + INLINE + '\n').replace('\nstatic void dm_stage_body(', '\n' + INLINE + ' void dm_stage_body('), src)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):

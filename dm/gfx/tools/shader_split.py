@@ -63,7 +63,7 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
@@ -3698,6 +3698,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
+    if d[:4] == SHARC: out.extend(sharc_shaders(d, label)); return
     if d[:8] == SHAD: out.extend(shad_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
@@ -3817,6 +3818,59 @@ def bnd2_shaders(d, label):
     found = []
     for rid, typ, k, r in bnd2_resources(d, label):
         if b'\x91\x68\x86\x19' in r: found += glslc_shaders(r, f'{label}/{rid:016x}.{typ:x}.{k}', need=False)
+    return found
+
+SHARC = b'RAHS'
+
+def sharc_shaders(d, label):
+    """GIANTS Engine SHARC v11 (Farming Simulator 26's shared/shader_switch.sharc).
+    A 0x2c-byte header gives the sizes of three entry tables (24, 32 and 20 bytes per entry). The data follows the tables:
+    metadata blocks, then the shader members with their property records, side records and length-prefixed names.
+    Each shader member starts with five LZMA1 property bytes and decodes to one GLSLC output. The game omits LZMA end markers,
+    so the GLSLC header's output length and the section checks establish whether the shader is complete."""
+    if len(d) < 0x2c: red(f'{label}: truncated SHARC header')
+    version, _, _, header_size, metadata_count, shader_count, hierarchy_count = struct.unpack_from('<7I', d, 4)
+    if version != 11 or header_size < 0x2c:
+        red(f'{label}: SHARC version {version}, header size {header_size:#x}: layout this reader does not know')
+    shader_table = header_size + 24 * metadata_count
+    pos = shader_table + 32 * shader_count + 20 * hierarchy_count
+    if pos > len(d): red(f'{label}: SHARC entry tables end at {pos:#x}, past the file size {len(d):#x}')
+
+    for i in range(metadata_count):
+        size, properties = struct.unpack_from('<IH', d, header_size + 24 * i)
+        pos += size + 5 * properties
+        if pos > len(d): red(f'{label}: SHARC metadata {i} runs past the file')
+
+    found = []
+    output_limit = 10_000_000
+    for i in range(shader_count):
+        size, properties, side_records, _, _, _, _, names = struct.unpack_from('<8I', d, shader_table + 32 * i)
+        where = f'{label}#{i}'
+        chunk = span(d, pos, size, f'{where}: SHARC compressed member')
+        if len(chunk) <= 5: red(f'{where}: short SHARC LZMA member')
+        pos += size + 5 * properties + 16 * side_records
+        if pos > len(d): red(f'{where}: SHARC property or side records run past the file')
+        for _ in range(names):
+            _, length = field(d, '<BB', pos, f'{where}: SHARC name header')
+            pos += 2 + length
+            if pos > len(d): red(f'{where}: SHARC name runs past the file')
+
+        props = chunk[0]
+        dict_size = int.from_bytes(chunk[1:5], 'little')
+        try:
+            dec = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=[{
+                'id': lzma.FILTER_LZMA1,
+                'dict_size': min(dict_size, output_limit),   # a member cannot refer back further than the bytes it has decoded
+                'lc': props % 9, 'lp': props // 9 % 5, 'pb': props // 45,
+            }])
+            raw = dec.decompress(chunk[5:], max_length=output_limit + 1)
+        except (lzma.LZMAError, ValueError) as e:
+            red(f'{where}: damaged SHARC LZMA stream ({e})')
+        if len(raw) > output_limit: red(f'{where}: SHARC member exceeds the {output_limit:,}-byte decode limit')
+        expected, _, _, _ = glslc_layout(raw, 0)
+        if raw[:4] != GLSLC_MAGIC or not 0 < expected <= len(raw):
+            red(f'{where}: incomplete SHARC GLSLC output ({len(raw)} bytes decoded, {expected} declared)')
+        found.extend(glslc_shaders(raw[:expected], where, offsets=(0,)))
     return found
 
 HEAPS_CACHE = 'shaders.cache.nx'
@@ -4065,6 +4119,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == SHARC:   # GIANTS Engine shader archive
+        with open(path, 'rb') as f: found = sharc_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:3] == b'PAK':   # a Heaps PAK archive (Dead Cells): only its shader cache is read, not its 2 GB of other files (heaps_pak_files, heaps_shaders)
         with open(path, 'rb') as f:

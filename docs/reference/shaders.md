@@ -238,6 +238,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [Absolum](../../dm/games/0100A83022A22000/README.md): 163 GLSLC outputs in `shaders.nx.bin` (`rom:/shaders.nx.bin`: a u32 count, then per entry a u32 hash, a u32 size and one whole output): 162 unique shaders, 83 pixel and 79 vertex, every vertex shader paired with the single-stage cover ([Single-stage programs paired with a cover](#single-stage-programs-paired-with-a-cover)). Its `.xnb` effects are XNA's D3D9 effects, MOJOSHADER linked in, which the GPU does not run.
   - [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): 3,050 loose files in `data/shaders_binary` (`*.vs` / `*.ps`, one stage each, one output per file), read like FINAL FANTASY TACTICS' technique files; its vertex shaders are in two parts ([VertexA and VertexB parts merged into one vertex shader](#vertexa-and-vertexb-parts-merged-into-one-vertex-shader)).
 
+### SHARC archives in GIANTS Engine
+
+- **Symptom:** the shader split finds no shaders in main or the RomFS, which keeps them in `shared/shader_switch.sharc`.
+- **Cause:** SHARC v11 (`RAHS`) puts three entry tables after its `0x2c`-byte header, then the metadata and shader payloads. Each shader member contains one GLSLC output compressed with raw LZMA1, preceded by a five-byte property and dictionary header.
+- **Fix:** `shader_split.py` (`sharc_shaders`) checks the table and member spans, including the side records and length-prefixed names. The LZMA members omit end markers, so the reader checks each decoded GLSLC output against its declared length and requires it to pass the GLSLC parser. A short member fails the archive read even if earlier members decoded.
+- **Found on:** [Farming Simulator 26: Nintendo Switch Edition](../../dm/games/0100D440269E8000/README.md), update 1.0.1.0. Removing one to eight bytes from the final compressed member left its GLSLC output short even when the compressed size was adjusted to match.
+
 ### GLSLC outputs holding several stages
 
 - **Symptom:** the split found no shader in the game (0 shaders).

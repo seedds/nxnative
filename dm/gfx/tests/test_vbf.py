@@ -72,6 +72,27 @@ class Vbf(unittest.TestCase):
         bad = bytearray(effect); struct.pack_into('<I', bad, 13 + 0x100 + 0x704, 0x104)
         self.assertEqual([x[1] for x in split.phyre_shaders(bad, 'bad')], ['ps'])
         self.assertEqual(split.phyre_shaders(b'RYHP' + split.CTL_MAGIC, 'short'), [])
+        literal = bytearray(vs); literal[0x80:0x84] = split.CTL_MAGIC
+        self.assertEqual([x[1] for x in split.phyre_shaders(b'RYHP' + literal, 'literal')], ['vs'])
+
+    def test_headerless_compute_is_bounded_by_the_effect(self):
+        cs = bytearray(program('vs')); cs[:0x100] = bytes(0x100)
+        struct.pack_into('<3I', cs, 0x100 + 0x748, 8, 4, 1)
+        effect = b'RYHP' + bytes(9) + cs + program('ps')
+        out = []; split.scan_blob(effect, 'effect', out)
+        self.assertEqual([x[1] for x in out], ['cs', 'ps'])
+        self.assertIsNone(split.check('effect', *out[0][1:]))
+        self.assertEqual(split.phyre_shaders(cs, 'unframed'), [])
+        for at, value in ((0x748, 0), (0x704, 0x100000), (0x20, 0x100000)):
+            bad = bytearray(effect); struct.pack_into('<I', bad, 13 + 0x100 + at, value)
+            self.assertEqual([x[1] for x in split.phyre_shaders(bad, 'bad')], ['ps'])
+        bad = bytearray(effect); bad[13 + 4:13 + 8] = split.CTL_MAGIC
+        self.assertEqual([x[1] for x in split.phyre_shaders(bad, 'overlap')], ['ps'])
+
+    def test_effect_keeps_the_parent_archive_budget(self):
+        effect = b'RYHP' + bytes(9) + program('ps')
+        with self.assertRaisesRegex(SystemExit, 'archive members add up to more than'):
+            split.scan_blob(effect, '/member', [], left=[1, 1])
 
     def test_phyre_programs_in_main(self):
         """FFXII TZA: Phyre code area + control section pairs in main, unaligned, outside any RYHP container and referenced by nothing: raw_shaders takes the code area that ends at each"""

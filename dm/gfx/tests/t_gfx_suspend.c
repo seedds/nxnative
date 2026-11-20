@@ -14,7 +14,6 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #define mtl_sub_commit test_sub_commit
 #define mtl_queue_activate test_queue_activate
 #define mtl_set_queue_origin_lower_left test_queue_origin
-#define mtl_sub_index test_sub_index
 #define mtl_exec_rest test_exec_rest
 #define mtl_exec test_exec
 #define mtl_set_frame test_set_frame
@@ -26,7 +25,6 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #undef mtl_sub_commit
 #undef mtl_queue_activate
 #undef mtl_set_queue_origin_lower_left
-#undef mtl_sub_index
 #undef mtl_exec_rest
 #undef mtl_exec
 #undef mtl_set_frame
@@ -64,7 +62,6 @@ void test_sub_begin(void) {}
 uint64_t test_sub_commit(void) { atomic_fetch_add(&commits, 1); dispatch_semaphore_signal(committed); return 0; }
 void test_queue_activate(uint64_t serial) { (void)serial; }
 void test_queue_origin(int on) { (void)on; }
-void test_sub_index(const uint64_t *handles, int count) { (void)handles; (void)count; }
 void test_exec_rest(const uint64_t *handles, int count) { (void)handles; (void)count; }
 void test_exec(const uint8_t *commands) { (void)commands; }
 void test_set_frame(uint64_t frame) { (void)frame; }

@@ -608,10 +608,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // CALL.REL.NOINC target: a function call; the callee returns to the next instruction (RET.REL.NODEC, through the return offset the caller left in a
-        // register, which the call itself replaces).
+        // Ordinary shaders keep their existing inferred native-call ABI. RT
+        // entries instead prove an unchanged driver RPC and flatten NOINC
+        // transfers into the caller CFG; the target can also be a named entry.
         public static void ACall(EmitterContext context)
         {
+            if (context.TranslatorContext.RayTracingProgram != null)
+            {
+                RayTracingControlFlow.ValidateCall(context.CurrOp);
+                context.Branch(context.GetLabel(RayTracingControlFlow.DirectTarget(context.CurrOp)));
+                return;
+            }
             if (Decoder.IsAmpereJumpCall(context.Program, context.CurrOp))
             {
                 context.Branch(context.GetLabel(Decoder.AmpereTarget(context.CurrOp)));
@@ -625,6 +632,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         public static void ARet(EmitterContext context)
         {
+            if (context.TranslatorContext.RayTracingProgram != null)
+            {
+                RayTracingControlFlow.ValidateReturn(context.CurrOp);
+                context.Return();
+                return;
+            }
             if (!context.IsNonMain)
             {
                 throw AFail(context, "RET in the main function");

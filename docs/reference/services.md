@@ -1112,7 +1112,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the host's `UserPresence::Initialize` returned `RES_FAIL` like the other friends calls. The game's start-up takes the failure as fatal and stops before it mounts its save, so the loading screen waits for a scene that is never asked for. A presence is the game's own object until the friends service publishes it, so failing to set one up is not what an offline console reports.
 - **Fix:** `UserPresence::Initialize`, `SetDescription` and `Commit` succeed and publish nothing (`hle_friends.c`). The calls that need the service (friend lists, notification queue, online play sessions, invitations) still fail.
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_friends`.
-- **Found on:** Twelve Minutes (`0100CD701434C000`, Unity 2019.4.31f1 IL2CPP, SDK 12.3.7; seedds/nxnative#217). Its profile and game note are pending in [PR #2904](https://github.com/seedds/nxnative/pull/2904).
+- **Found on:** [Twelve Minutes](../../dm/games/0100CD701434C000/README.md) (`0100CD701434C000`, Unity 2019.4.31f1 IL2CPP, SDK 12.3.7; seedds/nxnative#217).
 
 ### The network account check is cancelled offline
 

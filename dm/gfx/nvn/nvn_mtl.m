@@ -16397,6 +16397,9 @@ static uint64_t loop_state(NvShader *cs) {
     return cs->loop_gpu;
 }
 static void dispatch_(const p_dispatch *dp) {
+    // An empty direct grid invokes no shader and changes no resources. Metal
+    // rejects it; indirect counts belong to the GPU and are left untouched.
+    if (!dp->ind && (!dp->x || !dp->y || !dp->z)) return;
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
     // DispatchComputeIndirect: the group counts {x, y, z} at ind (MTLDispatchThreadgroupsIndirectArguments) are usually written by the GPU earlier in the frame; Metal reads them when the dispatch runs

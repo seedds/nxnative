@@ -576,6 +576,12 @@ t_tiled_resolve: t_tiled_resolve.m $(MTL_T_DEP)
 check_t_tiled_resolve: t_tiled_resolve
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
+t_dispatch_zero: t_dispatch_zero.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_zero.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dispatch_zero
+check_t_dispatch_zero: t_dispatch_zero
+	MTL_DEBUG_LAYER=1 ./t_dispatch_zero
+
 t_compressed_copy: t_compressed_copy.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_compressed_copy.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_compressed_copy

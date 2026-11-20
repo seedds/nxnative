@@ -1587,8 +1587,12 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
     for (int i = 0; i < n; i++) *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
 }
 // compact: as one OPC_HANDLES record (the handles' final values; BindTexturesDeferred edits its record afterwards, so it takes the canonical one)
+enum { BIND_REC_MAX = 32 };   // the handles one record holds
 static p_bind_handles *bind_handles_ex(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h, int compact) {
-    if (n < 0 || n > 32) { LOG("[RED] bind handle count %d", n); return NULL; }   // a record holds 32
+    if (n < 0) { LOG("[RED] bind handle count %d", n); return NULL; }
+    // More handles than a record holds go in records of 32 each, in slot order: NVN binds up to the stage's slot count in one call (Immortals Fenyx Rising binds 49 textures at once; they
+    // were all dropped, with a [RED] line per call). Only the deferred bind needs the record back, and it splits its own calls (nvnCommandBufferBindTexturesDeferred)
+    if (n > BIND_REC_MAX) { for (int k = 0; k < n; k += BIND_REC_MAX) bind_handles_ex(c, op, st, first + k, n - k < BIND_REC_MAX ? n - k : BIND_REC_MAX, h + k, compact); return NULL; }
     // the replay's tables: textures 0-255 (separate texture r at 128 + r), samplers 0-127, images 0-31
     n = slots_bound(op == OP_BIND_SAMP ? "BindSamplers" : op == OP_BIND_IMG ? "BindImages" : "BindTextures", st, first, n,
                     op == OP_BIND_SAMP ? DMSH_C2_SEP_SLOTS : op == OP_BIND_IMG ? 32 : NVN_SEPTEX_SLOT0 + DMSH_C2_SEP_SLOTS);
@@ -2943,6 +2947,7 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
+    { void mtl_pool_alias_drop(uint64_t, uint64_t); mtl_pool_alias_drop((uint64_t)(uintptr_t)v->base, (uint64_t)(uintptr_t)v->base + v->size); }
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
@@ -3002,6 +3007,22 @@ int nvn_vpool_unmapped(uint64_t a) {
         const vpte *e = vpt_get(v, a - b); r = !e || !e->phys; break; }
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
+// The physical address behind [a, a + n) of a sparse pool's reservation, when every page of it is mapped and the pages are physically contiguous: what the GPU reaches through the
+// virtual address. A mapping the host could not remap into the reservation (a request not aligned to the host page: kept in the page table only) has no run of its own, so a buffer
+// copy through it is replayed on the physical pool instead (nvn_mtl.m mtl_sub_copy). → 1 and *phys, or 0
+int nvn_vpool_phys(uint64_t a, uint64_t n, uint64_t *phys) {
+    int r = 0; if (!n) return 0;
+    pthread_mutex_lock(&g_vp_mu);
+    for (int i = 0; i < g_nvp; i++) { const struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
+        if (a < b || a - b >= v->size || n > v->size - (a - b)) continue;
+        const vpte *e = vpt_get(v, a - b); if (!e || !e->phys) break;
+        uint64_t p0 = (uint64_t)(uintptr_t)e->phys + ((a - b) & 0xfff); r = 1;
+        for (uint64_t pg = ((a - b) & ~0xfffull) + 0x1000; pg < a - b + n; pg += 0x1000) {   // the following pages continue the first's physical range
+            const vpte *f = vpt_get(v, pg); if (!f || !f->phys || (uint64_t)(uintptr_t)f->phys != p0 + (pg - (a - b))) { r = 0; break; } }
+        if (r) *phys = p0;
+        break; }
+    pthread_mutex_unlock(&g_vp_mu); return r;
+}
 static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t *phys) {
     uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1;
     g_vnote[gen % VNOTE_N].gen = gen; g_vnote[gen % VNOTE_N].lo = (uint64_t)(uintptr_t)v->base + voff; g_vnote[gen % VNOTE_N].hi = (uint64_t)(uintptr_t)v->base + voff + size;
@@ -3059,6 +3080,15 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     vm_address_t to = (vm_address_t)(v->base + r->voff);
     // Not aliased (see above): only textures read through the page table see it; the GPU cannot address it directly
     if ((uint64_t)r->voff + r->size > v->len || ((uintptr_t)to | r->size | (uint64_t)r->voff) & (pg - 1) || (ph && (((uintptr_t)ph->mem + (uintptr_t)r->poff) & (pg - 1)))) {
+        {   // the GPU reaches it through an alias of the physical pool's buffer (nvn_mtl.m mtl_pool_alias)
+            int mtl_pool_alias(uint64_t, uint64_t, uint64_t); void mtl_pool_alias_drop(uint64_t, uint64_t);
+            uint64_t va = (uint64_t)(uintptr_t)(v->base + r->voff);
+            mtl_pool_alias_drop(va, va + r->size);
+            if (ph && (uint64_t)r->voff + r->size <= v->len && mtl_pool_alias(va, r->size, (uint64_t)(uintptr_t)(ph->mem + r->poff))) {
+                static _Atomic uint64_t na; if (!atomic_fetch_add(&na, 1)) LOG("[nvn] virtual pool %p: a request not aligned to the host page (map %#llx+%#llx) is reached by the GPU through the physical pool's buffer (later cases are not logged)",
+                                                                             (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size);
+                return 1; }
+        }
         static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[nvn] virtual pool %p: a request %s (%s %#llx+%#llx) is kept in the page table only: textures read it, the GPU cannot address it (later cases are not logged)",
                                                                    (const void *)v->pool, (uint64_t)r->voff + r->size > v->len ? "beyond the reservation" : "not aligned to the host page", r->phys ? "map" : "unmap", (unsigned long long)r->voff, (unsigned long long)r->size);
         return 1;
@@ -3591,8 +3621,12 @@ NVN(nvnCommandBufferBindTextures, void, NVNcommandBuffer *c, NVNshaderStage st, 
 //   passing the address of the handle field in the texture sampler object with a count of 1; command blocks are recorded once and submitted repeatedly, and the handle is written / replaced afterwards. The host used to copy the handles at recording (mostly 0),
 //   so every texture of the deferred lighting composite became the dummy texture 0 and the whole 3D picture was black. The address is recorded and the replay layer reads it when it reads the record (bh_fresh)
 NVN_NOPROTO(nvnCommandBufferBindTexturesDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNtextureHandle *h) { st = st_host(st);
-    p_bind_handles *r = bind_handles_ex(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h, 0);
-    if (r && h) { r->defer = 1; r->src = (uint64_t)(uintptr_t)h; }
+    for (int k = 0; k < n || (!n && !k); k += BIND_REC_MAX) {   // records of at most 32 handles, each reading its own part of h at replay
+        int m = n - k < BIND_REC_MAX ? n - k : BIND_REC_MAX;
+        p_bind_handles *r = bind_handles_ex(c, OP_BIND_TEX, st, first + k, m, h ? (const uint64_t *)h + k : NULL, 0);
+        if (r && h) { r->defer = 1; r->src = (uint64_t)(uintptr_t)((const uint64_t *)h + k); }
+        if (!n) break;
+    }
 }
 NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNimageHandle h) { st = st_host(st); uint64_t v = (uint64_t)h; bind_handles(c, OP_BIND_IMG, st, i, 1, &v); }
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }

@@ -275,12 +275,12 @@ def modules_supplying(exefs, want, modules, hooks=None):   # the modules left ou
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
-def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0, oodle_ttdat=0, gl_fixed_calls=False, vk_named=False):
+def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0, oodle_ttdat=0, gl_fixed_calls=False, vk_named=False, anvil_forges=0):
     """{name: (value, reason)}: graphics (vulkan when main names Vulkan through nn::ro, or imports Vulkan without nvnBootstrapLoader, including loader-only games with SPIR-V and no EGL or NVN NROs;
     gl when main imports eglCreateWindowSurface and has GLSL or fixed-function evidence; else nvn), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
     GLSL source where gl_shaders.py looks, gl_src strings in main and gl_files files in the RomFS: it puts its shaders together at run time, LÖVE from its Lua), glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (prepare shared Unreal shader code
     archives for the split), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives, oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries, oodle_ue3 Unreal Engine 3 packages with Oodle chunks
-    or frostbite Frostbite superbundles, whose cas files are Oodle Leviathan, or oodle_ttdat TT Games CC4 DAT archives:
+    or frostbite Frostbite superbundles, whose cas files are Oodle Leviathan, or oodle_ttdat TT Games CC4 DAT archives, or anvil_forges Anvil forges:
     Oodle-compressed file by file, which the shader split decodes with the game's own decoder in the Mac host's tool mode), ue_legacy (Unreal paks whose shaders are inline in the cooked packages:
     legacy paks, version 4, which the shader split reads through the game's own decoder the same way, and version 11 paks without shader code archives, Zlib, read by uepak.py itself).
     unreal_paks counts the paks with shader code archives, legacy_paks those with inline shaders (uepak.inline_shaders). Checked against every profile: Hades and Super Mario Galaxy Vulkan, Galaxy alone with no SPIR-V file, Three Houses alone compiling
@@ -321,11 +321,12 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                               f'the RomFS holds {romfs_glsl} GLSL source files and main calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Turrican Anthology Vol. I), captured by booting it on the Mac' if romfs_glsl and not glsl_src else
                               f'main holds {glsl_src} GLSL sources and calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Fire Emblem: Three Houses), captured by booting it on the Mac'),
             'ue_decode': (not vulkan and not gl and bool(unreal_paks), f'{unreal_paks} Unreal pak(s) selected for shared shader archive preparation'),
-            'oodle_packs': (not vulkan and not gl and bool(trinity_packs or oodle_pkz or oodle_gfpak or oodle_ue3 or frostbite or oodle_ttdat), (f'{trinity_packs} Trinity pack file(s) (ONEPACK, arc/data.trpfs: Pokémon Legends: Z-A)' if trinity_packs else
+            'oodle_packs': (not vulkan and not gl and bool(trinity_packs or oodle_pkz or oodle_gfpak or oodle_ue3 or frostbite or oodle_ttdat or anvil_forges), (f'{trinity_packs} Trinity pack file(s) (ONEPACK, arc/data.trpfs: Pokémon Legends: Z-A)' if trinity_packs else
                             'Frostbite superbundles (Data/layout.toc, cas files: EA SPORTS FC 27), the shaders in their CompiledBytecode resources' if frostbite else
                             f'{oodle_pkz} PlatinumGames PKZ archive(s) with Oodle Kraken entries (Bayonetta 3)' if oodle_pkz else
                             f'{oodle_gfpak} Game Freak GFPAK archive(s) with Oodle Kraken entries (Pokémon Legends: Arceus)' if oodle_gfpak else
                             f'{oodle_ttdat} TT Games CC4 DAT archive(s) with .nnx_shaders members (Skywalker Saga)' if oodle_ttdat else
+                            f'{anvil_forges} Anvil forge(s) (scimitar, Immortals Fenyx Rising), the shaders in their resources' if anvil_forges else
                             f'{oodle_ue3} Unreal Engine 3 package(s) with Oodle-compressed chunks (Batman: Arkham Knight, its combined shader cache among them)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
             'ue_legacy': (not vulkan and not gl and bool(legacy_paks), f'{legacy_paks} Unreal pak(s) with the shaders inline in the cooked packages (legacy, version 4, UE 4.18: DRAGON QUEST XI S, LZ5, decoded by the game\'s own decoder in the Mac host, dm/host/hle_oodle.c DM_OODLE_SERVE; '
                           'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib, or with the cooked packages in an IoStore container beside it: Mario & Luigi: Brothership, Oodle): the shader split reads them file by file')}
@@ -410,9 +411,14 @@ def build_sources(exefs, romfs, modules):
                 oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
     import ttdat
     oodle_ttdat = sum(ttdat.needs_oodle(os.path.join(d, n)) for d, _, names in os.walk(romfs) for n in names if n.lower().endswith('.dat'))
+    anvil_forges = 0   # Ubisoft Anvil forges ('scimitar\0', Immortals Fenyx Rising): every file's containers are Oodle, decoded with the game's own decoder (shader_split.py forge_jobs)
+    for d, _, names in os.walk(romfs):
+        for n in names:
+            if n.endswith('.forge'):
+                with open(os.path.join(d, n), 'rb') as f: anvil_forges += f.read(9) == b'scimitar\0'
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
     return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat, gl_fixed_calls=fixed_calls, vk_named=vk_named)
+                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat, gl_fixed_calls=fixed_calls, vk_named=vk_named, anvil_forges=anvil_forges)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)

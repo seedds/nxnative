@@ -1075,6 +1075,45 @@ static void pool_new_put(pool_new *n) {   // caller holds g_mu
     g_pool_adds++;
     [g_keep addObject:n->buf];
 }
+// A sparse pool's mapping the host cannot alias in the address space: its physical source does not start on a host page where the virtual range does (a 4 KB Switch page offset under
+// a 16 KB Mac page). Immortals Fenyx Rising maps its sparse UI and geometry pools in requests of 2 to 8 MB from a physical pool whose storage starts 0x3000 into a host page: the page
+// table held them, textures read them, but the GPU read zeros through the virtual address (the title's logo and button glyph were not drawn). The virtual range becomes an entry of
+// the pool table over the physical pool's buffer at the right offset: the GPU reads and writes the physical storage itself. Dropped with the mapping or the pool (mtl_pool_alias_drop)
+static void big_moved(int i); static int pool_find(uint64_t addr, uint64_t len);
+static NSMutableArray *g_alias_keep;
+int mtl_pool_alias(uint64_t va, uint64_t size, uint64_t pa) {
+    mtl_init();
+    int ok = 0;
+    pthread_mutex_lock(&g_mu);
+    int i = pool_find(pa, size);
+    if (i >= 0) {
+        pool_ent e = g_pools[i];
+        if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
+        g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
+        uintptr_t off = (uintptr_t)pa - e.base;   // the physical address's offset in its buffer
+        g_pools[g_npool++] = (pool_ent){(uintptr_t)va, (uintptr_t)(va + size), (uintptr_t)va - off, e.buf, e.gpu, (const void *)(uintptr_t)(va | 1), 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), (uintptr_t)(va + size), REACH_END};
+        if (!g_alias_keep) g_alias_keep = [NSMutableArray array];
+        [g_alias_keep addObject:e.buf]; g_pool_adds++; ok = 1;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (ok) reg_bump(-1, REG_POOL);
+    return ok;
+}
+void mtl_pool_alias_drop(uint64_t lo, uint64_t hi) {   // every alias entry inside [lo, hi)
+    int n = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; ) {
+        const pool_ent *e = &g_pools[i];
+        if (((uintptr_t)e->key & 1) && e->lo >= lo && e->hi <= hi) {
+            id<MTLBuffer> b = e->buf; if (e->res) g_pool_res_n--;
+            NSUInteger k = [g_alias_keep indexOfObjectIdenticalTo:b]; if (k != NSNotFound) [g_alias_keep removeObjectAtIndex:k];
+            g_pools[i] = g_pools[--g_npool]; if (i < g_npool) big_moved(i); n++; continue; }
+        i++;
+    }
+    if (n) { g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); }
+    pthread_mutex_unlock(&g_mu);
+    if (n) reg_bump(-1, REG_POOL);
+}
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
     pool_new n; pool_new_prep(&n, mem, size);
@@ -1226,7 +1265,19 @@ int mtl_addr_known(uint64_t addr, uint64_t len) {
     pthread_mutex_lock(&g_mu); int b = big_of(addr), ok = b >= 0 ? addr + len <= g_big[b].hi : pool_find(addr, len) >= 0; pthread_mutex_unlock(&g_mu);
     return ok;
 }
-int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
+// A buffer copy through a sparse pool page with no buffer of its own (a mapping hle_nvn.c could not alias in the address space: Immortals Fenyx Rising's physical storage starts
+// 0x3000 into a 16 KB host page) is replayed on the physical page behind it (nvn_vpool_phys), as the GPU reaches it; before, the run ended (FATAL buffer copy address is in no memory pool). Looked up after g_mu is released: the sparse pools take g_vp_mu
+static int mtl_addr_in(uint64_t addr, uint64_t len, void **buf, uint64_t *off);
+static int mtl_gpu_addr_in(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu);
+static int sparse_phys(uint64_t a, uint64_t n, uint64_t *p) {
+    int nvn_vpool_phys(uint64_t, uint64_t, uint64_t *);
+    if (!n || !nvn_vpool_phys(a, n, p)) return 0;
+    static int once; if (!once++) MLOG("an address on a sparse pool page with no run (%#llx, %llu bytes) is read through its physical page at %#llx (later cases are not logged)", (unsigned long long)a, (unsigned long long)n, (unsigned long long)*p);
+    return 1;
+}
+int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) { return mtl_addr_in(addr, len, buf, off); }
+int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) { return mtl_gpu_addr_in(addr, len, buf, off, gpu); }
+static int mtl_addr_in(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
     int ok = 0;
@@ -1237,7 +1288,7 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
-int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
+static int mtl_gpu_addr_in(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; *gpu = c->gpu + *off; return 1; }
     int ok = 0;
@@ -2050,13 +2101,17 @@ static void b2b_note(uint64_t dst, uint64_t n) {
     g_b2b_lo[g_b2b_n] = dst; g_b2b_hi[g_b2b_n++] = hi;
 }
 static void buffer_copy_note(uint64_t dst, uint64_t n) { post_buffer_copy(dst, n); b2b_note(dst, n); }
+// A copy through a sparse pool page with no run is replayed on the physical pages behind it (mtl_addr); the destination's dirty tracking takes the physical address too
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
+    { uint64_t p; void *b_; uint64_t o_; if (!mtl_addr_in(dst, n, &b_, &o_) && sparse_phys(dst, n, &p)) dst = p;
+      if (!mtl_addr_in(src, n, &b_, &o_) && sparse_phys(src, n, &p)) src = p; }
     rc_copy(src,dst,n);
     if (src != dst) nvn_buffer_write_ranges(dst, n, buffer_copy_note);
     pend_add(dst, n, 2); g_mdx_epoch++;
     void *sb, *db; uint64_t so, dof;
-    if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
-        MDIE("buffer copy address is in no memory pool src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+    if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof)) {
+        void nvn_vpool_note(uint64_t, char *, size_t); char sn[256], dn[256]; nvn_vpool_note(src, sn, sizeof sn); nvn_vpool_note(dst, dn, sizeof dn);
+        MDIE("buffer copy address is in no memory pool src=%#llx%s dst=%#llx%s n=%#llx", (unsigned long long)src, sn, (unsigned long long)dst, dn, (unsigned long long)n); }
     if (src != dst && src < dst + n && dst < src + n) { static int once;   // Metal leaves an overlapping copy undefined; seen only in Cuphead while its pool allocator gave out overlapping blocks (hle_nvn.c zcull_size)
         if (!once++) MLOG("[RED] buffer copy with overlapping source and destination (src %#llx dst %#llx, %llu bytes): the result is undefined", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n); }
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
@@ -5212,7 +5267,13 @@ static id<MTLTexture> tex_buffer(const tex_t *t) {
     uint32_t pf = 0; uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     void *mb; uint64_t mo;
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || !bpb) { RED_ONCE(36, "buffer texture format %#x not mapped", t->d.format); return nil; }
-    if (!t->mem || !mtl_addr((uint64_t)t->mem, (uint64_t)t->d.width * bpb, &mb, &mo)) { RED_ONCE(37, "buffer texture storage is not in a memory pool"); return nil; }
+    NSUInteger tw = t->d.width;   // the elements viewed: fewer when the texture is declared past the buffer that holds its start (Immortals Fenyx Rising's 144 MB view over a sparse pool)
+    if (t->mem && !mtl_addr((uint64_t)t->mem, (uint64_t)t->d.width * bpb, &mb, &mo) && mtl_addr((uint64_t)t->mem, 1, &mb, &mo)) {
+        uint64_t room = ((__bridge id<MTLBuffer>)mb).length - mo; tw = (NSUInteger)(room / (uint64_t)bpb);
+        NSUInteger al_ = tbuf_view_align((MTLPixelFormat)pf), lead_ = (NSUInteger)(mo % al_); tw = tw > lead_ / (NSUInteger)bpb + al_ ? tw - al_ : 0;
+        static int once; if (!once++) MLOG("buffer texture %p declared with %u elements of format %#x, past the buffer that holds it: viewed with the %lu that fit (later cases are not logged)", t->mem, t->d.width, t->d.format, (unsigned long)tw);
+        if (!tw) return nil; }
+    else if (!t->mem || !mtl_addr((uint64_t)t->mem, (uint64_t)t->d.width * bpb, &mb, &mo)) { { void nvn_vpool_note(uint64_t, char *, size_t); char nb[256] = ""; if (t->mem) nvn_vpool_note((uint64_t)t->mem, nb, sizeof nb); RED_ONCE(37, "buffer texture storage is not in a memory pool (%p, %llu bytes, format %#x)%s", t->mem, (unsigned long long)t->d.width * bpb, t->d.format, nb); } return nil; }
     id<MTLBuffer> b = (__bridge id<MTLBuffer>)mb;
     NSUInteger al = tbuf_view_align((MTLPixelFormat)pf);
     // Metal makes a buffer texture only at an offset of its buffer that is a multiple of the device's alignment for the format (16 bytes on an M4 Pro, more on an iPhone), and the GPU
@@ -5224,7 +5285,7 @@ static id<MTLTexture> tex_buffer(const tex_t *t) {
     // DMSH_TBIAS_SLOTS) reads an aligned copy (tbuf_shadow). Below the element size the view stays a dummy
     NSUInteger lead = (NSUInteger)(mo % al);
     if (lead % (NSUInteger)bpb) { RED_ONCE(38, "buffer texture offset %#llx not aligned to its %d-byte elements", (unsigned long long)mo, bpb); return nil; }
-    NSUInteger w = t->d.width + lead / (NSUInteger)bpb, row = (w * (NSUInteger)bpb + al - 1) / al * al;
+    NSUInteger w = tw + lead / (NSUInteger)bpb, row = (w * (NSUInteger)bpb + al - 1) / al * al;
     if (mo - lead + row > b.length) { RED_ONCE(166, "buffer texture at pool offset %#llx, %lu elements of format %#x, ends too near its pool buffer's end for a view from the %lu-byte boundary below: the slot reads 0",
                                               (unsigned long long)mo, (unsigned long)t->d.width, t->d.format, (unsigned long)al); return nil; }
     if (lead) { static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: viewed from %#llx, its coordinates moved by %lu elements (first case)", (unsigned long long)mo, (unsigned long)al, (unsigned long long)(mo - lead), (unsigned long)(lead / (NSUInteger)bpb)); }
@@ -9380,9 +9441,13 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     d.vertexFunction = vs && vs->mesh_kind != 2 ? vs->fn : nil; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;   // mtk_pso copies the raster state only: a mesh function is not a vertex function
     // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
     // Pipelines are built on several threads at once: the keys and the library are set up once (a lazy setup raced, and a thread used a library another had just replaced: Hades II, 6 keys)
-    if (fs) { static char keys[6][24]; static int nk; static id<MTLLibrary> hl; static dispatch_once_t once;
-        dispatch_once(&once, ^{ const char *e = getenv("DM_NVN_HILITE");
-            for (const char *q = e; q && *q && nk < 6; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(keys[nk], q, n); keys[nk++][n] = 0; }
+    // Groups for bisection: "a,b/c,d,e/…" colours every key of group g with colour g (up to 6 groups, 512 keys); without '/', key i takes colour i as before
+    if (fs) { static char keys[512][24]; static int col[512]; static int nk; static id<MTLLibrary> hl; static dispatch_once_t once;
+        dispatch_once(&once, ^{ const char *e = getenv("DM_NVN_HILITE"); int grouped = e && strchr(e, '/'), g = 0;
+            for (const char *q = e; q && *q && nk < (grouped ? 512 : 6) && g < 6; ) { size_t n = strcspn(q, ",/"); if (n > 23) n = 23;
+                if (n) { memcpy(keys[nk], q, n); keys[nk][n] = 0; col[nk] = grouped ? g : nk; nk++; }
+                q += strcspn(q, ",/"); if (*q == '/') g++; if (*q) q++; }
+            if (nk) MLOG("DM_NVN_HILITE: %d fragment shader keys coloured%s", nk, grouped ? " in groups" : "");
             if (!nk) return;
             NSError *err = nil; hl = dev_lib(@"#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; };\n"
                 "fragment O hl0() { return {float4(1,0,1,1),float4(1,0,1,1),float4(1,0,1,1)}; } fragment O hl1() { return {float4(0,1,0,1),float4(0,1,0,1),float4(0,1,0,1)}; }\n"
@@ -9390,7 +9455,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
                 "fragment O hl4() { return {float4(0,0,1,1),float4(0,0,1,1),float4(0,0,1,1)}; } fragment O hl5() { return {float4(1,1,1,1),float4(1,1,1,1),float4(1,1,1,1)}; }\n", &err);
             if (!hl) MLOG("[RED] HILITE shader compile failed %s", err.localizedDescription.UTF8String); });
         for (int i = 0; i < nk; i++) if (!strncmp(fs->key, keys[i], strlen(keys[i]))) {
-            if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", i]];
+            if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", col[i]]];
             break; } }
     // Colour targets of another class than main0 declares (pso_cls): the typed-output entry point specialized for the pipeline's classes (dmsh_entry.py fs_uint). A float output meeting an
     // integer attachment, or the reverse: a pipeline built on its own is refused (Kirby and the Forgotten Land's 76 shaders writing an R8Uint colour 5, GitHub issue #2760: most of the
@@ -13296,6 +13361,15 @@ typedef struct {
     uint8_t image_class[DMSH_RT_IMAGE_SLOTS]; // float0, signed1, unsigned2, unbound/unsupported3.
 } rt_argument_values;
 static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex, const rt_argument_values *rt);
+// A storage buffer bound with a size past every buffer at its address: Immortals Fenyx Rising binds its UI element table as 512 MB at the start of a sparse pool of 144 MB,
+// and the lookup of the whole size failed, so the binding was the zero dummy and the vertex shader that reads the table placed the title's logo and button glyph nowhere. The shader
+// reads what the game wrote, which lies in the buffer that holds the address: the binding takes that buffer from the address on (as a length-1 lookup does), the rest stays unaddressed
+static int sbuf_clipped(uint64_t addr, uint64_t size, void **mb, uint64_t *mo, uint64_t *gpu) {
+    if (size <= 1 || !mtl_gpu_addr(addr, 1, mb, mo, gpu)) return 0;
+    static int once; if (!once++) MLOG("storage buffer %#llx bound with %llu bytes, past the buffer that holds it (%llu bytes from it): bound from its address to that buffer's end (later cases are not logged)",
+                                      (unsigned long long)addr, (unsigned long long)size, (unsigned long long)(((__bridge id<MTLBuffer>)*mb).length - *mo));
+    return 1;
+}
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     return encode_args_full(en, sh, nvn_stage, metal_vertex, NULL);
 }
@@ -13560,7 +13634,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         } else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) {   // B: storage buffers / compute-stage uniforms are device pointers; the address is taken by NVN slot
             const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL;
             void *mb; uint64_t mo, gpu;
-            if (u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
+            if (u && u->addr && (mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu) || sbuf_clipped(u->addr, u->size, &mb, &mo, &gpu))) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufp reg%d %s addr=%#llx size=%llu %s", g_stat_pass, nvn_stage, reg, u && u->addr ? "real" : "dummy", u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle
@@ -16193,7 +16267,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (ixc_wanted(dw, di)) { if (e && e->args) enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, e->ixb, e->ixlen, e->args); else RED_ONCE(88, "indirect draw skipped: the arguments for primitive %d were not converted (argument address %#llx is in no memory pool, or the conversion pipeline was not created)", prim, (unsigned long long)ind); }
         else if (!mdx && !mtl_addr(ind, dw ? 16 : 20, &ab, &ao)) RED_ONCE(88, "indirect draw skipped: argument address %#llx is in no memory pool", (unsigned long long)ind);
         else if (dw) { enc_r_draw_indirect(en, mp, mdx ? mdx : ((__bridge id<MTLBuffer>)ab).gpuAddress + ao); if (mdx) mdx_chain(dw->mdi_cnt, dw->mdi_i, mp, MTLIndexTypeUInt32, 0, 0); }
-        else if (!mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ig)) RED_ONCE(22, "index buffer is in no memory pool");
+        else if (!mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ig)) { void nvn_vpool_note(uint64_t, char *, size_t); char nb[256] = ""; nvn_vpool_note(di->ibuf, nb, sizeof nb);
+            RED_ONCE(22, "indirect indexed draw skipped: index buffer %#llx is in no memory pool (pass %llu)%s", (unsigned long long)di->ibuf, (unsigned long long)g_stat_pass, nb); }
         else { MTLIndexType ty = di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32; uint64_t il = ((__bridge id<MTLBuffer>)mb).length - mo;
             enc_r_draw_indexed_indirect(en, mp, ty, ig, il, mdx ? mdx : ((__bridge id<MTLBuffer>)ab).gpuAddress + ao); if (mdx) mdx_chain(di->mdi_cnt, di->mdi_i, mp, ty, ig, il); }
     } else if (dw && prim == 7) {   // Quads: shared indices 0,1,2,0,2,3

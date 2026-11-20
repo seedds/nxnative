@@ -52,6 +52,7 @@ targets:
         GCSupportsControllerUserInteraction: true   # Physical controllers (GameController)
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
+        NSLocalNetworkUsageDescription: Local multiplayer uses your local network to find and connect to compatible peers.
         CADisableMinimumFrameDurationOnPhone: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

@@ -107,10 +107,20 @@ static id compile_done(id result, NSError *error, NSError **out) {
 static id<MTLComputePipelineState> dev_cps(id<MTLFunction> f, NSError **out) {
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newComputePipelineStateWithFunction:f error:&e]; return compile_done(ps, e, out);
 }
+static id<MTLRenderPipelineState> missing_pipeline_function(NSString *stage, NSError **out) {
+    if (out) *out = [NSError errorWithDomain:@"nxnative.NVN.Pipeline" code:3
+        userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"missing %@ function", stage]}];
+    return nil;
+}
 static id<MTLRenderPipelineState> dev_rps(MTLRenderPipelineDescriptor *d, NSError **out) {
+    if (!d.vertexFunction) return missing_pipeline_function(@"vertex", out);
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e]; return compile_done(ps, e, out);
 }
 static id<MTLRenderPipelineState> dev_mps(MTLMeshRenderPipelineDescriptor *d, NSError **out) {
+    // A mesh pipeline requires a fragment function even for depth-only rendering (mtk_nop_fragment).
+    // Return a normal build failure if a required function could not be loaded or compiled.
+    if (!d.meshFunction) return missing_pipeline_function(@"mesh", out);
+    if (!d.fragmentFunction) return missing_pipeline_function(@"mesh fragment", out);
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithMeshDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&e]; return compile_done(ps, e, out);
 }
 static id<MTLFunction> dev_fn(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **out) {

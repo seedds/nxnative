@@ -626,13 +626,23 @@ static void compiler_death_notifications(void) {
     EXPECT("notify background: handed-over period not published", 1, archive_files(@(cdir)).count);
     // Geometry and embedded pipelines share these MTLDevice boundaries; no reporter is required to notify the archive.
     CompileFailureDevice *device = [CompileFailureDevice new]; device->device = g_dev;
+    id<MTLLibrary> mesh_lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct V { float4 p [[position]]; };\n"
+        "[[mesh]] void ms(mesh<V, void, 3, 1, topology::triangle> out) { out.set_primitive_count(0); }\n"
+        options:nil error:&err];
+    id<MTLFunction> mesh_fn = [mesh_lib newFunctionWithName:@"ms"];
+    EXPECT("notify device: fixture mesh function", 1, mesh_fn != nil);
     for (int kind = 0; kind < 4; kind++) {
         d.vertexDescriptor.layouts[16].stride = 4832 + kind * 16;
         EXPECT("notify device: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
         ep = g_ep; g_dev = (id<MTLDevice>)device; id result;
         if (kind == 0) result = cps_new([g_lib2 newFunctionWithName:@"vs"], NULL);   // unregistered: directly through the MTLDevice
         else if (kind == 1) result = pso_build_dev(d, 0, NULL);
-        else if (kind == 2) result = dev_mps([MTLMeshRenderPipelineDescriptor new], NULL);
+        else if (kind == 2) {
+            MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
+            m.meshFunction = mesh_fn; m.fragmentFunction = [g_lib newFunctionWithName:@"fs"];
+            result = dev_mps(m, NULL);
+        }
         else result = dev_lib(@"fragment void fixture() {}", NULL);
         g_dev = device->device;
         EXPECT("notify device: compile refused", 1, result == nil);

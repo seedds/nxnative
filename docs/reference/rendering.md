@@ -1529,6 +1529,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_pso_archive` covers discarding a crashed period, draining its counts and capturing into a fresh one. `crashed_flush_race` holds a render or compute capture across hand-over, blocks its failing fallback until the writer runs, and checks that no archive is published. `compiler_death_notifications` injects interrupted specialization and MTLDevice compiles with no error output, holds a background prediction past the writer's bounded wait after its period was handed over, and checks that ordinary compile errors still publish valid captures. Run the focused cases with `t_pso_archive --compiler-death`. Ocarina of Time (cut10, M2): the archive without the bad period starts and plays (F1233); that period alone aborts at every start.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an M2.
 
+### Missing required functions at the render pipeline API
+
+- **Symptom:** Metal can abort on a nil vertex, mesh or mesh fragment function when the host builds a pipeline through `MTLDevice`.
+- **Cause:** the device API validates its descriptor before returning a pipeline or an error. An unavailable shader function can leave a required descriptor member empty. Native mesh depth passes need the empty fragment function from `mtk_nop_fragment`.
+- **Fix:** `dev_rps` and `dev_mps` return a pipeline error before calling Metal when a required function is missing. Vertex depth-only passes can still omit their fragment function, and a mesh pipeline can still omit its object function.
+- **Check:** `t_pso_warm` with Metal API validation reproduces the nil vertex abort before the guard and verifies a returned error for missing vertex, mesh and mesh fragment functions after it. It also builds and draws valid native mesh pipelines and builds a depth-only mesh pipeline.
+- **Found on:** examined after the [Ocarina of Time compiler failures](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation). The fresh-start assertion logged in [#2825](https://github.com/seedds/nxnative/issues/2825#issuecomment-6983139176) occurs inside Metal's archive lookup after the host presents a complete Metal 4 descriptor. The device API checks cover a separate failure path.
+
 ### A pipeline compile crashes while an archive period is written
 
 - **Symptom:** the pipeline prebuild (`DM_PSO_PREBUILD=tool`, the NSP script's `[RED] dmhost exit code -11`), or a run that captures pipelines, dies with SIGSEGV and no `CRASH` line of its own. macOS's crash report has `objc_msgSend` ← `MultiLevelAirntBinaryCache::getElementAtDestination` ← `-[MTLCompiler compileFunctionRequestInternal:…]` ← `arch_capture`, and a thread on the `MTLBinaryArchive_Serialize` queue in `airntSerializeToURL` ← `arch_write_file`.

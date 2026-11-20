@@ -237,6 +237,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 ## Found on this game
 
 - [Inlining mesh helpers with subgroup inputs can crash the Metal compiler](../../../docs/reference/shaders.md#inlining-mesh-helpers-with-subgroup-inputs-can-crash-the-metal-compiler). The subgroup helper workaround clears the isolated foliage pipeline and the 164-row offline matrix at the supported deployment minimums.
+- [Missing required functions at the render pipeline API](../../../docs/reference/rendering.md#missing-required-functions-at-the-render-pipeline-api). The device API now returns an error for missing functions. The abort inside a bundled archive lookup remains open.
 
 - [Masked color targets store back during depth-only draws](../../../docs/reference/rendering.md#masked-color-targets-store-back-during-depth-only-draws). The depth prepass loaded a 1440×810 RG11B10F color target in eight passes per frame with all channels masked off. The author reported 35.5 MB/frame less attachment-store volume in the first A/B and 29.5 MB/frame less in the follow-up on an M2 MacBook Air. GPU and frame-time results were inconclusive. [PR #2771](https://github.com/seedds/nxnative/pull/2771)
 

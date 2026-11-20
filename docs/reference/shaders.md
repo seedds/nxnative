@@ -2384,6 +2384,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), the later M1/M2 reports in [#2825](https://github.com/seedds/nxnative/issues/2825) and [#2911](https://github.com/seedds/nxnative/issues/2911).
 - **Remaining:** affected-device retests are recorded in the game note. [Recovery of archives poisoned before the host fix](rendering.md#an-archive-period-written-after-the-compiler-service-died) remains separate; this workaround changes no host recovery or serialization.
 
+### Inlining mesh helpers with subgroup inputs can crash the Metal compiler
+
+- **Symptom:** a native mesh pipeline fails to compile with `XPC_ERROR_CONNECTION_INTERRUPTED`. The compiler report shows SIGBUS at `llvm::MachineOperand::setReg` under the mesh backend. In-flight compiles in the same service can also fail.
+- **Cause:** SPIRV-Cross's translated helpers and the generated stage body are forced into the mesh entry points at `-O1`. Relaxing that policy cleared the failure on an M2 Pro with macOS 27.0.1. Ordinary inlining still reproduced it offline at the 26.6 minimum. Forcing only the stage body out of line cleared the isolated row, with failures elsewhere in the batch. Forcing only the helpers that take subgroup inputs out of line cleared the entire batch. The earlier raw-search failure shares a backend stack signature. The relationship between the internal defects is unknown.
+- **Fix:** `mesh_subgroup_noinline` marks SPIRV-Cross's multiline helpers with `gl_Subgroup*` parameters `noinline` in final native mesh stages. It changes only those declarations, so the generated stage body and raw search stay forced inline. This is a workaround for Apple's backend.
+- **Check:** `test_dmsh_raw_noinline.py` checks that the rewrite selects the subgroup helper and preserves the raw search, stage body and other helpers. The isolated foliage pipeline reproduces the original SIGBUS in the offline backend on `g14s` at minimum 26.6. The subgroup helper rewrite clears the isolated pipeline and all 164 rows on the five checked targets.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), from [d4kine's isolation in PR #3069](https://github.com/seedds/nxnative/pull/3069).
+
 ### 128-bit raw global loads read one word at a time
 
 - **Symptom:** a pass of mesh, vertex or compute shaders whose build notes say `Global memory operation "Load" traced to no storage buffer` takes milliseconds of its stage's time for little drawing, at any resolution. Metal System Trace's Shader Timeline shows no samples for task and mesh shaders, so such a pass looks idle there; the encoder's vertex-stage time and an overlay A/B tell. Ocarina of Time's foliage mesh pass took 4.6 ms of vertex-stage time a frame at 683x384, 0.2 ms of fragment.

@@ -513,11 +513,84 @@ class DlcOnlyShaders(Base):
             ('registered with the DLC, packed without it', game_rows + dlc_rows, game_rows, True),
             ('registered without the DLC, packed with it', game_rows, game_rows + dlc_rows, True),
             ('registered under the old crediting (the shared shader as the DLC\'s), packed without it',   # such a profile is split again, not accepted
-             game_rows.splitlines(True)[0] + dlc_rows + 'vs_other.bin\t1\tvertex\tshared\t/aoc/1/re_dlc_000.pak#2#SDF#var619\n', game_rows, False)):
+             game_rows.splitlines(True)[0] + dlc_rows + 'vs_other.bin\t1\tvertex\tshared\t/aoc/1/re_dlc_000.pak#2#SDF#var619\n', game_rows, False),
+            ('DLC changed alongside main duplicate representative label shift',
+             'vs_main.bin\t0\tvertex\tmainkey\tmain#BNSH@0x1000#var2\n' + game_rows + dlc_rows,
+             'vs_main.bin\t0\tvertex\tmainkey\tmain#BNSH@0x1000#var0\n' + game_rows, True),
+            ('DLC changed alongside cross-family main label shift',
+             'vs_main.bin\t0\tvertex\tmainkey\tmain#BNSH@0x1000#var2\n' + game_rows + dlc_rows,
+             'vs_main.bin\t0\tvertex\tmainkey\tmain#GLSLC@0x1000\n' + game_rows, False)):
             with self.subTest(name=name):
                 self.src.joinpath('shader_map.tsv').write_text(profile); self.src.joinpath('shader_facts.tsv').write_text(facts)
                 tables.joinpath('shader_map.tsv').write_text(split); tables.joinpath('shader_facts.tsv').write_text(facts)
                 self.assertEqual(nsp.dlc_only_shader_change(game.Game(self.src), tables), want)
+
+
+class MainDuplicateLabelChange(Base):
+    K0, K1, K2, KR = '1' * 16, '2' * 16, '3' * 16, '4' * 16
+
+    def setUp(self):
+        super().setUp()
+        self.tables = self.tmp / 'new-tables'; self.tables.mkdir()
+        self.old = {
+            'shader_map.tsv': (
+                f'ps_content.bin\t0\tpixel\t{self.KR}\t/Content/Effects/ShadowRemove.xnb#MGFX@0x83#0\n'
+                f'ps_main.bin\t0\tpixel\t{self.K0}\tmain#MGFX@0xbd647d5#0\n'
+                f'ps_main.bin\t1\tpixel\t{self.K1}\tmain#MGFX@0xbd647d5#2\n'
+                f'ps_main.bin\t2\tpixel\t{self.K2}\tmain#MGFX@0xbd87e44#2\n'
+            ),
+            'shader_facts.tsv': f'{self.K0}\t{{"manual":1}}\n',
+            'shader_pairs.tsv': f'{self.K0}\t{self.K1}\n',
+            'pso_pairs.tsv': f'{self.K0}\t{self.K2}\n',
+        }
+        self.new = dict(self.old)
+        self.new['shader_map.tsv'] = (
+            f'ps_content.bin\t0\tpixel\t{self.KR}\t/Content/Effects/ShadowRemove.xnb#MGFX@0x83#0\n'
+            f'ps_main.bin\t0\tpixel\t{self.K0}\tmain#MGFX@0xbd647d5#0\n'
+            f'ps_main.bin\t1\tpixel\t{self.K2}\tmain#MGFX@0xbd647d5#18\n'
+            f'ps_main.bin\t2\tpixel\t{self.K1}\tmain#MGFX@0xbd647d5#2\n'
+        )
+        for n, text in self.old.items(): (self.src / n).write_text(text)
+
+    def check(self, tables=None, old=None):
+        if old is not None:
+            for n, text in old.items(): (self.src / n).write_text(text)
+        for n, text in (self.new if tables is None else tables).items(): (self.tables / n).write_text(text)
+        return nsp.main_duplicate_label_change(game.Game(self.src), self.tables)
+
+    def test_accepts_main_family_duplicate_label_shifts(self):
+        self.assertTrue(self.check())
+        for label, old_src, new_src in (
+            ('main BNSH', 'main#BNSH@0x1027000#var2', 'main#BNSH@0x1027000#var0'),
+            ('boot NRO BNSH', 'main/nro0.nro#BNSH@0x176e000#var13', 'main/nro0.nro#BNSH@0x176e000#var0'),
+            ('versioned main BNSH', 'main@v327680#BNSH@0x33ef000#var13', 'main@v327680#BNSH@0x33ef000#var0'),
+            ('decoded Unreal archive', '/ue_shaders/a.ushaderbytecode#UE#9', '/ue_shaders/b.ushaderbytecode#UE#1'),
+            ('GLSLC capture', '/glslc_capture/b.glslc#GLSLC@0x0', '/glslc_capture/a.glslc#GLSLC@0x0'),
+        ):
+            with self.subTest(label=label):
+                old_t = dict(self.old, **{'shader_map.tsv': f'ps_main.bin\t0\tpixel\t{self.K0}\t{old_src}\n'})
+                new_t = dict(self.old, **{'shader_map.tsv': f'ps_main.bin\t0\tpixel\t{self.K0}\t{new_src}\n'})
+                self.assertTrue(self.check(new_t, old_t))
+
+    def test_rejects_identity_order_romfs_or_table_changes(self):
+        for what, name, text in (
+            ('identical tables', 'shader_map.tsv', self.old['shader_map.tsv']),
+            ('removed shader key', 'shader_map.tsv', '\n'.join(self.new['shader_map.tsv'].splitlines()[:-1]) + '\n'),
+            ('added shader key', 'shader_map.tsv', self.new['shader_map.tsv'] + f'ps_main.bin\t3\tpixel\t{"5"*16}\tmain#MGFX@0xbd95ee0#1\n'),
+            ('changed key', 'shader_map.tsv', self.new['shader_map.tsv'].replace(self.K2, '9' * 16)),
+            ('changed stage', 'shader_map.tsv', self.new['shader_map.tsv'].replace(f'pixel\t{self.K2}', f'vertex\t{self.K2}')),
+            ('changed package', 'shader_map.tsv', self.new['shader_map.tsv'].replace(f'ps_main.bin\t1\tpixel\t{self.K2}', f'ps_other.bin\t0\tpixel\t{self.K2}')),
+            ('non-main source changed', 'shader_map.tsv', self.new['shader_map.tsv'].replace('ShadowRemove.xnb', 'Other.xnb')),
+            ('main to non-main', 'shader_map.tsv', self.new['shader_map.tsv'].replace('main#MGFX@0xbd647d5#18', '/Content/a.xnb#MGFX@0x0#0')),
+            ('cross-family main tag', 'shader_map.tsv', self.new['shader_map.tsv'].replace('main#MGFX@0xbd647d5#18', 'main#BNSH@0xbd647d5#var0')),
+            ('cross-version main prefix', 'shader_map.tsv', self.new['shader_map.tsv'].replace('main#MGFX@0xbd647d5#18', 'main@v1#MGFX@0xbd647d5#18')),
+            ('unrelated package index shifted', 'shader_map.tsv', self.new['shader_map.tsv'].replace('ps_content.bin\t0\t', 'ps_content.bin\t1\t')),
+            ('out-of-order indices', 'shader_map.tsv', self.new['shader_map.tsv'].replace(f'ps_main.bin\t1\tpixel\t{self.K2}', f'ps_main.bin\t2\tpixel\t{self.K2}').replace(f'ps_main.bin\t2\tpixel\t{self.K1}', f'ps_main.bin\t1\tpixel\t{self.K1}')),
+            ('changed facts', 'shader_facts.tsv', f'{self.K0}\t{{"manual":2}}\n'),
+            ('changed pairs', 'shader_pairs.tsv', f'{self.K1}\t{self.K0}\n'),
+            ('changed pso pairs', 'pso_pairs.tsv', '# none\n'),
+        ):
+            with self.subTest(what=what): self.assertFalse(self.check(dict(self.new, **{name: text})))
 
 
 class ComputeReaderAdditions(Base):
@@ -597,8 +670,8 @@ class SplitShaders(Base):
 
     def table(self, n): return self.tables[n] if hasattr(self, 'tables') else f'# split header\n{n}\t{self.rows}\n'
 
-    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, env=None):
-        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, env or {}, self.logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, derive_dup=None, env=None):
+        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, env or {}, self.logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute, derive_dup)
 
     def compute_addition(self):
         self.tables = {'shader_map.tsv': 'vs_data.bin\t0\tvertex\tbase\t/original\ncs_data.bin\t0\tcompute\tadded\t/assets#Compute#run.0\n',
@@ -705,6 +778,54 @@ class SplitShaders(Base):
         asset.write_bytes(b'updated DLC shader')
         self.go(g, dlc_roms=[dlc]); self.assertEqual(self.splits, 3)
         self.go(g); self.assertEqual(self.splits, 4)   # removing the DLC removes its shaders from the union
+
+    def test_main_duplicate_label_derivation_preserves_analysis_and_recovers_after_refresh(self):
+        old = {
+            'shader_map.tsv': (
+                'ps_content.bin\t0\tpixel\t1111111111111111\t/Content/a.xnb#MGFX@0x83#0\n'
+                'ps_main.bin\t0\tpixel\t2222222222222222\tmain#MGFX@0xbd647d5#2\n'
+                'ps_main.bin\t1\tpixel\t3333333333333333\tmain#MGFX@0xbd87e44#2\n'
+            ),
+            'shader_facts.tsv': '# none\n', 'shader_pairs.tsv': '# none\n', 'pso_pairs.tsv': '# none\n',
+        }
+        self.tables = dict(old, **{
+            'shader_map.tsv': (
+                'ps_content.bin\t0\tpixel\t1111111111111111\t/Content/a.xnb#MGFX@0x83#0\n'
+                'ps_main.bin\t0\tpixel\t3333333333333333\tmain#MGFX@0xbd647d5#18\n'
+                'ps_main.bin\t1\tpixel\t2222222222222222\tmain#MGFX@0xbd647d5#2\n'
+            ),
+        })
+        for n, text in old.items(): (self.src / n).write_text(text)
+        patch = self.src / 'patches.py'; patch.write_text(f'CUTS = {{"{BID}": []}}\n')
+        (self.src / 'c1_full.tsv').write_text('2222222222222222\t0\n')
+        (self.src / 'cb_extent.tsv').write_text('2222222222222222\t16\n')
+        g = game.Game(self.src)
+        def derive():
+            nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True, keep_analysis=True)
+            return game.Game(self.pdir)
+        promote, dlc, comp = mock.Mock(side_effect=derive), mock.Mock(), mock.Mock()
+        first = self.go(g, own=False, derive_dlc=dlc, derive_compute=comp, derive_dup=promote)
+        self.assertEqual((self.splits, promote.call_count), (1, 1))
+        dlc.assert_not_called(); comp.assert_not_called()
+        self.assertTrue(self.pkg.with_name('pkg.dup.key').is_file())
+        self.assertEqual((self.pdir / 'patches.py').resolve(), patch.resolve())
+        self.assertEqual((self.pdir / 'c1_full.tsv').read_text(), '2222222222222222\t0\n')
+        self.assertEqual((self.pdir / 'cb_extent.tsv').read_text(), '2222222222222222\t16\n')
+        self.assertEqual(game.Game(self.pdir).table('shader_map.tsv').read_text(), self.tables['shader_map.tsv'])
+        self.assertEqual(g.table('shader_map.tsv').read_text(), old['shader_map.tsv'])
+        # Second run reuses the verified proof without splitting again.
+        self.assertEqual(self.go(g, own=False, derive_dup=promote), first)
+        self.assertEqual((self.splits, promote.call_count), (1, 2))
+        # Once the registered profile is refreshed to the new map, proof is dropped and no derivation occurs.
+        g.table('shader_map.tsv').write_text(self.tables['shader_map.tsv'])
+        self.go(g, own=False, derive_dup=promote)
+        self.assertEqual((self.splits, promote.call_count), (2, 2))
+        self.assertFalse(self.pkg.with_name('pkg.dup.key').exists())
+        # Non-main changes are never promoted even with derive_dup enabled.
+        g.table('shader_map.tsv').write_text(old['shader_map.tsv'].replace('/Content/a.xnb', '/Content/b.xnb'))
+        with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'):
+            self.go(g, own=False, derive_dup=promote)
+        self.assertEqual(promote.call_count, 2)
 
     def own(self):   # a derived profile with the empty tables, as main makes it
         self.derive(); g = game.Game(self.pdir); nsp.provisional_prep(sys.executable, self.repo, {}, self.logs, g); return g

@@ -1093,18 +1093,20 @@ def frame_step_builds(path, table='FRAME_STEP'):   # the keys of a table of a pa
     return set()
 
 
-def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_label=''):
+def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_label='', keep_analysis=False):
     """The game's profile for a version it was not brought up on (the folder has no update, another update, files of other builds, or a registered build under another title ID: app),
     in pdir (outside the repository, where a provisional profile goes): its keys as they are, with this version's build row, package and shader versions, and app's title ID and
     main.npdm's program ID when app is not the profile's title. The shader tables, the chain header and the run-time capture list are
     left out: the build makes them again from this version's own files, as for a provisional profile. The hand-written tables (the prewarm list, shader_facts_manual.tsv) are copied:
     they name shaders by content key. A folder derived from the same inputs (the files copied and the game.tsv written, kept in <pdir>.derived.key) is kept as it is, with what later
     stages wrote into it (the heap check, the region check, the split's tables), so their own reuse holds. shader_only preserves all registered game.tsv rows and links its existing cuts:
-    only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) and no function-matched ones (MATCH_FRAME_STEP) for other builds only gets fps_target 0 for this version:
+    only the shader tables change with installed DLC, newly decoded compute kernels or shifted main duplicate labels (keep_analysis also preserves c1_full.tsv and cb_extent.tsv when the
+    shader key set and payloads are unchanged). The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) and no function-matched ones (MATCH_FRAME_STEP) for other builds only gets fps_target 0 for this version:
     its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
     if pdir.resolve() == g.dir.resolve():   # the delete below would take the files the copy reads; main never takes this script's own profiles as registered ones (own_profile_folders)
         raise BuildError(f'game profile {g.id} would be derived onto its own folder {g.dir}')
-    src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
+    copied_skip = ({'patches.py'} if shader_only else set()) | ({'c1_full.tsv', 'cb_extent.tsv'} if shader_only and keep_analysis else set())
+    src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or p.name in copied_skip))
     # The display version: the package's control data, else the one the profile registers for this main build. A NUP update or a dump carries no control data, and the game asks
     # the host for the version by its main's build ID (hle_sdk16.c GetDisplayVersion, the build rows): a row with ? is what the game then shows (Super Mario Bros. Wonder 1.2.1
     # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1). An unregistered NUP build can use its own numeric label.
@@ -1173,8 +1175,8 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_la
     why = 'no folder yet' if not (pdir / 'game.tsv').is_file() else 'game.tsv changed since' if not game_kept() else None
     if not why:
         if reused(kf, key) is not None: return disp
-        if reused(skf, skey) is not None:   # the tables later stages wrote (DERIVED_SKIP's names, but the patches.py link) stay
-            copy_in(lambda p: p.name in DERIVED_SKIP and p.name != 'patches.py')
+        if reused(skf, skey) is not None:   # the tables later stages wrote (DERIVED_SKIP's names, except copied/linked ones) stay
+            copy_in(lambda p: p.name in DERIVED_SKIP and p.name not in copied_skip)
             say(f'derived profile {pdir}: copied files changed, the split\'s tables kept'); return disp
         why = 'no split key' if not skf.is_file() else 'the split\'s inputs changed'
     say(f'derived profile {pdir}: made again ({why})')
@@ -2248,6 +2250,34 @@ def table_difference(name, profile, split):
     return '\n'.join(out)
 
 
+def _main_source_family(source):
+    """Source family for shaders collected with main in shader_split.py (main, boot NROs, /ue_shaders/, /glslc_capture/).
+    Returns (container_prefix, reader_tag), or None for non-main RomFS/DLC rows."""
+    if source.startswith(('/ue_shaders/', '/glslc_capture/')):
+        root = '/ue_shaders/' if source.startswith('/ue_shaders/') else '/glslc_capture/'
+        tag = re.search(r'#(UE\w*|GLSLC@)', source)
+        return (root, tag.group(1)) if tag else None
+    if source.startswith(('main#', 'main@', 'main/')):
+        prefix, sep, rest = source.partition('#')
+        if not sep: return None
+        tag = re.match(r'([A-Za-z0-9_]+@?)', rest)
+        return (prefix, tag.group(1)) if tag else None
+    return None
+
+
+def _base_rows_compatible(old_base, new_base):
+    """Whether non-DLC shader rows match, allowing only main-family duplicate representative label shifts
+    (same key, package and stage, same main reader family; every non-main source identical)."""
+    if old_base.keys() != new_base.keys(): return False
+    for k, (opkg, ost, osrc) in old_base.items():
+        npkg, nst, nsrc = new_base[k]
+        if (opkg, ost) != (npkg, nst): return False
+        if osrc != nsrc:
+            ofam, nfam = _main_source_family(osrc), _main_source_family(nsrc)
+            if ofam is None or ofam != nfam: return False
+    return True
+
+
 def dlc_only_shader_change(g, tables):
     """A different DLC shader union, with the registered non-DLC shaders and facts unchanged. Package indices may be re-numbered when an add-on is removed.
     Source ownership is the split's /aoc/<index>/ prefix; a module or base/update shader difference never qualifies for this shader-only derivation."""
@@ -2264,7 +2294,7 @@ def dlc_only_shader_change(g, tables):
         if old is None or new is None: return False
         old_dlc = {k: v for k, v in old.items() if v[2].startswith('/aoc/')}
         new_dlc = {k: v for k, v in new.items() if v[2].startswith('/aoc/')}
-        if old_dlc == new_dlc or {k: v for k, v in old.items() if k not in old_dlc} != {k: v for k, v in new.items() if k not in new_dlc}: return False
+        if old_dlc == new_dlc or not _base_rows_compatible({k: v for k, v in old.items() if k not in old_dlc}, {k: v for k, v in new.items() if k not in new_dlc}): return False
         dlc = old_dlc.keys() | new_dlc.keys()
         def facts(path):
             out, seen = [], set()
@@ -2276,6 +2306,45 @@ def dlc_only_shader_change(g, tables):
                 if c[0] not in dlc: out.append(line)
             return out
         return facts(g.table('shader_facts.tsv')) == facts(tables / 'shader_facts.tsv')
+    except (OSError, UnicodeError, ValueError): return False
+
+
+def main_duplicate_label_change(g, tables):
+    """Only representative source labels and package indices shifted for shaders collected with main
+    (checked first-copy vs. earlier last-copy selection in shader_split.py). Every shader key, stage,
+    package, non-main source, fact and pair table must remain identical, and every package's new indices
+    must follow shader_split.py's (source, key) ordering."""
+    def rows(path):
+        out = {}
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith(('#', 'package\t')): continue
+            c = line.split('\t')
+            if len(c) != 5 or not c[0].endswith('.bin') or not c[1].isdigit() or c[3] in out: raise ValueError('invalid shader map')
+            out[c[3]] = (c[0], int(c[1]), c[2], c[4])
+        return out
+    try:
+        old, new = rows(g.table('shader_map.tsv')), rows(tables / 'shader_map.tsv')
+        if not old or old.keys() != new.keys() or old == new: return False
+        changed_pkgs = set()
+        for k, (opkg, oidx, ost, osrc) in old.items():
+            npkg, nidx, nst, nsrc = new[k]
+            if (opkg, ost) != (npkg, nst): return False
+            if osrc != nsrc:
+                ofam, nfam = _main_source_family(osrc), _main_source_family(nsrc)
+                if ofam is None or ofam != nfam: return False
+                changed_pkgs.add(npkg)
+        if not changed_pkgs: return False
+        for k, (opkg, oidx, _, _) in old.items():
+            if opkg not in changed_pkgs and new[k][1] != oidx: return False
+        by_pkg = collections.defaultdict(list)
+        for k, (npkg, nidx, _, nsrc) in new.items(): by_pkg[npkg].append((nsrc, k, nidx))
+        for items in by_pkg.values():
+            if [nidx for _, _, nidx in sorted(items)] != list(range(len(items))): return False
+        for name in ('shader_facts.tsv', 'shader_pairs.tsv'):
+            if data_rows(g.table(name).read_bytes()) != data_rows((tables / name).read_bytes()): return False
+        pso = g.table('pso_pairs.tsv')
+        if pso.is_file() and data_rows(pso.read_bytes()) != data_rows((tables / 'pso_pairs.tsv').read_bytes()): return False
+        return True
     except (OSError, UnicodeError, ValueError): return False
 
 
@@ -2326,7 +2395,7 @@ def compute_reader_additions(g, tables, split_log):
     except (OSError, UnicodeError, ValueError): return False
 
 
-def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
+def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, derive_dup=None):
     """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
     the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (a damaged copy, ALLOW_DAMAGED, is keyed by its RomFS files' times and its damage list, so only the same extraction reuses it): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
@@ -2355,7 +2424,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     # Ocarina of Time's three damaged textures cost every build the split and all 42,848 shaders restored from the cache, about eleven minutes
     key = fingerprint(*inputs, *split_profile_inputs(g))
     dlckf, dlckey = pkg.with_name(pkg.name + '.dlc.key'), None
-    cskf, cskey, promoted = pkg.with_name(pkg.name + '.compute.key'), None, None
+    cskf, cskey = pkg.with_name(pkg.name + '.compute.key'), None
+    dupkf, dupkey, promoted = pkg.with_name(pkg.name + '.dup.key'), None, None
     def promote(derive, kind):
         nonlocal g, provisional, env, promoted
         g, provisional, promoted = derive(), True, kind; inputs[1] = True
@@ -2369,6 +2439,11 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         cskey = fingerprint(key, ('files', [Path(__file__)])) if key else None
         if cskey and reused(cskf, cskey) is not None:
             promote(derive_compute, 'compute')
+            key = fingerprint(*inputs, *split_profile_inputs(g))
+    if not provisional and derive_dup:
+        dupkey = fingerprint(key, ('files', [Path(__file__)])) if key else None
+        if dupkey and reused(dupkf, dupkey) is not None:
+            promote(derive_dup, 'dup')
             key = fingerprint(*inputs, *split_profile_inputs(g))
     have_pairs = g.table('pso_pairs.tsv').is_file() or pkg.with_name('pso_pairs.tsv').is_file()
     if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None and reused(outputkf, split_output_key(pkg, g)) is not None:
@@ -2393,6 +2468,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         promote(derive_dlc, 'dlc')
     if not provisional and derive_compute and compute_reader_additions(g, tmp / 'tables', text):
         promote(derive_compute, 'compute')
+    if not provisional and derive_dup and main_duplicate_label_change(g, tmp / 'tables'):
+        promote(derive_dup, 'dup')
     if provisional or g.table('pso_pairs.tsv').is_file(): names += ('pso_pairs.tsv',)
     else: shutil.copyfile(tmp / 'tables' / 'pso_pairs.tsv', pkg.with_name('pso_pairs.tsv'))
     if provisional:   # a provisional profile takes the tables as they come
@@ -2413,6 +2490,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     else: rmtree(dlckf)
     if promoted == 'compute' and cskey: cskf.write_text(f'{cskey}\nNewly decoded compute kernels\n')
     else: rmtree(cskf)
+    if promoted == 'dup' and dupkey: dupkf.write_text(f'{dupkey}\nMain duplicate shader source labels\n')
+    else: rmtree(dupkf)
     PROG.end(note)
     return key and package_key(pkg)
 
@@ -3491,12 +3570,12 @@ def main(args=None):
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
         oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
         own = bool(provisional or derived)   # the shader tables come from this build's split (the profile's are checked otherwise)
-        def derive_shader_tables(reason):   # called only after the strict DLC-only or additive-compute comparison passed
+        def derive_shader_tables(reason, keep_analysis=False):   # called only after the strict DLC-only, additive-compute or main-duplicate-label comparison passed
             nonlocal g, derived
             assert g is not None
             derived = reason
             pdir = Path(os.path.expanduser(args.profile_out or PROFILE_OUT)).resolve() if (args.profile_out or PROFILE_OUT) else work / 'profile'
-            derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True)
+            derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True, keep_analysis=keep_analysis)
             os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
             os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
             g = gamemod.load(g.id)
@@ -3504,7 +3583,8 @@ def main(args=None):
             return g
         derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
-        pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+        derive_dup = (lambda: derive_shader_tables('main duplicate shader labels shifted under first-copy selection', keep_analysis=True)) if not own else None
+        pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute, derive_dup)
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))

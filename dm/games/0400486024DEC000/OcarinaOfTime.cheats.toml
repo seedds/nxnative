@@ -1,0 +1,398 @@
+# Version-independent cheats for nxnative (scripts/cheat_anchor.py, format 1).
+# Imported from E0F3CCFAF50065AE.txt on 2026-11-07 with the code of build E0F3CCFAF50065AE. Compile it for a build with
+#   cheat_anchor.py compile <this file> --nso <that build's ExeFS/main> -o <cheats folder>
+# This source has no anchors, so its entries compile only for build E0F3CCFAF50065AE (update v131072): heap addresses
+# cannot be anchored, and the code patches at the end keep their stubs in the padding after the text and their switch
+# words in unused .bss, at this build's offsets (cheat_anchor.py import keeps them for this build only for those reasons).
+#
+# The codes are rainbowkittypaw's, posted on GBAtemp on 2026-11-06 for the Lichii emulator:
+#   https://gbatemp.net/threads/cheat-codes-ams-and-sx-os-add-and-request.520293/page-3738#post-10942642
+# Each sets one of the game's s32 game-data flags to 9999. This host keeps those flags 0x2000 bytes higher in the heap
+# than Lichii does, so every address here is the post's plus 0x2000, and each write is gated on the flag's hash being in
+# its slot of the game-data table (README.md, "Cheats").
+# The hearts entry after them is not from the post: it was found from the same table (flag 963 is current health, 964
+# max health, both in quarter hearts) and tested here. The speed and damage entries at the end are code patches found
+# on this host (README.md, "Cheats"); the three speed call sites are the ones afiaka87's oots2-release
+# "faster-movement-extra" doubles (MIT, https://github.com/afiaka87/oots2-release).
+
+format = 1
+title = "0400486024DEC000"
+authored = "E0F3CCFAF50065AE"
+
+[[cheats]]
+name = "GBAtemp codes by rainbowkittypaw 2026-11-06, ported (+0x2000)"
+label = true
+
+[[cheats]]
+name = "Infinite Rupees"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag a77921d7's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F370FC0 A77921D7
+04100000 7F37E134 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Deku Nuts"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag f30d9f54's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F372460 F30D9F54
+04100000 7F37EA1C 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Deku Sticks"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag b9494411's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F374100 B9494411
+04100000 7F37EA6C 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Seeds"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag 5fadf7fc's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F372FF8 5FADF7FC
+04100000 7F37EA44 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Bombs"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag db1bcd4f's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F372EA8 DB1BCD4F
+04100000 7F37E83C 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Bombchus"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag df7c517a's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F3715E8 DF7C517A
+04100000 7F37E8DC 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Hearts: flag 964 is max health, in quarter hearts"
+label = true
+
+[[cheats]]
+name = "20 heart containers"
+note = "Found from the game-data table, not from the post: max health (flag fbe01da1) = 80 quarter hearts"
+code = """
+40000000 00000000 00000000
+14150000 7F371620 FBE01DA1
+04100000 7F37E184 00000050
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Link speed (walk, run, roll): turn on one factor at a time"
+label = true
+
+[[cheats]]
+name = "Speed x1.5 - on"
+note = "Code patch: the three branches that hand Link a new speed (main+0x934990 walk / run, +0x933E30 and +0x933E74 rolls, all into main+0x9352F0) go through a stub at main+0x3C46400 that multiplies it by 1.5; one factor at a time"
+code = """
+40000000 00000000 00000000
+14050000 03C46400 00000000
+04000000 03C46400 1E2F1010
+20000000
+14050000 03C46404 00000000
+04000000 03C46404 1E300800
+20000000
+14050000 03C46408 00000000
+04000000 03C46408 1733BBBA
+20000000
+14050000 03C46408 1733BBBA
+14050000 00934990 94000258
+04000000 00934990 94CC469C
+20000000
+14050000 00933E30 14000530
+04000000 00933E30 14CC4974
+20000000
+14050000 00933E74 1400051F
+04000000 00933E74 14CC4963
+20000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Speed x1.5 - off"
+note = "Puts the three branches back on main+0x9352F0 (the stub stays, unused)"
+code = """
+40000000 00000000 00000000
+14050000 00934990 94CC469C
+04000000 00934990 94000258
+20000000
+14050000 00933E30 14CC4974
+04000000 00933E30 14000530
+20000000
+14050000 00933E74 14CC4963
+04000000 00933E74 1400051F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Speed x2 - on"
+note = "Code patch: the three branches that hand Link a new speed (main+0x934990 walk / run, +0x933E30 and +0x933E74 rolls, all into main+0x9352F0) go through a stub at main+0x3C46410 that multiplies it by 2; one factor at a time"
+code = """
+40000000 00000000 00000000
+14050000 03C46410 00000000
+04000000 03C46410 1E201010
+20000000
+14050000 03C46414 00000000
+04000000 03C46414 1E300800
+20000000
+14050000 03C46418 00000000
+04000000 03C46418 1733BBB6
+20000000
+14050000 03C46418 1733BBB6
+14050000 00934990 94000258
+04000000 00934990 94CC46A0
+20000000
+14050000 00933E30 14000530
+04000000 00933E30 14CC4978
+20000000
+14050000 00933E74 1400051F
+04000000 00933E74 14CC4967
+20000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Speed x2 - off"
+note = "Puts the three branches back on main+0x9352F0 (the stub stays, unused)"
+code = """
+40000000 00000000 00000000
+14050000 00934990 94CC46A0
+04000000 00934990 94000258
+20000000
+14050000 00933E30 14CC4978
+04000000 00933E30 14000530
+20000000
+14050000 00933E74 14CC4967
+04000000 00933E74 1400051F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Speed x3 - on"
+note = "Code patch: the three branches that hand Link a new speed (main+0x934990 walk / run, +0x933E30 and +0x933E74 rolls, all into main+0x9352F0) go through a stub at main+0x3C46420 that multiplies it by 3; one factor at a time"
+code = """
+40000000 00000000 00000000
+14050000 03C46420 00000000
+04000000 03C46420 1E211010
+20000000
+14050000 03C46424 00000000
+04000000 03C46424 1E300800
+20000000
+14050000 03C46428 00000000
+04000000 03C46428 1733BBB2
+20000000
+14050000 03C46428 1733BBB2
+14050000 00934990 94000258
+04000000 00934990 94CC46A4
+20000000
+14050000 00933E30 14000530
+04000000 00933E30 14CC497C
+20000000
+14050000 00933E74 1400051F
+04000000 00933E74 14CC496B
+20000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Speed x3 - off"
+note = "Puts the three branches back on main+0x9352F0 (the stub stays, unused)"
+code = """
+40000000 00000000 00000000
+14050000 00934990 94CC46A4
+04000000 00934990 94000258
+20000000
+14050000 00933E30 14CC497C
+04000000 00933E30 14000530
+20000000
+14050000 00933E74 14CC496B
+04000000 00933E74 1400051F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Damage: one-hit kill (bosses keep 1 HP), no damage to Link"
+label = true
+
+[[cheats]]
+name = "One-hit kill - on"
+note = "Code patch at the damage routine's sub (main+0x49DCDC, stub main+0x3C46440): any damage empties a plain life holder (enemies; bosses hold their last point); switch word main+0x4E9FE20"
+code = """
+40000000 00000000 00000000
+14050000 03C46440 00000000
+04000000 03C46440 F940010C
+20000000
+14050000 03C46444 00000000
+04000000 03C46444 D000782D
+20000000
+14050000 03C46448 00000000
+04000000 03C46448 911001AD
+20000000
+14050000 03C4644C 00000000
+04000000 03C4644C EB0D019F
+20000000
+14050000 03C46450 00000000
+04000000 03C46450 B00092CD
+20000000
+14050000 03C46454 00000000
+04000000 03C46454 4B09014C
+20000000
+14050000 03C46458 00000000
+04000000 03C46458 540000A0
+20000000
+14050000 03C4645C 00000000
+04000000 03C4645C B94E25AD
+20000000
+14050000 03C46460 00000000
+04000000 03C46460 340000ED
+20000000
+14050000 03C46464 00000000
+04000000 03C46464 2A0A03EC
+20000000
+14050000 03C46468 00000000
+04000000 03C46468 14000005
+20000000
+14050000 03C4646C 00000000
+04000000 03C4646C B94E21AD
+20000000
+14050000 03C46470 00000000
+04000000 03C46470 3400006D
+20000000
+14050000 03C46474 00000000
+04000000 03C46474 34000049
+20000000
+14050000 03C46478 00000000
+04000000 03C46478 2A1F03EC
+20000000
+14050000 03C4647C 00000000
+04000000 03C4647C 17215E19
+20000000
+14050000 03C4647C 17215E19
+14050000 0049DCDC 4B09014C
+04000000 0049DCDC 14DEA1D9
+20000000
+20000000
+14050000 04E9FE20 00000000
+04000000 04E9FE20 00000001
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "One-hit kill - off"
+note = "Clears the switch word; the stub stays and does the original subtraction"
+code = """
+40000000 00000000 00000000
+14050000 04E9FE20 00000001
+04000000 04E9FE20 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Link takes no damage - on"
+note = "Same stub: a game-data life holder (Link's, synced to flag 963) keeps its value; switch word main+0x4E9FE24. Replaces 'Infinite health', which wrote flag 963, only a copy of Link's life"
+code = """
+40000000 00000000 00000000
+14050000 03C46440 00000000
+04000000 03C46440 F940010C
+20000000
+14050000 03C46444 00000000
+04000000 03C46444 D000782D
+20000000
+14050000 03C46448 00000000
+04000000 03C46448 911001AD
+20000000
+14050000 03C4644C 00000000
+04000000 03C4644C EB0D019F
+20000000
+14050000 03C46450 00000000
+04000000 03C46450 B00092CD
+20000000
+14050000 03C46454 00000000
+04000000 03C46454 4B09014C
+20000000
+14050000 03C46458 00000000
+04000000 03C46458 540000A0
+20000000
+14050000 03C4645C 00000000
+04000000 03C4645C B94E25AD
+20000000
+14050000 03C46460 00000000
+04000000 03C46460 340000ED
+20000000
+14050000 03C46464 00000000
+04000000 03C46464 2A0A03EC
+20000000
+14050000 03C46468 00000000
+04000000 03C46468 14000005
+20000000
+14050000 03C4646C 00000000
+04000000 03C4646C B94E21AD
+20000000
+14050000 03C46470 00000000
+04000000 03C46470 3400006D
+20000000
+14050000 03C46474 00000000
+04000000 03C46474 34000049
+20000000
+14050000 03C46478 00000000
+04000000 03C46478 2A1F03EC
+20000000
+14050000 03C4647C 00000000
+04000000 03C4647C 17215E19
+20000000
+14050000 03C4647C 17215E19
+14050000 0049DCDC 4B09014C
+04000000 0049DCDC 14DEA1D9
+20000000
+20000000
+14050000 04E9FE24 00000000
+04000000 04E9FE24 00000001
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Link takes no damage - off"
+note = "Clears the switch word; the stub stays"
+code = """
+40000000 00000000 00000000
+14050000 04E9FE24 00000001
+04000000 04E9FE24 00000000
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]

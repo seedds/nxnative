@@ -721,6 +721,39 @@ static void t_motion_live(void) {
     CHECK(st[0].acc[2] == -1 && h_hid_SixRest(&h), "co-op: player 2's motion stays on its own sensor");
     dm_motion_clear(1); dm_pad_players(1); g_phone_mode = -1;
 }
+static void t_stick_motion(void) {
+    g_mode = 1; dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
+    hwm_clear(); guest_now = motion_now = 10000000000ull;
+    uint32_t h = 3; SixAxisState sensor; NpadState pad;
+    dm_pad_set(DM_BTN_A, 4000, 5000, DM_STICK_MAX, 0);
+    fill(&pad, NPAD_NO1, STYLE_FULLKEY);
+    CHECK(!dm_stick_motion_enabled() && pad.rx == DM_STICK_MAX, "stick motion: off by default");
+    dm_stick_motion_set(1);
+    fill(&pad, NPAD_NO1, STYLE_FULLKEY);
+    CHECK(pad.rx == 0 && pad.ry == 0 && !(pad.buttons & (1u << 22)), "stick motion: right stick and its direction bits are consumed");
+    CHECK(pad.lx == 4000 && pad.ly == 5000 && (pad.buttons & DM_BTN_A), "stick motion: other inputs still reach the game");
+    h_hid_SixStates(&sensor, 1, &h);
+    for (int i = 0; i < 40; i++) {
+        guest_now = motion_now += 25000000ull;
+        h_hid_SixStates(&sensor, 1, &h);
+    }
+    CHECK(sensor.acc[2] > .99f && sensor.dir[8] < -.99f && fabsf(sensor.gyro[1] - .5f) < .01f, "stick motion: full right can flip the sensor through 180 degrees");
+    dm_pad_set(0, 0, 0, DM_STICK_MAX / 10, 0);
+    guest_now = motion_now += 25000000ull;
+    h_hid_SixStates(&sensor, 1, &h);
+    CHECK(sensor.acc[2] > .99f && sensor.gyro[1] == 0, "stick motion: the dead zone holds the pose without turning");
+    dm_pad_set_player(1, 0, 0, 0, 0, DM_STICK_MAX);
+    fill(&pad, 1, STYLE_FULLKEY);
+    CHECK(pad.ry == DM_STICK_MAX, "stick motion: a separate player keeps their right stick");
+    dm_stick_motion_set(0);
+    fill(&pad, NPAD_NO1, STYLE_FULLKEY);
+    h_hid_SixStates(&sensor, 1, &h);
+    CHECK(pad.rx == DM_STICK_MAX / 10 && sensor.acc[2] == -1, "stick motion: disabling restores the stick and clears its pose");
+    dm_stick_motion_set(1);
+    h_hid_SixStates(&sensor, 1, &h);
+    CHECK(sensor.acc[2] == -1, "stick motion: starts level when re-enabled");
+    dm_stick_motion_set(0); dm_pad_set(0, 0, 0, 0, 0); dm_pad_players(1); hwm_clear();
+}
 static void t_motion_hid(void) {
     g_mode = 1; dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); g_phone_mode = 0;
     uint32_t h = 3; SixAxisState st;   // full key on No1: style index 3, as the SDK numbers six-axis and vibration handles
@@ -1748,6 +1781,7 @@ int main(void) {
     t_rumble_log();
     t_motion_threads();
     t_motion_live();
+    t_stick_motion();
     t_motion_hid();
     t_npad_imu_samples();
     t_imu_noise();

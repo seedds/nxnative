@@ -40,6 +40,7 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_sc_btn, g_sc_axes, g_sc_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
 static _Atomic uint64_t g_peek_latch;   // presses since the last dm_input_peek (the applet's reader)
 static _Atomic int g_hold;              // an applet holds the input (dm_input_hold)
+static _Atomic int g_stick_motion_on;
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
@@ -207,6 +208,8 @@ static char *keys_file(const char *path) {
 static void ctl_start(void);
 static void rec_start(void);
 void hid_keys_init(void) {
+    const char *stick_motion = getenv("DM_STICK_MOTION");
+    if (stick_motion && !strcmp(stick_motion, "1")) dm_stick_motion_set(1);
     ctl_start();
     rec_start();
     const char *e = getenv("DM_KEYS"); if (!e || !*e) return;
@@ -609,6 +612,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
+    if (!pl && dm_stick_motion_enabled()) a[2] = a[3] = 0;
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
@@ -807,6 +811,59 @@ static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHRE
 static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};   // each Joy-Con's own sensor (dm_motion_set_joy)
 static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
+static live_motion g_stick_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
+int dm_stick_motion_enabled(void) { return atomic_load(&g_stick_motion_on); }
+void dm_stick_motion_set(int enabled) {
+    live_motion *m = &g_stick_motion;
+    pthread_mutex_lock(&m->mu);
+    motion_reset(&m->st);
+    m->last_ns = 0;
+    m->count = 0;
+    motion_lag_reset(&m->lag);
+    atomic_store(&g_stick_motion_on, !!enabled);
+    pthread_mutex_unlock(&m->mu);
+}
+// Called with the stream locked. Store the sample on the host clock; guest clock lag is applied when read.
+static void motion_store(live_motion *m, uint64_t t, uint64_t now) {
+    if (m->last_ns) motion_lag_add(&m->lag, now - m->last_ns);
+    m->last_ns = t; m->received_ns = now;
+    if (!m->count) m->head = 0;
+    motion_sample *r = &m->ring[(m->head + m->count) % LIVE_RING];
+    r->t = t; motion_fill(&m->st, r->acc, r->gyro, r->angle, r->dir);
+    if (m->count < LIVE_RING) m->count++; else m->head = (m->head + 1) % LIVE_RING;
+}
+static float stick_motion_rate(int32_t axis) {
+    const float deadzone = 0.15f;
+    float travel = fminf(1.f, fabsf((float)axis / DM_STICK_MAX));
+    float speed = fmaxf(0.f, (travel - deadzone) / (1.f - deadzone));
+    return copysignf((float)M_PI * speed * speed, (float)axis);
+}
+// A deflected stick turns the virtual controller; neutral stops it at its current pose. This lets a motion puzzle hold a tilt or turn all the way over.
+static live_motion *stick_motion_sample(motion_state *out) {
+    live_motion *m = &g_stick_motion;
+    pthread_mutex_lock(&m->mu);
+    if (!dm_stick_motion_enabled()) { pthread_mutex_unlock(&m->mu); return NULL; }
+    uint64_t now = now_ns();
+    if (!m->last_ns || now > m->last_ns) {
+        uint64_t keys = atomic_load(&g_axes), script = atomic_load(&g_sc_axes);
+        int32_t x = pick(ax(keys, 2), ax(script, 2)), y = pick(ax(keys, 3), ax(script, 3));
+        uint32_t players = 1u | merged_players();
+        for (int p = 0; p < DM_PLAYERS; p++) if (players >> p & 1) {
+            uint64_t pad = atomic_load(&g_pad_axes[p]);
+            x = pick(x, ax(pad, 2)); y = pick(y, ax(pad, 3));
+        }
+        if (atomic_load(&g_hold)) x = y = 0;
+        const float rate[3] = {-stick_motion_rate(y), stick_motion_rate(x), 0};
+        const motion_map identity = {{0, 1, 2}, {1, 1, 1}, 1, 1};
+        float dt = m->last_ns ? fminf((float)(now - m->last_ns) / 1e9f, 0.05f) : 0;
+        motion_update(&m->st, &identity, m->st.acc, rate, dt, 0);
+        for (int i = 0; i < 3; i++) m->st.acc[i] = -m->st.R[2][i];
+        motion_store(m, now, now);
+    }
+    if (out) *out = m->st;
+    pthread_mutex_unlock(&m->mu);
+    return m;
+}
 static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
 static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
 static void motion_env(void) {
@@ -863,12 +920,7 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
         LOG("[hid] motion player 1 (%s): acc %+.2f %+.2f %+.2f G, gyro %+.3f %+.3f %+.3f rev/s (flat and still should read acc 0 0 -1)",
             source == 1 ? "phone" : source == 2 ? "controller HID" : "controller", m->st.acc[0], m->st.acc[1], m->st.acc[2], m->st.gyro[0], m->st.gyro[1], m->st.gyro[2]);
     }
-    if (m->last_ns) motion_lag_add(&m->lag, now - m->last_ns);   // how long after the last sample's time this one arrived: the delay the stream needs (six_source)
-    m->last_ns = t; m->received_ns = now;
-    if (!m->count) m->head = 0;   // a new stream (reset above) starts its history again
-    motion_sample *r = &m->ring[(m->head + m->count) % LIVE_RING];
-    r->t = t; motion_fill(&m->st, r->acc, r->gyro, r->angle, r->dir);   // host time: the guest clock's lag (a freeze, DM_DETCLOCK) is applied when read
-    if (m->count < LIVE_RING) m->count++; else m->head = (m->head + 1) % LIVE_RING;
+    motion_store(m, t, now);
     pthread_mutex_unlock(&m->mu);
 }
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
@@ -901,6 +953,10 @@ static uint64_t motion_copy(live_motion *m, motion_state *out) {   // a source's
 // DM_PHONE_MOTION says), with a copy of its state when out is given; NULL while none is fresh
 static live_motion *motion_pick(int p, motion_state *out) {
     if (p < 0 || p >= DM_PLAYERS) return NULL;
+    if (!p && dm_stick_motion_enabled()) {
+        live_motion *m = stick_motion_sample(out);
+        if (m) return m;
+    }
     pthread_once(&g_motion_once, motion_env);
     if (!p && g_phone_mode > 0) return motion_copy(&g_phone_motion, out) ? &g_phone_motion : NULL;
     // Match the button path: in a one-player game, a controller in another slot also drives player 1.

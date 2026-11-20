@@ -1001,6 +1001,7 @@ static DmSoundMenuDelegate *g_sound_menu;   // NSMenu keeps its delegate unretai
 static void sound_menu_shot(NSMenu *m, const char *path) {
     CGFloat w = 360, h = 0; for (NSMenuItem *it in m.itemArray) h += it.view ? it.view.frame.size.height : it.isSeparatorItem ? 9 : 22;
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:(NSInteger)w pixelsHigh:(NSInteger)h bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    if (!rep) return;
     NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
     [NSGraphicsContext saveGraphicsState]; NSGraphicsContext.currentContext = gc;
     [NSColor.windowBackgroundColor setFill]; NSRectFill(NSMakeRect(0, 0, w, h));
@@ -1008,8 +1009,8 @@ static void sound_menu_shot(NSMenu *m, const char *path) {
     for (NSMenuItem *it in m.itemArray) {
         CGFloat ih = it.view ? it.view.frame.size.height : it.isSeparatorItem ? 9 : 22; y -= ih;
         if (it.view) {
-            NSBitmapImageRep *r = [it.view bitmapImageRepForCachingDisplayInRect:it.view.bounds]; [it.view cacheDisplayInRect:it.view.bounds toBitmapImageRep:r];
-            [r drawInRect:NSMakeRect(0, y, it.view.frame.size.width, ih)];
+            NSBitmapImageRep *r = [it.view bitmapImageRepForCachingDisplayInRect:it.view.bounds];
+            if (r) { [it.view cacheDisplayInRect:it.view.bounds toBitmapImageRep:r]; [r drawInRect:NSMakeRect(0, y, it.view.frame.size.width, ih)]; }
         } else if (it.isSeparatorItem) { [NSColor.separatorColor setFill]; NSRectFill(NSMakeRect(10, y + 4, w - 20, 1)); }
         else [it.title drawAtPoint:NSMakePoint(18, y + 3) withAttributes:@{NSFontAttributeName: [NSFont menuFontOfSize:13], NSForegroundColorAttributeName: NSColor.labelColor}];
     }
@@ -1032,7 +1033,7 @@ static void sound_menu_test(void) {
                 if (sl && [label.stringValue isEqualToString:row]) hit = sl;
             }
             if (!hit) { LOG("front end: sound menu test: no row \"%s\"", row.UTF8String); return; }
-            hit.doubleValue = pct / 100.0; [NSApp sendAction:hit.action to:hit.target from:hit];
+            hit.doubleValue = pct / 100.0; SEL act = hit.action; if (act) [NSApp sendAction:act to:hit.target from:hit];
             NSTextField *shown = [hit.superview viewWithTag:100 + hit.tag];
             LOG("front end: sound menu test at %.0f s: %s slider to %.0f%%, row shows %s; master %d%%, music %.0f%%, engine %.0f%%, kart %.0f%%, item %.0f%%, voice %.0f%%, world %.0f%%, ui %.0f%%, other %.0f%%; saved %s = %s",
                 at, row.UTF8String, pct, shown.stringValue.UTF8String, dm_audio_volume(), dm_snd_gain(DM_SND_MUSIC) * 100, dm_snd_gain(DM_SND_ENGINE) * 100, dm_snd_gain(DM_SND_KART) * 100, dm_snd_gain(DM_SND_ITEM) * 100,

@@ -1,0 +1,9 @@
+# Fresh save, recorded with DM_REC from the first boot: the Switch 2 Edition's online tutorial and menus to the opening scene (the castle and the Flower Kingdom's characters, where the screenshot at 100 s is taken; no level is reached), the last button held on after the scene starts. Steps are frames, so the route does not depend on load time. 120 s: the quick run presents about 29 frames a second, and the recording ends near frame 2225, where the last hold (Right, which does nothing in the scene) is stretched to 20000 frames: a host whose scripted input ends exits by itself, and the harness counts that as a failed boot
+save	new
+keys	f279:A~f2,f317:A~f3,f383:A~f2,f468:Down~f4,f504:A~f2,f567:A~f3,f631:A~f3,f682:A~f3,f941:A~f3,f1052:A~f2,f1197:A~f2,f1236:A~f3,f1248:A~f3,f1261:A~f2,f1272:A~f3,f1291:A~f5,f1313:A~f2,f1348:Right~f20000,
+secs	120
+quick	120
+reach	2300@110
+window	90	20
+shots	100
+hang	30

@@ -5,6 +5,8 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import AVFAudio
+import CoreAudio
 import QuartzCore
 import Compression
 import SwiftUI
@@ -292,6 +294,7 @@ struct LauncherView: View {
             // the list's sections
             Box {
                 ForEach(m.settings.filter { $0.basic && m.visible($0) }) { SettingLine($0, m).equatable() }
+                if m.values["DM_MIC"] == "1" { MicrophoneDeviceRow() }
                 CloudSavesRow()
             }
             Box(inset: false) {
@@ -885,6 +888,7 @@ enum Symbols {
         "DM_SCREEN_ASPECT": "aspectratio", "DM_RUMBLE": "water.waves", "DM_RUMBLE_GAIN": "dial.medium",
         "DM_RUMBLE_MIN": "line.3.horizontal.decrease", "DM_PAD_PRESS_TO_JOIN": "person.badge.plus", "DM_SW2": "gamecontroller", "DM_PRESENT_SNAP": "square.3.layers.3d",
         "DM_PSO_MTL4": "bolt", "DM_PSO_PREBUILD": "hammer", "DM_NVN_ENC_THREAD": "cpu", "DM_FPS_HOLD": "timer", "DM_METAL_HUD": "chart.xyaxis.line",
+        "DM_MIC": "mic", "DM_MIC_GAIN": "mic.and.signal.meter",
     ]
     /// Symbols drawn here: the system has none for a frame rate, and its console symbols are a TV or a controller, not the console
     enum Drawn {
@@ -993,6 +997,90 @@ private struct AdvancedRow: View {
 private struct PressRow: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.opacity(configuration.isPressed ? 0.55 : 1)
+    }
+}
+
+/// The microphone's input device, a row of the basic box while Microphone is on. Kept in this app's preferences as launcher.DM_MIC_DEVICE (a Core Audio UID, or
+/// "default" for the system's input), which launcher.c puts into DM_MIC_DEVICE; a DM_MIC_DEVICE set at launch or by an env file wins, and is shown here
+private struct MicrophoneDeviceRow: View {
+    @AppStorage("launcher.DM_MIC_DEVICE") private var savedDevice = "default"
+    @State private var devices = MicrophoneInputDevices.list()
+    private let fixed = getenv("DM_MIC_DEVICE").map { String(cString: $0) }
+
+    private var options: [[String]] {
+        let value = fixed ?? savedDevice
+        return [["default", "System Default"]]
+            + (value != "default" && !devices.contains { $0.uid == value } ? [[value, "Selected device unavailable"]] : [])
+            + devices.map { [$0.uid, $0.name] }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            RowLabel(icon: "waveform.badge.mic") {
+                Text("Microphone input").opacity(fixed == nil ? 1 : 0.5)
+                if fixed != nil { Text("Set at launch or by an env file").font(.footnote).foregroundStyle(.secondary) }
+            }
+            Spacer(minLength: 8)
+            MenuChoice(title: "Microphone input", options: options, value: fixed ?? savedDevice, set: { savedDevice = $0 })
+                .disabled(fixed != nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            devices = MicrophoneInputDevices.list()
+        }
+    }
+}
+
+private struct MicrophoneInputDevice: Identifiable, Hashable {
+    let uid: String
+    let name: String
+    var id: String { uid }
+}
+
+private enum MicrophoneInputDevices {
+    static func list() -> [MicrophoneInputDevice] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioDeviceID>.size) else { return [] }
+        var ids = [AudioDeviceID](repeating: kAudioObjectUnknown, count: Int(size) / MemoryLayout<AudioDeviceID>.stride)
+        let status = ids.withUnsafeMutableBytes { bytes in
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, bytes.baseAddress!)
+        }
+        guard status == noErr else { return [] }
+        return ids.compactMap { device in
+            guard hasInput(device), let uid = string(device, selector: kAudioDevicePropertyDeviceUID),
+                  let name = string(device, selector: kAudioObjectPropertyName), !uid.isEmpty else { return nil }
+            return MicrophoneInputDevice(uid: uid, name: name)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static func hasInput(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamConfiguration,
+                                                 mScope: kAudioDevicePropertyScopeInput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioBufferList>.size) else { return false }
+        let data = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { data.deallocate() }
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, data) == noErr else { return false }
+        let buffers = UnsafeMutableAudioBufferListPointer(data.assumingMemoryBound(to: AudioBufferList.self))
+        return buffers.contains { $0.mNumberChannels > 0 }
+    }
+
+    private static func string(_ device: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var value: CFString?
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(device, &address, 0, nil, &size, UnsafeMutableRawPointer(pointer))
+        }
+        guard status == noErr, let value else { return nil }
+        return value as String
     }
 }
 
@@ -1287,6 +1375,31 @@ enum LauncherWindowLayout {
         return NSRect(x: frame.minX, y: top - h, width: frame.width, height: h)
     }
     static let least: CGFloat = 320   // a window dragged to the screen's bottom edge keeps this much, running under the edge, and is not closed to a strip
+}
+
+// Called on the main thread after settings and cloud-save decisions. The OS can present
+// its consent alert even when the settings window is suppressed.
+@_cdecl("dm_mac_microphone_consent")
+public func dmMacMicrophoneConsent() -> Int32 {
+    switch AVAudioApplication.shared.recordPermission {
+    case .granted: return 1
+    case .undetermined:
+        _ = NSApplication.shared
+        var allowed: Bool?
+        AVAudioApplication.requestRecordPermission { granted in
+            DispatchQueue.main.async { allowed = granted }
+        }
+        while allowed == nil {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        if allowed == true {
+            fputs("launcher: microphone permission allowed\n", stderr)
+            return 1
+        }
+    default: break
+    }
+    fputs("launcher: microphone permission denied\n", stderr)
+    return 0
 }
 
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices

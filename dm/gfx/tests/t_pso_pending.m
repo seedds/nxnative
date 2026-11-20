@@ -1,4 +1,8 @@
+#include <pthread.h>
+static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu);
+#define pthread_cond_wait pending_cond_wait
 #include "../nvn/nvn_mtl.m"
+#undef pthread_cond_wait
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
@@ -17,6 +21,23 @@ static int g_checks, g_failed;
 } while (0)
 #define EXPECT_TRUE(name, condition) EXPECT_EQ(name, 1, !!(condition))
 
+// Hold a notified consumer before it reacquires the table lock, so admission
+// can deterministically run in the completion-to-consumption window.
+static _Atomic int g_take_gate;
+static dispatch_semaphore_t g_take_waiting, g_take_notified, g_take_resume;
+static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
+    int gate = cv == &g_pp_cv && atomic_exchange(&g_take_gate, 0);
+    if (gate) dispatch_semaphore_signal(g_take_waiting);
+    int result = pthread_cond_wait(cv, mu);
+    if (gate) {
+        pthread_mutex_unlock(mu);
+        dispatch_semaphore_signal(g_take_notified);
+        dispatch_semaphore_wait(g_take_resume, DISPATCH_TIME_FOREVER);
+        pthread_mutex_lock(mu);
+    }
+    return result;
+}
+
 @interface TestPipelineState : NSObject { @public int call; } @end
 @implementation TestPipelineState @end
 
@@ -27,6 +48,7 @@ static int g_checks, g_failed;
     pthread_cond_t _cv;
     int _entered, _released, _block_through, _nil_call;
     int _sync_calls, _async_calls;
+    int _texture_allocations;
     pthread_t _submitter;
     NSMutableArray *_results;
     BOOL _submitter_call[1024];
@@ -42,6 +64,7 @@ static int g_checks, g_failed;
 - (int)entered;
 - (int)syncCalls;
 - (int)asyncCalls;
+- (int)textureAllocations;
 - (BOOL)callWasOnSubmitter:(int)call;
 - (void)expectAbsentPendingKey:(const pso_key *)key onSubmitterCall:(int)call;
 - (BOOL)submitterCallObservedKeyAbsent:(int)call;
@@ -58,6 +81,12 @@ static int g_checks, g_failed;
     return self;
 }
 - (void)dealloc { pthread_cond_destroy(&_cv); pthread_mutex_destroy(&_mu); }
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
+    (void)descriptor;
+    _texture_allocations++;
+    return nil;
+}
+- (int)textureAllocations { return _texture_allocations; }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
     (void)descriptor;
     pthread_mutex_lock(&_mu);
@@ -162,7 +191,7 @@ static void reset_queue(void) {
     pthread_mutex_lock(&g_pp_mu);
     for (int i = 0; i < PSO_PEND_MAX; i++) {
         g_pp[i].ps = nil; memset(&g_pp[i].k, 0, sizeof g_pp[i].k);
-        g_pp[i].used = g_pp[i].done = 0; g_pp[i].order = 0;
+        g_pp[i].used = g_pp[i].done = g_pp[i].taking = 0; g_pp[i].order = 0;
     }
     g_pp_kicked = g_pp_taken = 0;
     pthread_mutex_unlock(&g_pp_mu);
@@ -300,6 +329,93 @@ static void test_full_table_reclaims_done_not_running(void) {
     reset_queue();
 }
 
+static void test_completed_slot_kept_for_waiting_draw(void) {
+    reset_queue();
+    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:1 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    pso_key waiting = make_key(710), replacement = make_key(711);
+    EXPECT_EQ("waiting draw's build admitted", 1, pso_pend_kick_next(&waiting, test_vs, test_fs));
+    if (![dev waitForEntered:1 timeoutMs:5000]) { EXPECT_TRUE("waiting build entered", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
+    int original_slot = queue_index(&waiting);
+    pthread_mutex_lock(&g_pp_mu);
+    for (int i = 0; i < PSO_PEND_MAX; i++) if (!g_pp[i].used) {
+        g_pp[i].k = make_key((unsigned)i + 1); g_pp[i].used = g_pp[i].done = 1;
+        g_pp[i].run = 0; g_pp[i].d = nil; g_pp[i].order = ++g_pp_kicked;
+    }
+    pthread_mutex_unlock(&g_pp_mu);
+    g_take_waiting = dispatch_semaphore_create(0); g_take_notified = dispatch_semaphore_create(0); g_take_resume = dispatch_semaphore_create(0);
+    atomic_store(&g_take_gate, 1);
+    dispatch_group_t consumer = dispatch_group_create(); __block id<MTLRenderPipelineState> result = nil;
+    dispatch_group_async(consumer, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ result = pso_pend_take(&waiting); });
+    EXPECT_EQ("draw waits for its running build", 0, dispatch_semaphore_wait(g_take_waiting, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    [dev releaseThrough:1];
+    EXPECT_EQ("draw is notified but has not consumed its pipeline", 0, dispatch_semaphore_wait(g_take_notified, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT_EQ("background admission still uses another completed slot", 1, pso_pend_kick_d(&replacement, pso_desc(&replacement, test_vs, test_fs, nil, 0), 2, nil));
+    EXPECT_TRUE("replacement build completes", pending_done(&replacement, 5000));
+    EXPECT_TRUE("waiting draw's completed slot is not reclaimed", queue_index(&replacement) != original_slot);
+    dispatch_semaphore_signal(g_take_resume);
+    EXPECT_EQ("waiting draw returns", 0, dispatch_group_wait(consumer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT_TRUE("waiting draw receives its own pipeline", (__bridge void *)result == (__bridge void *)[dev resultForCall:1]);
+    EXPECT_TRUE("replacement remains available to its own draw", pso_pend_take(&replacement) != nil);
+    [dev releaseAll]; drain_queue(5000); reset_queue();
+}
+
+// A lookup worker and the submit thread use the same admission operation. Two
+// predictions may finish in A, A, B, A order, even after earlier builds retire.
+static void test_interleaved_prediction_budgets(void) {
+    reset_queue();
+    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:0 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    PsoPredictBudget *older = [PsoPredictBudget new], *newer = [PsoPredictBudget new];
+    for (unsigned i = 0; i < 2; i++) {
+        pso_key k = make_key(700 + i);
+        EXPECT_EQ("older prediction admits a guess", 1, pso_pend_kick_d(&k, pso_desc(&k, test_vs, test_fs, nil, 0), 1, older));
+        EXPECT_TRUE("older guess finishes and is taken", pending_done(&k, 5000) && pso_pend_take(&k) != nil);
+    }
+    pso_key b = make_key(702), a = make_key(703), c = make_key(704), demand = make_key(705);
+    EXPECT_EQ("newer prediction has a separate budget", 1, pso_pend_kick_budget(&b, test_vs, test_fs, 1, newer));
+    EXPECT_TRUE("newer guess finishes", pending_done(&b, 5000));
+    EXPECT_EQ("interleaved older worker cannot replenish its budget", 0, pso_pend_kick_d(&a, pso_desc(&a, test_vs, test_fs, nil, 0), 1, older));
+    EXPECT_EQ("duplicate admission does not spend the newer budget", 0, pso_pend_kick_d(&b, pso_desc(&b, test_vs, test_fs, nil, 0), 1, newer));
+    EXPECT_EQ("submitter and worker share the newer budget", 1, pso_pend_kick_d(&c, pso_desc(&c, test_vs, test_fs, nil, 0), 1, newer));
+    EXPECT_TRUE("second newer guess finishes", pending_done(&c, 5000));
+    EXPECT_EQ("submitter cannot exceed the worker's budget", 0, pso_pend_kick_budget(&a, test_vs, test_fs, 1, newer));
+    EXPECT_EQ("a later draw remains outside the guess budget", 1, pso_pend_kick_d(&demand, pso_desc(&demand, test_vs, test_fs, nil, 0), 2, older));
+    EXPECT_TRUE("later draw finishes", pending_done(&demand, 5000));
+    EXPECT_EQ("older prediction spent exactly two guesses", 2, older->admitted);
+    EXPECT_EQ("newer prediction spent exactly two guesses", 2, newer->admitted);
+    drain_queue(5000); reset_queue();
+}
+
+static _Atomic int g_counts_stop;
+static void *completed_counts_main(void *unused) {
+    (void)unused; uint64_t count = 0;
+    while (!atomic_load(&g_counts_stop)) {
+        pthread_mutex_lock(&g_pp_mu);
+        g_pp_kicked = ++count; g_pp_done_n = count;
+        pthread_mutex_unlock(&g_pp_mu);
+    }
+    return NULL;
+}
+static void test_inflight_counter_snapshot(void) {
+    pthread_mutex_lock(&g_pp_mu);
+    uint64_t kicked = g_pp_kicked, done = g_pp_done_n, stolen = g_pp_stolen;
+    g_pp_kicked = g_pp_done_n = g_pp_stolen = 0;
+    pthread_mutex_unlock(&g_pp_mu);
+    atomic_store(&g_counts_stop, 0); pthread_t writer;
+    int rc = pthread_create(&writer, NULL, completed_counts_main, NULL);
+    EXPECT_EQ("start concurrent admission/completion counters", 0, rc);
+    if (!rc) {
+        int valid = 1; char line[4096];
+        for (int i = 0; i < 20000 && valid; i++) {
+            mtl_pso_line(line, sizeof line);
+            const char *at = strstr(line, "in flight ");
+            valid = at && strtoull(at + strlen("in flight "), NULL, 10) <= 1;
+        }
+        atomic_store(&g_counts_stop, 1); pthread_join(writer, NULL);
+        EXPECT_TRUE("concurrent counter snapshots never underflow", valid);
+    }
+    pthread_mutex_lock(&g_pp_mu); g_pp_kicked = kicked; g_pp_done_n = done; g_pp_stolen = stolen; pthread_mutex_unlock(&g_pp_mu);
+}
+
 static void append_op(uint8_t *buf, size_t *used, unsigned op, const void *payload, size_t n) {
     size_t size = (8 + n + 7) & ~7ull;
     op_hdr h = {op, (uint32_t)size}; memcpy(buf + *used, &h, sizeof h);
@@ -372,6 +488,37 @@ static void test_prediction_restores_scissor(void) {
     g_exec_next = NULL;
 }
 
+static void test_prediction_only_reads_existing_targets(void) {
+    reset_queue(); reset_pso_cache(); state_reset();
+    GateDevice *dev = [[GateDevice alloc] initBlockingThrough:0 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
+    NvProg *program = [NvProg new]; program->sh[0] = test_vs; program->sh[1] = test_fs;
+    prog_t control = {.magic = MAGIC('P', 'R', 'O', 'G'), .nstage = 2, .serial = 0x7f010003};
+    serial_put(control.serial, program);
+    tex_t cold = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 0x7f010004,
+                  .d = {.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 16, .height = 16, .depth = 1, .levels = 1, .samples = 1}};
+    tex_t ready = cold; ready.serial++;
+    // For a target without a view, the descriptor supplies the format and sample count a texture would report.
+    tex_put(ready.serial, tex_desc(&ready, 0));
+    p_set_rt cold_pass = {.n = 1, .color = {&cold}}, ready_pass = {.n = 1, .color = {&ready}};
+    p_bind_program bind = {&control, 3};
+    p_draw draw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3, .instances = 1};
+    uint8_t stream[2048] = {0}; size_t used = 0;
+    append_op(stream, &used, OP_BIND_PROGRAM, &bind, sizeof bind);
+    append_op(stream, &used, OP_SET_RT, &cold_pass, sizeof cold_pass);
+    append_op(stream, &used, OP_DRAW, &draw, sizeof draw);
+    append_op(stream, &used, OP_SET_RT, &ready_pass, sizeof ready_pass);
+    append_op(stream, &used, OP_DRAW, &draw, sizeof draw);
+    append_op(stream, &used, OP_END, NULL, 0);
+
+    g_exec_next = stream; pso_predict_rest(); g_exec_next = NULL;
+    EXPECT_TRUE("prediction reaches the later pass with a realized target", [dev waitForEntered:1 timeoutMs:5000]);
+    EXPECT_TRUE("target prediction drains its compiler work", drain_queue(5000));
+    EXPECT_EQ("prediction only compiles for known attachments", 1, [dev entered]);
+    EXPECT_EQ("prediction does not allocate future textures", 0, [dev textureAllocations]);
+    tex_put(ready.serial, nil); serial_del(control.serial);
+    reset_queue(); reset_pso_cache();
+}
+
 // The prediction runs once per submission, at its first new miss: a draw whose own build is already under way drew in an earlier frame and does not start it (issue #2438)
 static void test_prediction_at_first_new_miss(void) {
     g_sub_serial = 100; g_pp_submit_mark = 0;
@@ -391,10 +538,14 @@ int main(void) {
         snprintf(test_vs->key, sizeof test_vs->key, "pending-base-vs"); snprintf(test_fs->key, sizeof test_fs->key, "pending-base-fs");
         test_two_active_exact_take_and_release();
         test_next_draws_pass_the_guess_limit();
+        test_interleaved_prediction_budgets();
         test_full_table_reclaims_done_not_running();
+        test_completed_slot_kept_for_waiting_draw();
         test_nil_prediction_falls_back_then_predicts();
         test_prediction_restores_scissor();
+        test_prediction_only_reads_existing_targets();
         test_prediction_at_first_new_miss();
+        test_inflight_counter_snapshot();
         printf("== %d PSO pending checks, %d failed ==\n", g_checks, g_failed);
         return g_failed != 0;
     }

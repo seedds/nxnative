@@ -359,6 +359,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool isBindless,
             int cbufSlot = TextureOperation.DefaultCbufSlot)
         {
+            if (context.TranslatorContext.RayTracingProgram != null)
+                throw new InvalidOperationException("RT surface loads require a separately defined typed image-load contract.");
             if (srcB == RegisterConsts.RegisterZeroIndex)
             {
                 return;
@@ -441,7 +443,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     Array.Resize(ref dests, outputIndex);
                 }
 
-                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle);
+                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle, cbufSlot);
 
                 SetBindingPair setAndBinding = isBindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.ImageLoad,
@@ -646,12 +648,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool useComponents,
             bool byteAddress,
             bool isBindless,
-            int cbufSlot = TextureOperation.DefaultCbufSlot)
+            int cbufSlot = TextureOperation.DefaultCbufSlot,
+            TextureFormat? forcedFormat = null)
         {
+            if (context.TranslatorContext.RayTracingProgram != null && !forcedFormat.HasValue)
+            {
+                if (!useComponents || isBindless || byteAddress || componentMask is not (SuRgba.R or SuRgba.Rg or SuRgba.Rgba))
+                    throw new InvalidOperationException("RT surface stores support only bound, formatted R/RG/RGBA operations.");
+                RayTracingSurfaces.EmitFormattedStore(context, imm, cbufSlot, format =>
+                    EmitSust(context, cacheOp, dimensions, size, imm, componentMask, srcA, srcB, srcC,
+                        useComponents, byteAddress, isBindless, cbufSlot, format));
+                return;
+            }
             SamplerType type = ConvertSamplerType(dimensions);
 
             if (type == SamplerType.None)
             {
+                if (context.TranslatorContext.RayTracingProgram != null)
+                    throw new InvalidOperationException("RT formatted image store has an unsupported surface dimension.");
                 context.TranslatorContext.GpuAccessor.Log("Invalid image store sampler type.");
                 return;
             }
@@ -717,7 +731,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (!isBindless)
                 {
-                    format = ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm);
+                    format = forcedFormat ?? ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm, cbufSlot);
                 }
             }
             else

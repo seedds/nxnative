@@ -36,6 +36,16 @@ int g_nmod;
 struct dm_flags g_flag;
 void hlecount_svc(int num) { (void)num; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
+static const uint8_t readonly_bytes[0x8000] = { 0x53, [0x7fff] = 0x49 };
+static const hle_readonly_shmem readonly_memory = { readonly_bytes, sizeof readonly_bytes };
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { return handle == 0x1042 ? &readonly_memory : NULL; }
+static hle_transfer_memory transfer_memory;
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory) { transfer_memory = memory; return 0x1043; }
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) {
+    if (handle != 0x1043 || !transfer_memory.size) return 0;
+    *memory = transfer_memory;
+    return 1;
+}
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
@@ -131,6 +141,56 @@ static memory_info query(uintptr_t a) {
 static void expect(uintptr_t a, uintptr_t base, size_t size, unsigned state, unsigned attr, unsigned perm) {
     memory_info m = query(a);
     assert(m.base == base && m.size == size && m.state == state && m.attr == attr && m.perm == perm);
+}
+static uint32_t shared_svc(int svc, uint32_t handle, uintptr_t addr, size_t size, unsigned permission) {
+    uint64_t regs[31] = { handle, addr, size, permission };
+    svc_dispatch(svc, regs, 0);
+    return (uint32_t)regs[0];
+}
+static void readonly_shared_memory(void) {
+    uintptr_t addr = alias + 0x10000;
+    size_t size = sizeof readonly_bytes;
+    assert(shared_svc(0x13, 0, addr, size, 1) == 0xe401u);
+    assert(shared_svc(0x13, 0x1042, addr, size, 3) != 0);
+    assert(!pages(1, addr, size));
+    assert(shared_svc(0x13, 0x1042, addr, size, 1) == BAD);
+    assert(!pages(0, addr, size));
+    assert(!shared_svc(0x13, 0x1042, addr, size, 1));
+    expect(addr, addr, size, 6, 0, 1);
+    assert(!memcmp((void *)addr, readonly_bytes, size));
+    assert(pages(1, addr, size) == BAD && pages(0, addr, size) == BAD);
+    assert(shared_svc(0x13, 0x1042, addr, size, 1) == BAD);
+    assert(!shared_svc(0x14, 0x1042, addr, size, 0));
+    assert(query(addr).state == 0);
+    assert(!pages(1, addr, size));
+    assert(*(uint8_t *)addr == 0 && *(uint8_t *)(addr + size - 1) == 0);
+    assert(!pages(0, addr, size));
+}
+static void transfer_memory_setup(void) {
+    uintptr_t addr = alias + 0x10000;
+    size_t size = memory_getpagesize();
+    assert(shared_svc(0x15, 0, addr, size, 0) == BAD);   // unbacked
+    assert(!pages(1, addr, size));
+    assert(shared_svc(0x15, 0, addr + 1, size, 0) == 0xcc01u);
+    assert(shared_svc(0x15, 0, addr, size - 1, 0) == 0xca01u);
+    assert(shared_svc(0x15, 0, addr, size, 2) == 0xd801u);
+    uint64_t regs[31] = {0, addr, size, 0};
+    svc_dispatch(0x15, regs, 0);
+    assert(!regs[0] && regs[1] == 0x1043 && transfer_memory.address == addr);
+    *(uint8_t *)addr = 0x42;
+    hle_transfer_mapping mapping = {0};
+    assert(hle_map_transfer_memory(&mapping, 0x1043, size, 0));
+    assert(mapping.address == addr && *(uint8_t *)mapping.address == 0x42);
+    assert(!hle_map_transfer_memory(&mapping, 0x1042, size, 0));
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size * 2, 0));
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size, 1));
+    transfer_memory.size = 0;   // The guest closed its own handle.
+    assert(pages(0, addr, size) == BAD);
+    hle_unmap_transfer_memory(&mapping);
+    hle_unmap_transfer_memory(&mapping);
+    assert(!pages(0, addr, size));
+    transfer_memory = (hle_transfer_memory){addr, size, 0};
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size, 0));
 }
 static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
     fflush(NULL); pid_t pid = fork(); assert(pid >= 0);
@@ -489,13 +549,20 @@ static void release_fallback(void) {
     fail_mmap = 0;
 }
 // A heap given back reads 0 when it grows again: a fresh mapping in anonymous memory, and SetHeapSize's zeroing with the guest in files (DM_GUEST_FILE), where the pages keep their bytes
-// The rule that puts the guest in files: the switch when it is set, otherwise a pool over a known room to the memory limit
+// The rule that puts the guest in files: the switch when it is set, otherwise a pool and the host's margin over a known room to the memory limit
 static void file_rule(void) {
-    const uint64_t G = 1ull << 30, pool9 = 9 * G, pool3 = 0xCD500000;
-    assert(guest_file_wanted(NULL, pool9, 8 * G) && guest_file_wanted("", pool9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
-    assert(!guest_file_wanted(NULL, pool9, 12 * G) && !guest_file_wanted(NULL, pool3, 6 * G));   // it fits an iPad's 12 GiB; a Switch game's pool fits 6
-    assert(!guest_file_wanted(NULL, pool9, 0));   // no limit known: the Mac
-    assert(!guest_file_wanted("0", pool9, 8 * G) && guest_file_wanted("1", pool3, 12 * G) && guest_file_wanted("1", pool3, 0));
+    unsetenv("DM_GUEST_FILE_HOST");
+    const uint64_t G = 1ull << 30, M = 1ull << 20, pool9 = 9 * G, pool3 = 0xCD500000, h9 = guest_host_margin(pool9), h3 = guest_host_margin(pool3);
+    assert(h9 == pool9 / 2 && h3 == pool3 / 2);   // half the pool
+    assert(guest_file_wanted(NULL, pool9, h9, 8 * G) && guest_file_wanted("", pool9, h9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
+    assert(guest_file_wanted(NULL, pool9, h9, 11 * G + 993 * M));   // and on the iPad of issue #1184, where the pool alone fitted and the host's memory did not
+    assert(!guest_file_wanted(NULL, pool9, 0, 11 * G + 993 * M));   // the rule before the margin
+    assert(!guest_file_wanted(NULL, pool3, h3, 7 * G + 993 * M) && !guest_file_wanted(NULL, pool3, h3, 5 * G + 819 * M));   // a Switch game's pool stays anonymous with 8 and 6 GiB limits
+    assert(!guest_file_wanted(NULL, pool9, h9, 0));   // no limit known: the Mac
+    assert(!guest_file_wanted("0", pool9, h9, 8 * G) && guest_file_wanted("1", pool3, h3, 12 * G) && guest_file_wanted("1", pool3, h3, 0));
+    setenv("DM_GUEST_FILE_HOST", "1G", 1); assert(guest_host_margin(pool9) == G);
+    setenv("DM_GUEST_FILE_HOST", "0", 1); assert(!guest_host_margin(pool9));
+    unsetenv("DM_GUEST_FILE_HOST");
 }
 // With the guest in files, what the game gives back in the alias region is punched out by the sweep once it has stayed given back over a whole sweep interval: a page mapped again in between keeps
 // its blocks, the rest give theirs back and read 0 when mapped again
@@ -602,7 +669,7 @@ int main(int argc, char **argv) {
 #if !TARGET_OS_IPHONE
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
-    layout_order();
+    layout_order(); readonly_shared_memory(); transfer_memory_setup();
     lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();

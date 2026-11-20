@@ -36,6 +36,7 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 - IoStore containers `Carrot4/Content/Paks/Carrot4-Switch.utoc` / `.ucas` (7.5 GB, TOC version 2; `.ucas` is the profile's `romfs_marker`) hold the cooked packages; everything else is in `Carrot4-Switch.pak` (3.5 GB, version 11 with the magic 0xcc from the end as DRAGON QUEST VII Reimagined's, 10,046 files, Zlib, index not encrypted): the configs, 1,294 Wwise `.wem` files, the WebM movies (stored) and the two shader code archives (stored).
 - The update (v262144, 0.9 GB) is a delta over the base RomFS.
 - Shaders: 15,727 distinct (16,190 in the two archives), every one an LZ4 block (`uepak.py` `lz4_shaders`), as DRAGON QUEST VII Reimagined's; all build. Every vertex shader is made to link with any pixel shader (`shader_split.py` `separable_pairs`).
+- **Shader map refresh (1.1.1, v262144).** Commit `8d62601f` changed the splitter to keep the first occurrence of a duplicate shader key within a scan. The regenerated map keeps all 15,727 keys and stages and moves two shaders from the Global archive's packages to the Carrot4 archive's packages. Shader facts and pairs match the registered tables. On an M3 Pro with macOS 27.0.1, all 15,727 Mac shaders built, and the packaged app booted and played through the Olimar opening. The build reused the rewritten executables, so fresh rewriting remains unverified.
 
 ## Services
 
@@ -60,8 +61,9 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 
 ## Found on this game
 
-General host changes first needed here; each applies to every game:
+General fixes and validation on this game.
 
+- On Apple M6 with macOS 27.2, the Olimar prologue exercised read-only storage promotion on chain `70572e88b08d`. At frame 3900, fragment shader `4cfa6a30de7eb7f2` drew with 256 bytes bound read-only to storage slot 0. The compiled `fp_s0` binding uses `constant` at Metal argument ID 11. Both this chain and main `e4b0d9b7` built all 15,727 shaders from the same refreshed package and map. Both runs reached the prologue with zero red lines and reported the same profile depth-mode mismatch. [Device loads from read-only storage buffers](../../../docs/reference/shaders.md#device-loads-from-read-only-storage-buffers)
 - **A network request kept on hold before it settles** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **Rewriter:** an `adrp` re-encoded inside a copied exclusive window (`window_adrp`) and gates before a `ret` (`scratch_dead`): [`adrp` inside an exclusive window](../../../docs/reference/rewriter.md#adrp-inside-an-exclusive-window), [Observation gates on any relocatable instruction](../../../docs/reference/rewriter.md#observation-gates-on-any-relocatable-instruction) (the `scratch_dead` rule, removed on 2026-10-31). Spin waits that store (`patch_nso.py` "Spin waits"): [development.md, Power](../../../docs/development.md#power).
 - **An Unreal engine region that `-SwitchVirtualAddressSpaceSize=` cannot size**, given what the alias region has room for at its default path's store (`dm/tools/ue_region.py`; a cut in this build's `patches.py` until 2026-10-31): [Unreal's engine address region and its options](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).

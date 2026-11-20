@@ -58,6 +58,14 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 
 The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <secs> [VAR=value…]` (`DMHOST=` for another host), `run/go.sh <shot> <wait> <presses…>` for a run with `DM_CTL`, `run/to_select.sh` and `run/play.sh <prefix> <host> <secs>`: from the save in `run/save`, A presses through the title, Select User, Tennis's match settings and the court into a doubles match at its serve prompt (about 2 minutes), then `Shake` every 2 s with a shot every 30 s.
 
+## Validation
+
+Compute-loop containment validation (2026-11-17, Apple M6, macOS 27.2): chain `968f7d1ea898` against `19d159c0b938`. The full libraries build 11,053 of 11,059 shaders on both revisions; the same six task/mesh payload failures remain. There are 291 compute shaders, 163 with 415 guarded loop sites; static inspection finds no unaccounted loop, including in helpers.
+
+A no-input title route ran for 120 s per revision from an isolated copy of the development save. Fifteen guarded kernels ran, covering 52 sites, with no cap hit or new red line. The warm repeat passes the full harness: screenshots at 105 and 115 s have zero dHash difference and RGB difference at most 0.03. In the 100–115 s window, 59.7 → 59.5 fps and p99 frame time 18.10 → 18.10 ms; peak footprint over the runs 6,522 → 6,497 MB. The first candidate run also had no cap hit or image difference; its preparation-only flag disappears on the warm repeat. This checks those compute workloads, not a played point or all legitimate loops. These comparisons do not isolate containment overhead.
+
+Raw-pointer discovery validation (2026-11-17, Apple M6, macOS 27.2): main `2925d7af`, chain `5ea15f2c8240`, against `039676b4017a`. Both libraries build 11,053 of 11,059 shaders, with the same six payload failures; every successful MSL source and variant is unchanged. The 373 raw-table reflections change, 372 gaining fixed pointer sources. The temporary 120-second no-input startup route stops at the controller-strap notice and passes `regress.py check` as `CHANGED` (pipeline prebuild off), with no red log kinds and screenshots within tolerance. By frame 3,900 the candidate read 10,650 pointer words across 2,130 bindings, with no newly addressed range: this covers the [discovery path](../../../docs/reference/shaders.md#raw-global-memory-through-a-pointer-read-when-the-draw-is-bound), not Ocarina's omitted-target symptom. In the measured startup window, 59.7 → 59.5 fps and p99 17.73 → 18.20 ms; peak footprint 6,447 → 6,466 MB. This single comparison does not isolate CPU discovery cost. The temporary route was not retained; gameplay and iOS were not rerun.
+
 ## Open
 
 - A point played on the Mac in this tree (needs a motion controller, or scripted moves that serve).
@@ -69,6 +77,7 @@ The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <
 
 ## Found on this game
 
+- [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): guarded compute kernels run before title-screen input; see [Validation](#validation).
 - [A dump tool's `.listing` files in the game's folders](../../../docs/reference/packing.md#a-dump-tools-listing-files-in-the-games-folders)
 - [File calls on a mount in the SDK's own table](../../../docs/reference/services.md#file-calls-on-a-mount-in-the-sdks-own-table)
 - [A read-only mount of the game's own save data](../../../docs/reference/services.md#a-read-only-mount-of-the-games-own-save-data)

@@ -207,8 +207,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             return s;
         }
 
-        // A barrier or memory barrier orders this lane's shared memory accesses on both sides (Barrier: BAR.SYNC; GroupMemoryBarrier / MemoryBarrier: MEMBAR, which the shader build
-        // makes fences on threadgroup memory too, membar_fence; SubgroupBarrier: LDSM's, InstEmitAmpereTensor.ALdsm)
+        // A barrier or memory barrier orders this lane's shared memory accesses on both sides (Barrier: BAR.SYNC; GroupMemoryBarrier / MemoryBarrier: MEMBAR, which SPIRV-Cross writes
+        // at MSL 3.2 as fences on threadgroup memory too, dmsh_chain.CROSS_MSL; SubgroupBarrier: LDSM's, InstEmitAmpereTensor.ALdsm)
         private static bool IsOrdering(Instruction inst)
         {
             return inst is Instruction.Barrier or Instruction.GroupMemoryBarrier or Instruction.MemoryBarrier or Instruction.SubgroupBarrier;

@@ -1,0 +1,34 @@
+# UnMetal (Unepic Fran's stealth action game): OpenGL 1.x fixed function through EGL, no shaders (README.md)
+
+# ---- Identity ----
+title_id	01008F4014A74000
+program_id	01008F4014A74000
+
+# ---- App ----
+name	UnMetal
+ipa	UnMetal.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.2.0	main=fbc3278ff44429c4fc81fd5e1e15dc2f	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_OpenGL)
+modules	main sdk
+romfs_marker	sound/music_exteriores.ogg
+zip_store	.ogg:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 164 MB of bss (counted as used memory): a 3072 MB heap region
+mem_reserve	0xf0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shaders ----
+shader_groups	/=romfs
+shader_note	UnMetal has no shaders: OpenGL 1.x fixed function, drawn by the GL layer's fixed pipeline (dm/gfx/msl/gl_ff.metal), no NVN tables

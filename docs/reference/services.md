@@ -830,6 +830,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** while the game window is key, `front_mac.m` holds a second activity with `NSActivityIdleDisplaySleepDisabled` (`display_awake`; `pmset -g assertions` shows `PreventUserIdleDisplaySleep` "NxNative active game window"). `input_release` lets go of it when the window loses focus or is minimized, `input_resume` takes it again, and startup takes it if the window became key before the focus observers were installed. Windowless runs never hold it. An explicit lock or sleep still works, and no input is synthesized.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) on the Mac, controller play; every game on the Mac (general); [PR #741](https://github.com/seedds/nxnative/pull/741).
 
+### Mac menu bar over the fullscreen game
+
+- **Symptom:** in fullscreen, the menu bar shows at the top of the game's screen whenever the game is the active app (a click on it, a controller in use), and goes away when another app on another screen is active. The system setting is "In Full Screen Only".
+- **Cause:** AppKit's default fullscreen auto-hides the menu bar; on that setup macOS brings it back for the active app's screen. Seen on macOS 27 with two screens, the game on the main one.
+- **Fix:** the window delegate (`DmWinDelegate`, `front_mac.m`) answers `window:willUseFullScreenPresentationOptions:` with `FullScreen | HideDock | HideMenuBar`, so fullscreen hides both for good. The delegate is set for every game window, so fullscreen entered later (⌃⌘F, the green button) gets it too. ⌘Q and ⌃⌘F still work with the bar hidden.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (M5, macOS 27.0.1, a 27-inch main screen and the built-in one); every game on the Mac (general).
+
 ### Mouse, keyboard and key code maps
 
 - **Symptom:** the first boot aborted in `hid::GetMouseState` (the SDK's mouse resource was never initialized).

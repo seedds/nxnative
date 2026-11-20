@@ -1377,6 +1377,20 @@ def dump_folder(folder):   # a folder of the game's files (pack_dump.py), with n
     return pack_dump.is_dump(folder) and not files_with_suffix(folder, *PACKAGE_SUFFIXES)
 
 
+def pre_extracted(folder):
+    """The pre-extracted build dirs in a game folder: *_build/extract/v*/ExeFS/main.npdm + RomFS.img, as nup/dump extraction writes them. {version name: Path} when found, None otherwise."""
+    result = {}
+    for d in folder.iterdir():
+        if not d.is_dir() or not d.name.endswith('_build'): continue
+        ex = d / 'extract'
+        if not ex.is_dir(): continue
+        for v in ex.iterdir():
+            if (v.is_dir() and v.name.startswith('v') and v.name[1:].isdigit()
+                    and (v / 'ExeFS' / 'main.npdm').is_file() and (v / 'RomFS.img').is_file()):
+                result[v.name] = v
+    return result or None
+
+
 def nup_file(path):   # the NUP to pack: path when it is a .nup file, else the one .nup in the folder when no game package is beside it; None when there is none
     if path.is_file():
         if not pack_nup.is_nup(path): raise BuildError(f'not a folder or a NUP file: {path}')
@@ -1466,6 +1480,23 @@ def scan_dump(dump, want=None):   # a dump folder as scan_nsps gives a folder of
     return app, {'base': pack_dump.base_of(dump), 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
 
 
+def scan_pre_extracted(nsp_dir, pre_ex_dirs, want=None):
+    """Pre-extracted build dirs (from an earlier nup/dump build): (title ID, {'base': None, 'updates', 'dlc', 'pre_extracted': the dirs})."""
+    ver_names = sorted(pre_ex_dirs, key=vnum)
+    try: app = pack_dump.program_id(pre_ex_dirs[ver_names[-1]] / 'ExeFS' / 'main.npdm')
+    except pack_dump.Error as e: raise BuildError(str(e)) from e
+    if want is not None and want != app: raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in pre-extracted dirs, which hold {app:016X}')
+    aoc_dir = pre_ex_dirs[ver_names[-1]].parent.parent / 'aoc'
+    aoc = {}
+    if aoc_dir.is_dir():
+        for p in aoc_dir.iterdir():
+            if p.is_file() and p.suffix == '.img':
+                try: idx = int(p.stem)
+                except ValueError: continue
+                aoc[app + 0x1000 + idx] = p
+    return app, {'base': None, 'updates': [(vnum(v), None) for v in ver_names], 'dlc': [(tid, None, p) for tid, p in sorted(aoc.items())], 'pre_extracted': pre_ex_dirs}
+
+
 def extract_dump(ex, name, src, app):   # one version of a dump folder (src: base/ or updates/<version>/) into the layout extract makes; the code modules and the image are kept while unchanged
     dst = ex / name; part = dst / 'RomFS.img.part'; rmtree(dst / 'extract.key')   # not nx_extract's output: an NSP build of this version extracts it again
     def poll():
@@ -1484,6 +1515,9 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
     Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract are as at the last extraction (extraction_key) (Monster Hunter Rise: 250 DLC, 30 s),
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
     if not fam['dlc']: return None
+    if fam.get('pre_extracted'):
+        aoc = work / 'aoc'
+        return aoc if aoc.is_dir() else None
     if fam.get('nup'):
         PROG.stage('unpack DLC', step='unpacking')
         try: pack_nup.pack_dlc(fam['nup'], app, {tid: k for tid, _, k in fam['dlc']}, work / 'aoc', say=lambda s: None)
@@ -3297,6 +3331,8 @@ def main(args=None):
     if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
     global NSP_FOLDER; NSP_FOLDER = nsp_dir
     dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
+    pre_ex = None if dump else pre_extracted(nsp_dir)
+    if pre_ex: dump = 'pre_extracted'
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = icon_file(args.icon or ICON, '--icon / ICON'); spare_icon = icon_file(args.fallback_icon or FALLBACK_ICON, '--fallback-icon / FALLBACK_ICON')
@@ -3320,9 +3356,12 @@ def main(args=None):
             say(f'program {app & 0xFFF} of application {fam["nup"].application:016X}; the RomFS of its program(s) '
                 + ', '.join(f'{i} ({pid:016X})' for i, (pid, _, _) in sorted(fam['nup'].siblings.items())) + f' go beside its own ({pack_nup.PROGRAMS}/), --program picks another')
         if fam['base'] is None: say(pack_nup.NO_BASE)
-    elif dump:
+    elif dump == 'folder':
         app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
+    elif pre_ex:
+        app, fam = scan_pre_extracted(nsp_dir, pre_ex, int(want, 16) if want else None)
+        say(f'pre-extracted: {app:016X}, {len(fam["updates"])} version(s), {len(fam["dlc"])} DLC')
     else:
         with package_reader(repo, keys, env) as packages:
             app, fam = scan_nsps(nsp_dir, packages.contents, int(want, 16) if want else None)
@@ -3400,15 +3439,15 @@ def main(args=None):
     nup_label = pack_nup.display_label(picks[pkg_ver][1] or picks[pkg_ver][0]) if nup else ''
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = (sum(pack_nup.romfs_bytes(fam['nup'], u or b, b) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = (sum(pack_nup.romfs_bytes(fam['nup'], u or b, b) for b, u in picks.values()) if nup else 0 if pre_ex else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
-    PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
+    PROG.plan((len(versions) + bool(fam['dlc']) if not pre_ex else 0) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
     nx = None if dump else find_nx_extract(repo, env)
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
-        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, logs, app, repo)
+        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else fam['pre_extracted'][ver] if pre_ex else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, logs, app, repo)
         if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app, repo)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules

@@ -1014,6 +1014,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Typed-output binding regression (2026-11-17):** `c75f0126` moved the operation into `main0_u`, whose generated reflection has `entry_u_logic` without the legacy `logic` dictionary. Pipeline selection accepted `u_logic`, but drawing bound buffer 29 only for `has_logic` (the dictionary), leaving the operation and masks unbound. Draws now bind for either capability. `t_logic` loads reflection and libraries made by the production build finisher through `shader_load`, then reads back all 16 operations on unsigned and normalized targets; it previously set `has_logic` by hand and hid the missing bind. Skyward Sword HD's reported return of the dark cinematic cast bisects to this change, but a matching pass capture and gameplay retest are still needed to confirm that connection.
 
+### Source-only blending on floating-point targets
+
+- **Symptom:** the title background and gameplay render black while the HUD and text remain visible. A pass dump shows the scene and its color lookup table rendered before tone mapping, but the bloom input holds positive infinity.
+- **Cause:** the bloom blur `f9895ce248715e99` enables ADD with source ONE and destination ZERO for both color and alpha. This state replaces the destination. On an M4 Pro with macOS 27.2.1, the enabled Metal blend state produced infinity in all 90,400 texels of the R11G11B10F target. The input RGBA8 texture and blur weights were finite. Tone mapping then sampled outside its color lookup table. An isolated Metal draw using the same fragment code and captured input with controlled vertices produced finite values with either blend state, so the lower-level trigger in the live pipeline remains open.
+- **Fix:** `pso_desc` implements source replacement by leaving blending disabled on float attachments for this exact state. Blends that use the destination or alter the source retain their blend factors and operations. `check_t_blend_zero` covers the pipeline descriptors and the existing float blend results.
+- **Found on:** LEGO Star Wars: The Skywalker Saga. With the source-only state represented directly, all 90,400 bloom texels were finite and the “Boarding Party” corridor rendered on the same Mac.
+
 ### Advanced blend modes as Porter-Duff factors
 
 - **Symptom:** `nvnBlendStateSetAdvancedMode 8` (SRC_OVER) logged and blended with the state's own functions.

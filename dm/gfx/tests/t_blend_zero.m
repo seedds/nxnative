@@ -30,6 +30,22 @@ static const struct { int on, src, dst, eq; char a0, a1; uint32_t word; } rows[]
 };
 enum { NROWS = sizeof rows / sizeof *rows };
 static blend_st state(int r) { blend_st b = {.target = 0, .src_rgb = (uint64_t)rows[r].src, .dst_rgb = (uint64_t)rows[r].dst, .src_a = O, .dst_a = Z, .eq_rgb = (uint64_t)rows[r].eq, .eq_a = ADD}; return b; }
+
+static void replace_float_case(void) {
+    pso_key key = {.blend_en = 1, .chmask = 0xf};
+    key.cfmt[0] = MTLPixelFormatRG11B10Float;
+    key.blend[0] = state(0);
+    CHECK(!pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.cfmt[0] = MTLPixelFormatRGBA16Float;
+    CHECK(!pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.blend[0].dst_a = O;
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.blend[0] = state(2);
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.cfmt[0] = MTLPixelFormatRGBA8Unorm;
+    key.blend[0] = state(0);
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+}
 // A merged pass's draw (g_pso_lmap, the map from the physical attachments to the shader's outputs; g_pso_fsfn, the fragment that writes each output to its attachment), as draw has it
 // for a pass that reads its targets from the tile: the words it binds are the state's under the map, as its pipeline's blending is. The shader's output 0 (the mist's SRC_ALPHA /
 // ONE_MINUS_SRC_ALPHA) goes to physical attachment 1, an RGBA16F target, beside an RGBA8 one at attachment 0 that no output reaches. Read without the map, the word is 0 (attachment 0
@@ -88,6 +104,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
     mtl_init(); g_msl_dir = @(argv[1]);
+    replace_float_case();
     int on = bz_on();
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingString:@"/blend.metal"] encoding:NSUTF8StringEncoding error:&error];
     if (!source) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }

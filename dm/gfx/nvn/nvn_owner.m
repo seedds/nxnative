@@ -558,20 +558,36 @@ own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use
 // A submitted descriptor and a queue binding hold the compiled program by its immutable initialization serial. Retaining it must not mint serial aliases:
 // alias churn invalidates texture tables and changes composite-program keys
 typedef struct { unsigned refs, retired; } prog_pin;
-static nvn_hmap g_prog_pins = {.klen = 8};   // protected by the submission lock
+// The pins have a lock of their own (g_pin_mu), taken before g_smu where both are held (serial_del, own_live_ref take g_smu), so a submission can pin a program its replay has
+// already resolved without the submission lock (own_prog_pin_live, nvn_queue.inc nq_snapshot_object): the game's thread then copies its command lists while the queue
+// replay thread translates the last ones, instead of waiting for it (OoT-30 C-4)
+static nvn_hmap g_prog_pins = {.klen = 8};   // under g_pin_mu
+static pthread_mutex_t g_pin_mu = PTHREAD_MUTEX_INITIALIZER;
 void mtl_prog_release(prog_t *p) {
     if (!p->serial) return;
+    pthread_mutex_lock(&g_pin_mu);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
     if (pin) pin->retired = 1; else serial_del(p->serial);
+    pthread_mutex_unlock(&g_pin_mu);
 }
 void mtl_prog_unpin(prog_t *p) {
+    pthread_mutex_lock(&g_pin_mu);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
     if (pin && !--pin->refs) { nvn_hm_del(&g_prog_pins, &p->serial); if (pin->retired) serial_del(p->serial); free(pin); }
+    pthread_mutex_unlock(&g_pin_mu);
 }
-void own_prog_pin(uint64_t serial) {
+static void prog_pin_locked(uint64_t serial) {
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &serial);
     if (!pin) { pin = calloc(1, sizeof *pin); if (!pin) ODIE("program retention allocation failed"); nvn_hm_put(&g_prog_pins, &serial, pin); }
     pin->refs++;
+}
+void own_prog_pin(uint64_t serial) { pthread_mutex_lock(&g_pin_mu); prog_pin_locked(serial); pthread_mutex_unlock(&g_pin_mu); }
+// Pins the program of serial when the serial table holds its compiled program (a replay resolved it), in one hold of the pin lock, so no release deletes it in between; 0: not resolved yet
+int own_prog_pin_live(uint64_t serial) {
+    pthread_mutex_lock(&g_pin_mu);
+    int live = own_live_ref(serial) != NULL; if (live) prog_pin_locked(serial);
+    pthread_mutex_unlock(&g_pin_mu);
+    return live;
 }
 
 own_alias_unheld own_alias_unheld_locked(void) {

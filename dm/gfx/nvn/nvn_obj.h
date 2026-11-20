@@ -373,6 +373,8 @@ void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 void mtl_prog_unpin(prog_t *p); // submit lock held: release a queued descriptor or saved binding
 void mtl_prog_snapshot(prog_t *copy, const prog_t *source); // submit lock held: retain compiled shaders behind owned metadata
+int mtl_prog_snapshot_live(prog_t *copy, const prog_t *source); // no lock: the same for a program a replay has resolved already; 0 (nothing done) for one it has not
+int mtl_prepared(void);   // the first submission's prepare step (mtl_prepare) has nothing left to do
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)

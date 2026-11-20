@@ -8,6 +8,7 @@
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <unistd.h>
 #if TARGET_OS_IPHONE
 int dm_ios_output_channels(void);   // front_ios.m: the audio session's output channel count
@@ -96,6 +97,17 @@ static void *event_notify(void *p) {
     return NULL;
 }
 
+// Game volume of the host, independent of the system volume: DM_VOLUME=0..100 (default 100), on a squared curve so the low end is usable; dm_audio_set_volume changes it live
+static _Atomic int g_host_vol = -1;
+void dm_audio_set_volume(int percent) { atomic_store(&g_host_vol, percent < 0 ? 0 : percent > 100 ? 100 : percent); }
+int dm_audio_volume(void) { int p = atomic_load(&g_host_vol); if (p < 0) { const char *e = getenv("DM_VOLUME"); p = e ? atoi(e) : 100; p = p < 0 ? 0 : p > 100 ? 100 : p; } return p; }   // percent, for the Sound menu
+static float dm_audio_host_gain(void) {
+    int p = atomic_load_explicit(&g_host_vol, memory_order_relaxed);
+    if (p < 0) { const char *e = getenv("DM_VOLUME"); p = e ? atoi(e) : 100; dm_audio_set_volume(p); p = atomic_load(&g_host_vol); }
+    return p >= 100 ? 1.f : (p / 100.f) * (p / 100.f);
+}
+// DM_SOUND_LOG's meter lives in hle_audren.c; this weak empty one lets a build without it (t_audio) link
+__attribute__((weak)) void dm_snd_meter_out(const int16_t *s, uint64_t n) { (void)s; (void)n; }
 // Take n bytes from the pending queue and hand them to the output side; once a whole block has played, move it to released and notify the ordinary thread.
 static void pull(aout *a, uint8_t *dst, uint64_t n) {
     int released = 0;
@@ -122,10 +134,12 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
         }
     }
     uint32_t vb = atomic_load_explicit(&a->vol, memory_order_relaxed);
-    if (vb != 0x3f800000u) {   // the output's volume (SetAudioOutVolume), as the audout session applies it to the PCM16 it plays; saturating
-        float v; memcpy(&v, &vb, 4);
+    float hv = dm_audio_host_gain();
+    if (vb != 0x3f800000u || hv != 1.f) {   // the output's volume (SetAudioOutVolume) times the host's game volume (DM_VOLUME), applied to the PCM16 it plays; saturating
+        float v; memcpy(&v, &vb, 4); v *= hv;
         for (uint64_t i = 0; i < ns; i++) { float x = s16[i] * v; s16[i] = (int16_t)(x > 32767.f ? 32767.f : x < -32768.f ? -32768.f : x); }
     }
+    dm_snd_meter_out(s16, ns);   // DM_SOUND_LOG's level after the master volume (hle_audren.c)
     if (released) {
         if (a->event) notify_release(a);   // the notify thread only signals the guest's event: outputs without one (the host's renderer output, games that poll) need no wake-up
         if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem);

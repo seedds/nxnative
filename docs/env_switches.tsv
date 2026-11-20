@@ -402,6 +402,21 @@ DM_SHARED_FONT_EXT	path	Font file served for shared-font type 5, the Nintendo ex
 DM_SHOW_FPS	player	`1` shows the frame-rate counter on the iPhone (frames put on screen per second, top left); at IPA build it sets `DMShowFPS` in `Info.plist`, which `Documents/env.txt` overrides
 DM_SIX_DELAY	switch	`=0` (the default), `=auto` or `=<ms>` (up to 40): `DM_IMU_DELAY`'s playout delay for the six-axis states (`GetSixAxisSensorStates`) instead of the IMU samples. None by default: a Switch 1 game reads the newest state each frame (aiming, steering), so a delay only adds latency. Also through `DM_CTL`'s `env`
 DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log only for dropped frames (kept in a ring of the last 16 frames, judged 8 frames late)
+DM_SOUND_AT	diagnostic	`=<seconds>:<category>=<percent>,…` sets a sound category's volume that many seconds after the first renderer update (`30:music=0,40:music=100`), to check changes while sounds play (`hle_audren.c`)
+DM_SOUND_CATS	path	The sound category table of Mario Kart World (`sound_cats.bin`: each sound's BWAV CRC-32 and ADPCM coefficients with its category); default `<DM_ROOT>/sound_cats.bin`. Without it the game's volumes are untouched (`hle_audren.c`)
+DM_SOUND_ENGINE	switch	`=<0..200>`: start volume in percent of one sound category of Mario Kart World; also `DM_SOUND_MUSIC`, `DM_SOUND_KART`, `DM_SOUND_ITEM`, `DM_SOUND_VOICE`, `DM_SOUND_WORLD`, `DM_SOUND_UI`, `DM_SOUND_OTHER`. Overrides the Sound menu's saved value (`hle_audren.c`)
+DM_SOUND_ITEM	switch	See `DM_SOUND_ENGINE`: item sounds
+DM_SOUND_KART	switch	See `DM_SOUND_ENGINE`: kart effects (drift, landing, road noise, collisions, horn)
+DM_SOUND_LEVEL_SECS	diagnostic	`=<n>`: with `DM_SOUND_LOG`, the output level line comes every n seconds instead of every minute
+DM_SOUND_LOG	diagnostic	`=1` logs each voice's sound category and how it was found (BWAV, coefficients, PCM stream), and every minute the counts and the output's RMS level; `=2` also every volume the game sets
+DM_SOUND_MENU_SHOT	diagnostic	`=<png>`: with `DM_SOUND_MENU_TEST`, draws the Sound menu's rows into that PNG after each step (`front_mac.m`)
+DM_SOUND_MENU_TEST	diagnostic	`=<seconds>:<row>=<percent>,…`: moves a row of the Mac's Sound menu (Master, Music, Engine, …) to that value at that time and runs its action as a drag does, to check the menu with no one at the screen (`front_mac.m`)
+DM_SOUND_MUSIC	switch	See `DM_SOUND_ENGINE`: music
+DM_SOUND_OTHER	switch	See `DM_SOUND_ENGINE`: sounds the table does not know
+DM_SOUND_SOLO_CYCLE	diagnostic	`=<seconds>`: with `DM_SOUND_LOG`, each sound category plays alone for that long in turn, then none, then all, with the output level logged for each
+DM_SOUND_UI	switch	See `DM_SOUND_ENGINE`: menu and system sounds
+DM_SOUND_VOICE	switch	See `DM_SOUND_ENGINE`: character voices
+DM_SOUND_WORLD	switch	See `DM_SOUND_ENGINE`: the world (ambience, objects, traffic, audience)
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
@@ -451,6 +466,7 @@ DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streamin
 DM_UPSCALER	player	`metalfx` draws the game's own upscaler shaders (agl's NDSR network, found by the shader map) with MetalFX's spatial scaler; `game` (the default) runs them
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
+DM_VOLUME	player	`=0..100`: the game's own volume, independent of the system volume, on a squared curve (default 100; `hle_audio.c`)
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WAKE_UNLOCKED	switch	`0` signals a woken guest thread while the waker still holds the thread lock, as before; by default the signal comes after the lock is let go, so the woken thread does not sleep again on it ([Wakes signalled after the scheduler lock is let go](reference/threads.md#wakes-signalled-after-the-scheduler-lock-is-let-go))
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set

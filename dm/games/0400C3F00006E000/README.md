@@ -106,6 +106,21 @@ Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's
 
 The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebuild.sh` (host copy `build/mkwhost`), `split.sh`, `shaders.sh`, `play.sh` (boots headless with `DM_CTL=run/ctl.txt`), `ctl.sh` (control lines; `wait S`, `snap NAME`), `to_race.sh` and `measure.sh <log>`. From a boot at the title (about 80 s): `to_race.sh` presses L+R, then A nine times with waits (Single Player, Grand Prix, Mario, the kart, the Mushroom Cup, 50cc, "Start Grand Prix?"). The opening and the race's start then take about a minute; `A~40` drives. `measure.sh` does all of this, waits for the race (over 1,500 draws a frame, no movie thread), and writes the timing and the `restop` residency lines to `run/<log>.res`. Control presses run in order, so `A~40` holds up later lines.
 
+## Sound categories
+
+The Mac app's **Sound** menu has a Master slider and one slider each (0–200 %) for music, engines, kart effects, items, character voices, the world, menus and other sounds. The game's mixer (aal) cannot be used to split them: music and engines go through the same submixes. The host instead tells each voice by the sound it plays (`hle_audren.c`, "sound categories"):
+
+- `sound_cats.py <RomFS.img or folder>` reads every `Sound/Resource/*.bars.zs` (22,629 sounds on 1.8.0). Each sound gets a category from its name (`BGM_` music, `SE_Kart_…_Engine` engine, …). It writes `sound_cats.bin` into the game's Application Support folder: each BWAV's CRC-32 (header +8; 18,113 distinct, none under two categories) and each channel's ADPCM coefficients, with the category. Nothing from the game is in the repository; the table is made from the player's own dump. Without the table the host leaves every volume as the game sets it.
+- Hooks on the audio renderer's voice calls (`AcquireVoiceSlot`, `AppendWaveBuffer`, `SetVoiceVolume`, the memory pools) find the BWAV a voice's first wave buffer lies in and look up its CRC. A streamed voice whose buffer is not inside a BWAV is found by its ADPCM coefficients. A PCM16 voice that matches neither is an Opus stream, and every Opus stream of this game is music.
+- A voice's volume is the game's own times its category's gain, set in `SetVoiceVolume`, so reverb and the submixes scale with it. A slider change is applied to the live voices at the next renderer update.
+
+Checked on 1.8.0 with `DM_SOUND_LOG=1` on the M3 (16 GB), muted, on the Mushroom Cup route:
+- Every voice of a race (about 600) got a category; the BWAV and coefficient lookups never disagreed.
+- With `DM_SOUND_SOLO_CYCLE=8`, each category alone measured: music −28 dB, engines −35, kart effects −38, the world −45, items −50, voices −54. All at 0 is silence.
+- `DM_SOUND_AT` and `DM_SOUND_MENU_TEST` moved music to 0, 100 and 30 % while it played, and the output followed. Master at 30 % took the output from −29.6 to −50.6 dB, as its squared curve gives.
+
+Not checked: the base game (v0) and iOS (the menu is Mac only; `DM_SOUND_*` in `env.txt` sets the start volumes there).
+
 ## 1.8.0
 
 Update 1.8.0 (v917504, SDK 21.4.0). Pull request #1116 ported it, and its facts (not its code) went into the host for this profile: the packing of a version with a `subsdk1`, and the Switch 2 services 1.8.0 calls at boot, which the base game does not import (the Nmouse pointer, GameChat's room event and camera storage, the camera context, the graphics system check, the HDR Bezier metadata and its clears; [services.md](../../../docs/reference/services.md#the-camera-through-the-graphics-system)). The NSP script packs it from a profile derived from this one, with its own shader tables.

@@ -947,6 +947,103 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
 
+// The Sound menu (hle_audren.c's sound categories): a Master slider (the host's game volume) and one slider per kind of sound the game plays. Kept in the app's
+// defaults and handed to the host at launch; a slider's change reaches the playing sounds at the game's next renderer update. Row tags: 0 master, 1 + category
+static NSString *const kSndTitle[DM_SND_CATS] = {@"Other", @"Music", @"Engine", @"Kart effects", @"Items", @"Character voices", @"World", @"Menus"};
+static const int kSndOrder[DM_SND_CATS] = {DM_SND_MUSIC, DM_SND_ENGINE, DM_SND_KART, DM_SND_ITEM, DM_SND_VOICE, DM_SND_WORLD, DM_SND_UI, DM_SND_OTHER};
+static NSString *snd_key(int tag) { return tag ? [NSString stringWithFormat:@"dm.sound.%s", dm_snd_name(tag - 1)] : @"dm.sound.master"; }
+static double snd_get(int tag) { return tag ? dm_snd_gain(tag - 1) : dm_audio_volume() / 100.0; }
+static void snd_set(int tag, double v) { if (tag) dm_snd_gain_set(tag - 1, (float)v); else dm_audio_set_volume((int)lround(v * 100)); }
+static void sound_load(void) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    for (int tag = 0; tag <= DM_SND_CATS; tag++) if ([d objectForKey:snd_key(tag)] && !(tag == 0 && getenv("DM_VOLUME"))) snd_set(tag, [d doubleForKey:snd_key(tag)]);
+    LOG("front end: sound menu: master %d%%, music %.0f%%, engine %.0f%%, kart %.0f%%, item %.0f%%, voice %.0f%%, world %.0f%%, ui %.0f%%, other %.0f%%", dm_audio_volume(), dm_snd_gain(DM_SND_MUSIC) * 100,
+        dm_snd_gain(DM_SND_ENGINE) * 100, dm_snd_gain(DM_SND_KART) * 100, dm_snd_gain(DM_SND_ITEM) * 100, dm_snd_gain(DM_SND_VOICE) * 100, dm_snd_gain(DM_SND_WORLD) * 100, dm_snd_gain(DM_SND_UI) * 100, dm_snd_gain(DM_SND_OTHER) * 100);
+}
+@interface DmSoundMenuDelegate : NSObject <NSMenuDelegate>
+@end
+@implementation DmSoundMenuDelegate
+// A menu row holding a label, a slider and the value in percent
+- (NSMenuItem *)sliderRow:(NSString *)name tag:(int)tag max:(double)max {
+    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 28)];
+    NSTextField *l = [NSTextField labelWithString:name]; l.frame = NSMakeRect(18, 5, 118, 18);
+    NSSlider *s = [NSSlider sliderWithValue:snd_get(tag) minValue:0 maxValue:max target:self action:@selector(slid:)];
+    s.frame = NSMakeRect(138, 3, 160, 22); s.continuous = YES; s.tag = tag;
+    NSTextField *p = [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f%%", snd_get(tag) * 100]]; p.frame = NSMakeRect(304, 5, 50, 18); p.tag = 100 + tag;
+    [v addSubview:l]; [v addSubview:s]; [v addSubview:p];
+    NSMenuItem *it = [NSMenuItem new]; it.view = v; return it;
+}
+- (void)slid:(NSSlider *)s {
+    int tag = (int)s.tag; double v = round(s.doubleValue * 20) / 20;   // steps of 5%
+    snd_set(tag, v);
+    NSTextField *p = [s.superview viewWithTag:100 + tag]; p.stringValue = [NSString stringWithFormat:@"%.0f%%", v * 100];
+    [NSUserDefaults.standardUserDefaults setDouble:v forKey:snd_key(tag)];
+}
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    [menu addItem:[self sliderRow:@"Master" tag:0 max:1]];
+    [menu addItem:NSMenuItem.separatorItem];
+    for (int i = 0; i < DM_SND_CATS; i++) [menu addItem:[self sliderRow:kSndTitle[kSndOrder[i]] tag:1 + kSndOrder[i] max:2]];
+    [menu addItem:NSMenuItem.separatorItem];
+    [menu addItemWithTitle:@"Reset All to 100%" action:@selector(resetAll:) keyEquivalent:@""].target = self;
+}
+- (void)resetAll:(NSMenuItem *)it {
+    (void)it;
+    for (int tag = 0; tag <= DM_SND_CATS; tag++) { snd_set(tag, 1); [NSUserDefaults.standardUserDefaults removeObjectForKey:snd_key(tag)]; }
+    LOG("front end: sound menu: every volume back to 100%%");
+}
+@end
+static DmSoundMenuDelegate *g_sound_menu;   // NSMenu keeps its delegate unretained
+
+// DM_SOUND_MENU_TEST=<seconds>:<row>=<percent>,... (a check of the Sound menu with no one at the screen): at each time the menu is built as when it opens, the named row's
+// slider (Master, Music, Engine, Kart effects, …) is moved to that value and its action runs, as a drag does. DM_SOUND_MENU_SHOT=<png> also draws the menu's rows into
+// that file after each step, to see the sliders where the steps left them
+static void sound_menu_shot(NSMenu *m, const char *path) {
+    CGFloat w = 360, h = 0; for (NSMenuItem *it in m.itemArray) h += it.view ? it.view.frame.size.height : it.isSeparatorItem ? 9 : 22;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:(NSInteger)w pixelsHigh:(NSInteger)h bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    if (!rep) return;
+    NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    [NSGraphicsContext saveGraphicsState]; NSGraphicsContext.currentContext = gc;
+    [NSColor.windowBackgroundColor setFill]; NSRectFill(NSMakeRect(0, 0, w, h));
+    CGFloat y = h;
+    for (NSMenuItem *it in m.itemArray) {
+        CGFloat ih = it.view ? it.view.frame.size.height : it.isSeparatorItem ? 9 : 22; y -= ih;
+        if (it.view) {
+            NSBitmapImageRep *r = [it.view bitmapImageRepForCachingDisplayInRect:it.view.bounds];
+            if (r) { [it.view cacheDisplayInRect:it.view.bounds toBitmapImageRep:r]; [r drawInRect:NSMakeRect(0, y, it.view.frame.size.width, ih)]; }
+        } else if (it.isSeparatorItem) { [NSColor.separatorColor setFill]; NSRectFill(NSMakeRect(10, y + 4, w - 20, 1)); }
+        else [it.title drawAtPoint:NSMakePoint(18, y + 3) withAttributes:@{NSFontAttributeName: [NSFont menuFontOfSize:13], NSForegroundColorAttributeName: NSColor.labelColor}];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(path) atomically:YES];
+}
+static void sound_menu_test(void) {
+    const char *spec = getenv("DM_SOUND_MENU_TEST"); if (!spec || !*spec) return;
+    NSString *all = @(spec);
+    for (NSString *step in [all componentsSeparatedByString:@","]) {
+        NSArray *tv = [step componentsSeparatedByString:@":"]; if (tv.count != 2) continue;
+        NSArray *rv = [tv[1] componentsSeparatedByString:@"="]; if (rv.count != 2) continue;
+        double at = [tv[0] doubleValue]; NSString *row = rv[0]; double pct = [rv[1] doubleValue];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(at * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSMenu *m = [[NSMenu alloc] initWithTitle:@"Sound"]; m.delegate = g_sound_menu; [g_sound_menu menuNeedsUpdate:m];
+            NSSlider *hit = nil;
+            for (NSMenuItem *it in m.itemArray) {
+                NSTextField *label = nil; NSSlider *sl = nil;
+                for (NSView *v in it.view.subviews) { if ([v isKindOfClass:NSSlider.class]) sl = (NSSlider *)v; else if ([v isKindOfClass:NSTextField.class] && !label) label = (NSTextField *)v; }
+                if (sl && [label.stringValue isEqualToString:row]) hit = sl;
+            }
+            if (!hit) { LOG("front end: sound menu test: no row \"%s\"", row.UTF8String); return; }
+            hit.doubleValue = pct / 100.0; SEL act = hit.action; if (act) [NSApp sendAction:act to:hit.target from:hit];
+            NSTextField *shown = [hit.superview viewWithTag:100 + hit.tag];
+            LOG("front end: sound menu test at %.0f s: %s slider to %.0f%%, row shows %s; master %d%%, music %.0f%%, engine %.0f%%, kart %.0f%%, item %.0f%%, voice %.0f%%, world %.0f%%, ui %.0f%%, other %.0f%%; saved %s = %s",
+                at, row.UTF8String, pct, shown.stringValue.UTF8String, dm_audio_volume(), dm_snd_gain(DM_SND_MUSIC) * 100, dm_snd_gain(DM_SND_ENGINE) * 100, dm_snd_gain(DM_SND_KART) * 100, dm_snd_gain(DM_SND_ITEM) * 100,
+                dm_snd_gain(DM_SND_VOICE) * 100, dm_snd_gain(DM_SND_WORLD) * 100, dm_snd_gain(DM_SND_UI) * 100, dm_snd_gain(DM_SND_OTHER) * 100, snd_key((int)hit.tag).UTF8String,
+                [[NSUserDefaults.standardUserDefaults objectForKey:snd_key((int)hit.tag)] description].UTF8String ?: "nothing");
+            const char *shot = getenv("DM_SOUND_MENU_SHOT"); if (shot && *shot) { [g_sound_menu menuNeedsUpdate:m]; sound_menu_shot(m, shot); }
+        });
+    }
+}
+
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
     NSTextField *_header;         // the one-line status line above the rows
@@ -1639,6 +1736,13 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
+        // Sound (hle_audren.c's sound categories): the saved volumes go to the host before the game opens its renderer
+        sound_load();
+        g_sound_menu = [DmSoundMenuDelegate new];
+        sound_menu_test();
+        NSMenu *sm = [[NSMenu alloc] initWithTitle:@"Sound"];
+        sm.delegate = g_sound_menu; sm.autoenablesItems = NO;
+        [[bar addItemWithTitle:@"Sound" action:nil keyEquivalent:@""] setSubmenu:sm];
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;

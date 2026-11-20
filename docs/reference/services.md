@@ -1454,6 +1454,13 @@ Most service calls can be found before they crash, before the first boot or the 
   - `time::StandardSteadyClock::now()`, the C++ clock form: a time point of seconds in `x0`. The SDK asks the steady-clock session `time::Initialize` opens and returns 0 without one (SDK 3.7.0, `sdk+0x16edf4` in [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md), which calls it from six sites in `main`); the host takes over `Initialize` and opens none, so the clock never moved. It is the host's monotonic seconds, as `GetCurrentTimePoint`. Reported in [PR #2729](https://github.com/seedds/nxnative/pull/2729).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md).
 
+### A game restart reports a user clock change
+
+- **Symptom:** after a normal game restart on the same Mac, Pokémon Brilliant Diamond can record a new time penalty and skip daily or weekly events.
+- **Cause:** the first user clock context in each process subtracts the whole-second steady time from the whole-second wall time. The result depends on the sampling phase and can vary by one second without a wall-clock adjustment. The context refresh also compared the wall time to guest ticks, which can stop while the steady clock keeps running.
+- **Fix:** bracket the wall-time read with steady-clock reads, subtract at nanosecond precision, and round the resulting offset to whole seconds. Use that clock pair for the snapshot and retain the existing in-process refresh threshold of more than one whole second. `t_time` runs the first sample at two phases in fresh processes and checks the threshold, forward and backward adjustments, and elapsed time while guest ticks are suspended.
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) 1.3.0 on macOS. The change covers game restarts on the same host boot.
+
 ### The adjustable network clock aborts in `Adjust`
 
 - **Symptom:** `game called nn::diag abort: Result 0x74, call site sdk+…` within the first frames, the backtrace's first `sdk` frame right past `time::AdjustableNetworkSystemClock::Adjust` (its last instruction is the call of `diag::detail::AbortImpl`, so the return address names the next function, `GetSystemClockContext` of the same class). Any other reader of an adjustable network clock, or the adjustable user clock's `now()`, aborts in `diag::detail::AbortImpl` under `time::detail::MonotonicSystemClock`.

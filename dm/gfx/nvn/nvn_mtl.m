@@ -8,6 +8,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <mach/mach_time.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -13363,9 +13364,35 @@ typedef struct {
 static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex, const rt_argument_values *rt);
 // A storage buffer bound with a size past every buffer at its address: Immortals Fenyx Rising binds its UI element table as 512 MB at the start of a sparse pool of 144 MB,
 // and the lookup of the whole size failed, so the binding was the zero dummy and the vertex shader that reads the table placed the title's logo and button glyph nowhere. The shader
-// reads what the game wrote, which lies in the buffer that holds the address: the binding takes that buffer from the address on (as a length-1 lookup does), the rest stays unaddressed
-static int sbuf_clipped(uint64_t addr, uint64_t size, void **mb, uint64_t *mo, uint64_t *gpu) {
+// reads what the game wrote, which lies in the buffer that holds the address: the binding takes that buffer from the address on (as a length-1 lookup does), the rest stays unaddressed.
+// A compute binding is widened to its declared size where the host memory after the buffer is readable (sbuf_wide): on the Switch an unmapped sparse page reads zero, on the Mac
+// a read past the buffer is a GPU address fault, and the intro's tiled-lighting and exposure kernels read past their 16 and 64 MB bindings now and then until macOS revoked the
+// process's GPU access; given the zero dummy instead, the intro's lighting ran slow and drew wrong. Past the buffer they read the host memory there instead of zeros.
+// Read-only bindings only: a kernel that writes through a widened binding writes the host memory after the pool (the game then crashed on a pointer it had overwritten)
+static id<MTLBuffer> sbuf_wide(const uint8_t *cpu, uint64_t size, uint64_t *off) {   // a buffer over [cpu, cpu + size), as far as the host memory there is readable, or nil
+    uint64_t pg = (uint64_t)getpagesize(); uintptr_t a = (uintptr_t)cpu & ~(uintptr_t)(pg - 1), want = ((uintptr_t)cpu + size + pg - 1) & ~(uintptr_t)(pg - 1), end = a;
+    while (end < want) {
+        mach_vm_address_t ra = end; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || ra > end || !(bi.protection & VM_PROT_READ)) break;
+        end = ra + rs < want ? (uintptr_t)(ra + rs) : want;
+    }
+    if (end <= (uintptr_t)cpu) return nil;
+    enum { NW = 64 }; static struct { uintptr_t a, b; __unsafe_unretained id<MTLBuffer> buf; } w[NW]; static int nw; static NSMutableArray *keep; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    id<MTLBuffer> r = nil;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < nw; i++) if (w[i].a <= a && w[i].b >= end) { r = w[i].buf; a = w[i].a; break; }
+    if (!r && nw < NW) {
+        r = [g_dev newBufferWithBytesNoCopy:(void *)a length:end - a options:MTLResourceStorageModeShared deallocator:nil];
+        if (r) { if (!keep) keep = [NSMutableArray array]; [keep addObject:r]; w[nw++] = (typeof(w[0])){a, end, r}; res_add(r); res_commit();
+            static int nl; if (nl++ < 4) MLOG("compute storage binding widened past its buffer: %p, %llu bytes declared, %llu readable (%d so far)", cpu, (unsigned long long)size, (unsigned long long)(end - (uintptr_t)cpu), nw); }
+    }
+    pthread_mutex_unlock(&mu);
+    if (r) *off = (uint64_t)((uintptr_t)cpu - a);
+    return r;
+}
+static int sbuf_clipped(uint64_t addr, uint64_t size, int wide, void **mb, uint64_t *mo, uint64_t *gpu) {
     if (size <= 1 || !mtl_gpu_addr(addr, 1, mb, mo, gpu)) return 0;
+    if (wide) { uint64_t o; id<MTLBuffer> w = sbuf_wide((const uint8_t *)((__bridge id<MTLBuffer>)*mb).contents + *mo, size, &o); if (w) { *mb = (__bridge void *)w; *mo = o; *gpu = w.gpuAddress + o; } }
     static int once; if (!once++) MLOG("storage buffer %#llx bound with %llu bytes, past the buffer that holds it (%llu bytes from it): bound from its address to that buffer's end (later cases are not logged)",
                                       (unsigned long long)addr, (unsigned long long)size, (unsigned long long)(((__bridge id<MTLBuffer>)*mb).length - *mo));
     return 1;
@@ -13634,7 +13661,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         } else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) {   // B: storage buffers / compute-stage uniforms are device pointers; the address is taken by NVN slot
             const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL;
             void *mb; uint64_t mo, gpu;
-            if (u && u->addr && (mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu) || sbuf_clipped(u->addr, u->size, &mb, &mo, &gpu))) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
+            if (u && u->addr && (mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu) || sbuf_clipped(u->addr, u->size, nvn_stage == 5 && !b->rw, &mb, &mo, &gpu))) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufp reg%d %s addr=%#llx size=%llu %s", g_stat_pass, nvn_stage, reg, u && u->addr ? "real" : "dummy", u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle

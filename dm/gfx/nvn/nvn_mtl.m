@@ -16637,7 +16637,11 @@ static int tex_storage_dst(const tex_t *t) {
         return !([o isKindOfClass:[NvPkg class]] && ((NvPkg *)o)->ps);
     }
     if (!t->mem || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER
-        || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))
+        || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE))
+        // A compressed format cannot be shader-written. IMAGE does not stop
+        // tex_cpu_content uploading it, so GPU copies must update that storage
+        // as well; otherwise a subsequent storage read sees the old bytes.
+        || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))
         || ((t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && !tex_cpu_written(t->serial))) return 0;
     if (t->has_layout || tex_cpu_written(t->serial) || nvn_ft_tracked(t->serial)) return !mtl_tex_gpu_owned(t->serial);
     return [tex_get(t->serial) isKindOfClass:[NvPkg class]];

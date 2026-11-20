@@ -576,6 +576,15 @@ t_tiled_resolve: t_tiled_resolve.m $(MTL_T_DEP)
 check_t_tiled_resolve: t_tiled_resolve
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
+t_compressed_copy: t_compressed_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_compressed_copy.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_compressed_copy
+check_t_compressed_copy: t_compressed_copy
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_compressed_copy
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_compressed_copy
+	DM_NVN_ENC_THREAD=0 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_FAIL_MODE=abort ./t_compressed_copy
+	DM_NVN_ENC_THREAD=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_FAIL_MODE=abort ./t_compressed_copy
+
 t_copy_alias: t_copy_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_copy_alias.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_copy_alias

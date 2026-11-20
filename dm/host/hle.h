@@ -14,6 +14,7 @@ typedef struct { const char *name; void *fn; } hle_ent;
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
 #define RES_OK 0u
 #define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
+enum { DM_APPLET_RESOURCE_USER_ID = 0x80 };   // identity of the game's applet in the single-process host
 
 // Guest address → host object side table
 void *objmap_get(const void *guest);

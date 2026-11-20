@@ -260,7 +260,7 @@ $(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | 
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c
 # nn::vi::ListFrameHistory: the SDK's FrameInfo, newest first, from the present queue's progress
 run: $(B)/t_vi_history
-$(B)/t_vi_history: t_vi_history.c ../../gfx/hle_vi.c ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_vi_history: t_vi_history.c ../../gfx/hle_vi.c ../../gfx/nvn/hdr.c ../../gfx/nvn/hdr.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_vi_history.c
 run: $(B)/t_nv
 $(B)/t_nv: t_nv.c ../../gfx/hle_nv.c ../hle.h ../dm.h $(GAME_H) | $(B)

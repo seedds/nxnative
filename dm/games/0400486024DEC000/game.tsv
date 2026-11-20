@@ -46,3 +46,6 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# HDR (nvn/hdr.c, DM_HDR): the game asks vi::QueryDisplayHdrStatus every frame and switches its window textures between RGBA8 (SDR) and RGB10A2 (HDR10) on the answer, live (main+0x346c680, the
+# query; main+0x5702c0, the queue submit that switches the format); the host answers on while the window's screen can show HDR, so DM_HDR defaults to auto for this game
+hdr	on

@@ -18,6 +18,7 @@
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
+#include "../gfx/nvn/hdr.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
@@ -56,11 +57,13 @@ int front_display_pixels(int *w, int *h) {
 }
 static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
+static void hdr_refresh(NSScreen *screen);
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
     if (!screen) return;
     g_screen_fps = (int)screen.maximumFramesPerSecond;
     g_screen_id = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
     g_screen_variable_refresh = screen.minimumRefreshInterval > 0 && screen.maximumRefreshInterval > screen.minimumRefreshInterval;
+    hdr_refresh(screen);
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
 // The software keyboard input box is up (front_text_input). The game window is not key then, which is not a focus change the game should see: on hardware the inline keyboard is drawn inside
@@ -132,6 +135,43 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
     }
     if (modes) CFRelease(modes);
     CGDisplayModeRelease(cur);
+}
+// HDR (DM_HDR, ../gfx/nvn/hdr.h): every screen event (the window shown, moved to another screen, a screen's parameters, full screen entered and left: whatever calls
+// screen_refresh) re-reads the window's screen: HDR is in effect while the setting is auto and the screen's potential EDR headroom is at least HDR_CAPABLE_POTENTIAL (4). The setting is
+// never written, so a MacBook → Studio Display → MacBook round trip goes HDR → SDR → HDR with no restart; vi tells the game (hle_vi.c), which switches its window textures, and the present
+// follows them (nvn_mtl.m present_now → front_hdr_layer). One [hdr] line per change of screen, potential headroom or decision. The current headroom follows the brightness slider
+// with no notification: a 2 Hz poll while HDR is in effect (it reads about 1.0 until EDR content is on screen, so the first half second after a switch may clip highlights). Main thread
+static NSTimer *g_hdr_timer; static double g_hdr_cur_logged;
+static void hdr_poll(void) {
+    NSScreen *s = g_win.screen; if (!s) return;
+    double cur = s.maximumExtendedDynamicRangeColorComponentValue; dm_hdr_headroom_set(cur);
+    if (fabs(cur - g_hdr_cur_logged) > 0.1 * fmax(g_hdr_cur_logged, 1)) { g_hdr_cur_logged = cur; LOG("[hdr] current EDR headroom %.2f on '%s'", cur, s.localizedName.UTF8String); }
+}
+static void hdr_refresh(NSScreen *screen) {
+    double pot = screen.maximumPotentialExtendedDynamicRangeColorComponentValue, cur = screen.maximumExtendedDynamicRangeColorComponentValue;
+    int on = dm_hdr_screen(pot, cur), pref = dm_hdr_pref();
+    CGDirectDisplayID id = g_screen_id; static int last_on = -1; static double last_pot = -1; static CGDirectDisplayID last_id;
+    if (on != last_on || pot != last_pot || id != last_id) {
+        last_on = on; last_pot = pot; last_id = id; g_hdr_cur_logged = cur;
+        LOG("[hdr] '%s': potential EDR headroom %.2f, current %.2f: %s (DM_HDR=%s)", screen.localizedName.UTF8String, pot, cur,
+            on ? "HDR" : !pref ? "SDR, HDR is off" : "SDR, the screen cannot show HDR", pref ? "auto" : "0");
+    }
+    if (on && !g_hdr_timer) {
+        g_hdr_timer = [NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { (void)t; hdr_poll(); }];
+        [NSRunLoop.mainRunLoop addTimer:g_hdr_timer forMode:NSRunLoopCommonModes];   // during a live resize too
+    } else if (!on && g_hdr_timer) { [g_hdr_timer invalidate]; g_hdr_timer = nil; }
+}
+void front_hdr_layer(int edr) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CAMetalLayer *l = g_layer; if (!l) return;
+        static CGColorSpaceRef own; static int kept;   // the layer's colour space as made (none: no colour matching), given back for SDR
+        if (!kept) { kept = 1; own = l.colorspace; if (own) CGColorSpaceRetain(own); }
+        if (edr) {
+            CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+            l.wantsExtendedDynamicRangeContent = YES; l.colorspace = cs; l.pixelFormat = MTLPixelFormatRGBA16Float; CGColorSpaceRelease(cs);
+        } else { l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.colorspace = own; l.wantsExtendedDynamicRangeContent = NO; }
+        LOG("[hdr] front end: the layer %s", edr ? "in extended dynamic range: RGBA16Float, extended linear sRGB" : "back to SDR: BGRA8Unorm, its own colour space, no EDR");
+    });
 }
 void front_screen_match(int fps) {
     if (!g_layer || g_match_want == fps) return;   // no window (a windowless run's main thread runs the guest), or the rate as before

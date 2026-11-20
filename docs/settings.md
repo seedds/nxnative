@@ -234,6 +234,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### HDR
+
+**On (HDR screens)** by default, for a game that draws HDR itself (Ocarina of Time). On a screen that can show HDR, such as a MacBook Pro's, the game draws its HDR picture: the sky, lights and highlights go brighter than white while the HUD stays at the screen's usual white. On a screen without HDR, such as a Studio Display, the game draws its usual picture. Moving the window between screens, docking or full screen switches it within a frame or two, and back again, without changing the setting. The brightness slider changes how much room the highlights have. Screenshots stay SDR. **Off** always draws the usual picture. In an `env.txt`: `DM_HDR=auto` or `0`.
+
 ### Switch 2 controllers
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.
@@ -273,6 +277,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
+| HDR (Mac) | `DM_HDR` | `auto` HDR on a screen that can show it, switched live as the window moves between screens (default for a game that draws HDR), `0` off |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |

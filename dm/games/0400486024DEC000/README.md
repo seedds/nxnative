@@ -340,6 +340,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [Textures made for GPU use kept from their CPU rewrites](../../../docs/reference/nvn-objects.md#textures-made-for-gpu-use-kept-from-their-cpu-rewrites): the terrain tiles' height, blend and hole maps rewritten as tile slots are reused; flat blue holes in the ground after an hour of play.
 - [`EventFd` needs no network](../../../docs/reference/services.md#eventfd-needs-no-network)
 - [Virtual audio input streams](../../../docs/reference/audio.md#virtual-audio-input-streams-sdk-2122): enable Microphone in the Mac launcher and use the game’s Ocarina Mic Input setting for humming or playing an instrument.
+- [Late audio producer wakeups despite fast rendering](../../../docs/reference/audio.md#late-audio-producer-wakeups-despite-fast-rendering): host scheduling fix for static with output underruns ([issue #3059](https://github.com/seedds/nxnative/issues/3059)); the reporter's M4 A/B reached zero underruns on speakers and AirPods. iOS device and power validation remain open.
 - [`nn::ndve`'s movie enhancement file](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)
 - [Task and mesh shaders in BNSH, and indirect mesh draws](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws)
 - [Indirect task / mesh draws on the encode thread](../../../docs/reference/rendering.md#indirect-task--mesh-draws-on-the-encode-thread): the iOS app aborted when a save loaded.

@@ -14,6 +14,9 @@
 // Command list format (SDK 16): header +0x04 command count, +0x08 mix buffer address, +0x10 buffer count, +0x14 samples per frame, +0x18 sample rate, commands from +0x20;
 //   each command +0x00 magic 0xcafebabe, +0x04 enabled, +0x05 command ID (DeviceSink = 0x13), +0x06 size; DeviceSink +0x128 upsampler buffer, +0x130 input count, +0x134 input indices (s16).
 #include "hle.h"
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -134,6 +137,30 @@ static ar_t *ar_of_sys(uint8_t *sys) {
     return found;
 }
 
+// QoS alone does not give this 5 ms producer a deadline: late wakeups drain the output even when mixing takes only 0.07 ms (#3059).
+// The computation is a scheduling budget, not busy time. Keep output setup/teardown outside real-time policy and preserve burst-refill pacing.
+static int render_rt(void) {
+    const char *e = getenv("DM_AUDREN_RT");
+    if (e && atoi(e) == 0) { LOG("audren: render thread keeps its default policy (DM_AUDREN_RT=0)"); return 0; }
+    mach_timebase_info_data_t tb;
+    kern_return_t kr = mach_timebase_info(&tb);
+    if (kr == KERN_SUCCESS) {
+        thread_time_constraint_policy_data_t p = {
+            .period = (uint32_t)(5000000ull * tb.denom / tb.numer),
+            .computation = (uint32_t)(1000000ull * tb.denom / tb.numer),
+            .constraint = (uint32_t)(5000000ull * tb.denom / tb.numer), .preemptible = TRUE
+        };
+        kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    }
+    LOG("%saudren: render thread time-constraint policy (requested period 5 ms, computation 1 ms) %s (%d)", kr == KERN_SUCCESS ? "" : "[RED] ",
+        kr == KERN_SUCCESS ? "set" : "failed to set; keeping default policy", (int)kr);
+    return kr == KERN_SUCCESS;
+}
+static void render_rt_end(void) {
+    kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_STANDARD_POLICY, NULL, THREAD_STANDARD_POLICY_COUNT);
+    if (kr != KERN_SUCCESS) LOG("[RED] audren: cannot restore render thread default policy (%d)", (int)kr);
+}
+
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
@@ -144,6 +171,7 @@ static void render_main(void *arg) {
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
     uint64_t next_exec = 0;
     int prefill = NBUF;
+    int rt = render_rt();
     while (atomic_load(&a->open)) {
         while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             aout_buf *b = dm_pcmout_released(out);
@@ -184,6 +212,7 @@ static void render_main(void *arg) {
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
         else if (prefill) prefill--;
     }
+    if (rt) render_rt_end();
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
 }
 

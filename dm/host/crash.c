@@ -11,6 +11,12 @@
 #include <mach/mach.h>
 #include <stdatomic.h>
 #include <time.h>
+#if TARGET_OS_OSX
+#include <crt_externs.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#endif
 
 static _Atomic uint64_t g_watch_last_ns;
 static _Atomic uint64_t g_watch_count;
@@ -39,6 +45,28 @@ void crash_watch_frame(void) { if (atomic_load(&g_watch_pregame)) crash_watch_pr
 void crash_watch_pregame_done(void) { atomic_store(&g_watch_pregame, 0); }
 void crash_watch_pregame_again(void) { atomic_store(&g_watch_pregame, 1); }   // Back from a run to the front end: count progress by presented frames again (diag.c)
 void crash_dump_now(const char *why);
+#if TARGET_OS_OSX
+// Keep the output path as one argument: shell quoting breaks apostrophes and can
+// execute path contents, and a command buffer can truncate a long path.
+static int watch_sample(const char *path) {
+    char pid[32];
+    snprintf(pid, sizeof pid, "%d", (int)getpid());
+    char *argv[] = {"/usr/bin/sample", pid, "1", "-f", (char *)path, NULL};
+    posix_spawn_file_actions_t actions;
+    int error = posix_spawn_file_actions_init(&actions);
+    if (error) return -1;
+    error = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    if (!error) error = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    pid_t child;
+    if (!error) error = posix_spawn(&child, argv[0], &actions, NULL, argv, *_NSGetEnviron());
+    posix_spawn_file_actions_destroy(&actions);
+    if (error) return -1;
+    int status;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+#endif
 static void *watchdog_main(void *arg) {
     (void)arg;
     for (;;) {
@@ -61,7 +89,7 @@ static void *watchdog_main(void *arg) {
             if (g_wait_dump) g_wait_dump();   // State of all blocking wait points on the graphics side (registered when nvn_mtl.m initializes)
 #if TARGET_OS_OSX
             { const char *d = getenv("DM_WATCH_SAMPLE");   // Mac diagnostics: when stuck, sample itself for 1 second and write the thread stacks to this path
-              if (d) { char c[1200]; snprintf(c, sizeof c, "/usr/bin/sample %d 1 -f '%s' >/dev/null 2>&1", (int)getpid(), d); if (system(c)) LOG("watchdog: sampling failed"); else LOG("watchdog: thread stacks written to %s", d); } }
+              if (d) { if (watch_sample(d)) LOG("watchdog: sampling failed"); else LOG("watchdog: thread stacks written to %s", d); } }
 #endif
             _exit(128 + SIGALRM);
         }
@@ -129,6 +157,8 @@ static void crash_gate(int sig) {
     if (none == me) _exit(128 + sig);
     for (;;) pause();
 }
+__attribute__((weak)) void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { (void)a; if (n) note[0] = 0; }   // nvn_mtl.m provides the strong definition
+__attribute__((weak)) void dm_vm_census(FILE *f) { (void)f; }   // memstat.m provides the strong definition (tests that link crash.c alone have none)
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -163,6 +193,33 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
     }
+    // What the graphics layer knows of the addresses in the registers (dm_gfx_addr_note: the memory pool, a texture's storage, a GPU write the host recorded on the page). A game's own
+    // data overwritten with float words (PRAGMATA's render command lists) asks whether the GPU or a host copy wrote there
+    for (int i = 0; i < 29; i++) {
+        uint64_t a = uc->uc_mcontext->__ss.__x[i]; char note[512]; note[0] = 0;
+        if (a < 0x100000000ull) continue;
+        dm_gfx_addr_note(a, note, sizeof note);
+        if (note[0]) fprintf(stderr, "[dm] x%d %#llx:%s\n", i, (unsigned long long)a, note);
+    }
+    // DM_CRASH_PEEK="sp+0x248*,x22-0x20": 0x100 bytes at each address, given as sp or a register plus or minus an offset, a trailing * reading the pointer stored there first
+    // (PRAGMATA's render function keeps its current draw item at sp + 0x248: the item and what it points at tell where a bad pointer came from); with what the graphics layer knows of it
+    if (getenv("DM_CRASH_PEEK")) {
+        char spec[512]; snprintf(spec, sizeof spec, "%s", getenv("DM_CRASH_PEEK"));
+        for (char *tok = strtok(spec, ","); tok; tok = strtok(NULL, ",")) {
+            uint64_t a = 0; char *p = tok;
+            if (!strncmp(p, "sp", 2)) { a = uc->uc_mcontext->__ss.__sp; p += 2; }
+            else if (*p == 'x') { long r = strtol(p + 1, &p, 10); if (r < 0 || r > 28) continue; a = uc->uc_mcontext->__ss.__x[r]; }
+            else continue;
+            if (*p == '+' || *p == '-') { long long d = strtoll(p, &p, 0); a += (uint64_t)d; }
+            if (*p == '*') { uint64_t v = 0; vm_size_t got = 0; if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, 8, (vm_address_t)&v, &got) != KERN_SUCCESS || got != 8) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); continue; } a = v; }
+            uint64_t w[32]; vm_size_t got = 0; char note[512]; note[0] = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); continue; }
+            dm_gfx_addr_note(a, note, sizeof note);
+            fprintf(stderr, "[dm] peek %s = %#llx:%s", tok, (unsigned long long)a, note);
+            for (int k = 0; k < 32; k++) { if (!(k % 4)) fprintf(stderr, "\n[dm]   +%#04x", k * 8); off("", w[k]); }
+            fputc('\n', stderr);
+        }
+    }
     dm_backtrace(uc->uc_mcontext->__ss.__fp);
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)
     {   uint64_t sp = uc->uc_mcontext->__ss.__sp;   // The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
@@ -179,6 +236,8 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
         }
         fputc('\n', stderr); }
+    // How full the address space is: an allocation that found no room (a thread's stack, a realloc, a Metal heap) aborts with the footprint far below the memory limit (issue #2444)
+    dm_vm_census(stderr);
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }

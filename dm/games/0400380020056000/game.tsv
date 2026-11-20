@@ -1,0 +1,36 @@
+# Splatoon Raiders (Switch 2, update v65536). In bring-up
+# Nintendo EPD's engine (sead / agl / gsys, Phive), SDK 21.4.4, NVN2 (Ampere shaders); modules main + subsdk0 (movie) + sdk.
+# Packed from a dump folder (base/, updates/<version>/) with scripts/pack_dump.py. Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code).
+
+# ---- Identity ----
+title_id	0400380020056000
+program_id	0400380020056000
+
+# ---- App ----
+name	Splatoon Raiders
+ipa	SplatoonRaiders.ipa
+app_category	public.app-category.action-games
+pad_layout	full
+
+# ---- Versions ----
+build	v65536	v65536	main=663c2e087a083f05307f229dfc4042d5	subsdk0=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	System/RegionLangMask.txt
+zip_store	.zs:.bwav:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure, not measured here). Unlike Bananza this NPDM declares a system resource, so virtual address memory is on.
+# 256 MB in front + alias region + 256 MB stack region + heap region: a starting split, to be measured
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x2000000
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
+shader_note	Splatoon Raiders shaders

@@ -34,6 +34,19 @@ struct Setting: Decodable, Identifiable {
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
+// The Frame rate row offers 120 only where the screen shows it: on an iPhone or iPad the host's reading of the game's screen (front_ios.m front_screen_max_fps: 60 on a screen
+// below 120 Hz and in Low Power Mode, where the host holds 60 anyway, hle_nvn.c high_cap_tick). The value in use stays listed, so a choice made on another screen is not dropped.
+// The Mac app's window keeps every option: its display can change under the window
+func offeredOptions(_ s: Setting, current: String?) -> [[String]] {
+    let options = s.options ?? []
+    #if canImport(UIKit)
+    guard s.env == "DM_FPS_TARGET", front_screen_max_fps() < 120 else { return options }
+    return options.filter { $0[0] != "120" || $0[0] == current }
+    #else
+    return options
+    #endif
+}
+
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
     let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
@@ -99,9 +112,20 @@ final class LauncherModel: ObservableObject {
         for s in settings {
             let v = values[s.env] ?? s.def
             if fixed.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr); continue }
-            if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
+            store(s, v)
             setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n", stderr)
         }
+    }
+    private func store(_ s: Setting, _ v: String) {
+        if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
+    }
+
+    // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start, and put in the environment.
+    // A value an env file or the launch fixed stays
+    func choose(_ s: Setting, _ v: String) {
+        guard !fixed.contains(s.env), s.accepts(v) else { return }
+        values[s.env] = v; store(s, v); setenv(s.env, v, 1)
+        fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
     }
 
     // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written

@@ -1,0 +1,47 @@
+# Area labels on issues (dm/tools/issue_areas.py): the labels pr-areas.yml gives pull requests (host, nvn, mac, "game: <title ID>", …), here from the words of an issue's title and the
+# title IDs in its text, and its kind (bug, enhancement, new game) from its form or the start of its title. An issue's text comes from anyone, so it reaches the tool on standard input only, never through an expression in the script, and the workflow checks out main and
+# runs nothing else. Labels are added, never removed, and a run creates only the labels that are missing, so colours and descriptions edited by hand stay. Run it by hand (workflow_dispatch)
+# to label every open issue. The triage report does not count these labels as triage (pr_areas.automatic).
+name: issue-areas
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # creating a label and adding it to an issue
+
+concurrency:
+  group: issue-areas-${{ github.event.issue.number || 'all' }}
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          issues=${ISSUE:-$(gh issue list --state open --limit 1000 --json number --jq '.[].number')}
+          declare -A made   # labels that exist
+          while IFS= read -r name; do made[$name]=1; done < <(gh label list --limit 1000 --json name --jq '.[].name')
+          for n in $issues; do
+            gh issue view "$n" --json title,body | python3 dm/tools/issue_areas.py > labels.tsv
+            add=()
+            while IFS=$'\t' read -r name color desc; do
+              if [ -z "${made[$name]:-}" ]; then gh label create "$name" --color "$color" --description "$desc" --force > /dev/null; made[$name]=1; fi
+              add+=(--add-label "$name")
+            done < labels.tsv
+            if [ ${#add[@]} -gt 0 ]; then gh issue edit "$n" "${add[@]}" > /dev/null; fi
+            echo "#$n: $(cut -f1 labels.tsv | paste -sd, -)"
+          done

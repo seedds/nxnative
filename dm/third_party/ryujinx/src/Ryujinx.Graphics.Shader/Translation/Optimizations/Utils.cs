@@ -169,8 +169,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                 // If all sources but one are undefined, we can assume that the one
                 // that is not undefined is the right one.
+                // nxnative: of this phi alone, not of a phi that merges it with something else: phi(phi(undefined, texture word), texture word | sampler word), a handle built under a
+                // guard in a register with no earlier value, gave the texture word alone, with no sampler. The other sources' phis are seen through instead
 
-                if (undefCount == phiNode.SourcesCount - 1)
+                if (recurse && undefCount == phiNode.SourcesCount - 1)
                 {
                     for (int i = phiNode.SourcesCount - 1; i >= 0; i--)
                     {
@@ -178,7 +180,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                         if (phiSource.Type != OperandType.Undefined)
                         {
-                            return phiSource;
+                            return FindLastOperation(phiSource, block);
                         }
                     }
                 }

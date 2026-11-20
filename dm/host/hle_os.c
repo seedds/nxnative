@@ -6,32 +6,40 @@
 #include <stdatomic.h>
 
 // ---------- Side table ----------
+// Guest object -> host state, linear probing with backward-shift deletion: no deleted markers, so every key sits once in the run of
+// occupied slots from its home slot, and an empty slot ends every search (t_objmap). Keys are guest pointers, never NULL.
 #define OM_SIZE (1u << 18)
+#define OM_MASK (OM_SIZE - 1)
 static struct { const void *k; void *v; } g_om[OM_SIZE];
 static pthread_mutex_t g_om_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & (OM_SIZE - 1); }
+static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & OM_MASK; }
+// The key's slot, or the empty slot that ends its run. Called with g_om_lock held
+static unsigned om_find(const void *k) {
+    unsigned i = om_h(k);
+    while (g_om[i].k && g_om[i].k != k) i = (i + 1) & OM_MASK;
+    return i;
+}
 void *objmap_get(const void *k) {
     pthread_mutex_lock(&g_om_lock);
-    void *r = NULL;
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
-        if (g_om[i].k == k) { r = g_om[i].v; break; }
-        if (!g_om[i].k) break;
-    }
+    void *r = g_om[om_find(k)].v;   // an empty slot holds NULL
     pthread_mutex_unlock(&g_om_lock);
     return r;
 }
 void objmap_put(const void *k, void *v) {
     pthread_mutex_lock(&g_om_lock);
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1))
-        if (g_om[i].k == k || !g_om[i].k || g_om[i].k == (void *)1) { g_om[i].k = k; g_om[i].v = v; break; }
+    unsigned i = om_find(k);
+    g_om[i].k = k; g_om[i].v = v;
     pthread_mutex_unlock(&g_om_lock);
 }
 void *objmap_del(const void *k) {
     pthread_mutex_lock(&g_om_lock);
-    void *r = NULL;
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
-        if (g_om[i].k == k) { r = g_om[i].v; g_om[i].k = (void *)1; g_om[i].v = NULL; break; }
-        if (!g_om[i].k) break;
+    unsigned i = om_find(k);
+    void *r = g_om[i].v;
+    if (g_om[i].k) {
+        // Close the hole: each later entry of the run whose home slot is not after the hole (cyclically) moves back into it
+        for (unsigned j = (i + 1) & OM_MASK; g_om[j].k; j = (j + 1) & OM_MASK)
+            if (((j - om_h(g_om[j].k)) & OM_MASK) >= ((j - i) & OM_MASK)) { g_om[i] = g_om[j]; i = j; }
+        g_om[i].k = NULL; g_om[i].v = NULL;
     }
     pthread_mutex_unlock(&g_om_lock);
     return r;
@@ -54,6 +62,17 @@ static int detclock_cfg(void) {
 }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
+int guest_clock_pinned(void) { return atomic_load(&g_gdet_on) || atomic_load(&g_gfz); }
+uint64_t guest_ns_at_host_time(uint64_t host_ns) {
+    if (atomic_load(&g_gdet_on)) return atomic_load(&g_gdet);
+    if (atomic_load(&g_gfz)) return atomic_load(&g_gfrozen);
+    uint64_t lag = atomic_load(&g_glag);
+    return host_ns >= lag ? host_ns - lag : 0;
+}
+// The system counter on that clock: 19.2 MHz on the Switch, 31.25 MHz (32 ns a tick) on the Switch 2, whose SDK reads cntpct_el0 and converts with that rate
+// (nn::os::GetSystemTickFrequency answers 0x1dcd650, sdk 20.5.19 Ounce). Read at 19.2 MHz, every tick span a Switch 2 game measured came out 1.63 times too short, and the
+// same clock's GPU timestamps 1.63 times too late: Donkey Kong Bananza's frame-rate controller took its frame for seconds long and held it at 20 fps (present interval 3)
+uint64_t guest_ticks(void) { return dm_sdk_ounce() ? guest_ns() / 32 : guest_ns() * 12 / 625; }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
 void dm_guest_frame_tick(void) {
     crash_watch_frame();
@@ -63,7 +82,7 @@ void dm_guest_frame_tick(void) {
         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
         LOG("DM_DETCLOCK: from the first present on, the guest clock advances by presents, step %llu ns", (unsigned long long)g_gdet_step); return;
     }
-    if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step); dm_guest_clock_advanced(); }
+    if (!atomic_load(&g_gfz)) atomic_fetch_add(&g_gdet, g_gdet_step);
 }
 static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
@@ -77,7 +96,10 @@ static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_g
 // frames as its period, got 0, and the next frame's loop that steps by it (main+0x9abd0) never ended. Guest reads of the system counter (the cntpct gate, svc GetSystemTick) wait while
 // the app is in the background (reason 1); host work (dm_host_work: inside a submit or present, which the graphics suspend waits for) reads the frozen clock, as do the other reasons
 static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_gfz_bg;
+// Each read also counts on the reading thread: a run of yields whose passes read the clock is a wait for a time, which the yield back-off sleeps from its start (hle_thread.c thr_yield)
+__thread uint64_t dm_clock_reads;
 void guest_clock_read_wait(void) {
+    dm_clock_reads++;
     if (!atomic_load(&g_gfz_bg) || atomic_load(&dm_host_work)) return;
     pthread_mutex_lock(&g_gfz_mu);
     while (g_gfz_reasons & 2u) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);
@@ -126,6 +148,7 @@ static void game_env_init(void) {
     char *s = strdup(e); int k = 0;
     for (char *t = strtok(s, " "); t && k < n; t = strtok(NULL, " ")) if (strchr(t, '=')) g_env_kv[k++] = t;
     if (k) LOG("game environment (%s): %s", getenv("DM_GAME_ENV") ? "DM_GAME_ENV" : "game profile game_env", e);
+    else free(s);   // no accepted entry points into the copy
 }
 static const char *const *game_env(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, game_env_init); return g_env_kv; }
 HLE_FORCE("getenv", "the game profile's game_env answers its names; the SDK's own getenv (an empty environ on Horizon) the rest", char *, g_getenv, const char *name) {

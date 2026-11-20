@@ -18,10 +18,11 @@ TBPP = {10: 1, 20: 2, 25: 2, 30: 2, 53: 4, 55: 4, 60: 4, 65: 8, 70: 4, 71: 4, 80
         130: .5, 131: .5, 132: 1, 133: 1, 134: 1, 135: 1, 140: .5, 141: .5, 142: 1, 143: 1, 150: 1, 151: 1, 152: 1, 153: 1, 250: 2, 252: 4, 255: 4, 260: 4}
 texinfo = collections.defaultdict(dict); sampled = collections.defaultdict(set); tgt = {}; maxvc = collections.defaultdict(int); ndraw = collections.defaultdict(int); fskeys = collections.defaultdict(set); fused = set(); att_desc = collections.defaultdict(list)
 import os, json; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools')); import shader_lib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
-LIB = os.path.join(DM_ROOT, f'build/cache/metal_shader_cache/b-{dmsh_chain.version()}')
+LIB = shader_lib.view(os.path.join(DM_ROOT, f'build/cache/metal_shader_cache/b-{dmsh_chain.version()}'))
 def tex_slots(key):
-    try: return sum(1 for b in json.load(open(f'{LIB}/{key}_b.json'))['bindings'] if b.get('kind') in ('tex', 'samp_tex'))
+    try: return sum(1 for b in json.loads((LIB / f'{key}_b.json').read_bytes())['bindings'] if b.get('kind') in ('tex', 'samp_tex'))
     except Exception: return 4
 nm = {}
 for ln in open(dmsh_chain.load_game().table('shader_map.tsv')):   # the current game profile's map (DM_GAME)

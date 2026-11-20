@@ -66,12 +66,22 @@ static void walk(seg *s, uint8_t *bytes, const cap_ops *ops, const uint8_t *orig
 }
 
 int main(void) {
+    cap_queue_state single = {0}, multi_queue = {0}, waited = {0};
+    cap_queue_note(&single, 11, 0); cap_queue_note(&single, 11, 0);
+    CHECK(!cap_queue_unsupported(&single), "one logical queue without waits remains capturable");
+    cap_queue_note(&multi_queue, 11, 0); cap_queue_note(&multi_queue, 12, 0);
+    CHECK(cap_queue_unsupported(&multi_queue) && atomic_load(&multi_queue.unsupported) == CAP_QUEUE_MULTIPLE, "different logical queues are rejected before their physical order can be mistaken for queue semantics");
+    cap_queue_note(&waited, 11, 1);
+    CHECK(cap_queue_unsupported(&waited) && atomic_load(&waited.unsupported) == CAP_QUEUE_WAIT, "wait-only queue operations cannot disappear from a capture");
+    CHECK(cap_record_unsupported(OP_WAIT_EVENT) && cap_record_unsupported(OP_WAIT_SYNC), "standalone replay rejects logical waits");
+    CHECK(!cap_record_unsupported(OP_FENCE_SYNC) && !cap_record_unsupported(OP_SIGNAL_EVENT), "legacy fences and event signals remain replayable");
     char path[1024]; const char *tmp = getenv("TMPDIR"); snprintf(path, sizeof path, "%s/t_capture_XXXXXX", tmp && *tmp ? tmp : "/tmp");
     int fd = mkstemp(path); CHECK(fd >= 0, "temporary file"); close(fd);
     pool_a = calloc(1, 65536); pool_b = calloc(1, 16384);
     for (int i = 0; i < 65536; i += 64) pool_a[i] = (uint8_t)i;
     game_pool = (pool_t){MAGIC('P', 'O', 'O', 'L'), 0x8, pool_a, 65536, NULL, 0};
     game_tex = (tex_t){.magic = MAGIC('T', 'E', 'X', 0), .mem = pool_a + 0x2000, .pool = &game_pool, .off = 0x2000, .serial = 77}; game_tex.L.size = 0x1000;
+    game_tex.d.pkg_layout = 0x404; game_tex.d.gob_order = 1;
     game_prog = (prog_t){.magic = MAGIC('P', 'R', 'O', 'G'), .nstage = 2, .serial = 5};
     game_dpool = (dpool_t){&game_pool, 0x8000, 256};
     seg s0 = {{0}, 0}, s1 = {{0}, 0}, s2 = {{0}, 0}; segs_by_addr[0] = &s0; segs_by_addr[1] = &s1; segs_by_addr[2] = &s2;
@@ -87,6 +97,8 @@ int main(void) {
     p_bind_ubo_small *us = emit(&s0, OP_BIND_UBO_SMALL, sizeof *us); *us = (p_bind_ubo_small){0, 2, 64, (uint64_t)(uintptr_t)pool_b + 0x1000};
     p_bind_handles *bh = emit(&s0, OP_BIND_TEX, offsetof(p_bind_handles, h) + 4 * 8); bh->stage = 1; bh->n = 4; bh->defer = 1; bh->src = (uint64_t)(uintptr_t)heap_handles;
     p_draw_idx *di = emit(&s0, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->count = 3; di->ibuf = (uint64_t)(uintptr_t)pool_a + 0x3000; di->ind = (uint64_t)(uintptr_t)pool_a + 0x3100;
+    p_multi_draw *multi = emit(&s0, OP_MULTI_DRAW, sizeof *multi);
+    *multi = (p_multi_draw){(uint64_t)(uintptr_t)pool_a + 0xf000, (uint64_t)(uintptr_t)pool_b, di->ibuf, -20, 1025, 4, 2};
     p_draw *dr = emit(&s0, OP_DRAW, offsetof(p_draw, ind)); dr->count = 3;   // a plain draw stops before ind (hle_nvn.c rec_draw)
     uint64_t *ev = emit(&s0, OP_SIGNAL_EVENT, 16); ev[0] = (uint64_t)(uintptr_t)pool_b + 0x10; ev[1] = 0x0000000700000001ull;
     uint64_t *ext = emit(&s0, OP_REPORT_COUNTER, 16); ext[0] = 2; ext[1] = 0x12345678;   // an address outside every pool: kept as it is
@@ -95,6 +107,7 @@ int main(void) {
     uint64_t *call = emit(&s0, OP_CALL, 8); *call = (uint64_t)(uintptr_t)s1.p;
     uint64_t *jump = emit(&s0, OP_JUMP, 8); *jump = (uint64_t)(uintptr_t)s2.p;
     p_clear_buf *cb = emit(&s1, OP_CLEAR_BUF, sizeof *cb); *cb = (p_clear_buf){(uint64_t)(uintptr_t)pool_a + 0x8000, 0x100, 0xdeadbeef, 0};
+    p_viewports *vp = emit(&s1, OP_VIEWPORTS, sizeof *vp); vp->n = 1; vp->v[0][2] = 1280; vp->v[0][3] = 720; vp->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT + 1;
     emit(&s1, OP_END, 0);
     uint64_t *fs = emit(&s2, OP_FENCE_SYNC, 8); *fs = (uint64_t)(uintptr_t)&game_sync;
     p_render_cond *rc = emit(&s2, OP_RENDER_COND, sizeof *rc); rc->mode = 1; rc->addr = (uint64_t)(uintptr_t)pool_b + 0x2000;
@@ -115,7 +128,20 @@ int main(void) {
     CHECK(!host_ptrs, "no host pointer left in the encoded records");
 
     cap_writer w; CHECK(cap_open(&w, path), "open for writing");
-    const char *lay = cap_layout(); cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
+    const char *lay = cap_layout();
+    const char *legacy = "format 1\nops 54\n";
+    CHECK(!cap_layout_matches(legacy, strlen(legacy)), "old absolute descriptor handles require a new capture");
+    const char *origin_layout = strstr(lay, "p_viewports 392");
+    CHECK(origin_layout && cap_layout_matches(lay, (size_t)(origin_layout - lay)), "captures before the viewport-origin extension remain readable");
+    const char *gob_layout = strstr(lay, "nvn_texdesc 40");
+    CHECK(gob_layout && cap_layout_matches(lay, (size_t)(gob_layout - lay)), "captures before the texture-order extension remain readable");
+    nvn_texdesc legacy_desc = {0}; uint32_t legacy_pkg = 0x1000;
+    memcpy((uint8_t *)&legacy_desc + offsetof(nvn_texdesc, pkg_layout), &legacy_pkg, sizeof legacy_pkg);
+    CHECK(legacy_desc.pkg_layout == legacy_pkg && legacy_desc.gob_order == 0, "old descriptors retain packaged layout and X1 replay order");
+    const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
+    CHECK(multi_layout && !cap_layout_matches(lay, (size_t)(multi_layout - lay)), "an incomplete format-2 layout remains rejected");
+    CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
+    cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
         memcpy(b, &h, sizeof h); memcpy(b + sizeof h, (const void *)(uintptr_t)regs[r].lo, (size_t)regs[r].size); cap_put(&w, CAP_REGN, 1, b, sizeof h + regs[r].size, 1); }
     for (int i = 0; i < 3; i++) { uint8_t b[8 + 4096]; uint32_t hd[2] = {(uint32_t)i, (uint32_t)all[i]->n}; memcpy(b, hd, 8); memcpy(b + 8, enc_bytes[i], all[i]->n); cap_put(&w, CAP_SEGM, 1, b, 8 + all[i]->n, 1); }
@@ -145,10 +171,12 @@ int main(void) {
     for (int i = 0; i < 3; i++) walk(all[i], segbuf[i], &dec, NULL);
     // every field: the same offset in the fresh region, or the rebuilt object
 #define AT(i, ptr, T) (*(T *)(segbuf[i] + ((const uint8_t *)(ptr) - all[i]->p)))
+    CHECK(AT(1, vp, p_viewports).origin == vp->origin, "recorded viewport origin survives relocation");
     const p_set_rt *rt = (const p_set_rt *)(segbuf[0] + 8);
     CHECK(rt->n == 2 && rt->color[1] == &new_tex, "a texture object pointer → the rebuilt object");
     CHECK((const uint8_t *)rt->color[0] > segbuf[0] && (const uint8_t *)rt->color[0] < segbuf[0] + seglen[0], "a snapshot inside the record → the same place in the copy");
     CHECK(rt->color[0]->mem == new_base[0] + 0x2000 && rt->color[0]->pool == &new_pool && rt->color[0]->serial == 78, "the snapshot's storage relocated");
+    CHECK(rt->color[0]->d.pkg_layout == 0x404 && rt->color[0]->d.gob_order == 1, "the snapshot retains packaged dimensions and its captured GOB order");
     CHECK(rt->depth->mem == new_base[0] + 0x4000 && rt->depth->serial == 79, "the depth snapshot relocated");
     CHECK(AT(0, bp, p_bind_program).prog == &new_prog && AT(0, bp, p_bind_program).stages == 3, "program pointer");
     CHECK(AT(0, sp, p_set_pool).pool == &new_dp, "descriptor pool pointer");
@@ -157,6 +185,9 @@ int main(void) {
     CHECK(AT(0, us, p_bind_ubo_small).addr == (uint64_t)(uintptr_t)new_base[1] + 0x1000, "compact uniform buffer relocated");
     CHECK(AT(0, bh, p_bind_handles).src == (uint64_t)(uintptr_t)new_base[2] && !memcmp(new_base[2], heap_handles, sizeof heap_handles), "deferred handles: their own region, relocated");
     CHECK(AT(0, di, p_draw_idx).ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && AT(0, di, p_draw_idx).ind == (uint64_t)(uintptr_t)new_base[0] + 0x3100, "index buffer and indirect arguments");
+    p_multi_draw moved = AT(0, multi, p_multi_draw);
+    CHECK(moved.ind == (uint64_t)(uintptr_t)new_base[0] + 0xf000 && moved.cnt == (uint64_t)(uintptr_t)new_base[1] &&
+          moved.ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && moved.stride == -20 && moved.max == 1025, "multi-draw relocation keeps the first record and the signed stride");
     CHECK(AT(0, ev, uint64_t) == (uint64_t)(uintptr_t)new_base[1] + 0x10, "event word relocated");
     CHECK(AT(0, ct, p_copy_t2t).dst == &new_tex && AT(0, ct, p_copy_t2t).src->serial == 80 && AT(0, ct, p_copy_t2t).src->mem == new_base[0] + 0x2000, "texture copy ends");
     CHECK(AT(0, call, uint64_t) == (uint64_t)(uintptr_t)segbuf[1] && AT(0, jump, uint64_t) == (uint64_t)(uintptr_t)segbuf[2], "call and jump → the copied segments");
@@ -177,6 +208,11 @@ int main(void) {
     FILE *f = fopen(path, "r+b"); fseeko(f, 0, SEEK_END); off_t n = ftello(f); fclose(f); truncate(path, n - 40);
     CHECK(cap_load(&rd, path) == 1, "a truncated capture still opens"); int r, bad = 0; while ((r = cap_next(&rd, &c, &d)) == 1) free(d); bad = r < 0; cap_unload(&rd);
     CHECK(bad, "a truncated capture ends in an error");
+    CHECK(cap_open(&w, path), "replace a rejected capture with a failure marker");
+    const char *why = cap_queue_unsupported(&waited);
+    cap_put(&w, CAP_FAIL, 0, why, strlen(why), 0); CHECK(cap_close(&w), "close rejected capture");
+    CHECK(cap_load(&rd, path) == 1 && cap_next(&rd, &c, &d) == 1 && c.tag == CAP_FAIL && c.raw == strlen(why) && !memcmp(d, why, c.raw), "failure reason survives the capture file round-trip");
+    free(d); cap_unload(&rd);
     unlink(path);
     printf("t_capture: %d checks, %d failed\n", checks, failed);
     return failed != 0;

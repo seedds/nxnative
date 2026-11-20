@@ -27,7 +27,7 @@ static void *emit(chain *c, unsigned op, size_t n) {
 static void submit(const uint8_t *h0) {   // as nvnQueueSubmitCommands, with the capture hook
     uint64_t h = (uint64_t)(uintptr_t)h0;
     nvn_cap_submit(1, &h);
-    mtl_sub_begin(); mtl_sub_index(&h, 1); mtl_exec_rest(NULL, 0); mtl_exec(h0); mtl_exec_rest(NULL, 0); mtl_sub_commit(); mtl_finish();
+    mtl_sub_begin(); mtl_exec_rest(NULL, 0); mtl_exec(h0); mtl_exec_rest(NULL, 0); mtl_sub_commit(); mtl_finish();
 }
 static void copy_block(chain *c, const tex_t *t, uint64_t src, int x, int y) {
     p_copy_b2t *b = emit(c, OP_COPY_B2T, sizeof *b); b->src = src; b->tex = t; b->r = (NVNcopyRegion){x, y, 0, 16, 16, 1};
@@ -81,6 +81,13 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!g_cap_done || g_cap_failed) { fprintf(stderr, "FAIL: capture %s\n", g_cap_done ? "incomplete" : "not written"); return 1; }
     if (g_cap_unmapped) { fprintf(stderr, "FAIL: %llu addresses outside every pool (the finalized pool's object read)\n", (unsigned long long)g_cap_unmapped); return 1; }
     if (*(uint32_t *)(pool + 0x30000) != 0x11223344) { fprintf(stderr, "FAIL: the called segment's buffer fill did not run\n"); return 1; }
+    // a shader's interface hash is of its binding values, not of nvn_refl.h's struct bytes: pinned, so a field widened or added there (682fdd26: nvn_rbind.n, soff) does not
+    // change it, which made the replayer refuse every capture although no binding had changed
+    { NvShader *sh = [NvShader new]; sh->rf.nb = 2; sh->rf.nv = 1; sh->rf.tg[0] = 64;
+      sh->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXA, .reg = 3, .aid = 1, .off = 0x40, .n = 300, .soff = 0x80}; sh->rf.b[1] = (nvn_rbind){.kind = 1, .rw = 1, .reg = 2};
+      sh->rf.v[0].loc = 4; sh->rf.v[0].nvn = 2; sh->rf.v[0].sh[0] = sh->rf.v[0].sh[1] = sh->rf.v[0].sh[2] = 0xff;
+      NvProg *pr = [NvProg new]; pr->sh[0] = sh; uint64_t h[6]; cap_iface(pr, h);
+      if (h[0] != 0xa0e0f743879fbedfull || h[1]) { fprintf(stderr, "FAIL: interface hash %#llx, pinned %#llx (cap_iface must hash binding values, not struct bytes)\n", (unsigned long long)h[0], 0xa0e0f743879fbedfull); return 1; } }
     printf("t_capture_live: frame 2 captured to %s\n", argv[1]);
     return 0;
 } }

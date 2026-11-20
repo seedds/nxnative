@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
+using System;
 using System.Numerics;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitHelper;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
@@ -20,6 +21,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand value = GetSrcReg(context, op.SrcB);
 
             Operand res = EmitAtomicOp(context, StorageKind.GlobalMemory, op.Op, op.Size, addrLow, addrHigh, value);
+
+            context.Copy(GetDest(op.Dest), res);
+        }
+
+        // nxnative: ATOM.CAS Rd, [Ra + imm], Rb, Rb+1 (CUDA atomicCAS): compares the word with Rb, swaps in Rb+1, Rd the old word (whether or not it swapped). The fields, from
+        // envytools' gm107.c (its 0xeef0 row: atommem0_imm, tabeef0sz) and nvdisasm's sm_61 records in CuAssembler: a signed byte displacement at 28..47, E at 48, .64 at 49.
+        // Every compiled form seen has bits 50..51 (Ryujinx's BcRz) clear and an even Rb. The 64-bit form (Metal has no 64-bit compare-and-swap), set bits 50..51 and an odd
+        // or RZ Rb fail translation, as SUATOM's unsupported forms do
+        public static void AtomCas(EmitterContext context)
+        {
+            InstAtomCas op = context.GetOp<InstAtomCas>();
+
+            if (op.Size64 || op.BcRz != 0 || (op.SrcB & 1) != 0)
+            {
+                throw new NotSupportedException($"ATOM.CAS at 0x{context.CurrOp.Address:x}: only the 32-bit form with bits 50..51 clear and an even Rb ({context.CurrOp.RawOpCode:x16}).");
+            }
+
+            int sOffset = (op.Imm20 << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
+
+            Operand res = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, addrLow, addrHigh, GetSrcReg(context, op.SrcB), GetSrcReg(context, op.SrcB + 1));
 
             context.Copy(GetDest(op.Dest), res);
         }
@@ -79,7 +102,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 srcA = context.BitwiseAnd(srcA, Const(0xffff));
             }
 
-            Operand addr = context.IAdd(srcA, Const(Imm16ToSInt(op.CbufOffset)));
+            // nxnative: added to a register, the immediate is signed and the sum 32 bits, as nvdisasm prints it (`LDC R11, c[0x3][R5+-0x4]` for 0xfffc) and as
+            // Xenoblade Chronicles 2's pixel shaders use it (c6 at R - 8 to R - 128); to reach past 32 KiB the compiler adds 0x10000 to the register (Ampere:
+            // Yoshi and the Mysterious Book's `IADD3 R40, R26, 0x10000` before c[6][R40 - 0x5578]). Alone (Ra = RZ), the immediate is the address as it is:
+            // Mortal Kombat 11 reads c[14][0x8448] that way, which sign-extended became the word 0x3FFFE112 and overflowed into the operand's slot field as c15
+            // (Operand.PackCbufInfo)
+            int immediate = op.SrcA == RegisterConsts.RegisterZeroIndex ? op.CbufOffset : Imm16ToSInt(op.CbufOffset);
+            Operand addr = context.IAdd(srcA, Const(immediate));
             Operand wordOffset = context.ShiftRightU32(addr, Const(2));
 
             for (int index = 0; index < count; index++)
@@ -134,7 +163,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstRed op = context.GetOp<InstRed>();
 
-            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
+            // nxnative: the displacement is signed, as ATOM's (envytools gm107.c: RED's address is atommem0_imm too)
+            int sOffset = (op.Imm20 << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
 
             EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
         }
@@ -166,7 +198,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitStore(context, StorageKind.SharedMemory, op.LsSize, GetSrcReg(context, op.SrcA), op.Dest, Imm24ToSInt(op.Imm24));
         }
 
-        private static Operand EmitLoadConstant(EmitterContext context, Operand slot, Operand offset)
+        // banks: the banks a run-time slot can be, when the caller knows them (Ampere's LDC .IS, ARuntimeBanks); else the accessor's bound banks
+        private static Operand EmitLoadConstant(EmitterContext context, Operand slot, Operand offset, uint? banks = null)
         {
             Operand vecIndex = context.ShiftRightU32(offset, Const(2));
             Operand elemIndex = context.BitwiseAnd(offset, Const(3));
@@ -180,7 +213,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Operand value = Const(0);
 
-                uint cbUseMask = context.TranslatorContext.GpuAccessor.QueryConstantBufferUse();
+                uint cbUseMask = banks ?? context.TranslatorContext.GpuAccessor.QueryConstantBufferUse();
 
                 while (cbUseMask != 0)
                 {
@@ -197,6 +230,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 return value;
             }
+        }
+
+        // nxnative: a float atomic add (RED.F32.FTZ.RN and ATOM's float form), as a compare-and-swap loop on the word: neither SPIR-V as the chain uses it nor Metal's texture atomics have one. It was
+        // dropped with a log line, so agl's scene analysis summed nothing: Ocarina of Time's probe_analyze reads the probes' luminance into a buffer the CPU turns into exposure, and at 0 the game took
+        // its full correction, several times too bright. Returns the value before the add
+        private static Operand EmitAtomicAddF32(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value)
+        {
+            Operand lblRetry = Label();
+            context.MarkLabel(lblRetry);
+
+            Operand expected = context.Load(storageKind, e0, e1);
+            Operand sum = context.FPAdd(expected, value);
+            Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
+
+            context.BranchIfTrue(lblRetry, context.ICompareNotEqual(found, expected));
+
+            return found;
         }
 
         private static Operand EmitAtomicOp(
@@ -216,6 +266,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     if (type is AtomSize.S32 or AtomSize.U32)
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
+                    }
+                    else if (type == AtomSize.F32FtzRn)
+                    {
+                        res = EmitAtomicAddF32(context, storageKind, e0, e1, value);
                     }
                     else
                     {
@@ -371,6 +425,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand srcA = context.Copy(new Operand(new Register(ra, RegisterType.Gpr)));
 
+            // nxnative: the words of one LDG.64 / LDG.128 are marked as one access (Operation.GlobalVectorCount, as in InstEmitAmpereMem.ALdg)
+            bool vector = count > 1 && storageKind == StorageKind.GlobalMemory && rd + count <= RegisterConsts.RegisterZeroIndex;
+            int group = vector ? ++context.GlobalVectorGroups : 0;
+
             for (int index = 0; index < count; index++)
             {
                 Register dest = new(rd + index, RegisterType.Gpr);
@@ -381,6 +439,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
 
                 Operand value = context.Load(storageKind, context.IAdd(srcA, Const(offset + index * 4)), addrHigh);
+
+                if (vector && value.AsgOp is Operation load)
+                {
+                    load.GlobalVectorCount = count;
+                    load.GlobalVectorWord = index;
+                    load.GlobalVectorGroup = group;
+                }
 
                 context.Copy(Register(dest), value);
             }
@@ -535,7 +600,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Operand carry = context.ICompareLessUnsigned(addrLow, offs);
 
-                addrHigh = context.IAdd(addrHigh, context.ConditionalSelect(carry, Const(1), Const(0)));
+                // nxnative: the displacement is signed (LDG / STG 24 bits, ATOM / RED 20), so a negative one adds -1 to the high word as well as the carry out of the low word.
+                // Adding the carry alone moved every access with a negative displacement 4 GB up (the low word's add carries unless it borrows), out of the storage buffer's range
+                addrHigh = context.IAdd(addrHigh, context.ConditionalSelect(carry, Const(offset < 0 ? 0 : 1), Const(offset < 0 ? -1 : 0)));
             }
 
             return (addrLow, addrHigh);

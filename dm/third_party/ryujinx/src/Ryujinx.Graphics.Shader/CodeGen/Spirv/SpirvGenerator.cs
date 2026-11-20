@@ -45,7 +45,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             context.AddCapability(Capability.Shader);
 
-            context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
+            // nxnative: raw global memory goes through physical storage buffer pointers (ShaderProperties.UsesPhysicalPointers), which take 64-bit physical addressing
+            if (context.Properties.UsesPhysicalPointers)
+            {
+                context.AddCapability(Capability.PhysicalStorageBufferAddresses);
+                context.AddCapability(Capability.Int64);
+                context.AddExtension("SPV_KHR_physical_storage_buffer");
+                context.SetMemoryModel(AddressingModel.PhysicalStorageBuffer64, MemoryModel.GLSL450);
+            }
+            else
+            {
+                context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
+            }
 
             context.AddCapability(Capability.GroupNonUniformBallot);
             context.AddCapability(Capability.GroupNonUniformShuffle);
@@ -71,6 +82,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Input, IoVariable.PrimitiveId)))
                 {
                     context.AddCapability(Capability.Geometry);
+                }
+
+                // nxnative: the sample index (PIXLD.MYINDEX) is a SampleRateShading input
+                if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Input, IoVariable.SampleId)))
+                {
+                    context.AddCapability(Capability.SampleRateShading);
+                }
+
+                // nxnative: the barycentric coordinates (a[0x3a8], a[0x3b4]) are SPV_KHR_fragment_shader_barycentric built-ins
+                if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Input, IoVariable.BaryCoord)) ||
+                    context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Input, IoVariable.BaryCoordNoPersp)))
+                {
+                    context.AddExtension("SPV_KHR_fragment_shader_barycentric");
+                    context.AddCapability(Capability.FragmentBarycentricKHR);
                 }
 
                 if (context.HostCapabilities.SupportsFragmentShaderInterlock)
@@ -138,6 +163,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                 SpvInstruction funcType = context.TypeFunction(retType, false, funcArgs);
                 SpvInstruction spvFunc = context.Function(retType, FunctionControlMask.MaskNone, funcType);
+
+                // nxnative: helpers whose body the shader build replaces in the Metal source keep their name (dmsh_hmma16816_f16)
+                if (function.Name.StartsWith("dmsh_"))
+                {
+                    context.Name(spvFunc, function.Name);
+                }
 
                 context.DeclareFunction(funcIndex, function, spvFunc);
             }

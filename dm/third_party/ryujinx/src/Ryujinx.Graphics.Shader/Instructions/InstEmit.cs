@@ -5,13 +5,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
 {
     static partial class InstEmit
     {
-        public static void AtomCas(EmitterContext context)
-        {
-            context.GetOp<InstAtomCas>();
-
-            context.TranslatorContext.GpuAccessor.Log("Shader instruction AtomCas is not implemented.");
-        }
-
         public static void AtomsCas(EmitterContext context)
         {
             context.GetOp<InstAtomsCas>();
@@ -192,13 +185,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             context.GetOp<InstPexit>();
 
             context.TranslatorContext.GpuAccessor.Log("Shader instruction Pexit is not implemented.");
-        }
-
-        public static void Pixld(EmitterContext context)
-        {
-            context.GetOp<InstPixld>();
-
-            context.TranslatorContext.GpuAccessor.Log("Shader instruction Pixld is not implemented.");
         }
 
         public static void Plongjmp(EmitterContext context)

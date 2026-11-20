@@ -22,6 +22,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         public Block CurrBlock { get; set; }
         public InstOp CurrOp { get; set; }
 
+        // nxnative: the last Operation.GlobalVectorGroup handed out (InstEmitAmpereMem.ALdg, InstEmitMemory.EmitLoad); 0 is no vector access
+        public int GlobalVectorGroups { get; set; }
+
         public int OperationsCount => _operations.Count;
 
         private readonly struct BrxTarget
@@ -214,6 +217,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             _operations.Add(operation);
         }
+
+        // The Ampere frontend's scoreboard model rewrites an instruction's operations after emitting them (Translator.EmitOpsAmpere)
+        internal Operation GetOperation(int index) => _operations[index];
+
+        internal void InsertOperation(int index, Operation operation) => _operations.Insert(index, operation);
 
         public void MarkLabel(Operand label)
         {

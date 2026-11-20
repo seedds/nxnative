@@ -8,7 +8,8 @@
 #import <AVFAudio/AVFAudio.h>
 #else
 #import <AppKit/AppKit.h>
-#import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/IOKitLib.h>
+#import <IOKit/hid/IOHIDDevice.h>
 #endif
 #include <math.h>
 #include <pthread.h>
@@ -85,7 +86,34 @@ static void report(NSError *e, NSString *target, const char *stage) {
 }
 
 @implementation DmRumbleChannel
-- (void)stop {
+// Core Haptics raises an NSException, not an NSError, when a player call reaches an engine that is not running ("-[CHHapticEngine(CHHapticEngineInternal)
+// checkEngineRunning:]: self.running"), and it offers no running state to ask first: the engine stops on its own at any time (an audio interruption,
+// the haptics helper's exit) while its stopped handler is only queued here, and a stop is asynchronous. So every entry into a channel (apply:, stop,
+// the queued renewals and stops) runs its Core Haptics calls through guarded:work:, and a raise drops the engine as a failed one. Uncaught, it ended
+// Mario Kart World on an iPhone (2026-11-07); which call raised there is not known. The host is ARC without -fobjc-arc-exceptions, so a raise leaks
+// what ARC held in the frames it unwinds: the player whose call raised (and so perhaps its dead engine) and the parameters sent to it, once per engine
+// failure (t_haptics_apple under leaks: about 300 bytes a raise, none with the flag). The flag would cover the whole host, or need a per-file rule in
+// both the Makefile and the iOS project; not worth it for this
+- (void)guarded:(const char *)stage work:(void (^)(void))work {
+    @try { work(); }
+    @catch (NSException *x) { [self stoppedEngine:x stage:stage]; }
+}
+// Like a failed start (failed:), except that neither the engine nor its players are called again: a stop sends the players zero, which raises once more.
+// Nothing plays from an engine that is not running. The next effect makes a new engine after the backoff
+- (void)stoppedEngine:(NSException *)x stage:(const char *)stage {
+    if (++errors <= 8 || errors % 64 == 0)
+        fprintf(stderr, "[RED] haptics: %s %s on a stopped engine (%s: %s)\n", self.target.UTF8String, stage,
+                x.name.UTF8String ?: "exception", x.reason.UTF8String ?: "no reason");
+    self.generation++; self.silenceGeneration++;   // its renewals, idle release and callbacks are stale
+    self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
+    self.engine = nil; self.pattern = nil; self.previous = nil; self.level = (dm_haptic_level){0, 0};
+    self.failures = MIN(self.failures + 1, 4u);
+    self.retryAfter = now() + (1u << (self.failures - 1));
+    dm_haptics_clear(self.player);
+}
+- (void)stop { [self guarded:"stop" work:^{ [self halt]; }]; }
+// stop's work, for callers already inside guarded:work:
+- (void)halt {
     self.generation++; self.silenceGeneration++;
     self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
     if (self.simple) {
@@ -99,7 +127,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
             __weak DmRumbleChannel *weak = self; CHHapticEngine *engine = self.engine;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((left + 0.05) * NSEC_PER_SEC)), queue, ^{
                 DmRumbleChannel *c = weak; if (c && c.engine == engine && c.pattern) return;   // a new effect took the engine meanwhile
-                [engine stopWithCompletionHandler:nil];
+                @try { [engine stopWithCompletionHandler:nil]; }
+                @catch (NSException *x) { if (c && c.engine == engine) [c stoppedEngine:x stage:"stop engine"]; }   // one no channel holds is gone anyway
             });
             return;
         }
@@ -117,23 +146,23 @@ static void report(NSError *e, NSString *target, const char *stage) {
     __weak DmRumbleChannel *weak = self; uint64_t generation = self.generation;
     NSTimeInterval wait = MAX(0, self.pulseEnd - PULSE_LEAD - self.engine.currentTime);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), queue, ^{
-        DmRumbleChannel *c = weak; NSError *e = nil;
+        DmRumbleChannel *c = weak;
         if (!c || c.generation != generation || c.pattern != next || c.level.intensity == 0) return;   // stopped, replaced or silent
-        if (![c pulse:&e]) [c failed:e stage:"pulse"];
+        [c guarded:"pulse" work:^{ NSError *e = nil; if (![c pulse:&e]) [c failed:e stage:"pulse"]; }];
     });
     return YES;
 }
-- (void)failed:(NSError *)error stage:(const char *)stage {
+- (void)failed:(NSError *)error stage:(const char *)stage {   // inside guarded:work: (apply: or a renewal), which handles a raise from halt
     report(error, self.target, stage);
-    [self stop]; self.engine = nil;   // A failed helper connection must not be reused for every later vibration.
+    [self halt]; self.engine = nil;   // A failed helper connection must not be reused for every later vibration.
     self.failures = MIN(self.failures + 1, 4u);
     self.retryAfter = now() + (1u << (self.failures - 1));
     dm_haptics_clear(self.player);
 }
 - (void)engineFailed:(NSError *)error stage:(const char *)stage {
     [self failed:error stage:stage];
-    // Only an engine that cannot be made or started moves a split route to the default locality;
-    // a player or parameter failure (a service reset, say) is retried on the same handle.
+    // A handle engine that cannot be made or started may fall back to the default locality.
+    // Other failures, and Joy-Cons whose localities must stay separate, retry the same actuator.
     if (self.fallback) self.fallback(self.retryAfter);
 }
 - (BOOL)startEngine {
@@ -158,7 +187,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
     if (![self.engine startAndReturnError:&error]) { [self engineFailed:error stage:"start engine"]; return NO; }
     return YES;
 }
-- (void)apply:(dm_haptic_level)level {
+- (void)apply:(dm_haptic_level)level { [self guarded:"apply" work:^{ [self applyLevel:level]; }]; }
+- (void)applyLevel:(dm_haptic_level)level {
     if ([self.target hasPrefix:@"controller"]) level.intensity = controller_level(level.intensity);
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;
@@ -185,9 +215,10 @@ static void report(NSError *e, NSString *target, const char *stage) {
                 fprintf(stderr, "haptics: player %d %s has no advanced players (%s %ld): plain players\n", self.player + 1, self.target.UTF8String,
                         error.domain.UTF8String ?: "no error", (long)error.code);
                 error = nil;
-                [self stop]; self.engine = nil;
+                [self halt]; self.engine = nil;
                 // Without advanced players, the engines of the left and right handles override each other on an Xbox Wireless Controller instead of
-                // adding up: with both playing, the handle motors were not felt, while one engine for both handles was
+                // adding up: with both playing, the handle motors were not felt, while one engine for both handles was. A route with no merge
+                // (one engine, a DualSense's handles, or separate Joy-Cons) keeps its channels
                 if (self.merge) { dm_haptics_clear(self.player); self.merge(); return; }
                 self.simple = YES;
                 if (![self startEngine]) return;
@@ -228,9 +259,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
 // failed on every locality on macOS 27.0.1), is driven through its own effects report, as SDL's hidapi driver does: 0x11 over Bluetooth
 // (78 bytes, CRC32 over 0xA2 and the first 74 bytes, rumble only, so the light bar is left alone), 0x05 over USB (32 bytes). Unlike the
 // handle engines of a server without advanced players, the report keeps the strong (left) and weak (right) motor apart.
-typedef struct { IOHIDDeviceRef dev; BOOL bluetooth; uint8_t motor[2], sent[2]; } ds4_out;
+typedef struct { IOHIDDeviceRef dev; uint64_t id; BOOL bluetooth; uint8_t motor[2], sent[2]; } ds4_out;   // id: its registry entry
 static ds4_out ds4[DM_PLAYERS];
-static IOHIDManagerRef hidManager;
 static uint32_t ds4_crc(const uint8_t *p, size_t n) {
     uint32_t c = ~0u;
     while (n--) { c ^= *p++; for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320u & -(c & 1)); }
@@ -260,7 +290,7 @@ static void ds4_apply(dm_haptic_state s) {
 }
 static void ds4_release(int p) {
     ds4_out *o = &ds4[p];
-    if (o->dev) { o->motor[0] = o->motor[1] = 0; if (o->sent[0] || o->sent[1]) ds4_send(p); CFRelease(o->dev); }
+    if (o->dev) { o->motor[0] = o->motor[1] = 0; if (o->sent[0] || o->sent[1]) ds4_send(p); IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev); }
     *o = (ds4_out){0};
 }
 @interface DmDs4Channel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (ds4_apply)
@@ -273,36 +303,50 @@ static void ds4_release(int p) {
     if (o->dev && (o->sent[0] || o->sent[1]) && !o->motor[0] && !o->motor[1]) ds4_send(self.player);
 }
 @end
-// Only a controller GameController calls a DualShock 4, and only while a Sony DualShock 4 HID device no other player drives is there
-static BOOL ds4_route(int p, GCController *controller) {
-    if (![controller.productCategory isEqualToString:GCProductCategoryDualShock4]) return NO;
-    if (!hidManager) {
-        hidManager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-        IOHIDManagerSetDeviceMatching(hidManager, (__bridge CFDictionaryRef)@{@kIOHIDVendorIDKey: @0x054C});
-        if (IOHIDManagerOpen(hidManager, kIOHIDOptionsTypeNone) != kIOReturnSuccess) { CFRelease(hidManager); hidManager = NULL; return NO; }
-    }
-    NSSet *devices = CFBridgingRelease(IOHIDManagerCopyDevices(hidManager));
-    for (id d in devices) {
-        IOHIDDeviceRef dev = (__bridge IOHIDDeviceRef)d;
+// The first DualShock 4 device no other player drives, opened for player p. The registry is asked at each connect: an IOHIDManager that is never scheduled
+// keeps the devices of the moment its matching was set, so a controller turned on later found none and stayed on Core Haptics, and one that came back got
+// its dead device. A scheduled one would depend on its arrival callback running before GameController's connect; the registry has the device by then
+static BOOL ds4_take(int p) {
+    CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
+    if (!match) return NO;
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x054C);
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;   // takes match
+    BOOL found = NO;
+    for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+        uint64_t id = 0; BOOL taken = NO;   // GameController does not name a controller's HID device: two connecting together may get each other's
+        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS) continue;
+        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && ds4[q].dev && ds4[q].id == id;
+        IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
+        if (!dev) continue;
         int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue];
-        if (pid != 0x05C4 && pid != 0x09CC && pid != 0x0BA0) continue;   // DualShock 4 v1, v2, the USB wireless adapter
-        BOOL taken = NO;   // GameController does not name a controller's HID device: two DualShock 4s each get one, possibly swapped
-        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && ds4[q].dev && CFEqual(ds4[q].dev, dev);
-        if (taken) continue;
-        ds4[p].dev = (IOHIDDeviceRef)CFRetain(dev);
-        ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
-        for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = @"DualShock 4 report"; [channels[p] addObject:c]; }
-        fprintf(stderr, "haptics: player %d controller %s, rumble through the DualShock 4 effects report (%s, product 0x%04x)\n",
-                p + 1, controller.vendorName.UTF8String ?: "unknown", ds4[p].bluetooth ? "Bluetooth" : "USB", pid);
-        return YES;
+        if ((pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0) && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {   // DualShock 4 v1, v2, the USB wireless adapter
+            ds4[p].dev = dev; ds4[p].id = id; found = YES;
+            ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+        } else CFRelease(dev);
     }
-    return NO;
+    IOObjectRelease(it);
+    return found;
+}
+// Only a controller GameController calls a DualShock 4, and only while such a HID device is free
+static BOOL ds4_route(int p, GCController *controller) {
+    if (![controller.productCategory isEqualToString:GCProductCategoryDualShock4] || !ds4_take(p)) return NO;
+    for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = @"DualShock 4 report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the DualShock 4 effects report (%s, product 0x%04x)\n", p + 1, controller.vendorName.UTF8String ?: "unknown",
+            ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
+    return YES;
 }
 #endif
 
+static void (*sinks[DM_PLAYERS])(const dm_haptic_state *);   // a player's own output instead of engines (dm_haptics_apple_set_sink)
+static void sink_apply(dm_haptic_state s) {   // on the queue: Rumble strength and cutoff, as the engines get them
+    for (int m = 0; m < 2; m++) { s.motor[m].amplitude_low = controller_level(s.motor[m].amplitude_low * gain); s.motor[m].amplitude_high = controller_level(s.motor[m].amplitude_high * gain); }
+    sinks[s.player](&s);
+}
+static void sink_silence(int p) { dm_haptic_state z = {0}; z.player = p; if (sinks[p]) sinks[p](&z); }
 static void apply(dm_haptic_state s) {
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
+        if (sinks[s.player]) { sink_apply(s); return; }   // the player is in range, as channels[] below assumes (hle_haptics.c)
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
@@ -323,9 +367,13 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
     add_engine(p, -1, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;
 }
+static GCHapticsLocality const kJoyConLeftLocality = (GCHapticsLocality)@"JoyCon (L)";
+static GCHapticsLocality const kJoyConRightLocality = (GCHapticsLocality)@"JoyCon (R)";
+
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
+    if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
     ds4_release(p);
     if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
@@ -333,13 +381,17 @@ static void configure(int p, GCController *controller) {
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;
         NSSet *localities = h.supportedLocalities;
-        if ([localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle]) {
-            add_engine(p, 0, @"controller left handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityLeftHandle]; });
-            add_engine(p, 1, @"controller right handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityRightHandle]; });
-            // Advertised handle localities can still fail to start. Fall back to the standard
-            // controller engine, once, rather than keeping two unusable helper connections.
+        BOOL handles = [localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle];
+        BOOL joycons = !handles && [localities containsObject:kJoyConLeftLocality] && [localities containsObject:kJoyConRightLocality];
+        if (handles || joycons) {
+            GCHapticsLocality leftLoc = handles ? GCHapticsLocalityLeftHandle : kJoyConLeftLocality;
+            GCHapticsLocality rightLoc = handles ? GCHapticsLocalityRightHandle : kJoyConRightLocality;
+            add_engine(p, 0, handles ? @"controller left handle" : @"controller left Joy-Con", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:leftLoc]; });
+            add_engine(p, 1, handles ? @"controller right handle" : @"controller right Joy-Con", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:rightLoc]; });
+            // Advertised handle localities can still fail to start. Fall back to the standard controller engine once.
+            // Joy-Cons can belong to different npads: Default mixes their motors, so a failed channel must retry its own locality.
             __weak NSArray *route = channels[p];
-            for (DmRumbleChannel *c in channels[p]) c.fallback = ^(NSTimeInterval retryAfter) {
+            if (handles) for (DmRumbleChannel *c in channels[p]) c.fallback = ^(NSTimeInterval retryAfter) {
                 if (!route || channels[p] != route) return;
                 for (DmRumbleChannel *old in channels[p]) [old stop];
                 channels[p] = [NSMutableArray new];
@@ -347,8 +399,10 @@ static void configure(int p, GCController *controller) {
                 dm_haptics_route(p, 1);
                 fprintf(stderr, "haptics: player %d retrying with the default controller locality\n", p + 1);
             };
-            // A server without advanced players gets one engine for both handles (see apply)
-            for (DmRumbleChannel *c in channels[p]) c.merge = ^{
+            // A server without advanced players gets one engine for both handles (see applyLevel), except for a DualSense or paired Joy-Cons:
+            // plain players on the DualSense's handle engines are felt apart (PR #986), and JoyCon (L) / JoyCon (R) are two separate Bluetooth
+            // controllers whose motors are routed per npad when split into JoyLeft and JoyRight
+            if (handles && ![controller.productCategory isEqualToString:GCProductCategoryDualSense]) for (DmRumbleChannel *c in channels[p]) c.merge = ^{
                 if (!route || channels[p] != route) return;
                 for (DmRumbleChannel *old in channels[p]) [old stop];
                 channels[p] = [NSMutableArray new];
@@ -371,6 +425,13 @@ static void configure(int p, GCController *controller) {
 #endif
     dm_haptics_route(p, channels[p].count != 0);
 }
+void dm_haptics_apple_set_sink(int p, void (*sink)(const dm_haptic_state *)) {
+    if (!queue || p < 0 || p >= DM_PLAYERS) return;
+    pthread_mutex_lock(&routeLock);
+    dm_haptics_route(p, 0);   // invalidate queued work before changing the output
+    dispatch_sync(queue, ^{ sink_silence(p); sinks[p] = sink; configure(p, controllers[p]); });
+    pthread_mutex_unlock(&routeLock);
+}
 void dm_haptics_apple_controller(int p, GCController *controller) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
@@ -384,7 +445,7 @@ void dm_haptics_apple_controller(int p, GCController *controller) {
 static void suspend(unsigned reason, BOOL on) {
     dm_haptics_suspend(reason, on);
     void (^stop)(void) = ^{
-        for (int p = 0; p < DM_PLAYERS; p++) for (DmRumbleChannel *c in channels[p]) [c stop];
+        for (int p = 0; p < DM_PLAYERS; p++) { for (DmRumbleChannel *c in channels[p]) [c stop]; sink_silence(p); }
     };
     if (on) { if (dispatch_get_specific(&queue)) stop(); else dispatch_sync(queue, stop); }
 }

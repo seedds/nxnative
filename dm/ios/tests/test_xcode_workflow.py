@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,26 +40,31 @@ class XcodePipelineTests(unittest.TestCase):
             update.touch()
             registered = game.load('0100A6301214E000')
             profile = SimpleNamespace(id=registered.id, title_id=registered.title_id, dir=root / 'profile' / registered.id,
-                                      get=registered.get, words=registered.words,
+                                      get=registered.get, words=registered.words, modules_in=registered.modules_in,
                                       builds=lambda: {'v0': {'display': '1.0.0', 'main': 'other-build'}})
-            sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'ue_decode', 'oodle_packs', 'ue_legacy')}
+            sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'gl_fixed', 'ue_decode', 'oodle_packs', 'ue_legacy')}
             sources['graphics'] = (graphics, 'fixture')
             fam = {'base': base, 'updates': [] if derived else [(327680, update)], 'dlc': []}
             version = 'v0' if derived else 'v327680'
             extraction = root / 'extracted' / version
             (extraction / 'RomFS').mkdir(parents=True)
             (extraction / 'ExeFS').mkdir()
+            def fake_run(cmd, log, **kwargs):
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text('')  # a successful command with no diagnostic output
+
             mocks = {}
             for name, value in {
                 'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None,
-                'free_gb': 10000, 'build_nx_extract': root / 'nx_extract',
-                'extract': extraction, 'can_clone': False, 'build_mismatch': [],
+                'free_gb': 10000, 'find_nx_extract': root / 'nx_extract',
+                'extract': extraction, 'check_formats': None, 'can_clone': False, 'build_mismatch': [],
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',
                 'build_shaders': root / 'shaders', 'build_vk_shaders': root / 'shaders',
                 'build_gl_shaders': root / 'shaders', 'provisional_prep': None, 'chain_header': None,
-                'refine_after_rewrite': profile, 'derive_profile': '1.0.0', 'run': None,
+                'derive_profile': '1.0.0',
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
+            mocks['run'] = stack.enter_context(patch.object(build, 'run', side_effect=fake_run))
             stack.enter_context(patch.dict(os.environ))  # derived profiles change the tool search environment
             stack.enter_context(patch.object(game, 'by_title', return_value=registered))
             stack.enter_context(patch.object(game, 'load', return_value=profile))
@@ -99,7 +105,7 @@ class XcodePipelineTests(unittest.TestCase):
                 self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
             else:
                 builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
-                self.assertTrue(builder.call_args.kwargs['reuse'])
+                self.assertTrue(builder.call_args.kwargs.get('reuse', True))   # reused (the default): a damaged copy is keyed by its files' times, not refused
             warnings = [event.get('msg', '') for event in events]
             self.assertEqual(any('this Xcode project uses' in message for message in warnings), derived)
             if derived:
@@ -233,6 +239,51 @@ class ImageStaging(unittest.TestCase):
             environment['DM_COPY_ROMFS'] = 'NO'; stage(); self.assertFalse((app / 'romfs.img').exists())
             self.assertTrue(romfs_image.same_identity((app / 'romfs.id').read_text(), romfs_image.identity(image)))   # the slim build names the image it needs
             environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file()); self.assertFalse((app / 'romfs.id').exists())
+            # the other programs' RomFS beside the image (scripts/pack_nup.py), where the host mounts them by program index: staged with the RomFS, also in the slim build (main.m names it)
+            programs = root / 'romfs_programs'; programs.mkdir(); (programs / '0.img').write_bytes(b'switch 1 data')
+            stage(); self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data')
+            (programs / '0.img').write_bytes(b'switch 1 data, updated'); environment['DM_COPY_ROMFS'] = 'NO'; stage()
+            self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data, updated')
+            environment.pop('DM_COPY_ROMFS'); shutil.rmtree(programs); stage(); self.assertFalse((app / 'romfs_programs').exists())
+
+    def test_one_library_file_is_staged_as_it_is(self):   # an NVN game's libraries (dm/tools/shader_lib.py), and the folder of a build from before them, each replacing the other
+        import romfs_image
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); ios = root / 'xcode'; (ios / 'Gen').mkdir(parents=True)
+            (ios / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
+            (ios / 'Gen/dm.xcconfig').touch()
+            source = root / 'source'; source.mkdir(); (source / 'marker').write_text('resource')
+            image = root / 'RomFS.img'; romfs_image.pack(source, image)
+            header = root / 'dmsh_chain.h'; header.write_text('#define DMSH_CHAIN "abc"\n')
+            shaders = root / 'shaders'; shaders.mkdir(); packed = shaders / 'b-abc.img'; packed.write_bytes(b'library file')
+            folder = root / 'old/b-abc'; folder.mkdir(parents=True); (folder / 'k_b.metallib').write_text('loose')
+            app = root / 'products/Game.app'
+            environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent), UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')
+            def stage(libraries):
+                with patch.object(sys, 'argv', ['gen_resources.py', str(ios), str(image), 'marker', str(libraries), 'b-abc', '', str(root / 'dd'), str(header)]):
+                    gen_resources.main()
+                result = subprocess.run(['bash', str(ios / 'tools/stage_resources.sh')], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            stage(packed)
+            staged_romfs, staged_shaders = app / 'romfs.img', app / 'msl/b-abc.img'
+            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
+            self.assertEqual(staged_shaders.read_bytes(), b'library file')
+            romfs_inode, shader_inode = staged_romfs.stat().st_ino, staged_shaders.stat().st_ino
+            stage(packed)
+            self.assertEqual(staged_romfs.stat().st_ino, romfs_inode)
+            self.assertEqual(staged_shaders.stat().st_ino, shader_inode)
+
+            previous = image.stat()
+            (source / 'marker').write_text('updated!')
+            romfs_image.pack(source, image)
+            self.assertEqual(image.stat().st_size, previous.st_size)
+            os.utime(image, ns=(previous.st_atime_ns, previous.st_mtime_ns + 2_000_000_000))
+            packed.write_bytes(b'newer')
+            stage(packed)
+            self.assertEqual(staged_romfs.read_bytes(), image.read_bytes())
+            self.assertEqual(staged_shaders.read_bytes(), b'newer')
+            stage(folder); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc']); self.assertEqual((app / 'msl/b-abc/k_b.metallib').read_text(), 'loose')
+            stage(packed); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
 
 
 if __name__ == '__main__':

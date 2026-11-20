@@ -8,6 +8,11 @@ namespace Ryujinx.Graphics.Shader
     /// </summary>
     public interface IGpuAccessor : ILogger
     {
+        // A serialized callable program may use constant banks for its runtime
+        // descriptor arena, rather than the ordinary game-UBO address convention.
+        // Keep such global addresses in the checked flat address space.
+        bool QueryRawGlobalMemory() => false;
+
         // Fixed VS capture ABI used by the offline Metal geometry path.
         bool QueryGeometryInputFixed() => false;
 
@@ -19,6 +24,41 @@ namespace Ryujinx.Graphics.Shader
         uint ConstantBuffer1Read(int offset)
         {
             return 0;
+        }
+
+        /// <summary>
+        /// Size in bytes of the constant buffer 1 data the host knows (an Ampere jump table ends there at the latest).
+        /// </summary>
+        int QueryConstantBuffer1Size()
+        {
+            return 0;
+        }
+
+        /// <summary>
+        /// NVN2 (Switch 2) compute shaders: the counts of the shader's own driver constant layout in c[0] (uniform buffer entries, storage buffer entries, texture
+        /// handles), its size and the bytes of its push constants, from the control section; null for other shaders.
+        /// </summary>
+        int[] QueryAmpereComputeC0Layout()
+        {
+            return null;
+        }
+
+        /// <summary>
+        /// NVN2 (Switch 2) graphics stages: the stage's own constant bank, c[25 + stage index], which holds the buffer entries the game pushes into graphics push block
+        /// 1 + stage index; the translator maps it onto that block of c[24] (AStageBlock). -1 for other shaders.
+        /// </summary>
+        int QueryAmpereStageBank()
+        {
+            return -1;
+        }
+
+        /// <summary>
+        /// NVN2 (Switch 2) task and mesh shaders, translated as compute: the byte offsets in shared memory of the stage memory the build reads back (dmsh_meshstage.py): the
+        /// workgroup's number, the stage input (a task's payload), the outputs (a payload, or a mesh shader's attributes) and a mesh shader's primitive bytes; null for other shaders.
+        /// </summary>
+        int[] QueryAmpereStageMemory()
+        {
+            return null;
         }
 
         /// <summary>

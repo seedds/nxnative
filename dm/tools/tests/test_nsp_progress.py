@@ -32,6 +32,13 @@ class Json(unittest.TestCase):
     def events(self, ev=None):
         return [e for e in map(json.loads, self.out.getvalue().splitlines()) if ev in (None, e['ev'])]
 
+    def test_warned_stage_end(self):   # a stage that finished without what it makes (the pipeline archive): ok, with a warn flag the launcher can show
+        self.prog.plan(2)
+        self.prog.stage('Pipeline archive'); self.prog.end('failed, the app is packed without one', warn=True)
+        self.prog.stage('pack'); self.prog.end('done')
+        e = self.events('stage_end')
+        self.assertEqual([(x['ok'], x.get('warn')) for x in e], [(True, True), (True, None)])
+
     def test_events(self):
         self.prog.plan(2)
         self.prog.stage('extract Pokémon', step='reading', done=0, total=10, unit='files', est=True)
@@ -81,6 +88,120 @@ class Json(unittest.TestCase):
         self.assertFalse(es[2]['ok'])
         self.assertTrue('out' in es[3]['msg'] and 'err' in es[3]['msg'])
 
+    def test_game(self):   # which game the app is (issue #1627): the event, then the message for people
+        app, icon = Path('/b/Zelda.app'), Path('/b/x/extract/v131072/icon.jpg')
+        nsp.say_game(0x0400486024DEC000, 'The Legend of Zelda', '1.0', 'org.nxnative.0400486024dec000', app, icon)
+        nsp.say_game(0x0400486024DEC000, 'Zelda', '1.0', 'b', None, None)   # an Xcode project, a game without an icon
+        es = self.events()
+        self.assertEqual([e['ev'] for e in es], ['game', 'say', 'game', 'say'])
+        self.assertEqual({k: v for k, v in es[0].items() if k != 't'}, {'ev': 'game', 'title_id': '0400486024DEC000', 'name': 'The Legend of Zelda', 'version': '1.0',
+                                                                   'bundle_id': 'org.nxnative.0400486024dec000', 'out': str(app), 'icon': str(icon)})
+        self.assertIn(f'; app: {app}', es[1]['msg'])
+        self.assertEqual((es[2]['out'], es[2]['icon']), (None, None))
+        self.assertNotIn('; app:', es[3]['msg'])
+        self.prog.mode = 'lines'; nsp.say_game(1, 'Zelda', '1.0', 'b', Path('/b/z.ipa'), None)   # the human modes get only the message
+        self.assertNotIn('"ev"', self.out.getvalue().splitlines()[-1])
+
+class ShadersStale(unittest.TestCase):
+    """build_shaders tells a front end (event shaders_stale, json mode) that cached libraries cannot be reused, once, before it rebuilds them"""
+    class Stop(Exception): pass
+
+    def run_step(self, mode, chain_dir=None, digest='aaaa', stamp=None, caches=None, keys=('x',), mac=True, reuse=False):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            sh = Path(tmp) / 'sh'
+            if caches is None: caches = [('cache', chain_dir or 'b-OLD', ('x',), stamp)]
+            for target, chain, cached, inputs in caches:
+                d = sh / target / chain; d.mkdir(parents=True)
+                for key in cached: (d / f'{key}_b.metallib').write_text('')
+                if inputs: (d / 'inputs.tsv').write_text(f'game\tg\ninputs\t{inputs}\n')
+            (Path(tmp) / 'shader_map.tsv').write_text(''.join(f'p.bin\t{i}\tvs\t{k}\tsrc\n' for i, k in enumerate(keys)))
+            prog = nsp.Progress(mode)
+            g = mock.Mock(); g.dir = Path(tmp); g.table.side_effect = lambda name: Path(tmp) / name
+            done = subprocess.CompletedProcess([], 0, stdout=f'{digest}\n', stderr='')
+            with contextlib.redirect_stdout(out), mock.patch.object(nsp, 'PROG', prog), mock.patch.object(nsp.threading, 'Thread'), \
+                 mock.patch.object(nsp, 'chain_of', return_value='NEW'), mock.patch.object(nsp.subprocess, 'run', return_value=done), \
+                 mock.patch.object(nsp, 'run', side_effect=self.Stop) as build, mock.patch.object(nsp, 'rmtree'), \
+                 mock.patch.object(nsp, 'fingerprint', return_value='K'), mock.patch.object(nsp, 'reused', return_value='ready' if reuse else None), \
+                 mock.patch.object(nsp, 'chain_tables', return_value=True):
+                args = ('py', Path(tmp), sh, Path(tmp) / 'xlate', {'WORK': tmp}, Path(tmp), g)
+                if reuse:
+                    nsp.build_shaders(*args, pkg_key='P', mac=mac)
+                    build.assert_not_called()
+                else:
+                    with self.assertRaises(self.Stop): nsp.build_shaders(*args, mac=mac)
+        return out.getvalue()
+
+    def events(self, text): return [e for e in (json.loads(l) for l in text.splitlines()) if e['ev'] == 'shaders_stale']
+
+    def test_chain_changed(self):
+        es = self.events(self.run_step('json'))
+        self.assertEqual(len(es), 1)
+        self.assertEqual([es[0][k] for k in ('reason', 'old', 'new', 'count')], ['chain', 'b-OLD', 'b-NEW', 1])
+
+    def test_inputs_changed(self):
+        es = self.events(self.run_step('json', chain_dir='b-NEW', digest='bbbb', stamp='aaaa'))
+        self.assertEqual([es[0][k] for k in ('reason', 'old', 'new', 'count')], ['inputs', 'aaaa', 'bbbb', 1])
+
+    def test_current_has_no_event(self):
+        self.assertEqual(self.events(self.run_step('json', chain_dir='b-NEW', digest='aaaa', stamp='aaaa')), [])
+
+    def test_partial_current_chain_still_reports_stale(self):
+        caches = [('cache', 'b-OLD', ('a', 'b'), 'aaaa'), ('cache', 'b-NEW', ('a',), None)]
+        es = self.events(self.run_step('json', caches=caches, keys=('a', 'b')))
+        self.assertEqual(len(es), 1)
+        self.assertEqual([es[0][k] for k in ('reason', 'old', 'new', 'count')], ['chain', 'b-OLD', 'b-NEW', 2])
+
+    def test_current_mac_does_not_hide_stale_ios(self):
+        caches = [('cache', 'b-NEW', ('x',), 'aaaa'), ('ios', 'b-OLD', ('x',), 'aaaa')]
+        es = self.events(self.run_step('json', caches=caches, mac=False))
+        self.assertEqual(len(es), 1)
+        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['chain', 2])
+
+    def test_count_uses_current_keys_not_historical_copies(self):
+        caches = [('cache', 'b-OLD', ('a', 'removed'), 'aaaa'), ('cache', 'b-OLDER', ('a',), 'aaaa')]
+        es = self.events(self.run_step('json', caches=caches, keys=('a', 'b', 'b')))
+        self.assertEqual(es[0]['count'], 2)   # a and b, once each; removed is no longer built
+
+    def test_count_includes_both_selected_targets(self):
+        caches = [('cache', 'b-NEW', ('x',), 'aaaa'), ('ios', 'b-NEW', ('x',), 'aaaa')]
+        es = self.events(self.run_step('json', caches=caches, digest='bbbb', mac=False))
+        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['inputs', 2])
+
+    def test_ios_only_count_excludes_old_mac_libraries(self):
+        caches = [('cache', 'b-OLD', ('x',), 'aaaa'), ('ios', 'b-OLD', ('x',), 'aaaa')]
+        es = self.events(self.run_step('json', caches=caches, mac=False))
+        self.assertEqual(es[0]['count'], 1)
+
+    def test_unselected_mac_stamp_has_no_event(self):
+        caches = [('cache', 'b-NEW', (), 'old'), ('ios', 'b-NEW', ('x',), 'aaaa')]
+        self.assertEqual(self.events(self.run_step('json', caches=caches, mac=False)), [])
+
+    def test_completed_current_chain_ignores_old_folders(self):
+        caches = [('cache', 'b-OLD', ('x',), 'old'), ('cache', 'b-NEW', ('x',), 'aaaa')]
+        self.assertEqual(self.events(self.run_step('json', caches=caches)), [])
+
+    def test_no_cached_libraries_has_no_event(self):
+        self.assertEqual(self.events(self.run_step('json', caches=[])), [])
+
+    def test_reused_libraries_have_no_event(self):
+        self.assertEqual(self.events(self.run_step('json', chain_dir='b-NEW', stamp='aaaa', reuse=True)), [])
+
+    def test_event_precedes_rebuild_with_same_message(self):
+        es = [json.loads(line) for line in self.run_step('json').splitlines()]
+        stale = next(i for i, e in enumerate(es) if e['ev'] == 'shaders_stale')
+        self.assertIsInstance(es[stale]['t'], (int, float))
+        self.assertEqual(es[stale + 1]['ev'], 'say')
+        self.assertIn('[NOTE] cached shader libraries cannot be reused', es[stale + 1]['msg'])
+
+    def test_no_json_unless_asked(self):
+        for mode in ('bar', 'lines', 'off'):
+            with self.subTest(mode=mode):
+                out = self.run_step(mode)
+                self.assertNotIn('shaders_stale', out)
+                self.assertIn('[NOTE] cached shader libraries cannot be reused (b-OLD -> b-NEW)', out)
+
+
 class Cli(unittest.TestCase):
     def test_argument_error_precedes_json_mode(self):
         r = subprocess.run([sys.executable, '-B', str(SCRIPT), '--progress', 'json', '--invalid-option'],
@@ -109,6 +230,9 @@ class HumanModes(unittest.TestCase):
             text = out.getvalue()
             self.assertIn('message', text)
             self.assertIn('✓ [1/1] compile', text)
+            with contextlib.redirect_stdout(io.StringIO()) as out2:
+                prog = nsp.Progress(mode); prog.plan(1); prog.stage('archive'); prog.end('failed', warn=True); prog.close()
+            self.assertIn('⚠ [1/1] archive', out2.getvalue())
             self.assertEqual('\r' in text, mode == 'bar')
             self.assertEqual(ticker is None, mode == 'off')
 

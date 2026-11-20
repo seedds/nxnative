@@ -16,6 +16,8 @@ void dm_haptics_clear(int player);                 // engine reset: needs a fres
 uint64_t dm_haptics_epoch(int player);
 uint32_t dm_haptics_available(void);
 int dm_haptics_enabled(void);   // an output sink is installed and rumble is on (whether or not a controller has connected yet)
+int dm_haptics_has_output(void);   // an output sink is installed, rumble on or off
+void dm_haptics_set_enabled(int on);   // rumble on or off while the game runs
 void dm_haptics_suspend(unsigned reason, int suspended);
 void dm_haptics_send(const dm_vibration_update *updates, int count);   // one atomic batch
 dm_vibration dm_haptics_actual(int player, int motor);

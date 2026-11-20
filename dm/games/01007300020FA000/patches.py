@@ -787,5 +787,12 @@ sites = [
     (0x9abf40, '29050011', 0x14018c02, '[up] pad auto-repeat count +0x30: b cave 0xa0ef48 (was add w9, w9, #1)'),
 ]
 
-# Whether a general rule could replace these patches (dm/tools/docs_patches.py lists it in docs/agents/game-patches.md)
-GENERALIZE = "No: the game's own clock and timers (a community 60 fps mod on the host's frame step)"
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': '60 fps frame step (112 sites)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an "
+            'exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata',
+     'checked': 'nso_fnmap of its 112 sites into those four mains (2026-11-09)',
+     'kept': '1.0.1 (2019) is the last update; a function match would serve no other build of this game'},
+]

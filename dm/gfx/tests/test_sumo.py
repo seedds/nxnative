@@ -95,7 +95,7 @@ class SumoTests(unittest.TestCase):
 
     def test_streams_keep_the_parent_archive_budget(self):
         with self.assertRaisesRegex(SystemExit, 'archive members add up to more than'):
-            split.scan_blob(mux(descriptor('vs')), '/member', [], left=[1])
+            split.scan_blob(mux(descriptor('vs')), '/member', [], left=[1, 1])
 
     def test_descriptor_bounds_version_and_shader_validation(self):
         for offset, fmt, value in [(4, '<I', 2), (0x78, '<Q', 0xffffffff), (0x78 + 8, '<Q', 0xd0), (0x78 + 16, '<I', 0x10), (0xd0 + 0x704, '<I', 8)]:

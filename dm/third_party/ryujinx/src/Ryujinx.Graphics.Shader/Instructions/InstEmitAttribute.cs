@@ -20,52 +20,57 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstAld op = context.GetOp<InstAld>();
 
+            EmitAld(context, op.Dest, op.SrcA, op.SrcB, op.Imm11, (int)op.AlSize, op.P, op.O, op.Phys);
+        }
+
+        internal static void EmitAld(EmitterContext context, int dest, int srcA, int srcB, int imm11, int alSize, bool p, bool o, bool phys)
+        {
             // Some of those attributes are per invocation,
             // so we should ignore any primitive vertex indexing for those.
-            bool hasPrimitiveVertex = AttributeMap.HasPrimitiveVertex(context.TranslatorContext.Definitions.Stage, op.O) && !op.P;
+            bool hasPrimitiveVertex = AttributeMap.HasPrimitiveVertex(context.TranslatorContext.Definitions.Stage, o) && !p;
 
-            if (!op.Phys)
+            if (!phys)
             {
-                hasPrimitiveVertex &= HasPrimitiveVertex(op.Imm11);
+                hasPrimitiveVertex &= HasPrimitiveVertex(imm11);
             }
 
-            Operand primVertex = hasPrimitiveVertex ? context.Copy(GetSrcReg(context, op.SrcB)) : null;
+            Operand primVertex = hasPrimitiveVertex ? context.Copy(GetSrcReg(context, srcB)) : null;
 
-            for (int index = 0; index < (int)op.AlSize + 1; index++)
+            for (int index = 0; index < alSize + 1; index++)
             {
-                Register rd = new(op.Dest + index, RegisterType.Gpr);
+                Register rd = new(dest + index, RegisterType.Gpr);
 
                 if (rd.IsRZ)
                 {
                     break;
                 }
 
-                if (op.Phys)
+                if (phys)
                 {
-                    Operand offset = context.ISubtract(GetSrcReg(context, op.SrcA), Const(AttributeConsts.UserAttributeBase));
+                    Operand offset = context.ISubtract(GetSrcReg(context, srcA), Const(AttributeConsts.UserAttributeBase));
                     Operand vecIndex = context.ShiftRightU32(offset, Const(4));
                     Operand elemIndex = context.BitwiseAnd(context.ShiftRightU32(offset, Const(2)), Const(3));
 
-                    StorageKind storageKind = op.O ? StorageKind.Output : StorageKind.Input;
+                    StorageKind storageKind = o ? StorageKind.Output : StorageKind.Input;
 
                     context.Copy(Register(rd), context.Load(storageKind, IoVariable.UserDefined, primVertex, vecIndex, elemIndex));
                 }
-                else if (op.SrcB == RegisterConsts.RegisterZeroIndex || op.P)
+                else if (srcB == RegisterConsts.RegisterZeroIndex || p)
                 {
-                    int offset = FixedFuncToUserAttribute(context.TranslatorContext, op.Imm11 + index * 4, op.O);
-                    bool isOutput = op.O && CanLoadOutput(offset);
+                    int offset = FixedFuncToUserAttribute(context.TranslatorContext, imm11 + index * 4, o);
+                    bool isOutput = o && CanLoadOutput(offset);
 
-                    if (!op.P && !isOutput && TryConvertIdToIndexForVulkan(context, offset, out Operand value))
+                    if (!p && !isOutput && TryConvertIdToIndexForVulkan(context, offset, out Operand value))
                     {
                         context.Copy(Register(rd), value);
                     }
                     else
                     {
-                        value = AttributeMap.GenerateAttributeLoad(context, primVertex, offset, isOutput, op.P);
+                        value = AttributeMap.GenerateAttributeLoad(context, primVertex, offset, isOutput, p);
 
                         if ((!context.TranslatorContext.Definitions.SupportsScaledVertexFormats || context.VertexAsCompute) &&
                             context.TranslatorContext.Stage == ShaderStage.Vertex &&
-                            !op.O &&
+                            !o &&
                             offset >= 0x80 &&
                             offset < 0x280)
                         {
@@ -94,8 +99,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
                 else
                 {
-                    int offset = FixedFuncToUserAttribute(context.TranslatorContext, op.Imm11 + index * 4, op.O);
-                    bool isOutput = op.O && CanLoadOutput(offset);
+                    int offset = FixedFuncToUserAttribute(context.TranslatorContext, imm11 + index * 4, o);
+                    bool isOutput = o && CanLoadOutput(offset);
 
                     context.Copy(Register(rd), AttributeMap.GenerateAttributeLoad(context, primVertex, offset, isOutput, false));
                 }
@@ -106,18 +111,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstAst op = context.GetOp<InstAst>();
 
-            for (int index = 0; index < (int)op.AlSize + 1; index++)
+            EmitAst(context, op.SrcA, op.SrcB, op.Imm11, (int)op.AlSize, op.P, op.Phys);
+        }
+
+        internal static void EmitAst(EmitterContext context, int srcA, int data, int imm11, int alSize, bool p, bool phys)
+        {
+            for (int index = 0; index < alSize + 1; index++)
             {
-                if (op.SrcB + index > RegisterConsts.RegisterZeroIndex)
+                if (data + index > RegisterConsts.RegisterZeroIndex)
                 {
                     break;
                 }
 
-                Register rd = new(op.SrcB + index, RegisterType.Gpr);
+                Register rd = new(data + index, RegisterType.Gpr);
 
-                if (op.Phys)
+                if (phys)
                 {
-                    Operand offset = context.ISubtract(GetSrcReg(context, op.SrcA), Const(AttributeConsts.UserAttributeBase));
+                    Operand offset = context.ISubtract(GetSrcReg(context, srcA), Const(AttributeConsts.UserAttributeBase));
                     Operand vecIndex = context.ShiftRightU32(offset, Const(4));
                     Operand elemIndex = context.BitwiseAnd(context.ShiftRightU32(offset, Const(2)), Const(3));
                     Operand invocationId = AttributeMap.HasInvocationId(context.TranslatorContext.Definitions.Stage, isOutput: true)
@@ -130,7 +140,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     // TODO: Support indirect stores using Ra.
 
-                    int offset = op.Imm11 + index * 4;
+                    int offset = imm11 + index * 4;
 
                     if (!context.TranslatorContext.AttributeUsage.IsUsedOutputAttribute(offset))
                     {
@@ -138,7 +148,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
 
                     offset = FixedFuncToUserAttribute(context.TranslatorContext, offset, isOutput: true);
-                    AttributeMap.GenerateAttributeStore(context, offset, op.P, Register(rd));
+                    AttributeMap.GenerateAttributeStore(context, offset, p, Register(rd));
                 }
             }
         }
@@ -147,13 +157,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstIpa op = context.GetOp<InstIpa>();
 
+            EmitIpa(context, op.Idx ? GetSrcReg(context, op.SrcA) : null, op.Imm10, op.IpaOp, op.SrcB, op.Sat, op.Dest);
+        }
+
+        // idxAddress: the whole attribute address of IPA.IDX (null otherwise)
+        // nxnative: at (null: none) is the word of an Ampere IPA at an offset from the pixel centre (AIpa)
+        internal static void EmitIpa(EmitterContext context, Operand idxAddress, int imm10, IpaOp ipaOp, int srcB, bool sat, int dest, Operand at = null)
+        {
             Operand res;
 
             bool isFixedFunc = false;
 
-            if (op.Idx)
+            if (idxAddress != null)
             {
-                Operand offset = context.ISubtract(GetSrcReg(context, op.SrcA), Const(AttributeConsts.UserAttributeBase));
+                Operand offset = context.ISubtract(idxAddress, Const(AttributeConsts.UserAttributeBase));
                 Operand vecIndex = context.ShiftRightU32(offset, Const(4));
                 Operand elemIndex = context.BitwiseAnd(context.ShiftRightU32(offset, Const(2)), Const(3));
 
@@ -162,24 +179,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                isFixedFunc = TryFixedFuncToUserAttributeIpa(context, op.Imm10, out res);
+                isFixedFunc = TryFixedFuncToUserAttributeIpa(context, imm10, out res);
 
-                if (op.Imm10 is >= AttributeConsts.UserAttributeBase and < AttributeConsts.UserAttributeEnd)
+                if (imm10 is >= AttributeConsts.UserAttributeBase and < AttributeConsts.UserAttributeEnd)
                 {
-                    int index = (op.Imm10 - AttributeConsts.UserAttributeBase) >> 4;
+                    int index = (imm10 - AttributeConsts.UserAttributeBase) >> 4;
 
                     if (context.TranslatorContext.Definitions.ImapTypes[index].GetFirstUsedType() == PixelImap.Perspective)
                     {
                         res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
                     }
                 }
-                else if (op.Imm10 is AttributeConsts.PositionX or AttributeConsts.PositionY)
+                else if (imm10 is AttributeConsts.BaryCoordX or AttributeConsts.BaryCoordX + 4 or AttributeConsts.BaryCoordX + 8)
+                {
+                    // nxnative: the perspective barycentric coordinates are read divided by w, like a perspective attribute
+                    res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
+                }
+                else if (imm10 is AttributeConsts.PositionX or AttributeConsts.PositionY)
                 {
                     // FragCoord X/Y must be divided by the render target scale, if resolution scaling is active,
                     // because the shader code is not expecting scaled values.
                     res = context.FPDivide(res, context.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.RenderScale), Const(0)));
 
-                    if (op.Imm10 == AttributeConsts.PositionY && context.TranslatorContext.Options.TargetApi != TargetApi.OpenGL)
+                    if (imm10 == AttributeConsts.PositionY && context.TranslatorContext.Options.TargetApi != TargetApi.OpenGL)
                     {
                         // If YNegate is enabled, we need to flip the fragment coordinates vertically, unless
                         // the API supports changing the origin (only OpenGL does).
@@ -191,13 +213,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         }
                     }
                 }
-                else if (op.Imm10 == AttributeConsts.PrimitiveId && context.TranslatorContext.Definitions.HalvePrimitiveId)
+                else if (imm10 == AttributeConsts.PrimitiveId && context.TranslatorContext.Definitions.HalvePrimitiveId)
                 {
                     // If quads are used, but the host does not support them, they need to be converted to triangles.
                     // Since each quad becomes 2 triangles, we need to compensate here and divide primitive ID by 2.
                     res = context.ShiftRightS32(res, Const(1));
                 }
-                else if (op.Imm10 == AttributeConsts.FrontFacing && context.TranslatorContext.GpuAccessor.QueryHostHasFrontFacingBug())
+                else if (imm10 == AttributeConsts.FrontFacing && context.TranslatorContext.GpuAccessor.QueryHostHasFrontFacingBug())
                 {
                     // gl_FrontFacing sometimes has incorrect (flipped) values depending how it is accessed on Intel GPUs.
                     // This weird trick makes it behave.
@@ -205,21 +227,44 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
-            if (op.IpaOp == IpaOp.Multiply && !isFixedFunc)
+            if (at != null && ipaOp != IpaOp.Constant && (idxAddress != null || IsInterpolatedFloat(imm10)))
             {
-                Operand srcB = GetSrcReg(context, op.SrcB);
+                // nxnative: what IPA.PASS reads (an attribute over w, 1 / w, a screen-linear attribute, the position) is linear over the screen within the
+                // primitive, so its value at an offset is the centre's plus the offset times its screen derivatives, which are exact for a linear function.
+                // The offset word holds x in bits 8..11 and y in bits 24..27, signed, in 1/16 pixel from the centre (Mesa NAK's load_barycentric_offset: s12 in
+                // 1/4096, of which GLSLC writes the top four bits)
+                Operand ox = context.FPMultiply(context.IConvertS32ToFP32(context.ShiftRightS32(context.ShiftLeft(at, Const(20)), Const(28))), ConstF(1f / 16));
+                Operand oy = context.FPMultiply(context.IConvertS32ToFP32(context.ShiftRightS32(context.ShiftLeft(at, Const(4)), Const(28))), ConstF(1f / 16));
+                Operand ddx = context.Add(Instruction.Ddx, Local(), res);
+                Operand ddy = context.Add(Instruction.Ddy, Local(), res);
 
-                res = context.FPMultiply(res, srcB);
+                res = context.FPAdd(res, context.FPAdd(context.FPMultiply(ddx, ox), context.FPMultiply(ddy, oy)));
             }
 
-            res = context.FPSaturate(res, op.Sat);
+            if (ipaOp == IpaOp.Multiply && !isFixedFunc)
+            {
+                Operand multiplier = GetSrcReg(context, srcB);
 
-            context.Copy(GetDest(op.Dest), res);
+                res = context.FPMultiply(res, multiplier);
+            }
+
+            res = context.FPSaturate(res, sat);
+
+            context.Copy(GetDest(dest), res);
         }
 
         public static void Isberd(EmitterContext context)
         {
             InstIsberd op = context.GetOp<InstIsberd>();
+
+            // nxnative: in a hull shader that writes its control points straight into the stage's circular buffer, ISBERD with O reads the shader's own outputs: the two
+            // words at 0x7e and 0x7f (the count of per-patch words and the stride between output words), and the output words it copies into the buffer after its
+            // body. DirectCbeWrites answers the first two and drops those copies
+            if (op.O && context.TranslatorContext.UsesDirectCbe)
+            {
+                context.Copy(GetDest(op.Dest), context.Load(StorageKind.Input, IoVariable.IsbeOutput, GetSrcReg(context, op.SrcA)));
+                return;
+            }
 
             // This instruction performs a load from ISBE (Internal Stage Buffer Entry) memory.
             // Here, we just propagate the offset, as the result from this instruction is usually
@@ -304,6 +349,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
         private static bool CanLoadOutput(int attr)
         {
             return attr is not AttributeConsts.TessCoordX and not AttributeConsts.TessCoordY;
+        }
+
+        // nxnative: a float attribute the rasterizer interpolates (not the primitive, layer and viewport indices, the viewport mask or the facing)
+        private static bool IsInterpolatedFloat(int attr)
+        {
+            return attr is >= AttributeConsts.PositionX and < AttributeConsts.ViewportMask or >= 0x3a8 and < AttributeConsts.BaryCoordX + 12;
         }
 
         private static bool TryFixedFuncToUserAttributeIpa(EmitterContext context, int attr, out Operand selectedAttr)

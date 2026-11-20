@@ -1,0 +1,45 @@
+# Princess Peach: Showtime! 1.0.0, Good-Feel / Unreal Engine 4.27 with Nintendo's NVN RHI, Wwise, SDK 15.3.2. Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents)
+
+# ---- Identity ----
+title_id	01007A3009184000
+program_id	01007A3009184000
+
+# ---- App ----
+name	Princess Peach: Showtime!
+ipa	PrincessPeachShowtime.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=928efe2954f680557b8b3839481c97db	subsdk0=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	PJ037/Content/Paks/PJ037-Switch.pak
+zip_store	.mp4:.pak:.metallib
+
+# ---- Memory ----
+# nninitStartup reserves one address region for the engine, 62 GB by default; the rewriter's engine-wide gate on the store of its size (dm/tools/ue_region.py; hle_svc.c)
+# gives it what the alias region has room for (2.81 GB). FMallocBinned3's pool reservation is replaced by the host's malloc zone (dm/tools/ue_malloc.py; hle_uemalloc.c).
+# The layout of the other Unreal games with virtual address memory: it needs no extended address space on an iPhone
+mem_reserve	0xF0000000
+mem_alias	0xC8000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+
+# ---- Frame rate ----
+# The Switch build sets rhi.SyncInterval 2 (30 fps). hle_fpslock.c lowers it, found by name by the rewriter (ue_cvar.py); the game's movement is time-based. DM_FPS_TARGET=30 restores 30
+fps_target	60
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Princess Peach: Showtime! shaders
+
+# ---- Depth ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

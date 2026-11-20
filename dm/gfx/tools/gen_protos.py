@@ -55,7 +55,16 @@ for i, n in enumerate(names):
           '    adrp x16, _nvn_slot@PAGE', '    add x16, x16, _nvn_slot@PAGEOFF',
           f'    mov x17, #{i * 16}', '    add x16, x16, x17',
           '    mov x17, #1', '    stadd x17, [x16]', '    ldr x17, [x16, #8]', '    br x17']
+# Uncounted trampolines _nvnthf_<i>: the same jump without the count. The count is an atomic add on a line every thread that calls NVN shares (the game's main thread and its
+# workers record command buffers at once), and in Breath of the Wild the trampolines of nvnBufferGetAddress and BindUniformBuffer took about 25 times the time of the functions
+# they lead to. hle_nvn.c hands these out unless call counts are asked for (DM_NVN_COUNT=1, the per-frame tables)
+for i, n in enumerate(names):
+    S += [f'    .globl _nvnthf_{i}', f'_nvnthf_{i}:',
+          '    adrp x16, _nvn_slot@PAGE', '    add x16, x16, _nvn_slot@PAGEOFF',
+          f'    mov x17, #{i * 16}', '    add x16, x16, x17',
+          '    ldr x17, [x16, #8]', '    br x17']
 S += ['    .data', '    .p2align 3', '    .globl _nvn_thunk', '_nvn_thunk:'] + [f'    .quad _nvnth_{i}' for i in range(len(names))]
+S += ['    .globl _nvn_thunk_fast', '_nvn_thunk_fast:'] + [f'    .quad _nvnthf_{i}' for i in range(len(names))]
 S += ['    .globl _nvn_names', '_nvn_names:'] + [f'    .quad Ln{i}' for i in range(len(names))]
 S += ['    .cstring'] + [f'Ln{i}: .asciz "{n}"' for i, n in enumerate(names)]
 open(th, 'w').write('\n'.join(S) + '\n')

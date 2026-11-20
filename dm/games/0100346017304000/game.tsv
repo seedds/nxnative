@@ -20,7 +20,7 @@ app_category	public.app-category.simulation-games
 # 1920x1080 in both modes
 op_mode	handheld
 # touch: the virtual gamepad starts in its Tap layout, every touch to the game (the pads' corners would cover the cards, the menu icons at the top right and the on-screen B button);
-# its layout button brings back 2D / 3D (the map scrolls with the right stick; L / R and ZL / ZR switch tabs and lists)
+# the in-game menu's Controller layout brings back 2D / 3D (the map scrolls with the right stick; L / R and ZL / ZR switch tabs and lists)
 pad_layout	touch
 
 # ---- Versions ----

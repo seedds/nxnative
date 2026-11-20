@@ -6,7 +6,7 @@ Update 1.5.28 (v1966080; the menu shows 1.5.27) over the base game, SDK 19.3.14.
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `871fb219…` (the constructor at `sdk+0x1423ec`, the movs at `+0x1423fc` and `+0x142468`) | the SDK-wide rule's cut (implementation 5), registered because the profile was brought up on this build; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `871fb219…` (the constructor at `sdk+0x1423ec`, the movs at `+0x1423fc` and `+0x142468`) | the SDK-wide rule's cut (implementation 5); see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | Ace Attorney Investigations Collection's and Monster Train 2's layout; with the hardware pool Unity ran out of address regions, see [Memory](#memory) |
 | `depth_mode zero` | `game.tsv` | the game calls `nvnDeviceSetDepthMode` with near = 0; it only decides the mode of the pipeline bases made before the game runs |
@@ -55,3 +55,4 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 ## Found on this game
 
 - An SDK 19.3.14 instance of [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
+- **Current:** [a virtual controller trusted but never published by GameController](../../../docs/reference/services.md#a-virtual-controller-is-trusted-but-never-published-by-gamecontroller): the host routing fix is checked with synthetic devices; a Steam Link retest is pending.

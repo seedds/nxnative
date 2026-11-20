@@ -1,4 +1,5 @@
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+using Ryujinx.Graphics.Shader.Translation;
 using System;
 using System.Collections.Generic;
 using static Ryujinx.Graphics.Shader.StructuredIr.AstHelper;
@@ -9,7 +10,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
     {
         // This is a modified version of the algorithm presented on the paper
         // "Taming Control Flow: A Structured Approach to Eliminating Goto Statements".
-        public static void Eliminate(GotoStatement[] gotos)
+        public static void Eliminate(GotoStatement[] gotos, Func<AggregateType, AstOperand> newTemp)
         {
             for (int index = gotos.Length - 1; index >= 0; index--)
             {
@@ -35,7 +36,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     }
                     while (!DirectlyRelated(drBlock, lBlock, drLevel, lLevel));
 
-                    MoveOutward(stmt, gLevel, drLevel);
+                    MoveOutward(gotos, index, stmt, gLevel, drLevel);
 
                     gBlock = drBlock;
                     gLevel = drLevel;
@@ -61,7 +62,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 {
                     if (gLevel > lLevel)
                     {
-                        MoveOutward(stmt, gLevel, lLevel);
+                        MoveOutward(gotos, index, stmt, gLevel, lLevel);
                     }
                     else
                     {
@@ -70,7 +71,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                             Lift(stmt);
                         }
 
-                        MoveInward(stmt);
+                        MoveInward(stmt, newTemp);
                     }
                 }
 
@@ -164,7 +165,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             stmt.IsLoop = false;
         }
 
-        private static void MoveOutward(GotoStatement stmt, int gLevel, int lLevel)
+        private static void MoveOutward(GotoStatement[] gotos, int index, GotoStatement stmt, int gLevel, int lLevel)
         {
             AstBlock origin = ParentBlock(stmt.Goto);
 
@@ -230,7 +231,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                     IAstNode last = block == lBlock && !stmt.IsLoop ? stmt.Label : null;
 
-                    AstBlock newBlock = Enclose(block, AstBlockType.Else, null, Next(stmt.Goto), last);
+                    // Without the else, what follows goes in an if (Enclose above), which a goto can jump into, as this one may on its
+                    // way to its label or an earlier one in this if may. Into an else it can only with a loop around the if and the else,
+                    // which closes where the else does: Splatoon Raiders' uber shaders, with their switches one after another, came out as
+                    // 26 such loops nested around the whole program (it has no jump back), which Metal's compilers cannot finish.
+                    AstBlock newBlock = HasGotoInto(gotos, index, child, block, Next(stmt.Goto), last) ? null : Enclose(block, AstBlockType.Else, null, Next(stmt.Goto), last);
 
                     if (newBlock != null)
                     {
@@ -242,7 +247,46 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             }
         }
 
-        private static void MoveInward(GotoStatement stmt)
+        // Whether the goto at index, or one not yet eliminated inside source, has its label among block's statements from first up to last
+        private static bool HasGotoInto(GotoStatement[] gotos, int index, AstBlock source, AstBlock block, IAstNode first, IAstNode last)
+        {
+            HashSet<IAstNode> range = [];
+
+            for (IAstNode node = first; node != last && node != null; node = Next(node))
+            {
+                range.Add(node);
+            }
+
+            // Gotos are in program order, and those not yet eliminated have not moved: the ones inside source come right before this one.
+            for (int other = index; other == index || (other >= 0 && IsInside(gotos[other].Goto, source)); other--)
+            {
+                IAstNode label = gotos[other].Label;
+
+                while (label != null && label.Parent != block)
+                {
+                    label = label.Parent;
+                }
+
+                if (label != null && range.Contains(label))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsInside(IAstNode node, AstBlock block)
+        {
+            while (node != null && node != block)
+            {
+                node = node.Parent;
+            }
+
+            return node != null;
+        }
+
+        private static void MoveInward(GotoStatement stmt, Func<AggregateType, AstOperand> newTemp)
         {
             AstBlock block = ParentBlock(stmt.Goto);
 
@@ -252,13 +296,18 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             {
                 AstBlock child = path[index];
                 AstBlock last = child;
+                AstBlock conditionBlock = null;
+                IAstNode guard = null;
+                bool either = false;
 
                 if (child.Type == AstBlockType.If)
                 {
                     // Modify the if condition to allow it to be entered by the goto.
                     if (!ContainsCondComb(child.Condition, Instruction.LogicalOr, stmt.Condition))
                     {
-                        child.OrCondition(stmt.Condition);
+                        conditionBlock = child;
+                        guard = stmt.Condition;
+                        either = true;
                     }
                 }
                 else if (child.Type == AstBlockType.Else)
@@ -273,7 +322,8 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                     if (!ContainsCondComb(ifBlock.Condition, Instruction.LogicalAnd, cond))
                     {
-                        ifBlock.AndCondition(cond);
+                        conditionBlock = ifBlock;
+                        guard = cond;
                     }
 
                     last = ifBlock;
@@ -281,12 +331,51 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                 Enclose(block, AstBlockType.If, stmt.Condition, Next(stmt.Goto), last);
 
+                if (conditionBlock != null)
+                {
+                    GuardEntryCondition(conditionBlock, guard, either, newTemp);
+                }
+
                 block.Remove(stmt.Goto);
 
                 child.AddFirst(stmt.Goto);
 
                 block = child;
             }
+        }
+
+        private static void GuardEntryCondition(AstBlock block, IAstNode guard, bool either,
+            Func<AggregateType, AstOperand> newTemp)
+        {
+            // Constants are defined on every entry path. Keep the direct
+            // condition, including the false label condition LoopExitCohort
+            // recognizes when moving a subgroup block back into its loop.
+            if (block.Condition is AstOperand { Type: OperandType.Constant })
+            {
+                if (either)
+                {
+                    block.OrCondition(guard);
+                }
+                else
+                {
+                    block.AndCondition(guard);
+                }
+
+                return;
+            }
+
+            // A goto can enter this block after bypassing the original
+            // condition's definition. Neither an eager logical operation nor
+            // oldCondition || gotoFlag may read that undefined value. Evaluate
+            // it only on the original entry path, with a result defined on
+            // both paths. Insert after the skip enclosure above: otherwise the
+            // goto would also skip this result's initialization.
+            AstOperand result = newTemp(AggregateType.Bool);
+            AstBlock evaluate = new(AstBlockType.If, either ? InverseCond(result) : result);
+            evaluate.Add(Assign(result, block.Condition));
+            block.Parent.AddBefore(block, Assign(result, guard));
+            block.Parent.AddBefore(block, evaluate);
+            block.Condition = result;
         }
 
         private static bool ContainsCondComb(IAstNode node, Instruction inst, IAstNode newCond)

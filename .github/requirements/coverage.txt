@@ -1,0 +1,6 @@
+# The coverage job's tools (.github/workflows/tests.yml, coverage job; pyproject.toml's [tool.coverage.run]), pinned so its numbers do not move with a new release.
+# The last three are the packages the tools import (as in tests.yml's tool-test job), so the tests that need them run under coverage too.
+coverage==7.17.0
+lz4==4.4.5
+capstone==5.0.9
+fonttools==4.67.0

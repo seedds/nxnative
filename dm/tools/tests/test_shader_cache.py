@@ -1,0 +1,592 @@
+#!/usr/bin/env python3
+# The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
+import concurrent.futures as cf, hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+from pathlib import Path
+from unittest import mock
+
+REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import shader_cache
+
+D1, D2, D3 = 'a' * 64, 'b' * 64, 'c' * 64
+APPLE_PYTHON = '/usr/bin/python3'   # Xcode's, whose sqlite3 is Apple's /usr/lib/libsqlite3.dylib: a fork that opens a database there dies (GitHub issue #2354)
+SERVED = STORE = None   # what the forked workers inherit, and each worker's own store
+
+
+def worker_start():
+    global STORE
+    assert SERVED is not None; STORE = SERVED.worker()
+
+
+def forked_work(i):
+    s = STORE; assert s is not None
+    for j in range(300): s.put(f'f{i}/{j}', f'{i}'.encode() * 1000); assert s.get(f'f{i}/{j}') == f'{i}'.encode() * 1000
+    with s.batch():
+        with s.batch(): s.put(f'f{i}/batch', b'b')
+        assert s.has(f'f{i}/batch')
+    try:
+        with s.batch(): s.put(f'f{i}/undone', b'u'); raise KeyError(i)
+    except KeyError: pass
+    try: s._call('close')
+    except ValueError: pass
+    else: raise AssertionError('a worker closed the store')
+    tmp = f'{WORK}/{i}'
+    assert s.to_file(f'f{i}/0', tmp) and not s.to_file('none', tmp); s.put_file(f'f{i}/file', tmp)
+    return s.get('before'), sorted(s.names(f'f{i}/'))[-2:], s.get(f'f{i}/file'), s.full
+
+
+def dies_in_batch(i):
+    s = STORE; assert s is not None
+    with s.batch(): s.put('dead', b'd'); os._exit(9)
+
+
+def forked_stores(path, work):
+    """Four forked workers of a process that has opened the store, as dmsh_build.py makes them → their results, and what the store holds then"""
+    import multiprocessing
+    global SERVED, WORK
+    WORK = work; store = shader_cache.Store(path); store.put('before', b'0'); SERVED = shader_cache.Served(store, 4)
+    with multiprocessing.get_context('fork').Pool(4, initializer=worker_start) as pool:   # every worker forked here, on any Python (an executor of Python 3.9 forks them as work comes)
+        SERVED.start()
+        got = pool.map(forked_work, range(4), 1)
+    store.put('after', b'1')   # this process's connection still works
+    return got, len(store.names('f')), store.has('f0/undone'), store.get('after')
+
+
+WORK = ''
+EXPECT = ([(b'0', [f'f{i}/batch', f'f{i}/file'], f'{i}'.encode() * 1000, False) for i in range(4)], 1208, False, b'1')
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.root = Path(t.name); self.path = self.root / 'cas.db'; self.said = []
+        self.store = shader_cache.Store(self.path, self.said.append); self.addCleanup(self.store.close)
+
+    def blobs(self): return self.store.db.execute('SELECT count(*) FROM blob').fetchone()[0]
+
+
+@unittest.skipIf(sys.version_info < (3, 11), 'an sqlite3 error carries its code from Python 3.11')
+class Renumbered(unittest.TestCase):
+    """A new file that takes another inode at its first write (an exFAT drive under macOS 26.6.2, GitHub issue #2434): SQLite's real SQLITE_READONLY_DBMOVED, made here by
+    putting a copy of the file in its place. DM_EXFAT_DIR=<a folder on an exFAT volume> also runs test_on_the_drive there"""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(dir=os.environ.get('DM_EXFAT_DIR')); self.addCleanup(t.cleanup)
+        self.path = Path(t.name) / 'sub' / 'cas.db'
+        self.renumber = 0; self.opened = 0; connect = shader_cache.sqlite3.connect; test = self
+
+        class Drive(sqlite3.Connection):
+            def execute(self, sql, *args):
+                cursor = super().execute(sql, *args)
+                if sql.startswith('PRAGMA auto_vacuum') and test.renumber:
+                    test.renumber -= 1; copy = test.path.with_name('copy'); copy.write_bytes(test.path.read_bytes()); os.replace(copy, test.path)
+                return cursor
+
+        def counted(*a, **k): self.opened += 1; return connect(*a, factory=Drive, **k)
+        patcher = mock.patch.object(shader_cache.sqlite3, 'connect', counted); patcher.start(); self.addCleanup(patcher.stop)
+
+    def check(self, opened):
+        s = shader_cache.Store(self.path); self.addCleanup(s.close)
+        if opened: self.assertEqual(self.opened, opened)
+        for i in range(200): s.put(f'x/{i}', os.urandom(5000))
+        self.assertEqual(len(s.names('x/')), 200)
+        self.assertEqual([s.db.execute(f'PRAGMA {p}').fetchone()[0] for p in ('page_size', 'auto_vacuum', 'journal_mode')], [16384, 2, 'wal'])
+
+    def test_a_renumbered_file_is_opened_again(self): self.renumber = 1; self.check(2)
+
+    def test_a_file_that_moves_again_fails(self):
+        self.renumber = 2
+        with self.assertRaises(sqlite3.OperationalError) as e: shader_cache.Store(self.path)
+        self.assertEqual((e.exception.sqlite_errorcode, self.opened), (shader_cache.DBMOVED, 2))
+
+    def test_on_the_drive(self): self.check(0 if os.environ.get('DM_EXFAT_DIR') else 1)   # opened once where the file keeps the inode SQLite notes, as on APFS; twice on such a drive
+
+
+class Entries(Base):
+    def test_in_and_out(self):
+        self.store.put('x/y', b'bytes')
+        self.assertEqual(self.store.get('x/y'), b'bytes'); self.assertTrue(self.store.has('x/y'))
+        self.assertIsNone(self.store.get('absent')); self.assertFalse(self.store.has('absent'))
+        self.store.put('x/y', b'new'); self.assertEqual(self.store.get('x/y'), b'new')
+
+    def test_empty_entry(self):
+        self.store.put('e', b''); self.assertEqual(self.store.get('e'), b''); self.assertTrue(self.store.has('e'))
+        out = self.root / 'out'; self.assertTrue(self.store.to_file('e', out)); self.assertEqual(out.read_bytes(), b'')
+
+    def test_names_take_a_prefix_only(self):
+        for n in ('shader/a/mac/x', 'shader/a/ios/x', 'shader/ab/mac/x', 'shader0'): self.store.put(n, b'1')
+        self.assertEqual(self.store.names('shader/a/'), {'shader/a/mac/x', 'shader/a/ios/x'})
+
+    def test_delete_prefix_takes_only_its_names_and_bytes_shared_stay(self):   # dmsh_build.py's staged outputs, once its image is written
+        self.store.put('stage/x/mac/k_b.metallib', b'shared'); self.store.put('stage/x/mac/k_b.json', b'staged only')
+        self.store.put('shader/d/mac/k_b.metallib', b'shared'); self.store.put('stage/xy', b'another stage')
+        self.store.delete_prefix('stage/x/')
+        self.assertEqual(self.store.names('stage/'), {'stage/xy'})
+        self.assertEqual(self.store.get('shader/d/mac/k_b.metallib'), b'shared')
+        self.assertEqual(self.blobs(), 2)   # 'staged only' gave its bytes back; 'shared' is still named
+
+    def test_the_same_bytes_are_stored_once(self):   # a library under its MSL's digest and its shader's digest was one APFS clone
+        self.store.put('metallib/mac/d.metallib', b'L' * 100000); self.store.put('shader/d/mac/k_b.metallib', b'L' * 100000)
+        self.assertEqual(self.blobs(), 1)
+        self.assertEqual(self.store.get('shader/d/mac/k_b.metallib'), b'L' * 100000)
+
+    def test_to_file_and_from_file(self):
+        src, dst = self.root / 'src', self.root / 'dst'; src.write_bytes(b'data')
+        self.store.put_file('f', src)
+        self.assertTrue(self.store.to_file('f', dst)); self.assertEqual(dst.read_bytes(), b'data')
+        self.assertFalse(self.store.to_file('absent', self.root / 'none')); self.assertFalse((self.root / 'none').exists())
+
+    def test_other_threads_read_on_connections_of_their_own(self):
+        # one connection gives an entry's bytes at 190 MB/s; the library image is written from 300,000 entries (shader_lib.py write), read by a few threads at once
+        for i in range(50): self.store.put(f's/{i}', bytes([i]) * 40000)
+        self.assertEqual(self.store.get('s/7'), bytes([7]) * 40000); self.assertEqual(self.store.readers, {})   # the thread that opened it: the one connection, as before
+        with cf.ThreadPoolExecutor(4) as pool: got = list(pool.map(lambda i: self.store.get(f's/{i}'), range(50)))
+        self.assertEqual(got, [bytes([i]) * 40000 for i in range(50)])
+        self.assertTrue(0 < len(self.store.readers) <= 4)
+        self.store.put('s/new', b'written since'); self.store.delete_prefix('s/1')   # what was written since is read, what was removed is gone
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(lambda: [self.store.get(n) for n in ('s/new', 's/1', 's/2', 'absent')]).result(), [b'written since', None, bytes([2]) * 40000, None])
+        self.store.close()
+        self.assertEqual(os.listdir(self.root), ['cas.db']); self.assertEqual(self.store.readers, {})   # their connections closed with it: one file is left
+
+    def test_a_read_in_another_thread_waits_for_a_batch_and_a_batch_reads_what_it_wrote(self):
+        started, read = threading.Event(), []
+        def reader(): started.wait(20); t = time.time(); read.append((self.store.get('in/batch'), time.time() - t))
+        def writer():
+            with self.store.batch():
+                self.store.put('in/batch', b'whole'); self.assertEqual(self.store.get('in/batch'), b'whole')   # its own write, on the one connection
+                started.set(); time.sleep(0.3)
+        with cf.ThreadPoolExecutor(2) as pool: a, b = pool.submit(reader), pool.submit(writer); b.result(); a.result()
+        self.assertEqual(read[0][0], b'whole'); self.assertGreater(read[0][1], 0.2)   # not "absent": the read came after the batch, as on one connection
+
+    def test_recovery_waits_for_readers_being_opened_or_queried(self):
+        # A reader's connection belongs to this database until its query finishes. Recovery used to clear the registry between registration and lookup (KeyError), close a
+        # connection during fetchall, or replace the database while a connection to the old file was still being opened. Pause real SQLite readers at both lifetime boundaries.
+        for stage in ('open', 'fetch', 'failed_fetch'):
+            with self.subTest(stage=stage): self.reader_recovery(stage)
+
+    def reader_recovery(self, stage):
+        connect = sqlite3.connect
+        entered, release, recovering, recovered = (threading.Event() for _ in range(4))
+        store = shader_cache.Store(self.root / f'{stage}.db', self.said.append); self.addCleanup(store.close)
+        store.put('entry', b'before recovery')
+        def pause():
+            entered.set()
+            if not release.wait(10): raise TimeoutError('the reader was not released')
+        class Cursor(sqlite3.Cursor):
+            def fetchall(self):
+                if stage != 'open': pause()
+                if stage == 'failed_fetch': raise sqlite3.DatabaseError('database disk image is malformed')
+                return super().fetchall()
+        class Reader(sqlite3.Connection):
+            def execute(self, sql, args=()): return self.cursor(factory=Cursor).execute(sql, args)
+            def close(self):
+                if entered.is_set() and not release.is_set(): raise AssertionError('closed an active reader')
+                super().close()
+        def opening(*args, **kwargs):
+            if kwargs.get('uri'):
+                db = connect(*args, factory=Reader, **kwargs)
+                if stage == 'open': pause()
+                return db
+            return connect(*args, **kwargs)
+        def recover():
+            recovering.set()
+            with store.lock: store._damage(sqlite3.DatabaseError('database disk image is malformed'))
+            recovered.set()
+        with mock.patch.object(shader_cache.sqlite3, 'connect', opening), cf.ThreadPoolExecutor(2) as pool:
+            read = pool.submit(store.get, 'entry')
+            try:
+                self.assertTrue(entered.wait(10))
+                recovery = pool.submit(recover)
+                self.assertTrue(recovering.wait(10))
+                self.assertFalse(recovered.wait(0.1), 'recovery replaced a database with an active reader')
+            finally: release.set()
+            self.assertEqual(read.result(10), None if stage == 'failed_fetch' else b'before recovery')
+            recovery.result(10)
+        self.assertTrue(recovered.is_set()); self.assertEqual(store.readers, {})
+        store.put('entry', b'after recovery')
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(store.get, 'entry').result(10), b'after recovery')
+
+    def test_parallel_queries_keep_independent_reader_lifetimes(self):
+        # The lifetime guard must not serialize unrelated readers: both queries need to enter SQLite before either one finishes.
+        self.store.put('entry', b'parallel'); together = threading.Barrier(2)
+        connect = sqlite3.connect
+        class Reader(sqlite3.Connection):
+            def execute(self, sql, args=()):
+                together.wait(10)
+                return super().execute(sql, args)
+        def opening(*args, **kwargs): return connect(*args, factory=Reader, **kwargs)
+        with mock.patch.object(shader_cache.sqlite3, 'connect', opening), cf.ThreadPoolExecutor(2) as pool:
+            reads = [pool.submit(self.store.get, 'entry') for _ in range(2)]
+            self.assertEqual([r.result(10) for r in reads], [b'parallel', b'parallel'])
+
+    def test_one_file_is_left(self):
+        self.store.put('x', b'1'); self.store.close()
+        self.assertEqual(os.listdir(self.root), ['cas.db'])
+        again = shader_cache.Store(self.path); self.addCleanup(again.close)
+        self.assertEqual(again.get('x'), b'1')
+
+
+class ReadOnly(Base):
+    def overlay(self, source=None):
+        s = shader_cache.Store(self.root / 'regress/cas.db', self.said.append, readonly=source or self.path)
+        self.addCleanup(s.close)
+        return s
+
+    def test_fallback_local_precedence_and_source_unchanged(self):
+        self.store.put(f'shader/{D1}/mac/k_b.metal', b'source')
+        self.store.put('metallib/mac/a.metallib', b'library')
+        self.store.put('variant/v/mac.metallib', b'variant')
+        self.store.put('stage/build/mac/k', b'private'); self.store.put('metallib/filled.json', b'private'); self.store.put('index/k.json', b'private')
+        self.store.close(); before = self.path.read_bytes(); stamp = self.path.stat().st_mtime_ns
+        s = self.overlay()
+        self.assertEqual(s.get(f'shader/{D1}/mac/k_b.metal'), b'source')
+        self.assertTrue(s.has('metallib/mac/a.metallib'))
+        self.assertEqual(s.names('variant/'), {'variant/v/mac.metallib'})
+        for name in ('stage/build/mac/k', 'metallib/filled.json', 'index/k.json'):
+            self.assertIsNone(s.get(name)); self.assertFalse(s.has(name)); self.assertNotIn(name, s.names(''))
+        s.put('metallib/mac/a.metallib', b'local'); s.put('metallib/mac/new.metallib', b'new')
+        self.assertEqual(s.get('metallib/mac/a.metallib'), b'local')
+        self.assertEqual(s.names('metallib/mac/'), {'metallib/mac/a.metallib', 'metallib/mac/new.metallib'})
+        s.delete_prefix('variant/'); self.assertEqual(s.get('variant/v/mac.metallib'), b'variant')
+        assert s.readonly is not None and len(s.readonly.dbs) == 1   # the store opened over a read-only one, open
+        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.dbs[0][1].execute('DELETE FROM entry')
+        s.close()
+        self.assertEqual(self.path.read_bytes(), before); self.assertEqual(self.path.stat().st_mtime_ns, stamp)
+
+    def test_committed_wal_is_visible_while_normal_build_is_open(self):
+        s = self.overlay()
+        self.store.put('metallib/mac/new.metallib', b'committed in WAL')
+        self.assertEqual(s.get('metallib/mac/new.metallib'), b'committed in WAL')
+        self.assertTrue(s.has('metallib/mac/new.metallib'))
+
+    def test_missing_or_damaged_source_is_never_created_or_repaired(self):
+        missing = self.root / 'absent/cas.db'; s = self.overlay(missing)
+        self.assertIsNone(s.get('metallib/mac/x.metallib')); s.close()
+        self.assertFalse(missing.parent.exists())
+        damaged = self.root / 'damaged.db'; damaged.write_bytes(b'not a database' * 3000)
+        before = damaged.read_bytes(); s = self.overlay(damaged)
+        self.assertIsNone(s.get('metallib/mac/x.metallib')); s.put('new', b'works')
+        self.assertEqual(s.get('new'), b'works'); self.assertEqual(damaged.read_bytes(), before)
+        self.assertEqual(len(self.said), 1)
+
+    def test_historical_builder_uses_harness_reader_including_forked_workers(self):
+        self.store.put('metallib/mac/a.metallib', b'library'); self.store.close()
+        before = hashlib.sha256(self.path.read_bytes()).digest()
+        script = self.root / 'old/build.py'; script.parent.mkdir()
+        (script.parent / 'shader_cache.py').write_text('raise AssertionError("historical cache reader was used")\n')
+        script.write_text('''import atexit, multiprocessing, os, shader_cache, sys
+s = shader_cache.Store(sys.argv[1]); atexit.register(s.close)
+assert s.get('metallib/mac/a.metallib') == b'library'
+served = shader_cache.Served(s, 1)
+def worker():
+    remote = served.worker()
+    assert remote.get('metallib/mac/a.metallib') == b'library'
+    remote.put('metallib/mac/new.metallib', b'new')
+p = multiprocessing.get_context('fork').Process(target=worker)
+p.start(); served.start(); p.join(20)
+assert p.exitcode == 0, p.exitcode
+''')
+        dest = self.root / 'regress.db'
+        r = subprocess.run([sys.executable, shader_cache.__file__, '--run', '--readonly', str(self.path), str(script), str(dest)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        s = shader_cache.Store(dest); self.addCleanup(s.close)
+        self.assertEqual(s.get('metallib/mac/new.metallib'), b'new')
+        self.assertIsNone(s.get('metallib/mac/a.metallib'))   # reading the fallback does not copy it
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).digest(), before)
+
+
+class Bounded(Base):
+    def fill(self):
+        for i in range(12):
+            d = f'{i:064x}'; data = os.urandom(220000)
+            self.store.put(f'shader/{d}/mac/k_b.metal', data, i)
+            self.store.put(f'shader/{d}/mac/k_b.json', b'{}', i)
+            self.store.put(f'metallib/mac/{d}.metallib', data, i)
+            self.store.put(f'metallib/mac/{d}_x.metallib', b'split', i)
+            self.store.put(f'variant/{d}/mac.metallib', data, i)
+            self.store.put(f'variant/{d}/metal', b'variant source', i)
+        self.store.put('metallib/filled.json', b'{}', 99)
+        self.store.put('stage/stopped/mac/k', os.urandom(300000), 99)
+
+    def test_physical_limit_dedup_and_whole_groups(self):
+        self.fill()
+        self.store.trim(1 << 20)
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+        self.assertFalse(self.store.has('metallib/filled.json')); self.assertFalse(self.store.names('stage/'))
+        names = self.store.names('')
+        self.assertIn(f'metallib/mac/{11:064x}.metallib', names)
+        for i in range(12):
+            d = f'{i:064x}'
+            self.assertEqual(f'shader/{d}/mac/k_b.metal' in names, f'shader/{d}/mac/k_b.json' in names)
+            self.assertEqual(f'metallib/mac/{d}.metallib' in names, f'metallib/mac/{d}_x.metallib' in names)
+            self.assertEqual(f'variant/{d}/mac.metallib' in names, f'variant/{d}/metal' in names)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM blob WHERE id NOT IN (SELECT blob FROM entry)').fetchone()[0], 0)
+
+    def test_failed_build_is_trimmed_when_last_user_leaves(self):
+        with self.assertRaises(RuntimeError):
+            with shader_cache.bounded(self.path, 1 << 20, self.said.append):
+                self.fill()
+                raise RuntimeError('build failed')
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+
+    def test_replaced_unreferenced_blobs_are_reclaimed_before_evicting_live_entries(self):
+        for i in range(12): self.store.put('index/k.json', os.urandom(200000), i)
+        self.store.put('index/k.json', b'current', 99)
+        self.assertEqual(self.store.trim(1 << 20), 0)
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+        self.assertEqual(self.store.get('index/k.json'), b'current')
+
+    def test_another_process_using_cache_prevents_eviction(self):
+        self.fill(); self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        code = "import fcntl,sys; f=open(sys.argv[1], 'a'); fcntl.flock(f,fcntl.LOCK_SH); print('held',flush=True); sys.stdin.read()"
+        p = subprocess.Popen([sys.executable, '-c', code, str(self.path) + '.lock'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert p.stdout is not None
+        try:
+            self.assertEqual(p.stdout.readline().strip(), 'held')
+            before = self.store.names('')
+            with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+            self.assertEqual(self.store.names(''), before)
+        finally:
+            p.communicate(timeout=10)
+        with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+
+    def test_writer_is_protected_without_a_live_harness(self):
+        # No parent bounded() lease: the builder itself must protect its staged outputs until it exits.
+        source = self.root / 'normal.db'; source.write_bytes(b'')
+        code = ("import atexit,os,sys; sys.path.insert(0,sys.argv[1]); import shader_cache\n"
+                "s=shader_cache.Store(sys.argv[2], readonly=sys.argv[3]); atexit.register(s.close)\n"
+                "for i in range(12): s.put(f'stage/build/{i}',os.urandom(200000))\n"
+                "s.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')\n"
+                "print('ready',flush=True); sys.stdin.read()\n")
+        p = subprocess.Popen([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path), str(source)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert p.stdout is not None
+        try:
+            self.assertEqual(p.stdout.readline().strip(), 'ready')
+            before = self.store.names('stage/')
+            with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+            self.assertEqual(self.store.names('stage/'), before)
+            self.assertGreater(self.path.stat().st_size, 1 << 20)
+        finally:
+            p.communicate(timeout=10)
+        self.assertEqual(p.returncode, 0)
+        with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+
+
+class Writers(Base):
+    def test_threads_share_it(self):
+        def work(i):
+            for j in range(200):
+                self.store.put(f't{i}/{j}', f'{i}.{j}'.encode()); self.assertEqual(self.store.get(f't{i}/{j}'), f'{i}.{j}'.encode())
+        ts = [threading.Thread(target=work, args=(i,)) for i in range(8)]
+        for t in ts: t.start()
+        for t in ts: t.join()
+        self.assertEqual(len(self.store.names('t')), 1600)
+
+    def test_a_batch_is_all_or_nothing(self):
+        with self.assertRaises(ZeroDivisionError):
+            with self.store.batch():
+                self.store.put('a', b'1'); self.store.put('b', b'2'); raise ZeroDivisionError
+        self.assertEqual(self.store.names(''), set())
+        with self.store.batch():
+            with self.store.batch(): self.store.put('a', b'1')
+            self.store.put('b', b'2')
+        self.assertEqual(self.store.names(''), {'a', 'b'})
+
+    def full_after(self, pages):   # the file may grow by this many pages more: SQLite then answers SQLITE_FULL, as on a full drive
+        n = self.store.db.execute('PRAGMA page_count').fetchone()[0]; self.store.db.execute(f'PRAGMA max_page_count={n + pages}')
+
+    def test_a_full_drive_fails_the_whole_batch(self):   # SQLite ends the transaction itself on SQLITE_FULL: an earlier write must not be lost while a later one lands outside the batch
+        self.store.put('before', b'0'); self.full_after(2)
+        with self.store.batch():
+            self.store.put('a', b'small'); self.store.put('b', b'x' * 200000); self.store.put('c', b'small too')
+        self.assertTrue(self.store.full); self.assertEqual(self.store.names(''), {'before'})
+        self.assertEqual(len([m for m in self.said if m.startswith('[RED]')]), 1)
+        self.store.put('d', b'1'); self.assertFalse(self.store.has('d'))   # the build goes on without the cache
+
+    def test_a_failed_commit_fails_the_batch(self):
+        class Db:   # the connection, whose commit finds the drive full
+            def __init__(self, db): self.db = db
+            def __getattr__(self, name): return getattr(self.db, name)
+            def commit(self): raise sqlite3.OperationalError('database or disk is full')
+        real = self.store.db
+        with mock.patch.object(self.store, 'db', Db(real)), self.store.batch(): self.store.put('a', b'1')
+        self.assertTrue(self.store.full); self.assertFalse(real.in_transaction); self.assertEqual(self.store.names(''), set())
+
+    def test_processes_share_it(self):   # regress.py's chain builds and the NSP script on one game's file
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import shader_cache\ns = shader_cache.Store(sys.argv[2])\n"
+                "for j in range(300): s.put(f'{sys.argv[3]}/{j}', sys.argv[3].encode() * 1000); assert s.get(f'{sys.argv[3]}/{j}') == sys.argv[3].encode() * 1000\ns.close()\n")
+        ps = [subprocess.Popen([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path), f'p{i}']) for i in range(4)]
+        self.assertEqual([p.wait() for p in ps], [0, 0, 0, 0])
+        self.assertEqual(len(self.store.names('p')), 1200)
+
+    def test_forked_workers_share_it(self):   # dmsh_build.py's worker processes: forks of a process that has the file open, their calls made by that process
+        self.store.close()
+        self.assertEqual(forked_stores(self.path, str(self.root)), EXPECT)
+
+    def test_forked_workers_with_apples_sqlite(self):   # the same with a Python whose SQLite is Apple's, where a fork that opens the file is killed
+        probe = "import _sqlite3, subprocess; print(subprocess.run(['otool', '-L', _sqlite3.__file__], capture_output=True, text=True).stdout)"
+        try: libs = subprocess.run([APPLE_PYTHON, '-c', probe], capture_output=True, text=True, timeout=60).stdout
+        except (OSError, subprocess.TimeoutExpired): libs = ''
+        if '/usr/lib/libsqlite3.dylib' not in libs: self.skipTest(f"no {APPLE_PYTHON} with Apple's SQLite")
+        self.store.close()
+        code = "import sys; sys.path.insert(0, sys.argv[1]); import test_shader_cache as t; assert t.forked_stores(sys.argv[2], sys.argv[3]) == t.EXPECT, 'results differ'"
+        r = subprocess.run([APPLE_PYTHON, '-c', code, str(Path(__file__).parent), str(self.path), str(self.root)], capture_output=True, text=True, timeout=300)
+        self.assertEqual((r.returncode, r.stderr), (0, ''))
+
+    def test_worker_dying_in_a_batch(self):   # its batch is rolled back and the store goes on
+        import concurrent.futures as cf, multiprocessing
+        global SERVED; SERVED = shader_cache.Served(self.store, 2)
+        with cf.ProcessPoolExecutor(2, mp_context=multiprocessing.get_context('fork'), initializer=worker_start) as ex:
+            ex.submit(int).result(); SERVED.start()
+            with self.assertRaises(cf.process.BrokenProcessPool): ex.submit(dies_in_batch, 0).result()
+        t = threading.Thread(target=lambda: self.store.put('alive', b'a')); t.start(); t.join(20)
+        self.assertFalse(t.is_alive()); self.assertFalse(self.store.has('dead')); self.assertTrue(self.store.has('alive'))
+
+
+    def test_a_killed_writer_loses_only_what_it_had_not_committed(self):
+        code = ("import os, sys; sys.path.insert(0, sys.argv[1]); import shader_cache\ns = shader_cache.Store(sys.argv[2]); s.put('done', b'1')\n"
+                "s.db.execute('BEGIN IMMEDIATE'); s.put('half', b'2'); os.kill(os.getpid(), 9)\n")
+        subprocess.run([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path)])
+        self.assertEqual(self.store.names(''), {'done'})
+
+
+class Damage(unittest.TestCase):
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.path = Path(t.name) / 'cas.db'; self.said = []
+
+    def test_a_file_that_is_no_database_costs_the_work_it_held(self):
+        self.path.write_bytes(b'not a database at all' * 2000)
+        s = shader_cache.Store(self.path, self.said.append); self.addCleanup(s.close)
+        self.assertIn('[RED]', self.said[0])
+        s.put('x', b'1'); self.assertEqual(s.get('x'), b'1')
+
+    def test_damage_found_in_use(self):
+        s = shader_cache.Store(self.path, self.said.append)
+        for i in range(300): s.put(f'x{i}', os.urandom(40000))
+        s.close()
+        b = bytearray(self.path.read_bytes()); b[16384:len(b) // 2] = b'\xee' * (len(b) // 2 - 16384); self.path.write_bytes(b)
+        s = shader_cache.Store(self.path, self.said.append)
+        for i in range(300): s.get(f'x{i}')   # a miss or an entry, never an exception
+        s.put('after', b'1'); self.assertEqual(s.get('after'), b'1')
+        s.close()
+        self.assertTrue(any('[RED]' in m for m in self.said))
+
+
+class Prune(Base):
+    def shader(self, digest, when):
+        self.store.put(f'shader/{digest}/mac/k_b.metal', digest.encode() * 10, when); self.store.put(f'shader/{digest}/mac/k_b.metallib', b'L' + digest.encode(), when)
+
+    def test_old_ones_go_with_their_bytes(self):
+        now = time.time()
+        for d in (D1, D2): self.shader(d, now - 100)
+        self.shader(D3, now + 100); self.store.put('shader/notadigest/mac/x', b'k', now - 100); self.store.put('metallib/mac/m.metallib', b'L' + D2.encode(), now - 100)
+        before = self.blobs()
+        self.assertEqual(self.store.prune_shaders({D1}, now), (1, 640))   # the source's bytes, not the library's
+        self.assertEqual({n.split('/')[1] for n in self.store.names('shader/')}, {D1, D3, 'notadigest'})
+        self.assertEqual(self.blobs(), before - 1)   # D2's source; its library's bytes stay under metallib/
+        self.assertEqual(self.store.get('metallib/mac/m.metallib'), b'L' + D2.encode())
+
+    def test_the_file_gives_back_its_pages(self):
+        now = time.time()
+        for i in range(40): self.store.put(f'shader/{i:064x}/mac/k_b.metal', os.urandom(100000), now - 100)
+        self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)'); big = self.path.stat().st_size
+        self.assertEqual(self.store.prune_shaders(set(), now)[0], 40)
+        self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        self.assertLess(self.path.stat().st_size, big // 4)
+
+
+class Generations(unittest.TestCase):   # one file per chain: a build writes its own, copies the Metal compiles it reads from older ones, and the older ones go whole after it
+    A, B, C = '0123456789ab', 'bbbbbbbbbbbb', 'cccccccccccc'
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.d = Path(t.name); self.said = []
+
+    def file(self, name, entries, when):   # a generation holding entries, last written at when
+        s = shader_cache.Store(self.d / name)
+        for n, data in entries.items(): s.put(n, data)
+        s.close(); os.utime(self.d / name, (when, when))
+
+    def names(self, path):
+        s = shader_cache.Store(path); self.addCleanup(s.close)
+        return set(s.names(''))
+
+    def test_older_compiles_are_copied_on_read(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/mac/old.metallib': b'legacy', f'shader/{D1}/mac/k_b.metal': b'old chain'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B', 'metallib/mac/old.metallib': b'newer'}, now - 100)
+        self.assertEqual([Path(p).name for p in shader_cache.generations(self.d)], [f'cas-{self.B}.db', 'cas.db'])   # newest first, the one file last
+        s = shader_cache.for_chain(self.d, self.A)
+        self.assertEqual(s.path, str(self.d / f'cas-{self.A}.db'))
+        self.assertTrue(s.has('metallib/mac/m.metallib'))
+        self.assertEqual(s.get('metallib/mac/old.metallib'), b'newer')   # the newest generation answers
+        self.assertIsNone(s.get(f'shader/{D1}/mac/k_b.metal')); self.assertFalse(s.has(f'shader/{D1}/mac/k_b.metal'))   # another chain's shader never hits
+        s.close()
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/old.metallib'})   # what it read is its own now; what it only saw is not
+
+    def test_older_generations_go_after_a_build(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/ios/i.metallib': b'ios', 'metallib/mac/x.metallib': b'old mac', f'shader/{D1}/mac/k_b.metal': b'm'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/b.metallib': b'B'}, now - 100)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])   # no file of its own: nothing goes
+        self.file(f'cas-{self.A}.db', {'metallib/mac/a.metallib': b'A', f'shader/{D2}/mac/k_b.metal': b'a'}, now)
+        open(self.d / 'cas.db.lock', 'w').close()
+        self.assertEqual(sorted(shader_cache.drop_generations(self.d, self.A, self.said.append)), [f'cas-{self.B}.db', 'cas.db'])
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), [f'cas-{self.A}.db'])
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/a.metallib', 'metallib/ios/i.metallib', f'shader/{D2}/mac/k_b.metal'})   # iOS, which it compiled none of, kept
+        self.assertIn('kept 1 ios Metal compiles of cas.db: this build compiled none for ios', self.said)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])
+
+    def test_a_folder_as_the_read_only_cache(self):   # regress.py's fallback reads the player's generations, never copying them
+        now = time.time()
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B'}, now - 100); self.file('cas.db', {'variant/v/x': b'v'}, now - 300)
+        s = shader_cache.Store(self.d / 'regress/cas.db', readonly=self.d); self.addCleanup(s.close)
+        self.assertEqual((s.get('metallib/mac/m.metallib'), s.get('variant/v/x')), (b'B', b'v'))
+        self.assertEqual(s._run('SELECT count(*) FROM entry')[0][0], 0)
+
+
+class Adopt(unittest.TestCase):
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.root = Path(t.name); self.old = self.root / 'cas'; self.path = self.root / 'cas.db'; self.said = []
+
+    def fill(self):
+        for name, data in (('metallib/mac/ab/abcd.metallib', b'compiled'), ('metallib/mac/ab/abcd_x.metallib', b'cut'), ('metallib/ios/cd/cdef.metallib', b'ios'), ('metallib/filled.json', b'{}'),
+                           (f'shader/{D1}/mac/k_b.metal', b'old chain'), ('index/k.json', b'{}'), ('variant/ee/metal', b'msl'), ('variant/ee/mac.metallib', b'v'), ('metallib/mac/ab/._abcd.metallib', b'appledouble')):
+            p = self.old / name; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(data)
+
+    def check(self):
+        s = shader_cache.Store(self.path)
+        self.assertEqual(s.names(''), {'metallib/mac/abcd.metallib', 'metallib/mac/abcd_x.metallib', 'metallib/ios/cdef.metallib'})
+        self.assertEqual(s.get('metallib/mac/abcd.metallib'), b'compiled')
+        s.close()
+        self.assertEqual(sorted(os.listdir(self.root)), ['cas.db'])
+
+    def test_a_folder(self):
+        self.fill(); self.assertEqual(shader_cache.adopt(self.old, self.path, self.said.append), 3); self.check()
+
+    def test_a_tar_read_without_unpacking(self):
+        self.fill()
+        with tarfile.open(f'{self.old}.tar', 'w', format=tarfile.PAX_FORMAT) as t: t.add(self.old, '.')
+        import shutil; shutil.rmtree(self.old)
+        self.assertEqual(shader_cache.adopt(self.old, self.path, self.said.append), 3); self.check()
+
+    def test_a_damaged_tar_costs_what_it_held(self):
+        Path(f'{self.old}.tar').write_bytes(b'not a tar' * 100)
+        self.assertEqual(shader_cache.adopt(self.old, self.path, self.said.append), 0)
+        self.assertFalse(Path(f'{self.old}.tar').exists()); self.assertTrue(any('[RED]' in m for m in self.said))
+
+    def test_nothing_there(self):
+        self.assertEqual(shader_cache.adopt(self.old, self.path, self.said.append), 0)
+        self.assertEqual(os.listdir(self.root), []); self.assertFalse(shader_cache.exists(self.path))
+
+    def test_what_a_stopped_build_left(self):
+        for p in (f'{self.old}.gone', f'{self.old}.unpack'): os.makedirs(p); (Path(p) / 'x').write_bytes(b'1')
+        Path(f'{self.old}.tar.part').write_bytes(b'1')
+        shader_cache.adopt(self.old, self.path, self.said.append)
+        self.assertEqual(os.listdir(self.root), [])
+
+
+if __name__ == '__main__': unittest.main()

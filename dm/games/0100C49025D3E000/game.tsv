@@ -32,6 +32,10 @@ app_pool	0xCD500000
 # the NPDM declares 6 MB of system resource
 sys_resource	0x600000
 
+# ---- Graphics ----
+# The registered build selects near-zero NVN depth (the NSP script's region check, 2026-10-29: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
+depth_mode	zero
+
 # ---- Shader split ----
 shader_groups	/Data/=data /Patch/=patch
 shader_note	EA SPORTS FC 27 shaders: Frostbite CompiledBytecode resources (frostbite.py)

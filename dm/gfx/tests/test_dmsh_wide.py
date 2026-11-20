@@ -1,0 +1,222 @@
+"""Storage words the translator split, read whole again (dmsh_wide.py wide_loads): which words become one read, which are left alone, and the compile."""
+from pathlib import Path
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+from dmsh_wide import wide_loads, constant_reads   # noqa: E402
+import dmsh_abi as abi   # noqa: E402
+
+# Splatoon Raiders' Hoian_UBER (3e5a302ac52b73bf) as spirv-cross writes it, cut down: one light's words from fp_s3 at 80 * index + 16 .. 44, a written buffer,
+# and words in two blocks
+LIGHT = '''#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct _29
+{
+    uint _m0[1];
+};
+
+struct spvDescriptorSetBuffer0
+{
+    const device _29* fp_s2 [[id(0)]];
+    const device _29* fp_s3 [[id(1)]];
+    device _29* fp_s4 [[id(2)]];
+};
+
+struct main0_out
+{
+    float4 m_0 [[color(0)]];
+};
+
+struct main0_in
+{
+    float4 m_1 [[user(locn0)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    main0_out out = {};
+    int _3483 = int(in.m_1.x) * 80;
+    int _3485 = _3483 + 16;
+    int _3487 = _3483 + 32;
+    uint _3493 = uint(int(uint(_3485) >> uint(2)));
+    float _3495 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3493)]);
+    uint _3499 = uint(int(uint(_3487) >> uint(2)));
+    float _3501 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3499)]);
+    int _3503 = _3487 + 4;
+    uint _3505 = uint(int(uint(_3503) >> uint(2)));
+    float _3507 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3505)]);
+    int _3509 = _3487 + 8;
+    uint _3511 = uint(int(uint(_3509) >> uint(2)));
+    float _3513 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3511)]);
+    int _3515 = _3487 + 12;
+    uint _3517 = uint(int(uint(_3515) >> uint(2)));
+    uint _3519 = (*spvDescriptorSet0.fp_s3)._m0[int(_3517)];
+    uint _20 = uint(int(uint(_3483) >> uint(2)));
+    uint _21 = (*spvDescriptorSet0.fp_s4)._m0[int(_20)];
+    int _22 = _3483 + 4;
+    uint _23 = uint(int(uint(_22) >> uint(2)));
+    uint _24 = (*spvDescriptorSet0.fp_s4)._m0[int(_23)];
+    int _30 = _3483 + 64;
+    int _31 = _3483 + 68;
+    uint _32 = uint(int(uint(_30) >> uint(2)));
+    uint _33 = uint(int(uint(_31) >> uint(2)));
+    uint _34 = (*spvDescriptorSet0.fp_s2)._m0[int(_33)];
+    uint _35 = (*spvDescriptorSet0.fp_s2)._m0[int(_32)];
+    int _40 = _3483 + 48;
+    uint _41 = uint(int(uint(_40) >> uint(2)));
+    uint _42 = (*spvDescriptorSet0.fp_s2)._m0[int(_41)];
+    if (_3495 > 0.0)
+    {
+        int _43 = _40 + 4;
+        uint _44 = uint(int(uint(_43) >> uint(2)));
+        _42 += (*spvDescriptorSet0.fp_s2)._m0[int(_44)];
+    }
+    out.m_0 = float4(_3495 + _3501, _3507 + _3513, as_type<float>(_3519 + _21 + _24), as_type<float>(_34 + _35 + _42));
+    return out;
+}
+'''
+
+
+# The same shader with fp_s3 bounded (TranslationFlags.MetalStorageBounds, GitHub issue #2618), as the translator writes a bounded read and dmsh_rewrite.select_guards makes it a
+# select: its signed index, the comparison with the length table (fp_c27, slot 3's words before the address and in all), and a read that gives 0 outside
+TABLE = '(*spvDescriptorSet0.fp_c%d)._m0[1]' % abi.SBLEN_BANK
+
+
+def bounded(src):
+    src = src.replace('    device _29* fp_s4 [[id(2)]];\n', '    device _29* fp_s4 [[id(2)]];\n    constant _30* fp_c27 [[id(3)]];\n')
+    src = src.replace('struct spvDescriptorSetBuffer0', 'struct _30\n{\n    uint4 _m0[16];\n};\n\nstruct spvDescriptorSetBuffer0')
+    def one(m):
+        indent, decl, pre, idx, post = m.groups()
+        return (f'{indent}int {idx}_i = int({idx});\n{indent}bool {idx}_b = (uint({idx}_i) + {TABLE}.z) < {TABLE}.w;\n'
+                f'{indent}{decl}{pre}select(0u, (*spvDescriptorSet0.fp_s3)._m0[{idx}_b ? {idx}_i : 0], {idx}_b){post}')
+    return re.sub(r'^( *)(\w+ _\d+ = )(.*?)\(\*spvDescriptorSet0\.fp_s3\)\._m0\[int\((_\d+)\)\](.*)$', one, src, flags=re.M)
+
+
+BOUNDED = bounded(LIGHT)
+
+
+class WideLoads(unittest.TestCase):
+    def test_bounded_words(self):
+        out = wide_loads(BOUNDED)
+        # read whole when the run's first and last words are inside the bound memory, else each word bounded as the translator bounds it
+        inside = lambda k: f'(uint(_3499_i + {k}) + {TABLE}.z) < {TABLE}.w'
+        self.assertIn(f'bool _dmw0_in = {inside(0)} && {inside(3)};', out)
+        lanes = ', '.join(f'select(0u, (*spvDescriptorSet0.fp_s3)._m0[{inside(k)} ? _3499_i + {k} : 0], {inside(k)})' for k in range(4))
+        self.assertIn(f'packed_uint4 _dmw0 = _dmw0_in ? *(const device packed_uint4*)&(*spvDescriptorSet0.fp_s3)._m0[_3499_i] : packed_uint4({lanes});', out)
+        for lane, var in zip('xyz', ('_3501', '_3507', '_3513')): self.assertIn(f'float {var} = as_type<float>(_dmw0.{lane});', out)
+        self.assertIn('uint _3519 = _dmw0.w;', out)
+        self.assertIn('float _3495 = as_type<float>(select(0u, (*spvDescriptorSet0.fp_s3)._m0[_3493_b ? _3493_i : 0], _3493_b));', out)   # alone on its step: as it was
+        self.assertIn('(*spvDescriptorSet0.fp_s4)._m0[int(_20)]', out)
+
+    def test_bounded_and_plain_words_stay_apart(self):
+        # a run is all bounded reads or all plain ones (a buffer is one or the other; mixed, the words are left alone)
+        mixed = BOUNDED.replace('    float _3507 = as_type<float>(select(0u, (*spvDescriptorSet0.fp_s3)._m0[_3505_b ? _3505_i : 0], _3505_b));',
+                                '    float _3507 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3505)]);')
+        out = wide_loads(mixed)
+        self.assertIn('(*spvDescriptorSet0.fp_s3)._m0[int(_3505)]', out)
+        self.assertNotIn('_dmw', out)   # a run starts on a 16-byte step: from byte 32 the bounded words stop at 36, which is plain
+
+    def test_words_of_one_light(self):
+        out = wide_loads(LIGHT)
+        # bytes 32..44 from one value: one packed_uint4 at the first word, each word its lane (float or uint alike)
+        self.assertIn('packed_uint4 _dmw0 = *(const device packed_uint4*)&(*spvDescriptorSet0.fp_s3)._m0[int(_3499)];', out)
+        for lane, var in zip('xyz', ('_3501', '_3507', '_3513')): self.assertIn(f'float {var} = as_type<float>(_dmw0.{lane});', out)
+        self.assertIn('uint _3519 = _dmw0.w;', out)
+        # byte 16 is alone on its 16-byte step: as it was
+        self.assertIn('float _3495 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3493)]);', out)
+        self.assertEqual(out.count('_dmw'), 5)   # one declaration, four lanes
+
+    def test_left_alone(self):
+        out = wide_loads(LIGHT)
+        self.assertIn('(*spvDescriptorSet0.fp_s4)._m0[int(_20)]', out)   # a buffer the shader may write
+        self.assertIn('(*spvDescriptorSet0.fp_s4)._m0[int(_23)]', out)
+        self.assertIn('(*spvDescriptorSet0.fp_s2)._m0[int(_33)]', out)   # the higher word read first
+        self.assertIn('(*spvDescriptorSet0.fp_s2)._m0[int(_32)]', out)
+        self.assertIn('(*spvDescriptorSet0.fp_s2)._m0[int(_41)]', out)   # its neighbour is in another block
+        self.assertIn('(*spvDescriptorSet0.fp_s2)._m0[int(_44)]', out)
+
+    def test_writes_end_a_run(self):
+        # a store through another binding (which may be the same memory), an atomic, a barrier or a new common value between the words: each word read where it was
+        first = '    float _3501 = as_type<float>((*spvDescriptorSet0.fp_s3)._m0[int(_3499)]);\n'
+        for between in ('    (*spvDescriptorSet0.fp_s4)._m0[int(_20)] = 1u;', '    (*spvDescriptorSet0.fp_s4)._m0[int(_20)] += 1u;',
+                        '    uint _90 = atomic_fetch_add_explicit((device atomic_uint*)&(*spvDescriptorSet0.fp_s4)._m0[int(_20)], 1u, memory_order_relaxed);',
+                        '    threadgroup_barrier(mem_flags::mem_device);', '    _3487 = _3483 + 48;'):
+            out = wide_loads(LIGHT.replace(first, first + between + '\n'))
+            self.assertNotIn('_dmw', out, between)
+            self.assertIn('(*spvDescriptorSet0.fp_s3)._m0[int(_3505)]', out)
+
+    def test_nothing_to_do(self):
+        plain = LIGHT.replace('const device', 'device')
+        self.assertEqual(wide_loads(plain), plain)
+
+    @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'Metal compiler')
+    def test_compiles(self):
+        with tempfile.TemporaryDirectory() as d:
+            plain, bounded = wide_loads(LIGHT), wide_loads(BOUNDED)
+            promoted, bounded_promoted = constant_reads(plain, {2, 3}), constant_reads(bounded, {2, 3})
+            self.assertIn('*(constant packed_uint4*)', promoted)
+            self.assertIn('*(constant packed_uint4*)', bounded_promoted)
+            for name, src in (('before', LIGHT), ('after', plain), ('promoted', promoted),
+                              ('bounded', BOUNDED), ('bounded_after', bounded), ('bounded_promoted', bounded_promoted)):
+                m = os.path.join(d, name + '.metal'); Path(m).write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', f'-fmodules-cache-path={d}',
+                                    m, '-o', os.path.join(d, name + '.air')],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class ConstantReads(unittest.TestCase):
+    """Only known read-only buffers with direct loads can change address space."""
+    SRC = """struct spvDescriptorSetBuffer0
+{
+    const device _40* fp_s0 [[id(3)]];
+    device _40* fp_s1 [[id(4)]];
+    const device _40* vp_s0 [[id(5)]];
+    const device _40* fp_s2 [[id(6)]];
+    const device _40* fp_s3 [[id(7)]];
+};
+    packed_uint3 _dmw0 = *(const device packed_uint3*)&(*spvDescriptorSet0.fp_s0)._m0[int(_9)];
+    float _5 = as_type<float>((*spvDescriptorSet0.fp_s0)._m0[int(_7)]);
+    (*spvDescriptorSet0.fp_s1)._m0[0] = 1u;
+    float _6 = as_type<float>((*spvDescriptorSet0.vp_s0)._m0[0]);
+    float _8 = f(spvDescriptorSet0.fp_s2);
+    uint _10 = (*spvDescriptorSet0.fp_s3)._m0[0];
+"""
+
+    def test_fragment_default(self):
+        out = constant_reads(self.SRC, {0, 2})
+        self.assertIn('constant _40* fp_s0 [[id(3)]];', out)
+        self.assertIn('*(constant packed_uint3*)&(*spvDescriptorSet0.fp_s0)._m0[int(_9)]', out)
+        self.assertIn('device _40* fp_s1 [[id(4)]];', out)            # written: device
+        self.assertIn('const device _40* vp_s0 [[id(5)]];', out)      # another stage
+        self.assertIn('const device _40* fp_s2 [[id(6)]];', out)      # its pointer handed to a function
+        self.assertIn('const device _40* fp_s3 [[id(7)]];', out)      # no read-only metadata for the slot
+        self.assertNotIn('const device packed_uint3', out)
+
+    def test_all_and_off(self):
+        self.assertIn('constant _40* vp_s0 [[id(5)]];', constant_reads(self.SRC, {0}, 'all'))
+        self.assertEqual(constant_reads(self.SRC, {0}, '0'), self.SRC)
+
+    def test_element_pointer_escapes(self):
+        for use in ('f(&(*spvDescriptorSet0.fp_s0)._m0[0])', 'f(&((*spvDescriptorSet0.fp_s0)._m0[0]))',
+                    '*(const device float*)&(*spvDescriptorSet0.fp_s0)._m0[0]'):
+            with self.subTest(use=use):
+                src = self.SRC + f'    float _11 = {use};\n'
+                self.assertEqual(constant_reads(src, {0}), src)
+
+    def test_element_reference_escapes(self):
+        src = 'uint ref(const device uint& word) { return word; }\n' + self.SRC
+        src += '    uint _11 = ref((*spvDescriptorSet0.fp_s0)._m0[0]);\n'
+        self.assertEqual(constant_reads(src, {0}), src)
+
+if __name__ == '__main__':
+    unittest.main()

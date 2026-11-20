@@ -6,14 +6,15 @@ On the Mac: the opening movie with its sound, the title (Press L+R), file select
 
 ## What it needs
 
-The provisional profile's guesses held, with `render_cond` added and two host changes in the movie decoder.
+The provisional profile's guesses held, with two host changes in the movie decoder.
 
 | Setting | Where | Why |
 |---|---|---|
-| `render_cond on` | [`game.tsv`](game.tsv) | the game skips clears under render conditions (`SetRenderEnableConditional`), as Tears of the Kingdom ([0100F2C0115B6000](../0100F2C0115B6000/README.md)) and Animal Crossing: New Horizons ([01006F8002326000](../01006F8002326000/README.md)) do; without evaluating them every level was black behind its HUD |
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares no system resource, so `IsVirtualAddressMemoryEnabled` is false, as on Horizon: no virtual address memory. The game sets a 3.14 GB heap (pool − used memory) |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | 256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region |
 | `shader_groups` (one group per RomFS top folder, `/Model/` … `/GameParameter/`) | `game.tsv` | see [Files and shaders](#files-and-shaders) |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): the game skips clears under render conditions (`SetRenderEnableConditional`), as Tears of the Kingdom ([0100F2C0115B6000](../0100F2C0115B6000/README.md)) and Animal Crossing: New Horizons ([01006F8002326000](../01006F8002326000/README.md)) do; without evaluating them every level was black behind its HUD.
 
 No `pad_layout`: the virtual gamepad starts in the default 2D layout.
 
@@ -27,7 +28,7 @@ The cutscenes are MP4 files (`Movie/*.mp4`, H.264 1080p and AAC stereo) played t
 
 ## Rendering
 
-- **Resolved: level scenes black behind the HUD** (`[RED] SetRenderEnableConditional: the host draws anyway`): fixed by `render_cond`.
+- **Resolved: level scenes black behind the HUD** (`[RED] SetRenderEnableConditional: the host draws anyway`): fixed by evaluating them (the profile key `render_cond` then; the host now evaluates them for every game).
 - **Resolved: advanced blend modes.** The level sets `nvnBlendStateSetAdvancedMode 8` (SRC_OVER) on one blend state. The host used to log it and blend with the state's own functions, which the hardware ignores while an advanced mode is set. The Porter-Duff modes now blend with the fixed-function factors they amount to (`blend_st` in `nvn_obj.h`, `adv_blend` in `nvn_mtl.m`).
 
 ## Files and shaders

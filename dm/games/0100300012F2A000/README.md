@@ -8,7 +8,7 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB, and 32 MB alignment for regions of 1 GB and more | `dm/tools/sdk_patches.py`, `sdk` build `d9add76f…` | StandardAllocator's region (more than 1 GB) aborted in `nninitStartup`; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB, and 2 MB alignment for regions of 4 MB and more (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `d9add76f…` | StandardAllocator's region (more than 1 GB) aborted in `nninitStartup`; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM declares 16 MB of system resource (virtual address memory) |
 | 5 GB block with a 2 GB pool: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x80000000` | `game.tsv` | Engage's 5 GB block (4.375 GB alias region). The heap check's 1 GB pool ran the game's malloc dry at the first loading screen |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the map cursor moves with the D-pad |
@@ -34,6 +34,10 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 - 20,424 shaders, all of which build: 20,392 from the bundles and Unity's 11 GLSLC outputs in `main`, and Bink's 32 (2 vertex, 22 pixel, 8 compute).
 - **Resolved: every movie drew white.** Bink's movie player builds its programs from 32 control sections and code areas in `main`'s read-only segment that are in no GLSLC output and no BNSH file. 26 are 0x20-byte records in two tables in `.data` (`{code area pointer, control section pointer, u32 code length, u32 control length}`, both pointers relative relocations). The code takes the other 6 by address (`adrp` + `add` to the control section and, a few instructions away, to the code area it copies with `memcpy`); the code area lies right after the control section's own length (+0x20, 16-byte aligned) or right before it, and two control sections share one code area. Both neighbours can pass the header and length checks, so the reader (`shader_split.py` `raw_shaders`) takes only a code area the code builds the address of, the nearest one to the control section's. The 8 compute shaders' code areas have no header (SDK 10). Without them the shaders were not in the map (two `[RED] shader … is not in the shader map` lines and `program has no vertex shader` as the opening movie starts). Of 25 `main`s on hand no other has such control sections.
 
+## Rendering
+
+- **Resolved (issue #2437): `FATAL NVN command list … record {op 8, size 504} … 0 bytes into its piece of 16` when the enemy uses a CO power**, about a minute into play, since f02d0474. A Unity rendering plugin in `main` (render-event handler `main+0x1545800`) rotates three command buffers with a 1 MB block each (pool +0, +0x200000, +0x400000), re-adding the block from its start for each event after a `SyncWait` on the fence it recorded there last. Two events a frame is the usual (one fence-only recording, one with work, traced on the Mac at the title); a frame with four records over the first one's block while the frame's list still calls it. The host now runs what the piece holds, as the GPU does: [A called recording recorded over before its caller is submitted](../../../docs/reference/nvn-objects.md#a-called-recording-recorded-over-before-its-caller-is-submitted). Not retested at a CO power here (it needs the reporter's save).
+
 ## Input
 
 - The 3D pad layout: the map cursor moves with the D-pad (the tutorial battle was played with it on the Mac).
@@ -51,4 +55,5 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 - **Shader control sections loose in `main`** (`shader_split.py` `raw_shaders`): [Loose control sections and code areas in `main` (Bink 2)](../../../docs/reference/shaders.md#loose-control-sections-and-code-areas-in-main-bink-2).
 - **`sdk` node-area and 1 GB alignment cuts in the `orr` form** of the SDK 7 / 8 constructor: [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area), [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - **The heap check's 1 GB pool is too small here**: [dm/games/README.md, Adding a game](../README.md#adding-a-game).
+- **A called recording recorded over before its caller is submitted** (the rendering plugin's three command buffers): [A called recording recorded over before its caller is submitted](../../../docs/reference/nvn-objects.md#a-called-recording-recorded-over-before-its-caller-is-submitted).
 - The spin-wait search's store rule takes one wider loop in its `main`: [development.md, Power](../../../docs/development.md#power).

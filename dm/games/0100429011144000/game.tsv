@@ -39,5 +39,7 @@ mem_stack	0x10000000
 app_pool	0x40000000
 
 # ---- Shader split ----
+# The registered build selects near-zero NVN depth; offline pipeline bases use main0_z.
+depth_mode	zero
 shader_groups	/Data/=data
 shader_note	Subnautica shaders

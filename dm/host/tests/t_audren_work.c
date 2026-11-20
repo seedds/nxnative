@@ -25,9 +25,14 @@ static void work_free(void *p) {
 
 enum { SDK_WORK = 0x760000, SERVICE_WORK = 0x61d000 };
 static int opens, starts, joins, closes, fail_open, nested;
-static int event_destroys, event_binds;
-static void *sdk_event;
+static int event_destroys, event_binds, attaches, event_in_handle;
+static void *sdk_event, *game_event;
 static void *sdk_work;
+static int acquire_during_destroy;
+static uint64_t notify_binding; static int notify_signals;
+static char switch_event[64]; static uint64_t switch_binding; static int switch_signals;
+static char notify_event[64];   // the output device notification's event (SDK 21+ names)
+static int notify_binds, notify_destroys;
 static void *map_key, *map_value;
 static size_t sdk_size(const uint8_t *param) {
     assert(*(int32_t *)(param + P_DEVICE) == 1 && *(int32_t *)(param + P_MODE) == 1);
@@ -47,13 +52,26 @@ static Result sdk_open(void **handle, const uint8_t *param, void *work, size_t s
     return RES_OK;
 }
 static Result sdk_open_ev(void **handle, void *ev, const uint8_t *param, void *work, size_t size) {
-    assert(ev);
+    assert(ev && ev != game_event);   // the SDK's CPU / manual open keeps this object and signals it on every render: the renderer's, never the game's
     sdk_event = ev;
-    return nested ? h_ar_Open0(handle, param, work, size) : sdk_open(handle, param, work, size);
+    Result r = nested ? h_ar_Open0(handle, param, work, size) : sdk_open(handle, param, work, size);
+    if (!r && event_in_handle) handle[1] = ev;   // SDK 3 to 12 keep the event in the handle (SDK 3 sdk+0x17dffc, SDK 12 sdk+0x4d274); SDK 18 keeps it at *handle[1]
+    return r;
 }
-static void sdk_destroy_event(void *ev) { assert(ev == sdk_event); event_destroys++; }
+static void sdk_destroy_event(void *ev) {
+    if (ev == notify_event) {
+        if (acquire_during_destroy) assert(h_ad_Notify21(notify_event) == 0x499);
+        notify_destroys++; notify_binding = 0; return;
+    }
+    assert(ev == sdk_event); event_destroys++;
+}
+static uint32_t sdk_readable(const void *ev) { assert(ev == sdk_event && event_binds); return 0x1002; }
+static void sdk_attach(void *ev, uint32_t h, int managed, int clear) {   // the game's object gets the copied read end, managed by the game, auto-clear: what the DSP open attaches
+    assert(ev == game_event && h == 0x1003 && managed == 1 && clear == 1);
+    attaches++;
+}
 static void sdk_close(void *obj, void *state) {
-    assert(obj == sdk_work && state == (uint8_t *)sdk_work + 0x80);
+    assert(obj == sdk_work && state == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
     assert(((uint8_t *)obj)[SDK_WORK - 1] == 0x5a);   // storage is alive through SDK teardown
     closes++;
 }
@@ -62,7 +80,10 @@ void *guest_sym(const char *name) {
     if (!strcmp(name, hle_force_h_ar_Open.name)) return sdk_open_ev;
     if (!strcmp(name, hle_force_h_ar_Open0.name)) return sdk_open;
     if (!strcmp(name, hle_force_h_ar_Close.name)) return sdk_close;
+    if (!strcmp(name, "_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE")) return sdk_close;   // an SDK with the renderer in the process (from SDK 3); never called here
     if (!strcmp(name, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE")) return sdk_destroy_event;
+    if (!strcmp(name, "_ZN2nn2os30GetReadableHandleOfSystemEventEPKNS0_15SystemEventTypeE")) return sdk_readable;
+    if (!strcmp(name, "_ZN2nn2os33AttachReadableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14EventClearModeE")) return sdk_attach;
     return NULL;
 }
 void *objmap_get(const void *key) { return key == map_key ? map_value : NULL; }
@@ -75,21 +96,28 @@ void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stac
     (void)fn; (void)arg; (void)prio; (void)stack; starts++; return (void *)1;
 }
 void dm_guest_thread_join(void *tt) {
-    assert(tt == (void *)1 && !atomic_load(&g_open));
+    assert(tt == (void *)1 && !atomic_load(&g_ar[0].open));
     assert(((uint8_t *)sdk_work)[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
     joins++;
 }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 uint64_t now_ns(void) { return 0; }
-void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
+module_t *module_of(const void *p) { (void)p; return NULL; }
+void *dm_pcmout_open_sink(void) { return NULL; }
+int dm_audio_output_channels(void) { return 2; }   // the renderer tests here take the stereo route
+int dm_audio_route(void) { return 2; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) {
-    assert(ev == sdk_event && ac == 1 && event_destroys == event_binds + 1);
+    if (ev == notify_event) { assert(ac == 0); notify_binds++; notify_binding = 0x7000 + (unsigned)notify_binds; return; }
+    if (ev == switch_event) { assert(ac == 0); switch_binding++; return; }
+    assert(ev == sdk_event && ac == 1 && event_destroys == 2 * event_binds + 1);   // after the open destroys the SDK's local event (each earlier Close destroyed one more)
     event_binds++;
 }
+uint32_t hle_dup_readable_handle(uint32_t h) { assert(h == 0x1002); return 0x1003; }
 
 int main(void) {
     uint8_t param[P_SIZE] = {0}, saved[P_SIZE];
@@ -127,19 +155,27 @@ int main(void) {
     assert(h_ar_WorkSize(param) == SERVICE_WORK);
     void *work; assert(!posix_memalign(&work, WORK_PAGE, SDK_WORK));
     memset(work, 0xa5, SDK_WORK);
-    void *handle[2], *event[8];
-    for (int route = 0; route < 3; route++) {
-        nested = route == 2;
+    void *handle[2], *event[8]; game_event = event;
+    for (int route = 0; route < 4; route++) {   // no event, event, nested open, event kept in the handle (SDK 3 to 12)
+        nested = route == 2; event_in_handle = route == 3;
         int a = allocations, s = starts, c = closes;
         Result r = route ? h_ar_Open(handle, event, param, work, SERVICE_WORK) : h_ar_Open0(handle, param, work, SERVICE_WORK);
         assert(!r && allocations == a + 1 && starts == s + 1);
         assert(handle[0] != work && map_value == backing);
         assert(((uint8_t *)work)[0] == 0xa5 && ((uint8_t *)work)[SERVICE_WORK - 1] == 0xa5);
         assert(!memcmp(param, saved, sizeof param));
+        if (route) {
+            assert((uint8_t *)sdk_event >= (uint8_t *)g_rev && (uint8_t *)sdk_event < (uint8_t *)(g_rev + 4));
+            assert(g_ar[0].handle[1] == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
+            memset(event, 0xee, sizeof event);   // the game may reuse its object at once (LEGO Star Wars: on its stack; Little Nightmares): nothing refers to it
+        }
+        int d = event_destroys;
         h_ar_Close(handle[0], handle[1]);
         assert(!backing && !map_key && allocations == frees && closes == c + 1 && joins == starts);
+        assert(event_destroys == d + !!route && !rev_find(handle[0]));   // Close destroys the renderer's event and frees its slot
     }
-    assert(event_destroys == 2 && event_binds == 2);   // event opens, including the nested route, replace the local event once
+    event_in_handle = nested = 0;
+    assert(event_destroys == 6 && event_binds == 3 && attaches == 3);   // each event open replaces the SDK's local event once, attaches the game's, and Close destroys it
     fail_open = 1;
     int s = starts;
     assert(h_ar_Open0(handle, param, work, SERVICE_WORK));
@@ -165,6 +201,36 @@ int main(void) {
         h_ar_Close(handle[0], handle[1]);
     }
     free(work);
+    // The output device notification: a second acquire is refused until a release, which destroys the event as the SDK's does (Nintendo Switch Sports Resort, main+0x3af119c)
+    h_ad_NotifyRelease21(notify_event);   // never acquired: nothing to destroy
+    assert(notify_destroys == 0);
+    assert(h_ad_Notify21(notify_event) == RES_OK);
+    assert(h_ad_Notify21(notify_event) == 0x499 && notify_binds == 1);   // the second acquire, before a release, is refused
+    dm_audio_device_changed(); assert(notify_signals == 1);
+    acquire_during_destroy = 1;
+    h_ad_NotifyRelease21(notify_event);
+    acquire_during_destroy = 0;
+    dm_audio_device_changed(); assert(notify_signals == 1);
+    assert(notify_destroys == 1);
+    assert(h_ad_Notify21(notify_event) == RES_OK && notify_binds == 2);
+    dm_audio_device_changed(); assert(notify_signals == 2);
+    h_ad_NotifyRelease21(notify_event);
+    assert(notify_destroys == 2);
+    switch_binding = 0x8000; h_ad_Notify7(switch_event);
+    dm_audio_device_changed(); assert(switch_signals == 1);
+    // Destroy/rebind the same storage as an unrelated event: the old audio subscriber cannot signal it.
+    switch_binding++;
+    dm_audio_device_changed(); assert(switch_signals == 1 && notify_signals == 2);
+    h_ad_Notify7(switch_event);
+    dm_audio_device_changed(); assert(switch_signals == 2);
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
+    return 0;
+}
+
+uint64_t hle_system_event_binding(void *ev) { assert(ev == notify_event || ev == switch_event); return ev == notify_event ? notify_binding : switch_binding; }
+int hle_signal_system_event_binding(uint64_t binding) {
+    if (!binding) return 0;
+    if (binding == notify_binding) { notify_signals++; return 1; }
+    if (binding == switch_binding) { switch_signals++; return 1; }
     return 0;
 }

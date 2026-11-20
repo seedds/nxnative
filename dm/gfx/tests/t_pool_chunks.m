@@ -1,0 +1,249 @@
+// A large memory pool in chunks (nvn_mtl.m BIG_MIN): a lookup gets a zero-copy buffer that holds what it asked and starts at its stride, so only what lookups reach is wired. The buffers must
+// say the same memory as the guest address, a chunk asked for more is lengthened, a read of unknown extent takes one buffer of the whole pool (no short chunk answers it), a texture's upload wires no chunk (up_big_src),
+// raw global memory's pool table covers the whole pool (big_full), the pool's removal takes every entry, a smaller pool stays one buffer, and each kind of pool buffer made over a
+// write-protected page still takes the GPU's writes without counting the page as written (pool_buf).
+#include "../nvn/nvn_mtl.m"
+void *front_metal_layer(void) { return NULL; }
+module_t *module_of(const void *p) { (void)p; return NULL; }
+module_t *g_mod; int g_nmod;
+void svc_thread_dump(void) {}
+uint64_t now_ns(void) { return bp_now(); }
+static int checks, failed;
+#define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
+static void finish(void) { CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK("GPU has no submission error", !mtl_last_commit_error()); }
+// The lookup holds [a, a + n) in one buffer whose contents are the guest's memory there, and the GPU address agrees
+static id<MTLBuffer> look(uint64_t a, uint64_t n) {
+    void *mb = NULL; uint64_t mo = 0, gpu = 0;
+    if (!mtl_gpu_addr(a, n, &mb, &mo, &gpu)) { CHECK("lookup found", 0); return nil; }
+    id<MTLBuffer> b = (__bridge id<MTLBuffer>)mb;
+    CHECK("buffer holds the range", mo + (n ? n : 1) <= b.length);
+    CHECK("contents are the guest's memory", (uint64_t)(uintptr_t)b.contents + mo == a);
+    CHECK("GPU address is the buffer's", gpu == b.gpuAddress + mo);
+    void *cb = NULL; uint64_t co = 0; CHECK("the CPU lookup agrees", mtl_addr(a, n, &cb, &co) && (uint64_t)(uintptr_t)((__bridge id<MTLBuffer>)cb).contents + co == a);
+    return b;
+}
+// A GPU fill of [a, a + n) through the buffer a lookup gives, then whether the guest's memory holds it
+static int gpu_fill_ok(uint64_t a, uint64_t n, uint8_t v) {
+    id<MTLBuffer> b = look(a, n); if (!b) return 0;
+    uint64_t off = a - (uint64_t)(uintptr_t)b.contents;
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
+    [ce fillBuffer:b range:NSMakeRange(off, n) value:v]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint8_t *p = (const uint8_t *)(uintptr_t)a; for (uint64_t i = 0; i < n; i++) if (p[i] != v) return 0;
+    return 1;
+}
+int main(void) { @autoreleasepool {
+    mtl_init();
+    const uint64_t GB = 1ull << 30, MB = 1ull << 20;
+    uint8_t *mem = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    uint64_t base = (uint64_t)(uintptr_t)mem;
+    int pools0 = g_npool;
+    mtl_pool_add(mem, GB);
+    CHECK("no buffer until a lookup", g_npool == pools0 && g_nbig == 1);
+    CHECK("overlapping buffers: barriers carry alias visibility", resource_vis() & MTL4VisibilityOptionResourceAlias);
+    pthread_mutex_lock(&g_mu); int peeked = pool_peek(base + 100), peek_chunks = g_npool; pthread_mutex_unlock(&g_mu);
+    CHECK("asking where an address is (the pool walk's statistics) makes no chunk", peeked == -1 && peek_chunks == pools0);
+    id<MTLBuffer> a = look(base + 100, 4096);
+    CHECK("one chunk", g_npool == pools0 + 1);
+    pthread_mutex_lock(&g_mu); int in_stride = pool_peek(base + 9 * MB), other = pool_peek(base + 300 * MB), n_after = g_npool; pthread_mutex_unlock(&g_mu);
+    CHECK("peek finds the chunk of a stride that has one", in_stride >= 0 && g_pools[in_stride].buf == a);
+    CHECK("peek of a stride with none: -1, and still no new chunk", other == -1 && n_after == pools0 + 1);
+    CHECK("a chunk is far smaller than the pool", a.length <= 3 * BIG_S);
+    CHECK("the same stride: the same buffer", look(base + 200, 4096) == a);
+    CHECK("no more chunks", g_npool == pools0 + 1);
+    id<MTLBuffer> far = look(base + 512 * MB + 5, 64);
+    CHECK("another stride: another buffer", far != a && g_npool == pools0 + 2);
+    id<MTLBuffer> cross = look(base + 48 * MB - 8, 64);   // across a stride's end: one buffer holds it
+    CHECK("across strides: its stride's chunk", cross && cross != a);
+    void *mb = NULL; uint64_t mo = 0, gpu = 0;   // CHECK goes on after a failed lookup, which writes none of them
+    int n1 = g_npool;
+    id<MTLBuffer> big = look(base + 300 * MB, 100 * MB);
+    CHECK("a long range in one buffer", big.length >= 100 * MB && g_npool == n1 + 1);
+    id<MTLBuffer> again = look(base + 300 * MB + 4096, 4096);
+    CHECK("its stride keeps the long chunk", again == big);
+    // The pool's end
+    CHECK("past the end: not found", !mtl_gpu_addr(base + GB - 8, 64, &mb, &mo, &gpu));
+    CHECK("at the end: found", mtl_gpu_addr(base + GB - 8, 8, &mb, &mo, &gpu));
+    CHECK("the end's buffer stops at the pool", (uint64_t)(uintptr_t)((__bridge id<MTLBuffer>)mb).contents + ((__bridge id<MTLBuffer>)mb).length == base + GB);
+    // A texture's upload: right bytes, through a buffer of its own, no chunk made and no chunk's memory left resident
+    tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .serial = 99700};
+    t.d = (nvn_texdesc){.target = 1, .format = NVN_FORMAT_RGBA8, .width = 256, .height = 256, .depth = 1, .levels = 1, .samples = 1}; nvn_tex_layout(&t.d, &t.L);
+    pool_t pool = {.magic = MAGIC('P', 'O', 'O', 'L'), .mem = mem, .size = GB, .flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    t.pool = &pool; t.mem = mem + 700 * MB;
+    uint32_t *lin = malloc(256 * 256 * 4); for (uint32_t i = 0; i < 256 * 256; i++) lin[i] = i * 2654435761u;
+    CHECK("swizzle", !nvn_swizzle(&t.d, 0, 0, lin, 256 * 4, t.mem));
+    int n2 = g_npool; mtl_sub_begin(); id<MTLTexture> image = tex_mtl(&t); CHECK("texture resolves", image != nil); finish();
+    CHECK("the upload made no chunk", g_npool == n2);
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:256 * 256 * 4 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
+    [ce copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(256, 256, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:256 * 4 destinationBytesPerImage:256 * 256 * 4];
+    [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    CHECK("the texture holds what the pool holds", !memcmp(rb.contents, lin, 256 * 256 * 4));
+    free(lin);
+    mtl_tex_release(&t);
+    // Raw global memory: the driver has given out no address in the pool, so the table leaves it out and it stays in chunks
+    mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
+    CHECK("a pool with no address given out stays out", g_big[0].full == 0);
+    // The address ranges merge and stay sorted
+    mtl_pool_addressed((void *)0x1000, 0x1000); mtl_pool_addressed((void *)0x3000, 0x1000); mtl_pool_addressed((void *)0x2000, 0x1000); CHECK("touching ranges merge", g_naddr == 1 && g_addr[0].lo == 0x1000 && g_addr[0].hi == 0x4000);
+    mtl_pool_addressed((void *)0x2000, 0x100); CHECK("a covered range adds nothing", g_naddr == 1);
+    mtl_pool_addressed((void *)0x8000, 0x1000); CHECK("a separate range", g_naddr == 2 && addr_meets(0x8800, 0x8900) && !addr_meets(0x5000, 0x6000) && addr_meets(0x3fff, 0x5000) && !addr_meets(0x4000, 0x5000));
+    // Once one is given out, the table reaches all of it, and lookups then have the whole pool
+    mtl_pool_addressed((void *)(uintptr_t)(base + 900 * MB), 4096);
+    mtl_sub_begin(); CHECK("pool table made again", gmem_map_gpu() != 0); finish();
+    CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
+    CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
+    // The lookup hint of a 2 MiB chunk: tagged with the chunk, names the entry holding all of it, and a chunk only partly inside has none of its own
+    {
+        const uint8_t *map = (const uint8_t *)gmem_map().contents;
+        uint64_t chunk = (base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
+        uint32_t hint; memcpy(&hint, map + (chunk % DMSH_GMEM_MAP_ENTRIES) * DMSH_GMEM_MAP_ENTRY + 24, sizeof hint);
+        unsigned entry = hint % DMSH_GMEM_MAP_ENTRIES;
+        CHECK("the hint names its chunk and an entry", entry && hint / DMSH_GMEM_MAP_ENTRIES == chunk);
+        uint64_t r[2]; memcpy(r, map + (size_t)entry * DMSH_GMEM_MAP_ENTRY, sizeof r);
+        CHECK("the entry holds the whole chunk", r[0] <= chunk << DMSH_GMEM_HINT_SHIFT && r[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
+    }
+    // A texture a shader read is made, and goes into the table in place: no new table, and the budget does not apply. One nobody read is not made: its entry is its stand-in (pool_stand; the
+    // dummy with DM_NVN_POOL_STANDIN=0). A render target no pass has written stays the dummy
+    {
+        tex_t rd = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .serial = 99801}, un = rd, rt = rd;
+        rd.d = (nvn_texdesc){.target = 1, .format = NVN_FORMAT_RGBA8, .width = 2048, .height = 2048, .depth = 1, .levels = 1, .samples = 1}; nvn_tex_layout(&rd.d, &rd.L);
+        rd.pool = &pool; rd.mem = mem + 100 * MB; rd.off = 100 * MB;
+        un = rd; un.serial = 99802; un.mem = mem + 110 * MB; un.off = 110 * MB;
+        rt = rd; rt.serial = 99803; rt.mem = mem + 120 * MB; rt.off = 120 * MB; rt.d.flags = NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+        mtl_reg_tex(301, &rd, NULL); mtl_reg_tex(302, &un, NULL); mtl_reg_tex(303, &rt, NULL);
+        // Past the budget, so the walk makes none of them
+        id<MTLBuffer> hog = [g_dev newBufferWithLength:pool_budget() + (1u << 20) options:MTLResourceStorageModePrivate]; CHECK("over the budget", hog && pool_budget_full());
+        __unsafe_unretained id<MTLBuffer> tb = nil, tb2 = nil;
+        mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
+        pool_gpu(0, MTLTextureType2D, 0, 0, &tb);
+        const uint64_t *e = (const uint64_t *)((const uint8_t *)tb.contents + DMSH_POOL_HEAD); uint64_t dummy = e[*(const uint32_t *)tb.contents];   // the entry past the table's IDs
+        #define UNREAD(x, i) (!g_treg[i].view && (stand_on() ? g_treg[i].stand && (x)[i] == g_treg[i].stand_rid : (x)[i] == dummy))
+        CHECK("the table's head holds the bitmap's address", *(const uint64_t *)((const uint8_t *)tb.contents + 8) == g_seen_buf.gpuAddress);
+        CHECK("unread textures are not made: a stand-in, and the dummy for a render target no pass has written", UNREAD(e, 301) && UNREAD(e, 302) && e[303] == dummy && !g_treg[303].stand);
+        uint64_t was = e[301];   // its stand-in, or the dummy
+        os_unfair_lock_unlock(&g_rmu); finish();
+        ((uint32_t *)g_seen_buf.contents)[301 / 32] |= 1u << (301 % 32) | 1u << (303 % 32);
+        mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
+        pool_gpu(0, MTLTextureType2D, 0, 0, &tb2);
+        const uint64_t *e2 = (const uint64_t *)((const uint8_t *)tb2.contents + DMSH_POOL_HEAD);
+        CHECK("a read texture goes in, past the budget", g_treg[301].view && e2[301] == g_treg[301].view_rid && e2[301] != dummy);
+        CHECK("and into the table a draw already encoded reads", e[301] != dummy && e[301] != was && !g_treg[301].stand);
+        CHECK("an unread one is still not made", UNREAD(e2, 302));
+        CHECK("a read render target no pass wrote stays the dummy", e2[303] == dummy);
+        os_unfair_lock_unlock(&g_rmu); finish();
+        // Another texture in a read ID keeps the ID's mark, so the next walk makes the replacement; an emptied ID is cleared, and an ID given its first texture has not been read
+        tex_t t4 = rd; t4.serial = 99804; t4.mem = mem + 130 * MB; t4.off = 130 * MB;
+        mtl_reg_tex(301, &un, NULL);
+        CHECK("an ID given another texture keeps its read mark", pool_seen(301));
+        mtl_reg_tex(301, NULL, NULL); CHECK("an emptied ID has not been read", !pool_seen(301));
+        mtl_reg_tex(304, &t4, NULL); CHECK("an ID given its first texture has not been read", !pool_seen(304));
+        mtl_reg_tex(302, NULL, NULL); mtl_reg_tex(303, NULL, NULL); mtl_reg_tex(304, NULL, NULL); mtl_tex_release(&rd); mtl_tex_release(&un); mtl_drain(); hog = nil;
+    }
+    // The write log: one bit an entry, and the host learns the range of the entry the bit names, from the table the shader used
+    {
+        id<MTLBuffer> map = gmem_map();
+        mtl_sub_begin(); uint64_t log = gml_take(map); CHECK("a log", log != 0);
+        id<MTLBuffer> lb = g_gml_free.lastObject; (void)lb;
+        const uint8_t *t = (const uint8_t *)map.contents; int n0 = g_gml_n, want = -1;
+        for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES && want < 0; k++) { uint64_t r[2]; memcpy(r, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); if (r[0] <= base + 900 * MB && base + 900 * MB < r[1]) want = k; }
+        CHECK("the pool has an entry to log", want > 0);
+        id<MTLBuffer> w = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
+        ((uint32_t *)w.contents)[want / 32] = 1u << (want % 32);
+        gml_read(w, map, 0, 0);
+        CHECK("the bit teaches its range", g_gml_n == n0 + 1 && g_gml_lo[n0] <= base + 900 * MB && base + 900 * MB < g_gml_hi[n0]);
+        gml_read(w, map, 0, 0);
+        CHECK("a known range adds nothing", g_gml_n == n0 + 1);
+        finish();
+    }
+    // A smaller pool is one buffer, and the removal of the large one takes all its entries
+    uint8_t *small = mmap(NULL, 64 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (small == MAP_FAILED) abort();
+    int n3 = g_npool; mtl_pool_add(small, 64 * MB); CHECK("one entry", g_npool == n3 + 1 && g_nbig == 1);
+    CHECK("its buffer is the whole pool", look((uint64_t)(uintptr_t)small + 10, 16).length == 64 * MB);
+    mtl_pool_del(mem); mtl_drain();
+    CHECK("no large pool left", g_nbig == 0);
+    CHECK("only the small pool's entry is left of those added", g_npool == pools0 + 1);
+    CHECK("the small pool still answers, its entry moved", look((uint64_t)(uintptr_t)small + 20, 16).length == 64 * MB);
+    CHECK("the large pool's addresses do not", !mtl_gpu_addr(base + 100, 4, &mb, &mo, &gpu));
+    mtl_pool_del(small); mtl_drain();
+    // Length 1: the read's extent is not known (an indirect draw's index buffer, a storage buffer whose address the game keeps). It may read on to the pool's end, so it takes one buffer of the
+    // whole pool, which every such lookup shares: a guess of 64 MB made a chunk of 80 MB and more at each stride, overlapping, 4,243 MB over a 1,507 MB pool in Trails in the Sky 1st Chapter (issue #877)
+    {
+        uint8_t *um = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (um == MAP_FAILED) abort();
+        uint64_t ub = (uint64_t)(uintptr_t)um, at = ub + 100 * MB + 16;
+        mtl_pool_add(um, GB);
+        id<MTLBuffer> short_view = look(at, 64);   // a chunk short of the pool's end, now in this thread's lookup cache
+        int before = g_npool;
+        CHECK("unknown extent: not the short chunk the cache holds", mtl_gpu_addr(at, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb != short_view);
+        id<MTLBuffer> whole = (__bridge id<MTLBuffer>)mb;
+        CHECK("unknown extent: one buffer of the whole pool", (uint64_t)(uintptr_t)whole.contents <= ub && (uint64_t)(uintptr_t)whole.contents + whole.length == ub + GB && g_npool == before + 1);
+        CHECK("its GPU address is the buffer's", gpu == whole.gpuAddress + mo);
+        for (unsigned k = 1; k < 20; k++) CHECK("unknown extent at other strides: the same buffer", mtl_gpu_addr(ub + k * 32 * MB + 4, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb == whole);
+        CHECK("at the end, unknown: the same buffer", mtl_gpu_addr(ub + GB - 8, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb == whole);
+        CHECK("and lookups of known length take it too", look(ub + 700 * MB, 4096) == whole && g_npool == before + 1);
+        int kept = 0; for (int i = 0; i < g_npool; i++) kept |= g_pools[i].buf == short_view;
+        CHECK("the short chunk stays for what was encoded with it", kept);
+        // The GPU reaches 96 MB past the address through it, past what the 64 MB guess held
+        NSError *err = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal; kernel void beyond(device uchar *p [[buffer(0)]]) { p[96u * 1024u * 1024u] = 0x7b; }" options:nil error:&err];
+        id<MTLComputePipelineState> ps = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"beyond"] error:&err] : nil;
+        CHECK("the fixture compiles", ps != nil);
+        uint64_t off = at - (uint64_t)(uintptr_t)whole.contents;
+        if (ps) {
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ps]; [enc setBuffer:whole offset:off atIndex:0];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [enc endEncoding];
+            [cb commit]; [cb waitUntilCompleted];
+            CHECK("the GPU writes 96 MB past an address of unknown extent", cb.status == MTLCommandBufferStatusCompleted && um[at - ub + 96 * MB] == 0x7b);
+        }
+        mtl_pool_del(um); mtl_drain();
+        CHECK("its removal takes every entry", g_nbig == 0 && g_npool == before - 1);
+        munmap(um, GB);
+    }
+    // A buffer made while any of its pages is write-protected (nvn_dirty_protect: a packaged texture's upload, an index range) drops every GPU write through it, with no error, even to pages
+    // never protected (issue #1591). Each kind of zero-copy buffer over pool memory, made over a protected page, must still take the GPU's writes
+    {
+        uint8_t *wp = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (wp == MAP_FAILED) abort();
+        uint64_t wb = (uint64_t)(uintptr_t)wp;
+        mtl_pool_add(wp, GB); nvn_dirty_add_range(wp, GB);
+        uint64_t tst = nvn_dirty_now(); nvn_dirty_protect(wp + 40 * MB, 4096);   // a texture's page in the stride the lookup below makes a chunk for
+        CHECK("a new chunk over a protected page takes GPU writes", gpu_fill_ok(wb + 41 * MB, 4096, 0x5a));
+        CHECK("the chunk does not make the texture's page written: it is not read again", !nvn_dirty_since(wp + 40 * MB, 4096, tst));
+        (void)look(wb + 200 * MB, 64);   // a short chunk, made over writable pages
+        nvn_dirty_protect(wp + 220 * MB, 4096);   // then a page past its end is protected, and a longer lookup lengthens it over that page
+        CHECK("a lengthened chunk over a protected page takes GPU writes", gpu_fill_ok(wb + 200 * MB, 32 * MB, 0x6b));
+        // Storage the GPU wrote (render targets in a CPU-visible pool, mtl_tex_gpu_written) is protected too. A chunk made over it must not make it the CPU's, which would take its textures
+        // from guest memory the GPU never wrote (PR #1604); storage the CPU wrote since stays the CPU's
+        {
+            pool_t wpool = {.magic = MAGIC('P', 'O', 'O', 'L'), .mem = wp, .size = GB, .flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+            tex_t gt = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .pool = &wpool, .mem = wp + 400 * MB}, ct = gt;
+            gt.L.size = ct.L.size = 4 * MB; ct.mem = wp + 440 * MB;
+            uintptr_t g0 = (uintptr_t)gt.mem, c0 = (uintptr_t)ct.mem;
+            mtl_tex_gpu_written(&gt); mtl_tex_gpu_written(&ct);
+            dm_guest_write_prepare(ct.mem + MB, 4096); ct.mem[MB] = 1;   // the CPU writes the second after the GPU did
+            CHECK("GPU-written storage: the GPU's", gws_owned(g0, g0 + 4 * MB));
+            CHECK("written by the CPU since: the CPU's", !gws_owned(c0, c0 + 4 * MB));
+            CHECK("a chunk over both takes GPU writes", gpu_fill_ok(wb + 400 * MB, 60 * MB, 0x4e));
+            CHECK("GPU-written storage stays the GPU's once the chunk is made", gws_owned(g0, g0 + 4 * MB));
+            CHECK("storage the CPU wrote stays the CPU's", !gws_owned(c0, c0 + 4 * MB));
+            dm_guest_write_prepare(gt.mem + MB, 4096); gt.mem[MB] = 1;
+            CHECK("protected again: a CPU write makes it the CPU's", !gws_owned(g0, g0 + 4 * MB));
+        }
+        nvn_dirty_protect(wp + 600 * MB, 4096);
+        mtl_pool_addressed(wp + 700 * MB, 4096);
+        mtl_sub_begin(); CHECK("pool table over the protected pool", gmem_map_gpu() != 0); finish();
+        CHECK("the whole-pool buffer over a protected page takes GPU writes", look(wb + 700 * MB, 4096).length == GB && gpu_fill_ok(wb + 700 * MB, 4096, 0x7c));
+        // Pools are 4 KB aligned and buffers whole host pages: a pool made after its neighbour's texture protected the page they share
+        uint8_t *two = mmap(NULL, 4 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (two == MAP_FAILED) abort();
+        size_t pg = (size_t)getpagesize(), half = pg + 4096;
+        mtl_pool_add(two, half); nvn_dirty_add_range(two, half);
+        uint64_t st = nvn_dirty_now(); nvn_dirty_protect(two + pg, 4096);   // the first pool's last page, which the second pool starts in
+        mtl_pool_add(two + half, 2 * MB); nvn_dirty_add_range(two + half, 2 * MB);
+        CHECK("a pool made over its neighbour's protected page takes GPU writes", gpu_fill_ok((uint64_t)(uintptr_t)(two + half + MB), 4096, 0x8d));
+        CHECK("the page opened for the buffer does not count as written", !nvn_dirty_since(two + pg, 4096, st));
+        dm_guest_write_prepare(two + pg, 4096); two[pg] = 1;   // protected again: tracked as before (a host write; the test has no fault handler for a CPU one)
+        CHECK("protected again: a write is seen", nvn_dirty_since(two + pg, 4096, st));
+        nvn_dirty_remove_range(two + half); mtl_pool_del(two + half); nvn_dirty_remove_range(two); mtl_pool_del(two);
+        nvn_dirty_remove_range(wp); mtl_pool_del(wp); mtl_drain();
+    }
+    printf("t_pool_chunks: %d checks, %d failed\n", checks, failed); return failed != 0;
+}}

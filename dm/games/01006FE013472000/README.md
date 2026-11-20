@@ -44,11 +44,14 @@ Everything else needed was general: see [Found on this game](#found-on-this-game
 
 General changes first needed here; each applies to every game:
 
-- **Texture and sampler pools for handles traced to no slot** (`Program.cs`, vendored `BindlessElimination.cs`, `dmsh_build.py` `pool_arrays`, `nvn_mtl.m` `pool_gpu`): [Texture handles from game memory index the pools](../../../docs/reference/shaders.md#texture-handles-from-game-memory-index-the-pools).
-- **Argument buffer members with attributes after their id** (`dmsh_build.py` `reflect`): [Argument buffer members with attributes after their id](../../../docs/reference/shaders.md#argument-buffer-members-with-attributes-after-their-id).
+- **Texture and sampler pools for handles traced to no slot** (`Program.cs`, vendored `BindlessElimination.cs`, `dmsh_reflect.py` `pool_arrays`, `nvn_mtl.m` `pool_gpu`): [Texture handles from game memory index the pools](../../../docs/reference/shaders.md#texture-handles-from-game-memory-index-the-pools).
+- **A texture read after its memory pool object was freed** (`nvn_mtl.m` `tex_mtl_`, `tex_by_id`; `hle_nvn.c` `nvnMemoryPoolFinalize`): the first pool walk here crashed once in `nvn_sparse_protect`, the same fault FINAL FANTASY RESONANCE met later: [A texture read after its memory pool object was freed](../../../docs/reference/nvn-objects.md#a-texture-read-after-its-memory-pool-object-was-freed).
+- **Argument buffer members with attributes after their id** (`dmsh_reflect.py` `reflect`): [Argument buffer members with attributes after their id](../../../docs/reference/shaders.md#argument-buffer-members-with-attributes-after-their-id).
+- **The offline archive's script streamed, not held** (`pso_offline.py` `write_script`, `archive_key`): 1.1.1's 140,036 bases, a 503 MB script; Python holds 0.06 GB, not 1.8 GB, while `metal-tt` runs. Why `metal-tt` failed after 76 minutes is open ([GitHub issue #1022](https://github.com/seedds/nxnative/issues/1022)): [Python memory during offline pipeline archive preparation](../../../docs/reference/shaders.md#python-memory-during-offline-pipeline-archive-preparation).
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 144 bindless accesses in 2 shaders (2 pixel; texture2D 8, texture2DArray 136), whose results read 0: `8626db4094a2d076` `b75794f25d7f3314`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - Only one board (Yoshi's Tropical Island) and two minigames (Speed Hockey, Tube It or Lose It) were played; the other boards, the other modes and most minigame NROs were not loaded.
 - Only the 1.1.1 build (`v131072`) is registered.
 - iPhone: not built, not installed, not tested.

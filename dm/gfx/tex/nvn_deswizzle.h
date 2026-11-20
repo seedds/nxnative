@@ -11,9 +11,21 @@
 int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_storage, void *dst_linear, size_t dst_pitch);
 // Reverse (for unit test round trips): linear src_linear → written into the corresponding level / layer of the whole-texture storage dst_storage
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_linear, size_t src_pitch, void *dst_storage);
+// Every step-th block of every step-th block row of a level and layer, the block in the middle of each step x step cell: nx x ny blocks into dst, rows of nx blocks (a small picture of a
+// level too large to read whole, for nvn_mtl.m's stand-ins). Block sizes of 1, 2, 4, 8 and 16 bytes; -1 for others and for what nvn_deswizzle does not support
+int nvn_deswizzle_pick(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_storage, uint32_t step, void *dst_linear, uint32_t nx, uint32_t ny);
+// One 64 KB tile (tx, ty) of a sparse texture's tiled level, given as its own 64 KB, into dst (block rows of dst_pitch bytes): *wb bytes of *rows block rows, the part inside the level
+int nvn_deswizzle_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32_t ty, const void *tile, void *dst_linear, size_t dst_pitch, uint32_t *wb, uint32_t *rows);
+// nvn_deswizzle from storage given from byte src_at of the whole texture's on (src points at that byte); the level and layer must lie at or after it
+int nvn_deswizzle_from(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint64_t src_at, void *dst_linear, size_t dst_pitch);
 // Single-point address: within this level and layer, linear (x byte, y block row, z slice) → block-linear byte offset relative to the start of this level and layer (unit tests verify against hand calculation).
 // row_bytes: the row as laid out, which a sparse texture's tiled levels pad to whole tiles (nvn_tex_level_gobs × 64)
-uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD);
+// The GOB's inner order: 0 the Tegra X1's (Switch), 1 the Switch 2's, whose 16-byte pieces go x5 y2 x4 y1 y0 from the GOB's start where the X1's go x5 y2 y1 x4 y0 (bits 5 and 6 of the
+// offset exchanged). Measured on Donkey Kong Bananza's BNTX textures (BC4, BC7; level 0 decoded both ways): with the X1's order every 16-byte piece kept its GOB but not its place in it,
+// which left the rocks' normal maps a weave of misplaced 4x4 blocks along every edge. NVN2's device flag bit 16 selects X1 order instead: the native driver's CPU copies and texture
+// descriptor word 2 bit 24 use that flag, independently of IMAGE. TextureInitialize captures the owning device's choice in the descriptor; every texture reader and writer uses it.
+static inline int nvn_gob_order(const nvn_texdesc *d) { return d->gob_order; }
+uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD, int switch2);
 
 int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
                        uint32_t *row_bytes, uint32_t *rows, uint32_t *slices,

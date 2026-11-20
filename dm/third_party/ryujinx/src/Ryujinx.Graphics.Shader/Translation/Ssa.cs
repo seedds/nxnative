@@ -8,6 +8,9 @@ namespace Ryujinx.Graphics.Shader.Translation
     static class Ssa
     {
         private const int GprsAndPredsCount = RegisterConsts.GprsCount + RegisterConsts.PredsCount;
+        private const int UniformsBase = GprsAndPredsCount + RegisterConsts.FlagsCount;
+        private const int UniformPredsBase = UniformsBase + RegisterConsts.UniformsCount;
+        private const int ShadowsBase = UniformPredsBase + RegisterConsts.UniformPredsCount;
 
         private class DefMap
         {
@@ -350,9 +353,21 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 return RegisterConsts.GprsCount + reg.Index;
             }
-            else /* if (reg.Type == RegisterType.Flag) */
+            else if (reg.Type == RegisterType.Flag)
             {
                 return GprsAndPredsCount + reg.Index;
+            }
+            else if (reg.Type == RegisterType.Uniform)
+            {
+                return UniformsBase + reg.Index;
+            }
+            else if (reg.Type == RegisterType.UniformPredicate)
+            {
+                return UniformPredsBase + reg.Index;
+            }
+            else /* if (reg.Type == RegisterType.Shadow) */
+            {
+                return ShadowsBase + reg.Index;
             }
         }
 
@@ -366,9 +381,21 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 return new Register(key - RegisterConsts.GprsCount, RegisterType.Predicate);
             }
-            else /* if (key < RegisterConsts.TotalCount) */
+            else if (key < UniformsBase)
             {
                 return new Register(key - GprsAndPredsCount, RegisterType.Flag);
+            }
+            else if (key < UniformPredsBase)
+            {
+                return new Register(key - UniformsBase, RegisterType.Uniform);
+            }
+            else if (key < ShadowsBase)
+            {
+                return new Register(key - UniformPredsBase, RegisterType.UniformPredicate);
+            }
+            else /* if (key < RegisterConsts.TotalCount) */
+            {
+                return new Register(key - ShadowsBase, RegisterType.Shadow);
             }
         }
     }

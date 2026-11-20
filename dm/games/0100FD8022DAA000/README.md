@@ -6,7 +6,7 @@ Update 1.4.0 (v393216) over the base game, SDK 18.3.5. NERD's Hagi Wii layer, as
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `6075151627016eef…` (shared with Galaxy) | the movie player's 384 MB allocator aborted the game at boot; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB, and regions of 4 MB and more aligned to 2 MB as SDK 20 | `dm/tools/sdk_patches.py`, the SDK-wide rules (`MATCH_CUTS`) on `sdk` build `6075151627016eef…` (shared with Galaxy; its row, the node area cut alone, was removed on 2026-10-30 after a run on Monster Train 2, the same build) | the movie player's 384 MB allocator aborted the game at boot; see [Memory](#memory) |
 | 1.25 GB block: `mem_reserve 0x50000000`, `mem_alias 0x20000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | a 512 MB alias region for that allocator; the guessed 256 MB held nothing after the node area |
 | `op_mode handheld` | `game.tsv` | the pointer (star bits, menus, the file select) is the touch screen in handheld mode; docked it is the Joy-Con gyro, which the host does not have |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout |
@@ -28,6 +28,7 @@ Update 1.4.0 (v393216) over the base game, SDK 18.3.5. NERD's Hagi Wii layer, as
 
 ## Rendering
 
+- **Resolved (GitHub issue 949): the storybook cutscenes were squeezed to 5:4 with black bars at the sides.** The game draws them anamorphically into a 5:4 crop of its 1920x1080 swapchain and crops the layer to it (`vi::SetLayerCrop`, 1200x960 docked, 800x640 handheld; 1920x1080 or 1280x720 otherwise), which the Switch's compositor stretches back to 16:9. In the 5:4 shots the paper frame takes the same 0.86 of the picture's width as in the 16:9 ones and the round A prompt is a tall oval. The present took the crop's shape as the picture's: [A crop only picks texels; the picture has the layer's shape](../../../docs/reference/rendering.md#a-crop-only-picks-texels-the-picture-has-the-layers-shape).
 - **Resolved (GitHub issue 72): the half of Mario facing the camera's left was white** on an iPhone. spirv-cross writes `FMin` / `FMax` / `FClamp` as `fast::min` / `max` / `clamp`, which leave a NaN operand's result to the GPU. Galaxy's GX lighting normalizes light directions the game leaves at (0, 0, 0) (the key and fill lights of its characters) and takes `max(0, dot(ldir, NaN))` as the spot term: 0 on the M4 Pro with either function, so the attenuation is 1. The fill light sits at the camera's left in view space, so its terminator runs down the middle of a character facing the camera. `vk_shaders.py` (and `dmsh_build.py`, `gl_shaders.py`) now write `precise::` functions, which return the other operand as Maxwell's `FMNMX` does.
 - **Resolved (GitHub issue 68): a crash in `bind_res` on an iPhone when the ship took off after the first galaxy.** The replay binds every element of an array the shader takes, and a set may still name an image view the game has destroyed (the hardware reads a descriptor only when a draw samples it). The layer's descriptors were pointers to its own view, sampler and buffer structs; the crash read a freed view's texture from element 1 of the 8-texture array. A descriptor now holds the texture, sampler state and buffer it was written with (retained), as a hardware descriptor holds a copy of the handle. Through the opening and the first storybook stage the game allocates 22,785 descriptor sets and frees none, and destroys only 5 image views (and 1,244 images), so a stale element is rare: a Mac run that kept destroyed objects to catch their binds found none there.
 
@@ -58,11 +59,13 @@ Mac repro of both: `DM_OE_SCRIPT=bg=1@20,bg=0@25`. The game froze after switchin
 
 General host changes first needed here; each applies to every game:
 
-- **`precise::` min / max / clamp** in every translator (`dmsh_build.py` `precise`, `vk_shaders.py`, `gl_shaders.py`; issue 72): [min, max and clamp with a NaN operand](../../../docs/reference/shaders.md#min-max-and-clamp-with-a-nan-operand).
+- **A crop only picks texels; the picture has the layer's shape** (`present_shape`; issue 949): [A crop only picks texels; the picture has the layer's shape](../../../docs/reference/rendering.md#a-crop-only-picks-texels-the-picture-has-the-layers-shape).
+- **`precise::` min / max / clamp** in every translator (`dmsh_rewrite.py` `precise`, `vk_shaders.py`, `gl_shaders.py`; issue 72): [min, max and clamp with a NaN operand](../../../docs/reference/shaders.md#min-max-and-clamp-with-a-nan-operand).
 - **Vulkan descriptors hold the Metal objects** (issue 68): [Descriptors hold the Metal objects they were written with](../../../docs/reference/rendering.md#descriptors-hold-the-metal-objects-they-were-written-with).
 - **Vulkan acquire and the vsync event thread follow the display link** (`mtl_link_wait_tick`, `mtl_link_wait_vsync`): [Vulkan acquire and vsync event follow the display link](../../../docs/reference/frame-rate.md#vulkan-acquire-and-vsync-event-follow-the-display-link).
 - **Focus message 15 only under focus handling modes 1 and 2** (`hle_oe.c`) and **the guest clock waits in the background** (`guest_clock_read_wait`): [Focus handling mode decides whether focus changes are notified](../../../docs/reference/services.md#focus-handling-mode-decides-whether-focus-changes-are-notified), [Guest clock reads wait while the app is in the background](../../../docs/reference/services.md#guest-clock-reads-wait-while-the-app-is-in-the-background).
 - **A yield whose callee-saved registers moved counts as progress** (`thr_yield`; this game's poll keeps them): [Yields that make progress return at once](../../../docs/reference/threads.md#yields-that-make-progress-return-at-once-thr_yield).
+- **`--title-id` picks one game of a two-game XCI** (this game shares a cartridge dump with Super Mario Galaxy): [A cartridge dump that holds two games packs only the first](../../../docs/reference/packing.md#a-cartridge-dump-that-holds-two-games-packs-only-the-first).
 
 ## Open
 

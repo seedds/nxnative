@@ -66,15 +66,20 @@ def cut(text, cap):
 
 
 def read_text(path):
-    """A regular text file's content (over FILE_CAP: both ends only), or None (a .keys file, a symlink, nonregular or binary)."""
+    """A regular text file's content (over FILE_CAP: complete lines at both ends), or None (a .keys file, a symlink, nonregular or binary)."""
     p = Path(path)
     if p.suffix.lower() == '.keys' or p.is_symlink() or not p.is_file(): return None
     with open(p, 'rb') as f:
         if b'\0' in f.read(4096): return None
         f.seek(0, 2); size = f.tell(); f.seek(0)
         if size <= FILE_CAP: return f.read().decode('utf-8', 'replace')
-        a = f.read(FILE_CAP // 2); f.seek(size - FILE_CAP // 2)
-        return a.decode('utf-8', 'replace') + f'\n[bug_report: {size - FILE_CAP} bytes cut here]\n' + f.read().decode('utf-8', 'replace')
+        a = f.read(FILE_CAP // 2)
+        f.seek(size - FILE_CAP // 2 - 1); before = f.read(1); b = f.read()
+        # Redaction matches whole lines. A cut can detach a key's value from its
+        # name or leave fewer than 32 hex digits, making the fragment look safe.
+        a = a[:a.rfind(b'\n') + 1]
+        if before != b'\n': b = b.partition(b'\n')[2]
+        return a.decode('utf-8', 'replace') + f'\n[bug_report: {size - len(a) - len(b)} bytes cut here]\n' + b.decode('utf-8', 'replace')
 
 
 def run_out(cmd, timeout=20):
@@ -136,14 +141,14 @@ def chain_version():
 
 
 def shader_dirs(app, build):
-    """Available library folder names only; a build may retain several old chains, so none establishes the chain the player ran."""
+    """Available library names only (a folder b-<chain>/ or its image b-<chain>.img, which dmsh_build.py writes); a build may retain several old chains, so none establishes the chain the player ran."""
     root = app if app else build
     dirs = [app / 'Contents/Resources/msl'] if app else [build / s for s in ('shader', 'shader/cache', 'shader/ios')] if build else []
     found = []
     for d in dirs:
         if d.is_symlink() or not d.is_dir(): continue
         found.extend(p.relative_to(root).as_posix() for p in d.iterdir()
-                     if not p.is_symlink() and p.is_dir() and re.fullmatch(r'b-[0-9a-f]+', p.name))
+                     if not p.is_symlink() and ((p.is_dir() and re.fullmatch(r'b-[0-9a-f]+', p.name)) or (p.is_file() and re.fullmatch(r'b-[0-9a-f]+\.img', p.name))))
     return sorted(found)
 
 

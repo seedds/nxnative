@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/regress.py: the parts that need no game, GPU or git revision: the MSL interface reader (GitHub issue #283), the [RED] normalization, the routes, and the comparisons
-import importlib.util, json, tempfile, unittest
+import fcntl, importlib.util, json, os, tempfile, time, unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -50,6 +50,57 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 
 
 class Regress(unittest.TestCase):
+    def test_gl_chain_key_tracks_the_glsl_compiler(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); compiler = root / 'glslangValidator'; compiler.write_bytes(b'compiler version one')
+            tree = NS(path=root)
+            g = NS(kind='gl', ver='v0', shader_roots=list)
+            gl = NS(sources=lambda roots: [(b'void main() {}', 'frag', 'synthetic')])
+            with patch.dict(os.environ, {}, clear=True), patch.object(regress, 'load_module', return_value=gl), \
+                 patch.object(regress.shutil, 'which', return_value=str(compiler)):
+                before = regress.chain_key(tree, g, 'other tools')
+                self.assertEqual(before, regress.chain_key(tree, g, 'other tools'))
+                compiler.write_bytes(b'compiler version two')
+                self.assertNotEqual(before, regress.chain_key(tree, g, 'other tools'))
+
+    def test_gl_manifest_preserves_translation_failures(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'translations.json'
+            p.write_text(json.dumps({'a_frag': {'st': 'ok', 'msl': 'abc', 'refl': 'def'}, 'b_frag': {'st': 'translation failed', 'err': 'sampler limit'}}))
+            built = regress.gl_manifest(p, True, Path(d) / 'log')
+            self.assertEqual((built['a_frag']['st'], built['b_frag']['st']), ('ok', 'translation failed'))
+            failed = regress.gl_manifest(p, False, Path(d) / 'log')
+            self.assertEqual((failed['a_frag']['st'], failed['b_frag']['st']), ('library failed', 'translation failed'))
+            p.write_text('{}')
+            with self.assertRaises(regress.HarnessError): regress.gl_manifest(p, True, Path(d) / 'log')
+
+    def test_gl_game_capture_roots_and_provisional_route(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); build = root / '0100000000000000_build'
+            (build / 'patched_v0').mkdir(parents=True); (build / 'shader/gl').mkdir(parents=True)
+            capture = build / 'extract/v0/gl_capture'; capture.mkdir(parents=True)
+            profile = build / 'profile/0100000000000000'; profile.mkdir(parents=True)
+            (profile / 'game.tsv').write_text('name\tSynthetic GL game\n')
+            (profile / 'smoke.tsv').write_text('secs\t120\nsave\tnew\n')
+            g = regress.Game(root, build)
+            self.assertEqual(g.kind, 'gl'); self.assertEqual(g.route()['secs'], 120)
+            with patch.object(regress.Game, 'romfs', return_value=root / 'romfs'):
+                self.assertEqual(g.shader_roots(), [root / 'romfs', capture, build / 'extract/v0/ExeFS/main'])
+
+    def test_run_env_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync a route's scratch save with the player's cloud save (docs/reference/services.md)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            g = NS(id='0100000000000000', folder=root, build=root / 'build', kind='nvn', romfs=lambda: root / 'romfs')
+            art = {'lib': root / 'lib', 'profile': root / 'profile'}
+            route = {'save': 'new'}
+            with patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud'), DM_SAVE_SYNC_CHOICE='cloud'):
+                env, src = regress.run_env(g, art, route, root / 'run', NS(env=[], no_hud=True))
+                self.assertEqual((env['DM_SAVE_SYNC'], env['DM_SAVE'], src), ('0', str(root / 'run/save'), None))
+                self.assertNotIn('DM_SAVE_SYNC_CHOICE', env)   # the player's answer to which save to keep
+                self.assertNotIn('DM_SAVE_SYNC_CHOICE', regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC_CHOICE=cloud'], no_hud=True))[0])
+                with self.assertRaises(regress.HarnessError): regress.run_env(g, art, route, root / 'run', NS(env=[f'DM_SAVE_SYNC={root}/cloud'], no_hud=True))
+                self.assertEqual(regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC=0'], no_hud=True))[0]['DM_SAVE_SYNC'], '0')
+
     def test_impact_without_machine_paths(self):
         env = {k: v for k, v in regress.os.environ.items() if k not in ('REGRESS_ROOT', 'REGRESS_GAMES')}
         with tempfile.TemporaryDirectory() as td:
@@ -147,6 +198,26 @@ class Regress(unittest.TestCase):
             with patch.object(regress.time, 'sleep'), patch.object(regress.subprocess, 'run', side_effect=OSError):
                 self.assertIsNone(regress.hang_evidence(NS(pid=4242), cwd))
 
+    def test_gl_frames_progress_while_display_link_messages_stop(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            now = [0.0]; log = Path(td) / 'log.txt'
+            child = NS(pid=4242, returncode=0, poll=lambda: 0 if now[0] >= 1.5 else None, send_signal=lambda _: None, wait=lambda _: None)
+            cafe = NS(poll=lambda: 0)
+            def popen(cmd, **kw):
+                if cmd[0] == 'caffeinate': return cafe
+                kw['stdout'].write('[dm] [nvn-mtl] presents 1\n'); kw['stdout'].flush(); return child
+            def sleep(secs):
+                now[0] += secs
+                with log.open('a') as f: f.write(f'[dm] [gl] frame {int(now[0] * 1200)}: draws 10\n')
+            for name, value in (('check_disk', None), ('wait_idle', True), ('take_lock', None), ('footprint', None), ('hang_evidence', None)):
+                stack.enter_context(patch.object(regress, name, return_value=value))
+            stack.enter_context(patch.object(regress.subprocess, 'Popen', side_effect=popen))
+            stack.enter_context(patch.object(regress.time, 'monotonic', side_effect=lambda: now[0]))
+            stack.enter_context(patch.object(regress.time, 'sleep', side_effect=sleep))
+            r = regress.run_watched(['host'], {}, Path(td), log, NS(min_free_gb=0, wait_idle=0, lock=None), limit=2, hang=0.5, kind='gl', what='synthetic')
+            self.assertIsNone(r['hang_at_s'])
+            self.assertGreaterEqual(r['max_frame'], 1200)
+
     def test_routes(self):   # every profile's smoke.tsv reads
         for f in (REPO / 'dm/games').glob('*/smoke.tsv'):
             r = regress.read_route(f)
@@ -175,6 +246,78 @@ class Regress(unittest.TestCase):
         self.assertEqual([x['key'] for x in d['added_failing']], ['e'])   # shader_regressions.py does not count a new key; the harness lists it apart
         self.assertEqual(d['changed']['msl'], 1); self.assertEqual(d['changed']['keys'], ['d'])
         self.assertEqual([x['vs'] for x in d['interface']['new']], ['w']); self.assertEqual(len(d['interface']['known']), 1)
+
+    def test_nvn_manifest_reads_losses_from_the_reflection(self):   # a cache hit translates nothing, so only the reflection knows
+        k = '0123456789abcdef'
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / '_b_build.json').write_text(json.dumps([{'key': k, 'st': 'ok'}, {'key': 'f' * 16, 'st': 'ok'}]))
+            handle = 'translator: Failed to find handle source for bindless access of type "texture2D".'
+            (d / f'{k}_b.json').write_text(json.dumps({'key': k + '_b', 'entries_lost': ['layer'], 'notes': [handle, handle, 'translator: Bindless handle taken from the one c[2] handle among its phi inputs.']}))
+            (d / f'{"f" * 16}_b.json').write_text(json.dumps({'key': 'f' * 16 + '_b', 'notes': []}))
+            m = regress.nvn_manifest(d, 1)
+        self.assertEqual((m[k]['deleted'], m[k]['lost']), ({'texture2D': 2}, {'layer': 1}))
+        self.assertNotIn('deleted', m['f' * 16]); self.assertNotIn('lost', m['f' * 16])
+
+    def loss(self, base, cand):
+        return regress.chain_diff({'shaders': {k: {'st': 'ok', **e} for k, e in base.items()}}, {'shaders': {k: {'st': 'ok', **e} for k, e in cand.items()}})['losses']
+
+    def test_new_deleted_read_is_caught(self):
+        x = self.loss({'a': {}}, {'a': {'deleted': {'texture2D': 1}}})['deleted']
+        self.assertEqual((x['baseline'], x['candidate'], x['rose'], x['held']), (0, 1, 1, 0))
+        self.assertEqual(x['keys'], [{'key': 'a', 'baseline': {}, 'candidate': {'texture2D': 1}}])
+
+    def test_new_lost_entry_is_caught(self):
+        x = self.loss({'a': {'lost': {'integer output': 1}}}, {'a': {'lost': {'integer output': 1, 'layer': 1}}})['lost']
+        self.assertEqual((x['rose'], x['held']), (1, 0))
+        self.assertEqual(x['keys'][0]['candidate'], {'integer output': 1, 'layer': 1})
+
+    def test_known_losses_do_not_fail(self):
+        same = {'a': {'deleted': {'texture2D': 26}, 'lost': {'layer': 1}}}
+        for kind, x in self.loss(same, same).items():
+            self.assertEqual((x['rose'], x['held'], x['keys']), (0, 1, []), kind)
+
+    def test_a_fix_elsewhere_does_not_hide_a_new_loss(self):   # the totals fall from 5 to 2, and b still lost one more
+        x = self.loss({'a': {'deleted': {'texture2D': 5}}, 'b': {}}, {'a': {'deleted': {'texture2D': 1}}, 'b': {'deleted': {'texture2D': 1}}})['deleted']
+        self.assertEqual((x['baseline'], x['candidate'], x['rose'], x['held']), (5, 2, 1, 1))
+        self.assertEqual(x['keys'][0]['key'], 'b')
+
+    def test_another_type_is_another_access(self):
+        self.assertEqual(self.loss({'a': {'deleted': {'texture2D': 1}}}, {'a': {'deleted': {'textureCube': 1}}})['deleted']['rose'], 1)
+
+    def test_new_shader_with_a_loss_is_caught(self):
+        self.assertEqual(self.loss({}, {'n': {'deleted': {'texture2D': 1}}})['deleted']['rose'], 1)
+
+    def test_loss_levels(self):
+        def grade(base, cand):
+            levels, known = regress.collections.defaultdict(list), []
+            regress.loss_levels(self.loss(base, cand), levels, known)
+            return levels, known
+        levels, known = grade({'a': {}}, {'a': {'deleted': {'texture2D': 1}}})
+        self.assertIn('1 shaders with more bindless accesses the translator deleted than in the baseline', levels['NEW-FAIL']); self.assertEqual(known, [])
+        levels, known = grade({'a': {'lost': {'layer': 1}}}, {'a': {'lost': {'layer': 1}}})
+        self.assertEqual(levels['NEW-FAIL'], []); self.assertEqual(known, ['1 shaders with extra entry points the library built without'])
+        levels, known = grade({'a': {'deleted': {'texture2D': 3}}}, {'a': {'deleted': {'texture2D': 1}}})
+        self.assertEqual(levels['NEW-FAIL'], []); self.assertEqual(levels['CHANGED'], ['bindless accesses the translator deleted: 3 → 1'])
+
+    def test_check_fails_on_a_new_loss_and_the_report_names_the_shader(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            root = Path(td)
+            a = NS(baseline='base', candidate='cand', no_smoke=True, rewrite=False, quick=False)
+            stack.enter_context(patch.object(regress, 'Tree', return_value=NS(id='tree')))
+            stack.enter_context(patch.object(regress, 'select', return_value=[NS(id='game', name='game')]))
+            stack.enter_context(patch.object(regress, 'rewriter_key', return_value='same'))
+            baseline = {'kind': 'nvn', 'ok': 1, 'total': 1, 'failed': 0, 'shaders': {'0123456789abcdef': {'st': 'ok'}}}
+            candidate = {'kind': 'nvn', 'ok': 1, 'total': 1, 'failed': 0, 'shaders': {'0123456789abcdef': {'st': 'ok', 'lost': {'layer': 1}}}}
+            stack.enter_context(patch.object(regress, 'chain_build', side_effect=[(baseline, root), (candidate, root)]))
+            stack.enter_context(patch.object(regress, 'new_report', return_value={'games': {}}))
+            finish = stack.enter_context(patch.object(regress, 'finish', return_value=1))
+            stack.enter_context(patch.object(regress, 'say'))
+            regress.cmd_check(a)
+            gr = finish.call_args.args[0]['games']['game']
+            self.assertEqual(gr['status'], 'NEW-FAIL')
+            md = regress.report_md({'baseline': None, 'candidate': None, 'command': 'chain', 'mode': 'chain', 'status': 'NEW-FAIL', 'machine': {'chip': 'x', 'macos': 'x', 'xcode': 'x'}, 'secs': 1, 'games': {'game': {'secs': {}, **gr}}})
+            self.assertIn('`0123456789abcdef`', md); self.assertIn('extra entry points', md)
 
     def test_smoke_diff(self):
         route = {'reach': (100, 30.0)}
@@ -246,7 +389,7 @@ class Regress(unittest.TestCase):
         self.assertEqual(regress.worst('PASS', 'CHANGED', 'REGRESSION'), 'REGRESSION'); self.assertEqual(regress.worst('NEW-FAIL', 'ERROR'), 'ERROR')
 
     def test_selection_keeps_games_without_routes(self):
-        games = [NS(id='a', name='routed', kind='nvn', route=lambda: {'save': 'new'}), NS(id='b', name='unrouted', kind='nvn', route=lambda: None)]
+        games = [NS(id='a', name='routed', kind='nvn', derived=False, route=lambda: {'save': 'new'}), NS(id='b', name='unrouted', kind='nvn', derived=False, route=lambda: None)]
         with patch.object(regress, 'find_games', return_value=games), patch.object(regress, 'say'):
             self.assertEqual(regress.select(NS(games=None), smoke=True), games)
 
@@ -272,6 +415,23 @@ class Regress(unittest.TestCase):
             hosts.assert_not_called(); smoke.assert_not_called()
             self.assertEqual([g['status'] for g in finish.call_args.args[0]['games'].values()], ['PASS', 'PASS'])
 
+    def test_prune_chains(self):   # the 3 used last, the recent and the stored baselines' stay; a build in use and other names are never touched
+        with tempfile.TemporaryDirectory() as td:
+            g = NS(id='game', kind='nvn', folder=Path(td)); root = regress.game_root(g) / 'chain'; root.mkdir(parents=True); old = time.time() - 30 * 86400
+            def build(i, when):
+                p = root / f'nvn-{i:012x}-in-k'; p.mkdir(); (p / 'f').write_text('x'); (root / f'{p.name}.lock').write_text('')
+                os.utime(root / f'{p.name}.lock', (when, when)); os.utime(p, (when, when)); return p
+            builds = [build(i, old - i * 3600) for i in range(8)]
+            recent = build(99, time.time() - 3600)
+            (root / 'mine').mkdir()
+            b = regress.game_root(g) / 'baselines/abc'; b.mkdir(parents=True); (b / 'chain.json').write_text(json.dumps({'key': builds[6].name}))
+            with open(root / f'{builds[7].name}.lock', 'a') as held, patch.object(regress, 'say'):
+                fcntl.flock(held, fcntl.LOCK_EX)
+                gone = regress.prune_chains(g)
+            self.assertEqual(sorted(gone), sorted(p.name for p in builds[2:6]))   # builds[0:2] and recent are the 3 used last, 6 is a baseline's, 7 is held
+            self.assertEqual(sorted(p.name for p in root.iterdir() if p.is_dir()), sorted(['mine', recent.name, builds[0].name, builds[1].name, builds[6].name, builds[7].name]))
+            self.assertFalse((root / f'{builds[2].name}.lock').exists())
+
     def test_reused_chain_rechecks_current_interface(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); g = NS(id='game', kind='nvn', folder=root)
@@ -279,9 +439,156 @@ class Regress(unittest.TestCase):
             (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'interface': {'bad': []}}))
             current = {'bad': [{'vs': 'new-pair'}]}
             with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), patch.object(regress, 'interface_check', return_value=current) as check:
-                manifest, _ = regress.chain_build(NS(), g, NS(tools_fp='', jobs=1))
+                manifest, _ = regress.chain_build(NS(path=root), g, NS(tools_fp='', jobs=1))
             check.assert_called_once()
             self.assertEqual(manifest['interface'], current)
+
+    def test_variant_hash_ignores_chain_stamps(self):   # 2026-10-31: DKC Tropical Freeze reported 720 changed shaders whose variants differed only in the stamps
+        k = '0123456789abcdef'
+        def lib(td, chain='c1', compiler='x1', bindings=(0,), msl='kernel void main0() {}', pull=b'\x01'):
+            d = Path(td); stamp = {'chain': chain, 'chain_metal': 'mac', 'chain_compiler': compiler}
+            (d / '_b_build.json').write_text(json.dumps([{'key': k, 'st': 'ok'}]))
+            (d / f'{k}_b.json').write_text(json.dumps({'key': k + '_b', **stamp}))
+            (d / f'{k}_bg0.json').write_text(json.dumps({'key': k + '_bg0', 'bindings': list(bindings), **stamp}))
+            (d / f'{k}_bg0.metal').write_text(msl)
+            (d / f'{k}_bp.metallib').write_bytes(pull)   # pull variants leave only their metallib here
+            return regress.nvn_manifest(d, 1)[k]['var']
+        def var(**kw):
+            with tempfile.TemporaryDirectory() as td: return lib(td, **kw)
+        base = var()
+        self.assertEqual(var(chain='c2', compiler='x2'), base)
+        for change in ({'bindings': (1,)}, {'msl': 'kernel void main0() { }'}, {'pull': b'\x02'}):
+            self.assertNotEqual(var(**change), base, change)
+
+    def test_reused_manifest_of_older_hashes_is_hashed_again(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', kind='nvn', folder=root)
+            out = regress.game_root(g) / 'chain/key'; (out / 'b-v').mkdir(parents=True)
+            (out / 'b-v/_b_build.json').write_text('[]')
+            (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'shaders': {'old': {}}, 'interface': {'bad': []}}))
+            fresh = {'k': {'st': 'ok', 'var': 'new'}}
+            with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), \
+                    patch.object(regress, 'interface_check', return_value={'bad': []}), patch.object(regress, 'nvn_manifest', return_value=fresh) as hashed:
+                manifest, _ = regress.chain_build(NS(path=root), g, NS(tools_fp='', jobs=1))
+                self.assertEqual((manifest['shaders'], manifest['hashes']), (fresh, regress.NVN_HASHES))
+                self.assertEqual(json.loads((out / 'manifest.json').read_text())['hashes'], regress.NVN_HASHES)
+                regress.chain_build(NS(path=root), g, NS(tools_fp='', jobs=1))
+            hashed.assert_called_once()   # a manifest of the current hashes is reused as it is
+            self.assertTrue((out / 'b-v').is_dir())   # a revision from before shader_lib.py: its host reads only the folder
+
+    def test_chain_builds_keep_their_own_cache_without_adopting_players_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); build = root / 'build'; g = NS(id='game', kind='nvn', folder=root, build=build)
+            new = root / 'new'; (new / 'dm/tools').mkdir(parents=True); (new / 'dm/tools/shader_cache.py').write_text('')
+            with patch.object(regress, 'ROOT', root):
+                own = regress.game_root(g)
+                self.assertEqual(regress.chain_cache(NS(path=new), g), own / 'cas.db')   # no player's build yet
+                old = build / 'shader/cache/cas/metallib/mac/ab'; old.mkdir(parents=True); (old / 'abcd.metallib').write_bytes(b'compiled')
+                self.assertEqual(regress.chain_cache(NS(path=new), g), own / 'cas.db')
+                self.assertEqual((old / 'abcd.metallib').read_bytes(), b'compiled')
+                self.assertFalse((build / 'shader/cache/cas.db').exists())
+                s = regress.shader_cache.Store(build / 'shader/cache/cas.db'); s.put('metallib/mac/abcd.metallib', b'compiled'); s.close()
+                self.assertEqual(regress.chain_cache(NS(path=new), g), own / 'cas.db')
+                self.assertEqual(regress.chain_cache(NS(path=root / 'revision-from-before'), g), own / 'cas')   # its dmsh_build.py wants a folder
+
+    def test_shader_cache_budget_scales_with_largest_library_and_can_be_overridden(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', folder=root, build=root / 'build')
+            a = NS(shader_cache_gb=None)
+            self.assertEqual(regress.shader_cache_limit(g, a), 8 << 30)
+            normal = g.build / 'shader/cache/b-normal.img'; normal.parent.mkdir(parents=True)
+            with normal.open('wb') as f: f.truncate(13 << 30)   # sparse: no shader bytes or disk allocation
+            self.assertEqual(regress.shader_cache_limit(g, a), 52 << 30)
+            newer = regress.game_root(g) / 'chain/new/b-new.img'; newer.parent.mkdir(parents=True)
+            with newer.open('wb') as f: f.truncate(15 << 30)
+            self.assertEqual(regress.shader_cache_limit(g, a), 60 << 30)
+            a.shader_cache_gb = 3.5
+            self.assertEqual(regress.shader_cache_limit(g, a), int(3.5 * (1 << 30)))
+        for value in ('0', '-1', 'nan', 'inf', 'not a number'):
+            with self.assertRaises(regress.argparse.ArgumentTypeError): regress.shader_cache_gb(value)
+
+    def test_legacy_cache_is_bounded_and_only_regression_legacy_files_are_adopted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', kind='nvn', folder=root, build=root / 'build')
+            own = regress.game_root(g); own.mkdir(parents=True); a = NS(shader_cache_gb=1 / 1024)
+            legacy = own / 'cas'
+            with patch.object(regress, 'say'):
+                with regress.regression_cache(NS(path=root / 'old'), g, a):
+                    regress.tree_tar.unpack(legacy)
+                    legacy.mkdir(); (legacy / 'large').write_bytes(os.urandom(2 << 20))
+                self.assertFalse(legacy.exists()); self.assertFalse((own / 'cas.tar').exists())
+                old = legacy / 'metallib/mac/ab'; old.mkdir(parents=True); (old / 'abcd.metallib').write_bytes(b'compiled')
+                tree = root / 'new'; (tree / 'dm/tools').mkdir(parents=True); (tree / 'dm/tools/shader_cache.py').touch()
+                with regress.regression_cache(NS(path=tree), g, a): pass
+            self.assertFalse(legacy.exists())
+            s = regress.shader_cache.Store(own / 'cas.db'); self.addCleanup(s.close)
+            self.assertEqual(s.get('metallib/mac/abcd.metallib'), b'compiled')
+            self.assertFalse(g.build.exists())
+
+    def test_reused_chain_enforces_lowered_cache_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', kind='nvn', folder=root, build=root / 'build')
+            tree = root / 'tree'; (tree / 'dm/tools').mkdir(parents=True); (tree / 'dm/tools/shader_cache.py').touch()
+            cache = regress.game_root(g) / 'cas.db'; s = regress.shader_cache.Store(cache)
+            for i in range(12): s.put(f'metallib/mac/{i}.metallib', os.urandom(200000), i)
+            s.close()
+            out = regress.game_root(g) / 'chain/key'; out.mkdir(parents=True)
+            (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'hashes': regress.NVN_HASHES, 'interface': {'bad': []}}))
+            with patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), patch.object(regress, 'interface_check', return_value={'bad': []}), patch.object(regress, 'say'):
+                regress.chain_build(NS(path=tree), g, NS(jobs=1, tools_fp='', shader_cache_gb=1 / 1024))
+            self.assertLessEqual(cache.stat().st_size, 1 << 20)
+
+    def test_chain_runner_reuses_normal_cache_read_only_and_shares_new_results_across_runs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); build = root / 'build'; tree = root / 'tree'; tools = tree / 'dm/gfx/tools'; tools.mkdir(parents=True)
+            (tree / 'dm/tools').mkdir(parents=True)
+            (tree / 'dm/tools/shader_cache.py').write_text('raise AssertionError("old cache module loaded")\n')
+            (tree / 'dm/tools/shader_lib.py').touch()
+            normal = build / 'shader/cache/cas.db'; s = regress.shader_cache.Store(normal)
+            s.put('metallib/mac/normal.metallib', b'normal'); s.close(); before = normal.read_bytes()
+            (tools / 'dmsh_build.py').write_text('''import atexit, json, os, shader_cache, sys
+from pathlib import Path
+s = shader_cache.Store(os.environ['DMSH_CAS']); atexit.register(s.close)
+assert s.get('metallib/mac/normal.metallib') == b'normal'
+reused = s.has('metallib/mac/new.metallib')
+if not reused: s.put('metallib/mac/new.metallib', b'new')
+out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
+(out / '_b_build.json').write_text(json.dumps([{'key': '0123456789abcdef', 'st': 'ok', 'err': ''}]))
+(out / '0123456789abcdef_b.metal').write_text('kernel void main0() {}')
+(out / '0123456789abcdef_b.metallib').write_bytes(s.get('metallib/mac/new.metallib'))
+(out / '0123456789abcdef_b.json').write_text('{}')
+(out / 'reused.txt').write_text(str(reused))
+''')
+            g = NS(id='game', kind='nvn', folder=root, build=build, env=lambda t: dict(os.environ), profile_dir=lambda t: root / 'profile')
+            a = NS(jobs=1, tools_fp='', shader_cache_gb=None)
+            def run(cmd, log, cwd, env, args, what):
+                r = regress.sh(cmd, cwd=cwd, env=env); log.write_text(r.stdout + r.stderr); return r.returncode, 0
+            with patch.object(regress, 'chain_key', side_effect=[('v', 'i', 'key1'), ('v', 'i', 'key2')]), patch.object(regress, 'interface_check', return_value={'bad': []}), patch.object(regress, 'run_heavy', side_effect=run), patch.object(regress, 'say'):
+                for key, reused in (('key1', 'False'), ('key2', 'True')):
+                    manifest, out = regress.chain_build(NS(path=tree, id='revision'), g, a)
+                    self.assertEqual((manifest['total'], manifest['ok']), (1, 1))
+                    self.assertEqual((regress.shader_lib.view(out / 'b-v') / 'reused.txt').read_text(), reused)
+            self.assertEqual(normal.read_bytes(), before)
+            s = regress.shader_cache.Store(regress.game_root(g) / 'cas.db'); self.addCleanup(s.close)
+            self.assertEqual(s.get('metallib/mac/new.metallib'), b'new')
+            self.assertIsNone(s.get('metallib/mac/normal.metallib'))
+
+    def test_a_chain_build_becomes_one_file_with_the_same_hashes(self):
+        k = '0123456789abcdef'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', kind='nvn', folder=root)
+            out = regress.game_root(g) / 'chain/key'; lib = out / 'b-v'; lib.mkdir(parents=True)
+            (lib / '_b_build.json').write_text(json.dumps([{'key': k, 'st': 'ok', 'err': ''}]))
+            (lib / f'{k}_b.metal').write_text('kernel void main0() {}'); (lib / f'{k}_b.metallib').write_bytes(b'lib')
+            (lib / f'{k}_b.json').write_text(json.dumps({'chain': 'v', 'bindings': []})); (lib / f'{k}_bp.metallib').write_bytes(b'pull')
+            folder = regress.nvn_manifest(lib, 1)
+            (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'shaders': folder, 'hashes': regress.NVN_HASHES, 'interface': {'bad': []}}))
+            tree = root / 'tree'; (tree / 'dm/tools').mkdir(parents=True); (tree / 'dm/tools/shader_lib.py').write_text('')
+            with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), patch.object(regress, 'interface_check', return_value={'bad': []}):
+                regress.chain_build(NS(path=tree), g, NS(tools_fp='', jobs=1))
+            self.assertFalse(lib.exists()); self.assertTrue((out / 'b-v.img').is_file())
+            self.assertEqual(regress.nvn_manifest(regress.shader_lib.view(lib), 1), folder)
+            self.assertEqual(str(regress.chain_lib(out)), str(out / 'b-v.img'))
 
     def test_smoke_requires_prebuild_and_screenshots(self):
         route = {'reach': (100, 10.0), 'shots': [8]}
@@ -294,23 +601,72 @@ class Regress(unittest.TestCase):
         self.assertTrue(regress.smoke_diff([good], [dict(good, shots={})], route)[0]['NEW-FAIL'])
         self.assertTrue(regress.run_failures({'exit': None, 'max_frame': -1, 'reached': False}, {'reach': None}))
 
+    def test_smoke_detects_archive_profile_mismatches(self):
+        # The harness makes its own archive, so a profile/runtime mismatch must also fail without a bundled archive.
+        depth = '[dm] [nvn-mtl] depth mode: near=0, vertex shaders use the main0_z entry\n'
+        rejected = ('[dm] [nvn-mtl] pipeline archive bundled with the app: made for chain b3ca4b7c621f; depth near=-w; '
+                    'pairs 255241 f6cf106d01da3da8, this run needs chain b3ca4b7c621f; depth near=0; pairs 255241 f6cf106d01da3da8: '
+                    'the device builds the bases it does not hold (the game\'s depth mode is not the one built for: the profile key depth_mode)\n')
+        cases = [(False, depth, 'profile depth_mode gl'), (True, depth, None),
+                 (True, '[dm] [nvn] depth mode near=-w (GL)\n', 'profile depth_mode zero'),
+                 (True, depth + rejected, 'bundled pipeline archive stamp'),
+                 (True, depth + rejected.replace('depth near=-w', 'depth near=0').replace('made for chain b3ca4b7c621f', 'made for chain old'), 'bundled pipeline archive stamp'),
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: made for (no prebuilt.tsv), this run needs chain current; depth near=0: the device builds the bases it does not hold\n', 'bundled pipeline archive stamp'),
+                 (False, '', None), (False, '[dm] [nvn] depth mode near=-w (GL)\n', None),
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of every shader pair (16 of 16 probed bases found, 26.0 ms)\n', None)]
+        route = dict(secs=10, quick=10, prebuild='off', keys='', reach=None, shots=[], hang=20)
+        for zero, text, failure in cases:
+            with self.subTest(zero=zero, text=text), tempfile.TemporaryDirectory() as td:
+                out = Path(td)
+                def watched(cmd, env, cwd, log, *args, text=text, **kw):
+                    log.write_text(text)
+                    return dict(exit=None, hang_at_s=None, hang_sample=None, first_frame_s=1, max_frame=500, peak_mb=100, busy=False, presents=[])
+                with patch.object(regress, 'run_env', return_value=({}, None)), patch.object(regress, 'run_watched', watched):
+                    run = regress.smoke_run(NS(kind='nvn', id='game', get_depth_zero=zero), None,
+                                            dict(host='host', modules='modules', host_key='h', modules_key='m'), route, True, out, None)
+                failures = regress.run_failures(run, route)
+                if failure:
+                    self.assertTrue(any(failure in f for f in failures), failures)
+                    good = dict(run, pipeline={})
+                    self.assertTrue(regress.smoke_diff([good], [run], route)[0]['NEW-FAIL'])
+                    self.assertIn('pipeline', regress.public_run(run))
+                else: self.assertEqual(failures, [])
+
     def test_each_candidate_screenshot_is_checked(self):
         route = {'reach': None}
         good = {'exit': None, 'max_frame': 500, 'shots': {'8': {'dhash': '0' * 16, 'rgb16': '00' * 768}}}
         bad = dict(good, shots={'8': {'dhash': 'f' * 16, 'rgb16': 'ff' * 768}})
         self.assertTrue(regress.smoke_diff([good], [good, bad], route)[0]['REGRESSION'])
 
-    def test_shader_build_pauses_for_unknown_lock_owner(self):
-        with tempfile.TemporaryDirectory() as td:
-            with patch.object(regress.subprocess, 'Popen') as spawn, patch.object(regress.bench, 'lock_holder', return_value=0), patch.object(regress.os, 'killpg') as kill, patch.object(regress.time, 'sleep'), patch.object(regress, 'say'):
-                spawn.return_value.poll.side_effect = [None, 0, 0]
-                regress.run_heavy(['build'], Path(td) / 'build.log', td, {}, NS(pause_lock=Path(td) / 'lock'), 'build')
-            self.assertTrue(any(c.args[1] == regress.signal.SIGSTOP for c in kill.call_args_list))
+    def test_idle_msbuild_workers_do_not_block_measurements(self):
+        worker = '/usr/local/share/dotnet/dotnet /sdk/10.0.403/MSBuild.dll /nodemode:1 /nodeReuse:true'
+        jobs = [(300, 1, 'S', '0.0', worker),
+                (301, 1, 'S', '12.0', worker),
+                (302, 1, 'U', '0.0', worker),
+                (303, 70, 'S', '0.0', worker),
+                (304, 1, 'S', '0.0', '/usr/local/share/dotnet/dotnet build project.csproj'),
+                (305, 1, 'S', '0.0', worker.replace('/nodeReuse:true', '/nodeReuse:false'))]
+        def process_list(command, **kwargs):
+            has_cpu = '%cpu=' in command[-1]
+            return NS(stdout='\n'.join(f'{pid} {parent} {state} ' + (f'{cpu} ' if has_cpu else '') + cmd for pid, parent, state, cpu, cmd in jobs))
+        with patch.object(regress, 'sh', process_list):
+            self.assertEqual(regress.heavy_jobs(), [f'{pid} {cmd}' for pid, _, _, _, cmd in jobs[1:]])
 
     def test_heavy_jobs_recognizes_harness_descendants_outside_shared_root(self):
-        processes = '100 1 S python3 /source/scripts/regress.py check\n101 100 S python3 /trees/dmsh_build.py\n102 101 R metal /games/title-work/regress/tmp/shader.metal\n103 1 R metal /another/build.metal\n104 100 R make dmhost\n'
+        processes = '100 1 S 0.0 python3 /source/scripts/regress.py check\n101 100 S 0.0 python3 /trees/dmsh_build.py\n102 101 R 90.0 metal /games/title-work/regress/tmp/shader.metal\n103 1 R 90.0 metal /another/build.metal\n104 100 R 90.0 make dmhost\n'
         with patch.object(regress, 'sh', return_value=NS(stdout=processes)), patch.object(regress.os, 'getpid', return_value=200):
             self.assertEqual(regress.heavy_jobs(), ['103 metal /another/build.metal', '104 make dmhost'])
+
+    def test_build_profile_runs_only_when_derived_or_unported(self):
+        # A provisional profile the NSP script left from before the game's profile was added must not shadow dm/games' (it lacked OCTOPATH TRAVELER 0's tex_dyn_slots and fps_target)
+        with tempfile.TemporaryDirectory() as td, patch.object(regress, 'REPO', Path(td) / 'repo'):
+            root, gid = Path(td), '0123456789ABCDEF'
+            build = root / f'{gid}_build'; (build / 'profile' / gid).mkdir(parents=True); (build / 'profile' / gid / 'game.tsv').write_text('# Provisional game profile\n')
+            self.assertTrue(regress.Game(root, build).derived)                       # no profile in dm/games: the provisional one
+            (root / 'repo/dm/games' / gid).mkdir(parents=True); (root / 'repo/dm/games' / gid / 'game.tsv').write_text('title_id\t' + gid + '\n')
+            self.assertFalse(regress.Game(root, build).derived)                      # a profile in dm/games: it runs, not the leftover guesses
+            (build / 'profile' / f'{gid}.derived.key').write_text('key\n')
+            self.assertTrue(regress.Game(root, build).derived)                       # derived from it for another version
 
     def test_chain_key_tracks_shader_package_and_split_pairs(self):
         with tempfile.TemporaryDirectory() as td:
@@ -341,6 +697,26 @@ class Regress(unittest.TestCase):
             before = regress.chain_key(tree, g, 'tools')[2]
             selected.write_bytes(b'converter B')
             self.assertNotEqual(before, regress.chain_key(tree, g, 'tools')[2])
+
+    def test_vk_chain_key_tracks_shader_bytes_in_a_folder_and_in_romfs_img(self):   # the image's entries were hashed as "missing": changed bytes kept the key
+        import sys; sys.path.insert(0, str(REPO / 'dm/gfx/tools')); import romfs_image
+        spirv = lambda tail: (0x07230203).to_bytes(4, 'little') + tail   # SPIR-V's magic: what vk_shaders.spirv_files keeps
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); files = root / 'files' / 'shaders'; files.mkdir(parents=True)
+            shader = files / 'a.spv'; (files / 'readme.txt').write_text('not a shader')
+            g = NS(kind='vk', ver='v0', env=lambda tree: dict(regress.os.environ), build=root)
+            tree = NS(path=root)
+            def key(form, tail):
+                shader.write_bytes(spirv(tail))
+                if form == 'image': romfs_image.pack(root / 'files', root / 'RomFS.img')
+                shader_root = root / 'files' if form == 'folder' else regress.rfs.Path(root / 'RomFS.img')
+                g.shader_roots = lambda: [shader_root]
+                return regress.chain_key(tree, g, 'tools')[2]
+            for form in ('folder', 'image'):
+                with self.subTest(form=form):
+                    first = key(form, b'original')
+                    self.assertEqual(first, key(form, b'original'), 'the same bytes, the same key')
+                    self.assertNotEqual(first, key(form, b'changed!'), 'changed bytes under the same name, another key')
 
     def test_baseline_context_tracks_route_save_artifacts_and_settings(self):
         with tempfile.TemporaryDirectory() as td:
@@ -513,7 +889,8 @@ class Validated(unittest.TestCase):
         route = {'reach': (120, 5), 'shots': [4]}
         green = {'exit': None, 'max_frame': 180, 'reached': True, 'secs': 6, 'shots': {'4': {'dhash': '0123456789abcdef', 'rgb16': '00' * 768}}}
         for failure in ({'crash': {'signal': 'SIGSEGV'}}, {'exit': 1}, {'hang_at_s': 3}, {'max_frame': -1},
-                        {'reached': False}, {'prebuild': {'exit': 1}}, {'shots': {}}):
+                        {'reached': False}, {'prebuild': {'exit': 1}}, {'shots': {}},
+                        {'pipeline': {'depth_profile': 'gl', 'depth_runtime': ['zero']}}, {'pipeline': {'stamp_mismatch': True}}):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
                 failed = green | failure
                 levels, known, _ = regress.smoke_diff([failed], [failed], route)

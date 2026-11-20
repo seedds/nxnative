@@ -39,6 +39,11 @@ mem_used	0x8000000
 # ---- Textures ----
 # Unreal loads its textures from the CPU straight into CPU-uncached pools after creating them and never flushes (its UI images, the world map, the sprite sheets): without both keys
 # they stay black or missing (the language notice's pictures, the title logo, the whole traveler selection), as for FINAL FANTASY TACTICS - The Ivalice Chronicles
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the host writes t.MaxFPS 60 and nvn.SyncInterval 1 (UE 4.18's Switch RHI) into the console variables the rewriter finds by name (dm/tools/ue_cvar.py,
+# which follows this build's inlined static constructors; hle_fpslock.c). Unreal steps the game by the time that really passed. DM_FPS_TARGET=30 keeps the game's 30 and saves power
+fps_target	60
+
 tex_flush_upload	on
 tex_dirty_upload	on
 

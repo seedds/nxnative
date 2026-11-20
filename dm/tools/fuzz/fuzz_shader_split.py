@@ -109,10 +109,19 @@ def arh1():
     return b'arh1' + struct.pack('<9I', 0, len(nodes), so, len(strings), no, len(nodes_b), fo, 1, key) + bytes(0x30 - 40) + enc(strings) + enc(nodes_b) + files
 
 
+def rgxd():
+    """A RAGE effect: 'rgxd', a parameter name, then one record per shader {u32 length, GLSLC's magic, u32 code length, u32 control length}, the code area, the control section; the second
+    control section carries 12 bytes past its own length, as 919 of Red Dead Redemption's do"""
+    d = bytearray(b'rgxd' + bytes(4) + b'\x07gWorld\0')
+    for (ctl, code), extra in ((VS, b''), (PS, bytes(12))):
+        c = ctl + extra; d += struct.pack('<I', 0x10 + len(code) + len(c)) + GLSLC + struct.pack('<II', len(code), len(c)) + code + c
+    return bytes(d)
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd()}
 
 
 def check(data):

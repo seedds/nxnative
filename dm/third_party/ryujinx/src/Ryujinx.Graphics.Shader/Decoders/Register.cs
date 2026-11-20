@@ -10,6 +10,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
         public bool IsRZ => Type == RegisterType.Gpr && Index == RegisterConsts.RegisterZeroIndex;
         public bool IsPT => Type == RegisterType.Predicate && Index == RegisterConsts.PredicateTrueIndex;
+        public bool IsURZ => Type == RegisterType.Uniform && Index == RegisterConsts.UniformZeroIndex;
+        public bool IsUPT => Type == RegisterType.UniformPredicate && Index == RegisterConsts.UniformPredicateTrueIndex;
 
         public Register(int index, RegisterType type)
         {

@@ -9,19 +9,23 @@
 
 static inline void dm_motion_attach(GCController *c, int player) {
     const char *e = getenv("DM_MOTION"); if (e && !atoi(e)) return;
+    dm_motion_clear(player);   // another controller takes the player: its stream and learned gyro offset start again (hle_hid.c)
     GCMotion *mo = c.motion;
     if (!mo || !mo.hasRotationRate) return;
     if (mo.sensorsRequireManualActivation) mo.sensorsActive = YES;   // DualSense / DualShock 4: off until asked for
-    __block int live = 0;
+    __block int live = 0, primed = 0; __block GCRotationRate first;
     mo.valueChangedHandler = ^(GCMotion *m) {
         float acc[3], rot[3];
         if (m.hasGravityAndUserAcceleration) {
             acc[0] = (float)(m.gravity.x + m.userAcceleration.x); acc[1] = (float)(m.gravity.y + m.userAcceleration.y); acc[2] = (float)(m.gravity.z + m.userAcceleration.z);
         } else { acc[0] = (float)m.acceleration.x; acc[1] = (float)m.acceleration.y; acc[2] = (float)m.acceleration.z; }
         rot[0] = (float)m.rotationRate.x; rot[1] = (float)m.rotationRate.y; rot[2] = (float)m.rotationRate.z;
-        // Some macOS controller drivers advertise motion but send only zeroes (#296). Those are no source until data arrives; later zeroes can be a real free-fall sample.
+        // Liveness heuristic: work around incorrect platform capability reporting (#296; NX2Apple #971, GameSir X5 Lite). Publish only once a raw rotation component differs
+        // exactly from the first report; acceleration alone does not qualify. Motion or noise is expected to vary a working gyro, but constant output does not prove a
+        // missing sensor, nor varying output a real one. Once qualified, pass stationary/zero samples until detach; each attach starts again. GameSir iPhone retest pending.
         if (!live) {
-            if (acc[0] == 0 && acc[1] == 0 && acc[2] == 0 && rot[0] == 0 && rot[1] == 0 && rot[2] == 0) return;
+            if (!primed) { primed = 1; first = m.rotationRate; return; }
+            if (m.rotationRate.x == first.x && m.rotationRate.y == first.y && m.rotationRate.z == first.z) return;
             live = 1;
         }
         dm_motion_set(player, acc, rot);

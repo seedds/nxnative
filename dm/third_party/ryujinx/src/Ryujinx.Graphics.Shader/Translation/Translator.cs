@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
@@ -10,6 +11,7 @@ namespace Ryujinx.Graphics.Shader.Translation
     {
         private const int ThreadsPerWarp = 32;
         private const int HeaderSize = 0x50;
+        private const int AmpereHeaderSize = 0x80;
 
         internal readonly struct FunctionCode
         {
@@ -26,18 +28,35 @@ namespace Ryujinx.Graphics.Shader.Translation
             return DecodeShader(address, gpuAccessor, options);
         }
 
-        private static TranslatorContext DecodeShader(ulong address, IGpuAccessor gpuAccessor, TranslationOptions options)
+        // Native bindings must start at RayTracingProgram.ReservedBindings.
+        // The input image contains original modules; metadata-planned MOVs are
+        // interpreted by emission, never applied as speculative binary patches.
+        public static TranslatorContext CreateRayTracingContext(IGpuAccessor gpuAccessor, TranslationOptions options, RayTracingProgram program)
+        {
+            ArgumentNullException.ThrowIfNull(program);
+            if (!options.Flags.HasFlag(TranslationFlags.Compute | TranslationFlags.Ampere) ||
+                options.TargetLanguage != TargetLanguage.Spirv || !gpuAccessor.QueryRawGlobalMemory() ||
+                options.Flags.HasFlag(TranslationFlags.MetalUniformBounds) || !program.Entries.Any(e => e.Address == 0))
+                throw new ArgumentException("Ray tracing requires an Ampere compute image, SPIR-V, flat global memory and an entry at address0.");
+            return DecodeShader(0, gpuAccessor, options, program);
+        }
+
+        private static TranslatorContext DecodeShader(ulong address, IGpuAccessor gpuAccessor, TranslationOptions options, RayTracingProgram rayTracingProgram = null)
         {
             int localMemorySize;
             ShaderDefinitions definitions;
             DecodedProgram program;
+            bool ampere = options.Flags.HasFlag(TranslationFlags.Ampere);
+            int headerSize = ampere ? AmpereHeaderSize : HeaderSize;
 
             if (options.Flags.HasFlag(TranslationFlags.Compute))
             {
                 definitions = CreateComputeDefinitions(gpuAccessor);
-                localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
+                localMemorySize = rayTracingProgram?.LocalMemoryBytes ?? gpuAccessor.QueryComputeLocalMemorySize();
 
-                program = Decoder.Decode(definitions, gpuAccessor, address);
+                program = ampere ? Decoder.DecodeAmpere(definitions, gpuAccessor, address,
+                    rayTracingProgram?.Entries.Select(e => e.Address).ToArray(), rayTracingProgram != null) : Decoder.Decode(definitions, gpuAccessor, address);
+                if (rayTracingProgram != null) RayTracingControlFlow.ValidateDecoded(program, rayTracingProgram);
             }
             else
             {
@@ -46,7 +65,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                 definitions = CreateGraphicsDefinitions(gpuAccessor, header);
                 localMemorySize = GetLocalMemorySize(header);
 
-                program = Decoder.Decode(definitions, gpuAccessor, address + HeaderSize);
+                program = ampere
+                    ? Decoder.DecodeAmpere(definitions, gpuAccessor, address + (ulong)headerSize)
+                    : Decoder.Decode(definitions, gpuAccessor, address + (ulong)headerSize);
             }
 
             ulong maxEndAddress = 0;
@@ -62,9 +83,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : HeaderSize);
+            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
 
-            return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
+            return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program, rayTracingProgram);
         }
 
         private static ShaderDefinitions CreateComputeDefinitions(IGpuAccessor gpuAccessor)
@@ -80,7 +101,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             TransformFeedbackOutput[] transformFeedbackOutputs = GetTransformFeedbackOutputs(gpuAccessor, out ulong transformFeedbackVecMap);
 
-            return new ShaderDefinitions(
+            ShaderDefinitions definitions = new(
                 header.Stage,
                 gpuAccessor.QueryGraphicsState(),
                 header.Stage == ShaderStage.Geometry && header.GpPassthrough,
@@ -93,7 +114,13 @@ namespace Ryujinx.Graphics.Shader.Translation
                 header.OmapDepth,
                 gpuAccessor.QueryHostSupportsScaledVertexFormats(),
                 transformFeedbackVecMap,
-                transformFeedbackOutputs);
+                transformFeedbackOutputs)
+            {
+                OutputWords = header.OutputWords ?? System.Array.Empty<int>(),
+                PerPatchAttributeCount = header.PerPatchAttributeCount,
+            };
+
+            return definitions;
         }
 
         internal static TransformFeedbackOutput[] GetTransformFeedbackOutputs(IGpuAccessor gpuAccessor, out ulong transformFeedbackVecMap)
@@ -143,7 +170,20 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             initializationOperations = 0;
 
-            FunctionMatch.RunPass(program);
+            bool ampere = translatorContext.Options.Flags.HasFlag(TranslationFlags.Ampere);
+
+            if (!ampere)
+            {
+                FunctionMatch.RunPass(program);
+            }
+
+            bool rayTracing = translatorContext.RayTracingProgram != null;
+            if (rayTracing)
+            {
+                DecodedFunction driver = new(ulong.MaxValue);
+                driver.SetBlocks([]);
+                program.AddFunctionAndSetId(driver);
+            }
 
             foreach (DecodedFunction function in program.Where(x => !x.IsCompilerGenerated).OrderBy(x => x.Address))
             {
@@ -154,7 +194,13 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             for (int index = 0; index < functions.Length; index++)
             {
-                EmitterContext context = new(translatorContext, resourceManager, program, vertexAsCompute, index != 0);
+                if (rayTracing && index == 0)
+                {
+                    functions[0] = new FunctionCode(RayTracingDriver.Emit(translatorContext.RayTracingProgram,
+                        translatorContext.Continuations, program));
+                    continue;
+                }
+                EmitterContext context = new(translatorContext, resourceManager, program, vertexAsCompute, rayTracing || index != 0);
 
                 if (initializeOutputs && index == 0)
                 {
@@ -170,10 +216,18 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                     context.EnterBlock(block.Address);
 
-                    EmitOps(context, block);
+                    if (ampere)
+                    {
+                        EmitOpsAmpere(context, block);
+                    }
+                    else
+                    {
+                        EmitOps(context, block);
+                    }
                 }
 
                 functions[index] = new(context.GetOperations());
+                if (rayTracing) translatorContext.Continuations.RecordInputs(function.Address, functions[index].Code, translatorContext.RayTracingProgram);
             }
 
             return functions;
@@ -311,6 +365,251 @@ namespace Ryujinx.Graphics.Shader.Translation
                 {
                     context.Store(storageKind, IoVariable.UserDefined, null, Const(location), Const(c), ConstF(c == 3 ? 1f : 0f));
                 }
+            }
+        }
+
+        // Ampere: the guard is bits 12..15 (a uniform predicate on the uniform datapath); BRA evaluates its guard with its condition itself.
+        // Scoreboards: a variable-latency instruction (one that sets a write barrier, control bits 110..113; 7 = none) writes its registers when the result
+        // arrives, and the compiler lets later instructions that do not wait on that barrier (wait mask, bits 116..122) read the registers' old values (LDG R2,
+        // [R2.64] then LDG R4, [R2.64 + 4] reads the address twice). Such an instruction's writes go to locals that start as the registers' values; they are
+        // copied to the registers before the first instruction that waits on the barrier, at DEPBAR, and at the end of the block. A guarded one whose guard is false at issue writes nothing, so the copy
+        // keeps what was written meanwhile: Yoshi and the Mysterious Book's local lights take EXP2 R17 under P4 and write R17 themselves under !P4 before the wait, and the stale value's copy (a squared
+        // distance, for the light's falloff) overexposed the scene.
+        private static void EmitOpsAmpere(EmitterContext context, Block block)
+        {
+            List<(Register Reg, Operand Value, Operand Guard)>[] pending = new List<(Register, Operand, Operand)>[7];
+            int shadows = 0;
+            Stack<int> freeShadows = new();
+
+            void Commit(int barrier)
+            {
+                if (pending[barrier] != null)
+                {
+                    foreach ((Register reg, Operand value, Operand guard) in pending[barrier])
+                    {
+                        if (guard != null)
+                        {
+                            Operand skip = Label();
+
+                            context.BranchIfFalse(skip, context.ICompareNotEqual(guard, Const(0)));
+                            context.Copy(Register(reg), value);
+                            context.MarkLabel(skip);
+                            freeShadows.Push(guard.GetRegister().Index);
+                        }
+                        else
+                        {
+                            context.Copy(Register(reg), value);
+                        }
+
+                        freeShadows.Push(value.GetRegister().Index);
+                    }
+
+                    pending[barrier] = null;
+                }
+            }
+
+            void CommitAll()
+            {
+                for (int b = 0; b < pending.Length; b++)
+                {
+                    Commit(b);
+                }
+            }
+
+            for (int opIndex = 0; opIndex < block.OpCodes.Count; opIndex++)
+            {
+                InstOp op = block.OpCodes[opIndex];
+                AmpereOp a = new(op);
+                int wait = a.Bits(116, 122);
+                int writeBarrier = a.Bits(110, 113);
+
+                for (int b = 0; b < 6; b++)
+                {
+                    if ((wait & (1 << b)) != 0)
+                    {
+                        Commit(b);
+                    }
+                }
+
+                if (a.Opcode == 0x91a || op.Props.HasFlag(InstProps.Bra))
+                {
+                    CommitAll();
+                }
+
+                if (context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.DebugMode))
+                {
+                    context.Add(new CommentNode($"0x{op.Address:X6}: 0x{op.RawOpCodeHi:X16}{op.RawOpCode:X16} {op.Name}"));
+                }
+
+                if (a.Pred == RegisterConsts.PredicateTrueIndex && a.PredInv)
+                {
+                    continue;
+                }
+
+                int opStart = context.OperationsCount;
+
+                Operand predSkipLbl = null;
+                Operand guardPred = null;
+
+                if (a.Pred != RegisterConsts.PredicateTrueIndex && a.Opcode != Instructions.AmpereOpcodes.Bra)
+                {
+                    Operand label;
+
+                    // The next block only when nothing waits for the end of this one's commits
+                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext() && writeBarrier >= 6 && Array.TrueForAll(pending, list => list == null || list.Count == 0))
+                    {
+                        label = context.GetLabel(block.Successors[0].Address);
+                    }
+                    else
+                    {
+                        label = Label();
+
+                        predSkipLbl = label;
+                    }
+
+                    RegisterType predType = Instructions.AmpereTable.HasUniformGuard(a.Opcode) ? RegisterType.UniformPredicate : RegisterType.Predicate;
+                    Operand pred = Register(a.Pred, predType);
+
+                    guardPred = pred;
+
+                    if (a.PredInv)
+                    {
+                        context.BranchIfTrue(label, pred);
+                    }
+                    else
+                    {
+                        context.BranchIfFalse(label, pred);
+                    }
+                }
+
+                context.CurrOp = op;
+
+                op.Emitter?.Invoke(context);
+
+                if (predSkipLbl != null)
+                {
+                    context.MarkLabel(predSkipLbl);
+                }
+
+                if (writeBarrier < 6 && !op.Props.HasFlag(InstProps.Bra))
+                {
+                    DeferAmpereWrites(context, opStart, pending, writeBarrier, ref shadows, freeShadows, guardPred, a.PredInv);
+                }
+            }
+
+            CommitAll();
+        }
+
+        // The registers written by the operations from opStart on become shadow registers (every use in the range too), each first set to the register's value
+        private static void DeferAmpereWrites(
+            EmitterContext context,
+            int opStart,
+            List<(Register Reg, Operand Value, Operand Guard)>[] pendingAll,
+            int barrier,
+            ref int shadows,
+            Stack<int> freeShadows,
+            Operand guardPred,
+            bool guardInv)
+        {
+            List<(Register Reg, Operand Value, Operand Guard)> pending = pendingAll[barrier] ??= [];
+
+            int end = context.OperationsCount;
+            Dictionary<Register, Operand> locals = new();
+
+            for (int i = opStart; i < end; i++)
+            {
+                Operation operation = context.GetOperation(i);
+
+                for (int d = 0; d < operation.DestsCount; d++)
+                {
+                    Operand dest = operation.GetDest(d);
+
+                    if (dest != null && dest.Type == OperandType.Register && !locals.ContainsKey(dest.GetRegister()))
+                    {
+                        if (freeShadows.Count == 0 && shadows == RegisterConsts.ShadowsCount)
+                        {
+                            throw new InvalidOperationException("Ampere: more deferred register writes pending at once than shadow registers");
+                        }
+
+                        locals[dest.GetRegister()] = Register(freeShadows.Count != 0 ? freeShadows.Pop() : shadows++, RegisterType.Shadow);
+                    }
+                }
+            }
+
+            if (locals.Count == 0)
+            {
+                return;
+            }
+
+            for (int i = opStart; i < end; i++)
+            {
+                Operation operation = context.GetOperation(i);
+
+                for (int d = 0; d < operation.DestsCount; d++)
+                {
+                    Operand dest = operation.GetDest(d);
+
+                    if (dest != null && dest.Type == OperandType.Register && locals.TryGetValue(dest.GetRegister(), out Operand local))
+                    {
+                        operation.SetDest(d, local);
+                    }
+                }
+
+                for (int s = 0; s < operation.SourcesCount; s++)
+                {
+                    Operand src = operation.GetSource(s);
+
+                    if (src != null && src.Type == OperandType.Register && locals.TryGetValue(src.GetRegister(), out Operand local))
+                    {
+                        operation.SetSource(s, local);
+                    }
+                }
+            }
+
+            int at = opStart;
+
+            foreach ((Register reg, Operand local) in locals)
+            {
+                context.InsertOperation(at++, new Operation(Instruction.Copy, local, Register(reg)));
+
+                Operand guard = null;
+
+                if (guardPred != null)
+                {
+                    if (freeShadows.Count == 0 && shadows == RegisterConsts.ShadowsCount)
+                    {
+                        throw new InvalidOperationException("Ampere: more deferred register writes pending at once than shadow registers");
+                    }
+
+                    // The guard as it is at issue, as a nonzero word (a float's bits, which the conditional select keeps), not 1: a denormal could be flushed
+                    guard = Register(freeShadows.Count != 0 ? freeShadows.Pop() : shadows++, RegisterType.Shadow);
+                    context.InsertOperation(at++, new Operation(Instruction.ConditionalSelect, guard, guardPred, Const(guardInv ? 0 : 0x3f800000), Const(guardInv ? 0x3f800000 : 0)));
+                }
+                else
+                {
+                    // A register written again before its earlier deferred write landed: the later write wins, the earlier shadow is free. A guarded later write may not happen, so the earlier one stays
+                    foreach (List<(Register Reg, Operand Value, Operand Guard)> list in pendingAll)
+                    {
+                        if (list == null)
+                        {
+                            continue;
+                        }
+
+                        foreach ((Register r, Operand v, Operand g) in list.FindAll(p => p.Reg.Equals(reg)))
+                        {
+                            freeShadows.Push(v.GetRegister().Index);
+
+                            if (g != null)
+                            {
+                                freeShadows.Push(g.GetRegister().Index);
+                            }
+                        }
+
+                        list.RemoveAll(p => p.Reg.Equals(reg));
+                    }
+                }
+
+                pending.Add((reg, local, guard));
             }
         }
 

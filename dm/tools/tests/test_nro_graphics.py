@@ -29,10 +29,36 @@ class NroGraphics(unittest.TestCase):
         self.assertEqual(s['graphics'][0], 'gl')
         self.assertFalse(s['glslc_capture'][0])
 
+    def test_own_glslc_beats_egl_in_main(self):   # Rayman 30th Anniversary Edition: EGL and glShaderSource linked, NVN and its own GLSL compiled with GLSLC
+        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader', 'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        self.assertEqual(s['graphics'][0], 'nvn')
+        self.assertTrue(s['glslc_capture'][0])
+        self.assertFalse(s['gl_capture'][0])
+
+    def test_glslc_without_nvn_stays_gl(self):   # no nvnBootstrapLoader in main: GLSLC alone does not make it an NVN game
+        s = pg.shader_sources(SDL_MAIN | {'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        self.assertEqual(s['graphics'][0], 'gl')
+
     def test_nro_glslc_needs_a_module_that_defines_it(self):
         s = pg.shader_sources(set(), 0, [], 0, 0, nro_imports={'nvnBootstrapLoader', 'glslcCompile'})
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertFalse(s['glslc_capture'][0])
+
+    def test_loader_only_vulkan_with_spirv(self):   # Re:ZERO - The Prophecy of the Throne: every Vulkan function through vkGetInstanceProcAddr, SPIR-V files in the RomFS
+        s = pg.shader_sources({'vkGetInstanceProcAddr'}, 0, [], 41, 0)
+        self.assertEqual(s['graphics'][0], 'vulkan')
+        self.assertFalse(s['vk_capture'][0])
+
+    def test_loader_only_beside_egl_stays_gl(self):   # Balatro: SDL's loader beside its EGL backend, which draws with GL, whatever SPIR-V files the RomFS holds
+        self.assertEqual(pg.shader_sources({'vkGetInstanceProcAddr'} | SDL_MAIN, 0, [], 3, 0, gl_names=1)['graphics'][0], 'gl')
+
+    def test_loader_only_without_spirv_is_not_vulkan(self):   # a bare loader import proves nothing without the shaders a Vulkan game ships
+        self.assertEqual(pg.shader_sources({'vkGetInstanceProcAddr'}, 0, [], 0, 0)['graphics'][0], 'nvn')
+
+    def test_loader_only_with_nvn_nros_stays_nvn(self):   # SDK's loader in main, NROs that draw with NVN, SPIR-V files in the RomFS: NVN
+        s = pg.shader_sources({'vkGetInstanceProcAddr'}, 0, [], 41, 0, nro_imports=frozenset({'nvnBootstrapLoader'}))
+        self.assertEqual(s['graphics'][0], 'nvn')
+        self.assertFalse(s['vk_capture'][0])
 
     def test_load_order(self):
         self.assertEqual(sorted(['sdk', 'subsdk2', 'main', 'subsdk0', 'subsdk10'], key=pg.load_order), ['main', 'subsdk0', 'subsdk2', 'subsdk10', 'sdk'])

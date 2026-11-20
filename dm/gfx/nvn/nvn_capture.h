@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include "nvn_obj.h"
 
 #define CAP_MAGIC "NVNCAP\0\0"
@@ -38,6 +39,7 @@ enum {
     CAP_PRES = CAP_TAG('P', 'R', 'E', 'S'),   // the present: cap_pres
     CAP_PHSH = CAP_TAG('P', 'H', 'S', 'H'),   // after the frame: every region's 4 KiB block hashes as the live run left them ({u32 region, u32 blocks, u64 hash[blocks]}...), for the replayer to compare
     CAP_LPIX = CAP_TAG('L', 'P', 'I', 'X'),   // the presented frame's pixels as the live run read them (level 0, rows packed, the format and size of cap_pres), for a pixel comparison; optional
+    CAP_FAIL = CAP_TAG('F', 'A', 'I', 'L'),   // text: why this capture cannot be replayed; readers must reject it
     CAP_END_ = CAP_TAG('E', 'N', 'D', ' '),
 };
 enum { CAP_RAW = 0, CAP_LZFSE = 1 };
@@ -88,6 +90,14 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
 int cap_tex_fields(tex_t *t, const cap_ops *ops, void *ctx);
 // Layout fingerprint of every payload struct the walk knows (text): stored in the capture, compared by the replayer
 const char *cap_layout(void);
+int cap_layout_matches(const char *layout, size_t n);
+// Version 1 records physical submission order, not logical queues or wait dependencies.
+// Keep this separate from cap_rec_fields: the scheduler also uses that generic field walk.
+const char *cap_record_unsupported(uint32_t op);
+typedef struct { _Atomic uint64_t first; _Atomic unsigned unsupported; } cap_queue_state;
+enum { CAP_QUEUE_MULTIPLE = 1, CAP_QUEUE_WAIT = 2 };
+void cap_queue_note(cap_queue_state *state, uint64_t serial, int waits);
+const char *cap_queue_unsupported(const cap_queue_state *state);
 
 // Writing: chunks, compressed with LZFSE when that makes them smaller
 typedef struct { FILE *f; uint64_t raw, stored; int err; } cap_writer;
@@ -107,3 +117,5 @@ static inline void cap_buf_free(cap_buf *b) { free(b->p); b->p = NULL; b->n = b-
 // Host hooks (nvn_capture.inc, in nvn_mtl.m): hle_nvn.c calls them at each submit (under the submit lock, before the replay) and each present (before it is queued)
 void nvn_cap_submit(int n, const uint64_t *handles);
 void nvn_cap_present(const tex_t *t, const int crop[4]);
+// Called at logical enqueue, before the scheduler removes waits. Thread-safe; never waits for GPU work.
+void nvn_cap_queue(uint64_t serial, int waits);

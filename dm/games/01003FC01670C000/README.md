@@ -25,6 +25,8 @@ No `patches.py`, no `sdk_patches.py` cut for its `sdk` build (`2d369d99…`), no
 
 ## Files and shaders
 
+- **Resolved: the registered 1.10 build stopped in the shader split** ([issue #3041](https://github.com/seedds/nxnative/issues/3041), 2026-11-20). The [checked first-copy selection introduced by `8d62601f`](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles) made the stored map stale. Re-extraction matches every registered module ID; last-copy selection reproduces the former map exactly. The full fresh split preserves all 751 distinct keys, stages, packages, complete shader payloads, facts and 376 pairs. All 87 duplicate records have byte-identical complete control sections and code. The refreshed map changes 26 sources and 609 additional package indices (635 rows). Its 752 non-comment rows include the column header. The unchanged packing gate rejects the former map with the reported error and accepts the refreshed one. Verification and build artifacts are under `01003FC01670C000-work/issue3041/` in the NSP folder.
+- **Refresh validation:** full Mac/iOS shader builds on chain `e641898384f7` with locked Xcode 27.2 pass all shaders and generated variants, with no shader failures, losses or red errors. Both library stamps and the generated host tables match refreshed inputs `db616796915d`; the Mac host build passes. No gameplay, device or game regression run was needed for unchanged shader payloads. Build caches are in the local NSP work folder, whose `data` and `packing` links retain the archive folder's extraction and packing checks.
 - Everything is in six CRI CPK archives (`ROBO_*.CPK`, 4.3 GB; `ROBO_US.CPK` is the profile's `romfs_marker`) that CRI File System opens through `nn::fs`; they hold textures, scripts, CRI ADX2 audio (acb / awb) and CRI USM movies. The host needs nothing but plain file access for them.
 - To look inside one: the header and TOC are `@UTF` tables (big-endian columns), masked with CRI's byte stream (`m = 0x655f`, then `m *= 0x4115` per byte); file offsets in the TOC are relative to the smaller of `TocOffset` and `ContentOffset`, and files whose `ExtractSize` differs from `FileSize` are CRILAYLA-compressed. The listing showed no shader container, which is how the shaders were found in `main` instead ([02, Data containers](../../../docs/agents/02-survey.md#data-containers-that-matter-to-the-host)).
 - Shaders: no shader file in RomFS. 838 GLSLC compiler outputs (magic `0x19866891`) sit in `main`'s read-only segment, each referenced from a `{pointer, size, 0}` table in `.data` (`shader_split.py` `glslc_shaders`). Each output holds one control section with the code area right after it; a debug section with the NV assembly and the GLSL source follows. The control sections are all at least 0x880 bytes.
@@ -38,6 +40,14 @@ No `patches.py`, no `sdk_patches.py` cut for its `sdk` build (`2d369d99…`), no
 - Every texture is created with `TextureBuilderSetPackagedTextureData`. **Current:** the host copies that data at `TextureInitialize` and uploads it like a packaged texture; the linear ones (the save thumbnails) are excluded and, in a CPU-visible pool, read straight from the pool buffer.
 - Attachment loads and stores per frame on the Mac went down about 15% once an inline uniform update inside a render pass stopped ending the pass ([development.md, Power](../../../docs/development.md#power)).
 
+## Cheats
+
+- **A community list is for 1.10** (`4B632573CA5C160E`): a Ryujinx list with invincible, one-hit kill, EP never decreases, plus an entry that installs the code the first two use.
+  - Its four `BD405800` (`ldr s0, [x0, #0x58]`) sites are 1.10's. In the base game 1.00 (main `57212E16CB83BB55`) the same functions lie 0x330 lower.
+  - Its code cave is the padding before the read-only data, `main+0x451FC4` = the read-only data − 0x3C in both builds. The cave's first two words are the #01 / #02 flags.
+  - A `BL` at `main+0x8F0EC` (1.10), in place of `0ABB7F75`, enters the cave.
+- **Compiled for 1.00** by `scripts/cheat_anchor.py` ([Cheats carried across game updates](../../../docs/reference/rewriter.md#cheats-carried-across-game-updates)): the EP sites by fingerprint, the hook by body digest (`main+0x8EDBC`), the `BL` re-encoded. Not tried in play.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
@@ -47,8 +57,10 @@ General host changes first needed here; each applies to every game:
 - **GLSLC outputs in `main`** (`shader_split.py` `glslc_shaders`, the control / code / length check): [GLSLC outputs in `main` and in loose files](../../../docs/reference/shaders.md#glslc-outputs-in-main-and-in-loose-files).
 - **Single-stage programs paired with a cover** (`vs_pad`), **a shader cache key that covers the pairs** (`shader_key`, `pair_keyed`), **triangle fans and indexed quads** (a shared fan index buffer; CPU expansion at replay in `nvn_mtl.m`), **vertex streams 14 and 15 at slots 14 and 15** (`VB_SLOT`) and **packaged texture data copied at `TextureInitialize`**: [Single-stage programs paired with a cover](../../../docs/reference/shaders.md#single-stage-programs-paired-with-a-cover), [Shader cache key covering the pairs](../../../docs/reference/shaders.md#shader-cache-key-covering-the-pairs), [Triangle fans and indexed quads](../../../docs/reference/rendering.md#triangle-fans-and-indexed-quads), [Vertex streams 14 and 15 at Metal slots 14 and 15](../../../docs/reference/rendering.md#vertex-streams-14-and-15-at-metal-slots-14-and-15), [Packaged texture data copied at `TextureInitialize`](../../../docs/reference/nvn-objects.md#packaged-texture-data-copied-at-textureinitialize).
 - **Finding service calls before the first boot** (`main`'s `nn::` imports filtered against `HLE_FORCE` names): [Listing a game's unhooked imports before they are met](../../../docs/reference/services.md#listing-a-games-unhooked-imports-before-they-are-met).
+- **Cheats carried across game updates** (`scripts/cheat_anchor.py`): [rewriter reference](../../../docs/reference/rewriter.md#cheats-carried-across-game-updates).
 
 ## Open
 
+- Cheats: the community list's install entry writes 0 to both the #01 / #02 flags on every pass, after those two in file order, so with it on the flags read 0 at the end of each pass. Check in play whether it must be turned off once its code is in.
 - `game.tsv` still describes the game as "In bring-up" (the Mac reaching the first battle), while AGENTS.md lists it as playable on the iPhone.
 - `game.tsv`: only the merged 1.10 copy is extracted; the base game's own build IDs are added when needed.

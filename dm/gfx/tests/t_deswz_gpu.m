@@ -96,7 +96,13 @@ int main(void) {
             {"minimal 2D array 64x64x3 mip", {4, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT, 0, 64, 64, 3, 7, 0}},
         };
         int fail = 0; unsigned n = 0;
-        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, queue, &cases[i], i == 1); n++; }
+        for (int order = 0; order < 2; order++) {
+            printf("captured GOB order %d\n", order);
+            for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+                test_case c = cases[i]; c.d.gob_order = (uint16_t)order;
+                fail |= run_case(dev, queue, &c, !order && i == 1); n++;
+            }
+        }
 
         test_case neg = {"negative control", {1, NVN_FORMAT_RGBA8, 0, 0, 64, 64, 1, 2, 0}};
         nvn_texlayout nl; nvn_tex_layout(&neg.d, &nl);

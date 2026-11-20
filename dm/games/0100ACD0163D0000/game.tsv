@@ -35,6 +35,10 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x2000000
 
+# ---- Graphics ----
+# The registered build selects near-zero NVN depth (the NSP script's region check, 2026-10-29: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
+depth_mode	zero
+
 # ---- Shader split ----
 shader_groups	/BmGame/=bmgame
 shader_note	Batman: Arkham Knight shaders (Unreal Engine 3 global and combined shader caches)

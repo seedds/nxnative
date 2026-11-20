@@ -6,6 +6,8 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         ConvertDoubleToFloat,
         ConvertFloatToDouble,
+        Hmma16816F16,
+        SharedFence,
         SharedAtomicMaxS32,
         SharedAtomicMinS32,
         SharedStore8,

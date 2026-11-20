@@ -19,7 +19,7 @@ app_category	public.app-category.card-games
 # handheld: the Switch build plays by touch there (SDL turns the touch screen into LÖVE touches and mouse presses: tap a card, drag it), which on the iPhone are the touches no
 # gamepad control takes, on the Mac the mouse; docked it reads only the pads. Its window is then the 1280x720 handheld display
 op_mode	handheld
-# touch: the virtual gamepad starts in its Tap layout, every touch to the game (the pads' corners would cover Run Info, Options and the deck); its layout button brings back 2D / 3D
+# touch: the virtual gamepad starts in its Tap layout, every touch to the game (the pads' corners would cover Run Info, Options and the deck); the in-game menu's Controller layout brings back 2D / 3D
 pad_layout	touch
 
 # ---- Versions ----

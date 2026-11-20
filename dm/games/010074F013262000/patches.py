@@ -1,7 +1,8 @@
 # Xenoblade Chronicles 3: changes to its own modules, checked by NSO build ID.
 # Nintendo SDK module changes belong to dm/tools/sdk_patches.py.
 CUTS = {
-    # 2.2.1: nninitStartup reserves 60 GB for Monolith's allocator. Its first
+    # 2.2.0 / 2.2.1 share this main build ID (issue #847; see README.md).
+    # nninitStartup reserves 60 GB for Monolith's allocator. Its first
     # arena reserves 4 GB + 128 KB, maps the first 128 KB for bookkeeping, and
     # takes additional pages on demand. iOS cannot reserve that address space.
     # The original arena commits 203 MB at the title and 225 MB in the opening
@@ -22,5 +23,9 @@ CUTS = {
     ],
 }
 
-# Whether a general rule could replace these patches (dm/tools/docs_patches.py lists it in docs/agents/game-patches.md)
-GENERALIZE = "No: Monolith's own allocator reservation; the cause, an iPhone's address space, cannot be fixed in the host"
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'malloc region 60 GB → 4 GB and its first arena', 'now': 'build', 'goal': 'game', 'purpose': 'address space',
+     'why': "Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit"},
+]

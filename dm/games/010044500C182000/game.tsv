@@ -1,0 +1,35 @@
+# Sid Meier's Civilization VI 1.2.19, Firaxis engine, Havok, Wwise, NVN.
+# Mac map rendering tested; see README.md for validation and open work.
+
+# ---- Identity ----
+title_id	010044500C182000
+program_id	010044500C182000
+
+# ---- App ----
+name	Sid Meier's Civilization VI
+ipa	SidMeiersCivilizationVI.ipa
+app_category	public.app-category.strategy-games
+
+# ---- Versions ----
+build	v1638400	1.2.19	main=56dc86f30efa78d01071458d31be8d25	subsdk0=c8a3cc0b1d1858330a881c0c2fc87940	sdk=5fd4f531c1195e9e5510c9e73f22cd39
+package	v1638400
+shader_versions	v1638400
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Base/Platforms/NX64/BLPs/UI/Icons.blp
+zip_store	.bk2:.blp:.bs:.civ6save:.dat:.nro:.otf:.png:.metallib
+
+# ---- Memory ----
+# The observed 0xc9400000-byte heap fits the 3.5 GiB heap partition.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource: SDK virtual address memory is disabled.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/DLC/=dlc /Base/=base /aspyrassets/=aspyrassets /.nrr/=nrr /CTP/=ctp
+shader_note	Sid Meier's Civilization VI shaders

@@ -10,7 +10,8 @@
 #   (FFRS-Switch.utoc / .ucas, Oodle in 64 KB blocks, not encrypted) as one ShaderCodeLibrary chunk each (the tables) and one ShaderCode chunk per group of shaders, every group Oodle-compressed
 #   on its own (Toc, io_archive). Both layers need the game's decoder, which runs in the Mac host's tool mode (OodleHost); the libraries come out as version 2 archives with every shader decoded.
 # The AES key is in main (Unreal embeds it): the 32-byte window of main's read-only or data segment that decrypts the index start to its mount point ("../../../"; Octopath Traveler 0: one window of
-#   116,287 tried). It is only kept in memory, never printed or written.
+#   116,287 tried), or, where clang split the key into two 16-byte literals, the pair main's code loads and stores together (code_keys; DRAGON QUEST III HD-2D Remake). It is only kept in
+#   memory, never printed or written.
 # Pak footer (version 11, the last 0xdd bytes): encryption key GUID (16), encrypted index flag (u8), magic 0x5A6F12E1, version (u32), index offset (u64), index size (u64), index SHA-1 (20),
 #   5 compression method names (32 bytes each).
 # Index: mount point (FString), entry count (i32), path hash seed (u64), path hash index (i32 flag, then u64 offset, u64 size, SHA-1), full directory index (the same, encrypted like the index),
@@ -19,6 +20,10 @@
 # Encoded entry: u32 bits (0-5 compression block size >> 11, 0x3f = a u32 follows; 6-21 block count; 22 encrypted; 23-28 compression method, 1-based; 29 stored size fits 32 bits; 30 raw size fits
 #   32 bits; 31 offset fits 32 bits), then offset, raw size, stored size (compressed entries only) and, for several blocks or an encrypted one, each block's u32 stored size. The data starts after
 #   the FPakEntry the pak repeats in front of it (53 bytes, + 4 + 16 per block when compressed); blocks follow each other, 16-aligned when encrypted.
+# Version 8 paks (UE 4.22 to 4.25: DRAGON BALL Z: KAKAROT, pakchunk0-Switch.pak 4.5 GB / 126,978 files and pakchunk1-Switch.pak 1.9 GB / 41,080 files, index not encrypted,
+#   Zlib blocks) read like version 4 below, except that the footer is version 11's and an FPakEntry's compression method is an index (from 1) into its names.
+# Version 9 adds a FrozenIndex byte before those names (magic 0xcd from the end). When set, the index is a UE4 memory image with relative pointers, 80-byte FPakEntry records and sparse
+#   directory maps (frozen_pak_index); when clear, it is version 8's serialized index. Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 1.53 uses frozen indices and Zlib blocks.
 # Older paks (version 4, UE 4.18: DRAGON QUEST XI S, pakchunk0-Switch.pak 6.6 GB / 264,844 files and pakchunk1-Switch.pak 7.2 GB / 147,824 files, the update's *_0_P.pak beside them) keep the
 #   legacy layout. Footer (the last 0x2d bytes): encrypted index flag (u8), magic, version, index offset, index size, SHA-1. Index: mount point, entry count, then per file its name (relative to the
 #   mount point) and its FPakEntry: offset, stored size, raw size (i64 each), compression flags (i32), SHA-1 (20), for a compressed file the block count (i32) and each block's start and end
@@ -28,6 +33,9 @@
 # Unreal Engine 4.27 with bShareMaterialShaderCode off (OCTOPATH TRAVELER II: Majesty/Content/Paks/Majesty-Switch.pak, version 11, 3.3 GB / 376,601 files, index not encrypted, Zlib blocks)
 #   has no shader code archive at all: each material keeps its shaders in its own cooked package (.uexp) and the engine's global shaders are in Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin,
 #   every shader an LSLG record stored without compression, as in a legacy pak (inline_shaders; shader_split.py ue_legacy_jobs reads them). Zlib and LZ4 blocks are decoded here (Pak.read).
+#   Unreal Engine 5.4 for the Switch 2 (Yoshi and the Mysterious Book: PJ045-Sage.utoc / .ucas, TOC version 6) does the same with export chunks of Unreal Engine 5's numbering, each shader an Oodle stream holding an NVN2 record with no LSLG (shader_map_entries, sage_record).
+#   With IoStore on as well (Mario & Luigi: Brothership: Vermillion-Switch.utoc / .ucas, Oodle in 256 KB blocks, TOC version 3) the cooked packages are the container's export bundles (Toc.export_bundles,
+#   named by Toc.names); the pak beside it keeps everything else, the global shader cache too.
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
 #   entries {u64 offset, u32 size, u32 raw size, u8 frequency} (17 bytes, packed), preload entries (16 each), shader indices (u32): each array is a u32 count and its elements; the code follows,
 #   offsets relative to its start. A shader whose size differs from its raw size is compressed.
@@ -35,7 +43,8 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
-import ctypes, json, os, re, struct, sys
+import json, os, re, struct, sys
+from typing import cast
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 
@@ -43,17 +52,7 @@ PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
 FREQ = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency (the archive's frequency census: 0 vertex, 3 pixel, 5 compute)
 
-_cc = None
-def aes_decrypt(key, data):
-    """AES-256 ECB decryption through CommonCrypto (every Mac has it; no Python package needed)"""
-    global _cc
-    if _cc is None:
-        _cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
-        _cc.restype = ctypes.c_int32
-        _cc.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-    out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
-    if _cc(1, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)): raise ValueError('CCCrypt failed')   # decrypt, AES, ECB
-    return out.raw[:moved.value]
+from aes import decrypt as aes_decrypt
 
 _M, _K0, _K1, _K2 = (1 << 64) - 1, 0xc3a5c85c97cb3127, 0xb492b66fbe98f273, 0x9ae16a3b2f90404f
 def _rot(v, s): return ((v >> s) | (v << (64 - s))) & _M if s else v
@@ -145,39 +144,52 @@ class R:
         v = struct.unpack_from(fmt, self.b, self.o); self.o += struct.calcsize(fmt); return v if len(v) > 1 else v[0]
     def raw(self, n): self.need(n); v = self.b[self.o:self.o + n]; self.o += n; return v
     def array(self, c, n): return struct.unpack(f'<{n}{c}', self.raw(struct.calcsize(c) * n))   # n elements of struct code c, checked before unpacking
+    def count(self): return self.array('i', 1)[0]   # a TArray's length
     def fstr(self):
         n = self.take('<i')
         if n < 0: return self.raw(-2 * n).decode('utf-16-le')[:-1]
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
-LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
+LEGACY = (4, 8, 9)   # per-file entries; version 9 may freeze them into a memory image. Version 8 (DRAGON BALL Z: KAKAROT, UE 4.2x) keeps version 4's index with the FPakEntry
+#   compression method as an index (from 1) into the footer's method names, and version 11's footer: key GUID, encrypted flag, magic 0xcc from the end, five 32-byte names after the SHA-1
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
+SHORT_V8_MAGIC_BACK = 0xac   # four compression method slots, with a one-byte method in each FPakEntry
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
-    Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
+    Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1); version 9 adds one flag, at 0xcd"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21), (0xcd, 0xcd + 21), (SHORT_V8_MAGIC_BACK, SHORT_V8_MAGIC_BACK + 21)):
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
-        if m == PAK_MAGIC: return back, ver
+        if m == PAK_MAGIC and (back != SHORT_V8_MAGIC_BACK or ver == 8): return back, ver
     raise ValueError('no pak footer')
 
 def pak_version(f):
     return magic_back(f)[1]
 
+def frozen_index(f, ver):
+    """Version 9 alone puts a FrozenIndex byte between the index SHA-1 and the five compression names."""
+    if ver != 9: return False
+    f.seek(-161, 2); flag = f.read(1)
+    if flag not in (b'\0', b'\1'): raise ValueError('invalid version 9 FrozenIndex flag')
+    return flag == b'\1'
+
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if (ver in LEGACY or ver == 11) and (ver in LEGACY) != (back == 0x2c): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
-    if ver in LEGACY:
+    if ver in (4, 11) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c or (ver == 9) != (back == 0xcd): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if ver == 4:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver != 11: raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    elif ver not in (8, 9, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
     else:
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
-        enc, methods = ft[k - 1], [ft[k + 44 + 32 * i:k + 76 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(5)]
+        frozen_index(f, ver)   # validate the flag even when only the footer is requested
+        names = k + 44 + (ver == 9)
+        slots = 4 if back == SHORT_V8_MAGIC_BACK else 5   # 0xc8 still has a fifth slot, shortened by four bytes
+        enc, methods = ft[k - 1], [ft[names + 32 * i:names + 32 * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(slots)]
     if ioff + isz > f.seek(0, 2): raise ValueError(f'the index ({isz:#x} bytes at {ioff:#x}) runs past the end of the pak')
     return enc, ioff, isz, methods, ver
 
@@ -186,33 +198,159 @@ def read_range(f, off, n, what):
     if off < 0 or n < 0 or off + n > f.seek(0, 2): raise ValueError(f'{what}: {n:#x} bytes at {off:#x} do not lie inside the file')
     f.seek(off); return f.read(n)
 
-def find_key(img, lo, hi, pak):
-    """The AES key among main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes): the one that decrypts the index start to a short mount point"""
+def frozen_pak_index(data, methods, what):
+    """UE4's 64-bit frozen FPakFileData: FString, TArray<FPakEntry>, TMap<FString, TMap<FString, int32>>.
+    Frozen pointers are signed displacements from their own address, shifted left one with bit 0 set. Arrays, sparse-map allocation bits and entry indices are bounded before use.
+    These in-memory entries are 80 bytes; the serialized headers before file data are still 53 bytes plus any compression-block table."""
+    def reader(at, size):
+        r = R(data, at, what); r.need(size); return r
+    def pointer(at, size):
+        packed = reader(at, 8).array('q', 1)[0]
+        if not packed & 1: raise ValueError(f'{what}: unfrozen pointer at {at:#x}')
+        target = at + (packed >> 1)
+        reader(target, size)
+        return target
+    def array(at, stride, exact=True):
+        n, cap = reader(at + 8, 8).take('<ii')
+        if n < 0 or cap < n or exact and cap != n: raise ValueError(f'{what}: invalid frozen array at {at:#x}')
+        return (pointer(at, n * stride) if n else 0), n
+    def string(at):
+        start, n = array(at, 2)
+        if not n: return ''
+        raw = reader(start, n * 2).raw(n * 2)
+        if raw[-2:] != b'\0\0': raise ValueError(f'{what}: unterminated frozen string at {at:#x}')
+        try: return raw[:-2].decode('utf-16-le')
+        except UnicodeDecodeError as e: raise ValueError(f'{what}: invalid frozen string at {at:#x}') from e
+    def slots(at, stride):
+        reader(at, 52)
+        start, n = array(at, stride, exact=False)
+        bits, capacity = reader(at + 24, 8).take('<ii')
+        if bits < n or capacity < bits: raise ValueError(f'{what}: invalid sparse allocation bits at {at:#x}')
+        flags = pointer(at + 16, ((bits + 31) // 32) * 4) if bits else 0
+        for i in range(n):
+            if data[flags + i // 8] & (1 << (i % 8)): yield start + i * stride
+
+    mount = string(0)
+    start, count = array(16, 80)
+    entries = []
+    for i in range(count):
+        at = start + i * 80
+        off, size, raw = reader(at, 24).take('<qqq')
+        blocks_at, nblocks = array(at + 48, 16)
+        bsz, meth, flags = reader(at + 64, 9).take('<IiB')
+        if min(off, size, raw, meth) < 0 or flags & ~3: raise ValueError(f'{what}: invalid frozen entry {i}')
+        if meth > len(methods) or meth and not methods[meth - 1]: raise ValueError(f'{what}: entry {i} names unknown compression method {meth}')
+        blocks = []
+        for j in range(nblocks):
+            s, t = reader(blocks_at + j * 16, 16).take('<qq')
+            if s < 0 or t < s: raise ValueError(f'{what}: invalid compression block in entry {i}')
+            blocks.append((s, t - s))
+        if meth and (not blocks or not bsz): raise ValueError(f'{what}: compressed entry {i} has no blocks or block size')
+        entries.append(dict(off=off, size=size, raw=raw, method=methods[meth - 1] if meth else '', encrypted=flags & 1, block_size=bsz, blocks=blocks or [(53, size)], deleted=bool(flags & 2)))
+    files = {}
+    for directory in slots(32, 80):
+        dn = string(directory)
+        for item in slots(directory + 16, 32):
+            name = (dn + string(item)).lstrip('/')
+            index = reader(item + 16, 4).count()
+            if not 0 <= index < count: raise ValueError(f'{what}: {name} names entry {index} outside the entry array')
+            e = entries[index]
+            if e['deleted'] and not e['size']: continue
+            if name in files: raise ValueError(f'{what}: duplicate file {name}')
+            files[name] = e
+    return mount, files
+
+def code_keys(img, lo):
+    """32-byte keys that main's code stores from two 16-byte literals: stp qA, qB, [x0] after ldr qA / qB, each from an adrp page plus its offset, within 8 instructions before it.
+    UE_REGISTER_ENCRYPTION_KEY's callback copies a 32-byte array into its argument, and clang may split the array into two 16-byte constants that do not lie side by side
+    (DRAGON QUEST III HD-2D Remake: main+0xa3fd24 is adrp, adrp, ldr q0, ldr q1, stp q0, q1, [x0], ret), so no window of main holds the key"""
+    w = struct.unpack_from(f'<{lo // 4}I', img)
+    out = []
+    for i, x in enumerate(w):
+        if x & 0xFFFF83E0 != 0xAD000000: continue   # stp qA, qB, [x0, #0] (signed offset)
+        page, half = {}, {}
+        for j in range(max(0, i - 8), i):
+            y = w[j]
+            if y & 0x9F000000 == 0x90000000:   # adrp: the page of pc + the 21-bit immediate pages
+                imm = (y >> 29 & 3) | (y >> 5 & 0x7FFFF) << 2
+                page[y & 31] = (j * 4 & ~0xFFF) + ((imm - (1 << 21) if imm & 1 << 20 else imm) << 12)
+            elif y & 0xFFC00000 == 0x3DC00000 and (y >> 5 & 31) in page:   # ldr qT, [xN, #imm12 * 16] on an adrp base
+                half[y & 31] = page[y >> 5 & 31] + (y >> 10 & 0xFFF) * 16
+            else: page.pop(y & 31, None); half.pop(y & 31, None)   # anything else that may write the register ends what it held
+        a, b = half.get(x & 31), half.get(x >> 10 & 31)
+        if a is not None and b is not None and a + 16 <= len(img) and b + 16 <= len(img): out.append(img[a:a + 16] + img[b:b + 16])
+    return out
+
+def find_key(img, lo, hi, pak, first=()):
+    """The AES key that decrypts the index start to a short mount point: one of first (a key another pak of the game opened with), one main's code stores from two 16-byte literals
+    (code_keys), else one of main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes)"""
     with open(pak, 'rb') as f:
-        _, ioff, _, _, _ = footer(f); f.seek(ioff); blk = f.read(16)
+        _, ioff, isz, _, ver = footer(f); frozen = frozen_index(f, ver); f.seek(ioff); blk = f.read(16)
+    def opens(k):   # the index starts with its mount point, an FString: length with the NUL (< 512), then a path from "." or "/": "../../../", or "/" in the empty paks beside
+        d = aes_decrypt(k, blk)   # IoStore containers (DRAGON BALL Sparking! ZERO's pakchunk1-17); the 12 bytes the block holds are printable up to the NUL
+        if frozen:
+            ptr, n, cap = struct.unpack('<qii', d)
+            at = ptr >> 1
+            if not ptr & 1 or not 1 < n < 512 or n != cap or not 16 <= at <= isz - n * 2: return False
+            # ECB permits checking the pointed-to mount directly, without allocating a candidate's entire index.
+            begin, end = at & ~15, (at + n * 2 + 15) & ~15
+            with open(pak, 'rb') as f: raw = aes_decrypt(k, read_range(f, ioff + begin, end - begin, pak))[at - begin:at - begin + n * 2]
+            try: s = raw.decode('utf-16-le')
+            except UnicodeDecodeError: return False
+            return s.startswith(('.', '/')) and s.endswith('\0') and all(c >= ' ' and not '\x7f' <= c <= '\x9f' for c in s[:-1])
+        n = struct.unpack_from('<i', d)[0]
+        if not 1 < n < 512 or d[4] not in b'./': return False
+        s = d[4:min(4 + n, 16)]
+        return all(0x20 <= c < 0x7F for c in s[:n - 1]) and (len(s) < n or s[n - 1] == 0)
+    for k in first:   # before code_keys, which reads all of main's code
+        if opens(k): return k
+    for k in code_keys(img, lo):
+        if opens(k): return k
     for a in range(lo, hi - 32, 4):
         w = img[a:a + 32]
-        if len(set(w)) < 20: continue
-        d = aes_decrypt(w, blk)
-        if 0 < struct.unpack_from('<i', d)[0] < 512 and d[4:7] == b'../': return w
+        if len(set(w)) >= 20 and opens(w): return w
     return None
+
+class Keys:
+    """The AES keys of a game's paks, from its mains (the ExeFS main of each version, base game first): keys(pak) → None for a pak whose index is not encrypted, else the key find_key finds,
+    trying each main in turn; ValueError when none opens it. Each main is loaded once, at the first encrypted pak, and a key found is tried first on the next pak, so a game's
+    second pak or version does not search main again (the shader code archives, job; the paks with the shaders inline, shader_split.py ue_legacy_jobs)"""
+    def __init__(self, mains):
+        self.mains, self.imgs, self.found = list(mains), {}, []
+    def __call__(self, pak):
+        with open(pak, 'rb') as f: enc = footer(f)[0]
+        if not enc: return None
+        for m in self.mains:
+            if m not in self.imgs: self.imgs[m] = nso_image(m)
+            img, lo, hi = self.imgs[m]
+            k = find_key(img, lo, hi, pak, first=self.found)
+            if k:
+                if k not in self.found: self.found.append(k)
+                return k
+        raise ValueError(f'{pak}: the index is encrypted and no key in main (a 32-byte window or two 16-byte literals its code stores together) decrypts it')
 
 class Pak:
     def __init__(self, path, key=None):
         self.path, self.key = path, key; self.f = open(path, 'rb')
         enc, ioff, isz, self.methods, self.version = footer(self.f)
+        short = self.version == 8 and len(self.methods) == 4
+        self.stored_header = 50 if short else 53
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
         r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
+        if frozen_index(self.f, self.version):
+            self.mount, self.files = frozen_pak_index(r.b, self.methods, r.what)
+            self.count = len(self.files)
+            return
         self.mount = r.fstr(); self.count = r.take('<i')
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
             self.files = {}
             for _ in range(self.count):
-                name = r.fstr(); off, size, raw, meth = r.take('<qqqi'); r.raw(20)
+                name = r.fstr(); off, size, raw, meth = r.take('<qqqB' if short else '<qqqi'); r.raw(20)
                 blocks = [r.take('<qq') for _ in range(r.take('<i'))] if meth else []
-                e, bsz = r.take('<BI'); head = 53 + (4 + 16 * len(blocks) if meth else 0)
+                e, bsz = r.take('<BI'); head = self.stored_header + (4 + 16 * len(blocks) if meth else 0)
                 if self.version < 5: blocks = [(s - off, t - s) for s, t in blocks]
                 else: blocks = [(s, t - s) for s, t in blocks]
-                self.files[name] = dict(off=off, raw=raw, size=size, method=LEGACY_METHODS.get(meth, f'flags {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
+                self.files[name] = dict(off=off, raw=raw, size=size, method=(LEGACY_METHODS.get(meth, f'flags {meth}') if self.version < 8 else self.methods[meth - 1] if 0 < meth <= len(self.methods) else f'method {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
             return
         r.take('<Q')
         if r.take('<i'): r.take('<QQ'); r.raw(20)   # path hash index (not needed with the full directory index)
@@ -247,7 +385,7 @@ class Pak:
         """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
-        if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])
+        if not e['method']: return self.read_at(cast(int, e['off']) + self.stored_header, e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
@@ -279,6 +417,35 @@ def archive(b, what='shader code archive') -> dict:
     r.raw(16 * r.take('<I'))
     indices = list(r.array('I', r.take('<I')))
     return dict(maps=maps, shaders=shaders, indices=indices, code=r.o)
+
+def archive_v1_decoded(b, what):
+    """Normalize the v1 table of hashes and stored or Zlib-compressed Switch records to v2, without any shader maps."""
+    import zlib
+    r = R(b, what=what)
+    if r.take('<I') != 1: raise ValueError(f'{what}: expected a version 1 shader archive')
+    count, = r.array('I', 1)
+    r.need(37 * count)
+    code = r.o + 37 * count
+    hashes, entries, decoded = bytearray(), bytearray(), bytearray()
+    max_decoded = 1032 * (len(b) - code)   # the maximum Deflate expansion, also bounding repeated references to the same bytes
+    for i in range(count):
+        hashes.extend(r.raw(20))
+        off, size, raw, freq = r.take('<QIIB')
+        if (not 0 < size <= raw <= 32 << 20 or code + off + size > len(b) or freq not in FREQ
+                or raw > 1032 * size or len(decoded) + raw > max_decoded):
+            raise ValueError(f'{what}: invalid version 1 shader entry {i}')
+        shader = b[code + off:code + off + size]
+        if size != raw:
+            z = zlib.decompressobj()
+            try: shader = z.decompress(shader, raw + 1)
+            except zlib.error as e: raise ValueError(f'{what}: shader {i} does not decode ({e})') from None
+            if not z.eof or z.unused_data or len(shader) != raw:
+                raise ValueError(f'{what}: shader {i} does not decode to {raw:#x} bytes')
+        if not shader.startswith(b'LSLG'): raise ValueError(f'{what}: shader {i} is missing its LSLG header')
+        entries.extend(struct.pack('<QIIB', len(decoded), raw, raw, freq))
+        decoded.extend(shader)
+    return (struct.pack('<III', ARCHIVE_VERSION, 0, count) + hashes + struct.pack('<II', 0, count)
+            + entries + bytes(8) + decoded)
 
 def decoded_archive(b, raws):
     """The archive with every shader replaced by its decoded bytes (raws, in entry order): the same tables, each entry's size = its raw size, the code laid out again
@@ -314,6 +481,7 @@ def lz4_shaders(b, a):
     return out
 
 TOC_MAGIC, IO_SHADER_LIBRARY, IO_SHADER_CODE = b'-==--==--==--==-', 8, 9   # EIoChunkType in Unreal Engine 5 (TOC version 4 and later; 4.27 numbers its chunk types otherwise)
+IO_EXPORT_BUNDLE, IO_EXPORT_BUNDLE_427 = 1, 2   # a cooked package's exports: EIoChunkType in Unreal Engine 5 (TOC version 4 and later), in Unreal Engine 4.27 (TOC version 3)
 
 class Toc:
     """An IoStore container: the .utoc's chunk table and compression blocks, the data in the .ucas beside it (<name>_s<n>.ucas for partitions after the first). A chunk is a range of the
@@ -326,9 +494,9 @@ class Toc:
         b = open(path, 'rb').read()
         if b[:16] != TOC_MAGIC: raise ValueError(f'{path}: not an IoStore TOC')
         self.path, self.key, self.version = path, key, b[16]
-        hsz, n, nblk, bsz, nmeth, mlen, self.block_size, _, nparts = struct.unpack_from('<9I', b, 20)
+        hsz, n, nblk, bsz, nmeth, mlen, self.block_size, dsz, nparts = struct.unpack_from('<9I', b, 20)
         if bsz != 12: raise ValueError(f'{path}: compression block entries of {bsz} bytes')
-        self.encrypted = b[80] >> 1 & 1
+        self.encrypted, self.parts = b[80] >> 1 & 1, nparts
         nseeds = struct.unpack_from('<I', b, 84)[0] if self.version >= 4 else 0
         self.part_size = struct.unpack_from('<Q', b, 88)[0] if self.version >= 3 and nparts > 1 else 1 << 64
         nover = struct.unpack_from('<I', b, 96)[0] if self.version >= 5 else 0
@@ -340,10 +508,36 @@ class Toc:
             self.blocks.append((int.from_bytes(e[:5], 'little'), int.from_bytes(e[5:8], 'little'), int.from_bytes(e[8:11], 'little'), e[11]))
         o += 12 * nblk
         self.methods = [b[o + mlen * i:o + mlen * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(nmeth)]
+        o += mlen * nmeth
+        # the directory index follows unless a signature comes first (flag 4); an encrypted container's (flag 2) is encrypted with the data's key (DRAGON BALL Sparking! ZERO), b'' without it
+        d = b[o:o + dsz] if b[80] & 8 and not b[80] & 4 else b''
+        self.dir_index = (aes_decrypt(key, d + bytes(-len(d) % 16))[:len(d)] if key else b'') if d and self.encrypted else d
         self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}
     def of_type(self, t):
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
         return [i for i, c in enumerate(self.ids) if c[11] == t] if self.version >= 4 else []
+    def export_bundles(self):
+        """Indices of the cooked packages' export chunks: chunk type 2 in Unreal Engine 4.27's numbering (TOC version 3 and before), 1 in Unreal Engine 5's"""
+        t = IO_EXPORT_BUNDLE if self.version >= 4 else IO_EXPORT_BUNDLE_427
+        return [i for i, c in enumerate(self.ids) if c[11] == t]
+    def ucas_paths(self):
+        return [self.path[:-5] + ('.ucas' if not k else f'_s{k}.ucas') for k in range(max(self.parts, 1))]
+    def names(self):
+        """{chunk index: file path} from the directory index (FIoDirectoryIndexResource: mount point, directories {name, first child, next sibling, first file}, files {name, next file,
+        chunk index}, string table; 0xffffffff ends a list), joined to the mount point with its leading ../ removed, as shader_split.py labels a pak's files (DRAGON BALL Sparking! ZERO's
+        pakchunk2-17 mount at ../../../SparkingZERO/Content/L10N/<language>/…, the others at ../../../); {} when the container has none"""
+        if not self.dir_index: return {}
+        r = R(self.dir_index, what=f'{self.path}: the directory index'); mount = r.fstr()
+        dirs = [r.take('<4I') for _ in range(r.count())]; files = [r.take('<3I') for _ in range(r.count())]
+        strs = [r.fstr() for _ in range(r.count())]
+        out, none = {}, 0xffffffff; todo = [(0, '')] if dirs else []
+        while todo:
+            d, at = todo.pop(); name, child, sib, f = dirs[d]
+            here = at + strs[name] + '/' if name != none else at
+            if sib != none: todo.append((sib, at))
+            if child != none: todo.append((child, here))
+            while f != none: nm, f, chunk = files[f]; out[chunk] = here + strs[nm]
+        return {c: re.sub(r'^(\.\./)+', '', os.path.normpath(mount + v)) for c, v in out.items()}
     def ucas(self, part):
         if part not in self.files: self.files[part] = open(self.path[:-5] + ('.ucas' if not part else f'_s{part}.ucas'), 'rb')
         return self.files[part]
@@ -445,28 +639,56 @@ def paks(romfs):
     """Every pak under the RomFS"""
     return sorted(os.path.join(dp, f) for dp, _, fs in os.walk(romfs) for f in fs if f.endswith('.pak'))
 
-def inline_shaders(path):
-    """Whether a pak keeps its shaders inline in its cooked packages rather than in shader code archives: every legacy pak (DRAGON QUEST XI S), and a version 11 pak whose directory index
-    names cooked packages (.uexp) and no .ushaderbytecode (OCTOPATH TRAVELER II: bShareMaterialShaderCode off). FINAL FANTASY RESONANCE's pak holds configs only (its shaders are in its IoStore
-    container) and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
-    with open(path, 'rb') as f:
-        enc, ioff, isz, _, ver = footer(f)
-        if ver in LEGACY: return True
-        if enc: return False
-        r = R(read_range(f, ioff, isz, path), what=f'{path}: the index'); r.fstr(); r.take('<iQ')
-        if r.take('<i'): r.take('<QQ'); r.raw(20)
-        if not r.take('<i'): return False
-        doff, dsz = r.take('<QQ'); d = read_range(f, doff, dsz, path)
-    return b'.ushaderbytecode\0' not in d and b'.uexp\0' in d
+def inline_in_containers(path):
+    """Whether the containers in a pak's folder hold its cooked packages with their shaders inline: export bundles, the only part shader_split.py ue_legacy_jobs reads and only from this folder, and
+    no shader libraries, which every Unreal Engine 5 container with shared shader code has beside its export bundles (FINAL FANTASY RESONANCE)"""
+    folder = os.path.dirname(os.path.abspath(path))
+    tocs = [t for t in io_tocs(folder) if os.path.dirname(t.path) == folder]
+    return any(t.export_bundles() for t in tocs) and not any(t.of_type(IO_SHADER_LIBRARY) for t in tocs)
 
-def unreal_paks(romfs, inline=None):
-    """The paks under the RomFS that Unreal wrote (its magic in the footer; inline None = any, True = those whose shaders are inline in the cooked packages, False = the others, inline_shaders):
-    the NSP script decodes the shader code archives of the others (decode_ue_shaders); shader_split.py reads the inline ones file by file (ue_legacy_jobs)"""
-    out = []
+def pak_shader_sources(path, key=None):
+    """(scan inline packages or adjacent IoStore bundles, try extracting shader archives).
+    Versions 4 and ordinary v8 use the inline scan. Short v8 and v9 can supply both sources: .ushaderbytecode for extraction, and .uexp, a global shader cache or adjacent inline export bundles.
+    Version 11 uses the inline scan when its directory names no .ushaderbytecode and names either .uexp or a global shader cache beside inline export bundles. An empty v11 index supplies neither.
+    Encrypted paks with no key that can hold shared archives are sent for extraction so it can report the missing key."""
+    with open(path, 'rb') as f:
+        enc, ioff, isz, methods, ver = footer(f)
+        if ver == 9 or ver == 8 and len(methods) == 4:
+            if enc and not key: return False, True
+            pak = Pak(path, key)
+            with pak.f:
+                archives = any(n.endswith('.ushaderbytecode') for n in pak.files)
+                members = any(n.endswith('.uexp') or os.path.basename(n).startswith('GlobalShaderCache-') for n in pak.files)
+            return members or inline_in_containers(path), archives
+        if ver in LEGACY: return True, False
+        if enc and not key: return False, True
+        def at(off, n):   # the index and the full directory index are encrypted alike (Pak.read_at)
+            b = read_range(f, off, (n + 15) & ~15 if enc else n, path)
+            return aes_decrypt(key, b)[:n] if enc else b
+        r = R(at(ioff, isz), what=f'{path}: the index'); r.fstr(); count, _ = r.take('<iQ')
+        if not count: return False, False
+        if r.take('<i'): r.take('<QQ'); r.raw(20)
+        if not r.take('<i'): return False, True
+        doff, dsz = r.take('<QQ'); d = at(doff, dsz)
+    inline = b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
+    return inline, not inline
+
+def inline_shaders(path, key=None):
+    """True when the split should scan inline shaders, False for archive extraction alone, None for neither."""
+    inline, archives = pak_shader_sources(path, key)
+    if inline: return True
+    return False if archives else None
+
+def unreal_paks(romfs, inline=None, mains=()):
+    """Unreal paks under the RomFS. inline=None lists all parsed paks, True selects the inline scan, False selects archive extraction (pak_shader_sources).
+    A mixed short v8 or v9 pak appears in both selections. mains: the ExeFS mains whose key opens an encrypted index (Keys)."""
+    out, keys = [], Keys(mains)
     for p in paks(romfs):
-        try: inl = inline_shaders(p)
+        try: k = keys(p) if mains else None
+        except (OSError, ValueError, struct.error): k = None
+        try: scan_inline, extract_archives = pak_shader_sources(p, k)
         except (OSError, ValueError, struct.error): continue   # shorter than a footer, or no Unreal pak
-        if inline is None or inl == inline: out.append(p)
+        if inline is None or (scan_inline if inline else extract_archives): out.append(p)
     return out
 
 def job(romfs, main_nso, work, decode=None):
@@ -474,7 +696,7 @@ def job(romfs, main_nso, work, decode=None):
     The shader libraries of IoStore containers (Unreal Engine 5.6, FINAL FANTASY RESONANCE: no archive in the pak) go there already decoded: their container blocks and shader groups are
     Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job"""
     os.makedirs(os.path.join(work, 'archives'), exist_ok=True)
-    img, lo, hi = nso_image(main_nso); key = None; listing, recs = [], []
+    keys = Keys([main_nso]); listing, recs = [], []
     tocs = io_tocs(romfs)
     libs = [t for t in tocs if t.of_type(IO_SHADER_LIBRARY)]
     if libs and not decode: raise ValueError(f'{libs[0].path}: IoStore shader libraries need the game\'s decoder (decode)')
@@ -491,18 +713,19 @@ def job(romfs, main_nso, work, decode=None):
             name = io_library_name(t, i, names) + '.ushaderbytecode'; b = io_archive(t, i, decode, chunk.get)
             open(os.path.join(work, 'archives', name), 'wb').write(b)
             listing.append(dict(name=name, pak=os.path.relpath(t.path, romfs), path=f'chunk {t.ids[i].hex()}', shaders=len(archive(b)['shaders']), compressed=0, compression='IoStore, decoded'))
-    for pak in unreal_paks(romfs, inline=False):
-        with open(pak, 'rb') as f: enc = footer(f)[0]
-        if enc and key is None:
-            key = find_key(img, lo, hi, pak)
-            if key is None: raise ValueError(f'{pak}: the index is encrypted and no window of main decrypts it')
-        p = Pak(pak, key)
+    for pak in unreal_paks(romfs, inline=False, mains=[main_nso]):
+        p = Pak(pak, keys(pak))
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
-            b = p.read(path); a = archive(b, f'{pak}: {path}'); name = os.path.basename(path)
-            comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
-            raws = lz4_shaders(b, a)
-            if comp and raws: b = decoded_archive(b, raws); comp, how = [], 'LZ4'   # decoded here: the Oodle job gets none of them
-            else: how = 'Oodle' if comp else ''
+            b = p.read(path); what = f'{pak}: {path}'; name = os.path.basename(path)
+            v1 = b.startswith(b'\x01\0\0\0')
+            if v1: b = archive_v1_decoded(b, what)
+            a = archive(b, what)
+            if v1: comp, how = [], 'v1, decoded'
+            else:
+                comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
+                raws = lz4_shaders(b, a) if comp else None
+                if raws: b = decoded_archive(b, raws); comp, how = [], 'LZ4'   # decoded here: the Oodle job gets none of them
+                else: how = 'Oodle' if comp else ''
             open(os.path.join(work, 'archives', name), 'wb').write(b)
             for i in comp:
                 off, size, raw, _ = a['shaders'][i]; recs.append((name, i, b[a['code'] + off:a['code'] + off + size], raw))
@@ -542,13 +765,46 @@ def lslg(s):
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
 
+CTL_NVN2 = b'\x34\x12\x76\x98\xc9\0\0\0'
+def sage_record(s):
+    """A decoded Switch 2 shader (Unreal Engine 5.4's SP_GLSL_SAGE, Yoshi and the Mysterious Book): a 0x3e-byte header with no magic, u32 name length, the name ("Global/<type>/0:/Engine/Private/<file>.usf|<entry>"),
+    u32 code length, the code area (Ampere), u32 control length, the control section (an NVN2 one, version 0xc9) and a tail of 12 bytes. → (name, control section, code area), or None if the layout differs"""
+    k = s.find(CTL_NVN2)
+    if k < 12 or k + 0x48 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x44)[0]
+    c = k - 4 - ncode
+    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
+    return bytes(s[:c - 4]).rstrip(b'\0').rsplit(b'\0', 1)[-1].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+
+OODLE_BLOCK = re.compile(b'\x8c[\x06\x0a\x0b\x0c]')   # the first bytes of a stream: Kraken, Mermaid, Selkie, Leviathan
+def shader_map_entries(d, proved=None):
+    """The entries of the FShaderMapResourceCode tables in a cooked package or global shader cache whose shaders Oodle compressed: a count, that many 20-byte hashes, the count again, then
+    that many {i32 length, code, i32 raw size, u8 frequency}. A table is found by a first entry's stream and held by its two counts and by the walk over all its entries, as a stream's two first bytes
+    turn up inside other data. That is no proof: an entry of a package's export list reads as a one-entry table (OCTOPATH TRAVELER II: name number 1, flags 8, then the 8 bytes of the size 0xb8c and
+    the offset 30650). So proved(first row), when given, has the last word, as a decode has for the other streams of a blind scan, and a table it refuses hides nothing that lies inside it.
+    → [(offset of the code, length, raw size, frequency)] of the tables that hold"""
+    out, end = [], 0
+    for m in OODLE_BLOCK.finditer(d):
+        i = m.start()
+        if i < end or i < 12: continue
+        count = int.from_bytes(d[i - 8:i - 4], 'little'); hashes = i - 8 - 20 * count
+        if not 1 <= count <= 1 << 20 or hashes < 4 or int.from_bytes(d[hashes - 4:hashes], 'little') != count: continue
+        rows, p = [], i - 4
+        for _ in range(count):
+            if p + 4 > len(d): break
+            n = int.from_bytes(d[p:p + 4], 'little'); q = p + 4 + n
+            if not 1 <= n or q + 5 > len(d): break
+            raw, f = int.from_bytes(d[q:q + 4], 'little'), d[q + 4]
+            if not n <= raw <= 1 << 28 or f > 15: break
+            rows.append((p + 4, n, raw, f)); p = q + 5
+        if len(rows) == count and (proved is None or proved(rows[0])): out += rows; end = p
+    return out
+
 if __name__ == '__main__':
     try:
         cmd = sys.argv[1] if len(sys.argv) > 1 else ''
         if cmd == 'list':
-            img, lo, hi = nso_image(sys.argv[3])
-            with open(sys.argv[2], 'rb') as f: enc = footer(f)[0]
-            p = Pak(sys.argv[2], find_key(img, lo, hi, sys.argv[2]) if enc else None)
+            p = Pak(sys.argv[2], Keys([sys.argv[3]])(sys.argv[2]))
             with open(sys.argv[4], 'w') as f:
                 f.write('path\traw\tstored\tmethod\tencrypted\tblocks\n')
                 for path in sorted(p.files):

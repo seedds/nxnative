@@ -9,7 +9,7 @@ Update 1.1.0 (v65536) over the base game, SDK 11.4.0. HAL Laboratory's own engin
 | 4 GB block: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | no system resource; 256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region. See [Memory](#memory) |
 | `modules main subsdk0 sdk` | `game.tsv` | `subsdk0` is the movie library: the opening and ending movies and the guide movies |
 | `shader_groups /gfx/=gfx /ptcl/=ptcl /lyt/=lyt /shader/=shader` | `game.tsv` | the shaders are BNSH archives in HAL's `.cmp` containers; see [Files and shaders](#files-and-shaders) |
-| Node area cut and 32 MB alignment of large regions | `dm/tools/sdk_patches.py`, `sdk` build `b39add63…` | registered for [Pokémon Legends: Arceus](../01001F5010DFA000/README.md) on this build; this game has no virtual address memory and never reaches them |
+| Node area cut and 2 MB alignment of large regions (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `b39add63…` | [Pokémon Legends: Arceus](../01001F5010DFA000/README.md)'s build, cut by the SDK-wide rules; this game has no virtual address memory and never reaches them |
 
 No code of the game is cut, and no run-time key is set. The game asks for present interval 1 and paces itself at 30 fps.
 
@@ -26,6 +26,8 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 ## Rendering
 
 - **Current, harmless:** `[RED] texture type mismatch: shader … declares slot 1 / 2 as Metal type 2, texture ID … is type 7 (NVN target 2, format 0x38 …); bound as is`, once per shader, for eight UI layout pixel shaders so far (`lyt/TitleMenu`, `lyt/Resident/TitleLogo`, `lyt/Cmn/HeroPanel`, `lyt/Step/ScopeCine`, `lyt/Arena/Entry`). The texture is a 16×16×16 RGBA8 sRGB 3D texture, one of the colour-grading lookup tables (`texlist 2`), left in slots the layout material does not use: the layout shader samples slots 1 and 2 only when its uniform `c3[0].y` is non-zero.
+
+- **Fixed on the Mac, iPhone retest open (2026-11-16): most of the scene missing on an iPhone** ([#2760](https://github.com/seedds/nxnative/issues/2760), iPhone19,4, 1.0.0 base): `failed to create render pipeline … output of type float4 is not compatible with a MTLPixelFormatR8Uint color attachment` for 76 fragment shaders in Waddle Dee Town (`dfcaf654d8910f1c`, Kirby's Cone model, and `9df52ef750e8bd77`, a town house, among them), each writing colour 5 into an R8Uint target beside float ones; black sky, no characters. With `DM_PSO_MTL4=1` the pipelines built from Metal 4 bases and the scene looked right for 20 minutes, but colour 5 took undefined values. None of the 76 had the integer entry point the build gave by its code; every pixel shader has the typed-output entry point now ([Typed outputs for every pixel shader](../../../docs/reference/shaders.md#typed-outputs-for-every-pixel-shader)). The Mac draws through Metal 4 bases by default, which hid it: Point of Arrival has such shaders too. Checked 2026-11-16 on an M4 Pro, 1.1.0: all 15,552 pixel shaders with a colour output have `main0_u` (the other 2,908 write depth only); `dfcaf654d8910f1c` and `9df52ef750e8bd77` with the reporter's pipeline (colour 5 R8Uint) through the `MTLDevice`: `main0` is refused with the reporter's message, `main0_u` builds; the beach and Point of Arrival with `DM_PSO_MTL4=0`, then with Metal 4 bases: 30 fps, the scene whole, over 128 shaders taking `main0_u` for an unsigned colour 5 (`typed outputs: side library … loaded for target classes 0x20`), no red line but the layout shaders' [texture type mismatches](#rendering). Waddle Dee Town is past the Mac's tested route; the iPhone is to be checked by the reporter.
 
 ## Movies
 
@@ -60,5 +62,8 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 ## Found on this game
 
+- [iOS drops a lone Joy-Con without an extended gamepad profile](../../../docs/reference/services.md#ios-drops-a-lone-joy-con-without-an-extended-gamepad-profile).
 - [HAL's `.cmp` containers: a size-prefixed frame](../../../docs/reference/shaders.md#hals-cmp-containers-a-size-prefixed-frame).
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff).
+- [Typed outputs for every pixel shader](../../../docs/reference/shaders.md#typed-outputs-for-every-pixel-shader): its 76 shaders writing an R8Uint colour 5 in Waddle Dee Town ([#2760](https://github.com/seedds/nxnative/issues/2760)).
+- [Built-in fonts and the audio device notification of SDK 21](../../../docs/reference/services.md#built-in-fonts-and-the-audio-device-notification-of-sdk-21): its Nintendo Switch 2 Edition (program `04004D300C5AE001`) asks for its fonts with `GetBuiltInFontDataSet` at boot.

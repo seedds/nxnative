@@ -9,72 +9,170 @@ endif
 GAME_DIR = ../../games/$(GAME)
 GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
-CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H))
+# The host's shaders compiled for the Mac (host_msl_gen.h, made by the host Makefile from dm/gfx/msl; nvn/host_msl.m loads them)
+MSL_H = ../../host/gen/msl-macosx/host_msl_gen.h
+CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
-GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H)
+GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) ../../host/hle.h ../../host/registration.h $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
-$(GAME_H):
+# Regenerated on every make (host_msl_force), by the host Makefile: a header from an older game.py lacks newer defines; game.py writes it only when it changes, so an unchanged header rebuilds no test
+$(GAME_H): host_msl_force
 	$(MAKE) -C ../../host game_profile GAME=$(GAME)
-FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
+$(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py host_msl_force
+	$(MAKE) -C ../../host host_msl GAME=$(GAME)
+.PHONY: host_msl_force
+host_msl_force:
+FW=-framework Metal -framework MetalFX -framework Foundation -framework IOKit -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
 MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
+# CPU-only section walks, including every registration producer; ASan needs no prefix ignorelist.
+REGISTRATION_SRC=../gl/hle_gl.m ../../host/hle.c ../../host/hle_table.c ../../host/hle_sf.c ../nvn/nvn_mtl.m $(MTL_T_SRC)
+REGISTRATION_DEP=Makefile t_registration.m ../vk/hle_vk.m $(REGISTRATION_SRC) $(MTL_T_DEP)
+t_registration: $(REGISTRATION_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_registration.m $(REGISTRATION_SRC) $(FW)
+t_registration_asan: $(REGISTRATION_DEP)
+	clang $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_registration.m $(REGISTRATION_SRC) $(FW)
+.PHONY: registration-asan
+registration-asan: t_registration_asan
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./t_registration_asan
+t_rt_unbind: t_rt_unbind.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_unbind.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_rt_unbind
+check_t_rt_unbind: t_rt_unbind
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_rt_unbind
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_rt_unbind
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_UNBIND_DEFER=0 ./t_rt_unbind
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_UNBIND_DEFER=0 ./t_rt_unbind
 # The run list: every t_*.c and t_*.m but those in NOT_RUN. `make run` builds them all (in parallel with -j), then runs them one after another, each through its check_
 # target: ./t_x by default, with the environment its RUN_ENV gives it (check_t_x: RUN_ENV = MTL_DEBUG_LAYER=1, beside its build rule), or a check_t_x recipe of its own when it
-# runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus),
-# a fixture test_image_atomic_bounds.py builds itself (t_atomic_return), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
-# its translated fixtures), and t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml)
-NOT_RUN = t_host_stubs t_present_rescue_focus t_atomic_return t_geometry_primitive_id t_gpuprof
+# runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus, t_gpu_lost_front),
+# fixtures test_image_atomic_bounds.py and test_global_memory.py build themselves (t_atomic_return, t_global_memory), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
+# its translated fixtures), t_compute_loops (test_dmsh_compute_loops.py supplies its rewritten fixtures), t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml), and t_gpu_fault_kinds, whose cases fault the GPU on purpose
+NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t_global_memory t_geometry_primitive_id t_compute_loops t_gpuprof t_gpu_fault_kinds
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
-.PHONY: run check_test_dmsh_pull check_test_tbdr_budget
+.PHONY: run check_test_dmsh_pull check_test_tbdr_budget check_test_dmsh_ast_optimizer check_test_dmsh_native_functions
 run: $(RUN_TESTS)
-	@$(MAKE) --no-print-directory -j1 $(addprefix check_,$(RUN_TESTS)) check_test_dmsh_pull check_test_tbdr_budget
+	@$(MAKE) --no-print-directory -j1 $(addprefix check_,$(RUN_TESTS)) check_test_dmsh_pull check_test_tbdr_budget check_test_dmsh_ast_optimizer check_test_dmsh_native_functions
 check_test_dmsh_pull:
 	python3 test_dmsh_pull.py
 check_test_tbdr_budget:
 	DM_GAME=$(GAME) python3 test_tbdr_budget.py
+check_test_dmsh_ast_optimizer:
+	DMSH_TEST_GPU=1 python3 test_dmsh_ast_optimizer.py
+check_test_dmsh_native_functions:
+	DMSH_TEST_GPU=1 python3 test_dmsh_native_functions.py
 t_transform_feedback: t_transform_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_transform_feedback.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_transform_feedback
 check_t_transform_feedback: t_transform_feedback
-	DM_TEST_TRANSFORM_FEEDBACK=$(CURDIR)/t_transform_feedback MTL_DEBUG_LAYER=1 python3 -m unittest test_transform_feedback.py
-t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(GFX_H)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(FW)
-t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(GFX_H)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(FW)
+	DM_TEST_TRANSFORM_FEEDBACK="$(CURDIR)/t_transform_feedback" MTL_DEBUG_LAYER=1 python3 -m unittest test_transform_feedback.py
+# Per-frame arena blocks: shared between submissions, released above the keep count once idle, never while a pending submission holds them (t_arena_trim.m)
+t_arena_trim: t_arena_trim.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_arena_trim.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_arena_trim
+check_t_arena_trim: t_arena_trim
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_NVN_ARENA_TRIM=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
+	DM_NVN_ARENA_SHARE=0 MTL_DEBUG_LAYER=1 ./t_arena_trim
+t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
+t_mtl_init: t_mtl_init.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mtl_init.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_mtl_init
+check_t_mtl_init: t_mtl_init
+	./t_mtl_init
+	DM_TEST_NO_METAL4=1 ./t_mtl_init
+t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -DDM_TEST_NVN_SDK -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
+t_nvn_accel: t_nvn_accel.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_accel.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_accel: RUN_ENV = MTL_DEBUG_LAYER=1
+t_nvn_accel_sbt: t_nvn_accel_sbt.m t_nvn_accel.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_accel_sbt.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_accel_sbt: RUN_ENV = MTL_DEBUG_LAYER=1
+t_nvn_resource_stages: t_nvn_resource_stages.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_resource_stages.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_resource_stages: RUN_ENV = MTL_DEBUG_LAYER=1
+t_nvn_rt_state: t_nvn_rt_state.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn_rt_state.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_nvn_rt_state: RUN_ENV = MTL_DEBUG_LAYER=1
+t_rt_comp: t_rt_comp.c ../nvn/hle_nvn.c ../nvn/nvn_rt.h ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_comp.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
-t_builtin: t_builtin.m ../nvn/nvn_builtin.h
-	clang -O1 -g -Wall -fobjc-arc -o $@ t_builtin.m -framework Metal -framework Foundation
+t_dirty_init: t_dirty_init.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_init.c ../../host/crash.c ../nvn/nvn_dirty.c
+t_dirty_init_tsan: t_dirty_init.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -fsanitize=thread -o $@ t_dirty_init.c ../../host/crash.c ../nvn/nvn_dirty.c
+.PHONY: tsan-dirty-init
+tsan-dirty-init: t_dirty_init_tsan
+	TSAN_OPTIONS=halt_on_error=1:abort_on_error=0 ./t_dirty_init_tsan   # exit, not abort: the crash handler this test installs would report the abort
+t_dirty_reuse: t_dirty_reuse.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_reuse.c ../../host/crash.c ../nvn/nvn_dirty.c
+t_dirty_reuse_tsan: t_dirty_reuse.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -fsanitize=thread -o $@ t_dirty_reuse.c ../../host/crash.c ../nvn/nvn_dirty.c
+.PHONY: tsan-dirty-reuse
+tsan-dirty-reuse: t_dirty_reuse_tsan
+	TSAN_OPTIONS=halt_on_error=1:abort_on_error=0 ./t_dirty_reuse_tsan 2000   # exit, not abort: the crash handler this test installs would report the abort
+t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_retire_race.c ../../host/crash.c
+t_host_msl: t_host_msl.m ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_host_msl.m ../nvn/host_msl.m -framework Metal -framework Foundation
+t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_builtin.m ../nvn/host_msl.m -framework Metal -framework Foundation
 t_vin: t_vin.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_vin.m -framework Metal -framework Foundation
 t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf2d.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
-t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
-	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c
-t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h
-	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
+t_tbuf_access: t_tbuf_access.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_access.m $(MTL_T_SRC) $(FW)
+t_tbuf_live: t_tbuf_live.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_tbuf_live
+check_t_tbuf_live: t_tbuf_live
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_live
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_live
+.PHONY: check_t_tbuf_access
+check_t_tbuf_access: t_tbuf_access
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access shadow
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access rows
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_access shadow
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_access rows
+t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle.h
+	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c ../tex/nvn_deswizzle.c
+t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
-t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
+t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
-t_cover: t_cover.c ../nvn/nvn_cover.h
-	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
+t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_counter_clock.m ../../host/hle_os.c $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
+t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
+	clang -O1 -Wall -o $@ t_thread_rt.c
+t_link_drain: t_link_drain.c ../nvn/nvn_link_drain.h ../nvn/nvn_link_latch.h
+	clang -O1 -Wall -o $@ t_link_drain.c
+t_link_latch_cb: t_link_latch_cb.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_link_latch_cb.m $(MTL_T_SRC) $(FW)
+t_link_latch: t_link_latch.c ../nvn/nvn_link_latch.h
+	clang -O1 -Wall -o $@ t_link_latch.c
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)
@@ -86,12 +184,10 @@ check_t_thermal: t_thermal
 thermal-tsan: t_thermal_tsan
 	./t_thermal_tsan
 	DM_THERMAL_CAP=0 ./t_thermal_tsan
-t_fuse_check: t_fuse_check.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_fuse_check.m $(MTL_T_SRC) $(FW)
 t_perf_order: t_perf_order.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_perf_order.m $(MTL_T_SRC) $(FW)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_perf_order.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_perf_order_tsan: t_perf_order.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -fsanitize=thread -o $@ t_perf_order.m $(MTL_T_SRC) $(FW)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=thread -o $@ t_perf_order.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: perf-order-cpu
 perf-order-cpu: t_perf_order
 	@for fast in 0 1; do for waits in 0 1; do \
@@ -105,6 +201,7 @@ check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+	DM_NVN_FACE_MERGE=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)
@@ -112,6 +209,12 @@ t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)
 .PHONY: check_t_cpu_tex
 check_t_cpu_tex: t_cpu_tex
 	MTL_DEBUG_LAYER=1 ./t_cpu_tex --metal
+t_vc_lifetime: t_vc_lifetime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vc_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_vc_lifetime: RUN_ENV = MTL_DEBUG_LAYER=1
+t_read_owner: t_read_owner.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_read_owner.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_read_owner: RUN_ENV = MTL_DEBUG_LAYER=1
 # DM_NVN_CAPTURE: the replayer (a tool, not a test: it needs a capture, docs/agents/05-debugging.md) and the CPU-only test of the capture format and record relocation
 nvn_replay: nvn_replay.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ nvn_replay.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
@@ -121,6 +224,10 @@ t_capture: t_capture.c ../nvn/nvn_capture.c ../nvn/nvn_capture.h ../nvn/nvn_obj.
 check_t_capture: t_capture
 	./t_capture
 # On the GPU: two synthetic frames through the capture hooks, the second one captured, then replayed by nvn_replay (same digest, twice)
+t_large_mdi: t_large_mdi.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_large_mdi.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+t_mdx_prescan: t_mdx_prescan.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mdx_prescan.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_capture_live: t_capture_live.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_capture_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_capture_live
@@ -131,18 +238,68 @@ t_cube_placeholder: t_cube_placeholder.m $(MTL_T_DEP)
 .PHONY: check_t_cube_placeholder
 check_t_cube_placeholder: t_cube_placeholder
 	MTL_DEBUG_LAYER=1 ./t_cube_placeholder
+t_ms_slot: t_ms_slot.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ms_slot.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_ms_slot
+check_t_ms_slot: t_ms_slot
+	MTL_DEBUG_LAYER=1 ./t_ms_slot
+t_cbs_fault: t_cbs_fault.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cbs_fault.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_cbs_fault
+check_t_cbs_fault: t_cbs_fault
+	./t_cbs_fault
+# What macOS records for each kind of bad GPU read (issue #1289); faults the GPU on purpose, so it is run by hand, not in the run list
+t_gpu_fault_kinds: t_gpu_fault_kinds.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_gpu_fault_kinds.m -framework Metal -framework Foundation
+t_bc_alias: t_bc_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_bc_alias.m $(MTL_T_SRC) $(FW)
+check_t_bc_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_tex_fit_root: t_tex_fit_root.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_fit_root.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_tex_fit_root
 check_t_tex_fit_root: t_tex_fit_root
 	MTL_DEBUG_LAYER=1 ./t_tex_fit_root
+t_addr_known: t_addr_known.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_addr_known.m $(MTL_T_SRC) $(FW)
+t_pool_chunks: t_pool_chunks.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_chunks.m $(MTL_T_SRC) $(FW)
+t_pool_retire: t_pool_retire.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_retire.m $(MTL_T_SRC) $(FW)
+check_t_pool_retire: RUN_ENV = MTL_DEBUG_LAYER=1
+t_gmem_words: t_gmem_words.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gmem_words.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_gmem_words
+check_t_gmem_words: t_gmem_words
+	MTL_DEBUG_LAYER=1 ./t_gmem_words
+t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_notes.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pool_replay: t_pool_replay.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_replay.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+check_t_pool_replay: RUN_ENV = MTL_DEBUG_LAYER=1
+t_htab_update: t_htab_update.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_htab_update.m $(MTL_T_SRC) $(FW)
+check_t_htab_update: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pool_standin_sparse: t_pool_standin_sparse.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_standin_sparse.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+check_t_pool_standin_sparse: RUN_ENV = MTL_DEBUG_LAYER=1
+t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_readback: t_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_readback
 check_t_readback: t_readback
-	MTL_DEBUG_LAYER=1 ./t_readback
+	DM_NVN_FAST_WAKE=1 MTL_DEBUG_LAYER=1 ./t_readback
+	DM_NVN_FAST_WAKE=0 MTL_DEBUG_LAYER=1 ./t_readback
 t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_crop.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_present_crop
+check_t_present_crop: t_present_crop
+	DM_PRESENT_LINK=0 MTL_DEBUG_LAYER=1 ./t_present_crop --external-screenshots
+	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=0 ./t_present_crop
+	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
+	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
+	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
 t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue
@@ -153,6 +310,10 @@ t_present_alloc: t_present_alloc.m $(MTL_T_DEP)
 .PHONY: check_t_present_alloc
 check_t_present_alloc: t_present_alloc
 	MTL_DEBUG_LAYER=1 ./t_present_alloc
+# A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
+t_gpu_lost: t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_SRC) $(FW)
+check_t_gpu_lost: RUN_ENV = MTL_DEBUG_LAYER=1
 t_present_snap: t_present_snap.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_snap.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_present_snap
@@ -161,20 +322,45 @@ check_t_present_snap: t_present_snap
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap pacing
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap copy
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap pacing
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap resize
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap resize
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap queued
+	DM_PRESENT_LINK=0 MTL_DEBUG_LAYER=1 ./t_present_snap screen
+	DM_PRESENT_LINK=0 MTL_DEBUG_LAYER=1 ./t_present_snap screen_snap
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap queued
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap ticket
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap ticket
 t_reorder_chain: t_reorder_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_reorder_chain.m $(MTL_T_SRC) $(FW)
 check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
-t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)
-check_t_defer_chain: RUN_ENV = MTL_DEBUG_LAYER=1
-t_zskip: t_zskip.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_zskip.m $(MTL_T_SRC) $(FW)
-t_xv: t_xv.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_xv.m $(MTL_T_SRC) $(FW)
 t_ub: t_ub.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ub.m $(MTL_T_SRC) $(FW)
 t_gpuprof: t_gpuprof.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpuprof.m $(MTL_T_SRC) $(FW)
+t_sub_overlap: t_sub_overlap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sub_overlap.m $(MTL_T_SRC) $(FW)
+t_dispatch_own: t_dispatch_own.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_own.m $(MTL_T_SRC) $(FW)
+t_dispatch_pipeline: t_dispatch_pipeline.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_pipeline.m $(MTL_T_SRC) $(FW)
+check_t_dispatch_pipeline: RUN_ENV = MTL_DEBUG_LAYER=1 DM_NDVE_ENGINE=1
+.PHONY: check_t_dispatch_own
+check_t_dispatch_own: t_dispatch_own
+	@set -e; for own in "" --own; do for enc in 0 1; do \
+	    DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own $$own; \
+	done; done
+t_dispatch_barrier: t_dispatch_barrier.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_barrier.m $(MTL_T_SRC) $(FW)
+t_compute_loops: t_compute_loops.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_compute_loops.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dispatch_barrier
+check_t_dispatch_barrier: t_dispatch_barrier
+	@set -e; for mode in full game; do for enc in 0 1; do \
+	    DM_NVN_DISPATCH_BARRIER=$$mode DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_barrier; \
+	done; done; for r in 0 1; do DM_NVN_DISPATCH_RANGELESS=$$r MTL_DEBUG_LAYER=1 ./t_dispatch_barrier; done
+t_args_gen: t_args_gen.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_args_gen.m $(MTL_T_SRC) $(FW)
+check_t_args_gen: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vbuf: t_vbuf.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vbuf.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_vbuf
@@ -194,10 +380,27 @@ t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
 check_t_queue_origin: t_queue_origin
 	MTL_DEBUG_LAYER=1 ./t_queue_origin
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_queue_origin
+t_rt_lifetime: t_rt_lifetime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_rt_lifetime
+check_t_rt_lifetime: t_rt_lifetime
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
 check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
+t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)
+check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
+t_upload_idle: t_upload_idle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_idle.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_upload_idle
+check_t_upload_idle: t_upload_idle
+	env -u DM_NVN_UPLOAD_IDLE_MS DM_NVN_UPLOAD_REUSE=1 MTL_DEBUG_LAYER=1 ./t_upload_idle
+	DM_NVN_UPLOAD_IDLE_MS=0 DM_NVN_UPLOAD_REUSE=1 MTL_DEBUG_LAYER=1 ./t_upload_idle
+	DM_NVN_UPLOAD_IDLE_MS=2000 DM_NVN_UPLOAD_REUSE=1 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_upload_idle
+	DM_NVN_UPLOAD_IDLE_MS=2000 DM_NVN_UPLOAD_REUSE=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_upload_idle
 t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_slots.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_slots
@@ -209,6 +412,16 @@ t_sbw: t_sbw.m $(MTL_T_DEP)
 .PHONY: check_t_sbw
 check_t_sbw: t_sbw
 	./t_sbw
+t_ubp_running: t_ubp_running.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ubp_running.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_ubp_running
+check_t_ubp_running: t_ubp_running
+	./t_ubp_running
+# CPU only (no Metal device), with AddressSanitizer and UBSan: lookups fill g_ubp_idx up to the bound pend_room keeps (CI runs it). Globals are not instrumented: hle_nvn.c walks its entry table across neighbouring globals
+t_pend_index: t_pend_index.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=address,undefined -mllvm -asan-globals=0 -o $@ t_pend_index.m $(MTL_T_SRC) $(FW)
+t_bind_stages: t_bind_stages.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=address,undefined -mllvm -asan-globals=0 -o $@ t_bind_stages.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_direct_upload: t_direct_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_direct_upload.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_direct_upload
@@ -227,50 +440,92 @@ t_geometry_feedback: t_geometry_feedback.m t_geometry.m $(MTL_T_DEP)
 check_t_geometry_feedback: RUN_ENV = MTL_DEBUG_LAYER=1
 t_geometry_primitive_id: t_geometry_primitive_id.m t_geometry.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry_primitive_id.m $(MTL_T_SRC) $(FW)
+# Mesh draws and their runs through mtl_exec (nvn_geometry.inc geo_mesh_take), with the shaders test_dmsh_geometry.py writes: in runs, single, and in runs on the encoding thread (iOS's default)
+t_geometry_mesh: t_geometry_mesh.m t_geometry.m ../tools/dmsh_mesh.py $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry_mesh.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_geometry_mesh
+check_t_geometry_mesh: t_geometry_mesh
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_geometry.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_geometry_mesh "$$work"; DM_NVN_GEO_MESH_RUN=0 MTL_DEBUG_LAYER=1 ./t_geometry_mesh "$$work"; DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_geometry_mesh "$$work"
 .PHONY: check_t_feedback
 check_t_feedback: t_feedback
-	MTL_DEBUG_LAYER=1 ./t_feedback
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_fetch.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_feedback "$$work"; DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_feedback "$$work"; DM_NVN_ENC_THREAD=1 DM_NVN_SUB_IDLE_FB=1 MTL_DEBUG_LAYER=1 ./t_feedback "$$work"
 t_mip_extent: t_mip_extent.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mip_extent.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_mip_extent
 check_t_mip_extent: t_mip_extent
 	MTL_DEBUG_LAYER=1 ./t_mip_extent
-	MTL_DEBUG_LAYER=1 ./t_mip_extent --stencil-only
-t_rt_range_shape: t_rt_range_shape.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_range_shape.m $(MTL_T_SRC) $(FW)
-t_rt_range_ro: t_rt_range_ro.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_range_ro.m $(MTL_T_SRC) $(FW)
-t_rt_range: t_rt_range.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_range.m $(MTL_T_SRC) $(FW)
-.PHONY: check_t_rt_range
-check_t_rt_range: t_rt_range
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range
-	MTL_DEBUG_LAYER=1 ./t_rt_range   # DontCare on by default: attachment bytes use the closed-form expectation of "one depth-stencil store saved per pass"
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --disabled
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --small-depth
-	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --sample-attachment --both-flags
-t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
+t_rec_draws: t_rec_draws.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rec_draws.m $(MTL_T_SRC) $(FW)
+t_ubc_wait: t_ubc_wait.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ubc_wait.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_look_wait: t_pso_look_wait.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_look_wait.m $(MTL_T_SRC) $(FW)
+check_t_pso_look_wait: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_demand_record: t_pso_demand_record.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_demand_record.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_demand_record
+check_t_pso_demand_record: t_pso_demand_record
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record --off
+	MTL_DEBUG_LAYER=1 ./t_pso_demand_record --cap
+t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_shmap_warm.m $(MTL_T_SRC) $(FW)
+t_pso_bg_look: t_pso_bg_look.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bg_look.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_bg_look
+check_t_pso_bg_look: t_pso_bg_look
+	MTL_DEBUG_LAYER=1 ./t_pso_bg_look
+t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_stencil.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_depth_stencil
+check_t_pso_depth_stencil: t_pso_depth_stencil
+	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
 t_pull: t_pull.m ../tools/dmsh_pull.metal $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pull.m $(MTL_T_SRC) $(FW)
 check_t_pull: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pull_inv: t_pull_inv.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_pull_inv.m -framework Metal -framework Foundation
 check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
-t_pso_archive: t_pso_archive.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) $(FW)
+t_wline: t_wline.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_wline.m -framework Metal -framework Foundation
+check_t_wline: RUN_ENV = MTL_DEBUG_LAYER=1
+t_vs_unit: t_vs_unit.m ../tools/dmsh_side.py ../tools/dmsh_pull.py ../tools/dmsh_pull.metal ../tools/dmsh_vin.py ../tools/dmsh_entry.py ../tools/dmsh_geometry.py
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_vs_unit.m -framework Metal -framework Foundation
+check_t_vs_unit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_archive: t_pso_archive.m $(MTL_T_DEP) ../../host/hle_lifecycle.c
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) ../../host/hle_lifecycle.c $(FW)
 .PHONY: check_t_pso_archive
 check_t_pso_archive: t_pso_archive
 	MTL_DEBUG_LAYER=1 ./t_pso_archive
-	MTL_DEBUG_LAYER=1 python3 test_pso_archive.py $(CURDIR)/t_pso_archive
+	MTL_DEBUG_LAYER=1 python3 test_pso_archive.py "$(CURDIR)/t_pso_archive"
 t_pso_bundle: t_pso_bundle.m ../tools/pso_offline.py $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bundle.m $(MTL_T_SRC) $(FW)
+t_pso_admission: t_pso_admission.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_admission.m $(MTL_T_SRC) $(FW)
+t_library_data: t_library_data.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_library_data.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_admission
+check_t_pso_admission: t_pso_admission
+	@for mode in aggregate fragmented empty unknown map-fail exact ample native; do ./t_pso_admission $$mode || exit $$?; done
 t_pso_stall: t_pso_stall.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_stall.m $(MTL_T_SRC) $(FW)
 check_t_pso_stall: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_race: t_pso_race.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_race.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_race
+check_t_pso_race: t_pso_race
+	./t_pso_race -n 400
 check_t_pso_bundle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_prewarm: t_pso_prewarm.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_prewarm.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_prewarm
+check_t_pso_prewarm: t_pso_prewarm
+	MTL_DEBUG_LAYER=1 ./t_pso_prewarm
 t_pso_warm: t_pso_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_warm.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_warm
@@ -282,9 +537,38 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_swizzle.m $(MTL_T_SRC) $(FW)
 check_t_view_swizzle: RUN_ENV = MTL_DEBUG_LAYER=1
+# Tessellation's layout and expansion kernel on the GPU (nvn_tess.inc, dmsh_tess.py), from the shipped MSL test_dmsh_tess.py writes
+t_tess: t_tess.m
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tess.m -framework Metal -framework Foundation
+.PHONY: check_t_tess
+check_t_tess: t_tess
+	DM_TEST_TESS="$(CURDIR)/t_tess" MTL_DEBUG_LAYER=1 python3 -m unittest test_dmsh_tess.py
+t_view_reuse: t_view_reuse.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_view_reuse.m $(MTL_T_SRC) $(FW)
+check_t_view_reuse: RUN_ENV = MTL_DEBUG_LAYER=1
+t_border: t_border.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_border.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_border
+check_t_border: t_border
+	MTL_DEBUG_LAYER=1 ./t_border
+	DM_TEST_BORDER="$(CURDIR)/t_border" MTL_DEBUG_LAYER=1 python3 -m unittest test_dmsh_border.py
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
+t_res_commit: t_res_commit.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
+check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_res_cb: t_res_cb.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_res_cb.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_res_cb
+check_t_res_cb: t_res_cb
+	@set -e; for enc in 0 1; do DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; done
+t_upload_src: t_upload_src.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_upload_src
+check_t_upload_src: t_upload_src
+	DM_NVN_UPLOAD_SRC_MB=0 MTL_DEBUG_LAYER=1 ./t_upload_src
+	DM_NVN_UPLOAD_SRC_MB=96 MTL_DEBUG_LAYER=1 ./t_upload_src
 t_upload_budget: t_upload_budget.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_budget.m $(MTL_T_SRC) $(FW)
 check_t_upload_budget: t_upload_budget
@@ -293,6 +577,27 @@ check_t_upload_budget: t_upload_budget
 .PHONY: check_t_upload_budget
 t_linear_readback: t_linear_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_linear_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_tiled_resolve: t_tiled_resolve.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tiled_resolve.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_tiled_resolve
+check_t_tiled_resolve: t_tiled_resolve
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_tiled_resolve
+t_dispatch_zero: t_dispatch_zero.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_zero.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dispatch_zero
+check_t_dispatch_zero: t_dispatch_zero
+	MTL_DEBUG_LAYER=1 ./t_dispatch_zero
+
+t_compressed_copy: t_compressed_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_compressed_copy.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_compressed_copy
+check_t_compressed_copy: t_compressed_copy
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_compressed_copy
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_compressed_copy
+	DM_NVN_ENC_THREAD=0 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_FAIL_MODE=abort ./t_compressed_copy
+	DM_NVN_ENC_THREAD=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_FAIL_MODE=abort ./t_compressed_copy
+
 t_copy_alias: t_copy_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_copy_alias.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_copy_alias
@@ -304,13 +609,25 @@ check_t_linear_readback: t_linear_readback
 	MTL_DEBUG_LAYER=1 ./t_linear_readback
 t_pfv: t_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m $(MTL_T_SRC) $(FW)
+t_dlss_scaler: t_dlss_scaler.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_scaler.m $(MTL_T_SRC) $(FW)
+check_t_dlss_scaler: RUN_ENV = MTL_DEBUG_LAYER=1
+t_int_float_view: t_int_float_view.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_int_float_view.m $(MTL_T_SRC) $(FW)
+check_t_int_float_view: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_pfv: RUN_ENV = MTL_DEBUG_LAYER=1
 t_integer_blend: t_integer_blend.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_integer_blend.m $(MTL_T_SRC) $(FW)
 t_missing_src1: t_missing_src1.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_missing_src1.m $(MTL_T_SRC) $(FW)
+t_clear_msaa: t_clear_msaa.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_msaa.m $(MTL_T_SRC) $(FW)
+check_t_clear_msaa: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_integer_blend: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_missing_src1: RUN_ENV = MTL_DEBUG_LAYER=1
+t_omap_mask: t_omap_mask.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_omap_mask.m $(MTL_T_SRC) $(FW)
+check_t_omap_mask: RUN_ENV = MTL_DEBUG_LAYER=1
 t_primitive_restart: t_primitive_restart.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_primitive_restart.m $(MTL_T_SRC) $(FW)
 check_t_primitive_restart: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -320,46 +637,313 @@ check_t_depth16_clear: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_ds: t_clear_ds.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_ds.m $(MTL_T_SRC) $(FW)
 check_t_clear_ds: RUN_ENV = MTL_DEBUG_LAYER=1
+t_lazy_clear_order: t_lazy_clear_order.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_lazy_clear_order.m $(MTL_T_SRC) $(FW)
+check_t_lazy_clear_order: RUN_ENV = MTL_DEBUG_LAYER=1
+t_zero_depth: t_zero_depth.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_zero_depth.m $(MTL_T_SRC) $(FW)
+check_t_zero_depth: RUN_ENV = MTL_DEBUG_LAYER=1
+t_zero_colour: t_zero_colour.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_zero_colour.m $(MTL_T_SRC) $(FW)
+check_t_zero_colour: RUN_ENV = MTL_DEBUG_LAYER=1
+t_clear_layers: t_clear_layers.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_layers.m $(MTL_T_SRC) $(FW)
+check_t_clear_layers: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_tex: t_clear_tex.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_tex.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_clear_tex
 check_t_clear_tex: t_clear_tex
 	MTL_DEBUG_LAYER=1 ./t_clear_tex
+t_attachment_capacity: t_attachment_capacity.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_attachment_capacity.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_attachment_capacity
+check_t_attachment_capacity: t_attachment_capacity
+	@for compiler in 0 1; do for enc in 0 1; do \
+	    DM_PSO_MTL4=$$compiler DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
+	done; done
+t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
+check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_primitive_id.m $(MTL_T_SRC) $(FW)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upgrade_alias.m $(MTL_T_SRC) $(FW)
 check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
+t_alias_takeover: t_alias_takeover.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_takeover.m $(MTL_T_SRC) $(FW)
+t_dead_targets: t_dead_targets.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dead_targets.m $(MTL_T_SRC) $(FW)
+check_t_dead_targets: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_alias_takeover: RUN_ENV = MTL_DEBUG_LAYER=1
+# The resource owner alone: nvn_owner.m (and the texture layouts it sizes shared entries with) with this test's stand-ins for the replay layer's hooks, no nvn_mtl.m
+t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/nvn_hmap.h ../nvn/nvn_obj.h $(GAME_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
+t_partial_upload: t_partial_upload.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_partial_upload.m $(MTL_T_SRC) $(FW)
+check_t_partial_upload: RUN_ENV = MTL_DEBUG_LAYER=1
+t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_srgb_alias.m $(MTL_T_SRC) $(FW)
+check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_alias: t_image_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_alias.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_image_alias
 check_t_image_alias: t_image_alias
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_image_alias
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_image_alias
+t_rt_recycle: t_rt_recycle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_recycle.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_rt_recycle
+check_t_rt_recycle: t_rt_recycle
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+t_storage_pair: t_storage_pair.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_pair.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_storage_pair
+check_t_storage_pair: t_storage_pair
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_storage_pair
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_storage_pair
+	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_storage_pair
+	DM_NVN_STORAGE_ALIAS=0 MTL_DEBUG_LAYER=1 ./t_storage_pair
+# A game's upscaler drawn by MetalFX (any profile; the profile's upscaler shaders, from its shader map, when it has some); with and without the switch, and on the encoding thread
+t_upscaler_mfx: t_upscaler_mfx.m t_mfx_passes.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_upscaler_mfx
+# (MetalFX's Metal 4 scaler stops under Metal validation on a barrier-stage setting of its own that has no public API, "_outputTextureBarrierStages not set": its run is without it)
+check_t_upscaler_mfx: t_upscaler_mfx
+	DM_NVN_ENC_THREAD=0 DM_UPSCALER=metalfx ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx DM_NVN_BARRIER=game ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx DM_NVN_MFX_DIRECT=0 ./t_upscaler_mfx
+	MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
+# NVN2's DLSS on MetalFX's temporal scaler, with and without the encoding thread (MetalFX encodes into the real command buffer; validation stops its Metal 4 scalers, as above)
+t_dlss_mfx: t_dlss_mfx.m t_mfx_passes.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_mfx.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dlss_mfx
+# With zombie objects: a scaler released under its encoders is then a message to a deallocated instance at the commit, every time (without them it depends on what took its memory)
+check_t_dlss_mfx: t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 DM_NVN_BARRIER=game ./t_dlss_mfx
+t_pso_msaa: t_pso_msaa.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_msaa.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_msaa
+check_t_pso_msaa: t_pso_msaa
+	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_msaa
+	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_msaa
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_msaa
+t_buffer_image_bias: t_buffer_image_bias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_buffer_image_bias.m $(MTL_T_SRC) $(FW)
+check_t_buffer_image_bias: RUN_ENV = MTL_DEBUG_LAYER=1
+t_tbuf_handle: t_tbuf_handle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_handle.m $(MTL_T_SRC) $(FW)
+check_t_tbuf_handle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_descriptor_pools: t_descriptor_pools.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_descriptor_pools.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_descriptor_pools: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_type: t_image_type.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_type.m $(MTL_T_SRC) $(FW)
+check_t_image_type: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_srgb: t_image_srgb.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_srgb.m $(MTL_T_SRC) $(FW)
+check_t_image_srgb: RUN_ENV = MTL_DEBUG_LAYER=1
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
+t_vk_fan: t_vk_fan.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_fan.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_fan: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
-t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
+t_vk_cmds: t_vk_cmds.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_cmds.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_compute: t_vk_compute.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_compute.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_argbuf: t_vk_argbuf.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_argbuf.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../gl/gl_aliases.h ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
-.PHONY: check_t_gl_imports gl-imports
+.PHONY: check_t_gl_imports gl-imports gl-imports-cpu gl-arguments
 check_t_gl_imports: t_gl_imports
-	./t_gl_imports
-	./t_gl_imports --stubs
+	MTL_DEBUG_LAYER=1 ./t_gl_imports
+	MTL_DEBUG_LAYER=1 ./t_gl_imports --stubs
+gl-arguments: t_gl_imports
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 ../../tools/tests/test_gl_shaders.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_gl_imports --fixture "$$work"
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; mkdir "$$work/capture"; \
+	    MTL_DEBUG_LAYER=1 DM_MSL_DIR="$$work" DM_TEMP="$$work" DM_GL_CAPTURE="$$work/capture" \
+	    DM_GL_CAPTURE_COMPILER="$(abspath ../tools/gl_shaders.py)" ./t_gl_imports --capture
 gl-imports: check_t_gl_imports
+gl-imports-cpu: t_gl_imports
+	MTL_DEBUG_LAYER=1 ./t_gl_imports --cpu
+	MTL_DEBUG_LAYER=1 ./t_gl_imports --cpu --stubs
 check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
+# An attachment opened with LOAD_OP_DONT_CARE keeps what the image held, colour, depth and stencil (Re:ZERO's post chain)
+t_vk_dontcare: t_vk_dontcare.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_dontcare.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+# The validation layer fills every DontCare load with a pattern, so a DontCare load fails the check whatever the tile memory happens to hold
+check_t_vk_dontcare: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
+# A Vulkan 1D image is a one-row 2D texture: drawn into, mipmapped, layered and depth, under the validation layer that aborts on each with a Metal 1D texture
+# Swap chain images are released once the presents that showed them are done, over more recreations than the window-texture list holds
+t_vk_swapchain_life: t_vk_swapchain_life.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_swapchain_life.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_1d: t_vk_1d.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_1d.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_1d: RUN_ENV = MTL_DEBUG_LAYER=1
+# A clear reads the member of VkClearColorValue the format names: uint32, int32 or float32, by a render pass's LOAD_OP_CLEAR and by vkCmdClearColorImage
+t_vk_clear_int: t_vk_clear_int.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_clear_int.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_clear_int: RUN_ENV = MTL_DEBUG_LAYER=1
+t_vk_clear_attachments: t_vk_clear_attachments.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_clear_attachments.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_clear_attachments: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
+check_t_vk_cmds: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_vk_compute: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
+check_t_vk_argbuf: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
+t_vk_renderdragon: t_vk_renderdragon.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_renderdragon.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_renderdragon: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
 check_t_float_pad: RUN_ENV = MTL_DEBUG_LAYER=1
+# Kept vertex conversions: kept from the second submission, equal to vconv_elem, dropped by a write to the source (game, host or GPU), left by a write beside it.
+t_vconv_keep: t_vconv_keep.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vconv_keep.m $(MTL_T_SRC) $(FW)
 # The alpha test through the replay (t_alpha.m), with its shaders from test_dmsh_alpha.py
 t_alpha: t_alpha.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alpha.m $(MTL_T_SRC) $(FW)
 check_t_alpha: t_alpha
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_alpha.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_alpha "$$work"
+# NVIDIA's "zero times anything is zero" float blending through the replay (t_blend_zero.m), with its shader from test_dmsh_blend_zero.py; then Apple's blender as it is
+t_blend_zero: t_blend_zero.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero.m $(MTL_T_SRC) $(FW)
+check_t_blend_zero: t_blend_zero
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"; DM_NVN_BLEND_ZERO=0 MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"
+# NVIDIA's rounding of a float colour into a normalized target through the replay (t_rop_round.m), with its shader from test_dmsh_blend_zero.py; then Apple's conversion as it is
+t_rop_round: t_rop_round.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rop_round.m $(MTL_T_SRC) $(FW)
+check_t_rop_round: t_rop_round
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture-rop "$$work"; MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"; DM_NVN_ROP_ROUND=0 MTL_DEBUG_LAYER=1 ./t_rop_round "$$work"
+# Typed outputs through the pipeline path (t_typed_outputs.m), with its libraries from test_dmsh_typed.py, on the Metal 4 path and the MTLDevice's
+t_typed_outputs: t_typed_outputs.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_typed_outputs.m $(MTL_T_SRC) $(FW)
+check_t_typed_outputs: t_typed_outputs
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_typed.py --fixture "$$work"; for m in 1 0; do DM_PSO_MTL4=$$m MTL_DEBUG_LAYER=1 ./t_typed_outputs "$$work"; done
+# Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
+t_logic: t_logic.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
+check_t_logic: t_logic
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+# gl_FragCoord.z against the depth the rasterizer stored for the same triangle, through dmsh_rewrite.py frag_z_snap's dm_zsnap (from test_dmsh_zsnap.py)
+t_zsnap: t_zsnap.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_zsnap.m -framework Metal -framework Foundation
+check_t_zsnap: t_zsnap
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_zsnap.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_zsnap "$$work"
+# MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
+t_mufu_turns: t_mufu_turns.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
+# Compute threads that return before a barrier count as arrived on the Mac's GPU, as on NVIDIA's (no translator change needed)
+t_barrier_exit: t_barrier_exit.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_barrier_exit.m -framework Metal -framework Foundation
+# Native task/mesh draws must render on the first pipeline use, with direct and threaded Metal encoding.
+t_mesh_first_use: t_mesh_first_use.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_first_use.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_mesh_first_use
+check_t_mesh_first_use: t_mesh_first_use
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
+
+t_wait_event: t_wait_event.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_wait_event.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+
+t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+
+.PHONY: check_t_wait_event check_t_queue_lifetime
+check_t_wait_event: t_wait_event
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+check_t_queue_lifetime: t_queue_lifetime
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+
+t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_render_enable_queue
+check_t_render_enable_queue: t_render_enable_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+
+t_vis_need: t_vis_need.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vis_need.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_vis_need
+check_t_vis_need: t_vis_need
+	MTL_DEBUG_LAYER=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_VIS_NEED=0 ./$<
+
+t_render_counter_overlap: t_render_counter_overlap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_render_counter_overlap.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_render_counter_overlap
+check_t_render_counter_overlap: t_render_counter_overlap
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tg_spill.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_tg_spill
+check_t_tg_spill: t_tg_spill
+	MTL_DEBUG_LAYER=1 ./$<
+	MTL_DEBUG_LAYER=1 ./$< --own
+
+# A read ID keeps its read mark when it gets another texture: first-table GPU pixels, finalized IDs, IDs waiting for the read budget.
+t_pool_seen_replace: t_pool_seen_replace.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_seen_replace.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pool_seen_replace
+check_t_pool_seen_replace: t_pool_seen_replace
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_seen_replace
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_seen_replace
+
+# A texture the pool walk leaves out for good holds a stand-in of its own smallest levels until its first read (issue #1969)
+t_pool_standin: t_pool_standin.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_standin.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pool_standin
+check_t_pool_standin: t_pool_standin
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+# A virtual pool's first whole mapping aliases it only while no address of its own range has left the host; sampler IDs past the pool are empty slots (issue #2513, PR #2519)
+t_vpool_first_map: t_vpool_first_map.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vpool_first_map.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_vpool_first_map
+check_t_vpool_first_map: t_vpool_first_map
+	MTL_DEBUG_LAYER=1 ./t_vpool_first_map
+
+# Storage buffers by address (SBUFU / SBUFQ) bounded by the memory the host bound there (nvn_mtl.m sblen_put; GitHub issue #2618)
+t_storage_bounds: t_storage_bounds.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_bounds.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_storage_bounds
+check_t_storage_bounds: t_storage_bounds
+	MTL_DEBUG_LAYER=1 ./t_storage_bounds
+
+# A texture pool table of another layered type than the ID's texture holds a view of it when a shader read the ID through that type (pool_fit): a 2D sprite read as a 2D array, a cube read as a cube
+t_pool_typebridge: t_pool_typebridge.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_typebridge.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pool_typebridge
+check_t_pool_typebridge: t_pool_typebridge
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_typebridge
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_typebridge
+
+# Sparse mappings reach texture ID views, pool tables and handle tables as notes of the textures they change (treg_sparse_notes), read back on the GPU
+t_sparse_pool_cache: t_sparse_pool_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_pool_cache.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
+t_sparse_copy: t_sparse_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_copy.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -22,7 +22,7 @@ class NroPack(unittest.TestCase):
         for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
         self.out = self.tmp / 'patched_test'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
-        self.g = types.SimpleNamespace(words=lambda k: ['main'])
+        self.g = types.SimpleNamespace(words=lambda k: ['main'], modules_in=lambda folder: ['main'])
         self.row = 'refused\t' + 'ab' * 32 + '\t128\tgame.nrr\tloose sdk.nro\n'
         self.collections = self.rewrites = 0
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'run', self.collect),
@@ -51,10 +51,10 @@ class NroPack(unittest.TestCase):
 
     def test_parser_changes_recollect(self):
         self.build()
-        for i, f in enumerate(('dm/gfx/tools/smash_arc.py', 'dm/tools/nso_syms.py'), 2):
-            (self.repo / f).write_text('v2'); self.build()
-            self.assertEqual(self.collections, i)
-        self.assertEqual(self.rewrites, 1)   # identical collected bytes do not need another rewrite
+        (self.repo / 'dm/gfx/tools/smash_arc.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (2, 1))   # identical collected bytes can reuse the rewrite
+        (self.repo / 'dm/tools/nso_syms.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (3, 2))   # the rewriter also reads symbols directly
 
     def test_removed_registration_drops_stale_manifest(self):
         self.build(); (self.rom / 'game.nrr').unlink(); self.build()

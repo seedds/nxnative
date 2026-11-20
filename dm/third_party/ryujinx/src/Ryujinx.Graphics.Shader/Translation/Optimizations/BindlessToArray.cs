@@ -12,6 +12,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // 1 and 0 elements are not considered arrays anymore.
         public const int MinimumArrayLength = 2;
+        private const int NvnSlotArrayLength = 32;      // nxnative: as BindlessElimination's
 
         public static void RunPassOgl(BasicBlock block, ResourceManager resourceManager)
         {
@@ -191,6 +192,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                 int cbufSlot;
                 int handleIndex;
+                int[] computeLayout = src0CbufSlot == 0 ? gpuAccessor.QueryAmpereComputeC0Layout() : null;
+                bool nativeCompute = computeLayout != null && computeLayout.Length >= 5 && !texOp.Inst.IsImage();
+
+                if (nativeCompute)
+                {
+                    // NVN2 compute's indexed sampled-texture handles are in its per-shader c0, not a game's uniform buffer. Images have their own table. Fixed reads already pass through AMapC0; an indexed LDC cannot
+                    // be mapped until its use as a texture table is known. The array below is the canonical c2 table, with its index mapped after the native byte offset is recovered.
+                    // Fast Fusion's volumetric fog otherwise named cb196608_10568000 (native c0 plus a fixed c2 sampler), which reflection cannot bind.
+                    src0CbufSlot = NvnTextureBufferIndex;
+                }
 
                 if (hasSecondaryHandle)
                 {
@@ -205,6 +216,30 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                 int length = Math.Max(MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromBuffer(src0CbufSlot));
 
+                // nxnative: the replay binds images and buffer textures element by element, so these stay short; the game's sampled textures take a table the host builds (dmsh_build.py pool_arrays)
+                if (src0CbufSlot != NvnTextureBufferIndex && (texOp.Inst.IsImage() || (texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer))
+                {
+                    length = Math.Min(length, NvnSlotArrayLength);
+                }
+
+                // nxnative: handles at a computed index past a constant base, the base beyond the array's length: every read would clamp to its last element, which is no handle. Fire Emblem Fortune's
+                // Weave's character shaders read their cube maps as c[14][8 i + 0x340] (LDC after a shift of 3). The array starts at the base instead (the host fills element k from base + 8k), so
+                // the index is that of the handle within the table. A base inside the array keeps the array at 0, as before
+                if (!nativeCompute && !hasSecondaryHandle && TryArrayBase(ldcVecIndex, out Operand tableIndex, out int baseOffset) && baseOffset / 8 >= length)
+                {
+                    TurnIntoArray(resourceManager, texOp, cbufSlot, baseOffset / 4, length);
+
+                    Operand element = Local();
+                    Operand elementMin = Local();
+
+                    block.Operations.AddBefore(node, new Operation(Instruction.ShiftRightU32, element, tableIndex, Const(3)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.MinimumU32, elementMin, element, Const(length - 1)));
+
+                    texOp.SetSource(0, elementMin);
+
+                    continue;
+                }
+
                 TurnIntoArray(resourceManager, texOp, cbufSlot, handleIndex, length);
 
                 Operand vecIndex = Local();
@@ -215,10 +250,69 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 block.Operations.AddBefore(node, new Operation(Instruction.ShiftLeft, vecIndex, ldcVecIndex, Const(1)));
                 block.Operations.AddBefore(node, new Operation(Instruction.ShiftRightU32, elemIndex, ldcElemIndex, Const(1)));
                 block.Operations.AddBefore(node, new Operation(Instruction.Add, index, vecIndex, elemIndex));
+                if (nativeCompute)
+                {
+                    // As AMapC0: push blocks, then 16-byte uniform/storage descriptors, then 8-byte combined and separate texture handles. Both canonical tables use 8-byte rows.
+                    int push0 = (computeLayout[4] + 15) & ~15;
+                    int push1 = computeLayout.Length > 7 ? (computeLayout[7] + 15) & ~15 : 0;
+                    int combinedBase = 0x10 + push0 + push1 + 0x10 * (computeLayout[0] + computeLayout[1]);
+                    int separateBase = combinedBase + 8 * computeLayout[2];
+                    Operand combined = Local();
+                    Operand separate = Local();
+                    Operand beforeSeparate = Local();
+                    Operand mapped = Local();
+
+                    block.Operations.AddBefore(node, new Operation(Instruction.Add, combined, index, Const((0x20 - combinedBase) / 8)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.Add, separate, index, Const((0x168 - separateBase) / 8)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.CompareLessU32, beforeSeparate, index, Const(separateBase / 8)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.ConditionalSelect, mapped, beforeSeparate, combined, separate));
+                    index = mapped;
+                }
                 block.Operations.AddBefore(node, new Operation(Instruction.MinimumU32, indexMin, index, Const(length - 1)));
 
                 texOp.SetSource(0, indexMin);
             }
+        }
+
+        // nxnative: the vector index of a constant buffer load whose address is (index + a constant byte offset) >> 2 >> 2: that index and offset
+        private static bool TryArrayBase(Operand vecIndex, out Operand index, out int byteOffset)
+        {
+            index = null;
+            byteOffset = 0;
+
+            static bool ShiftBy2(Operand o, out Operand source)
+            {
+                source = null;
+
+                if (o.AsgOp is Operation op && op.Inst == Instruction.ShiftRightU32 && op.GetSource(1).Type == OperandType.Constant && op.GetSource(1).Value == 2)
+                {
+                    source = op.GetSource(0);
+
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (!ShiftBy2(vecIndex, out Operand word))
+            {
+                return false;
+            }
+
+            if (word.AsgOp is Operation plus0 && plus0.Inst == Instruction.Add && plus0.GetSource(1).Type == OperandType.Constant && plus0.GetSource(1).Value == 0)
+            {
+                word = plus0.GetSource(0);
+            }
+
+            if (!ShiftBy2(word, out Operand address) || address.AsgOp is not Operation add || add.Inst != Instruction.Add || add.GetSource(1).Type != OperandType.Constant)
+            {
+                return false;
+            }
+
+            index = add.GetSource(0);
+            byteOffset = add.GetSource(1).Value;
+
+            return byteOffset > 0 && (byteOffset & 7) == 0;
         }
 
         private static void TurnIntoArray(ResourceManager resourceManager, TextureOperation texOp, int cbufSlot, int handleIndex, int length)

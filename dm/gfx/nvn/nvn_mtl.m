@@ -1768,7 +1768,7 @@ uint64_t mtl_cut_count(void);
 // A render pass line also gives what it loaded and stored of its attachments (KB, the bandwidth ledger's view: DontCare stores are not counted) and the Metal pixel formats of
 // colour attachment 0 and of the depth / stencil attachment (0: none)
 enum { GP_MAX = 4096 };   // the largest timestamp heap Metal makes
-typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; } gp_lab;   // seg: the command buffer (segment) of the submission it is in
+typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; char ck[3][17]; uint8_t nck; } gp_lab;   // ck: the compute shader keys of the first three dispatches in a compute encoder   // seg: the command buffer (segment) of the submission it is in
 static id<MTL4CounterHeap> g_gp_heap; static gp_lab g_gp_lab[GP_MAX / 2]; static int g_gp_n, g_gp_state, g_gp_cur = -1; static long g_gp_f0 = -2, g_gp_f1, g_gp_every; static uint64_t g_gp_frame;
 static const void *g_gp_e;   // the encoder g_gp_cur belongs to: m4_end also ends the upload / diagnostics / present encoders, which may end while a profiled pass is open (#531)
 static _Atomic int g_gp_busy;   // a periodic profile's report has not been printed yet: the heap is still being read
@@ -1816,6 +1816,12 @@ static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right 
     else [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:g_gp_heap atIndex:2 * g_gp_n];
     g_gp_n++;
 }
+static void gp_note_cs(const char *key) {   // a dispatch into the profiled compute encoder: its shader key, for the [gpuprof] line (the first three)
+    if (g_gp_cur < 0 || g_gp_lab[g_gp_cur].kind == 'R' || !key || !key[0]) return;
+    gp_lab *l = &g_gp_lab[g_gp_cur]; if (l->nck >= 3) return;
+    for (int i = 0; i < l->nck; i++) if (!strncmp(l->ck[i], key, 16)) return;
+    strncpy(l->ck[l->nck], key, 16); l->ck[l->nck][16] = 0; l->nck++;
+}
 static void gp_end(id e) {   // right before that encoder ends
     if (g_gp_cur < 0 || (__bridge const void *)e != g_gp_e) return;   // another queue's encoder: the open pass keeps its label and gets its end stamp from its own end
     int k = g_gp_cur; g_gp_cur = -1; g_gp_e = NULL;
@@ -1832,7 +1838,7 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
         if (!t0 || a < t0) t0 = a; if (b > t1) t1 = b;
         if (l->kind == 'R') { np++; ld += l->ld_kb; st += l->st_kb;
             MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt); }
-        else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w); }
+        else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u%s%s %s %s", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w, l->nck ? " shaders " : "", l->nck ? l->ck[0] : "", l->nck > 1 ? l->ck[1] : "", l->nck > 2 ? l->ck[2] : ""); }
     span = (t1 - t0) * tick_ns / 1e3;
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
     free(lab); atomic_store(&g_gp_busy, 0);
@@ -15514,6 +15520,17 @@ static int mdx_next(const p_draw *dw, const p_draw_idx *di) {
 #include "nvn_feedback.inc"
 
 static int skip_fs_draw(NvProg *pr);   // DM_NVN_SKIP_FS (diagnostic), also for task / mesh draws
+// DM_NVN_SKIP_CS=<compute key>[,…] (up to 16, the first 16 hex digits): drops every dispatch of those compute shaders, to measure their GPU cost or to trade an effect for GPU time.
+// What the dispatches would have written keeps its earlier contents, so only an effect whose output a later pass reads as optional is safe to drop; check the picture
+static int skip_cs(NvShader *cs) {
+    static char keys[16][17]; static int nk = -1;
+    if (nk < 0) { nk = 0; for (const char *q = getenv("DM_NVN_SKIP_CS"); q && *q && nk < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
+            size_t n = strcspn(q, ","); if (n > 16) n = 16; if (!n) continue; memcpy(keys[nk], q, n); keys[nk][n] = 0; nk++; }
+        if (nk) MLOG("DM_NVN_SKIP_CS: dispatches of %d compute shader(s) dropped", nk); }
+    if (!nk || !cs || !cs->key[0]) return 0;
+    for (int i = 0; i < nk; i++) if (!strncmp(cs->key, keys[i], strlen(keys[i]))) { static uint64_t n; if (!n++) MLOG("DM_NVN_SKIP_CS: first dispatch of %s dropped", cs->key); return 1; }
+    return 0;
+}
 #include "nvn_geometry.inc"
 static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 #include "nvn_tess.inc"   // patches: vertex capture -> hull kernel -> domain as the vertex stage
@@ -16447,6 +16464,7 @@ static void dispatch_(const p_dispatch *dp) {
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
+    if (skip_cs(cs)) return;   // DM_NVN_SKIP_CS
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
@@ -16464,6 +16482,7 @@ static void dispatch_(const p_dispatch *dp) {
         if (tg_groups > (g_dev.maxBufferLength - (4u << 20)) / cs->rf.tg_spill) { RED_ONCE(162, "dispatch of %s: %llu workgroups of %u bytes of threadgroup memory exceed Metal's largest buffer; skipped", cs->key, (unsigned long long)tg_groups, cs->rf.tg_spill); return; }
     }
     int own = dispatch_own();
+    gp_note_cs(cs->key);
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     // A sampled format view may upgrade its texture and copy its pixels. Prepare the compute table before opening an encoder of its own,

@@ -520,6 +520,7 @@ private struct SettingLine: View, Equatable {
     let fixedBy: String?   // what fixes the row ("Set at launch", "Set by an env file"); nil: the player's to change
     let handheld: Bool     // the chosen console mode, for the render scale's size in pixels
     let set: (String) -> Void
+    @State private var held: Bool?   // the changed mark while a slider is dragged: kept from the drag's start until its end, so a drag across the default does not flash Reset
 
     init(_ s: Setting, _ m: LauncherModel) {
         self.s = s
@@ -530,7 +531,8 @@ private struct SettingLine: View, Equatable {
     }
     static func == (a: SettingLine, b: SettingLine) -> Bool { a.s.env == b.s.env && a.value == b.value && a.fixedBy == b.fixedBy && a.handheld == b.handheld }
 
-    private var changed: Bool { fixedBy == nil && !s.isDefault(value) }
+    private var differs: Bool { fixedBy == nil && !s.isDefault(value) }
+    private var changed: Bool { held ?? differs }
     // A Reset link only where the tested default is not plainly the other value: a slider, a choice of more than two. A switch or a choice of two is reset by itself
     private var resets: Bool { s.kind == "range" || (s.kind == "choice" && (s.options?.count ?? 0) > 2) }
     // Side by side only when every label fits its share of the control's width: two languages are two options too, and "American English" does not
@@ -585,7 +587,7 @@ private struct SettingLine: View, Equatable {
         case "range":
             let label = LauncherModel.rangeLabel(s, number.wrappedValue, handheld: handheld)
             HStack(spacing: 10) {
-                Slider(value: number, in: (s.min ?? 0)...(s.max ?? 1))
+                Slider(value: number, in: (s.min ?? 0)...(s.max ?? 1)) { held = $0 ? differs : nil }
                     .frame(width: s.base == nil ? 150 : 120)   // room for the size in pixels beside it
                     .accessibilityLabel(s.label)
                     .accessibilityValue(label)

@@ -246,6 +246,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `AVAudioSession` `setPreferredIOBufferDuration:0.005` (and 48 kHz) before the game opens audio and again on return to the foreground (`front_ios_audio_session` in `front_ios.m`); the device then calls back with 240 frames and nothing underruns.
 - **Check:** when checking a new device, read the host's `audio #N device callbacks` line, normally reported every 2000 callbacks: frames per callback, queued blocks, underruns. A busy diagnostic writer can merge windows; the line states their actual callback count.
 
+### AudioOut crackle on a Bluetooth route
+
+- **Symptom:** regular clicks in menus and races over Bluetooth on an iPhone. Built-in speakers play normally. In matched windows of 8,000 callbacks, the speaker route had 4 underruns at 240 frames per callback. The Bluetooth route had 669 at 278–279 frames.
+- **Cause:** RemoteIO can grant a different duration from the requested 5 ms. On the tested route, 256 frames at 44.1 kHz become 278–279 at the host's 48 kHz. A guest with two short buffers in flight can enter a callback with one partial block and one full block. If their combined length is too short, the callback fills the gap with zeros before the guest can refill a released buffer.
+- **Fix:** When a guest AudioOut callback requests more than 5 ms, copy the tail of its last guest block before releasing the descriptor, provided the tail is at most 480 frames (10 ms at 48 kHz) and fits the host buffer. The guest can refill between callbacks. The next consumer, including the silent sink, plays that copy first. The buffer count includes the staged block until it drains. Stop discards it along with queued audio.
+- **Found on:** [Need for Speed: Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md), update 1.0.3 on iPhone with Nothing Ear earbuds.
+- **Check:** `t_audio_stats` replays both callback sizes against two recycled 256-frame buffers through the real render callback. The Bluetooth replay goes from 666 underruns to zero in 8,000 callbacks and checks PCM order, the queue count and Stop/restart. Mono and stereo tests check that a 480-frame tail stages and still counts across a queue index wrap, and that a 481-frame tail stays in the guest queue. Playback on an iPhone with the upstream patch remains to be checked.
+
 ### The Mac's default I/O buffer
 
 - **Symptom:** clicks and dropouts on the Mac, heard as clipping; the log's `audio #N device callbacks` lines show hundreds of underruns per 2000 callbacks. Closing an output can also log `[RED] audio device buffer: ... (status 560947818)` (`!obj`).

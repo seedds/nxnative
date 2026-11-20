@@ -24,6 +24,7 @@ import shader_lib   # noqa: E402
 ACCESS = re.compile(r"\b[a-z]+_c1\)\._m0\[([^\]]+)\]")
 DEFINITION = re.compile(r"\b(u?int|u?short|u?long|bool)\s+(_\d+)\s*=\s*([^;]+);")
 ASSIGNMENT = re.compile(r"(?<![\w.])(_\d+)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|(?<![\w.])(_\d+)\s*(?:\+\+|--)|(?:\+\+|--)\s*(_\d+)\b")
+ASSIGNED = re.compile(r"(_(?<![\w.]_)\d+)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)")   # ASSIGNMENT's first form, its literal first (the scan stops only at a `_`): all ASSIGNMENT can match in a text without ++ and --
 TOKEN = re.compile(r"\s*(0[xX][0-9a-fA-F]+[uU]?|\d+\.\d*(?:[eE][-+]?\d+)?f?|\d+[uU]?|[A-Za-z_]\w*(?:\.\w+)*|\.\w+|<<|>>|<=|>=|==|!=|&&|\|\||[-+*/%&|^~!?:(),<>\[\]])")
 UNBOUNDED = (None, None)
 CASTS = {"int", "uint", "short", "ushort", "long", "ulong"}
@@ -187,13 +188,28 @@ def c1_span(json_path):
 def definitions_of(source):
     """Integer temporaries written only where they are declared. A variable assigned again (a loop counter, a value merged from branches) is left out, so it reads as unbounded.
     A name may be declared more than once with the same text: vertex shaders carry a copy of the main function (main0_z, dmsh_entry.py vs_depth); differing declarations are left out too"""
-    writes, decls = {}, {}
-    for m in ASSIGNMENT.finditer(source):
-        name = m.group(1) or m.group(2) or m.group(3); writes[name] = writes.get(name, 0) + 1
-    for kind, name, text in DEFINITION.findall(source): decls.setdefault(name, set()).add((kind, text.strip()))
-    counts = {}
-    for _, name, _ in DEFINITION.findall(source): counts[name] = counts.get(name, 0) + 1
+    writes, decls, counts = {}, {}, {}
+    if "++" in source or "--" in source:
+        for m in ASSIGNMENT.finditer(source):
+            name = m.group(1) or m.group(2) or m.group(3); writes[name] = writes.get(name, 0) + 1
+    else:   # the same matches, about four times as fast (the translator's MSL has no ++ or --)
+        for name in ASSIGNED.findall(source): writes[name] = writes.get(name, 0) + 1
+    for kind, name, text in DEFINITION.findall(source):
+        decls.setdefault(name, set()).add((kind, text.strip())); counts[name] = counts.get(name, 0) + 1
     return {name: next(iter(d)) for name, d in decls.items() if len(d) == 1 and writes.get(name, 0) == counts[name]}
+
+
+class Definitions:
+    """definitions_of(source) for Interval, made when the first temporary is looked up. Most indices are literals or expressions without one (of Tears of the Kingdom's shaders with a c1
+    read, 2% have a temporary in an index), and the scans definitions_of makes were most of what a shader cost both tools"""
+    def __init__(self, source): self.source, self.made = source, None
+
+    def all(self):
+        if self.made is None: self.made = definitions_of(self.source)
+        return self.made
+
+    def __contains__(self, name): return name in self.all()
+    def __getitem__(self, name): return self.all()[name]
 
 
 def proven(index, definitions, span):
@@ -314,7 +330,7 @@ def c1_span_of(data):   # c1_span on the reflection's bytes (None: missing)
 def unproven_in(source, reflection):   # whether one of the shader's c1 reads is not proven bounded: its MSL, its reflection json's bytes
     accesses = set(ACCESS.findall(source))
     if not accesses: return False
-    definitions, span = definitions_of(source), c1_span_of(reflection)
+    definitions, span = Definitions(source), c1_span_of(reflection)
     return not all(proven(index, definitions, span) for index in accesses)
 
 

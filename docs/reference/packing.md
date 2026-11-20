@@ -180,6 +180,35 @@
 - **Fix:** with `DMSH_TABLE_MEMO` set to a folder, each tool keeps a line per shader there (`c1_guard.memo`, `cb_extent.memo`): the SHA-256 of the files it read, then its answer. The next run takes the answer of every shader whose files hash the same and analyses the rest. The NSP script sets it to its shader cache folder for the build and for `chain_tables`. The memo's first line is a fingerprint of `c1_guard.py`, `cb_extent.py`, `dmsh_abi.py` and the header it reads (`dm/gfx/nvn/dmsh_abi.h`: the binding kinds `cb_extent.py` filters on), so an edit to any of them starts it empty. It holds the last run's answers only (6.5 MB for Ocarina of Time). Without the variable nothing is hashed.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072 on an M3 Max: both tables in 95.1 s without the memo, 96.8 s with an empty one and 6.5 s from a full one, byte-identical after the header in all three runs. `dm/tools/tests/test_nsp_chain.py` (`TableTools`: the same tables from the memo, its answer used, changed bytes analysed again, another version's memo not taken).
 
+### A cold build spends half a minute on the c1 and uniform extent tables
+
+- **Symptom:** after the last shader of a cold full build, `dmsh_build.py` keeps every core busy for about another half minute before it prints `c1_full.tsv: …` and `cb_extent.tsv: …`: Tears of the Kingdom's 28,669 shaders on an M5 Pro, 33 s of a 507 s build when the build runs them. The tools alone on a finished library: 27 s, and 14 s for Breath of the Wild.
+- **Cause:** `c1_guard.py` and `cb_extent.py` spent their time in patterns over each shader's whole MSL. The interval arithmetic was 1% of it.
+  - `definitions_of` scanned every shader with a c1 read or a bounded uniform read for its temporaries: the declarations twice, the assignments once. It was 85% of `c1_guard.py` and 52% of `cb_extent.py`. Most indices are literals and ask for no definition: of 484 sampled shaders with a c1 read, 11 have a temporary in an index.
+  - `ASSIGNMENT` starts with a lookbehind or an alternation, and `cb_extent.py` ran two patterns that start with `\b` for each binding of each shader (45% of its time). `re` tries such a pattern at every character ([Rewrites that try every character of a large source](shaders.md#rewrites-that-try-every-character-of-a-large-source)).
+- **Fix:** the same answers from less scanning, in the two tools.
+  - `Definitions` makes `definitions_of` when `Interval` first looks a temporary up.
+  - `definitions_of` counts the declarations in the scan that collects them. It finds the assignments with `ASSIGNED`, `ASSIGNMENT`'s first form with its literal first, when the text has no `++` and no `--`: the other two forms need one. A text with one takes `ASSIGNMENT` as before.
+  - `cb_extent.py` `uses_of` counts a binding's uses and its declaration with `str.find` and the characters on both sides.
+  - The memo's fingerprint covers both tools, so the first build after this fills the memo again.
+- **Measurement:** M5 Pro (18 cores), Python 3.13, the Mac library image, no memo, the two tools one after the other as the build runs them, best of three.
+
+  | Both tools, wall (CPU) | Before | After |
+  |---|---|---|
+  | Tears of the Kingdom, 28,669 shaders | 26.7 s (458 s) | 5.0 s (79 s) |
+  | Breath of the Wild, 19,592 | 14.3 s (241 s) | 3.0 s (45 s) |
+  | Pokémon Scarlet, 30,142 | 24.2 s (417 s) | 4.8 s (76 s) |
+
+  A whole cold Mac build of Tears of the Kingdom, one run each: 507.1 to 490.9 s. The two tools inside it: 33.3 s (543 s of CPU) to 10.5 s (109 s). The rest of the build, the same work in both, took 473.8 and 480.4 s.
+
+  Both tables of the three games are the same line for line after the header, which holds the time of the run, and so are the two whole builds' tables.
+- **Open:**
+  - Reading a vertex shader's body once was measured and not taken. Its MSL holds `main0`'s body in `main0`, `main0_z` and `main0_gs`, and the copies are 55% of a library's text. Dropping them halves the unchanged tools (26.7 to 13.3 s) and saves 1.4 s after this change (5.0 to 3.6 s), for a check of the three entry points' forms.
+  - The memo ([A reuse build spends a minute and a half on the c1 and uniform extent tables](#a-reuse-build-spends-a-minute-and-a-half-on-the-c1-and-uniform-extent-tables)) no longer gains on these games: a run from a full memo is 4.9 s for Tears of the Kingdom, since every file is still read and hashed. Not measured on Ocarina of Time, which the memo was written for.
+  - `ACCESS` also starts with `\b` and is most of what `c1_guard.py` still costs.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), in a profile of its cold Mac build.
+- **Check:** `dm/gfx/tests/test_table_scans.py`: the assignment scan against the plain one, definitions made only for a temporary, `uses_of` against the two patterns.
+
 ### Every second build signs the whole Mac app again
 
 - **Symptom:** a build's last stage shows `Mac app · game files` without `(reused, signed)` and signs for three minutes, though the game files did not change and the build before it showed `game files (reused, signed)`; a build that changed nothing still shows `Mac app · pipeline archive` and signs for half a minute. Ocarina of Time (a 36 GB app) on an M3 Max: `Mac app` took 3:33 in the build after one where it took 1:11, and four packs that each changed one small file took 8 s, 220 s, 8 s and 220 s.

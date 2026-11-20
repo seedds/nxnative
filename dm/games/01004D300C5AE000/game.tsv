@@ -2,7 +2,7 @@
 # Format: see dm/games/README.md
 # HAL Laboratory's own engine on NintendoWare (G3d, Font, Fxt) and nn::atk2 sound, SDK 11.4.0, NVN; subsdk0 is the movie module (VP9 / Vorbis WebM cinematics and guide movies).
 # The shaders are BNSH archives inside HAL's .cmp containers under gfx/, ptcl/ and lyt/, in the loose shader/ files and embedded in main (shader_split.py); no run met a shader missing from the map.
-# The game asks for present interval 1 and paces itself at 30 fps, as on the Switch
+# The game asks for present interval 1 and paces itself (30 fps on the Switch); with the profile's cuts it runs at 60 or 120 (Frame rate below)
 
 # ---- Identity ----
 title_id	01004D300C5AE000
@@ -24,6 +24,13 @@ shader_versions	v65536
 modules	main subsdk0 sdk
 romfs_marker	mov/EventMovie/Ending.webm
 zip_store	.bfstm:.cmpbin:.opus:.webm:.metallib
+
+# ---- Frame rate ----
+# 120 fps where the screen shows it, else 60: the rewriter's cuts put the game's frame pacer in 1/120 s units and keep its step in 1/60 s (patches.py), and the host writes the
+# pacer's units a frame (hle_fpslock.c: 1 at 120, 2 at 60) from the hold, which falls to 60 when frames do not fit, on a screen below 120 Hz and, on a Mac, on battery or in Low Power Mode.
+# Speed played the same at 60 and 120 (README.md, Frame rate). DM_FPS_TARGET=60 holds 60, 30 holds 30
+fps_target	120
+fps_max	120
 
 # ---- Memory ----
 # The NPDM declares no system resource, so there is no virtual address memory: the game sets a heap of the pool less 64 MB of used memory (3.14 GB, measured), which fits the

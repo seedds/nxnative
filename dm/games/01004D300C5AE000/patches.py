@@ -1,23 +1,42 @@
 # Kirby and the Forgotten Land (01004D300C5AE000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a
 # module's NSO build ID; CUTS as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 CUTS = {
-  # 1.1.0 (v65536) main: 60 fps. The frame pacer (the function at main+0x52fa50) picks the vsyncs a frame waits from the mode at [x19+0x60]: 0 → [x19+0x64]*[x19+0x10],
-  # 1 → [x19+0x64]*[x19+0x24], 2 → [x19+0x64]*[x19+0x3c] (2 in play, 30 fps); it then waits until that many vsyncs (16,666,666 ns each) have passed since the last frame.
-  # The game measures each frame's length in vsyncs (at least 1) and steps its time by it, so a frame of one vsync runs at 60 fps at the same speed.
-  # The cuts take mode 2's path whatever the mode and wait one vsync there, as theboy181's 60 fps patch for 1.0.0 does (main D9BA7DB7: 0x5330D8 and 0x533110; carried to this
-  # build by the block's shape and checked by disassembly: same compares, loads and multiply, 1.1.0 adds a 10 µs sleep register w28 to the wait loop)
+  # 1.1.0 (v65536) main: 60 and 120 fps. The frame pacer (the function at main+0x52fa50, its object at [[main+0xa65f58]+8]) picks the units a frame waits from the mode at
+  # [x19+0x60]: 0 → [x19+0x64]*[x19+0x10], 1 → [x19+0x64]*[x19+0x24], 2 → [x19+0x64]*[x19+0x3c] (2 in play: 30 fps on the Switch, [+0x3c] = 2); it waits until that many
+  # units (16,666,666 ns, a vsync) have passed since the last frame, measures the frame's length in units (at least 1), and the game steps by their average, the float at
+  # [x19+0x6c] that its 17 readers take as the frame step in 1/60 s. So the game keeps its speed at any rate.
+  # The cuts take mode 2's path whatever the mode (theboy181's 60 fps patch for 1.0.0, main D9BA7DB7 0x5330D8, carried to this build by the block's shape and checked by
+  # disassembly), make the unit 1/120 s (8,333,333 ns, in each of the pacer's four waits and measures), and halve the measured units where they become the float step, so the
+  # step stays in 1/60 s: 0.5 a frame at 120 fps. Then [+0x3c] counts 1/120 s: the host writes 1 for 120 or 2 for 60 (hle_fpslock.c, fps_target; the game had 1 there at boot)
   'a6ce40dc3aedb1becacd2f1ff4515307': [
-    (0x533cd8, 'a0010054', '0d000014', '60 fps: b.eq main+0x533d0c → b (the pacer takes mode 2 whatever its mode)'),
-    (0x533d18, '367d081b', '36008052', '60 fps: mul w22, w9, w8 → mov w22, #1 (mode 2 waits one vsync a frame)'),
-    # Distant animations: the branch past a distance test ([x26+0x7c] squared against s3) is taken always, so distant animations run at 60 fps too, as the patch describes it (theboy181's "Full" variant, 1.0.0 0x7F0D1C; the function is an exact match across the builds, main+0x7f0a30 → main+0x7f5bc0)
-    (0x7f5eac, '25020054', '11000014', '60 fps: b.pl main+0x7f5ef0 → b (distant actors animate every frame)'),
+    (0x533cd8, 'a0010054', '0d000014', 'pacer: b.eq main+0x533d0c → b (mode 2 whatever the mode)'),
+    (0x532e68, '49058a52', 'a9028552', 'pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815'),
+    (0x532e6c, 'c91fa072', 'e90fa072', 'pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)'),
+    (0x532e74, '28058a92', '88028592', 'pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815'),
+    (0x532e78, '28e0bff2', '08f0bff2', 'pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16'),
+    (0x532ec0, '49058a52', 'a9028552', 'pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815'),
+    (0x532ec4, 'c91fa072', 'e90fa072', 'pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)'),
+    (0x532ecc, '28058a92', '88028592', 'pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815'),
+    (0x532ed0, '28e0bff2', '08f0bff2', 'pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16'),
+    (0x532fd8, '49058a52', 'a9028552', 'pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815'),
+    (0x532fdc, 'c91fa072', 'e90fa072', 'pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)'),
+    (0x532fe4, '28058a92', '88028592', 'pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815'),
+    (0x532fe8, '28e0bff2', '08f0bff2', 'pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16'),
+    (0x533d50, '49058a52', 'a9028552', 'pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815'),
+    (0x533d54, 'c91fa072', 'e90fa072', 'pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)'),
+    (0x533d5c, '28058a92', '88028592', 'pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815'),
+    (0x533d60, '28e0bff2', '08f0bff2', 'pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16'),
+    (0x532f34, '0001221e', '00fd021e', 'pacer: scvtf s0, w8 → scvtf s0, w8, #1 (the measured 1/120 s units halved into the step in 1/60 s)'),
+    # Distant animations: the branch past a distance test ([x26+0x7c] squared against s3) is taken always, so distant animations run every frame, as theboy181's "Full" variant
+    # describes it (1.0.0 0x7F0D1C; the function is an exact match across the builds, main+0x7f0a30 → main+0x7f5bc0)
+    (0x7f5eac, '25020054', '11000014', 'distant animations: b.pl main+0x7f5ef0 → b (they animate every frame)'),
   ],
 }
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
-    {'what': "frame pacer: one vsync a frame (60 fps), distant actors animate every frame", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
-     'why': "the game's own pacer and its actors' update distance; a function-matched rule could carry them over the game's updates",
-     'checked': '1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched) and the same actor function'},
+    {'what': "frame pacer in 1/120 s units (60 and 120 fps), distant animations every frame", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own pacer and its distant-animation test; a function-matched rule could carry them over the game's updates",
+     'checked': '1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched), its four unit constants, and the same animation function'},
 ]

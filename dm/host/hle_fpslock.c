@@ -22,11 +22,12 @@
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
-// switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, VSYNCS_DEFAULT2_I32 };
+// switch an engine reads before it takes those fields at all (written 1 at any target), and a frame's length in ticks of 1/120 s as an int32 (120 / frame rate: a pacer the rewriter
+// moved to 120 Hz units)
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, VSYNCS_DEFAULT2_I32, TICKS120_I32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
-typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
+typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; uint32_t ptr2; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none); ptr2: the object is the pointer at [main+ptr_off] + ptr2 (0: [main+ptr_off] itself)
 static const lock_t k_locks[] = {
     // Monster Hunter Rise 16.0.2: RE Engine's frame limit, a float at [main+0x1295b3f0]+0x434 (the pointer is a global in main's bss). The frame loop (main+0x6b106c8) sleeps until
     // [+0x430] / [+0x434] sixtieths of a second have passed ([+0x430] = 60) and steps the game by the time that really passed (+0x41c), so a higher limit runs the game faster in frames
@@ -52,6 +53,10 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Kirby and the Forgotten Land 1.1.0: HAL's frame pacer, the object at [[main+0xa65f58]+8] (the game's 17 readers of its frame step load it so). In its mode 2 (the one that
+    // paces play) a frame waits [+0x64] * [+0x3c] units since the last one, and the game steps by the units it measured. The rewriter moves the units from 1/60 s to 1/120 s and
+    // halves the measured units into the step (patches.py), so 2 is 60 fps and 1 is 120 (the game had 1 there at boot), at the same speed either way (played on the Mac at 60 and 120)
+    { "a6ce40dc3aedb1becacd2f1ff4515307", "Kirby frame pacer (ticks of 1/120 s)", 0xa65f58, 0x3c, TICKS120_I32, 1, 0, 0, 8 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 #define MAX_LOCKS (NLOCKS + 7)   // target, Monolith, four Unreal rows, Unity targetFrameRate
@@ -302,6 +307,7 @@ void dm_fps_lock_tick(void) {
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
+        if (L->ptr2 && (!rd(obj + L->ptr2, &obj, sizeof obj) || !obj)) continue;
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
@@ -333,6 +339,10 @@ void dm_fps_lock_tick(void) {
                 want = 1;
                 if (cur) continue;   // already 1, or not this switch: 0 is the engine's default
                 snprintf(was, sizeof was, "%u", cur);
+            } else if (L->kind == TICKS120_I32) {
+                want = 120 / (uint32_t)target;   // 1 at 120 fps, 2 at 60, 4 at 30
+                if (cur == want || cur < 1 || cur > 4) continue;   // already set, or not set yet
+                snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = L->kind == FPS_I32;
                 want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
@@ -347,6 +357,7 @@ void dm_fps_lock_tick(void) {
                 else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
                 else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);
+                else if (L->kind == TICKS120_I32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }

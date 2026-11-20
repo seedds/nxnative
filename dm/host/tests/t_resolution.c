@@ -5,6 +5,7 @@ static module_t modules[1];
 module_t *g_mod = modules; int g_nmod = 1;
 static int writes;
 void dm_guest_write_prepare(void *p, size_t n) { (void)p; (void)n; writes++; }
+int nvn_fps_high_now(void) { return 60; }   // hle_nvn.c; hle_fpslock.c calls it for a game profile with fps_max 120
 static int checks, failed;
 #define CHECK(c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "failed line %d: %s\n", __LINE__, #c); } } while (0)
 

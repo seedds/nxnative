@@ -27,8 +27,9 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 |---|---|---|---|---|---|---|---|
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
-| `build` → `game` | frame pacer: one vsync a frame (60 fps), distant actors animate every frame | frame rate | gap | checked: 1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched) and the same actor function | 1 | [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md) | the game's own pacer and its actors' update distance; a function-matched rule could carry them over the game's updates |
+| `build` → `game` | frame pacer in 1/120 s units (60 and 120 fps), distant animations every frame | frame rate | gap | checked: 1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched), its four unit constants, and the same animation function | 1 | [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md) | the game's own pacer and its distant-animation test; a function-matched rule could carry them over the game's updates |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
+| `build` → `game` | HAL's frame pacer units a frame (1/120 s, after the rewriter's cuts) at a fixed pointer | frame rate | gap | checked: 1.1.0 main: the pacer's mode-2 wait reads [+0x64] * [+0x3c]; the host's writes followed the hold on the Mac (2026-11-20) | 1 | [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md) | the game's own pacer object, reached as its 17 frame-step readers reach it; a function-matched rule could carry the pointer over the game's updates |
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
@@ -67,7 +68,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 10 | 0 | 0 | `game`, `build` → `game` |
-| [Kirby and the Forgotten Land](#kirby-and-the-forgotten-land) | 3 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Kirby and the Forgotten Land](#kirby-and-the-forgotten-land) | 19 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Kirby's Dream Buffet](#kirbys-dream-buffet) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -298,7 +299,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
 - **1.8d.310c `main`** `a48c0de3…`
-  - host [hle_fpslock.c:54](../../dm/host/hle_fpslock.c#L54): engine frame limit set to fps_target: FIFA frame regulator
+  - host [hle_fpslock.c:55](../../dm/host/hle_fpslock.c#L55): engine frame limit set to fps_target: FIFA frame regulator
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
@@ -352,12 +353,30 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md), `01004D300C5AE000`, [patches.py](../../dm/games/01004D300C5AE000/patches.py).
 
-- **`build` → `game`**, frame rate, gap, checked: 1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched) and the same actor function: frame pacer: one vsync a frame (60 fps), distant actors animate every frame. The game's own pacer and its actors' update distance; a function-matched rule could carry them over the game's updates
+- **`build` → `game`**, frame rate, gap, checked: 1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched), its four unit constants, and the same animation function: frame pacer in 1/120 s units (60 and 120 fps), distant animations every frame. The game's own pacer and its distant-animation test; a function-matched rule could carry them over the game's updates
+- **`build` → `game`**, frame rate, gap, checked: 1.1.0 main: the pacer's mode-2 wait reads [+0x64] * [+0x3c]; the host's writes followed the hold on the Mac (2026-11-20): HAL's frame pacer units a frame (1/120 s, after the rewriter's cuts) at a fixed pointer. The game's own pacer object, reached as its 17 frame-step readers reach it; a function-matched rule could carry the pointer over the game's updates
 
-- **1.1.0 `main`** `a6ce40dc…` ([patches.py:9](../../dm/games/01004D300C5AE000/patches.py#L9))
-  - cut `+0x533cd8`: 60 fps: b.eq main+0x533d0c → b (the pacer takes mode 2 whatever its mode)
-  - cut `+0x533d18`: 60 fps: mul w22, w9, w8 → mov w22, #1 (mode 2 waits one vsync a frame)
-  - cut `+0x7f5eac`: 60 fps: b.pl main+0x7f5ef0 → b (distant actors animate every frame)
+- **1.1.0 `main`** `a6ce40dc…` ([patches.py:11](../../dm/games/01004D300C5AE000/patches.py#L11))
+  - cut `+0x533cd8`: pacer: b.eq main+0x533d0c → b (mode 2 whatever the mode)
+  - cut `+0x532e68`: pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815
+  - cut `+0x532e6c`: pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)
+  - cut `+0x532e74`: pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815
+  - cut `+0x532e78`: pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16
+  - cut `+0x532ec0`: pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815
+  - cut `+0x532ec4`: pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)
+  - cut `+0x532ecc`: pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815
+  - cut `+0x532ed0`: pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16
+  - cut `+0x532fd8`: pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815
+  - cut `+0x532fdc`: pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)
+  - cut `+0x532fe4`: pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815
+  - cut `+0x532fe8`: pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16
+  - cut `+0x533d50`: pacer unit 1/60 → 1/120 s: mov w9, #0x502a → #0x2815
+  - cut `+0x533d54`: pacer unit 1/60 → 1/120 s: movk w9, #0xfe → #0x7f, lsl #16 (8,333,333 ns)
+  - cut `+0x533d5c`: pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815
+  - cut `+0x533d60`: pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16
+  - cut `+0x532f34`: pacer: scvtf s0, w8 → scvtf s0, w8, #1 (the measured 1/120 s units halved into the step in 1/60 s)
+  - cut `+0x7f5eac`: distant animations: b.pl main+0x7f5ef0 → b (they animate every frame)
+  - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: Kirby frame pacer (ticks of 1/120 s)
 
 ### Kirby's Dream Buffet
 
@@ -374,7 +393,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:39](../../dm/host/hle_fpslock.c#L39): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:40](../../dm/host/hle_fpslock.c#L40): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope
 
@@ -401,7 +420,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one RE Engine game here, judgement: RE Engine's frame limit at a fixed pointer. Engine code other RE Engine games ship
 
 - **16.0.2 `main`** `c9a3dd77…`
-  - host [hle_fpslock.c:35](../../dm/host/hle_fpslock.c#L35): engine frame limit set to fps_target: RE Engine frame limit
+  - host [hle_fpslock.c:36](../../dm/host/hle_fpslock.c#L36): engine frame limit set to fps_target: RE Engine frame limit
 
 ### Need For Speed™ Hot Pursuit Remastered
 
@@ -412,11 +431,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.0.3 `main`** `799d1061…` ([patches.py:7](../../dm/games/010029B0118E8000/patches.py#L7))
   - cut `+0x4835a4`: frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)
-  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion 60 fps mode
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion frame ticks
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion frame ticks / 10
-  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion 2D game step
-  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Criterion 3D game step
+  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion 60 fps mode
+  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion frame ticks
+  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion frame ticks / 10
+  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Criterion 2D game step
+  - host [hle_fpslock.c:49](../../dm/host/hle_fpslock.c#L49): engine frame limit set to fps_target: Criterion 3D game step
 
 ### NieR:Automata The End of YoRHa Edition (010056B015FE8000)
 
@@ -435,7 +454,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:76](../../dm/host/hle_fpslock.c#L76): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -454,7 +473,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:77](../../dm/host/hle_fpslock.c#L77): frame interval and dynamic-resolution floor
 
 ### Ori and the Will of the Wisps
 

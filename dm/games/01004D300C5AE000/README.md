@@ -36,9 +36,9 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 ## Frame rate
 
-- **Current:** 60 fps on 1.1.0, through the profile's cuts (`patches.py`): the game's frame pacer waits one vsync a frame instead of two, and distant animations run every frame (theboy181's 60 fps patch for 1.0.0, carried to 1.1.0 by disassembly). The game measures each frame's length in vsyncs (at least one) and steps its time by it, so it keeps its speed: played on the Mac with two controllers, animations at normal speed (2026-11-20); the title screen at 59–60 fps, CPU 62–75% of a core, 1.9–2.4 W.
+- **Current:** 120 fps on 1.1.0 where the screen shows it, 60 otherwise (`fps_target 120`, `fps_max 120`). The profile's cuts (`patches.py`) take the frame pacer's mode-2 path whatever its mode (theboy181's 60 fps patch for 1.0.0, carried to 1.1.0 by disassembly), move its unit from 1/60 to 1/120 s, and halve the measured units where they become the frame step, so the step the game's 17 readers take stays in 1/60 s (0.5 a frame at 120). The pacer's units a frame, `[[main+0xa65f58]+8]+0x3c`, are written by the host from the 120 fps hold (`hle_fpslock.c`: 1 at 120, 2 at 60, 4 at 30; the game had 1 there at boot, so without the host it would run at 120 there). Distant animations run every frame (theboy181's "Full" variant). Speed: played on the Mac at 60 and at 120 (an island, then a level with a boss, moving platforms, Mouthful Mode and timed challenges): nothing ran fast (2026-11-20). At 120 in play on an Apple M6: 118.5 fps on average over 20 minutes, 9 of 242 five-second windows at 100–109 fps, CPU 3.1 W on average (4.6 W at most), GPU about 6 ms a frame (about 70 % busy, against 35 % at 60). The title screen at 60: 1.9–2.4 W of CPU.
+- **Current:** on battery or in Low Power Mode the Mac holds 60 ([A 120 fps cap follows the Mac's power](../../../docs/reference/frame-rate.md#a-120-fps-cap-follows-the-macs-power)); `DM_BATTERY_120=1` keeps 120. Checked from the adapter only (`front end: power from the adapter`, then `120 fps: cap 0 → 120 fps`); the switch on battery is not yet run on the Mac.
 - **Resolved:** before the cuts, 30 fps on the Mac, as on the Switch (`power` lines: 28–30 fps; frame interval p99 33.6 ms in play). The game sets present interval 1 and paces its frames itself. CPU about one core and 5–5.6 W on an Apple M6 in Point of Arrival.
-- **Open:** 120 fps. The pacer's unit is one 60 Hz vsync (16,666,666 ns) and a frame counts at least one, so frames of 8.3 ms would run the game at twice its speed; it needs the time step itself changed.
 
 ## Audio
 
@@ -64,6 +64,7 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 ## Found on this game
 
+- [A 120 fps cap follows the Mac's power](../../../docs/reference/frame-rate.md#a-120-fps-cap-follows-the-macs-power).
 - [iOS drops a lone Joy-Con without an extended gamepad profile](../../../docs/reference/services.md#ios-drops-a-lone-joy-con-without-an-extended-gamepad-profile).
 - [HAL's `.cmp` containers: a size-prefixed frame](../../../docs/reference/shaders.md#hals-cmp-containers-a-size-prefixed-frame).
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff).

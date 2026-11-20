@@ -27,6 +27,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 |---|---|---|---|---|---|---|---|
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
+| `build` → `game` | frame pacer: one vsync a frame (60 fps), distant actors animate every frame | frame rate | gap | checked: 1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched) and the same actor function | 1 | [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md) | the game's own pacer and its actors' update distance; a function-matched rule could carry them over the game's updates |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
@@ -66,6 +67,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 10 | 0 | 0 | `game`, `build` → `game` |
+| [Kirby and the Forgotten Land](#kirby-and-the-forgotten-land) | 3 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Kirby's Dream Buffet](#kirbys-dream-buffet) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -345,6 +347,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x166dab4`: KIDS frame task: fps and the frame-rate block = the cap, vsyncs per update marked; device frame rate 59.94 / vsyncs (state page target fps; 0 = the game's 30)
   - frame step `+0x166dc60`: KIDS frame task: the frame-rate object's steps × its fps × vsyncs per update / 60 (state page target fps; 0 = as the game sets them)
 - **function-matched frame step** (`main` of builds without FRAME_STEP): 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters: a function of 0x1078 bytes, `+0x134`, `+0x2e0` in it; nnMain, a function of 0x3a40 bytes, `+0x1e60` in it; scene update, a function of 0xb88 bytes, `+0x86c`, `+0x890` in it; frame-rate block writer, a function of 0x7c bytes,  in it
+
+### Kirby and the Forgotten Land
+
+[Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md), `01004D300C5AE000`, [patches.py](../../dm/games/01004D300C5AE000/patches.py).
+
+- **`build` → `game`**, frame rate, gap, checked: 1.0.0 and 1.1.0 main disassembled: the same pacer block (three of that shape in each, the third patched) and the same actor function: frame pacer: one vsync a frame (60 fps), distant actors animate every frame. The game's own pacer and its actors' update distance; a function-matched rule could carry them over the game's updates
+
+- **1.1.0 `main`** `a6ce40dc…` ([patches.py:9](../../dm/games/01004D300C5AE000/patches.py#L9))
+  - cut `+0x533cd8`: 60 fps: b.eq main+0x533d0c → b (the pacer takes mode 2 whatever its mode)
+  - cut `+0x533d18`: 60 fps: mul w22, w9, w8 → mov w22, #1 (mode 2 waits one vsync a frame)
+  - cut `+0x7f5eac`: 60 fps: b.pl main+0x7f5ef0 → b (distant actors animate every frame)
 
 ### Kirby's Dream Buffet
 

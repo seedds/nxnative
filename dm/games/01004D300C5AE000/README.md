@@ -36,7 +36,9 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 
 ## Frame rate
 
-- **Current:** 30 fps on the Mac, as on the Switch (`power` lines: 28–30 fps; frame interval p99 33.6 ms in play). The game sets present interval 1 and paces its frames itself. CPU about one core and 5–5.6 W on an Apple M6 in Point of Arrival.
+- **Current:** 60 fps on 1.1.0, through the profile's cuts (`patches.py`): the game's frame pacer waits one vsync a frame instead of two, and distant animations run every frame (theboy181's 60 fps patch for 1.0.0, carried to 1.1.0 by disassembly). The game measures each frame's length in vsyncs (at least one) and steps its time by it, so it keeps its speed: played on the Mac with two controllers, animations at normal speed (2026-11-20); the title screen at 59–60 fps, CPU 62–75% of a core, 1.9–2.4 W.
+- **Resolved:** before the cuts, 30 fps on the Mac, as on the Switch (`power` lines: 28–30 fps; frame interval p99 33.6 ms in play). The game sets present interval 1 and paces its frames itself. CPU about one core and 5–5.6 W on an Apple M6 in Point of Arrival.
+- **Open:** 120 fps. The pacer's unit is one 60 Hz vsync (16,666,666 ns) and a frame counts at least one, so frames of 8.3 ms would run the game at twice its speed; it needs the time step itself changed.
 
 ## Audio
 

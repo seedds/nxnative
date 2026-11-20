@@ -28,11 +28,12 @@
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
-enum { UE5, UE4_27, UE5_6, UE3 };
+enum { UE5, UE4_27, UE5_6, UE3, UE4_25 };
 // name: the slot of the name getter, which the rewriter reports (UE_MALLOC_SLOT); size32: the size arguments and results are 32-bit (UE3); try_malloc / try_realloc 0: no such slot
 static const struct { int name, nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; bool size32; } k_lay[] = {
     [UE5] = { 22, 26, 6, 7, 8, 9, 10, 11, 12, { 13, 14, 15, 19 } },      // Trim, the TLS cache setup and teardown, DumpAllocatorStats
     [UE4_27] = { 19, 21, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },
+    [UE4_25] = { 17, 19, 3, 0, 4, 0, 5, 6, 7, { 8, 9, 10, 14 } },   // UE 4.24 / 4.25: no TryMalloc / TryRealloc (DRAGON BALL Z: KAKAROT)
     [UE5_6] = { 26, 32, 6, 7, 8, 9, 10, 13, 14, { 15, 16, 17, 18, 19, 23 } },   // Trim, the four TLS cache calls, DumpAllocatorStats
     [UE3] = { -1, 25, 4, 0, 5, 0, 6, 3, 20, { 13, 21, 22 }, true },   // the TLS cache flush and setup, Trim
 };

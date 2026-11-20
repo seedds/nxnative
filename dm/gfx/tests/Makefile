@@ -65,6 +65,11 @@ check_test_dmsh_ast_optimizer:
 	DMSH_TEST_GPU=1 python3 test_dmsh_ast_optimizer.py
 check_test_dmsh_native_functions:
 	DMSH_TEST_GPU=1 python3 test_dmsh_native_functions.py
+t_vertex_viewport_mask: t_vertex_viewport_mask.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vertex_viewport_mask.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_vertex_viewport_mask
+check_t_vertex_viewport_mask: t_vertex_viewport_mask
+	DMSH_TEST_GPU=1 DMSH_TEST_VIEWPORT_HOST="$(CURDIR)/t_vertex_viewport_mask" MTL_DEBUG_LAYER=1 python3 -m unittest test_vertex_viewport_mask.py
 t_transform_feedback: t_transform_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_transform_feedback.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_transform_feedback

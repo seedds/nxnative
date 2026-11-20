@@ -6701,7 +6701,7 @@ static void shmap_read(void) {
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_d, geo_fn; NSString *u_name; id<MTLLibrary> ulib; NSMutableDictionary *ufn; int u_side, ulib_state, u_alpha, u_logic;   // u_name: the typed-output entry point (dmsh_entry.py fs_uint), nil when the shader has none; in the side library <key>_bx when u_side, else in its own (ulib: that library, loaded on first need when u_side; ulib_state as afn_state); ufn: it specialized per pipeline's target classes, alpha test and logic operation (typed_fn); u_alpha / u_logic: it holds those two (the reflection's entry_u_alpha, entry_u_logic); fn_d: the dual-source one (dmsh_entry.py fs_dual)
     id<MTLLibrary> xlib; int xlib_state;   // the side library <key>_bx, loaded once on first need (bx_lib) for at_fn, lo_fn and typed_fn
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, layer_out, viewport_mask; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     NSDictionary *rtMetadata;   // immutable RT runtime/catalog JSON, present only for the universal RT library
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
@@ -7074,7 +7074,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (o->mesh_notask && !(o->mesh_obj = j[@"entry_object"] ? fn4_note([lib newFunctionWithName:j[@"entry_object"]], lib, j[@"entry_object"], nil) : nil))
         MLOG("[RED] mesh shader %s: no object entry point (entry_object) in its library: its draws are skipped", pc.UTF8String);
     // writes the layer: its passes are layered and its pipelines get an input class (pso_desc). main0 / main0_z by the reflection's layer_out (dmsh_entry.py layer_out), the layer entry points always
-    if (stage == 0) o->layer_out = layer || [j[@"layer_out"] boolValue];
+    if (stage == 0) { o->layer_out = layer || [j[@"layer_out"] boolValue]; o->viewport_mask = !layer && [j[@"viewport_mask"] boolValue]; }
     if (stage == 0 && !layer) o->has_pull = [j[@"pull"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_alpha = [j[@"alpha"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_bz = [j[@"blend_zero"] boolValue];

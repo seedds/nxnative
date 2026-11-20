@@ -2190,6 +2190,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** the host's network rounds each HMMA's f16 accumulator once per 8 products, as the translated helper does since [HMMA rounds its f16 accumulator once per 8 products](#hmma-rounds-its-f16-accumulator-once-per-8-products) (resolved; before that both rounded after every product, as `simdgroup_half8x8` does, and differed from the Switch in the low bits of most HMMAs). The host's network follows the helper, and `test_ndve_engine.py` fails when the two differ.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate): its title and opening movies ([issue 1375](https://github.com/seedds/nxnative/issues/1375), PR #1894).
 
+### An interrupted compute compile broke the NDVE sequence
+
+- **Symptom:** green and grey striped blocks over the opening movie after `XPC_ERROR_CONNECTION_INTERRUPTED`. The host logs `[RED] NDVE engine: a dispatch out of the network's order` and disables the engine for the rest of the run.
+- **Cause:** when Apple's `MTLCompilerService` died, NVN dispatch cached the interrupted compute compile as a permanent failure. The dispatch returned before the NDVE engine saw the layer, so the next layer looked out of order. The game's fallback then ran with the same dispatch missing.
+- **Fix:** recognized NDVE dispatches reach the engine after resource preparation and before the translated pipeline lookup. If the engine falls back, the host leaves interrupted compiles retryable on a later dispatch and caches permanent refusals.
+- **Check:** `t_dispatch_pipeline` injects the Metal error through the real dispatch path, checks that the next fallback dispatch writes its result, and checks that NDVE advances through the two reported layers without asking Metal for the first layer's fallback.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), on an M2 MacBook Air on macOS 27.0 ([issue #2920](https://github.com/seedds/nxnative/issues/2920)).
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.

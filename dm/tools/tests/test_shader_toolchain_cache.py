@@ -25,6 +25,7 @@ TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
 import dmsh_mtlcache  # noqa: E402
+import dmsh_rewrite  # noqa: E402
 import dmsh_rt_compile  # noqa: E402
 import shader_cache  # noqa: E402
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -320,7 +321,7 @@ class TargetSelection(unittest.TestCase):
                     ns: dict[str, Any] = dict(os=os, json=json, subprocess=subprocess, out=td, w=td, TARGETS=targets,
                               IOSOUT=str(ios) if 'ios' in targets else None, MESH_STATS=collections.Counter(),
                               MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose),
-                              output=output, commit=mock.Mock())
+                              dmsh_rewrite=dmsh_rewrite, output=output, commit=mock.Mock())
                     exec(compile(ast.Module(body=[function], type_ignores=[]), '<mesh targets>', 'exec'), ns)
                     ns['mesh_finish'](('vertex', 'geometry'))
                     compose.assert_called_once_with('vertex source', 'geometry source', [36])
@@ -436,6 +437,56 @@ class MetalPrefill(unittest.TestCase):
         (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}_bf.metallib').write_bytes(b'TILE')
         notes = self.cache.fill(str(self.old))
         self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+
+    def test_a_vertex_library_beside_a_pulling_or_shadow_input_library_does_not_prefill(self):   # it may be a piece of the vertex unit (dmsh_side.vs_unit), not the compile of its .metal
+        for side in ('_bp', '_bv'):
+            with self.subTest(side=side):
+                self.cache.store = shader_cache.Store(self.root / f'cas{side}.db'); self.cache.stats.clear()
+                self.earlier_libraries(self.cache.ident['mac'].hex())
+                (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}{side}.metallib').write_bytes(b'SIDE')
+                notes = self.cache.fill(str(self.old))
+                self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+                (self.old / f'{2:016x}{side}.metallib').unlink()
+
+    def test_a_cut_library_is_told_in_its_own_targets_folder(self):   # an iPhone-only build: the Mac folder holds the sources and no library that would tell
+        ios = self.root / 'ios-old'; ios.mkdir()
+        def compile_current(msl, air, lib): Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
+            cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas-ios.db'), {'ios': ('iphoneos', 'flags', compile_current)}, str(self.root))
+        for i in range(3):
+            stem = f'{i:016x}_b'; src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src)
+            (ios / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'CUT FROM ANOTHER SOURCE')
+            (ios / (stem + '.json')).write_text(json.dumps({'chain_metal': 'flags', 'stage': 'vs', 'chain_compiler': cache.ident['ios'].hex()}))
+        (ios / f'{2:016x}_bp.metallib').write_bytes(b'PULLING')
+        notes = cache.fill(str(self.old), str(ios))
+        self.assertEqual(cache.stats['ios', 'filled'], 2, notes)
+
+    def test_a_cut_ios_base_cannot_prefill_after_packing_omits_its_pulling_library(self):
+        ios = self.root / 'b-ios'; ios.mkdir()
+
+        def compile_current(msl, air, lib):
+            Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
+            cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas-ios.db'), {'ios': ('iphoneos', 'flags', compile_current)}, str(self.root))
+        for i in range(3):
+            stem = f'{i:016x}_b'
+            src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src)
+            (ios / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'CUT FROM ANOTHER SOURCE')
+            reflection = cache.with_compiler('ios', {'stage': 'vs'})
+            if i == 2: reflection['chain_metal_cut'] = True
+            (ios / (stem + '.json')).write_text(json.dumps(reflection))
+        (ios / f'{2:016x}_bp.metallib').write_bytes(b'PULLING')
+        self.assertTrue(shader_lib.pack(ios, leave_out=True))
+        self.assertTrue(shader_lib.left_out_pulling(ios))
+
+        notes = cache.fill(str(self.old), str(ios))
+        self.assertEqual(cache.stats['ios', 'filled'], 2, notes)
+        result = self.root / 'result.metallib'
+        cache.compile('ios', str(self.old / f'{2:016x}_b.metal'), str(result))
+        self.assertEqual(result.read_bytes(), b'TESTED MSL 2')
 
     def test_compile_split_keeps_every_piece(self):
         msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'

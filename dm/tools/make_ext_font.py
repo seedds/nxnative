@@ -43,7 +43,7 @@ def rot(pts, cx, cy, deg):
 
 class Letters:
     def __init__(self, path):
-        self.f = TTFont(path); self.gs = self.f.getGlyphSet(); self.cmap = self.f.getBestCmap()
+        self.f = TTFont(path, fontNumber=0); self.gs = self.f.getGlyphSet(); self.cmap = self.f.getBestCmap()
     def knock(self, pen, text, cx, cy, h):
         # knock text out of the plate, centred at (cx, cy) with height h
         names = [self.cmap[ord(ch)] for ch in text]; x = 0; parts = []

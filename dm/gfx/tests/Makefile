@@ -162,7 +162,7 @@ t_pace: t_pace.c ../nvn/nvn_pace.h
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_counter_clock.m ../../host/hle_os.c $(MTL_T_SRC) $(FW)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_counter_clock.m ../../host/hle_os.c $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 t_thread_rt: t_thread_rt.c ../nvn/nvn_rt.h
@@ -295,6 +295,7 @@ t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_crop.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_present_crop
 check_t_present_crop: t_present_crop
+	DM_PRESENT_LINK=0 MTL_DEBUG_LAYER=1 ./t_present_crop --external-screenshots
 	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=0 ./t_present_crop
 	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
@@ -389,6 +390,14 @@ check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
+t_upload_idle: t_upload_idle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_idle.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_upload_idle
+check_t_upload_idle: t_upload_idle
+	env -u DM_NVN_UPLOAD_IDLE_MS DM_NVN_UPLOAD_REUSE=1 MTL_DEBUG_LAYER=1 ./t_upload_idle
+	DM_NVN_UPLOAD_IDLE_MS=0 DM_NVN_UPLOAD_REUSE=1 MTL_DEBUG_LAYER=1 ./t_upload_idle
+	DM_NVN_UPLOAD_IDLE_MS=2000 DM_NVN_UPLOAD_REUSE=1 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_upload_idle
+	DM_NVN_UPLOAD_IDLE_MS=2000 DM_NVN_UPLOAD_REUSE=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_upload_idle
 t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_slots.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_slots
@@ -480,6 +489,9 @@ check_t_pull_inv: RUN_ENV = MTL_DEBUG_LAYER=1
 t_wline: t_wline.m ../tools/dmsh_pull.py ../tools/dmsh_pull.metal
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_wline.m -framework Metal -framework Foundation
 check_t_wline: RUN_ENV = MTL_DEBUG_LAYER=1
+t_vs_unit: t_vs_unit.m ../tools/dmsh_side.py ../tools/dmsh_pull.py ../tools/dmsh_pull.metal ../tools/dmsh_vin.py ../tools/dmsh_entry.py ../tools/dmsh_geometry.py
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_vs_unit.m -framework Metal -framework Foundation
+check_t_vs_unit: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_archive: t_pso_archive.m $(MTL_T_DEP) ../../host/hle_lifecycle.c
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) ../../host/hle_lifecycle.c $(FW)
 .PHONY: check_t_pso_archive
@@ -546,7 +558,10 @@ check_t_res_cb: t_res_cb
 	@set -e; for enc in 0 1; do DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; done
 t_upload_src: t_upload_src.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
-check_t_upload_src: RUN_ENV = MTL_DEBUG_LAYER=1
+.PHONY: check_t_upload_src
+check_t_upload_src: t_upload_src
+	DM_NVN_UPLOAD_SRC_MB=0 MTL_DEBUG_LAYER=1 ./t_upload_src
+	DM_NVN_UPLOAD_SRC_MB=96 MTL_DEBUG_LAYER=1 ./t_upload_src
 t_upload_budget: t_upload_budget.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_budget.m $(MTL_T_SRC) $(FW)
 check_t_upload_budget: t_upload_budget
@@ -606,6 +621,9 @@ check_t_lazy_clear_order: RUN_ENV = MTL_DEBUG_LAYER=1
 t_zero_depth: t_zero_depth.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_zero_depth.m $(MTL_T_SRC) $(FW)
 check_t_zero_depth: RUN_ENV = MTL_DEBUG_LAYER=1
+t_zero_colour: t_zero_colour.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_zero_colour.m $(MTL_T_SRC) $(FW)
+check_t_zero_colour: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_layers: t_clear_layers.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_layers.m $(MTL_T_SRC) $(FW)
 check_t_clear_layers: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -722,6 +740,12 @@ t_vk_fan: t_vk_fan.m ../vk/hle_vk.m $(MTL_T_DEP)
 check_t_vk_fan: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_cmds: t_vk_cmds.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_cmds.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_compute: t_vk_compute.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_compute.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_argbuf: t_vk_argbuf.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_argbuf.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../gl/gl_aliases.h ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 .PHONY: check_t_gl_imports gl-imports gl-imports-cpu gl-arguments
@@ -751,6 +775,9 @@ check_t_vk_1d: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_clear_int: t_vk_clear_int.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_clear_int.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 check_t_vk_clear_int: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_vk_cmds: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_vk_compute: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
+check_t_vk_argbuf: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

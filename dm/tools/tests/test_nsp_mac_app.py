@@ -501,6 +501,21 @@ class PackReuse(unittest.TestCase):
         (t / 'p1/msl/k.metallib').write_bytes(b'lib2')
         self.assertIn('step: shader libraries\n', self.pack())
 
+    def test_program_shader_bundle_reuses_canonical_image_name(self):
+        library = self.tmp / 'b-abcdef012345'
+        shutil.copytree(self.tmp / 'msl', library)
+        self.assertTrue(pack_app.shader_lib.pack(library, say=lambda s: None))
+        program = ['1', *(str(self.tmp / p) for p in ('patched', 'romfs')), f'{library}.img', str(self.tmp / 'profile'), str(self.tmp / 'html')]
+        self.args.program = ['\t'.join(program)]
+        self.pack()
+        packed = Path(self.args.out) / 'Contents/PlugIns/ShaderLibraries.bundle/Contents/Resources/msl/p1'
+        self.assertEqual([p.name for p in packed.iterdir()], ['b-abcdef012345.img'])
+
+        program[3] = str(library)
+        self.args.program = ['\t'.join(program)]
+        self.assertIn('step: shader libraries (reused, signed)\n', self.pack())
+        self.assertEqual([p.name for p in packed.iterdir()], ['b-abcdef012345.img'])
+
     def test_other_programs_romfs_beside_the_romfs(self):   # a NUP of several programs (scripts/pack_nup.py): romfs_programs/ beside the RomFS, in a data bundle of its own, where the host looks
         t = self.tmp; (t / 'romfs_programs').mkdir(); (t / 'romfs_programs/0.img').write_bytes(b'switch 1 data')
         self.pack()
@@ -684,6 +699,21 @@ class App(unittest.TestCase):
                                    '--tables', str(t / 'profile'), '--font', str(t / 'font'), '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--env-file', str(t / 'env.txt'), '--settings', str(t / 'launcher.json'), '--title-id', TID.lower(),
                                    '--name', 'Game: Test', '--version', '1.0.1', '--lang', 'fr', '--marker', 'region_common/audio/edward.bfsar', '--icon', str(t / 'icon.jpg'),
                                    '--category', 'public.app-category.games'])
+        # Bundle variants share the launcher sources. Keep the linker output so each pack can still sign its own copy.
+        build_launcher = pack_app.build_launcher
+        launcher = t / 'launcher-fixture'
+        launcher_inputs = None
+
+        def build_fixture(out, *inputs):
+            nonlocal launcher_inputs
+            if inputs == launcher_inputs:
+                shutil.copy(launcher, out)
+            else:
+                build_launcher(out, *inputs)
+                shutil.copy(out, launcher)
+                launcher_inputs = inputs
+
+        cls.enterClassContext(mock.patch.object(pack_app, 'build_launcher', build_fixture))
         with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(cls.args)
 
     @classmethod
@@ -747,6 +777,22 @@ class App(unittest.TestCase):
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
+
+    def test_library_given_as_its_image(self):
+        lib = self.tmp / 'packed/b-0123456789ab'
+        shutil.copytree(self.tmp / 'cache/b-0123456789ab', lib)
+        self.assertTrue(pack_app.shader_lib.pack(lib, say=lambda s: None))
+        self.assertFalse(lib.exists())
+        app = self.tmp / 'Image.app'
+        with contextlib.redirect_stdout(io.StringIO()):
+            pack_app.pack(types.SimpleNamespace(**{**vars(self.args), 'out': str(app), 'msl': f'{lib}.img'}))
+        contents = app / 'Contents'
+        msl = contents / 'Resources/msl'
+        self.assertEqual([p.name for p in msl.iterdir()], ['b-0123456789ab.img'])
+        self.assertEqual(plistlib.loads((contents / 'Info.plist').read_bytes())['DMChain'], '0123456789ab')
+        self.assertTrue(msl.is_symlink())
+        self.assertEqual(msl.resolve(), contents / 'PlugIns/ShaderLibraries.bundle/Contents/Resources/msl')
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', app], check=True, capture_output=True)
 
     def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:

@@ -386,6 +386,36 @@ static MTL4CommitOptions *commit_opts(DmCommitFB *fb) {
     return o;
 }
 static id<MTL4CounterHeap> g_ts_heap;   // tentative: defined with the segment timestamps below
+// ---------- Slow residency and queue commits ----------
+// Time changes to g_res and the Metal 4 commits for main command buffers, uploads and snapshot copies.
+// Log calls that return after at least 100 ms, excluding time spent acquiring the commit lock.
+// Each kind logs the first 20 and every 100th. The graphics test lowers the threshold.
+static uint64_t g_slow_commit_ns = 100000000ull;
+static _Atomic uint64_t g_slow_res_commits, g_slow_queue_commits;
+static char g_feedback_key;
+static inline int on_feedback_q(void) { return dispatch_get_specific(&g_feedback_key) != NULL; }
+static inline uint64_t commit_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static uint64_t slow_commit_log_number(_Atomic uint64_t *count) {
+    uint64_t n = atomic_fetch_add_explicit(count, 1, memory_order_relaxed) + 1;
+    return n <= 20 || n % 100 == 0 ? n : 0;
+}
+static void commit_thread_name(char *th, size_t n) {
+    th[0] = 0; pthread_getname_np(pthread_self(), th, n);
+    if (!th[0]) snprintf(th, n, "%#x", pthread_mach_thread_np(pthread_self()));
+}
+static inline uint64_t q4_commit_elapsed(const id<MTL4CommandBuffer> *buffers, NSUInteger count, MTL4CommitOptions *options) {
+    uint64_t start = commit_now();
+    if (options) [g_q4 commit:buffers count:count options:options];
+    else [g_q4 commit:buffers count:count];
+    return commit_now() - start;
+}
+// Call after releasing g_res_commit_mu and publishing progress for that commit.
+static void q4_commit_slow(uint64_t dt, const char *site) {
+    if (dt < g_slow_commit_ns) return;
+    uint64_t k = slow_commit_log_number(&g_slow_queue_commits); if (!k) return;
+    char th[64]; commit_thread_name(th, sizeof th);
+    MLOG("[RED] slow queue commit: %.1f ms at %s on thread %s%s (#%llu)", dt / 1e6, site, th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)k);
+}
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 // Ends a Metal 4 command buffer, naming the residency sets first (see res_name). A recorded one (DM_NVN_ENC_THREAD) records its end, and the encode thread names them at RO_CB_END.
 // Nothing else calls endCommandBuffer (dm/tools/tests/test_residency_naming.py)
@@ -599,23 +629,40 @@ static void res_check(id r, const char *what, int reg) {
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
 // Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
-// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
-static void res_commit(void) { @autoreleasepool {
+// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set.
+// Upload staging is queued with the commit lock held so this caller also owns the removal references through their release.
+static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autoreleasepool {
     pthread_mutex_lock(&g_res_commit_mu);
+    if (staging) for (id<MTLAllocation> obj in staging) res_remove(obj);
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
     pthread_mutex_unlock(&g_res_mu);
+    uint64_t dt = 0;
     if (n) {
-        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        uint64_t t0 = commit_now();
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+        dt = commit_now() - t0;
         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
     }
     pthread_mutex_unlock(&g_res_commit_mu);
+    uint64_t slow = n && dt >= g_slow_commit_ns ? slow_commit_log_number(&g_slow_res_commits) : 0;
+    uint64_t adds = 0, removes = 0, added_bytes = 0, removed_bytes = 0;
+    if (slow) for (size_t i = 0; i < n; i++) {
+        uint64_t size = ((__bridge id<MTLAllocation>)q[i].o).allocatedSize;
+        if (q[i].add) { adds++; added_bytes += size; }
+        else { removes++; removed_bytes += size; }
+    }
     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
     free(q);
+    if (slow) {
+        char th[64]; commit_thread_name(th, sizeof th);
+        MLOG("[RED] slow residency commit: %.1f ms (adds %llu, %.1f MB; removes %llu, %.1f MB) on thread %s%s (#%llu)",
+             dt / 1e6, (unsigned long long)adds, added_bytes / 1048576.0, (unsigned long long)removes, removed_bytes / 1048576.0,
+             th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)slow);
+    }
 } }
+static void res_commit(void) { res_commit_retiring(nil); }
 static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
@@ -859,6 +906,7 @@ static void mtl_init_once(void) {
     if (!no4) {
         dispatch_queue_attr_t feedback_attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
         g_feedback_q = dispatch_queue_create("dm.nvn.mtl4-feedback", feedback_attr);
+        dispatch_queue_set_specific(g_feedback_q, &g_feedback_key, &g_feedback_key, NULL);
         MTL4CommandQueueDescriptor *q4d = [MTL4CommandQueueDescriptor new]; q4d.feedbackQueue = g_feedback_q;
         g_q4 = [g_dev newMTL4CommandQueueWithDescriptor:q4d error:&re];
         if (!g_q4) no4 = "failed to create the MTL4CommandQueue";
@@ -3361,10 +3409,23 @@ static _Atomic uint64_t g_upload_gpu_ns;
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[3];
-// Waiting for upload batches to finish (g_up_pending, g_up_alloc_busy): the batches' completion handler broadcasts after it updates them, so waiters sleep until then (they used to poll every 0.2–1 ms;
+// Waiting for upload batches to finish (g_up_pending, g_up_alloc_busy): up_complete broadcasts after updating them, so waiters sleep until then (they used to poll every 0.2–1 ms;
 // Three Houses' loader calls QueueFinish after each resource, each one waited up to a millisecond late). The 10 ms timeout is only a safety net
 static pthread_mutex_t g_up_wmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_up_wcv = PTHREAD_COND_INITIALIZER;
 static void up_wake(void) { pthread_mutex_lock(&g_up_wmu); pthread_cond_broadcast(&g_up_wcv); pthread_mutex_unlock(&g_up_wmu); }
+static void up_complete(unsigned slot) {
+    atomic_store(&g_up_alloc_busy[slot], 0);
+    atomic_fetch_sub(&g_up_pending, 1);
+    up_wake();
+}
+static dispatch_queue_t res_commit_q(void) {
+    static dispatch_once_t once;
+    static dispatch_queue_t queue;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("dm.nvn.res-commit", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    });
+    return queue;
+}
 static void up_wait_zero(_Atomic int *v, int site) {
     if (!atomic_load(v)) { if (ws_on()) ws_put(site, 0, 0); return; }
     uint64_t w0 = ws_t0();
@@ -3479,7 +3540,7 @@ static id<MTLBuffer> g_up_block;
 static size_t g_up_block_off, g_up_block_size;
 static NSMutableArray *g_up_keep;
 // Limit overflow staging per batch. The three upload slots bound in-flight
-// batches; up_begin publishes queued commits before waiting for a slot. A single
+// batches through staging retirement; up_begin publishes queued commits before waiting for a slot. A single
 // texture larger than the budget gets its own block (uploads are not tiled here).
 static size_t g_up_staging_bytes;
 #define UP_BATCH_BYTES (128u * 1024u * 1024u)
@@ -3537,15 +3598,20 @@ static void up_flush(void) {
         }
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
-        @autoreleasepool {
-            for (id<MTLResource> obj in staging) res_remove(obj);
-            [staging removeAllObjects];
-            [views removeAllObjects];   // upload-only integer views share their targets' residency
-            res_commit();
+        @autoreleasepool { [views removeAllObjects]; }   // upload-only integer views share their targets' residency
+        if (staging.count) {
+            // Keep the slot busy through retirement to bound staging memory during a burst.
+            // The feedback queue can run later completions while the worker waits for the commit lock.
+            dispatch_async(res_commit_q(), ^{
+                @autoreleasepool {
+                    res_commit_retiring(staging);
+                    [staging removeAllObjects];
+                }
+                up_complete(slot);
+            });
+        } else {
+            up_complete(slot);
         }
-        atomic_store(&g_up_alloc_busy[slot], 0);
-        atomic_fetch_sub(&g_up_pending, 1);
-        up_wake();
     }];
     res_commit();
     cb_end(cb, nil);
@@ -19560,13 +19626,17 @@ static uint64_t snap_take(const tex_t *t) {
     if (rec_on() && g_rb_started) {   // a block of the encode thread's queue, behind the frame's work (see above)
         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
         rec_blk *b = rec_own_begin();
-        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
+        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb); r->a[2] = (uintptr_t)"encode thread (snapshot copy)";
         r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_commit_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
+        pthread_mutex_lock(&g_res_commit_mu);
+        uint64_t elapsed = q4_commit_elapsed(&cb, 1, nil);
+        [g_q4 signalEvent:g_snap_ev value:v];
+        pthread_mutex_unlock(&g_res_commit_mu);
         atomic_store(&g_snap_cmt, v);
+        q4_commit_slow(elapsed, "snap_take (snapshot copy)");
     }
     g_snap[k].ev = v;
     return g_snap[k].serial;

@@ -56,6 +56,7 @@ static id<MTLBuffer> readback(VkCommandBuffer cb, VkImage im) {
     replay(&rs, cb);
     NSUInteger row = extent * sizeof(uint32_t);
     id<MTLBuffer> out = [g_dev newBufferWithLength:row * extent options:MTLResourceStorageModeShared];
+    if (!out) abort();
     id<MTLBlitCommandEncoder> be = [rs.cb blitCommandEncoder];
     [be copyFromTexture:im->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
               sourceSize:MTLSizeMake(extent, extent, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:0];

@@ -42,11 +42,10 @@ static VkCommandBuffer commands(VkCommandBufferLevel level, VkRenderPass rp, VkF
         .flags = level == VK_COMMAND_BUFFER_LEVEL_SECONDARY ? VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT : 0, .pInheritanceInfo = &inherit};
     assert(h_vkBeginCommandBuffer(cb, &bi) == VK_SUCCESS); return cb;
 }
-static VkCommandBuffer begin(target *t, VkClearValue value) {
-    VkCommandBuffer cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+static void begin(VkCommandBuffer cb, target *t, VkClearValue value) {
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = &t->rp, .framebuffer = &t->fb,
         .renderArea = {{0, 0}, {t->fb.w, t->fb.h}}, .clearValueCount = 1, .pClearValues = &value};
-    h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE); return cb;
+    h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
 }
 static void submit(VkCommandBuffer cb) {
     assert(h_vkEndCommandBuffer(cb) == VK_SUCCESS);
@@ -63,12 +62,14 @@ static id<MTLBuffer> pixels(VkImage im, uint32_t mip, uint32_t layer, uint32_t b
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:tex.pixelFormat width:w height:h mipmapped:NO];
         td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> resolved = [g_dev newTextureWithDescriptor:td];
+        if (!resolved) abort();
         MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
         d.colorAttachments[0].texture = tex; d.colorAttachments[0].resolveTexture = resolved;
         d.colorAttachments[0].loadAction = MTLLoadActionLoad; d.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
         [[cb renderCommandEncoderWithDescriptor:d] endEncoding]; tex = resolved;
     }
     id<MTLBuffer> out = [g_dev newBufferWithLength:w * h * bytes options:MTLResourceStorageModeShared];
+    if (!out) abort();
     id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
     [be copyFromTexture:tex sourceSlice:layer sourceLevel:mip sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:out destinationOffset:0 destinationBytesPerRow:w * bytes destinationBytesPerImage:w * h * bytes options:option];
@@ -86,7 +87,8 @@ static void typed_colors(void) {
     };
     for (uint32_t k = 0; k < sizeof formats / sizeof *formats; k++) for (int whole = 0; whole < 2; whole++) {
         target t = make_target(formats[k].format, 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_1_BIT);
-        VkCommandBuffer cb = begin(&t, (VkClearValue){0});
+        VkCommandBuffer cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+        begin(cb, &t, (VkClearValue){0});
         VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .clearValue.color = formats[k].value};
         VkClearRect r = {whole ? (VkRect2D){{0, 0}, {4, 4}} : (VkRect2D){{1, 1}, {2, 2}}, 0, 1};
         h_vkCmdClearAttachments(cb, 1, &a, 1, &r); h_vkCmdEndRenderPass(cb); submit(cb);
@@ -139,7 +141,8 @@ static void view_layers(void) {
 }
 static void multisample(void) {
     target t = make_target(VK_FORMAT_R8G8B8A8_UNORM, 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_4_BIT);
-    VkCommandBuffer cb = begin(&t, (VkClearValue){.color.float32 = {0, 0, 1, 1}});
+    VkCommandBuffer cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+    begin(cb, &t, (VkClearValue){.color.float32 = {0, 0, 1, 1}});
     VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .clearValue.color.float32 = {1, 0, 0, 1}};
     VkClearRect r = {{{1, 1}, {2, 2}}, 0, 1};
     h_vkCmdClearAttachments(cb, 1, &a, 1, &r); h_vkCmdEndRenderPass(cb); submit(cb);
@@ -152,7 +155,8 @@ static void depth_stencil(void) {
     for (uint32_t k = 0; k < 3; k++) {
         target t = make_target(formats[k], 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_1_BIT);
         const fmt_t *f = fmt_of(formats[k]); int depth = fmt_has_depth(f), stencil = fmt_has_stencil(f);
-        VkCommandBuffer cb = begin(&t, (VkClearValue){.depthStencil = {1, 0x35}});
+        VkCommandBuffer cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+        begin(cb, &t, (VkClearValue){.depthStencil = {1, 0x35}});
         VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .clearValue.depthStencil = {0.25f, 0xa7}};
         VkClearRect r = {{{1, 1}, {2, 2}}, 0, 1};
         if (depth) h_vkCmdClearAttachments(cb, 1, &a, 1, &r);
@@ -213,7 +217,8 @@ static void draw_clear_draw(void) {
     assert(h_vkCreateQueryPool(&g_device, &qi, NULL, &q) == VK_SUCCESS);
     VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .clearValue.color.uint32 = {0xffffffff}};
     VkClearRect r = {{{1, 1}, {2, 2}}, 0, 1};
-    VkCommandBuffer cb = begin(&t, (VkClearValue){0}); VkDeviceSize offset = 0;
+    VkCommandBuffer cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+    begin(cb, &t, (VkClearValue){0}); VkDeviceSize offset = 0;
     VkViewport vp = {0, 0, 4, 4, 0, 1}; VkRect2D sc = {{0, 0}, {4, 4}};
     h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); h_vkCmdBindVertexBuffers(cb, 0, 1, &vb[0], &offset);
     h_vkCmdSetViewport(cb, 0, 1, &vp); h_vkCmdSetScissor(cb, 0, 1, &sc);

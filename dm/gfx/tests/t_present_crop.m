@@ -32,8 +32,9 @@ extern int g_shape_w,g_shape_h;   // t_host_stubs.c: the last shape the present 
 static int check_present_resize(id<MTLTexture> src, int w, int h) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
     d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageRenderTarget;
-    id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];res_add(out);res_commit();
+    id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];if(!out)abort();res_add(out);res_commit();
     id<MTL4CommandAllocator> al=[g_dev newCommandAllocator];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];id<MTLSharedEvent> ev=[g_dev newSharedEvent];
+    if(!al || !cb || !ev)abort();
     [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,src,out,NULL,g_present_uv[0],&g_fx_present);[cb endCommandBuffer];
     [g_q4 commit:&cb count:1];[g_q4 signalEvent:ev value:1];
     EXPECT("resize present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);res_remove(out);return kind;
@@ -114,12 +115,14 @@ static void check_external_screenshots(void) {
     td.usage = MTLTextureUsageRenderTarget;
     td.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [g_dev newTextureWithDescriptor:td];
+    if (!tex) abort();
     const uint8_t black[4 * 4 * 4] = {0};
     [tex replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:black bytesPerRow:16];
 
     id<MTLSharedEvent> ready = [g_dev newSharedEvent];
     id<MTLCommandQueue> producer = [g_dev newCommandQueue];
     id<MTLCommandBuffer> cb = [producer commandBuffer];
+    if (!ready || !producer || !cb) abort();
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = tex;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;

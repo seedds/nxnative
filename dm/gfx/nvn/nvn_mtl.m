@@ -7861,6 +7861,11 @@ static int mtl_pf_dpf(MTLPixelFormat pf) {
     }
     return NVN_DPF_FLOAT;
 }
+static int img_needs_class_view(id<MTLTexture> t, int dpf) {
+    if (dpf == NVN_DPF_FLOAT && t.textureType != MTLTextureTypeTextureBuffer) return 0;
+    MTLPixelFormat pf = t.pixelFormat;
+    return dpf == NVN_DPF_FLOAT ? tbuf_view_format(pf, dpf) != pf : mtl_pf_dpf(pf) != dpf;
+}
 // An image slot the shader declares as uint / int holding a texture of another class: on the Switch the shader's image format decides how the texel's bits are read. FINAL FANTASY TACTICS -
 // The Ivalice Chronicles' UI composite blends into the RGBA8 window texture in software, loading it as r32ui and unpacking the four bytes (uirender.tec, fragment 4cf1975ed1e36590); bound as
 // it was, an RGBA8Unorm texture in a texture2d<uint> argument read undefined values and translucent UI came out yellow and white. The slot gets a view of the same texel size in the
@@ -7880,19 +7885,23 @@ static void img_fit_upgrade(void) {
 // The view also takes the type the shader declares, with the layers fit_layers gives, as tex_fit does for sampling: Metal drops the stores to a 2D array bound to a texture2d argument.
 // Mario Kart World's blob shadows (GitHub issue #1648): a compute pass writes the mips of each layer of two R8 2D arrays through one-layer array views in image slots its shader declares
 // 2D; levels 1 and 2 stayed zero, and the decal that samples them drew a dark box around each kart's shadow
+// A 32-bit integer buffer image can also be read or written through a float declaration, as in LEGO Star Wars' exposure histogram. Use a float view of the same buffer so the integer
+// atomic slots and float load/store slots see the same bits, with the same coordinate bias (tbuf_lead).
 // An sRGB texture's image is its linear twin (pf_srgb_linear; no format-view usage needed for that pair): NVN's image loads and stores convert no sRGB, as OpenGL's image units, whose
 // formats have no sRGB ones, while Metal decodes a read and encodes a write through an sRGB format. Star Fox's upscaler network (ddc729bcdb4c8df9) samples its RGBA8_SRGB input, which
 // the game encodes once more beforehand, and stores its output, sRGB-encoded already, into an RGBA8_SRGB image (1536x864): Metal encoded it a second time, and the picture came out
 // pale and washed out, its dark parts lifted (median 0.16 → 0.46) and with them the bloom's haze and the fur's grain
 static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, MTLTextureType want, uint64_t *rid) {
-    size_t n = mtl_pf_bytes(t.pixelFormat); int u = dpf == NVN_DPF_UINT, cls = dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != dpf;
+    size_t n = mtl_pf_bytes(t.pixelFormat); int u = dpf == NVN_DPF_UINT, cls = img_needs_class_view(t, dpf);
+    const char *class_name = dpf == NVN_DPF_FLOAT ? "float" : u ? "uint" : "int";
     MTLPixelFormat lin = pf_srgb_linear(t.pixelFormat);
-    MTLPixelFormat pf = !cls ? (lin != MTLPixelFormatInvalid ? lin : t.pixelFormat) : n == 1 ? (u ? MTLPixelFormatR8Uint : MTLPixelFormatR8Sint) : n == 2 ? (u ? MTLPixelFormatR16Uint : MTLPixelFormatR16Sint) : n == 4 ? (u ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint)
+    MTLPixelFormat pf = !cls ? (lin != MTLPixelFormatInvalid ? lin : t.pixelFormat) : dpf == NVN_DPF_FLOAT ? tbuf_view_format(t.pixelFormat, dpf)
+                      : n == 1 ? (u ? MTLPixelFormatR8Uint : MTLPixelFormatR8Sint) : n == 2 ? (u ? MTLPixelFormatR16Uint : MTLPixelFormatR16Sint) : n == 4 ? (u ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint)
                       : n == 8 ? (u ? MTLPixelFormatRG32Uint : MTLPixelFormatRG32Sint) : n == 16 ? (u ? MTLPixelFormatRGBA32Uint : MTLPixelFormatRGBA32Sint) : MTLPixelFormatInvalid;
     id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
     while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
     if (pf == MTLPixelFormatInvalid || tid <= 0 || tid >= g_ntreg) {
-        RED_ONCE(106, "image read as %s in the shader, texture of Metal format %lu (texture ID %d): no view of that class, bound as is (reads undefined)", u ? "uint" : "int", (unsigned long)t.pixelFormat, tid); return nil; }
+        RED_ONCE(106, "image read as %s in the shader, texture of Metal format %lu (texture ID %d): no view of that class, bound as is (reads undefined)", class_name, (unsigned long)t.pixelFormat, tid); return nil; }
     NSUInteger ns = t.textureType != want ? fit_layers(t, want) : t.textureType == MTLTextureType3D ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
     if (!ns) {
         RED_ONCE(157, "image slot declared as Metal type %lu holds texture ID %d of type %lu (Metal format %lu, %lux%lu): no view bridges them, bound as is (its accesses are undefined, its stores lost)",
@@ -7909,7 +7918,7 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, MTLTextureType
     k.sw[0] = MTLTextureSwizzleRed; k.sw[1] = MTLTextureSwizzleGreen; k.sw[2] = MTLTextureSwizzleBlue; k.sw[3] = MTLTextureSwizzleAlpha;   // no channel mapping: the same view as tex_by_id's of these parameters
     id<MTLTexture> v = vc_get(base, &k);
     if (!v && (v = [base newTextureViewWithPixelFormat:pf textureType:want levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns)])) vc_put(base, r->t.pool, &k, v);
-    if (!v) { RED_ONCE(107, "cannot create the image view of class %s, Metal type %lu (texture ID %d, Metal format %lu, type %lu)", !cls ? "unchanged" : u ? "uint" : "int", (unsigned long)want, tid, (unsigned long)t.pixelFormat, (unsigned long)t.textureType); return nil; }
+    if (!v) { RED_ONCE(107, "cannot create the image view of class %s, Metal type %lu (texture ID %d, Metal format %lu, type %lu)", !cls ? "unchanged" : class_name, (unsigned long)want, tid, (unsigned long)t.pixelFormat, (unsigned long)t.textureType); return nil; }
     { static int once; if (cls && !once++) MLOG("image read in another class than its texture: first case texture ID %d Metal format %lu → %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
     { static int once; if (t.textureType != want && !once++) MLOG("image slot of another type than its texture: first case texture ID %d, Metal type %lu → %lu, %lu layers", tid, (unsigned long)t.textureType, (unsigned long)want, (unsigned long)ns); }
     { static int once; if (!cls && pf != t.pixelFormat && !once++) MLOG("sRGB texture bound as an image: loaded and stored raw through a view of its linear format, first case texture ID %d Metal format %lu → %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
@@ -9370,11 +9379,16 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
         // Integer targets: no blending. Maxwell ignores the blend enable on them; Metal refuses the pipeline (an assertion even without the API validation layer): Luigi's Mansion 3's integer G-buffer (PR #105)
         if (!k->logic && l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {   // a logic operation takes the place of blending (lop_key)
-            c.blendingEnabled = YES; blend_st bl = adv_blend(k->blend[l]);
+            blend_st bl = adv_blend(k->blend[l]);
             if (fs && fs->rf.color_known && (!(fs->rf.color_mask & 2) || (dual && !dual_fn)) && !fsfn) {
                 bl.src_rgb = blend_zero_src1(bl.src_rgb); bl.dst_rgb = blend_zero_src1(bl.dst_rgb);
                 bl.src_a = blend_zero_src1(bl.src_a); bl.dst_a = blend_zero_src1(bl.dst_a);
             }
+            // ONE + ZERO under ADD replaces the float attachment. LEGO Star Wars' bloom pass writes +Inf across an R11G11B10F target when this goes through Metal's blender.
+            if (pf_is_float(c.pixelFormat) && bl.src_rgb == NVN_BLEND_FUNC_ONE && bl.dst_rgb == NVN_BLEND_FUNC_ZERO &&
+                bl.src_a == NVN_BLEND_FUNC_ONE && bl.dst_a == NVN_BLEND_FUNC_ZERO &&
+                bl.eq_rgb == NVN_BLEND_EQUATION_ADD && bl.eq_a == NVN_BLEND_EQUATION_ADD) continue;
+            c.blendingEnabled = YES;
             c.sourceRGBBlendFactor = bfac(bl.src_rgb); c.destinationRGBBlendFactor = bfac(bl.dst_rgb);
             c.sourceAlphaBlendFactor = bfac(bl.src_a); c.destinationAlphaBlendFactor = bfac(bl.dst_a);
             c.rgbBlendOperation = bop(bl.eq_rgb); c.alphaBlendOperation = bop(bl.eq_a);
@@ -12563,7 +12577,7 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
                  (unsigned long)t.usage, (unsigned long)t.parentTexture.usage, (unsigned)b->reg, (unsigned)b->rw);
         t = nil;
     }
-    if (t && (swz_only || t.textureType != (MTLTextureType)b->dtt || (b->dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != b->dpf) || (pf_srgb_linear(t.pixelFormat) != MTLPixelFormatInvalid && t.textureType != MTLTextureTypeTextureBuffer))) {   // img_fit: a view of the shader's class, type, or of an sRGB's linear twin
+    if (t && (swz_only || t.textureType != (MTLTextureType)b->dtt || img_needs_class_view(t, b->dpf) || (pf_srgb_linear(t.pixelFormat) != MTLPixelFormatInvalid && t.textureType != MTLTextureTypeTextureBuffer))) {   // img_fit: a view of the shader's class, type, or of an sRGB's linear twin
         uint64_t r2 = 0; id<MTLTexture> v = img_fit(tid, t, b->dpf, (MTLTextureType)b->dtt, &r2);
         if (v) { t = v; *rid = r2; } else if (swz_only) t = nil;
     }

@@ -52,7 +52,7 @@ General host changes first needed here; each applies to every game:
 
 - **`nn::audio::SetAudioOutVolume` / `GetAudioOutVolume`** per output (`hle_audio.c`): [AudioOut volume kept per output](../../../docs/reference/audio.md#audioout-volume-kept-per-output).
 - **Storage takeover in the storage-sharing texture table** (`alias_take_over` in `nvn_mtl.m`, with its guards for live texture objects and lookups in the last 16 submissions, and the `shared textures N (…)` memory line): [Shared-storage entries taken over by a new texture](../../../docs/reference/rendering.md#shared-storage-entries-taken-over-by-a-new-texture).
-- The halfword jump-table padding (`half_count`) changed 1 to 6 tables in some `main`s, this one among them: [Halfword jump table landing pads sized to the largest entry](../../../docs/reference/rewriter.md#halfword-jump-table-landing-pads-sized-to-the-largest-entry).
+- The halfword jump-table padding changed 1 to 6 tables in some `main`s, this one among them: [Halfword jump table landing pads sized to the largest entry](../../../docs/reference/rewriter.md#halfword-jump-table-landing-pads-sized-to-the-largest-entry).
 
 ## Open
 

@@ -1,4 +1,5 @@
-"""The alpha test entry points (dmsh_alpha.py, dmsh_side.py): every fragment entry point gets one that takes the state and tests colour 0's alpha after the body, the output stays
+"""The alpha test entry points (dmsh_alpha.py, dmsh_side.py): main0 and main0_d get one that takes the state and tests colour 0's alpha after the body (main0_u holds the same test
+under its constant, dmsh_entry.fs_uint), the output stays
 a library that compiles for the Mac and the iPhone, and shaders without a float colour 0 alpha get none. With --fixture <dir>, writes the replay test's shaders (t_alpha.m): the base
 sources and their side libraries, compiled"""
 import pathlib, re, shutil, subprocess, sys, tempfile, unittest
@@ -23,12 +24,13 @@ fragment main0_out main0(float4 gl_FragCoord [[position]])
     return out;
 }
 '''
-BASE = MAIN + dmsh_entry.uint_entry(MAIN)   # main0_u as the build writes it (dmsh_entry.py), each colour a float or an integer by its function constant; the unit makes main0's body dm_body_main0
+BASE = MAIN + dmsh_entry.fs_uint(MAIN)   # main0_u as the build writes it (dmsh_entry.py), each colour a float or an integer by its function constant; the unit makes main0's body dm_body_main0
 VERTEX = '\nvertex float4 vertex_main(uint i [[vertex_id]]) { float2 v[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)}; return float4(v[i], 0, 1); }\n'
 ARGS = MAIN.replace('fragment main0_out main0(float4 gl_FragCoord [[position]])',
     'struct spvDescriptorSetBuffer0 { constant float* width [[id(0)]]; };\n\nfragment main0_out main0(float4 gl_FragCoord [[position]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])').replace('gl_FragCoord.x / 8.0', 'gl_FragCoord.x / *spvDescriptorSet0.width')
 TEST = 'float dm_a = 1.0f; dm_a = float(dm_r.m_0.w);\n    if (!dm_alpha_pass(dm_a, dm_alpha)) discard_fragment();'
 PARAM = f'constant dm_alpha_state& dm_alpha [[buffer({dmsh_abi.ALPHA_BUFFER})]]'
+UTEST = '    if (dm_at) { if (!dm_alpha_pass(float(out.m_0.w), dm_alpha)) discard_fragment(); }'   # main0_u's
 
 
 def compile_lib(src, root, name, sdk='macosx'):   # → the library path; CalledProcessError with the compiler's message
@@ -47,12 +49,14 @@ def variant(src):   # (the compile unit, its alpha test entry points)
 class AlphaVariant(unittest.TestCase):
     def test_every_entry_point(self):
         v, entries = variant(BASE)
-        self.assertEqual(entries, ['main0_a', 'main0_u_a'])
-        self.assertEqual(v.count(PARAM), 2)
+        self.assertEqual(entries, ['main0_a'])   # main0_u holds its own, under its constant
+        self.assertEqual(v.count(PARAM), 1)
         self.assertEqual(v.count(TEST), 1)   # main0_a
-        # main0_u_a: colour 0 is the float or the integer vector of its bits, whichever the pipeline's constant leaves
-        self.assertEqual(v.count('float dm_a = 1.0f; if (dm_uf0) dm_a = float(dm_r.m_0.w); if (dm_ui0) dm_a = as_type<float>(dm_r.m_0_ui.w);'), 1)
         self.assertIn('main0_out dm_r = dm_body_main0(gl_FragCoord);', v)
+        # main0_u: the state an argument only with the test, which reads colour 0's alpha before the outputs are typed
+        self.assertIn(f'fragment main0_out_u main0_u(float4 gl_FragCoord [[position]], constant dm_alpha_state& dm_alpha [[buffer({dmsh_abi.ALPHA_BUFFER}), function_constant(dm_at)]]', v)
+        self.assertIn(UTEST + '\n    main0_out_u r = {};', v)
+        self.assertEqual(dmsh_entry.typed_ops(BASE), {'alpha': True, 'logic': True})
 
     def test_the_body_stays_as_written(self):
         v, _ = variant(BASE)
@@ -69,7 +73,7 @@ class AlphaVariant(unittest.TestCase):
         for attr in ('[[early_fragment_tests]]', '[[ early_fragment_tests ]]'):   # the second: SPIR-V Cross's spelling
             with self.subTest(attr=attr):
                 v, entries = variant(BASE.replace('fragment main0_out main0(', attr + ' fragment main0_out main0('))
-                self.assertEqual(entries, ['main0_a', 'main0_u_a'])
+                self.assertEqual(entries, ['main0_a'])
                 self.assertIn(attr + ' fragment main0_out main0_a(float4 gl_FragCoord [[position]], ' + PARAM + ')', v)
                 self.assertIn(attr + ' fragment main0_out main0(float4 gl_FragCoord [[position]])', v)
                 self.assertNotIn(attr + ' static', v)
@@ -84,9 +88,12 @@ class AlphaVariant(unittest.TestCase):
             with self.subTest(why=why):
                 self.assertEqual(dmsh_alpha.refused(src), why)
                 self.assertFalse(variant(src)[1])
+                self.assertNotIn('dm_at', dmsh_entry.fs_uint(src) or '')   # nor in main0_u
 
     def test_taken_buffer_no_entry_point(self):
-        self.assertFalse(variant(BASE.replace('float4 gl_FragCoord [[position]])', f'float4 gl_FragCoord [[position]], constant float& x [[buffer({dmsh_abi.ALPHA_BUFFER})]])', 1))[1])
+        taken = MAIN.replace('float4 gl_FragCoord [[position]])', f'float4 gl_FragCoord [[position]], constant float& x [[buffer({dmsh_abi.ALPHA_BUFFER})]])', 1)
+        self.assertFalse(variant(taken + dmsh_entry.fs_uint(taken))[1])
+        self.assertFalse(dmsh_entry.typed_ops(dmsh_entry.fs_uint(taken))['alpha'])
 
     @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
     def test_compiles_on_both_platforms(self):
@@ -98,9 +105,9 @@ class AlphaVariant(unittest.TestCase):
                         except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
-def fixture(out):   # t_alpha.m's shaders: <name>.metal (the base, compiled by the test) and <key>_bx.metallib (the side library the host loads), for key 0 and 1
+def fixture(out):   # t_alpha.m's shaders: <name>.metal (base) and <key>_bx.metallib (side library), keys 0/1 for RGBA and key 2 for an RGB-only export with MSL padding
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
-    for i, src in enumerate((MAIN, ARGS)):
+    for i, src in enumerate((MAIN, ARGS, MAIN)):
         (out / f'base{i}.metal').write_text(src + VERTEX)
         u, info = dmsh_side.unit(src)
         lib = compile_lib(u + VERTEX, out, f'a{i}')

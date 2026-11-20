@@ -144,6 +144,25 @@ class Matching(unittest.TestCase):
         missing = image({0x100: caller(0x100, 0x500)})
         with self.assertRaisesRegex(MatchError, '0 matching'): Image(missing, 0x2000).match(self.rule)
 
+    def test_called_by_identifies_one_of_two_identical_callees(self):
+        leaf = [0x52800020, RET]
+        init = [0x52800080, RET]
+        original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: init})
+        parsed = Image(original, 0x2000)
+        clock: dict[str, object] = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
+        with self.assertRaisesRegex(MatchError, '2 matching'):
+            parsed.match(dict(clock, name='clock'))
+
+        clock['called_by'] = dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12)
+        startup = dict(size=8, fingerprints=[parsed.fingerprint(0x700)], cuts=[(0, '80008052', '60008052', 'startup')])
+        rule = dict(name='rate', functions=[startup, clock])
+        moved = image({0x800: caller(0x800, 0x1200), 0x1200: leaf, 0x1400: leaf, 0x1600: init})
+        self.assertEqual([cut[0] for cut in Image(moved, 0x2000).match_patch(rule)], [0x1600, 0x1200])
+
+        # A changed callee invalidates the caller fingerprint, so the startup cut is withheld as well.
+        struct.pack_into('<I', moved, 0x1200, 0x52800040)
+        self.assertEqual(resolve(moved, 0x2000, [rule], lambda _: None), [])
+
     def test_original_bytes_still_required(self):
         rule = copy.deepcopy(self.rule); rule['cuts'][0] = (8, '00000000', 'e0124091', 'heap')
         with self.assertRaisesRegex(MatchError, 'original bytes differ'): Image(self.original, 0x2000).match(rule)

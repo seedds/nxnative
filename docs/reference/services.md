@@ -969,6 +969,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
+### The display's largest layer from `vi::ListDisplays`
+
+- **Symptom:** A game draws into a 3840x2160 swapchain on a 4K display and sets `WindowCrop 0,0 1920x1080`.
+- **Cause:** The game sizes its docked window from the largest layer in `ListDisplays` (`DisplayInfo` +0x50 and +0x58), then caps it at `QueryDisplayBufferMaxResolution`. The host hardcoded 1920x1080 in the first call, so the 4K cap in the second call could not raise the window size.
+- **Fix:** `hle_vi.c` shares [the display's largest buffer](#the-displays-largest-buffer) between both replies for Switch 2 SDKs. Switch 1 SDKs get 1920x1080 from `ListDisplays`.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) ([issue #2895](https://github.com/seedds/nxnative/issues/2895)).
+
 ### `vi::InitializeWithVrrLfcEnabled`
 
 - **Symptom:** SIGSEGV reading address 0 in `SdkMutexType::Lock` (`sdk+0x171ef8`) right after graphics initialize, under `nn::vi2::InitializeWithVrrLfcEnabled`.

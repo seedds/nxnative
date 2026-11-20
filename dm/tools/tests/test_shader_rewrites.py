@@ -59,6 +59,63 @@ class UniformMatchScan(unittest.TestCase):
         self.assertGreater(matches, 1000)   # the corpus must exercise matching paths, not only no-ops
 
 
+class GuardScans(unittest.TestCase):
+    # dmsh_rewrite.select_guards' scans against the patterns tried at every character, kept here as they were: the same matches in the same order, with their spans and groups
+    SIZE = r'\(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> (?:2|4)u\)' % dmsh_abi.CBSIZE_BANK
+    TABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % dmsh_abi.SBLEN_BANK
+    GBOOL = re.compile(r'\bbool (_\d+) = [^;\n]* < %s;' % SIZE)
+    SBOOL = re.compile(r'\bbool (_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (TABLE, TABLE))
+    NAME = re.compile(r'(?<!\[)\b(_\d+) \?')
+    ROW, BUF = '(*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0]', '(*spvDescriptorSet0.cp_s3)._m0[_12 ? _3 : 0]'
+    SIZED = 'bool _5 = _3 < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);' % dmsh_abi.CBSIZE_BANK
+    ROW_SIZED = SIZED.replace(' >> 2u', ' >> 4u')
+    LENGTH = 'bool _12 = (uint(_3) + {0}.z) < {0}.w;'.format('(*spvDescriptorSet0.cp_c%d)._m0[1]' % dmsh_abi.SBLEN_BANK)
+    CHOICE, STORED = '_5 ? %s[_4] : 0.0' % ROW, '_12 ? %s : 0u' % BUF
+
+    @staticmethod
+    def seen(m):
+        return m.span(), m.groups(), m.groupdict()
+
+    def compare(self, src, conds=('_5', '_12')):
+        """→ how many matches the two comparisons and the two choices have on src, and whether a name of conds is left: each scan as its pattern"""
+        counts = []
+        for new, old in ((dmsh_rewrite._GBOOL, self.GBOOL), (dmsh_rewrite._SBOOL, self.SBOOL)):
+            want = [self.seen(m) for m in old.finditer(src)]
+            self.assertEqual([self.seen(m) for m in new.finditer(src)], want, src); counts.append(len(want))
+        def logged(log):   # a replacement that records its matches; every third is left as it is, as a choice on another name is
+            def repl(m):
+                log.append(self.seen(m)); return m.group(0) if len(log) % 3 == 0 else '<%d>' % len(log)
+            return repl
+        for pat in (dmsh_rewrite._GROW, dmsh_rewrite._SROW):
+            want, got = [], []
+            text = pat.sub(logged(want), src)
+            self.assertEqual(dmsh_rewrite._gsub(pat, logged(got), src), text, src); self.assertEqual(got, want, src); counts.append(len(want))
+        want = next((m for m in self.NAME.finditer(src) if m.group(1) in conds), None); got = dmsh_rewrite._gleft(src, conds)
+        self.assertEqual(got and self.seen(got), want and self.seen(want), src)
+        return counts + [int(bool(want))]
+
+    def test_boundaries_and_both_forms(self):
+        for prefix in ('', 'x', '_', '.', 'é', '́', '\x00', ' ', '(', '>', '>(', 'x(', '((', '[', '_5 ? '):
+            for body in (self.SIZED, self.ROW_SIZED, self.LENGTH, self.CHOICE, '(%s)' % self.CHOICE, self.CHOICE.replace('[_4]', '.z'), self.STORED, '(%s)' % self.STORED, '_5 ? _7 : 0.0'):
+                for suffix in ('', ';', ')', '.x', 'u', '1', ' ? ', dmsh_rewrite._GREAD, '\n'):
+                    self.compare(prefix + body + suffix)
+        self.assertEqual(self.compare(self.SIZED + '\nfloat _6 = %s;' % self.CHOICE), [1, 0, 1, 0, 1])
+        self.assertEqual(self.compare(self.ROW_SIZED + '\nfloat _6 = %s;' % self.CHOICE), [1, 0, 1, 0, 1])
+        self.assertEqual(self.compare(self.LENGTH + '\nuint _6 = as_type<uint>(%s) + (%s);' % (self.STORED, self.STORED)), [0, 1, 0, 2, 1])
+        self.assertEqual(self.compare('xbool' + self.SIZED[4:] + ' float _6 = _7 * (%s);' % self.CHOICE), [0, 0, 1, 0, 1])
+        self.assertEqual(self.compare('float _6 = %s[_4];' % self.ROW), [0, 0, 0, 0, 0])   # the index's own choice is no name's
+
+    def test_as_the_patterns_on_random_text(self):
+        rng = random.Random(1932)
+        parts = [self.SIZED, self.ROW_SIZED, self.LENGTH, self.SIZED.replace('_5', '_١'), 'bool ', 'bool _7 = _3', ' < ', self.CHOICE, '(%s)' % self.CHOICE, self.CHOICE.replace('[_4]', '.z'),
+                 self.CHOICE.replace('_5', '_7'), self.STORED, '(%s)' % self.STORED, self.ROW, self.BUF, '_5', '_12', '_7', '_5 ? ', '_12 ?', ' ? ', ' ?', ' : 0.0', ' : 0', 'u',
+                 dmsh_rewrite._GREAD, '(*spvDescriptorSet0.fp_c14)._m0[', '(', ')', '[', ']', '>', '.', '_', 'x', '1', '١', 'é', '́', '\x00', ' ', ';', '\n', ' = ']
+        totals = [0] * 5
+        for _ in range(10000):
+            totals = [a + b for a, b in zip(totals, self.compare(noise(rng, parts, rng.randrange(30))))]
+        for n in totals: self.assertGreater(n, 1000)   # the corpus must exercise every scan's matching paths, not only no-ops
+
+
 class AssignedOnce(unittest.TestCase):
     def test_a_name_assigned_once(self):
         self.assertTrue(dmsh_fetch._once('float _12 = 1.0;\n', '_12'))

@@ -113,6 +113,7 @@ static struct {
     int (*find_buf)(const void *md, const char *k, void **buf);
     size_t (*size)(const void *buf);
     void *(*nvn_sync)(const void *buf);   // used only by the native texture mode; Engage's subsdk0 has it too, but it is not required
+    int native_color_keys;
 } G;
 
 // The movie signal of the frame step (hle_nvn.c fps_step_cap and high_cap_tick). The players of the games it steps take one picture per game frame rather than by the picture's time,
@@ -213,6 +214,9 @@ static void md_syms(void) {
     G.find_i32 = msym("_ZNK5movie9MediaData9FindInt32EPKcPi");
     G.find_buf = msym("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
     G.size = buffer_getter("_ZNK5movie6Buffer4SizeEv", "_ZN5movie6Buffer4SizeEv");
+    const void *converter = guest_sym("_ZN5movie25convertMessageToMediaDataERKN7android2spINS0_8AMessageEEEPNS_9MediaDataE");
+    const module_t *movie = converter ? module_of(converter) : NULL;
+    G.native_color_keys = movie && movie->movie_native_color_keys;
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
@@ -240,7 +244,6 @@ static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
 // g_dfmu and each decoder's dmu are held while guest code signals events, so guest threads take them with dm_host_lock: a thread waiting for one counts as blocked, and the
 // signaller's handoff does not wait for it (Kirby and the Forgotten Land froze at its first guide movie: the handoff waited for the input thread, which waited for dmu)
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
-void dm_host_lock(pthread_mutex_t *m);   // hle_thread.c
 static pthread_mutex_t g_dfmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_dfcv = PTHREAD_COND_INITIALIZER;
 static struct { void *d; int ev; uint64_t due; } g_dfq[64]; static int g_ndfq, g_dfthr;
 static void md_defer_body(void *arg);
@@ -908,13 +911,14 @@ static void md_format(mdec_t *d, void *md) {
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
     G.set_i32(md, "nv12-uv-stride", stride); G.set_i32(md, "nv12-width", w); G.set_i32(md, "nv12-height", h);
-    // The picture's colour space, as DecoderImpl::GetOutputBufferFormatFromDecoder (SDK 4 subsdk0+0x2d8c60) sets it: the hardware decoder's hw-buf-ColorSpace / 32 + 1, 1 to 5. Kirby Star Allies' player
-    // (main+0x1529f8) indexes its YUV → RGB matrices with it: 1 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, 5 BT.601 limited; anything else, an unset key too, selects an
-    // all-zero matrix, which drew its movies black. By the rule md_rgba uses: what the stream declares, undeclared BT.709 from 720 lines up. VideoToolbox's H.264 pictures are always video range (open_session)
+    // SDK 7.3.2 uses the hardware colour indices directly. SDK 4.4.1 adds one and also uses 1 for limited BT.601.
+    // Keep the established mapping for unrecognized implementations and old rewrite outputs. H.264 planes from VideoToolbox are video range.
     int b709, full = 0;
     if (d->avc) b709 = mavc_bt709(d->avc, h);
     else { b709 = d->vpx_cs == VPX_CS_BT_709 || (d->vpx_cs == VPX_CS_UNKNOWN && h >= 720); full = d->vpx_full; }
-    G.set_i32(md, "nv12-colorspace", (b709 ? 3 : 1) + full);
+    int key = (b709 ? 3 : 1) + full;
+    if (G.native_color_keys) key = b709 ? 2 + full : full ? 1 : 4;
+    G.set_i32(md, "nv12-colorspace", key);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;

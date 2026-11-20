@@ -11,8 +11,22 @@
 # gives for the same groups changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
 # Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of each further library's functions...)
 # → (base bytes, each further library's bytes...); shared_body(msl) → msl with main0's body as dm_body_main0 (None on an unknown shape), calling(e, name, ret, tail) → an entry point calling it
+#
+# A vertex shader's libraries come from one Metal compile too (vs_unit). Its body was optimized nine times in two compiles, twelve in three with integer inputs: <key>_b held it in main0,
+# main0_z and main0_gs, the pulling library <key>_bp (dmsh_pull.py) in main0, main0_z and twice in each wide-line entry, the shadow-input library <key>_bv (dmsh_vin.py) in three more.
+# The unit holds the body once, as dm_vs_body, and is cut into the same three libraries:
+#   · always_inline in the entry points pipelines are made of: main0 and main0_z, their pulling versions main0_p / main0_zp and their shadow-input versions main0_v / main0_zv (one
+#     unit cannot name them all main0: the reflection's `pull` and `vin` give the names, which the host and pso_offline.py read). The optimizer then sees in each what it saw
+#     before, the copy of the body, so the GPU gets the code it got: every output compared on the GPU was bit-identical (the libraries are not byte-identical: main0 applies the
+#     depth line once, after the call, where the copy had it before every return);
+#   · one out-of-line copy, dm_vs_body_o, for the wide-line entries main0_wl / main0_z_wl, which few draws take and which ran the body twice each. A plain static function, never
+#     noinline: marked noinline, a body shared with main0_gs changed that entry's results in 24 of 52 shaders tried (up to 12,544 units in the last place);
+#   · main0_gs (dmsh_geometry.capture) and the rarer entry points (main0_discard, main0_tf, the layer ones) stay whole copies: main0_gs has its capture epilogue at every return, and
+#     with it once after a call one shader of 52 gave other low bits (docs/reference/shaders.md, One compile for a vertex shader's libraries, has the measurements).
+# Usage: vs_unit(source with every entry point, dmsh_pull.variant's source or None, dmsh_vin.variant's source or None) → (the compile unit, the reflection's names of the pulling
+# entry points {'entry', 'entry_z', 'entry_wl', 'entry_z_wl'}, of the shadow-input ones {'entry', 'entry_z'}); raises ValueError on a source of another shape
 import re, struct
-import dmsh_alpha, dmsh_logic
+import dmsh_alpha, dmsh_logic, dmsh_pull
 
 _ENTRY = re.compile(r'^((?:\[\[[^\]]*\]\]\s*)?)fragment\s+(\w+)\s+(\w+)\s*\(', re.M)   # an attribute may come first on the line ([[ early_fragment_tests ]])
 
@@ -108,6 +122,75 @@ def unit(msl) -> tuple[str | None, dict]:
     plain = [f'{e["attr"]}fragment {e["ret"]} {e["name"]}({", ".join(e["params"])})\n{{\n    return dm_body_{e["name"]}({e["args"]});\n}}\n' for e in es]
     helpers = ('' if 'struct dm_alpha_state ' in msl else dmsh_alpha.HELPER) + ('' if 'struct dm_logic_state ' in msl else dmsh_logic.HELPER)   # main0_u brings them when it uses them
     return msl[:es[0]['start']] + helpers + dmsh_logic.constants(targets) + ''.join(src) + msl[at:] + '\n' + ''.join(plain + thin), {'alpha': list(alpha), 'logic': list(logic)}
+
+
+_VENTRY = re.compile(r'^vertex (\S+) (\w+)\((.*)\)\n\{\n', re.M)   # a vertex entry point as the translator and the chain's tools write it: its header on one line
+_VEND = re.compile(r'\n\}(?:\n|$)')
+VS_DEPTH = 'out.gl_Position.z = fma(out.gl_Position.z, 0.5, out.gl_Position.w * 0.5);'   # the line dmsh_entry.vs_depth puts before every `return out;` of main0
+VS_BODY = 'static __attribute__((always_inline)) main0_out dm_vs_body('
+VS_BODY_OUT = 'static main0_out dm_vs_body_o('   # the out-of-line copy: no noinline (see above)
+VS_PULLED = {'main0': 'main0_p', 'main0_z': 'main0_zp'}   # the pulling entry points' names in the unit, where main0 and main0_z are the shader's own
+VS_SHADOW = {'main0': 'main0_v', 'main0_z': 'main0_zv'}   # the shadow-input ones
+
+
+def vs_entries(src):
+    """{name: ret, params (the text between its parentheses), start, body (after its opening brace's line), end (after its closing brace's line)} of the vertex entry points. Raises
+    ValueError when one has no end"""
+    out = {}
+    for m in _VENTRY.finditer(src):
+        e = _VEND.search(src, m.end() - 1)
+        if not e: raise ValueError(f'no end of {m[2]}')
+        out[m[2]] = {'ret': m[1], 'params': m[3], 'start': m.start(), 'body': m.end(), 'end': e.end()}
+    return out
+
+
+def vs_unit(full, pulled=None, shadowed=None):
+    es = vs_entries(full)
+    if 'main0' not in es or 'main0_z' not in es: raise ValueError('no main0 and main0_z')
+    e0, ez = es['main0'], es['main0_z']
+    if e0['end'] > ez['start'] or (e0['ret'], ez['ret']) != ('main0_out', 'main0_out') or e0['params'] != ez['params']: raise ValueError('main0 and main0_z differ in more than their bodies')
+    gl, z = full[e0['body']:e0['end']], full[ez['body']:ez['end']]   # the body as main0 has it, with the depth line, and as main0_z has it
+    if 'return out;' not in z or gl != z.replace('return out;', VS_DEPTH + '\n    return out;'): raise ValueError('main0 is not main0_z with the depth line')
+    taken = [n for n in (*VS_PULLED.values(), *VS_SHADOW.values(), 'main0_wl', 'main0_z_wl') if n in es] + [n for n in ('dm_vs_body', 'dm_wl_in') if n + '(' in full]
+    if taken: raise ValueError(f'the source has a {taken[0]} already')
+    decl, args = [], []
+    for p in _params(e0['params']):
+        d = re.sub(r'\s*\[\[.*\]\]$', '', p); a = re.search(r'(\w+)$', d)
+        if not a or 'function_constant' in p: raise ValueError(f'a parameter of main0: {p[:80]}')
+        decl.append(d); args.append(a.group(1))
+    decl, args = ', '.join(decl), ', '.join(args)
+    def calling(text, fn, n_gl, n_z):   # text with its copies of the body as calls of fn; n_gl, n_z: how many copies of each form it must hold
+        if (text.count(gl), text.count(z)) != (n_gl, n_z): raise ValueError(f'{text.count(gl)} and {text.count(z)} copies of the body where {int(n_gl)} and {int(n_z)} belong')
+        return text.replace(gl, f'    main0_out out = {fn}({args});\n    {VS_DEPTH}\n    return out;\n}}\n').replace(z, f'    return {fn}({args});\n}}\n')
+    def renamed(variant, names):   # a variant's main0 / main0_z under the unit's names: each keeps its prologue (the inputs pulled, or the shadows ORed in) and calls the body
+        ve, text, got = vs_entries(variant), '', {}
+        if 'main0' not in ve: raise ValueError('a variant without main0')
+        for n, new in names.items():
+            if n not in ve: continue
+            one = variant[ve[n]['start']:ve[n]['end']]
+            if not one.startswith(f'vertex main0_out {n}('): raise ValueError(f'the variant\'s {n} does not return main0_out')
+            text += '\n' + calling(f'vertex main0_out {new}(' + one[len(f'vertex main0_out {n}('):], 'dm_vs_body', n == 'main0', n == 'main0_z'); got['entry' if n == 'main0' else 'entry_z'] = new
+        return text, got
+    wide = bool(pulled) and '\nstatic inline main0_in dm_wl_in(' in pulled
+    head = full[:e0['start']]
+    if pulled:   # the layout block and its fetch, where dmsh_pull.variant puts them
+        ui = head.find('using namespace metal;')
+        if ui < 0: raise ValueError('no "using namespace metal;"')
+        ui += len('using namespace metal;'); head = head[:ui] + '\n\n' + dmsh_pull.FETCH + (dmsh_pull.WL_MSL if wide else '') + head[ui:]
+    src = (head + f'{VS_BODY}{decl})\n{{\n' + z + '\n' + (f'{VS_BODY_OUT}{decl})\n{{\n    return dm_vs_body({args});\n}}\n\n' if wide else '')
+           + calling(full[e0['start']:ez['end']], 'dm_vs_body', 1, 1) + full[ez['end']:])   # main0 and main0_z; what follows them stays: main0_gs and the rarer entry points, each a whole copy
+    pn, vn = {}, {}
+    if pulled:
+        text, pn = renamed(pulled, VS_PULLED); src += text
+        if wide:   # dm_wl_in, dm_wl_mix, then each entry's body function dm_wlb_<entry> and its wide-line entry <entry>_wl: the pulling variant's last text
+            wl = pulled[pulled.index('\nstatic inline main0_in dm_wl_in('):]
+            pn.update({k: n + '_wl' for n, k in (('main0', 'entry_wl'), ('main0_z', 'entry_z_wl')) if f'\nvertex main0_out {n}_wl(' in wl})
+            src += calling(wl, 'dm_vs_body_o', 'entry_wl' in pn, 'entry_z_wl' in pn)
+    if shadowed:
+        st = re.search(r'\nstruct main0_in_v\n\{\n.*?\n\};', shadowed, re.S)
+        if not st: raise ValueError('a shadow-input variant without main0_in_v')
+        text, vn = renamed(shadowed, VS_SHADOW); src += '\n' + st[0] + '\n' + text
+    return src, pn, vn
 
 
 def _tags(b, p, end):   # the tag list at p as [(tag, value)]

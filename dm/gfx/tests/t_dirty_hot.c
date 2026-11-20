@@ -1,8 +1,8 @@
-// Hot pages in dirty-page tracking (T-141): a page written again and again while a reader keeps protecting it cools (left writable, always counted as written) instead of
-// faulting at every write, and comes back under protection once its time is up; and a fault on a page the tracker holds as writable ("none") while the kernel has it read-only
-// (someone else's protection) is not claimed, so it cannot loop.
-// Expected values come from the rule, not from the implementation: after HOT_N quick write-faults the next protection leaves the page writable and a write to it neither faults
-// nor goes unseen (nvn_dirty_since says written for any stamp); after the cooling time the page is protected again, a stamp taken then sees it clean until the next write.
+// Write-pending pages in dirty-page tracking (T-141, issue #3097): a page made writable for a faulting game write stays writable, and every reader counts it as written, until
+// a whole frame has passed since that write; then the next protection protects it with a fresh generation. And a fault on a page the tracker holds as writable ("none")
+// while the kernel has it read-only (someone else's protection) is not claimed, so it cannot loop.
+// Expected values come from the rule, not from the implementation: in the frame of the write and the next, protection leaves the page writable, a write to it neither faults
+// nor goes unseen; once a whole frame has passed it is protected again, an earlier stamp sees it as written once more, a stamp taken then sees it clean until the next write.
 #include "../nvn/nvn_dirty.c"
 #include <stdio.h>
 
@@ -14,7 +14,7 @@ void crash_install(void);
 static int g_fail;
 #define EXPECT(name, want, got) do { \
     long long want_ = (long long)(want), got_ = (long long)(got); \
-    printf("%-66s expected %-4lld → got %-4lld %s\n", name, want_, got_, want_ == got_ ? "✓" : "✗"); \
+    printf("%-70s expected %-4lld → got %-4lld %s\n", name, want_, got_, want_ == got_ ? "✓" : "✗"); \
     if (want_ != got_) g_fail++; \
 } while (0)
 
@@ -22,39 +22,54 @@ static int kernel_writable(const void *p) { return page_writable((uintptr_t)p); 
 
 int main(void) {
     crash_install();
-    g_cool_ms = 300;   // short, so the test does not wait 2 s
     size_t pg = (size_t)getpagesize();
-    volatile uint8_t *page = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    volatile uint8_t *page = mmap(NULL, 6 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (page == MAP_FAILED) { perror("mmap"); return 2; }
-    nvn_dirty_add_range((const void *)page, 4 * pg);
+    nvn_dirty_add_range((const void *)page, 6 * pg);
+    nvn_dirty_frame();
 
-    // A ping-pong: protect, write (faults), HOT_N times within HOT_MS of each other
-    uint64_t f0 = atomic_load(&g_faults);
-    for (int k = 0; k < HOT_N; k++) { nvn_dirty_protect((const void *)page, pg); page[8] = (uint8_t)k; }
-    EXPECT("each of the quick writes faulted once", HOT_N, atomic_load(&g_faults) - f0);
-    EXPECT("the page cooled", 1, atomic_load(&g_cools));
+    // A write faults: the page is write-pending for this frame and the next
+    nvn_dirty_protect((const void *)page, pg);
+    uint64_t f0 = atomic_load(&g_faults); page[8] = 1;
+    EXPECT("the first write after protection faults", 1, atomic_load(&g_faults) - f0);
+    uint64_t st = nvn_dirty_now(); nvn_dirty_protect((const void *)page, pg);    // a reader: stamp, protect, read (the ping-pong's re-protection)
+    EXPECT("protection in the same frame leaves the page writable (kernel)", 1, kernel_writable((const void *)page));
+    uint64_t f1 = atomic_load(&g_faults); page[9] = 2;
+    EXPECT("so the writer's next store does not fault", 0, atomic_load(&g_faults) - f1);
+    EXPECT("and the reader sees that store (its stamp counts the page as written)", 1, nvn_dirty_since((const void *)page, 16, st));
+    nvn_dirty_frame();
+    nvn_dirty_protect((const void *)page, pg);
+    EXPECT("one frame later (not a whole frame since the write) still writable", 1, kernel_writable((const void *)page));
 
-    // Cooling: protection leaves it writable, writes do not fault, and every stamp sees it as written
-    uint64_t st = nvn_dirty_now(); nvn_dirty_protect((const void *)page, pg);
-    EXPECT("protection while cooling leaves the page writable (kernel)", 1, kernel_writable((const void *)page));
-    uint64_t f1 = atomic_load(&g_faults); page[9] = 0x77;
-    EXPECT("a write while cooling does not fault", 0, atomic_load(&g_faults) - f1);
-    EXPECT("a stamp taken just before that protection sees the page as written", 1, nvn_dirty_since((const void *)page, 16, st));
-    EXPECT("so does a stamp taken now", 1, nvn_dirty_since((const void *)page, 16, nvn_dirty_now()));
-    nvn_dirty_protect((const void *)(page + pg), pg);
-    EXPECT("the next page, never hot, is protected as usual", 0, kernel_writable((const void *)(page + pg)));
-
-    // The time is up: protected again, writes seen as usual
-    usleep((useconds_t)(g_cool_ms + 100) * 1000);
-    uint64_t old = st; nvn_dirty_protect((const void *)page, pg);
-    EXPECT("after the cooling time protection makes it read-only again", 0, kernel_writable((const void *)page));
-    EXPECT("a stamp from while it cooled still sees it as written", 1, nvn_dirty_since((const void *)page, 16, old));
+    // A whole frame has passed: protected again, written seen as usual
+    nvn_dirty_frame();
+    uint64_t old = nvn_dirty_now() - 1; nvn_dirty_protect((const void *)page, pg);
+    EXPECT("once a whole frame has passed, protection makes it read-only again", 0, kernel_writable((const void *)page));
+    EXPECT("a stamp from while it was pending sees it as written once more", 1, nvn_dirty_since((const void *)page, 16, old));
     uint64_t st2 = nvn_dirty_now(); nvn_dirty_protect((const void *)page, pg);
-    EXPECT("a stamp taken after it is protected again sees it clean", 0, nvn_dirty_since((const void *)page, 16, st2));
-    usleep(150 * 1000);   // past HOT_MS: this write is a single fault, not a hot run
-    page[10] = 1;
-    EXPECT("a later write is seen", 1, nvn_dirty_since((const void *)page, 16, st2));
-    EXPECT("one slow write does not cool it again", 1, atomic_load(&g_cools));
+    EXPECT("a stamp taken after that sees it clean", 0, nvn_dirty_since((const void *)page, 16, st2));
+    nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)page, pg);
+    EXPECT("quiet frames bring no more re-reads", 0, nvn_dirty_since((const void *)page, 16, st2));
+    page[10] = 3;
+    EXPECT("a later write faults and is seen", 1, nvn_dirty_since((const void *)page, 16, st2));
+    EXPECT("pages made write-pending so far (two faulting writes)", 2, atomic_load(&g_pends));
+
+    // A page never written is protected as usual
+    nvn_dirty_protect((const void *)(page + pg), pg);
+    EXPECT("a page with no faulting write is protected at once", 0, kernel_writable((const void *)(page + pg)));
+
+    // A sparse tile's protection that leaves a write-pending page writable moves the sparse write count (no fault will)
+    volatile uint8_t *sp = page + 3 * pg;
+    nvn_dirty_protect((const void *)sp, pg); sp[0] = 1;
+    uint64_t sw = nvn_dirty_sparse_writes(); nvn_dirty_protect_sparse((const void *)sp, pg);
+    EXPECT("sparse protection of a write-pending page moves the sparse write count", 1, nvn_dirty_sparse_writes() - sw);
+
+    // DM_NVN_DIRTY_PENDING=0: protected again at once, as before
+    g_pend_on = 0;
+    volatile uint8_t *off = page + 4 * pg;
+    nvn_dirty_protect((const void *)off, pg); off[0] = 1; nvn_dirty_protect((const void *)off, pg);
+    EXPECT("with pending off, protection right after a write makes it read-only", 0, kernel_writable((const void *)off));
+    g_pend_on = 1;
 
     // Somebody else's read-only protection over a page the tracker holds as writable: the fault is not the tracker's
     uintptr_t third = (uintptr_t)page + 2 * pg;

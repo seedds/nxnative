@@ -25,6 +25,7 @@ The provisional profile's guesses held.
 
 - 3,549 XNB files, 3,535 of them LZ4 and 8 LZX (MonoGame's compressed XNB; LZX is flag 0x80, LZ4 flag 0x40).
 - **Current:** 65 shaders (23 pixel, 42 vertex): 64 in the MonoGame effects in `main` (SpriteBatch's and the game's) and one in `Content/Effects/ShadowRemove.xnb`, an LZ4 XNB that `shader_split.py` decompresses before reading it (`xnb_decompress`).
+- **Resolved: duplicate representative labels (2026-11-21, [issue #2924](https://github.com/seedds/nxnative/issues/2924)).** Checked first-copy selection (`8d62601f`) over the registered v1310720 `main` (`e7f84509…`, 66 MGFX occurrences reducing to 64 keys with byte-identical duplicate control sections and code) updates 14 rows in [`shader_map.tsv`](shader_map.tsv): 2 source labels (`f959a0f8e9641f25` moves from `main#MGFX@0xbd87e44#2` to `main#MGFX@0xbd647d5#18`, `d94db26519ed226f` moves from `main#MGFX@0xbd95ee0#0` to `main#MGFX@0xbd647d5#8`) and 12 `ps_main.bin` package indices. All 65 shader keys, stages, packages, `shader_facts.tsv`, and `shader_pairs.tsv` remain unchanged. Shared mechanism: [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - Nearly everything draws with SpriteBatch: the prewarm list is its two shaders and four pipelines, and with it nothing was built on demand over the route above.
 
 ## Input

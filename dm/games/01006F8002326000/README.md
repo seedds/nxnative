@@ -45,6 +45,7 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 
 - RomFS: 97,997 zstd files (`.zs`, most of them models), BWAV sound, a few Yaz0 SARC archives (`.szs`). The profile's `romfs_marker` is `Movie/OpeningMovie.webm`.
 - **Current:** 9,766 BNSH programs: `Shader/Park_UBER_All` (3,385) and the other bfsha / sharcb in `Shader/`, agl's `System/Agl/agl_resource` (3,206), particle effects in `Effect/` (2,522), models' own bfsha in `Model/`, layouts (bgsh) in `Layout/`, the game's keyboard in `Swkbd/` and 40 in `main`.
+- **Resolved: duplicate representative labels (2026-11-21, [issue #2924](https://github.com/seedds/nxnative/issues/2924)).** Checked first-copy selection (`8d62601f`) over the registered v2228224 `main` (`ff1d1c05…`, 96 embedded BNSH occurrences reducing to 40 keys with byte-identical duplicate control sections and code) updates 36 rows in [`shader_map.tsv`](shader_map.tsv) (22 source labels and 14 package indices). All 9,766 shader keys, stages, packages, non-`main` rows, `shader_facts.tsv`, `shader_pairs.tsv`, and `pso_pairs.tsv` remain unchanged. Shared mechanism: [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - The keyboard's ocean background has 8 geometry shaders, which do not translate; the name entry draws without them.
 - Prewarm list: recorded from a fresh save through the counter, the movie and the arrival to the dock (965 lines).
 

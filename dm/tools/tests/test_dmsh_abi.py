@@ -17,15 +17,14 @@ import dmsh_abi as abi   # noqa: E402
 
 # Literals of the ABI still written in each file (outside comments), counted as the ratchet below does: the value, or the kind string (repr). These stay for other reasons:
 # a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), and 0x100
-# where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
-# a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
+# where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py.
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
     'dm/gfx/nvn/nvn_mtl.m': {"'geometry'": 3, '0x100': 2, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
-    'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
+    'dm/gfx/nvn/nvn_obj.h': {},
     'dm/gfx/tools/dmsh_build.py': {"'c1'": 4, "'geometry'": 3, "'img'": 1, "'tex'": 1, '0x100': 2},
     'dm/gfx/tools/dmsh_fetch.py': {},
     'dm/gfx/tools/dmsh_rewrite.py': {},
@@ -103,7 +102,7 @@ class Build(unittest.TestCase):
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_every_kind_is_written_by_the_build(self):
-        build = [REPO / 'dm/gfx/tools' / f for f in ('dmsh_build.py', 'dmsh_reflect.py', 'dmsh_rewrite.py', 'dmsh_entry.py')]   # the build and the modules that write its reflection
+        build = [REPO / 'dm/gfx/tools' / f for f in ('dmsh_build.py', 'dmsh_reflect.py', 'dmsh_rewrite.py', 'dmsh_entry.py', 'dmsh_rt_compile.py')]   # the build and the modules that write its reflection
         for p in build[:3]: self.assertRegex(p.read_text(), r'(?m)^import .*\bdmsh_abi as abi\b', p.name)   # dmsh_entry.py writes no binding
         src = ''.join(p.read_text() for p in build)
         unused = [k for k in abi.VALUES if k.startswith('KIND_') and f'abi.{k}' not in src]
@@ -141,6 +140,7 @@ class Host(unittest.TestCase):
         src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
         got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
         self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK,
+                               'NxComputeUniformBase': abi.C0_CS_UBO, 'NxComputeUniformStride': abi.C0_ROW, 'NxComputeUniformSlots': abi.C0_CS_UBO_SLOTS,
                                'NxBufferImageBiasBank': abi.TBIAS_BANK, 'NxBufferImageBiases': abi.TBIAS_SLOTS,
                                'NxStorageLengthsBank': abi.SBLEN_BANK, 'NxStorageLengthSlots': abi.SBLEN_SLOTS})
         self.assertIn('TranslationFlags.MetalStorageBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())

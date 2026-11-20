@@ -38,6 +38,11 @@ No game-specific rewriter cuts, SDK cuts or host branches are needed for the tes
 - The corridor runs at the game's 60 fps when the Mac window is presenting. Missing shader-pair tables and an archive built for the wrong depth caused first-use pipeline hitches (see [Rendering and shaders](#rendering-and-shaders)). Window-inactive timing is not a gameplay frame-rate measurement.
 - **Validation:** four-minute and seven-minute repeats through the opening corridor, followed by an 85-second run of the finalized profile with prewarming enabled. The final run has no red line. Timed runs end deliberately with SIGALRM (`CRASH sig=14`), rather than a game crash. The unsigned IPA's ZIP CRC check passed; it contains all 9,858 base shader libraries and no signing entries.
 
+## Controller rumble
+
+- **Resolved: cached device info disabled rumble before a Bluetooth controller connected.** The game takes two full-key vibration handles at boot, then asks `GetVibrationDeviceInfo`. The host answered device type 0 until a haptics output was routed, so the game kept that answer and sent only one idle value for the session. The [general host fix](../../../docs/reference/services.md#a-vibration-device-before-its-controller-connects) separates channel validity, permission and send routing; no game-specific rule is needed.
+- **Reported validation ([PR #2859](https://github.com/seedds/nxnative/pull/2859)):** update 1.1.0, a Pro Controller 2 over Bluetooth LE on an M5 Pro running macOS 27.3. Before the fix: device info answered type 0 and the game sent one idle value. After: type 1, about 400 game values/s, no unrouted values once the pad connected, and 22–27 rumble packets/s when the game set a nonzero amplitude; rumble was felt when an item was used. The game's rumble is on and has no switch. Ocarina of Time rumbled with the same controller before and after as a control. These are the PR author's checks, not a new local hardware test; iOS rumble remains untested.
+
 ## Mac routes
 
 The development build is `01008CF01BAAC000_build/` beside the NSPs, with runs and diagnostic saves in `01008CF01BAAC000-work/run/`. Set `DM_ROMFS` to the build's `extract/v196608/RomFS`, `DM_MSL_DIR` to `shader/cache`, and `DM_NVN_SHMAP` to this profile's `shader_map.tsv`.
@@ -53,6 +58,7 @@ The development build is `01008CF01BAAC000_build/` beside the NSPs, with runs an
 
 ## Found on this game
 
+- **A cached vibration-device answer prevented rumble after a late controller connection:** [A vibration device before its controller connects](../../../docs/reference/services.md#a-vibration-device-before-its-controller-connects).
 - **An iPhone build's launcher toggles built no pipeline bases** (issue #1684): the build left out the pulling libraries, as the profile leaves `pso_mtl4` off; it keeps them now. [Pulling vertex inputs](../../../docs/reference/rendering.md#pulling-vertex-inputs). Not yet run on a device with the fix.
 - **Mac app pair tables:** [Shader-pair tables in a Mac app](../../../docs/reference/shaders.md#shader-pair-tables-in-a-mac-app).
 - **An archive built for the profile's default GL depth was rejected at runtime:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).

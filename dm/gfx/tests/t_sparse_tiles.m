@@ -54,6 +54,53 @@ static uint64_t kept_for(const uint8_t *lo, size_t n) {   // shared slots of [lo
     for (size_t i = 0; i < g_sp_ntl; i++) if (g_sp_tl[i].p >= (uintptr_t)lo && g_sp_tl[i].p < (uintptr_t)lo + n && !g_sp_tl[i].rc) k++;
     pthread_mutex_unlock(&g_sp_mu); return k;
 }
+// Placement tiles use CPU snapshots too. A queued buffer copy must land before a first upload and immediately invalidate an existing tile, without waiting 60 frames.
+static void buffer_upload(uint8_t *phys) {
+    const uint64_t vo = 1ull << 30, po = 60u << 20, n = 0x10000;
+    uint8_t *src = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); if (src == MAP_FAILED) abort();
+    mtl_pool_add(src, n);
+    map_at(vo, n, po, 1); memset(phys + po, 0x11, n);
+    NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, 4096); h_nvnTextureBuilderSetHeight(&tb, 4096);
+    h_nvnTextureBuilderSetLevels(&tb, 13);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, vo);
+    CHECK("copy destination placement texture", h_nvnTextureInitialize(&tx, &tb));
+    uint32_t want[128 * 128];
+    for (unsigned run = 0; run < 2; run++) {
+        uint32_t colour = run ? 0xffabcdef : 0xff123456;
+        for (unsigned i = 0; i < 128 * 128; i++) { want[i] = colour; ((uint32_t *)src)[i] = colour; }
+        struct { op_hdr c; uint64_t a[3]; op_hdr bc; p_blend_color col; op_hdr end; } ops = {
+            .c = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a = {(uintptr_t)src, (uintptr_t)(g_sparse.mem + vo), n},
+            .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
+        mtl_sub_begin();
+        if (run) { CHECK("placement texture accessed before its copy", tex_mtl((const tex_t *)&tx) != nil); map_at(vo + n, n, po + n, 1); }
+        id<MTLSharedEvent> gate = [g_dev newSharedEvent]; [g_q4 waitForEvent:gate value:1];
+        mtl_exec((const uint8_t *)&ops);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200000000), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ gate.signaledValue = 1; });
+        id<MTLTexture> m = tex_mtl((const tex_t *)&tx);
+        CHECK("placement CPU upload waits for the buffer copy", gate.signaledValue == 1);
+        finish();
+        CHECK("large destination uses placement sparse tiles", m.isSparse);
+        CHECK("placement tile immediately shows the copied texels", same_tile(m, 0, 0, 128, 128, want));
+    }
+    const tex_t *t = (const tex_t *)&tx;
+    uint64_t tail = nvn_tex_level_offset(&t->d, 6), tail_n = t->L.layer_size - tail;
+    map_at(vo + tail, tail_n, po + 2 * n, 1);
+    dm_guest_write_prepare(phys + po + 2 * n, n); memset(phys + po + 2 * n, 0x22, n);
+    (void)resolve(&tx);   // the tail has its own earlier content
+    uint32_t tail_want[64 * 64];
+    for (unsigned i = 0; i < n / 4; i++) ((uint32_t *)src)[i] = 0xff987654;
+    for (unsigned i = 0; i < 64 * 64; i++) tail_want[i] = 0xff987654;
+    struct { op_hdr c; uint64_t a[3]; op_hdr bc; p_blend_color col; op_hdr end; } ops = {
+        .c = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a = {(uintptr_t)src, (uintptr_t)(g_sparse.mem + vo + tail), tail_n},
+        .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
+    mtl_sub_begin(); mtl_exec((const uint8_t *)&ops); finish();
+    map_at(vo + 2 * n, n, po + 3 * n, 1);
+    id<MTLTexture> m = resolve(&tx);
+    CHECK("mapping another tile preserves the copied mip tail's dirty baseline", same(m, 6, 0, 0, 64, 64, tail_want, 64));
+    h_nvnTextureFinalize(&tx); map_at(vo, 3 * n, 0, 0); map_at(vo + tail, tail_n, 0, 0); mtl_pool_del(src); mtl_drain(); munmap(src, n);
+}
 int main(void) { @autoreleasepool {
     mtl_init();
     enum { W = 4096, LEVELS = 13, TILE = 0x10000, TW = 128 };
@@ -63,6 +110,7 @@ int main(void) { @autoreleasepool {
     CHECK("physical pool", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_phys, (const NVNmemoryPoolBuilder *)&pb));
     pb = (pool_builder_t){.size = DM_GAME_APP_POOL + (1ull << 32), .flags = NVN_MEMORY_POOL_FLAGS_VIRTUAL};
     CHECK("sparse pool", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_sparse, (const NVNmemoryPoolBuilder *)&pb));
+    buffer_upload(phys);
     NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, W);
     h_nvnTextureBuilderSetLevels(&tb, LEVELS); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 0);
     CHECK("sparse texture", h_nvnTextureInitialize(&tx, &tb));

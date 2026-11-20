@@ -17,7 +17,7 @@ static NSString *k_vs =
 "    float4 p = in.m_0;\n    p.x += float(gl_InstanceIndex) * u.x * p.w;\n    out.gl_Position = p;\n    out.out_c = float4(float(gl_VertexIndex));\n    return out;\n}\n";
 static NSString *k_fs = @"#include <metal_stdlib>\nusing namespace metal;\nstruct I { float4 c [[user(locn0)]]; };\nfragment float4 fs(I in [[stage_in]]) { return float4(in.c.x + 1.0); }\n";
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
-typedef struct { dm_vstream_c s[16]; uint32_t attr[16]; } dm_vlayout_c;
+typedef struct { dm_vstream_c s[16]; uint32_t attr[32]; } dm_vlayout_c;
 typedef struct { uint64_t ib; float vp[2]; float width; uint32_t prim, count; int32_t base; uint32_t isz, restart, ri, zclip, rect, pad; } wl_block;   // nvn_wline.inc
 enum { W = 64 };
 static id<MTLDevice> dev; static id<MTLCommandQueue> q; static id<MTLRenderPipelineState> ps;
@@ -49,10 +49,14 @@ int main(void) { @autoreleasepool {
     dev = MTLCreateSystemDefaultDevice(); q = [dev newCommandQueue]; NSError *e = nil;
     char dir[] = "/tmp/t_wline.XXXXXX"; if (!mkdtemp(dir)) return 1;
     NSString *in = [@(dir) stringByAppendingPathComponent:@"v.metal"], *out = [@(dir) stringByAppendingPathComponent:@"vp.metal"];
-    [k_vs writeToFile:in atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    char cmd[2048]; snprintf(cmd, sizeof cmd, "python3 -c \"import sys; sys.path.insert(0, '../tools'); import dmsh_pull; v, i = dmsh_pull.variant(open(sys.argv[1]).read()); assert i['entry_wl'] == 'main0_wl', i; open(sys.argv[2], 'w').write(v)\" '%s' '%s'", in.UTF8String, out.UTF8String);
-    if (system(cmd)) { fprintf(stderr, "dmsh_pull.variant failed\n"); return 1; }
+    if (!in || !out || ![k_vs writeToFile:in atomically:NO encoding:NSUTF8StringEncoding error:nil]) return 1;
+    NSTask *task = [NSTask new]; task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
+    task.arguments = @[@"python3", @"-c", @"import sys; sys.path.insert(0, '../tools'); import dmsh_pull; v, i = dmsh_pull.variant(open(sys.argv[1]).read()); assert i['entry_wl'] == 'main0_wl', i; open(sys.argv[2], 'w').write(v)", in, out];
+    if (![task launchAndReturnError:&e]) { fprintf(stderr, "dmsh_pull.variant launch: %s\n", e.localizedDescription.UTF8String); return 1; }
+    [task waitUntilExit];
+    if (task.terminationStatus) { fprintf(stderr, "dmsh_pull.variant failed\n"); return 1; }
     NSString *pull = [NSString stringWithContentsOfFile:out encoding:NSUTF8StringEncoding error:nil];
+    if (!pull) return 1;
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     MTLCompileOptions *o = [MTLCompileOptions new]; o.preserveInvariance = YES;
     id<MTLLibrary> lp = [dev newLibraryWithSource:pull options:o error:&e], lf = lp ? [dev newLibraryWithSource:k_fs options:o error:&e] : nil;

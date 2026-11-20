@@ -55,3 +55,4 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 ## Found on this game
 
 - An SDK 19.3.14 instance of [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
+- **Current:** [a virtual controller trusted but never published by GameController](../../../docs/reference/services.md#a-virtual-controller-is-trusted-but-never-published-by-gamecontroller): the host routing fix is checked with synthetic devices; a Steam Link retest is pending.

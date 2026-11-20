@@ -69,22 +69,144 @@ def translate_file(path, tmp):
     return vs.one((key, '/' + Path(path).name, data), tmp)
 
 
+GEOMETRY_VIEWPORT = '''OpCapability Geometry
+OpCapability MultiViewport
+OpMemoryModel Logical GLSL450
+OpEntryPoint Geometry %main "main" %pos_in %route_in %pos_out %route_out
+OpExecutionMode %main Triangles
+OpExecutionMode %main OutputTriangleStrip
+OpExecutionMode %main OutputVertices 3
+OpExecutionMode %main Invocations 1
+OpDecorate %pos_in BuiltIn Position
+OpDecorate %route_in Location 1
+OpDecorate %pos_out BuiltIn Position
+OpDecorate %route_out BuiltIn ViewportIndex
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%int = OpTypeInt 32 1
+%float = OpTypeFloat 32
+%vec = OpTypeVector %float 4
+%zero = OpConstant %int 0
+%one = OpConstant %int 1
+%three = OpConstant %int 3
+%pos_array = OpTypeArray %vec %three
+%route_array = OpTypeArray %uint %three
+%pos_in_p = OpTypePointer Input %pos_array
+%route_in_p = OpTypePointer Input %route_array
+%vertex_p = OpTypePointer Input %vec
+%instance_p = OpTypePointer Input %uint
+%pos_out_p = OpTypePointer Output %vec
+%route_out_p = OpTypePointer Output %uint
+%pos_in = OpVariable %pos_in_p Input
+%route_in = OpVariable %route_in_p Input
+%pos_out = OpVariable %pos_out_p Output
+%route_out = OpVariable %route_out_p Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpBranch %loop
+%loop = OpLabel
+%i = OpPhi %int %zero %entry %next %emit
+%more = OpSLessThan %bool %i %three
+OpLoopMerge %done %emit None
+OpBranchConditional %more %emit %done
+%emit = OpLabel
+%pv = OpAccessChain %vertex_p %pos_in %i
+%rv = OpAccessChain %instance_p %route_in %i
+%p = OpLoad %vec %pv
+%r = OpLoad %uint %rv
+OpStore %pos_out %p
+OpStore %route_out %r
+OpEmitVertex
+%next = OpIAdd %int %i %one
+OpBranch %loop
+%done = OpLabel
+OpReturn
+OpFunctionEnd
+'''
+
+VERTEX_VIEWPORT = '''OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %instance %position %route
+OpDecorate %instance BuiltIn InstanceIndex
+OpDecorate %position BuiltIn Position
+OpDecorate %route Location 1
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%vec = OpTypeVector %float 4
+%zero = OpConstant %float 0
+%one = OpConstant %float 1
+%pos = OpConstantComposite %vec %zero %zero %zero %one
+%uint_in = OpTypePointer Input %uint
+%uint_out = OpTypePointer Output %uint
+%vec_out = OpTypePointer Output %vec
+%instance = OpVariable %uint_in Input
+%route = OpVariable %uint_out Output
+%position = OpVariable %vec_out Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%index = OpLoad %uint %instance
+OpStore %route %index
+OpStore %position %pos
+OpReturn
+OpFunctionEnd
+'''
+
+
 class VkShaders(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(shutil.which('spirv-as'), 'spirv-as required to assemble the test shaders')
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
 
-    def translate(self, asm):
-        """vk_shaders.one() on the assembled shader: (key, stage, resource rows, [MSL text of each variant])"""
+    def assemble(self, asm):
         spv = self.tmp / 'shader.spv'
         subprocess.run(['spirv-as', '--target-env', 'vulkan1.1', '-o', str(spv), '-'], input=asm, text=True, check=True)
         subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+        return spv
+
+    def translate(self, asm):
+        """vk_shaders.one() on the assembled shader: (key, stage, resource rows, [MSL text of each variant])"""
+        spv = self.assemble(asm)
         out = self.tmp / 'out'; out.mkdir(exist_ok=True)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', ResourceWarning)   # the tool leaves its files to be closed at collection
             key, stage, res, msls, _, _ = translate_file(spv, str(out))
         self.assertEqual(key, hashlib.sha256(spv.read_bytes()).hexdigest()[:16])
         return key, stage, res, [Path(m).read_text() for m in msls]
+
+    def test_geometry_pass_through_or_reordered_position(self):
+        _, stage, resources, srcs = self.translate(GEOMETRY_VIEWPORT)
+        self.assertEqual((stage, resources, srcs), ('geomvp:1', [], []))
+        spv = self.assemble(GEOMETRY_VIEWPORT.replace('%pos_in %i', '%pos_in %zero'))
+        self.assertEqual(translate_file(spv, str(self.tmp)), 'geom')
+
+    def test_viewport_variant_requires_an_instance_uniform_index(self):
+        key, _, _, srcs = self.translate(VERTEX_VIEWPORT)
+        self.assertEqual(len(srcs), 2)
+        self.assertIn('[[user(locn1)]]', srcs[0])
+        self.assertIn('[[viewport_array_index]]', srcs[1])
+        self.assertIn(f'vk_{key}_vp1(', srcs[1])
+        self.assertEqual(len(self.translate(VERTEX_VIEWPORT.replace('BuiltIn InstanceIndex', 'BuiltIn VertexIndex'))[3]), 1)
+
+    def test_viewport_variant_preserves_unsigned_bone_indices(self):
+        asm = VERTEX_VIEWPORT.replace('%position %route', '%position %route %bones', 1)
+        asm = asm.replace('OpDecorate %instance', 'OpName %bones "a_indices"\nOpDecorate %bones Location 2\nOpDecorate %instance', 1)
+        asm = asm.replace('%uint = OpTypeInt 32 0', '%uint = OpTypeInt 32 0\n%int = OpTypeInt 32 1\n%int_in = OpTypePointer Input %int')
+        asm = asm.replace('%pos = OpConstantComposite %vec %zero %zero %zero %one', '%bones = OpVariable %int_in Input')
+        asm = asm.replace('OpStore %position %pos', '%index_data = OpLoad %int %bones\n%x = OpConvertSToF %float %index_data\n'
+                          '%pos = OpCompositeConstruct %vec %x %zero %zero %one\nOpStore %position %pos')
+        data = self.assemble(asm).read_bytes()
+        key = hashlib.sha256(data).hexdigest()[:16]
+        _, _, _, msls, _, info = vs.one((key, '/synthetic.material.bin@0x0', data), str(self.tmp))
+        self.assertEqual(info, '2')
+        self.assertEqual(len(msls), 4)
+        combined = (self.tmp / f'{key}_u_vp1.metal').read_text()
+        self.assertIn('uint a_indices [[attribute(2)]]', combined)
+        self.assertIn('int(in.a_indices)', combined)
+        self.assertIn('[[viewport_array_index]]', combined)
 
     def test_entry_point_of_an_hlsl_shader(self):   # DXC names it PSMain (or ps_*), spirv-cross renames that one to vk_<key>
         key, stage, _, srcs = self.translate(fragment(entry='PSMain'))

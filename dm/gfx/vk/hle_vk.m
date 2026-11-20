@@ -190,7 +190,7 @@ static id<MTLSamplerState> ab_sampler_fail(void) {
 // p is the push-constant block; U / B / T / S are members of a set's argument buffer at buffer slot `slot`, with a separate Metal ID (+ element);
 // o is a dynamic offset's index in q, and q is the slot of that offset buffer
 typedef struct { char kind; uint8_t set, slot; uint16_t count, binding, arg_id; } shres;
-typedef struct { char key[17]; int frag, comp, nres, bone_index; uint16_t wg[3]; shres res[24]; } shinfo;   // wg: compute shader local size from comp:x,y,z
+typedef struct { char key[17]; int frag, comp, nres, bone_index, geom_vp; uint16_t wg[3]; shres res[24]; } shinfo;   // geom_vp: location + 1, zero for shaders without viewport lowering
 enum { ST_VERT, ST_FRAG, ST_COMP };
 static int is_arg(char k) { return k && strchr("UBTS", k); }
 static shinfo *g_sh; static int g_nsh;
@@ -230,6 +230,10 @@ static void sh_load(void) {
         s->bone_index = -1;
         char *extra = rest ? strchr(rest, '\t') : NULL;
         if (!strcmp(stage, "vert") && extra) sscanf(extra + 1, "%d", &s->bone_index);
+        if (!strncmp(stage, "geomvp:", 7)) {
+            unsigned loc;
+            if (sscanf(stage + 7, "%u", &loc) == 1 && loc < 32) s->geom_vp = (int)loc + 1;
+        }
         sh_read_resources(s, res);
     }
     fclose(f);
@@ -255,6 +259,11 @@ static void dev_init_once(void) {
     }
 }
 static void dev_init(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, dev_init_once); }
+enum { MAX_VIEWPORTS = 16 };
+static uint32_t max_viewports(void) {
+    dev_init();
+    return [g_dev supportsFamily:MTLGPUFamilyApple5] ? MAX_VIEWPORTS : 1;   // the host runs on Apple Silicon
+}
 
 // ---------- Objects ----------
 // Dispatchable handles: their first word is where a loader keeps its dispatch table
@@ -315,7 +324,8 @@ struct VkPipeline_T {
     int fan, restart;   // a triangle fan, drawn as a list (fan_arrays, fan_indexed), and its primitive restart
     int bias, dyn_bias, dyn_blend; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
     char keys[64]; int told;   // its shaders' keys, for the report of draws skipped (told: reported)
-    int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+    uint32_t nviewport;
+    MTLViewport vp0, *vp; VkRect2D sc0, *sc;   // static state, with heap storage only for multiple viewports
     abuf_t ab[3][2]; int nab[3];   // at most two argument buffers per stage (ST_*)
     // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
     // pipeline keeps its depth-stencil description and builds the state for the masks set (one cached)
@@ -422,7 +432,7 @@ static void pdev_props(VkPhysicalDeviceProperties *p) {
     l->maxComputeSharedMemorySize = 32768; l->maxComputeWorkGroupCount[0] = l->maxComputeWorkGroupCount[1] = l->maxComputeWorkGroupCount[2] = 65535;
     l->maxComputeWorkGroupInvocations = 1024; l->maxComputeWorkGroupSize[0] = l->maxComputeWorkGroupSize[1] = 1024; l->maxComputeWorkGroupSize[2] = 64;
     l->subPixelPrecisionBits = 8; l->subTexelPrecisionBits = 8; l->mipmapPrecisionBits = 8; l->maxDrawIndexedIndexValue = 0xffffffffu; l->maxDrawIndirectCount = 0xffffffffu;
-    l->maxSamplerLodBias = 15; l->maxSamplerAnisotropy = 16; l->maxViewports = 1; l->maxViewportDimensions[0] = l->maxViewportDimensions[1] = 16384;
+    l->maxSamplerLodBias = 15; l->maxSamplerAnisotropy = 16; l->maxViewports = max_viewports(); l->maxViewportDimensions[0] = l->maxViewportDimensions[1] = 16384;
     l->viewportBoundsRange[0] = -32768; l->viewportBoundsRange[1] = 32767; l->viewportSubPixelBits = 8;
     l->minMemoryMapAlignment = 64; l->minTexelBufferOffsetAlignment = 256; l->minUniformBufferOffsetAlignment = 256; l->minStorageBufferOffsetAlignment = 256;
     l->minTexelOffset = -8; l->maxTexelOffset = 7; l->minTexelGatherOffset = -32; l->maxTexelGatherOffset = 31;
@@ -441,6 +451,7 @@ static void pdev_feats(VkPhysicalDeviceFeatures *f) {
     f->drawIndirectFirstInstance = f->depthClamp = f->depthBiasClamp = f->fillModeNonSolid = f->largePoints = f->samplerAnisotropy = 1;
     f->textureCompressionBC = f->textureCompressionASTC_LDR = f->occlusionQueryPrecise = f->fragmentStoresAndAtomics = 1;
     f->shaderImageGatherExtended = f->shaderClipDistance = f->shaderResourceMinLod = 1;
+    f->multiViewport = max_viewports() > 1;
 }
 static void pdev_mem(VkPhysicalDeviceMemoryProperties *m) {
     memset(m, 0, sizeof *m);
@@ -1085,12 +1096,12 @@ VKB(vkCreateShaderModule, VkResult, VkDevice d, const VkShaderModuleCreateInfo *
     sh_capture(m->key, ci->pCode, ci->codeSize);
     m->si = sh_find(m->key);
     @autoreleasepool {
-        if (m->si && g_lib) {
+        if (m->si && !m->si->geom_vp && g_lib) {
             m->fn = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s", m->key]];
             if (m->si->bone_index >= 0) m->fn_u = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_u", m->key]];
         }
     }
-    if (!m->fn) LOG("[vk] [RED] shader %s (%zu bytes of SPIR-V) is not in the library", m->key, ci->codeSize);
+    if (!m->fn && !(m->si && m->si->geom_vp)) LOG("[vk] [RED] shader %s (%zu bytes of SPIR-V) is not in the library", m->key, ci->codeSize);
     else OLOG("CreateShaderModule %s", m->key);
     *out = m; return VK_SUCCESS;
 }
@@ -1169,9 +1180,24 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
     @autoreleasepool {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         char keys[64] = ""; int dual = dual_source(ci->pColorBlendState), lacking = 0;   // lacking: the pipeline requests a fragment stage whose Metal function is missing from the library
+        int geom_vp = 0;
+        for (uint32_t s = 0; s < ci->stageCount; s++) {
+            const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s];
+            if (st->stage == VK_SHADER_STAGE_GEOMETRY_BIT && st->module->si) geom_vp = st->module->si->geom_vp;
+        }
+        VkPrimitiveTopology topology = ci->pInputAssemblyState ? ci->pInputAssemblyState->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         for (uint32_t s = 0; s < ci->stageCount; s++) {
             const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s]; VkShaderModule m = st->module;
-            if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) { pd.vertexFunction = spec_fn(vertex_function(m, ci->pVertexInputState), st->pSpecializationInfo); p->vs = m->si; }
+            if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) {
+                id<MTLFunction> fn = vertex_function(m, ci->pVertexInputState);
+                if (geom_vp) {
+                    const char *suffix = fn && fn == m->fn_u ? "_u" : "";
+                    fn = fn && topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && max_viewports() > 1
+                        ? [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s%s_vp%d", m->key, suffix, geom_vp - 1]] : nil;
+                    if (!fn) LOG("[vk] [RED] geometry viewport lowering unavailable for vertex shader %s at location %d (topology %d)", m->key, geom_vp - 1, topology);
+                }
+                pd.vertexFunction = spec_fn(fn, st->pSpecializationInfo); p->vs = m->si;
+            }
             else if (st->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
                 if (dual && m->fn) {   // pipelines may be built on several threads
                     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mu);
@@ -1181,7 +1207,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
                 pd.fragmentFunction = spec_fn(dual && m->fn_d ? m->fn_d : m->fn, st->pSpecializationInfo); p->fs = m->si;
                 lacking |= !pd.fragmentFunction;
             }
-            else RED1("shader stage %#x not implemented", st->stage);
+            else if (st->stage != VK_SHADER_STAGE_GEOMETRY_BIT || !geom_vp) RED1("shader stage %#x not implemented", st->stage);
             strlcat(keys, s ? " " : "", sizeof keys); strlcat(keys, m->key, sizeof keys);
         }
         strlcpy(p->keys, keys, sizeof p->keys);
@@ -1221,7 +1247,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             if (at->location < 31 && at->binding < 14) vd.attributes[at->location].bufferIndex = p->vb_slot[at->binding];
         }
         pd.vertexDescriptor = vd;
-        switch (ci->pInputAssemblyState ? ci->pInputAssemblyState->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
+        switch (topology) {
             case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: p->prim = MTLPrimitiveTypePoint; pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; break;
             case VK_PRIMITIVE_TOPOLOGY_LINE_LIST: p->prim = MTLPrimitiveTypeLine; pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine; break;
             case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: p->prim = MTLPrimitiveTypeLineStrip; pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine; break;
@@ -1272,9 +1298,10 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             p->dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         } else p->dss = g_dss_off;
         const VkPipelineDynamicStateCreateInfo *dy = ci->pDynamicState;
+        int dyn_vp = 0, dyn_sc = 0;
         for (uint32_t i = 0; dy && i < dy->dynamicStateCount; i++) {
             VkDynamicState s = dy->pDynamicStates[i];
-            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1;
+            if (s == VK_DYNAMIC_STATE_VIEWPORT) dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) dyn_sc = 1;
             else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
             else if (s == VK_DYNAMIC_STATE_LINE_WIDTH) continue;   // Metal draws lines one pixel wide whatever the width (Super Mario 64 sets 1)
             else if (s == VK_DYNAMIC_STATE_DEPTH_BIAS) p->dyn_bias = 1; else if (s == VK_DYNAMIC_STATE_BLEND_CONSTANTS) p->dyn_blend = 1;
@@ -1283,14 +1310,28 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
-        if (!p->dyn_vp && vs && vs->pViewports && vs->viewportCount) { p->vp = vp_of(&vs->pViewports[0]); p->has_vp = 1; }
-        if (!p->dyn_sc && vs && vs->pScissors && vs->scissorCount) { p->sc = vs->pScissors[0]; p->has_sc = 1; }
+        p->nviewport = vs && vs->viewportCount ? vs->viewportCount : 1;
+        if (p->nviewport > max_viewports() || (vs && vs->scissorCount && vs->scissorCount != p->nviewport)) {
+            LOG("[vk] [RED] pipeline %s has unsupported viewport/scissor counts %u/%u", keys, p->nviewport, vs ? vs->scissorCount : 0);
+            return p;
+        }
+        if (!dyn_vp && vs && vs->pViewports && vs->viewportCount) {
+            p->vp = p->nviewport == 1 ? &p->vp0 : zalloc(p->nviewport * sizeof *p->vp);
+            for (uint32_t i = 0; i < p->nviewport; i++) p->vp[i] = vp_of(&vs->pViewports[i]);
+        }
+        if (!dyn_sc && vs && vs->pScissors && vs->scissorCount) {
+            p->sc = p->nviewport == 1 ? &p->sc0 : zalloc(p->nviewport * sizeof *p->sc);
+            memcpy(p->sc, vs->pScissors, p->nviewport * sizeof *p->sc);
+        }
         NSError *err = nil;
         p->pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
         if (!p->pso) { static int n; if (n++ < 20) LOG("[vk] [RED] cannot build the pipeline (%s): %s", keys, err.localizedDescription.UTF8String); }
         else if (!ab_init(p, ST_VERT, pd.vertexFunction, p->vs) || !ab_init(p, ST_FRAG, pd.fragmentFunction, p->fs)) {
             p->pso = nil; ab_free(p); LOG("[vk] [RED] graphics pipeline %s refused: argument-buffer initialization failed", keys);
-        } else g_n_pso++;
+        } else {
+            g_n_pso++;
+            if (geom_vp) OLOG("geometry viewport pipeline %s uses location %d and %u viewport(s)", keys, geom_vp - 1, p->nviewport);
+        }
     }
     return p;
 }
@@ -1332,7 +1373,14 @@ VKB(vkCreateComputePipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t 
     for (uint32_t i = 0; i < n; i++) out[i] = cpipe_make(&ci[i]);   // as for graphics: a pipeline Metal refuses is handed out, and its dispatches are skipped
     return VK_SUCCESS;
 }
-VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; p->cpso = nil; p->dss_dyn = nil; ab_free(p); for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]); free(p); } }
+VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) {
+    (void)d; (void)a;
+    if (!p) return;
+    p->pso = nil; p->dss = nil; p->cpso = nil; p->dss_dyn = nil; ab_free(p);
+    for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]);
+    if (p->nviewport > 1) { free(p->vp); free(p->sc); }
+    free(p);
+}
 
 // ---------- Command buffers: recording ----------
 enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL,
@@ -1343,8 +1391,8 @@ typedef struct { VkPipeline p; int compute; } c_pipe;
 typedef struct { uint32_t first, n, ndyn; int compute; VkDescriptorSet s[8]; uint32_t dyn[]; } c_sets;
 typedef struct { uint32_t first, n; VkBuffer b[14]; VkDeviceSize o[14]; } c_vb;
 typedef struct { VkBuffer b; VkDeviceSize o; VkIndexType t; } c_ib;
-typedef struct { VkViewport v; } c_vp;
-typedef struct { VkRect2D r; } c_sc;
+typedef struct { uint32_t first, n; VkViewport v[]; } c_vp;
+typedef struct { uint32_t first, n; VkRect2D r[]; } c_sc;
 typedef struct { uint32_t count, inst, first; int32_t voff; uint32_t first_inst; } c_drawi;
 typedef struct { VkBuffer src, dst; uint32_t n; VkBufferCopy r[]; } c_copyb;
 typedef struct { VkBuffer src; VkImage dst; uint32_t n; VkBufferImageCopy r[]; } c_copyb2i;
@@ -1426,8 +1474,16 @@ VK(vkCmdBindVertexBuffers, void, VkCommandBuffer cb, uint32_t first, uint32_t n,
     memcpy(c->b, b, c->n * sizeof *b); memcpy(c->o, o, c->n * sizeof *o);
 }
 VK(vkCmdBindIndexBuffer, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkIndexType t) { c_ib *c = rec(cb, C_IB, sizeof *c); c->b = b; c->o = o; c->t = t; }
-VK(vkCmdSetViewport, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) { if (!first && n) ((c_vp *)rec(cb, C_VP, sizeof(c_vp)))->v = v[0]; }
-VK(vkCmdSetScissor, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r) { if (!first && n) ((c_sc *)rec(cb, C_SC, sizeof(c_sc)))->r = r[0]; }
+VK(vkCmdSetViewport, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) {
+    if (!n || first >= MAX_VIEWPORTS || n > MAX_VIEWPORTS - first) return;
+    c_vp *c = rec(cb, C_VP, sizeof *c + n * sizeof *v);
+    c->first = first; c->n = n; memcpy(c->v, v, n * sizeof *v);
+}
+VK(vkCmdSetScissor, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r) {
+    if (!n || first >= MAX_VIEWPORTS || n > MAX_VIEWPORTS - first) return;
+    c_sc *c = rec(cb, C_SC, sizeof *c + n * sizeof *r);
+    c->first = first; c->n = n; memcpy(c->r, r, n * sizeof *r);
+}
 VK(vkCmdDrawIndexed, void, VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t voff, uint32_t first_inst) {
     *(c_drawi *)rec(cb, C_DRAWI, sizeof(c_drawi)) = (c_drawi){count, inst, first, voff, first_inst};
 }
@@ -1570,7 +1626,7 @@ typedef struct {
     struct { VkDescriptorSet s; uint32_t dyn[16]; } set[8], cset[8];   // graphics and compute bind points have separate sets
     VkBuffer vb[14]; VkDeviceSize vbo[14];
     VkBuffer ib; VkDeviceSize ibo; MTLIndexType it; uint32_t isz;
-    VkViewport vp; VkRect2D sc; int have_vp, have_sc, vp_dirty, sc_dirty;
+    VkViewport vp[MAX_VIEWPORTS]; VkRect2D sc[MAX_VIEWPORTS]; uint32_t have_vp, have_sc; int vp_dirty, sc_dirty;
     uint8_t pc[3][256];   // push writes can address the same bytes independently by shader stage
     subq_t *sq;
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
@@ -1678,8 +1734,6 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     s->applied = NULL; s->rt_w = w; s->rt_h = h;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
     // Resetting them at every pass drew Super Mario Galaxy's handheld UI 1.5x too big: it sets a 1280x720 viewport once and then draws through several passes into its 1920x1080 swapchain
-    if (!s->have_vp) s->vp = (VkViewport){0, 0, (float)w, (float)h, 0, 1};
-    if (!s->have_sc) s->sc = (VkRect2D){{0, 0}, {w, h}};
     s->vp_dirty = s->sc_dirty = 1;
     g_n_pass++;
     occ_start(s);
@@ -1814,6 +1868,39 @@ static int bind_args(rs_t *s, VkPipeline p, const shinfo *si, int st) {   // a s
     }
     return 1;
 }
+static MTLScissorRect metal_scissor(VkRect2D r, uint32_t w, uint32_t h) {
+    // Metal requires the scissor to lie inside the render target.
+    int64_t x1 = (int64_t)r.offset.x + r.extent.width, y1 = (int64_t)r.offset.y + r.extent.height;
+    x1 = x1 < 0 ? 0 : x1 > w ? w : x1;
+    y1 = y1 < 0 ? 0 : y1 > h ? h : y1;
+    int64_t x0 = r.offset.x < 0 ? 0 : r.offset.x > x1 ? x1 : r.offset.x;
+    int64_t y0 = r.offset.y < 0 ? 0 : r.offset.y > y1 ? y1 : r.offset.y;
+    return (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
+}
+static void apply_viewports(rs_t *s, VkPipeline p) {
+    uint32_t n = p->nviewport;
+    if (s->vp_dirty) {
+        MTLViewport v[MAX_VIEWPORTS];
+        const MTLViewport *vp = p->vp;
+        if (!vp) {
+            MTLViewport full = {0, 0, s->rt_w, s->rt_h, 0, 1};
+            for (uint32_t i = 0; i < n; i++) v[i] = s->have_vp >> i & 1 ? vp_of(&s->vp[i]) : full;
+            vp = v;
+        }
+        if (n == 1) [s->re setViewport:vp[0]]; else [s->re setViewports:vp count:n];
+        s->vp_dirty = 0;
+    }
+    if (s->sc_dirty) {
+        MTLScissorRect rects[MAX_VIEWPORTS];
+        VkRect2D full = {{0, 0}, {s->rt_w, s->rt_h}};
+        for (uint32_t i = 0; i < n; i++) {
+            VkRect2D r = p->sc ? p->sc[i] : s->have_sc >> i & 1 ? s->sc[i] : full;
+            rects[i] = metal_scissor(r, s->rt_w, s->rt_h);
+        }
+        if (n == 1) [s->re setScissorRect:rects[0]]; else [s->re setScissorRects:rects count:n];
+        s->sc_dirty = 0;
+    }
+}
 static int pre_draw(rs_t *s) {
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
@@ -1833,8 +1920,12 @@ static int pre_draw(rs_t *s) {
         s->d_dirty = 1;
         [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
         s->s_dirty = 1;
-        if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
-        if (p->has_sc) s->sc_dirty = 1;
+        VkPipeline old = s->applied;
+        if (!old || old->nviewport != p->nviewport) s->vp_dirty = s->sc_dirty = 1;
+        else {
+            if (old->vp != p->vp && (!old->vp || !p->vp || memcmp(old->vp, p->vp, p->nviewport * sizeof *p->vp))) s->vp_dirty = 1;
+            if (old->sc || p->sc) s->sc_dirty = 1;
+        }
         s->applied = p;
     }
     if (s->d_dirty) {   // dynamic blend constants and depth bias, after the pipeline's own (a pipeline's depth bias applies only when it enables depth bias)
@@ -1858,20 +1949,7 @@ static int pre_draw(rs_t *s) {
         }
     }
     s->s_dirty = 0;
-    if (s->vp_dirty) {
-        MTLViewport v = p->has_vp ? p->vp : vp_of(&s->vp);
-        [re setViewport:v]; s->vp_dirty = 0;
-    }
-    if (s->sc_dirty) {   // Metal requires the scissor to lie inside the render target
-        VkRect2D r = p->has_sc ? p->sc : s->sc;
-        int32_t x0 = r.offset.x < 0 ? 0 : r.offset.x, y0 = r.offset.y < 0 ? 0 : r.offset.y;
-        int64_t x1 = (int64_t)r.offset.x + r.extent.width, y1 = (int64_t)r.offset.y + r.extent.height;
-        if (x1 > s->rt_w) x1 = s->rt_w;
-        if (y1 > s->rt_h) y1 = s->rt_h;
-        if (x0 > x1) x0 = (int32_t)x1;
-        if (y0 > y1) y0 = (int32_t)y1;
-        [re setScissorRect:(MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)}]; s->sc_dirty = 0;
-    }
+    if (s->vp_dirty || s->sc_dirty) apply_viewports(s, p);
     bind_res(s, p, p->vs, ST_VERT); bind_res(s, p, p->fs, ST_FRAG); bind_push(s, p, p->vs, ST_VERT); bind_push(s, p, p->fs, ST_FRAG);
     if (!bind_args(s, p, p->vs, ST_VERT) || !bind_args(s, p, p->fs, ST_FRAG)) return 0;
     for (uint32_t i = 0; i < 14; i++)
@@ -2360,8 +2438,14 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
             case C_QCOPY: copy_queries(s, c); break;
             case C_VB: { const c_vb *x = c; for (uint32_t i = 0; i < x->n; i++) { s->vb[x->first + i] = x->b[i]; s->vbo[x->first + i] = x->o[i]; } break; }
             case C_IB: { const c_ib *x = c; s->ib = x->b; s->ibo = x->o; s->it = x->t == VK_INDEX_TYPE_UINT32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16; s->isz = x->t == VK_INDEX_TYPE_UINT32 ? 4 : 2; break; }
-            case C_VP: s->vp = ((const c_vp *)c)->v; s->vp_dirty = 1; s->have_vp = 1; break;
-            case C_SC: s->sc = ((const c_sc *)c)->r; s->sc_dirty = 1; s->have_sc = 1; break;
+            case C_VP: {
+                const c_vp *x = c; memcpy(s->vp + x->first, x->v, x->n * sizeof *x->v);
+                s->have_vp |= ((1u << x->n) - 1) << x->first; s->vp_dirty = 1; break;
+            }
+            case C_SC: {
+                const c_sc *x = c; memcpy(s->sc + x->first, x->r, x->n * sizeof *x->r);
+                s->have_sc |= ((1u << x->n) - 1) << x->first; s->sc_dirty = 1; break;
+            }
             case C_DRAWI: {
                 const c_drawi *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;

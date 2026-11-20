@@ -2,7 +2,7 @@
 // modules the way the layer wraps a library function):
 //   · a pipeline that requests a fragment stage whose function the library lacks is refused and its draws are counted as skipped, while one with no fragment stage at all (a
 //     depth-only pipeline) is built, and so is one with a geometry stage: requested and not available is refused, not requested is built
-//   · buffer fill and update, image resolve and same-size blit, indirect draws, dynamic blend constants, secondary command buffers, events and query copies
+//   · viewport selection and clipping, buffer fill and update, image resolve and same-size blit, indirect draws, dynamic blend constants, secondary command buffers, events and query copies
 #include "../vk/hle_vk.m"
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -146,6 +146,57 @@ static void test_indirect_fans(VkRenderPass rp, VkFramebuffer fb, VkImage target
     h_vkDestroyBuffer(dev, args, NULL); h_vkDestroyBuffer(dev, indices, NULL);
 }
 
+static void test_geometry_viewports(VkRenderPass rp, VkFramebuffer fb, VkImage target) {
+    if (max_viewports() == 1) return;
+    const shinfo route = {.geom_vp = 2};   // a geomvp:1 table row
+    VkShaderModule gs = module_of_fn(NULL, "000000000000000a");
+    gs->si = &route;
+    VkShaderModule vs = module_of_fn("t_vs", "000000000000000b");
+    VkShaderModule fs = module_of_fn("t_vp_fs", "000000000000000c");
+    VkPipelineShaderStageCreateInfo stages[] = {stage(VK_SHADER_STAGE_GEOMETRY_BIT, gs), stage(VK_SHADER_STAGE_VERTEX_BIT, vs),
+                                                stage(VK_SHADER_STAGE_FRAGMENT_BIT, fs)};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
+    VkPipelineColorBlendStateCreateInfo blend = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
+    VkViewport viewports[] = {{0, 0, 2, 4, 0, 1}, {2, 0, 2, 4, 0, 1}};
+    VkRect2D scissors[] = {{{1, 0}, {1, 4}}, {{3, 0}, {1, 4}}};
+    VkPipelineViewportStateCreateInfo vp = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                                            .viewportCount = 2, .pViewports = viewports, .scissorCount = 2, .pScissors = scissors};
+    VkDynamicState states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = states};
+    VkGraphicsPipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 3, .pStages = stages,
+                                       .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms,
+                                       .pColorBlendState = &blend, .renderPass = rp};
+    for (int dynamic = 0; dynamic < 2; dynamic++) {
+        ci.pDynamicState = dynamic ? &dyn : NULL;
+        VkPipeline p;
+        h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+        CHECK(p->pso != nil, "the geometry pipeline picks the matching vertex variant");
+        VkCommandBuffer cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+        h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        if (dynamic) {
+            const VkViewport initial[] = {viewports[0], viewports[0]};
+            const VkRect2D clips[] = {scissors[0], scissors[0]};
+            h_vkCmdSetViewport(cb, 0, 2, initial);
+            h_vkCmdSetScissor(cb, 0, 2, clips);
+            h_vkCmdSetViewport(cb, 1, 1, &viewports[1]);
+            h_vkCmdSetScissor(cb, 1, 1, &scissors[1]);
+        }
+        h_vkCmdDraw(cb, 3, 2, 0, 0);
+        h_vkCmdEndRenderPass(cb); run(cb);
+        uint8_t pixels[64]; download(target, 4, 4, pixels);
+        const uint8_t row[] = {0, 0, 255, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 255, 0, 255};
+        int match = 1;
+        for (unsigned y = 0; y < 4; y++) match &= !memcmp(pixels + y * sizeof row, row, sizeof row);
+        CHECK(match, "%s viewport and scissor arrays route instances to the expected pixels", dynamic ? "partially updated dynamic" : "static");
+        h_vkDestroyPipeline(dev, p, NULL);
+    }
+    h_vkDestroyShaderModule(dev, gs, NULL); h_vkDestroyShaderModule(dev, vs, NULL); h_vkDestroyShaderModule(dev, fs, NULL);
+}
+
 int main(void) {
     dev = &g_device; queue = &g_queue;
     @autoreleasepool {
@@ -154,8 +205,12 @@ int main(void) {
         lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
                 "vertex float4 t_vs(uint v [[vertex_id]]) { float2 p = float2((v << 1) & 2, v & 2); return float4(p * 2.0 - 1.0, 0.0, 1.0); }\n"   // one triangle over the whole target
                 "vertex float4 t_fan(uint v [[vertex_id]]) { const float2 p[4] = {float2(-1,-1),float2(1,-1),float2(1,1),float2(-1,1)}; return float4(p[v],0,1); }\n"
+                "struct Routed { float4 p [[position]]; uint i [[viewport_array_index]]; };\n"
+                "vertex Routed vk_000000000000000b_vp1(uint v [[vertex_id]], uint i [[instance_id]]) { float2 p = float2((v << 1) & 2, v & 2); return {float4(p * 2.0 - 1.0, 0.0, 1.0), i}; }\n"
+                "fragment float4 t_vp_fs(uint i [[viewport_array_index]]) { return i ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1); }\n"
                 "fragment float4 t_fs() { return float4(1.0, 0.5, 0.0, 1.0); }\n" options:nil error:&err];
         CHECK(lib != nil, "the test shaders compile: %s", err.localizedDescription.UTF8String);
+        g_lib = lib;
         VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; h_vkCreateCommandPool(dev, &pci, NULL, &pool);
         VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = 1 << 20, .memoryTypeIndex = 1}; h_vkAllocateMemory(dev, &mai, NULL, &mem);
         VkShaderModule vs = module_of_fn("t_vs", "0000000000000001"), fs = module_of_fn("t_fs", "0000000000000002");
@@ -298,6 +353,7 @@ int main(void) {
         h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
         CHECK(all_near(px, 16, 255, 128, 0, 255), "an indexed indirect draw reads its arguments and the index buffer (first texel %u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
         test_indirect_fans(crp, cfb, target, fs);
+        test_geometry_viewports(crp, cfb, target);
 
         // ---- Dynamic blend constants: the pipeline blends with CONSTANT_COLOR, the constants come from the command ----
         VkPipeline blended = make_pipe(crp, ok_st, 2, 1);

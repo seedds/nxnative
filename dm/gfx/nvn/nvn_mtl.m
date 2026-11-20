@@ -1583,14 +1583,14 @@ static int pend_room(int nodes) {
 // wrote them. A counter report does not count against this submission's shadows: the host writes reports on the CPU when the whole submission has completed, so no draw of it reads one
 // (Fire Emblem Engage writes its query reports into the page of a uniform block); for later submissions it counts by its own 16 bytes while this one runs (hw_note, hw_live).
 // A GPU write over more than SBW_WPAGES pages is kept as an interval instead (overlapping ones merge): a storage buffer bound with size 0 counts as the rest of its Metal buffer (sbw_len)
-enum { SBW_N = 16384, SBW_WPAGES = 64, SBW_WN = 64 };
+enum { SBW_N = 1 << 17, SBW_WPAGES = 64, SBW_WN = 256 };   // 131,072 pages (512 MB): large Switch 2 scenes (e.g. Donkey Kong Bananza's 3D overview map with ~7,500 terrain chunks binding 15 KB writable SSBOs) exceed 16,384 unique pages per submission
 static struct { uint64_t page; uint32_t gen; uint8_t src; } g_sbwp[SBW_N]; static int g_nsbw, g_sbw_over;   // src: SBW_* bits; pages in the set this submission; over: a write could not be kept (set full, size not known)
-static uint16_t g_sbw_list[SBW_N];   // the slots this submission took, in order (g_nsbw of them): the commit reads these instead of all SBW_N slots (gw_commit), about 30 times a frame
+static uint32_t g_sbw_list[SBW_N];   // the slots this submission took, in order (g_nsbw of them): the commit reads these instead of all SBW_N slots (gw_commit), about 30 times a frame
 static uint64_t g_sbw_wlo[SBW_WN], g_sbw_whi[SBW_WN]; static int g_nsbw_w;   // the wide writes of this submission
 static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not there (or no room to add)
-    unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 50) & (SBW_N - 1);
+    unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 47) & (SBW_N - 1);
     for (int i = 0; i < 64; i++, h = (h + 1) & (SBW_N - 1)) {
-        if (g_sbwp[h].gen != g_pend_gen) { if (!add) return -1; g_sbwp[h].page = pg; g_sbwp[h].gen = g_pend_gen; g_sbwp[h].src = 0; g_sbw_list[g_nsbw++] = (uint16_t)h; return (int)h; }
+        if (g_sbwp[h].gen != g_pend_gen) { if (!add) return -1; g_sbwp[h].page = pg; g_sbwp[h].gen = g_pend_gen; g_sbwp[h].src = 0; g_sbw_list[g_nsbw++] = (uint32_t)h; return (int)h; }
         if (g_sbwp[h].page == pg) return (int)h; }
     return -1;
 }
@@ -2242,14 +2242,14 @@ static void ubd_read(uint64_t lo, size_t n, void *out) {
 // Breath of the Wild updates part of a bound block about 226 times a frame outdoors and ended a pass for nearly every one (about 900 MB of attachment loads and stores a frame on an iPhone).
 // DM_NVN_UB_PARTIAL=0 turns it off
 static int ub_partial_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_PARTIAL"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_PARTIAL=0: a binding the deferred uniform updates cover only in part ends the pass as before"); } return v; }
-enum { GW_SETS = 1 << 14, GW_WAYS = 7, GW_PAGES = 4096 };   // set-associative with a non-latching per-set overflow fence: a direct-mapped slot that collapsed to ~0 on a 2-page collision stayed latched as ~0 forever while any page in that slot kept writing each frame, causing false gw_live hits in rc_source()
+enum { GW_SETS = 1 << 15, GW_WAYS = 7, GW_PAGES = 4096 };   // set-associative with a non-latching per-set overflow fence: a direct-mapped slot that collapsed to ~0 on a 2-page collision stayed latched as ~0 forever while any page in that slot kept writing each frame, causing false gw_live hits in rc_source()
 typedef struct { uint64_t page[GW_WAYS], fence[GW_WAYS], over_fence; } gw_set;
 static gw_set g_gw[GW_SETS];   // pages written by running submissions; over_fence covers any page that spilled past GW_WAYS live pages in the set without latching onto later non-overflowing writes
 static gw_set g_gwx[GW_SETS];  // the same without the inline updates the host remembers (um_ent): what a uniform shadow cannot read from memory
 static uint64_t g_gw_all;                            // every page counts as written until this fence completes (a submission whose writes could not all be listed)
 static uint64_t g_ubp_made, g_ubp_reused, g_ubp_refused;   // partial shadows made / taken from the cache / refused (the pass ended), for the residency set line
 static uint64_t g_ubp_why[6];   // why ubp_get refused: 0 too large or off, 1 other GPU writes in this submission (sbw), 2 GPU writes of an earlier submission still running, 3 a copy, fill or feedback write queued, 4 unreadable or too many writes, 5 a report of an earlier submission still to land (hw_live)
-static inline unsigned gw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 50) & (GW_SETS - 1); }
+static inline unsigned gw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 49) & (GW_SETS - 1); }
 // Writes of GW_PAGES pages or more, kept whole. They used to count as a write anywhere (g_gw_all): one storage binding over 16 MB in each submission (Splatoon Raiders) refused every uniform shadow of the next one, and the
 // pass ended for each. The same range comes back every submission, so few are live at a time; only when none of the slots is free does it still count as a write anywhere
 enum { GWW_N = 32 };

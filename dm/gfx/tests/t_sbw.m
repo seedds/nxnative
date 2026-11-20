@@ -116,5 +116,15 @@ int main(void){@autoreleasepool{
     CHECK("overflow fence expires once f0 completes even while one page stays live at f0+1",!gw_live(vaddr,vaddr+8)&&gw_live(coll[0]<<12,(coll[0]<<12)+64)&&rc_value(vaddr,&x)&&x==0);
     g_done=was_done; g_gw_all=was_all; memset(g_gw,0,sizeof g_gw); memset(g_gwx,0,sizeof g_gwx);}
     pend_reset();
+    // Large scenes with thousands of small writable SSBOs (e.g. ~7,500 15 KB terrain chunks in Donkey Kong Bananza's 3D overview map) touch >16,384 unique 4 KB pages in one submission.
+    {uint64_t arena=0x8140000000ull, other=0x8021f3e100ull, was_done=g_done, was_all=g_gw_all;
+    g_gw_all=0; memset(g_gw,0,sizeof g_gw); memset(g_gwx,0,sizeof g_gwx);
+    for(int i=0;i<6000;i++) sbw_note(arena+(uint64_t)i*0x4000ull,0x3a98,SBW_GPU);   // 24,000 distinct 4 KB pages
+    CHECK("24,000 distinct written pages in one submission do not overflow g_sbwp",!g_sbw_over&&g_nsbw==24000);
+    CHECK("written chunk pages are tracked while an unrelated uniform block is clean",sbw_hits(arena,arena+64)&&sbw_hits(arena+5999ull*0x4000ull,arena+5999ull*0x4000ull+64)&&!sbw_hits(other,other+0x70));
+    gw_commit(was_done+200);
+    CHECK("committing 24,000 written pages does not taint g_gw_all",g_gw_all==0&&gw_live(arena,arena+64));
+    g_done=was_done; g_gw_all=was_all; memset(g_gw,0,sizeof g_gw); memset(g_gwx,0,sizeof g_gwx);}
+    pend_reset();
     printf("t_sbw: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

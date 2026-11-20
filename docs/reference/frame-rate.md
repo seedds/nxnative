@@ -58,6 +58,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the game window resigning key is sent to the game as out of focus, and Tears of the Kingdom stops presenting while out of focus. During an unattended run another app (a build, a notification, another session's window) takes the key window now and then. Every hung TotK run in the harness's folder on 2026-11-03/04 had that focus line without a return; the runs that passed either had none or regained focus within a second.
 - **Fix:** `regress.py` runs the host with `DM_FOCUS_KEEP=1` (`front_mac.m`): the game stays in focus while its window is up, whichever app is active; minimizing still counts.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (the regress route, 2026-11-03 and 04).
+- **Also found on** [UnMetal](../../dm/games/01008F4014A74000/README.md#found-on-this-game). While out of focus, it keeps clearing and presenting but skips every game draw. A frame counter can keep advancing over the black picture, so the fresh-save check verifies the cell and HUD on screen.
 
 ### Benchmark captures perturb the measured frame pacing
 

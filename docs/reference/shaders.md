@@ -4,13 +4,28 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Telltale effect packs in ttarch2 archives
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`, with `shaders: 0`, on a Telltale Tool game whose RomFS is `.ttarch2` archives and whose `main` names `*.t3fxpack`. No BNSH, BAHS or control-section magic appears in the compressed files.
+- **Cause:** the archives use `NCTT` or `ZCTT` wrappers. A `ZCTT` block has version `0x10000`, a chunk count and `count + 1` 64-bit offsets, followed by raw-deflate chunks. The effect packs contain unaligned records: a code area, a 32-bit control length, then the control section. Compute code areas can be headerless. Existing BNSH and whole-GLSLC readers cannot reach these records.
+- **Fix:** `ttarch2_shaders` detects the wrapper by magic, checks compressed-block ranges and inflates shader archives identified by `.t3fxpack` in their initial directory data. It takes the code area immediately before each control-length word and retains only pairs accepted by `glslc_stage` and `check()`. No title, build or profile switch selects the reader.
+- **Check:** `test_ttarch2.py` covers deflate chunks, both wrappers, unaligned and headerless compute records, inconsistent control lengths, non-shader archives and file-scanner dispatch with the original shader bytes preserved. A real-archive A/B check against the pre-integration splitter finds zero keys without the reader and 24,243 with it; the keys exactly match [PR #1965](https://github.com/seedds/nxnative/pull/1965).
+- **Found on:** [Sam & Max: The Devil's Playhouse 1.8.0](../../dm/games/0100D5501857E000/README.md), a provisional Mac profile with a successful user playtest; episode completion and save/reload remain unvalidated.
+
+### RenderDragon material shaders
+
+- **Symptom:** the packer finds no loose SPIR-V files, although the game creates its modules from assets it ships.
+- **Cause:** RenderDragon places bgfx vertex and fragment v5 and compute v3 shader records in `renderer/materials/*.material.bin`. Its built-in graphics shader records are in the main NSO. Each record has a uniform table and a length-prefixed SPIR-V payload.
+- **Fix:** `vk_shaders.py` checks the material and bgfx headers, bounds-checks the uniform records and shader length, and requires the SPIR-V instruction stream to occupy that length exactly. It deduplicates by the same hash of the payload that the runtime uses. Compute rows include their workgroup size. Fragment shaders with three or more color outputs keep their normal MRT layout, which Metal cannot compile as dual-source blending.
+- **Found on:** [Minecraft for Nintendo Switch](../../dm/games/0100D71004694000/README.md) 1.26.62, with 1,784 unique graphics and 44 compute modules, including 11 built-in modules in `main`.
+
 ### L.A. Noire WAD and VFP shader arrays
 
 - **Symptom:** the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials.
 - **Cause:** `out.wad.nx` has a span table and a name table. Its `.vfp.nx` members store the GLSLC headers, control sections and code in separate arrays.
 - **Fix:** the splitter maps `out.wad.nx` with the `WAD\x01` signature and reads its `.vfp.nx` members. It checks the name table and shader member ranges, requires non-empty code and complete coverage of the VFP arrays, then passes the original control and code bytes to the existing shader checks. The VFP arrays give individual stages. Their vertex and pixel pairing is unknown.
 - **Check:** `dm/gfx/tests/test_noire_shader.py` checks keys and bytes in both RomFS forms, the signature and basename gate, and rejection of truncated directories, invalid names and malformed spans. On M4 Pro/macOS 27.2.1, the WAD yielded zero shaders with `a6aaf66d` and 8,933 with the reader. A full split with the reader and the startup captures found 8,968 shaders, all of which compiled for the Mac.
-- **Found on:** L.A. Noire 1.2 (`0100830004FB6000`), [NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386). The Mac build with the [direct `irs` service fix](services.md#direct-irs-connection-and-status-memory) loaded the 8,968-entry map. Captures show the officers' faces, uniforms and badges in the opening patrol-car scene and on foot at the first intersection. In “Upon Reflection,” the player confirmed that the alley characters' materials rendered correctly and the notebook pages were readable on the same M4 Pro/macOS 27.2.1 build.
+- **Found on:** [L.A. Noire 1.2](../../dm/games/0100830004FB6000/README.md#mac-validation) ([NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386)).
 
 ### Firaxis CIVBSF shader libraries
 
@@ -113,6 +128,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** a worker's exception (and `red()`, a `SystemExit`) ended the whole split through the process pool, so one archive of a format revision a reader does not know stopped every other file's shaders too. `nlg_dict` read its index without checking the layout, so an index of another revision gave an `IndexError` instead of a line naming the archive.
 - **Fix:** `scan_file` leaves out a file whose reader fails, with `[RED] <file>: <why> (its shaders are left out)`, and the split goes on; at the end it prints `[RED] <n> file(s) could not be read, their shaders are left out (first: …)` and writes its tables. The NSP script shows that line and packs a provisional profile's IPA without those shaders; for a registered profile it stops there, since the profile's tables were split from every file. `nlg_dict` checks that the records and chunks fit the index and every chunk index is in range before reading it. The format itself still needs a reader: the line names the archive and, for NLG, its header bytes.
 - **Found on:** Mario Strikers: Battle League (no profile; [seedds/nxnative#282](https://github.com/seedds/nxnative/pull/282)): one of its 879 Next Level Games archives, a revision `nlg_dict` does not read. That revision is read now: [Next Level Games archives of revision 4](#next-level-games-archives-of-revision-4).
+
+### A large NXCX texture archive stalls the shader split
+
+- **Symptom:** the split stays at 99% for many minutes and the remaining worker consumes nearly all memory on a 16 GB Mac.
+- **Cause:** the generic loose-file scanner reads the entire 15.6 GiB `w_allpac.mrg` into a Python bytes object and searches it repeatedly for embedded formats. Byte sequences that happen to match shader magics occur inside compressed textures and trigger extra searches.
+- **Fix:** for an `NXCX` texture archive, look for embedded signatures in overlapping 16 MiB chunks. Pass GLSLC candidate offsets to the existing validator through a read-only mapping. If a signature indicates another supported embedded format, use the ordinary loose-file scanner.
+- **Found on:** [TSUKIHIME A piece of blue glass moon](../../dm/games/010057A01E4D4000/README.md) 1.0.2. The full split finished in 77–80 seconds on a 16 GB Apple M6 Mac mini with the files on S790. The original run was stopped after 19 minutes 55 seconds and its worker peaked at a 15.6 GiB physical footprint. The original reader, run against the large archive using a mapping for comparison, also found zero shaders there.
+- **Check:** `dm/tools/tests/test_split_nxcx.py` compares both paths for a valid GLSLC record whose magic crosses the chunk boundary, and checks that a BNSH signature takes the ordinary path.
 
 ### Next Level Games archives of revision 4
 

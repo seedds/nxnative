@@ -115,6 +115,7 @@ dm/gfx/tools/cb_extent.py	shader:stage:*	the uniform read extents
 dm/gfx/tools/shader_split.py	shader:stage:*	the shader tables (after a split)
 dm/gfx/tools/unityfs.py	shader:stage:*	the Unity serialized shader reader (after a split)
 dm/tools/patch_nso.py	*:*	the rewriter: every game's code
+dm/tools/jump_solver.py	*:*	jump-table proofs in the shared rewriter
 dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
 dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files

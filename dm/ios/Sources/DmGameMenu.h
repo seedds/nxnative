@@ -10,6 +10,8 @@ void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each t
 int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
 void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start
+bool dm_pad_edit_offered(void);   // the touch controls can be moved / resized now (2D or 3D, no controller connected)
+void dm_pad_edit_begin(void);   // edit mode: drag to move, pinch to resize, Done saves (per layout)
 void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
 bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
 #ifdef __cplusplus

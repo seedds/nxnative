@@ -24,8 +24,8 @@ $(B)/t_bcat_store: t_bcat_store.m ../hle_bcat_apple.m ../nextendo_bcat.h | $(B)
 	$(CLANG) $(BCAT_WARN) -fobjc-arc $(BCAT_CRYPTO_FLAGS) -o $@ t_bcat_store.m $(BCAT_CRYPTO_LIB) -lz -framework Foundation
 $(B)/t_bcat_sdk: t_bcat_sdk.c t_bcat_guest.S ../hle_bcat.c ../nextendo_bcat.h ../hle_bigstack.c $(GAME_H) | $(B)
 	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_sdk.c t_bcat_guest.S ../hle_bigstack.c
-$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
-	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
 $(B)/t_fs $(B)/t_fs_directory $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_bcat_fs: bcat_absent.h
 bcat-fixtures: $(B)/t_bcat_store $(B)/t_bcat_sdk $(B)/t_bcat_fs
 	$(B)/t_bcat_store

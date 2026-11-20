@@ -94,7 +94,12 @@ class PullingInputs(unittest.TestCase):
         no_input = shader(['float4']).replace('struct main0_in\n{\n    float4 m_0 [[attribute(0)]];\n};\n', '').replace('main0_in in [[stage_in]], ', '')
         self.assertEqual(dmsh_pull.variant(no_input), (None, 'no stage input'))
         self.assertEqual(dmsh_pull.variant(shader(['float4'], extra='constant float4& x [[buffer(16)]];\n'))[1], 'buffer 16 is taken')
-        self.assertEqual(dmsh_pull.variant(shader(['float4']).replace('[[attribute(0)]]', '[[attribute(17)]]'))[1], 'an input at attribute 16 or above')
+        self.assertEqual(dmsh_pull.variant(shader(['float4']).replace('[[attribute(0)]]', '[[attribute(32)]]'))[1], 'an input at attribute 32 or above')
+
+    def test_attributes_past_16(self):   # NVN2's attributes 16-31 (Unreal Engine 5's vertex factories use 16): read through the layout block like the others
+        v, info = dmsh_pull.variant(shader(['float4', 'uint4']).replace('[[attribute(1)]]', '[[attribute(16)]]'))
+        self.assertIsNotNone(v, info); self.assertEqual(info['inputs'], [0, 16]); self.assertIn('dm_fetch(dm_lay, 16u,', v)
+        self.compiles(v)
 
 if __name__ == '__main__':
     unittest.main()

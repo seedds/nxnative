@@ -59,7 +59,7 @@ Status: brought up on the Mac through the opening movie, the title (name entry, 
 
 ## Rewriter
 
-- **Resolved: a `jump table <addr>` assertion where the index is a copy made before the check** (`main+0x2dd8cd0`: `mov w0,w18`, then 41 instructions holding two other jump tables on `x0`, then `cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18`). `check_before_copy` accepts it. A copy of `patch_nso.py` whose assert prints and continues found this one alone among the 25,508 `x18` sites.
+- **Resolved: a `jump table <addr>` assertion where the index is a copy made before the check** (`main+0x2dd8cd0`: `mov w0,w18`, then 41 instructions holding two other jump tables on `x0`, then `cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18`). The [jump solver](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow) proves it: the compare narrows `w18`'s value, which the copy in `w0` shares. A copy of `patch_nso.py` whose assert prints and continues found this one alone among the 25,508 `x18` sites.
 - `main` has no unwind entries for its first 70 MB (a 68 MB stretch), which the rewriter disassembled as one function (6 minutes); it got through on a quieter Mac with the compressor and swap. With functions analysed in pieces it takes 292 pieces, and the result is the same as with 1 MB pieces and `b` within 256 KB (75 pieces).
 
 ## Mac routes
@@ -78,7 +78,7 @@ General host changes first needed here; each applies to every game:
 - **Shop service accessors** (`hle_misc.c`), **`nvnTextureGetTextureAddress` / `nvnCommandBufferGetCommandMemorySize`**: [Shop service accessors](../../../docs/reference/services.md#shop-service-accessors), [Pool size getters, texture address and command memory size](../../../docs/reference/nvn-objects.md#pool-size-getters-texture-address-and-command-memory-size).
 - **Unreal console variables registered by their constructor** (UE 4.18; `dm/tools/ue_cvar.py`, which the host's earlier run-time search passed over to the next variable's object): [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
 - **Vorbis type-2 residues with more than two channels**: [stb_vorbis README](../../third_party/stb_vorbis/README.md).
-- **Rewriter:** an index copied before its bounds check (`check_before_copy`): [Index copied before the bounds check](../../../docs/reference/rewriter.md#index-copied-before-the-bounds-check).
+- **Rewriter:** an index copied before its bounds check (now the [jump solver](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow)): [Index copied before the bounds check](../../../docs/reference/rewriter.md#index-copied-before-the-bounds-check).
 - **The node-area and 32 MB alignment cuts on SDK 7 / 8 builds** (the `orr w9, wzr, #0x3fe00000` form), later taken by Super Smash Bros. Ultimate's and Advance Wars 1+2's `sdk` builds: [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area), [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 
 ## Open

@@ -71,7 +71,7 @@ int main(void) { @autoreleasepool {
     p_bind_program bind={.prog=&pg[0],.stages=3};emit(OP_BIND_PROGRAM,&bind,sizeof bind);emit(OP_DRAW,&draw,sizeof draw);
     int32_t barrier=NVN_BARRIER_ORDER_PRIMITIVES_BIT;emit(OP_BARRIER,&barrier,sizeof barrier);
     bind.prog=&pg[1];emit(OP_BIND_PROGRAM,&bind,sizeof bind);emit(OP_DRAW,&draw,sizeof draw);emit(OP_END,NULL,0);
-    mtl_sub_begin();uint64_t handle=(uint64_t)commands;mtl_sub_index(&handle,1);mtl_exec(commands);
+    mtl_sub_begin();mtl_exec(commands);
     CHECK(g_nsd==10,"eight colors, depth and stencil are all tracked");
     CHECK(g_sd[8].depth==1&&g_sd[9].depth==2,"last entries retain separate depth/stencil identities");
     CHECK(g_pass.dfmt==260&&g_pass.sfmt==260,"write tracking preserves pipeline formats after both vertex draws");
@@ -88,5 +88,5 @@ int main(void) { @autoreleasepool {
     const float *z=d.bytes;const uint8_t *st=s.bytes;good=1;
     for(int i=0;i<64;i++)good&=z[i]==.75f&&st[i]==0xa5;
     CHECK(good,"both depth and stencil planes preserve their literal clear");
-    printf("attachment capacity: %d checks, %d failed (TBDR=%d)\n",checks,failed,tbdr_on());return failed!=0;
+    printf("attachment capacity: %d checks, %d failed\n",checks,failed);return failed!=0;
 } }

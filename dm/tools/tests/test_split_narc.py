@@ -100,6 +100,25 @@ class LooseNarc(unittest.TestCase):
         (_, keys, pairs, extra), log = self.scan(archive([member(0x10, b'BNTX' + bytes(64)), b'']))
         self.assertEqual((keys, pairs, extra, log), ({}, set(), {}, ''))
 
+    def test_malformed_archive_and_member_keep_the_reader_diagnosis(self):
+        missing_sections = struct.pack('<4sHHIHH', b'NARC', 0xfffe, 0, 16, 16, 0)
+        bad_distance = archive([b'\x60\0\0\x02\x80\x12\0'])
+        for data, message in ((missing_sections, 'no BTAF or GMIF'), (bad_distance, 'an LZ distance before the start')):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(SystemExit, r'\[RED\] /court.narc.*' + message):
+                    ss.scan_blob(data, '/court.narc', [])
+                fz.check(data)   # the fuzz harness accepts the same declared rejection
+
+    def test_narc_tables_are_bounded_before_reading(self):
+        raw = archive([b'plain'])
+        cases = [(b'NARC', 'header cut short')]
+        for offset, value, message in ((20, 0, 'invalid NARC section size'), (20, len(raw), 'invalid NARC section size'),
+                                       (24, 0xffffffff, 'member table cut short'), (32, 0xffffffff, 'past the GMIF end')):
+            data = bytearray(raw); struct.pack_into('<I', data, offset, value); cases.append((bytes(data), message))
+        for data, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(SystemExit, r'\[RED\] /court.narc: .*' + message):
+                ss.scan_blob(data, '/court.narc', [])
+
     def test_cli_matches_a_plain_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); rom = root / 'RomFS'; rom.mkdir()

@@ -1,7 +1,7 @@
 // GPU copies into a texture of a sparse pool that the host uploads whole (tex_from_storage): the copy reaches the physical memory mapped behind the texture, as the hardware's does
 // (gsb_swz through the page table); a copy into a level of a texture bound from that level (sparse_view) lands in that level (tex_mtl_all); and an upload after a mapping change keeps
 // what earlier copies wrote, also when the copy's command buffer is still running (the upload batch's GPU gather, or on the CPU sp_store_wait). Densha de GO!! Hashiro Yamanote Line
-// streams the finer levels of its sparse ASTC textures in by buffer-to-texture copies, and every upload after a mapping change put back zeros (GitHub #2350). Run twice: with the GPU
+// streams the finer levels of its sparse ASTC textures in by buffer-to-texture copies, and every upload after a mapping change put back zeros (GitHub #2350). A gather alone leaves the physical pool it reads out of the residency set (gather_only). Run twice: with the GPU
 // deswizzle (the gather on the GPU) and without it (the gather on the CPU). Texel values are literal colours
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
@@ -31,20 +31,27 @@ static void copy_in(pool_t *cpool, NVNtexture *tx, unsigned level, unsigned w, c
     NVNcopyRegion r = {0, 0, 0, (int)w, (int)w, 1};
     h_nvnCommandBufferCopyBufferToTexture(&cmd, (NVNbufferAddress)src, tx, &v, &r, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_exec(nvn_rec_linear(h, NULL));
+    uint8_t *linear = nvn_rec_linear(h, NULL);
+    state_reset(); memset(&R, 0, sizeof R); mtl_exec(linear);
+    free(linear); h_nvnCommandBufferFinalize(&cmd);
 }
 static int words_not(const uint8_t *p, uint64_t n, uint32_t want) { int bad = 0; for (uint64_t i = 0; i < n; i += 4) bad += *(const uint32_t *)(p + i) != want; return bad; }
 // Texels of level `level` (w x w) of the host texture other than want: the texture is looked up (and uploaded if its pages changed) in this submission, and read after it
-static int host_not(const tex_t *t, unsigned level, unsigned w, uint32_t want) {
-    id<MTLTexture> mt = tex_mtl_all(t);
-    next_sub();
-    if (!mt || level >= mt.mipmapLevelCount || mt.width != t->d.width) return -1;
+static int texture_not(id<MTLTexture> mt, unsigned level, unsigned w, uint32_t want) {
+    if (!mt || level >= mt.mipmapLevelCount) return -1;
     id<MTLBuffer> b = [g_dev newBufferWithLength:(NSUInteger)w * w * 4 options:MTLResourceStorageModeShared];
+    if (!b) abort();
     id<MTLCommandBuffer> c = q_cb(); id<MTLBlitCommandEncoder> e = [c blitCommandEncoder];
     [e copyFromTexture:mt sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, w, 1) toBuffer:b destinationOffset:0
         destinationBytesPerRow:w * 4 destinationBytesPerImage:(NSUInteger)w * w * 4];
     [e endEncoding]; [c commit]; [c waitUntilCompleted];
     return words_not(b.contents, (uint64_t)w * w * 4, want);
+}
+static int host_not(const tex_t *t, unsigned level, unsigned w, uint32_t want) {
+    id<MTLTexture> mt = tex_mtl_all(t);
+    next_sub();
+    if (!mt || mt.width != t->d.width) return -1;
+    return texture_not(mt, level, w, want);
 }
 static void run(int gpu, pool_t *virt, pool_t *phys, uint8_t *pmem, pool_t *cpool, uint8_t *cmem, uint64_t VO, uint64_t P0, uint64_t P1) {
     const uint32_t A = 0xff112233, B = 0xff445566, C = 0xff778899;
@@ -92,6 +99,67 @@ static void run(int gpu, pool_t *virt, pool_t *phys, uint8_t *pmem, pool_t *cpoo
     snprintf(n, sizeof n, "%s: ReadTexels of level 0, from the storage, reads the copy", how); CHECK(got[0] == C && got[3] == C, n);
     h_nvnTextureFinalize(&tx);
 }
+// A texture over a physical pool nothing on the GPU writes into, uploaded: its gather reads the pool through a buffer the upload batch holds, and leaves the pool out of the
+// residency set. Through the pool's own buffer (mtl_gpu_addr) every pool behind a gathered texture was wired for good: Resident Evil 4 had 148 pools and 777 MB wired by the forest (#2350)
+static void gather_only(int gpu, pool_t *virt, pool_t *gphys, uint8_t *gmem, uint64_t VO, uint64_t P) {
+    const uint32_t D = 0xff99aabb;
+    const char *how = gpu ? "GPU gather" : "CPU gather";
+    char n[200];
+    g_nvn_deswz_gpu = gpu;
+    NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, 128); h_nvnTextureBuilderSetHeight(&tb, 128); h_nvnTextureBuilderSetLevels(&tb, 1);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)virt, VO);
+    CHECK(h_nvnTextureInitialize(&tx, &tb), "sparse texture of one level");
+    const tex_t *t = (const tex_t *)&tx;
+    for (uint64_t o = 0; o < 0x10000; o += 4) *(uint32_t *)(gmem + P + o) = D;
+    snprintf(n, sizeof n, "%s: the texture mapped over a pool only read", how); CHECK(map(virt, gphys, VO, P, 0x10000), n);
+    int res = g_pool_res_n;
+    snprintf(n, sizeof n, "%s: the upload reads the pool", how); CHECK(host_not(t, 0, 128, D) == 0, n);
+    snprintf(n, sizeof n, "%s: and leaves it out of the residency set (pools resident %d, before %d)", how, g_pool_res_n, res); CHECK(g_pool_res_n == res, n);
+    h_nvnTextureFinalize(&tx);
+}
+// A buffer copy through a sparse virtual address must invalidate uploads from its physical pages, including textures reached through the page table.
+static void buffer_alias(pool_t *virt, pool_t *phys, uint8_t *pmem, uint8_t *cmem) {
+    const uint64_t vo = 0x500000, po = 0x100000, n = 0x10000;
+    const uint32_t old = 0xff123456, copied = 0xffabcdef;
+    dm_guest_write_prepare(pmem + po, n);
+    for (uint64_t i = 0; i < n; i += 4) { *(uint32_t *)(pmem + po + i) = old; *(uint32_t *)(cmem + 0x40000 + i) = copied; }
+    CHECK(map(virt, phys, vo, po, n), "buffer-copy destination mapped to physical pages");
+    tex_t physical = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial(), .pool = phys, .mem = pmem + po, .off = po, .has_layout = 1};
+    physical.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 128, .height = 128, .depth = 1, .levels = 1, .samples = 1};
+    nvn_tex_layout(&physical.d, &physical.L);
+    NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, 128); h_nvnTextureBuilderSetHeight(&tb, 128);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)virt, vo);
+    CHECK(h_nvnTextureInitialize(&tx, &tb), "texture over the sparse destination initialized");
+    mtl_tex_cpu_written(&physical);
+    CHECK(host_not(&physical, 0, 128, old) == 0 && host_not((const tex_t *)&tx, 0, 128, old) == 0, "physical and sparse textures uploaded before the copy");
+    mtl_sub_copy((uint64_t)(uintptr_t)(cmem + 0x40000), (uint64_t)(uintptr_t)(virt->mem + vo), n);
+    next_sub();
+    CHECK(words_not(pmem + po, n, copied) == 0, "buffer copy writes the physical pages");
+    CHECK(host_not(&physical, 0, 128, copied) == 0, "completed sparse buffer copy invalidates the physical texture");
+    CHECK(host_not((const tex_t *)&tx, 0, 128, copied) == 0, "completed sparse buffer copy invalidates the sparse texture");
+    CHECK(tex_mtl_all(&physical) && tex_mtl_all((const tex_t *)&tx), "both destination textures accessed in the copy's submission");
+    for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(cmem + 0x40000 + i) = old;
+    struct { op_hdr c; uint64_t a[3]; op_hdr bc; p_blend_color col; op_hdr end; } ops = {
+        .c = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a = {(uintptr_t)(cmem + 0x40000), (uintptr_t)(virt->mem + vo), n},
+        .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
+    mtl_exec((const uint8_t *)&ops);
+    id<MTLTexture> direct = tex_mtl_all(&physical), mapped = tex_mtl_all((const tex_t *)&tx);
+    next_sub();
+    CHECK(texture_not(direct, 0, 128, old) == 0, "same-submission sparse copy invalidates the physical texture");
+    CHECK(texture_not(mapped, 0, 128, old) == 0, "same-submission sparse copy invalidates the sparse texture");
+    CHECK(host_not(&physical, 0, 128, old) == 0, "physical upload includes the preceding copy's completion stamp");
+    for (uint64_t i = 0; i < n; i += 4) *(uint32_t *)(cmem + 0x40000 + i) = copied;
+    mtl_sub_copy((uintptr_t)(cmem + 0x40000), (uintptr_t)(virt->mem + vo), n);
+    CHECK(map(virt, NULL, vo, 0, n), "destination unmapped before the copy completes");
+    next_sub();
+    CHECK(words_not(pmem + po, n, copied) == 0, "copy still writes the physical pages retained by its Metal buffer");
+    CHECK(host_not(&physical, 0, 128, copied) == 0, "completion invalidates the physical destination after unmapping");
+    mtl_tex_release(&physical); h_nvnTextureFinalize(&tx);
+}
 void crash_install(void);
 int main(void) { @autoreleasepool {
     alarm(120); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();
@@ -103,6 +171,9 @@ int main(void) { @autoreleasepool {
     posix_memalign((void **)&cmem, 16384, 1 << 20); memset(cmem, 0, 1 << 20);
     pool_t phys = {0}, virt = {0}, cpool = {0}; pool_builder_t pb = {.mem = pmem, .size = 2 << 20, .flags = 0x24};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&phys, (NVNmemoryPoolBuilder *)&pb), "physical pool");
+    uint8_t *gmem = NULL; posix_memalign((void **)&gmem, 16384, 1 << 20); memset(gmem, 0, 1 << 20);
+    pool_t gphys = {0}; pb = (pool_builder_t){.mem = gmem, .size = 1 << 20, .flags = 0x24};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&gphys, (NVNmemoryPoolBuilder *)&pb), "physical pool only read");
     pb = (pool_builder_t){.mem = cmem, .size = 1 << 20, .flags = 0x24};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&cpool, (NVNmemoryPoolBuilder *)&pb), "command and source pool");
     pb = (pool_builder_t){.size = DM_GAME_APP_POOL + (1ull << 32), .flags = NVN_MEMORY_POOL_FLAGS_VIRTUAL};   // larger than the application pool: sparse from the start
@@ -111,9 +182,13 @@ int main(void) { @autoreleasepool {
     CHECK(map(&virt, &phys, 0x10000000, 0x1F0000, 0x1000), "a first mapping");
     CHECK(nvn_sparse_pool(&virt), "the pool reads through its page table");
     run(1, &virt, &phys, pmem, &cpool, cmem, 0x100000, 0x000000, 0x040000);
+    gather_only(1, &virt, &gphys, gmem, 0x300000, 0x00000);
     run(0, &virt, &phys, pmem, &cpool, cmem, 0x200000, 0x080000, 0x0C0000);
+    gather_only(0, &virt, &gphys, gmem, 0x400000, 0x10000);
     g_nvn_deswz_gpu = gpu;
+    buffer_alias(&virt, &phys, pmem, cmem);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&cpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
-    mtl_sub_commit(); mtl_drain(); free(pmem); free(cmem);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&gphys);
+    mtl_sub_commit(); mtl_drain(); free(pmem); free(cmem); free(gmem);
     printf("sparse copies: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

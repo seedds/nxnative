@@ -1,5 +1,5 @@
-# Tales of Eternia Remastered 2.0.0 (Unity 6000.0.66f2 IL2CPP, CRIWARE, SDK 21.4.4, NVN).
-# Initial profile from the NSP survey. Tested on an Apple silicon Mac and an iPhone 15 Pro Max.
+# Tales of Eternia Remastered 2.0.0 and 2.1.0 (Unity 6000.0.66f2 IL2CPP, CRIWARE, SDK 21.4.4, NVN).
+# Profile from the NSP survey; both listed builds were tested on an Apple silicon Mac.
 
 # ---- Identity ----
 title_id	010006E0230AC000
@@ -12,8 +12,9 @@ app_category	public.app-category.games
 
 # ---- Versions ----
 build	v65536	2.0.0	main=54b55157030f6a82281b70339a64bce5	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
-package	v65536
-shader_versions	v65536
+build	v131072	2.1.0	main=b52625611ef77737706f69c3187a5df3	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
+package	v131072
+shader_versions	v65536 v131072
 
 # ---- Files ----
 # every module main imports from

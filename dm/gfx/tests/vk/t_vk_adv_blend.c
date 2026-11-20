@@ -10,7 +10,8 @@
 //    blend does not clamp; LINEARDODGE drawn with the state's own functions on every path (vk_gpl.c adv_kept: neither reduced nor drawn through the extension, open), a
 //    negative source on an RGBA16F target with Mario vs. Donkey Kong's SRC_ALPHA, ONE scaled by As (ONE, ONE and the mode's equation add it in full, so these checks fail on
 //    the code that reduced it), and on RGBA8 the state's ONE, ZERO as a replace, premultiplied or not, on levels A and D;
-//    and an advanced draw, a plain one and an advanced one again in one pass (the dynamic state shadow of vk_commands.c dyn_apply);
+//    and an advanced draw, a plain one and an advanced one again in one pass (the dynamic state shadow of vk_commands.c dyn_apply); the reductions' exactness by target format
+//    (MULTIPLY and INVERT_RGB exact on a target without alpha, whose destination is always opaque);
 // 3. on a device with VK_EXT_blend_operation_advanced (and advancedBlendCoherentOperations): every mode its limits allow, drawn through the extension against the reference, on
 //    level A (the advanced state dynamic, with extendedDynamicState3ColorBlendAdvanced) and with the blend baked (levels B and D), and the alternation of advanced and plain
 //    draws in one pass through it. Lavapipe has not the extension: the part says it is skipped and why, and does not fail.
@@ -21,6 +22,7 @@
 #include "shaders/gen/fullscreen_vert.h"
 
 void hvk_pso_test_level(char level);
+int hvk_adv_exact_on(unsigned mode, VkFormat f);
 static NVNqueue g_q; static hv_cmds g_c; static hv_pool g_p; static NVNprogram g_ucol; static float *g_ubo;
 
 // ---------- The CPU reference (the specification's equations, in double) ----------
@@ -396,6 +398,27 @@ int main(void) {
         double w = 1; int ok = alt_case(NVN_BLEND_ADVANCED_MODE_MULTIPLY, src, dst, &w);
         char name[200]; snprintf(name, sizeof name, "MULTIPLY, plain SRC_OVER, MULTIPLY in one pass: each column as its blend gives it (worst %.4f)", w);
         t(name, ok && w <= 3.0 / 255);
+    }
+
+    // The conditional reductions on a target without alpha (vk_gpl.c fmt_no_alpha, R_OPAQUE): blending reads its destination alpha as 1, so MULTIPLY and INVERT_RGB, exact
+    // over an opaque destination, are exact for every input there (Mario vs. Donkey Kong draws MULTIPLY into its R11G11B10F scene, where the red line called it approximate:
+    // these checks fail on that code); with alpha they stay conditional, and LIGHTEN, which also needs an opaque source, stays conditional everywhere
+    {
+        static const struct { unsigned m; VkFormat f; int want; const char *what; } c[] = {
+            {NVN_BLEND_ADVANCED_MODE_MULTIPLY, VK_FORMAT_B10G11R11_UFLOAT_PACK32, 1, "MULTIPLY on R11G11B10F: exact"},
+            {NVN_BLEND_ADVANCED_MODE_MULTIPLY, VK_FORMAT_R16G16_SFLOAT, 1, "MULTIPLY on RG16F: exact"},
+            {NVN_BLEND_ADVANCED_MODE_INVERT_RGB, VK_FORMAT_B10G11R11_UFLOAT_PACK32, 1, "INVERT_RGB on R11G11B10F: exact"},
+            {NVN_BLEND_ADVANCED_MODE_MULTIPLY, VK_FORMAT_R8G8B8A8_UNORM, 0, "MULTIPLY on RGBA8: exact only over an opaque destination"},
+            {NVN_BLEND_ADVANCED_MODE_MULTIPLY, VK_FORMAT_R16G16B16A16_SFLOAT, 0, "MULTIPLY on RGBA16F: exact only over an opaque destination"},
+            {NVN_BLEND_ADVANCED_MODE_INVERT_RGB, VK_FORMAT_R8G8B8A8_UNORM, 0, "INVERT_RGB on RGBA8: exact only over an opaque destination"},
+            {NVN_BLEND_ADVANCED_MODE_LIGHTEN, VK_FORMAT_B10G11R11_UFLOAT_PACK32, 0, "LIGHTEN on R11G11B10F: still conditional (needs an opaque source too)"},
+            {NVN_BLEND_ADVANCED_MODE_SCREEN, VK_FORMAT_R8G8B8A8_UNORM, 1, "SCREEN on RGBA8: exact (unchanged)"},
+        };
+        for (size_t k = 0; k < sizeof c / sizeof *c; k++) {
+            int got = hvk_adv_exact_on(c[k].m, c[k].f);
+            if (got != c[k].want) fprintf(stderr, "%s: hvk_adv_exact_on gave %d\n", c[k].what, got);
+            t(c[k].what, got == c[k].want);
+        }
     }
 
     // 3. VK_EXT_blend_operation_advanced: every mode the device's limits allow, against the reference, on level A (the advanced state dynamic, vkCmdSetColorBlendAdvancedEXT)

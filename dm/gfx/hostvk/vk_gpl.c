@@ -81,6 +81,18 @@ static int fmt_float(VkFormat f) {
         default: return 0;
     }
 }
+// Whether f has no alpha channel: blending reads a missing destination alpha as 1, so every destination of such a target is opaque (Ad = 1). The colour formats NVN renders to
+// without alpha: one, two and three channels, R11G11B10F and RGB565
+static int fmt_no_alpha(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM:
+        case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16B16_SFLOAT:
+        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+        case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16:
+            return 1;
+        default: return 0;
+    }
+}
 // ---------- Advanced blend modes (step P8, design 6; docs/reference/rendering.md, "Advanced blend modes on the Vulkan backend") ----------
 // While an advanced mode is set (blend_st.adv, hle_nvn.c) the Switch's GPU blends by NV_blend_equation_advanced and ignores the state's own functions. VK_EXT_blend_operation_advanced
 // is the same definition (the specification's "Advanced Blend Operations"): with uncorrelated overlap, premultiplied colours (Cs, As), (Cd, Ad) and Cs' = Cs / As, Cd' = Cd / Ad,
@@ -94,7 +106,8 @@ static int fmt_float(VkFormat f) {
 //   PLUS_CLAMPED, PLUS_CLAMPED_ALPHA, MINUS_CLAMPED: PLUS and MINUS clamped to [0, 1], exact on a fixed-point target, whose stored result is clamped (PLUS_CLAMPED_ALPHA's
 //   clamp to As + Ad holds as Cs + Cd <= As + Ad for premultiplied colours); on a float target exact while no sum passes 1 (no difference falls below 0);
 //   alpha of every f / X / Y / Z blend mode: As + Ad (1 - As), ONE, ONE_MINUS_SRC_ALPHA.
-// Exact under a condition (R_COND), used as the closest fixed-function blend where the state's own functions would be arbitrary (the error is bounded and has a known sign):
+// Exact under a condition (R_COND; R_OPAQUE where the condition is an opaque destination, which a target without alpha always is), used as the closest fixed-function blend
+// where the state's own functions would be arbitrary (the error is bounded and has a known sign):
 //   MULTIPLY: Cs Cd + Cs (1 - Ad) + Cd (1 - As), three terms: DST_COLOR, ONE_MINUS_SRC_ALPHA drops Cs (1 - Ad), exact over an opaque destination (Ad = 1), darker by Cs (1 - Ad) elsewhere;
 //   INVERT_RGB: Cs (Ad - Cd) + Cd (1 - As): ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, exact over an opaque destination, brighter by Cs (1 - Ad) elsewhere;
 //   LIGHTEN: max(Cs + Cd (1 - As), Cd + Cs (1 - Ad)): the MAX operation (factors ignored) gives max(Cs, Cd), exact where both are opaque, darker elsewhere (at most 1/4 over the
@@ -115,7 +128,9 @@ static int fmt_float(VkFormat f) {
 // the Switch clamps such a source before the microcode on an unsigned float target is not known, so the mode keeps the picture it had before the equation was used
 // (docs/reference/rendering.md, "Advanced blend modes on the Vulkan backend")
 static int adv_kept(unsigned mode) { return mode == NVN_BLEND_ADVANCED_MODE_LINEARDODGE; }
-enum { R_EXACT = 1, R_UNORM, R_COND };   // exact; exact on a fixed-point target (float: while unclamped); exact under the row's condition
+// R_OPAQUE: exact under the condition of an opaque destination, so exact for every input on a target without alpha (fmt_no_alpha), such as the R11G11B10F scenes Mario vs.
+// Donkey Kong draws MULTIPLY into (level 3-DK), where the red line used to call the reduction approximate
+enum { R_EXACT = 1, R_UNORM, R_COND, R_OPAQUE };   // exact; exact on a fixed-point target (float: while unclamped); exact under the row's condition; exact over an opaque destination
 typedef struct { uint8_t s, d, eq, sa, da, eqa, mask, cls; } adv_row;
 #define ROW(s, d, eq, sa, da, eqa, mask, cls) {NVN_BLEND_FUNC_##s, NVN_BLEND_FUNC_##d, NVN_BLEND_EQUATION_##eq, NVN_BLEND_FUNC_##sa, NVN_BLEND_FUNC_##da, NVN_BLEND_EQUATION_##eqa, mask, cls}
 static const adv_row k_red[NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY + 1] = {
@@ -141,8 +156,8 @@ static const adv_row k_red[NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY + 1] = {
     [NVN_BLEND_ADVANCED_MODE_RED] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x1, R_EXACT),
     [NVN_BLEND_ADVANCED_MODE_GREEN] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x2, R_EXACT),
     [NVN_BLEND_ADVANCED_MODE_BLUE] = ROW(ONE, ZERO, ADD, ZERO, ONE, ADD, 0x4, R_EXACT),
-    [NVN_BLEND_ADVANCED_MODE_MULTIPLY] = ROW(DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
-    [NVN_BLEND_ADVANCED_MODE_INVERT_RGB] = ROW(ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ZERO, ONE, ADD, 0xf, R_COND),
+    [NVN_BLEND_ADVANCED_MODE_MULTIPLY] = ROW(DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_OPAQUE),
+    [NVN_BLEND_ADVANCED_MODE_INVERT_RGB] = ROW(ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, ADD, ZERO, ONE, ADD, 0xf, R_OPAQUE),
     [NVN_BLEND_ADVANCED_MODE_LIGHTEN] = ROW(ONE, ONE, MAX, ONE, ONE_MINUS_SRC_ALPHA, ADD, 0xf, R_COND),
 };
 #undef ROW
@@ -161,8 +176,15 @@ static const adv_row *adv_row_of(const blend_st *b, VkFormat f, int *exact) {
     if (!r || b->adv_ovl) return NULL;
     if (b->adv_npm && ((r->s != NVN_BLEND_FUNC_ONE && r->s != NVN_BLEND_FUNC_ZERO) || r->d == NVN_BLEND_FUNC_SRC_COLOR || r->d == NVN_BLEND_FUNC_ONE_MINUS_SRC_COLOR ||
                        r->eq == NVN_BLEND_EQUATION_MAX || r->eq == NVN_BLEND_EQUATION_MIN)) return NULL;
-    *exact = r->cls == R_EXACT || (r->cls == R_UNORM && !fmt_float(f));
+    *exact = r->cls == R_EXACT || (r->cls == R_UNORM && !fmt_float(f)) || (r->cls == R_OPAQUE && fmt_no_alpha(f));
     return r;
+}
+// For the tests (t_vk_adv_blend): whether mode's reduction is exact for every input on a target of format f, with a premultiplied source and uncorrelated overlap (-1: not reduced)
+int hvk_adv_exact_on(unsigned mode, VkFormat f);
+int hvk_adv_exact_on(unsigned mode, VkFormat f) {
+    blend_st b; memset(&b, 0, sizeof b); b.adv = mode & 63u;
+    int exact = 0;
+    return adv_row_of(&b, f, &exact) ? exact : -1;
 }
 // Why VK_EXT_blend_operation_advanced did not draw a mode, for the red lines
 static const char *adv_ext_why(void) {

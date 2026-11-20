@@ -506,13 +506,13 @@ class PackReuse(unittest.TestCase):
         shutil.copytree(self.tmp / 'msl', library)
         self.assertTrue(pack_app.shader_lib.pack(library, say=lambda s: None))
         program = ['1', *(str(self.tmp / p) for p in ('patched', 'romfs')), f'{library}.img', str(self.tmp / 'profile'), str(self.tmp / 'html')]
-        self.args.program = ['\t'.join(program)]
+        self.args.program = ['\t'.join(program)]  # pyright: ignore[reportArgumentType]  (program is list[str])
         self.pack()
         packed = Path(self.args.out) / 'Contents/PlugIns/ShaderLibraries.bundle/Contents/Resources/msl/p1'
         self.assertEqual([p.name for p in packed.iterdir()], ['b-abcdef012345.img'])
 
         program[3] = str(library)
-        self.args.program = ['\t'.join(program)]
+        self.args.program = ['\t'.join(program)]  # pyright: ignore[reportArgumentType]  (program is list[str])
         self.assertIn('step: shader libraries (reused, signed)\n', self.pack())
         self.assertEqual([p.name for p in packed.iterdir()], ['b-abcdef012345.img'])
 

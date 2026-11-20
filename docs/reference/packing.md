@@ -157,7 +157,7 @@
 - **Symptom:** the shader split reports `unsupported TT Games compression b'DFLT'` and leaves out the affected add-on shaders.
 - **Cause:** the CC4 reader handled stored members and OODL chunks. DFLT uses the same 12-byte chunk header with little-endian stored and decoded lengths. Each compressed chunk in the tested DLC holds one final DEFLATE block. The type bits are 0 for dynamic Huffman and 1 for fixed Huffman. Standard DEFLATE expects 2 for dynamic Huffman.
 - **Fix:** interpret the DFLT block type before decoding with zlib. Require the decoder to consume the whole chunk and produce exactly its declared length within the indexed member size.
-- **Found on:** LEGO Star Wars: The Skywalker Saga 1.10.0. All 551 compressed chunks from 83 shader members in 15 DLC archives decode. The full split adds 984 shader keys to the 98,315 from the updated game and reports no unreadable files.
+- **Found on:** [LEGO Star Wars: The Skywalker Saga](../../dm/games/010042D00D900000/README.md) 1.10.0. All 551 compressed chunks from 83 shader members in 15 DLC archives decode. The full split adds 984 shader keys to the 98,315 from the updated game and reports no unreadable files.
 
 ### The shader package and the shader map come from different splits
 

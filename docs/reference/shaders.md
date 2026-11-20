@@ -1701,6 +1701,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`GlobalMemory`: the three fail on `main`). A GPU cross-check of 300 LDG / STG / ATOMG / RED from an nvdisasm-validated corpus (sm_86 and sm_80 compiled code), as one-thread compute shaders through a gmem_map the harness builds as the host does (`dmsh_abi.h` `DMSH_GMEM_MAP_*`), production options: 135 identical to 300. Which forms NVN's compiler emits for games is not known here: the descriptor form is CUDA's usual one, and no game note in this repository shows it.
 - **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
 
+### Maxwell PRMT byte permutation
+
+- **Symptom:** the translator reports `Shader instruction PrmtI is not implemented.` (or `PrmtR`, `PrmtC`, `PrmtRc`), and leaves the destination unchanged. A shader may still compile despite the missing operation.
+- **Cause:** the Maxwell decoder recognized the register, immediate-selector and two constant-buffer forms, but all four emitters only logged a note. Ampere's separate PRMT emitter did not cover these encodings.
+- **Fix:** Maxwell PRMT selects four bytes from its two data operands. In generic mode each selector nibble names one of eight bytes and may replicate that byte's sign; F4E, B4E, RC8, ECL, ECR and RC16 use the selector's low two bits and copy bytes without sign replication, as specified by [NVIDIA's PTX PRMT table](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-prmt). The `Rc` encoding takes its selector from the register field and its upper data word from the constant buffer. Reserved mode values fail translation. The shader chain changes, so existing shader libraries must be rebuilt.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) and [Farming Simulator 26](../../dm/games/0100D440269E8000/README.md) recorded `PrmtI` in their shader builds; [#2040](https://github.com/seedds/nxnative/issues/2040) identified the missing Maxwell implementation separately from the Ampere series. Their shader builds and runtime impact after this change remain unverified; synthetic encoded shaders establish the instruction behavior without game files.
+
 ### Maxwell ATOM.CAS
 
 - **Symptom:** the shader build counts `Shader instruction AtomCas is not implemented.` among the translator's messages, and the shader still loads: its global compare-and-swap does nothing and its result register keeps its old contents (a hash-table insertion or a lock-free update that never lands).

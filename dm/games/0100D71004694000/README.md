@@ -18,6 +18,7 @@ The Mac brings up the title panorama, the first-run dialog and a local world. Pr
 - [Vulkan functions looked up by name](../../../docs/reference/rendering.md#vulkan-functions-looked-up-by-name) and [RenderDragon material shaders](../../../docs/reference/shaders.md#renderdragon-material-shaders).
 - [RenderDragon's unsigned bone indices](../../../docs/reference/rendering.md#renderdragons-unsigned-bone-indices).
 - [Vulkan shader resource tables truncated](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated).
+- [Vulkan partial attachment clears](../../../docs/reference/rendering.md#vulkan-partial-attachment-clears-skipped).
 - [Distributing branch hops between patch areas](../../../docs/reference/rewriter.md#distributing-branch-hops-between-patch-areas).
 
 ## Bone-index layout
@@ -44,6 +45,14 @@ Neither advanced mode is available through this build's normal settings. Mode 1 
 
 The client renderer update (`+0x422e5a0`) checks the corresponding capability and replaces either unsupported request with mode 0 before passing it to the framebuilder. Saved settings cannot bypass these checks. This is a static trace of the original NSO, corroborated by focused Ghidra decompilation and Capstone inspection, not a physical Switch runtime observation. It does not establish availability in a separate native Switch 2 executable.
 
+## Attachment clears
+
+Resolved in the general host: [partial attachment clears](../../../docs/reference/rendering.md#vulkan-partial-attachment-clears-skipped) now preserve exact regions, view-relative layers and unselected aspects. The API defect was demonstrated with synthetic color and depth GPU readbacks, not a Minecraft screenshot failure.
+
+On the unmodified host, a menu-to-world investigation reached 30,900 frames without an unsupported-clear diagnostic. The first 20 sampled calls at `main+0xe9533cc` cleared full 1920×1080 rectangles, base layer 0, count 1. Native code at `+0xe9530fc..+0xe953184` computes the rectangle from view bounds rather than a fixed full-image constant. This bounded runtime observation does not prove that partial clears are unreachable in other scenes or modes.
+
+Focused GPU checks and the full Hades regression passed on Apple M6. No additional Minecraft gameplay validation is pending for this API fix: its clear semantics are checked directly, and the observed Minecraft route did not exercise the partial path. iOS remains untested.
+
 ## Open
 
-Online services remain unverified. Clear rectangles smaller than an attachment still report unsupported operations.
+Online services remain unverified.

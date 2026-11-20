@@ -36,6 +36,7 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 - IoStore containers `Carrot4/Content/Paks/Carrot4-Switch.utoc` / `.ucas` (7.5 GB, TOC version 2; `.ucas` is the profile's `romfs_marker`) hold the cooked packages; everything else is in `Carrot4-Switch.pak` (3.5 GB, version 11 with the magic 0xcc from the end as DRAGON QUEST VII Reimagined's, 10,046 files, Zlib, index not encrypted): the configs, 1,294 Wwise `.wem` files, the WebM movies (stored) and the two shader code archives (stored).
 - The update (v262144, 0.9 GB) is a delta over the base RomFS.
 - Shaders: 15,727 distinct (16,190 in the two archives), every one an LZ4 block (`uepak.py` `lz4_shaders`), as DRAGON QUEST VII Reimagined's; all build. Every vertex shader is made to link with any pixel shader (`shader_split.py` `separable_pairs`).
+- **Shader map refresh (1.1.1, v262144).** Commit `8d62601f` changed the splitter to keep the first occurrence of a duplicate shader key within a scan. The regenerated map keeps all 15,727 keys and stages and moves two shaders from the Global archive's packages to the Carrot4 archive's packages. Shader facts and pairs match the registered tables. On an M3 Pro with macOS 27.0.1, all 15,727 Mac shaders built, and the packaged app booted and played through the Olimar opening. The build reused the rewritten executables, so fresh rewriting remains unverified.
 
 ## Services
 

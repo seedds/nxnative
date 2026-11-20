@@ -29,7 +29,8 @@ int main(void) {
     CHECK(h_fr_NqInit(presence, uid) == RES_FAIL, "NotificationQueue::Initialize still fails");
     CHECK(h_fr_OpenSession(uid) == RES_FAIL, "DeclareOpenOnlinePlaySession still fails");
     // Resolve the actual takeovers: a missing or misspelled overload would run the SDK's friends client instead (PR #2162).
-    Result (*key_uid)(void *, const void *, int) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb");
+    // The Uid form is a wait entry (HLE_FORCE_WAIT): its table function is the gate into entry.S, which only a guest thread may enter, so the check calls the hook itself
+    Result (*key_uid)(void *, const void *, unsigned) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb") ? h_fr_GetPHKey : NULL;
     Result (*key_no_uid)(void *, int) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyEb");
     uint8_t key[0x100], before[sizeof key];
     memset(before, 0xa5, sizeof before);

@@ -738,10 +738,24 @@ static _Atomic int g_power_saving;
 int dm_power_saving_now(void) { return g_power_saving; }
 static void power_refresh(void) {
     static int keep = -1; if (keep < 0) { const char *e = getenv("DM_BATTERY_120"); keep = e && atoi(e) != 0; }
-    CFTypeRef info = IOPSCopyPowerSourcesInfo(); int battery = 0;
-    if (info) { CFStringRef src = IOPSGetProvidingPowerSourceType(info); battery = src && CFStringCompare(src, CFSTR(kIOPMBatteryPowerKey), 0) == kCFCompareEqualTo; CFRelease(info); }
+    // On battery = no power adapter connected. Not the providing source, which flipped between battery and adapter 8 times in a session of Kirby and the
+    // Forgotten Land with a 140 W adapter in (the battery at 78-80 %: most likely macOS holding its charge at a limit runs the Mac from the battery for a
+    // while; not confirmed), so 120 fps fell to 60 with the adapter in
+    int battery = 0; CFTypeRef info = IOPSCopyPowerSourcesInfo();
+    if (info) {
+        CFArrayRef list = IOPSCopyPowerSourcesList(info); int has_battery = 0;
+        for (CFIndex i = 0; list && i < CFArrayGetCount(list); i++) {
+            CFDictionaryRef d = IOPSGetPowerSourceDescription(info, CFArrayGetValueAtIndex(list, i)); CFStringRef t = d ? CFDictionaryGetValue(d, CFSTR(kIOPSTypeKey)) : NULL;
+            if (t && CFStringCompare(t, CFSTR(kIOPSInternalBatteryType), 0) == kCFCompareEqualTo) has_battery = 1;
+        }
+        if (list) CFRelease(list);
+        CFDictionaryRef adapter = IOPSCopyExternalPowerAdapterDetails();
+        battery = has_battery && !adapter;   // a Mac without a battery is never on battery
+        if (adapter) CFRelease(adapter);
+        CFRelease(info);
+    }
     int low = NSProcessInfo.processInfo.lowPowerModeEnabled, saving = !keep && (battery || low);
-    static int was = -1; if (saving != was || was < 0) LOG("front end: power %s%s%s", battery ? "on battery" : "from the adapter", low ? ", Low Power Mode on" : "",
+    static int was = -1; if (saving != was || was < 0) LOG("front end: power %s%s%s", battery ? "on battery (no adapter)" : "adapter connected or no battery", low ? ", Low Power Mode on" : "",
         keep ? " (DM_BATTERY_120: 120 fps stays)" : saving ? ": a 120 fps game runs at 60" : "");
     was = saving; g_power_saving = saving;
 }

@@ -730,6 +730,32 @@ static void *guest_tramp(void *p) {
     ((guest_arg *)p)->fn(); LOG("guest thread finished"); exit(0);
 }
 
+// Frame-rate counter (DM_SHOW_FPS=1, as on iOS): the frames put on screen in the last second (nvn_mtl.m counts them for NVN and the Vulkan layer alike; frames the
+// display link merged away are not counted), in a small label at the window's top right. A text layer over the game's Metal layer: the game view hosts that layer,
+// so it takes no subviews, and the layer's autoresizing keeps the label in its corner through resizes and fullscreen
+uint64_t mtl_present_count(void);
+static void front_mac_fps(CALayer *host) {
+    CATextLayer *t = [CATextLayer layer];
+    NSFont *f = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightSemibold];
+    t.font = (__bridge CFTypeRef)f; t.fontSize = 13; t.alignmentMode = kCAAlignmentCenter;
+    t.foregroundColor = NSColor.whiteColor.CGColor; t.backgroundColor = [NSColor colorWithWhite:0 alpha:0.45].CGColor; t.cornerRadius = 6;
+    t.contentsScale = host.contentsScale > 0 ? host.contentsScale : 2; t.string = @"-- fps";
+    CGFloat w = 66, h = 20;
+    t.frame = CGRectMake(host.bounds.size.width - w - 10, host.bounds.size.height - h - 10, w, h);
+    t.autoresizingMask = kCALayerMinXMargin | kCALayerMinYMargin; t.zPosition = 1000;
+    [host addSublayer:t];
+    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
+    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *tm) {
+        (void)tm; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        if (now - t0 < 1.5) t.string = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span was a stall or the background: no reading
+        t.contentsScale = host.contentsScale > 0 ? host.contentsScale : t.contentsScale;                    // the window may have moved to a screen of another scale
+        [CATransaction commit];
+        n0 = n; t0 = now;
+    }];
+    LOG("front end: frame-rate counter on (DM_SHOW_FPS)");
+}
+
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
 __attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
 
@@ -1611,6 +1637,7 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
+        if (getenv("DM_SHOW_FPS") && atoi(getenv("DM_SHOW_FPS"))) front_mac_fps(g_layer);   // just the frame rate, top right (Apple's HUD shows much more)
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);

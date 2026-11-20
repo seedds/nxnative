@@ -125,8 +125,8 @@ sync-wait: $(B)/t_sync_wait
 .PHONY: sync-wait
 run: $(B)/t_symbols
 run: $(B)/t_server_environment
-$(B)/t_server_environment: t_server_environment.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c
+$(B)/t_server_environment: t_server_environment.c t_net_off.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c t_net_off.c
 .PHONY: server-environment
 server-environment: $(B)/t_server_environment
 	$(B)/t_server_environment

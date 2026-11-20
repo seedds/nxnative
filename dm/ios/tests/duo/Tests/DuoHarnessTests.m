@@ -1557,8 +1557,12 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self beginTouches:@[touch] onPad:pad];
     XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A, @"On: a touch key presses with a controller connected");
     [self endTouches:@[touch] onPad:pad cancelled:NO];
+    // The controller's player: player 1 unless an earlier controller of the same name left its slot to it (pad_slots.h: a reconnected controller gets its player back)
+    uint32_t players = duo_harness_state().connected_players;
+    XCTAssertEqual(__builtin_popcount(players), 1, @"the controller is a player");
+    int slot = players ? __builtin_ctz(players) : 0;
     [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:1];
-    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A, @"and the controller still plays");
+    XCTAssertEqual(duo_harness_state().players[slot].buttons, DM_BTN_A, @"and the controller still plays");
     [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:0];
 
     XCTAssertTrue(dm_setting_live("DM_TOUCH_CONTROLS", "auto"));

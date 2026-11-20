@@ -17,3 +17,4 @@ long dm_sk_write(int fd, const void *data, unsigned long size);
 int dm_sk_poll(void *fds, uint64_t count, int milliseconds);
 int dm_sk_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, const int64_t *timeout);
 int dm_sk_errno(void);
+int dm_sk_unavailable(void);   // remote networking offline: -1 with ENETDOWN (an explicit network mode answers through the transport instead)

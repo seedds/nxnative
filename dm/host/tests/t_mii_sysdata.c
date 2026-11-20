@@ -3,6 +3,7 @@
 // MiiResource: and, refused, crashed later reading a texture file's part sizes through a null pointer. Expectations are written from the games' readers, not from this code
 #include "../hle_fs.c"
 #include "../hle_mii.c"
+#include "bcat_absent.h"   // hle_fs.c weak-imports the BCAT provider (nextendo_bcat.h), which this test does not link
 #include <sys/stat.h>
 #include <zlib.h>
 struct dm_flags g_flag; uint64_t g_t0_ns;

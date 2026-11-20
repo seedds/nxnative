@@ -1,8 +1,11 @@
-// Network services stay offline. The BSD service additionally supplies process-local UDP and EventFd transports, which offline engines use for their own threads.
+// Network services: offline by default. Offline, the BSD service supplies process-local UDP and EventFd transports, which offline engines use for their own threads; an
+// explicit network mode translates the guest's sockets to Darwin's instead (net_socket.h).
 #include "hle.h"
 #include "hle_net.h"
+#include "net_socket.h"
 #include <pthread.h>
 #include <stdatomic.h>
+void dm_guest_sleep_ns(int64_t ns);
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
 // SDK 21 (Star Fox) inlines nn::socket::Initialize(const Config &) into the game, and the service connection is this call
@@ -17,35 +20,62 @@ HLE_FORCE("_ZN2nn4nifm10InitializeEv", "connects to the nifm network management 
 // the submission and settled at the next. The hold used to be 50 ms of host time: Hades' NetworkPollThread (main+0x27aaa0) polls with SleepThread(0) and cancels after 2,000
 // queries, 2,000 IPCs on the Switch but 0.1 ms here, so it cancelled and submitted again forever (1.17 billion queries a minute, a host core). Its stamp, now_ns() | 1, also read
 // as settled at once whenever the next query came within the same 42 ns clock tick (30% of Hades' submissions)
+static _Atomic int g_nifm_pending;
 static _Atomic int g_nifm_hold;   // queries the pending request still answers "on hold" (0 = none, or settled)
-HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "offline: the request is on hold for the first query, then settles as unavailable", void, h_nifm_Submit, void) { atomic_store(&g_nifm_hold, 1); }
-HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "offline: drops the pending request", void, h_nifm_Cancel, void) { atomic_store(&g_nifm_hold, 0); }
+HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "offline: the request is on hold for the first query, then settles as unavailable", void, h_nifm_Submit, void) { atomic_store(&g_nifm_pending, 1); atomic_store(&g_nifm_hold, 1); }
+HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "offline: drops the pending request", void, h_nifm_Cancel, void) { atomic_store(&g_nifm_pending, 0); atomic_store(&g_nifm_hold, 0); }
 HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "offline: on hold for the first query after the submission", int, h_nifm_OnHold, void) {
     int h = atomic_load(&g_nifm_hold);
     while (h > 0 && !atomic_compare_exchange_weak(&g_nifm_hold, &h, h - 1)) {}
     return h > 0;
 }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: the network is always unavailable", int, h_nifm_Available, void) { return 0; }
-// Returns bool (`and w0, w0, #1`, Metroid Dread's sdk+0x336210): whether the system's network screen resolved the error
-HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "offline: not resolved, shows no system network screen", unsigned, h_nifm_HandleErr, void) { return 0; }
-HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "offline: no proxy setting", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }
-HLE_FORCE("nnsslInitialize", "connects to the ssl service; the network library's global init needs it to succeed, offline creates no session (cut)", Result, h_ssl_Initialize, void) { return RES_OK; }
-HLE_FORCE("nnsslFinalize", "pairs with nnsslInitialize (cut)", Result, h_ssl_Finalize, void) { return RES_OK; }
+int dm_nifm_available(void) { return dm_net_enabled() && atomic_load(&g_nifm_pending) && !atomic_load(&g_nifm_hold) && !dm_net_ipconfig(NULL, NULL, NULL, NULL, NULL); }
+void dm_nifm_submit_wait(void) { if (dm_net_enabled()) { h_nifm_Submit(); while (h_nifm_OnHold()) dm_guest_sleep_ns(0); } }
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline by default; explicit LAN reports the actual IPv4 request state", int, h_nifm_Available, void) { return dm_nifm_available(); }
+HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "whether the network request was resolved without a system UI", unsigned, h_nifm_HandleErr, void) { return dm_nifm_available() != 0; }
+HLE_FORCE("_ZN2nn4nifm26HandleNetworkRequestResultEv", "SDK 4 network request result without a system UI", Result, h_nifm_HandleResult, void) { return dm_nifm_available() ? RES_OK : RES_FAIL; }
+HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline by default; explicit LAN returns the actual interface IPv4 address", Result, h_nifm_GetIp, uint32_t *a) { if (!a) return RES_FAIL; *a = 0; return dm_net_ipconfig(a, NULL, NULL, NULL, NULL) ? RES_FAIL : RES_OK; }
+// The proxy setting (nifm::ProxySetting, 0xaa bytes: enabled +0, port +2, server +4, auto-auth +0x68, user +0x69, password +0x89, as Super Mario Bros. Wonder 1.2.1
+// reads it: libcurl's proxy code at main+0xf7aa40 clears 0xaa bytes first, and gRPC's proxy mapper at main+0xb31760 asks too). In a network mode the host uses no
+// proxy, so it answers as a console without one: success, every field zero. Offline it still fails
+HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "network mode: no proxy (every field zero); offline: no proxy setting", Result, h_nifm_GetProxy, void *p) {
+    if (!p || !dm_net_enabled()) return RES_FAIL;
+    memset(p, 0, 0xaa); static int told; if (!told++) LOG("nifm: proxy setting asked: none (the host uses no proxy)"); return RES_OK;
+}
 
-// ---------- BSD service: local UDP/EventFd work offline; remote networking stays unavailable ----------
+// ---------- BSD service: local UDP/EventFd offline (remote networking unavailable); an explicit network mode translates the guest ABI to Darwin ----------
 // Local transports are used even by offline games: RakNet sends a startup datagram to itself in Divinity: Original Sin 2. No host socket is opened. Descriptors belong to
 // this service, not Darwin's fd table, and stay small enough for games' fd_set arrays. Address/flag/error constants below are the Horizon/FreeBSD ABI (libnx's BSD service passes
 // these structures/flags unchanged; FreeBSD11 sys/socket.h and netinet/in.h). IPv4 payloads retain packet boundaries; the per-endpoint queue holds at most256 packets/1MiB.
-#define SK_ENETDOWN 50
-static __thread int t_skerr = SK_ENETDOWN;
-static int sk_error(int error) { t_skerr = error; return -1; }
-static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
-int dm_sk_errno(void) { return t_skerr; }
-#define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable", int, cname, __VA_ARGS__)
+// Not cut: Inet* / nnsocketInet* byte order and address text conversion (pure computation).
+// Both keep one errno (dm_net_errno). The network transport sets the Linux numbers hle_net_backend.c documents, and remote networking offline is Linux's ENETDOWN
+// too, as Horizon's BSD IPC errno reaches the game unchanged (MK8 SDK 4 detail::Socket / GetLastErrno). The local service's other numbers below are FreeBSD's.
+#define SK_ENETDOWN 100
+// The game's errno. On Horizon nn::socket's errno is the C library's: detail::SetLastErrno and GetLastErrno write and read *__errno_location(), and code such
+// as gRPC's reads errno itself. Super Mario Bros. Wonder's gRPC sets 97 when it leaves IPv6 (main+0xb61480) and reads errno after its non-blocking connect
+// (main+0xb61e38, tcp_client_posix.cc:299): with only the host's copy set, it took that connect's EINPROGRESS for the stale 97 and gave the address up.
+// A failed hook writes it on the game's thread, at the hook boundary; a game without __errno_location keeps only the host's copy
+static int *(*_Atomic g_guest_errno)(void); static _Atomic int g_guest_errno_looked;
+static int *guest_errno_location(void) {
+    if (!atomic_load(&g_guest_errno_looked)) { g_guest_errno = (int *(*)(void))guest_sym("__errno_location"); atomic_store(&g_guest_errno_looked, 1); }
+    int *(*loc)(void) = g_guest_errno; return loc ? loc() : NULL;
+}
+long dm_net_guest_errno(long r) { if (r < 0) { int *e = guest_errno_location(); if (e) *e = dm_net_errno(); } return r; }
+int dm_net_guest_errno_get(void) { int *e = guest_errno_location(); return e ? *e : dm_net_errno(); }
+static int sk_error(int error) { dm_net_set_errno(error); return -1; }
+static int sk_fail(void) { return sk_error(dm_net_enabled() ? 95 : SK_ENETDOWN); }
+int dm_sk_unavailable(void) { return sk_fail(); }
+int dm_sk_errno(void) { return dm_net_errno(); }
+#define SKF(m, cname, ...) HLE_FORCE(m, "socket call: the local BSD descriptor service offline, translated Darwin sockets in an explicit network mode", int, cname, __VA_ARGS__)
+#define SKW(m, cname, ...) HLE_FORCE_WAIT(m, "blocking socket call with a pausable guest context: the local service offline, Darwin sockets in a network mode", int, cname, __VA_ARGS__)
+// A call with both forms: the network transport in an explicit network mode, the local service otherwise; a failure also sets the game's errno
+#define SKD(net, local) dm_net_guest_errno(dm_net_enabled() ? (long)(net) : (long)(local))
 void dm_guest_sleep_ns(int64_t ns);
-void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);
-static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
+void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);   // hle_thread.c
+// Poll / Select with nothing to wait on waits out the timeout and returns 0, as POSIX and Horizon's bsd service ignore negative descriptors (Dark Souls Remastered's
+// "NexusRevolution Socket" thread spun a core on Poll(fds, 0, 33 ms) when it failed at once). An endless wait on nothing never returns; HLE_FORCE_WAIT publishes the guest
+// context, so a collector can pause the thread while it waits
+static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT64_MAX / 1000000) return sk_error(22);   /* EINVAL */ dm_guest_sleep_ns(ms * 1000000); return 0; }
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 enum { EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_POLLNVAL = 0x20,
        SK_EBADF = 9, SK_EAGAIN = 35, SK_EINVAL = 22, SK_EMSGSIZE = 40, SK_EOPNOTSUPP = 45, SK_EADDRINUSE = 48, SK_ENOTCONN = 57,
@@ -93,10 +123,10 @@ static int efd_read(int fd, uint64_t *out) {
     dm_host_mutex_lock(&g_efd_m); int r = -1;
     uint64_t gen = efd_used(fd) ? g_efd[fd].generation : 0;
     for (;;) {
-        if (!efd_used(fd) || g_efd[fd].generation != gen) { t_skerr = SK_EBADF; break; }
+        if (!efd_used(fd) || g_efd[fd].generation != gen) { dm_net_set_errno(SK_EBADF); break; }
         uint64_t *c = &g_efd[fd].count; int f = g_efd[fd].flags;
         if (*c) { if (f & 1) { *out = 1; *c -= 1; } else { *out = *c; *c = 0; } r = 0; break; }
-        if (f & 6) { t_skerr = SK_EAGAIN; break; }
+        if (f & 6) { dm_net_set_errno(SK_EAGAIN); break; }
         dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() ? 1000000 : 100000000);
     }
     pthread_mutex_unlock(&g_efd_m); return r;
@@ -224,10 +254,10 @@ long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const vo
     if (flags & ~(SK_MSG_DONTWAIT | 4 | 0x20000)) return sk_error(SK_EOPNOTSUPP);
     uint32_t addr = 0; uint16_t port = 0; if (a && sk_addr_read(a, al, &addr, &port)) return -1;
     dm_host_mutex_lock(&g_efd_m); long r = -1;
-    if (!sk_udp_locked(fd)) { t_skerr = SK_EBADF; goto done; }
-    if (g_efd[fd].shut_write) { t_skerr = 32; goto done; }
-    if (!a) { if (!g_efd[fd].connected) { t_skerr = 39; goto done; } addr = g_efd[fd].peer_addr; port = g_efd[fd].peer_port; }
-    if (!port) { t_skerr = SK_EINVAL; goto done; }
+    if (!sk_udp_locked(fd)) { dm_net_set_errno(SK_EBADF); goto done; }
+    if (g_efd[fd].shut_write) { dm_net_set_errno(32); goto done; }
+    if (!a) { if (!g_efd[fd].connected) { dm_net_set_errno(39); goto done; } addr = g_efd[fd].peer_addr; port = g_efd[fd].peer_port; }
+    if (!port) { dm_net_set_errno(SK_EINVAL); goto done; }
     if (!addr) addr = 0x7f000001;
     if (!g_efd[fd].port && sk_bind_locked(fd, 0, 0)) goto done;
     uint32_t src = g_efd[fd].addr ? g_efd[fd].addr : 0x7f000001;
@@ -241,7 +271,7 @@ long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const vo
         // UDP drops a datagram when the receive queue is full; the sender still succeeds, as it has no delivery acknowledgement.
         if (g_efd[i].packets < SK_PACKET_MAX && n <= (size_t)g_efd[i].rcvbuf && g_efd[i].queued <= (size_t)g_efd[i].rcvbuf - n) {
             sk_packet *p = malloc(sizeof *p + n);
-            if (!p) { t_skerr = 55; goto done; }   // ENOBUFS
+            if (!p) { dm_net_set_errno(55); goto done; }   // ENOBUFS
             p->next = NULL; p->addr = src; p->port = g_efd[fd].port; p->size = n; if (n) memcpy(p->data, data, n);
             if (g_efd[i].tail) g_efd[i].tail->next = p; else g_efd[i].head = p;
             g_efd[i].tail = p; g_efd[i].queued += n; g_efd[i].packets++; pthread_cond_broadcast(&g_efd_c);
@@ -267,10 +297,10 @@ long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, uns
     if ((!data && n) || (a && !al)) return sk_error(SK_EINVAL);
     if (flags & ~(SK_MSG_DONTWAIT | SK_MSG_PEEK)) return sk_error(SK_EOPNOTSUPP);
     dm_host_mutex_lock(&g_efd_m); long r = -1;
-    if (!sk_udp_locked(fd)) { t_skerr = SK_EBADF; goto done; }
+    if (!sk_udp_locked(fd)) { dm_net_set_errno(SK_EBADF); goto done; }
     uint64_t gen = g_efd[fd].generation, start = guest_ns();
     for (;;) {
-        if (!sk_udp_locked(fd) || g_efd[fd].generation != gen) { t_skerr = SK_EBADF; break; }
+        if (!sk_udp_locked(fd) || g_efd[fd].generation != gen) { dm_net_set_errno(SK_EBADF); break; }
         sk_packet *p = g_efd[fd].head;
         if (p) {
             size_t copied = n < p->size ? n : p->size; if (copied) memcpy(data, p->data, copied); sk_addr_write(a, al, p->addr, p->port); r = (long)copied;
@@ -278,9 +308,9 @@ long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, uns
             break;
         }
         if (g_efd[fd].shut_read) { r = 0; break; }
-        if (flags & SK_MSG_DONTWAIT || g_efd[fd].flags & SK_NONBLOCK) { t_skerr = SK_EAGAIN; break; }
+        if (flags & SK_MSG_DONTWAIT || g_efd[fd].flags & SK_NONBLOCK) { dm_net_set_errno(SK_EAGAIN); break; }
         int64_t left = g_efd[fd].recv_timeout ? g_efd[fd].recv_timeout - (int64_t)(guest_ns() - start) : 100000000;
-        if (left <= 0) { t_skerr = SK_EAGAIN; break; }
+        if (left <= 0) { dm_net_set_errno(SK_EAGAIN); break; }
         if (dm_detclock_enabled() && left > 1000000) left = 1000000;
         dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, left);
     }
@@ -300,9 +330,10 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t gen
     }
     return ready;
 }
-int dm_sk_poll(void *fds, uint64_t n, int ms) {
+int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
+    if (dm_net_enabled()) return dm_net_poll(fds, n, ms);   // the transport's sockets and event descriptors
     sk_pollfd *p = fds; uint64_t open = 0, generation[EFD_MAX] = {0};
-    if (!p && n) return sk_error(SK_EINVAL);
+    if (n > 1024 || (!p && n)) return sk_error(!p && n ? 14 : SK_EINVAL);   // EFAULT for a missing array
     dm_host_mutex_lock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0 && sk_used(p[i].fd)) { open |= 1ull << p[i].fd; generation[p[i].fd] = g_efd[p[i].fd].generation; }
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
@@ -315,8 +346,9 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {
     }
     pthread_mutex_unlock(&g_efd_m); return ready;
 }
-// fd_set is1024 bits; timeval is {i64 seconds, i64 microseconds}. Only this service's small descriptors can become ready.
+// fd_set is1024 bits; timeval is {i64 seconds, i64 microseconds}. Only this service's small descriptors can become ready. An explicit network mode goes to the transport's Select instead
 int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {
+    if (dm_net_enabled()) return dm_net_select(nfds, r, w, e, tv);
     uint64_t *sets[3] = {r, w, e}; static const int16_t ask[3] = {SK_POLLIN, SK_POLLOUT, 0}; sk_pollfd p[EFD_MAX]; int np = 0;
     if (nfds < 0 || (tv && (tv[0] < 0 || tv[1] < 0 || tv[1] >= 1000000))) return sk_error(SK_EINVAL);
     if (nfds > 1024) nfds = 1024;
@@ -336,99 +368,81 @@ int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t 
     }
     return n;
 }
-SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
-SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
-SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return dm_sk_close(s); }
-SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
-SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
-SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
-SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
-SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c, int v) { return dm_sk_fcntl(s, c, v); }
-// SDK 21 overloads Star Fox imports: plain sockaddr, the ShutdownMethod enum, Read / Write and a name lookup without options; SetAllocator keeps nothing, as no session is created
-SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName21, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
-SKF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_sk_Shutdown21, int s, int how) { return dm_sk_shutdown(s, how); }
-HLE_FORCE("_ZN2nn6socket4ReadEiPvm", "local UDP/EventFd (offline BSD service)", long, h_sk_Read, int s, void *b, unsigned long n) { return dm_sk_read(s, b, n); }
-HLE_FORCE("_ZN2nn6socket5WriteEiPKvm", "local UDP/EventFd (offline BSD service)", long, h_sk_Write, int s, const void *b, unsigned long n) { return dm_sk_write(s, b, n); }
-HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKc", "name resolution (cut): NULL", void *, h_sk_GetHostEnt21, const char *n) { (void)n; t_skerr = SK_ENETDOWN; return NULL; }
+SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return SKD(dm_net_socket(a, b, c), dm_sk_socket(a, b, c)); }
+SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return SKD(dm_net_bind(s, a, n), dm_sk_bind(s, a, n)); }
+SKW("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { return SKD(dm_net_connect(s, a, n), dm_sk_connect(s, a, n)); }
+SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { return SKD(dm_net_listen(s, n), sk_fail()); }
+SKW("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { return SKD(dm_net_accept(s, a, n), sk_fail()); }
+SKW("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return SKD(dm_net_close(s), dm_sk_close(s)); }
+SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { return SKD(dm_net_name(s, a, n, 1), dm_sk_name(s, a, n, 1)); }
+SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return SKD(dm_net_name(s, a, n, 0), dm_sk_name(s, a, n, 0)); }
+SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return SKD(dm_net_sockopt(s, l, o, v, n, 0), dm_sk_getopt(s, l, o, v, n)); }
+SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return SKD(dm_net_sockopt(s, l, o, (void *)v, &n, 1), dm_sk_setopt(s, l, o, v, n)); }
+SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c, int v) { return SKD(dm_net_fcntl(s, c, v), dm_sk_fcntl(s, c, v)); }
+SKW("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
+SKW("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_net_guest_errno(dm_sk_select(n, r, w, e, t)); }
+// SDK 21 overloads Star Fox imports: plain sockaddr, the ShutdownMethod enum, Read / Write and a name lookup without options; SetAllocator keeps nothing, as no session is created. All go where their SockAddr forms do (the overloads only differ in the C type they spell)
+SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName21, int s, void *a, unsigned *n) { return SKD(dm_net_name(s, a, n, 1), dm_sk_name(s, a, n, 1)); }
+SKF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_sk_Shutdown21, int s, int how) { return SKD(dm_net_shutdown(s, how), dm_sk_shutdown(s, how)); }
+HLE_FORCE_WAIT("_ZN2nn6socket4ReadEiPvm", "socket read: local UDP/EventFd offline, the transport in a network mode", long, h_sk_Read, int s, void *b, unsigned long n) { return SKD(dm_net_recv(s, b, n, 0, NULL, NULL), dm_sk_read(s, b, n)); }
+HLE_FORCE_WAIT("_ZN2nn6socket5WriteEiPKvm", "socket write: local UDP/EventFd offline, the transport in a network mode", long, h_sk_Write, int s, const void *b, unsigned long n) { return SKD(dm_net_send(s, b, n, 0, NULL, 0), dm_sk_write(s, b, n)); }
+HLE_FORCE_WAIT("_ZN2nn6socket16GetHostEntByNameEPKc", "name resolution, offline by default", void *, h_sk_GetHostEnt21, const char *n) { return dm_net_gethostbyname(n); }
 HLE_FORCE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", "socket library allocator; no session is created, ignored", void, h_sk_SetAlloc, void *r) { (void)r; }
-SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 // The C library's poll (SDK 21's nnmusl, Star Fox): it needs the socket state of the initialization cut above and fails with EFAULT without it, which the game's loop takes as fatal, so it goes
 // to the host's Poll too
-SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
-SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "a descriptor of the bsd service that works offline: a host counter", int, h_sk_EventFd, unsigned long v, int f) { return efd_create(v, f); }
-HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the host counter", int, h_sk_EventFdRead, int s, unsigned long *v) { uint64_t c = 0; int r = efd_read(s, &c); if (!r && v) *v = c; return r; }
-HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the host counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) { return efd_write(s, v); }
-SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
-SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
-HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
-    (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4;   // EAI_FAIL
+SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
+// EventFd works in every mode. Offline it is the counter table above (a garbage collector of the game's own wakes its pollers, Ocarina of Time at startup). In a network mode it is a
+// descriptor of the transport's socket table (dm_net_eventfd, hle_net_backend.c), numbered with the sockets, so the transport's Poll and Select see both: gRPC polls its sockets and
+// its wakeup descriptor together (nn::npln). A blocking read waits as the host's other waits do: dm_guest_cond_wait_ns offline, the transport's bracketed host waits otherwise
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "a counter descriptor: the host's table offline, the transport's socket table in a network mode", int, h_sk_EventFd, unsigned long v, int f) { int rv = dm_net_enabled() ? dm_net_eventfd(v, f) : efd_create(v, f); return (int)dm_net_guest_errno(rv); }
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the counter; blocks unless the descriptor never blocks", int, h_sk_EventFdRead, int s, unsigned long *v) { uint64_t c = 0; int rv = dm_net_enabled() ? dm_net_eventfd_read(s, &c) : efd_read(s, &c); if (!rv && v) *v = c; return (int)dm_net_guest_errno(rv); }
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) { int rv = dm_net_enabled() ? dm_net_eventfd_write(s, v) : efd_write(s, v); return (int)dm_net_guest_errno(rv); }
+// Resolver options (nn::socket::ResolverOption: its key is the first word). The host resolver has none to apply: setting one is accepted and not applied, and reading one fails,
+// as there is no value to give. Each key is logged once, so a game that depends on one shows it
+static int sk_res_option(const void *o, int key, int set) {
+    if (set) key = o ? *(const int32_t *)o : -1;
+    static _Atomic uint64_t seen[2]; uint64_t bit = key >= 0 && key < 64 ? 1ull << key : 1ull << 63;
+    if (!(atomic_fetch_or(&seen[set], bit) & bit)) LOG("%ssocket: resolver option %d %s", set ? "" : "[RED] ", key, set ? "set: accepted, the host resolver does not apply it" : "read: the host resolver has none, fails");
+    if (set && dm_net_enabled() && o) return 0;
+    return sk_fail();
 }
-HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAddrInfo, void *ai) { (void)ai; }
-HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution (cut): NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { return t_skerr; }
+SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; return sk_res_option(NULL, k, 0); }
+SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { return sk_res_option(o, 0, 1); }
+HLE_FORCE_WAIT("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "socket call: local UDP offline, the transport in a network mode", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return SKD(dm_net_recv(s, b, n, f, NULL, NULL), dm_sk_recvfrom(s, b, n, f, NULL, NULL)); }
+HLE_FORCE_WAIT("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "socket call: local UDP offline, the transport in a network mode", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return SKD(dm_net_recv(s, b, n, f, a, al), dm_sk_recvfrom(s, b, n, f, a, al)); }
+HLE_FORCE_WAIT("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "socket call: local UDP offline, the transport in a network mode", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return SKD(dm_net_send(s, b, n, f, NULL, 0), dm_sk_sendto(s, b, n, f, NULL, 0)); }
+HLE_FORCE_WAIT("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
+    return dm_net_getaddrinfo(h, s, hint, res);
+}
+HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "release only resolver allocations owned by the host", void, h_sk_FreeAddrInfo, void *ai) { dm_net_freeaddrinfo(ai); }
+HLE_FORCE_WAIT("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution, offline by default", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)o; (void)c; return dm_net_gethostbyname(n); }
+HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { return dm_net_errno(); }
 // C interface
-SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
-SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
-SKF("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-SKF("nnsocketClose", h_nsk_Close, int s) { return dm_sk_close(s); }
-SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
-SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
-SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
-SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
-SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c, int v) { return dm_sk_fcntl(s, c, v); }
-SKF("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
-SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
-SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { (void)o; return sk_fail(); }
-HLE_FORCE("nnsocketRecv", "local UDP (offline BSD service)", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
-HLE_FORCE("nnsocketSend", "local UDP (offline BSD service)", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
-HLE_FORCE("nnsocketSendTo", "local UDP (offline BSD service)", long, h_nsk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
-HLE_FORCE("nnsocketRecvFrom", "local UDP (offline BSD service)", long, h_nsk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
-HLE_FORCE("nnsocketRead", "local UDP/EventFd (offline BSD service)", long, h_nsk_Read, int s, void *b, unsigned long n) { return dm_sk_read(s, b, n); }
-HLE_FORCE("nnsocketWrite", "local UDP/EventFd (offline BSD service)", long, h_nsk_Write, int s, const void *b, unsigned long n) { return dm_sk_write(s, b, n); }
-HLE_FORCE("nnsocketGetHostByNameWithOptions", "name resolution (cut): NULL", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
-HLE_FORCE("nnsocketGetLastErrno", "socket error code kept by the host", int, h_nsk_GetErrno, void) { return t_skerr; }
-HLE_FORCE("nnsocketSetLastErrno", "socket error code kept by the host", void, h_nsk_SetErrno, int e) { t_skerr = e; }
-
-// ---------- ssl: offline, Initialize and a context's Create / Destroy succeed, everything else that contacts the service fails ----------
-// A context is a session of the local ssl service, so on Horizon Create works with no network and only a connection needs one; DRAGON QUEST BUILDERS 2 ends its startup when Create fails (main+0x861260).
-// Not cut: Context / Connection construction and destruction, Context::GetContextId (only read and write game objects).
-#define SSF(m, cname, ...) HLE_FORCE(m, "ssl service (cut): fails", Result, cname, __VA_ARGS__)
-HLE_FORCE("_ZN2nn3ssl10InitializeEv", "same as nnsslInitialize: succeeds, creates no session (cut)", Result, h_ssl_InitCpp, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn3ssl8FinalizeEv", "pairs with Initialize (cut)", Result, h_ssl_FinCpp, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn3ssl7Context6CreateENS1_10SslVersionE", "a session of the local ssl service: succeeds offline, connects to nothing (cut)", Result, h_ssl_CtxCreate, void *self, int v) { (void)self; (void)v; return RES_OK; }
-HLE_FORCE("_ZN2nn3ssl7Context7DestroyEv", "pairs with Create (cut)", Result, h_ssl_CtxDestroy, void *self) { (void)self; return RES_OK; }
-SSF("_ZN2nn3ssl7Context19RegisterInternalPkiEPmNS1_11InternalPkiE", h_ssl_CtxRegPki, void *self, uint64_t *id, int p) { (void)self; (void)id; (void)p; return RES_FAIL; }
-SSF("_ZN2nn3ssl7Context9RemovePkiEm", h_ssl_CtxRemovePki, void *self, uint64_t id) { (void)self; (void)id; return RES_FAIL; }
-SSF("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", h_ssl_BiBufSize, uint32_t *o, void *ids, unsigned n) { (void)ids; (void)n; if (o) *o = 0; return RES_FAIL; }
-SSF("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj", h_ssl_BiCerts, void **o, uint8_t *b, unsigned bs, void *ids, unsigned n) { (void)o; (void)b; (void)bs; (void)ids; (void)n; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection6CreateEPNS0_7ContextE", h_ssl_CnCreate, void *self, void *ctx) { (void)self; (void)ctx; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection7DestroyEv", h_ssl_CnDestroy, void *self) { (void)self; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection11DoHandshakeEv", h_ssl_CnHandshake, void *self) { (void)self; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection11SetHostNameEPKcj", h_ssl_CnHost, void *self, const char *h, unsigned n) { (void)self; (void)h; (void)n; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection9SetIoModeENS1_6IoModeE", h_ssl_CnIoMode, void *self, int m) { (void)self; (void)m; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection19SetSessionCacheModeENS1_16SessionCacheModeE", h_ssl_CnCache, void *self, int m) { (void)self; (void)m; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection19SetSocketDescriptorEi", h_ssl_CnSock, void *self, int s) { (void)self; (void)s; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection12GetLastErrorEPNS_6ResultE", h_ssl_CnLastErr, void *self, uint32_t *r) { (void)self; if (r) *r = RES_FAIL; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection18GetVerifyCertErrorEPNS_6ResultE", h_ssl_CnVerifyErr, void *self, uint32_t *r) { (void)self; if (r) *r = RES_FAIL; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection4PeekEPcPij", h_ssl_CnPeek, void *self, char *b, int *o, unsigned n) { (void)self; (void)b; (void)n; if (o) *o = 0; return RES_FAIL; }
-SSF("_ZN2nn3ssl10Connection4PollEPNS1_9PollEventES3_j", h_ssl_CnPoll, void *self, void *o, void *i, unsigned t) { (void)self; (void)o; (void)i; (void)t; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ssl10Connection4ReadEPcj", "ssl service (cut): read returns -1", int, h_ssl_CnRead, void *self, char *b, unsigned n) { (void)self; (void)b; (void)n; return -1; }
-HLE_FORCE("_ZN2nn3ssl10Connection5WriteEPKcj", "ssl service (cut): write returns -1", int, h_ssl_CnWrite, void *self, const char *b, unsigned n) { (void)self; (void)b; (void)n; return -1; }
-// C interface: all return nnResult
-#define SSC(m, cname) HLE_FORCE(m, "ssl service (cut): fails", Result, cname, void) { return RES_FAIL; }
-SSC("nnsslConnectionCreate", h_nssl_Create) SSC("nnsslConnectionDestroy", h_nssl_Destroy)
-SSC("nnsslConnectionDoHandshakeWithCertBuffer", h_nssl_Handshake) SSC("nnsslConnectionGetConnectionId", h_nssl_GetId)
-SSC("nnsslConnectionGetNextAlpnProto", h_nssl_GetAlpn) SSC("nnsslConnectionGetVerifyCertError", h_nssl_VerifyErr)
-SSC("nnsslConnectionPeek", h_nssl_Peek) SSC("nnsslConnectionPending", h_nssl_Pending) SSC("nnsslConnectionRead", h_nssl_Read)
-SSC("nnsslConnectionSetHostName", h_nssl_SetHost) SSC("nnsslConnectionSetIoMode", h_nssl_SetIo)
-SSC("nnsslConnectionSetNextAlpnProto", h_nssl_SetAlpn) SSC("nnsslConnectionSetOption", h_nssl_SetOpt)
-SSC("nnsslConnectionSetSessionCacheMode", h_nssl_SetCache) SSC("nnsslConnectionSetSocketDescriptor", h_nssl_SetSock)
-SSC("nnsslConnectionSetVerifyOption", h_nssl_SetVerify) SSC("nnsslConnectionWrite", h_nssl_Write)
-SSC("nnsslContextDestroy", h_nssl_CtxDestroy) SSC("nnsslContextGetContextId", h_nssl_CtxGetId)
+SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { return SKD(dm_net_socket(a, b, c), dm_sk_socket(a, b, c)); }
+SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { return SKD(dm_net_bind(s, a, n), dm_sk_bind(s, a, n)); }
+SKW("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { return SKD(dm_net_connect(s, a, n), dm_sk_connect(s, a, n)); }
+SKW("nnsocketClose", h_nsk_Close, int s) { return SKD(dm_net_close(s), dm_sk_close(s)); }
+SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { return SKD(dm_net_name(s, a, n, 1), dm_sk_name(s, a, n, 1)); }
+SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { return SKD(dm_net_name(s, a, n, 0), dm_sk_name(s, a, n, 0)); }
+SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return SKD(dm_net_sockopt(s, l, o, v, n, 0), dm_sk_getopt(s, l, o, v, n)); }
+SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return SKD(dm_net_sockopt(s, l, o, (void *)v, &n, 1), dm_sk_setopt(s, l, o, v, n)); }
+SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c, int v) { return SKD(dm_net_fcntl(s, c, v), dm_sk_fcntl(s, c, v)); }
+SKW("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
+HLE_FORCE_WAIT("nnsocketGetHostByNameCancel", "real IPv4 resolution with an independent cancellation ID", void *, h_nsk_GetHostCancel, const char *name, uint32_t id) { return dm_net_gethostbyname_cancel(name, id); }
+HLE_FORCE_WAIT("_ZN2nn6socket13GetHostByNameEPKci", "real IPv4 resolution with an independent cancellation ID", void *, h_sk_GetHostCancel, const char *name, uint32_t id) { return dm_net_gethostbyname_cancel(name, id); }
+HLE_FORCE("nnsocketRequestCancelHandle", "allocate a nonzero resolver cancellation identity, not a socket", uint32_t, h_nsk_RequestCancel, void) { return dm_net_request_cancel_handle(); }
+HLE_FORCE("_ZN2nn6socket19RequestCancelHandleEv", "allocate a nonzero resolver cancellation identity, not a socket", uint32_t, h_sk_RequestCancel, void) { return dm_net_request_cancel_handle(); }
+SKW("nnsocketCancel", h_nsk_Cancel, uint32_t id) { return dm_net_guest_errno(dm_net_cancel(id)); }
+SKW("_ZN2nn6socket6CancelEi", h_sk_Cancel, uint32_t id) { return dm_net_guest_errno(dm_net_cancel(id)); }
+SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; return sk_res_option(NULL, k, 0); }
+SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { return sk_res_option(o, 0, 1); }
+HLE_FORCE_WAIT("nnsocketRecv", "socket receive: local UDP offline, the transport in a network mode", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return SKD(dm_net_recv(s, b, n, f, NULL, NULL), dm_sk_recvfrom(s, b, n, f, NULL, NULL)); }
+HLE_FORCE_WAIT("nnsocketSend", "socket send: local UDP offline, the transport in a network mode", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { return SKD(dm_net_send(s, b, n, f, NULL, 0), dm_sk_sendto(s, b, n, f, NULL, 0)); }
+HLE_FORCE_WAIT("nnsocketSendTo", "socket send: local UDP offline, the transport in a network mode", long, h_nsk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return SKD(dm_net_send(s, b, n, f, a, al), dm_sk_sendto(s, b, n, f, a, al)); }
+HLE_FORCE_WAIT("nnsocketRecvFrom", "socket receive: local UDP offline, the transport in a network mode", long, h_nsk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return SKD(dm_net_recv(s, b, n, f, a, al), dm_sk_recvfrom(s, b, n, f, a, al)); }
+HLE_FORCE_WAIT("nnsocketRead", "socket read: local UDP/EventFd offline, the transport in a network mode", long, h_nsk_Read, int s, void *b, unsigned long n) { return SKD(dm_net_recv(s, b, n, 0, NULL, NULL), dm_sk_read(s, b, n)); }
+HLE_FORCE_WAIT("nnsocketWrite", "socket write: local UDP/EventFd offline, the transport in a network mode", long, h_nsk_Write, int s, const void *b, unsigned long n) { return SKD(dm_net_send(s, b, n, 0, NULL, 0), dm_sk_write(s, b, n)); }
+HLE_FORCE_WAIT("nnsocketGetHostByNameWithOptions", "name resolution, offline by default", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)o; (void)c; return dm_net_gethostbyname(n); }
+HLE_FORCE("nnsocketGetLastErrno", "the game's errno, as nn::socket::GetLastErrno reads it", int, h_nsk_GetErrno, void) { return dm_net_guest_errno_get(); }
+HLE_FORCE("nnsocketSetLastErrno", "sets the host's copy and the game's errno", void, h_nsk_SetErrno, int e) { dm_net_set_errno(e); dm_net_guest_errno(-1); }
+// ---------- ssl: hle_ssl.c (the client TLS service, offline and online) ----------

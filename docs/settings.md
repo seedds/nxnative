@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter), [Network](#network)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -92,6 +92,16 @@ Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizo
 ### Frame-rate counter
 
 Shows the frames per second at the top left.
+
+### Network
+
+How the game reaches other players. **Offline** is the default and keeps the game off the network. **LAN** and **Local wireless** play with devices on the same Wi-Fi network: LAN for games with a LAN mode, Local wireless for the Switch's local play between consoles.
+
+**Nextendo (online)** is offered only by an app built with `--nextendo`, and is then the default. It plays online through Nextendo, a community service that stands in for Nintendo's servers. Sign in under **Online** below the settings first. Nextendo gives a game token only to an account with a confirmed e-mail and a linked Discord account. The app keeps the sign-in in its own storage, and signing out there forgets it.
+
+Signing in is all a game needs to go online: the app already carries Nextendo's certificate, so there is nothing to copy onto the phone. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. Under **Online**, **Birthday, if Nextendo has none** is used only when the account gives none.
+
+**Player name** appears below the settings while Network is anything but Offline. It is the name other players see, up to 10 characters. Leave it empty to use your Nextendo username, or Player when you are not signed in. `DM_NICK` in `Documents/env.txt` does the same, and the field then shows it without letting you change it.
 
 ## Controls
 

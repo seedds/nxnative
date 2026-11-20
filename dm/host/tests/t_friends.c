@@ -4,6 +4,9 @@
 #include <mach-o/getsect.h>
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { (void)g; }
+// the local user here (t_nextendo_off.c has the offline Nextendo provider); the presence and key checks below use another Uid
+static const uint8_t k_local[16] = {2};
+int dm_account_uid_exists(const void *uid) { return uid && !memcmp(uid, k_local, sizeof k_local); }
 extern const struct mach_header_64 _mh_execute_header;
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "✓" : "✗", s); } while (0)
@@ -26,7 +29,8 @@ int main(void) {
     CHECK(h_fr_NqInit(presence, uid) == RES_FAIL, "NotificationQueue::Initialize still fails");
     CHECK(h_fr_OpenSession(uid) == RES_FAIL, "DeclareOpenOnlinePlaySession still fails");
     // Resolve the actual takeovers: a missing or misspelled overload would run the SDK's friends client instead (PR #2162).
-    Result (*key_uid)(void *, const void *, int) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb");
+    // The Uid form is a wait entry (HLE_FORCE_WAIT): its table function is the gate into entry.S, which only a guest thread may enter, so the check calls the hook itself
+    Result (*key_uid)(void *, const void *, unsigned) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb") ? h_fr_GetPHKey : NULL;
     Result (*key_no_uid)(void *, int) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyEb");
     uint8_t key[0x100], before[sizeof key];
     memset(before, 0xa5, sizeof before);
@@ -34,8 +38,9 @@ int main(void) {
     for (size_t i = 0; i < sizeof local_args / sizeof *local_args; i++) {
         if (key_uid) {
             memcpy(key, before, sizeof key);
-            CHECK(key_uid(key, uid, local_args[i]) == RES_FAIL, "play history key with Uid is unavailable");
-            CHECK(!memcmp(key, before, sizeof key), "failed key query with Uid leaves output untouched");
+            // The Uid form is the host's own key (hle_friends_history.c, t_friends_history): a Uid other than the local user's is refused and the key cleared
+            CHECK(key_uid(key, uid, local_args[i]) == DM_FRIENDS_HISTORY_INVALID_UID, "play history key for another Uid is refused");
+            CHECK(!memcmp(key + DM_FRIENDS_HISTORY_KEY_SIZE, before + DM_FRIENDS_HISTORY_KEY_SIZE, sizeof key - DM_FRIENDS_HISTORY_KEY_SIZE), "the refusal writes only the key's 64 bytes");
         }
         if (key_no_uid) {
             memcpy(key, before, sizeof key);

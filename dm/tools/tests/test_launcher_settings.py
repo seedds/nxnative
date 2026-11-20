@@ -89,6 +89,14 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
                 self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
 
+    def test_network_offers_nextendo_only_in_a_nextendo_build(self):   # build_ipa.sh DM_NEXTENDO / DM_NETWORK (the NSP script's --nextendo)
+        values = lambda rows: [o[0] for o in rows['DM_NETWORK']['options']]
+        plain = build(WONDER, 'nvn')
+        self.assertEqual((values(plain), plain['DM_NETWORK']['default']), (['offline', 'lan', 'ldn'], 'offline'))
+        with patch.dict(os.environ, {'DM_NEXTENDO': '1', 'DM_NETWORK': 'nextendo'}):
+            online = build(WONDER, 'nvn')
+        self.assertEqual((values(online), online['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'nextendo'], 'nextendo'))
+
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):
             build(WONDER, 'nvn', 'mca')

@@ -21,6 +21,10 @@ void *objmap_get(const void *guest);
 void objmap_put(const void *guest, void *host);
 void *objmap_del(const void *guest);
 uint64_t now_ns(void);
+// A host hook implementing a blocking guest call gives up its guest core while actually waiting.
+// Balanced and nestable; unrelated to GPU ownership or graphics suspension.
+void dm_guest_host_wait_begin(void);
+void dm_guest_host_wait_end(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
@@ -59,14 +63,14 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
             "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n"              \
             ".if " HLE_STR(HLE_NARG(__VA_ARGS__)) " > 8\n    mov x17, #(((" HLE_STR(HLE_NARG(__VA_ARGS__)) " - 8) * 8 + 15) & ~15)\n" \
             "    b _dm_bigstack_enter_n\n.else\n    b _dm_bigstack_enter\n.endif\n");           \
-    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)(uintptr_t)cname##_bs, why}); \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)(uintptr_t)cname##_bs, why, NULL}); \
     static ret cname(__VA_ARGS__)
 // Same as above, but the implementation runs on the caller's stack. Only for a take-over that runs the game's own code (an NRO's init and fini, a JIT plugin): that code's stack
 // use is the game's, sized for the thread's own stack (which can be larger than the 512 KB host stack), and it may switch stacks itself (a coroutine), which would reuse the
 // host stack the take-over is on. A short call into the SDK (fs::IsMounted, the audio renderer's command generation) is no reason. Say why beside it
 #define HLE_FORCE_DIRECT(mangled, why, ret, cname, ...)                                            \
     static ret cname(__VA_ARGS__);                                                                \
-    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)cname, why}); \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)cname, why, NULL}); \
     static ret cname(__VA_ARGS__)
 // A guest alias: every reference to mangled binds to the loaded modules' own definition of target instead, as if the module had imported target. No host code runs and no
 // signature is restated, so the alias holds for every SDK that defines both. For a hardware class whose constructor the host takes over to build the SDK's software class in the
@@ -84,6 +88,17 @@ __attribute__((weak, naked, visibility("hidden"))) void dm_bigstack_enter_n(void
 // same programs as above
 void *dm_bigstack_caller(void *ra);
 __attribute__((weak, visibility("hidden"))) void *dm_bigstack_caller(void *ra) { return ra; }
+
+// A blocking host takeover must publish the guest's real register context before waiting: a pause signal cannot stop host code safely.
+// The static stub saves a full dm_gate frame, registers it with thr_svc_enter, runs the implementation on the big host stack, and waits for resume at thr_svc_leave before returning.
+// Only <=8 integer/pointer arguments and an integer/pointer return in x0; no floating-point or stack arguments, variadics, or callbacks into guest code while the frame is published.
+#define HLE_FORCE_WAIT(mangled, why, ret, cname, ...)                                              \
+    static ret cname(__VA_ARGS__) __attribute__((used));                                          \
+    extern const char cname##_wait[];                                                             \
+    __asm__(".text\n.p2align 2\n.globl _" #cname "_wait\n.private_extern _" #cname "_wait\n_" #cname "_wait:\n" \
+            "    stp x16, x17, [sp, #-32]!\n    str x30, [sp, #16]\n    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_hle_wait_enter\n"); \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)(uintptr_t)cname##_wait, why, NULL}); \
+    static ret cname(__VA_ARGS__)
 
 // Host service sessions (hle_sf.c): a request on a session the host serves, as its service sees it, and the answer it fills in. The input is the raw CMIF data after the "SFCI"
 // header; the buffers are the client's A (send), B (receive) and X (pointer) descriptors, read and written in place (one address space); the output is the raw data after "SFCO",

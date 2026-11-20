@@ -23,11 +23,11 @@ while a[:1] in (['--tag'], ['--jit']):
 out, dst, names = a[0], a[1], a[2:]
 PG = 0x4000
 def r16(x): return (x + PG - 1) & ~(PG - 1)
-def pieces(n):   # the module's (x0, W, x1[, x2]) as (file start, end)
-    hdr = dict(l[2:].split() for l in open(f'{out}/{n}.fixups.tsv'))
+def pieces(n, directory=out):   # the module's (x0, W, x1[, x2]) as (file start, end)
+    hdr = dict(l[2:].split() for l in open(f'{directory}/{n}.fixups.tsv'))
     te, po = int(hdr['TEXT_END'], 16), int(hdr['PATCH_OFF'], 16)
     ko, ks = int(hdr['KEY_PAGE_OFF'], 16), int(hdr['KEY_PAGE_SIZE'], 16)
-    bin_ = os.path.abspath(f'{out}/{n}.patched.bin'); sz = os.path.getsize(bin_)
+    bin_ = os.path.abspath(f'{directory}/{n}.patched.bin'); sz = os.path.getsize(bin_)
     a, end = r16(te), r16(sz)
     if po < 0:   # patch area before the base (patch_nso.py FAR): W ends at the end of data, the loader supplies zero pages for bss and the key page; in the file the patch area follows at FILE_IMAGE_LEN
         fl, bl = int(hdr['FILE_IMAGE_LEN'], 16), int(hdr.get('BACK_LEN', '0'), 16)
@@ -48,6 +48,14 @@ for n in names:
         assert all(len(x) <= 16 for x in sect.split(','))
         asm.append(f'    .section {sect}'); place(asm, bin_, sz, lo, hi)
     flags.append(f'-Wl,-segprot,__DM{tag}{n}W,rw,rw')
+if 'main' in names and os.path.isfile(os.path.join(out, 'nextendo/main.fixups.tsv')):
+    # Nextendo's patched main (scripts/build_ipa_from_nsp.py --nextendo, <out>/nextendo) as module nmain, beside the original: iOS runs no code made at run time,
+    # so the copy the loader maps in Nextendo mode is in the executable too (loader.c nextendo_main, embed_name). After NX-Port-Studio (MIT)
+    bin_, sz, parts = pieces('main', os.path.join(out, 'nextendo'))
+    for sect, (lo, hi) in zip((f'__TEXT,__dm{tag}nmainx0', f'__DM{tag}nmainW,__img', f'__TEXT,__dm{tag}nmainx1', f'__TEXT,__dm{tag}nmainx2'), parts):
+        assert all(len(x) <= 16 for x in sect.split(','))
+        asm.append(f'    .section {sect}'); place(asm, bin_, sz, lo, hi)
+    flags.append(f'-Wl,-segprot,__DM{tag}nmainW,rw,rw')
 tab = os.path.join(out, 'nro.tsv')
 nros = [ln.split('\t')[0] for ln in open(tab) if ln.strip() and not ln.startswith('#') and not ln.startswith('refused\t')] if os.path.exists(tab) else []
 if nros:

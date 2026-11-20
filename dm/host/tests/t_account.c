@@ -40,6 +40,13 @@ int main(int argc, char **argv) {
             assert(h_acc_Exists(&exists, &u2) == RES_OK && exists);
             assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
             assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &k_uid, 16));
+        } else if (!strcmp(argv[1], "--picked")) {   // the game shows the selector first and opens the chosen user 2
+            UserHandle h1, h2;
+            assert(!dm_account_uid_exists(&k_uid) && !dm_account_copy_uid(&out));   // no active user before an open
+            assert(h_acc_OpenUser(&h2, &u2) == RES_OK && dm_account_uid_exists(&u2) && !dm_account_uid_exists(&k_uid));
+            assert(h_acc_OpenPre(&h1) == RES_OK && dm_account_uid_exists(&u2) && !dm_account_uid_exists(&k_uid));   // a later open does not move it
+            h_acc_CloseUser(&h2); assert(dm_account_copy_uid(&out) && !memcmp(&out, &u2, 16));   // nor does closing it
+            uint8_t avail = 7; assert(h_acc_NsaAvail(&avail, &h1) == RES_OK && !avail);   // another user has no network account
         } else if (!strcmp(argv[1], "--corrupt")) {
             assert(h_acc_ListAll(&n, list, 8) == RES_FAIL && n == 0);
             choice = FRONT_USER_CREATE; assert(h_acc_ShowCreator() == RES_FAIL && calls == 0);
@@ -54,7 +61,9 @@ int main(int argc, char **argv) {
     snprintf(save, sizeof save, "%s/save", root); setenv("DM_SAVE", save, 1);
     Uid out, list[8]; UserHandle h, other; int n;
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+    assert(!dm_account_uid_exists(&k_uid));
     assert(h_acc_TryOpenPre(&h) && h_acc_OpenPre(&other) == RES_OK && h.v[2] != other.v[2]);
+    assert(dm_account_uid_exists(&k_uid));   // the launch user, opened first, is the active user
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 1);
     h_acc_CloseUser(&h); h_acc_CloseUser(&h);
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 1);
@@ -88,7 +97,7 @@ int main(int argc, char **argv) {
     assert(h_acc_ListAll(&n, list, 8) == RES_OK && n == 2 && dm_uid_user(&list[1]) == 2);
     assert(h_acc_OpenUser(&h, &u2) == RES_FAIL);
     assert(h_acc_OpenUser(&h, &u3) == RES_OK && h_acc_OpenUser(&other, &u3) == RES_OK);
-    assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &u3, 16));
+    assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &u3, 16) && !dm_account_uid_exists(&u3) && dm_account_uid_exists(&k_uid));
     assert(h_acc_EnsureNsa(&h) == 0x27c); // ResultCancelledByUser for an open local account
     h_acc_CloseUser(&h); h_acc_CloseUser(&h);
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 1 && dm_uid_user(list) == 2);
@@ -118,11 +127,12 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; i++) assert(!pthread_join(threads[i], NULL));
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0 && waiting == 0);
     child(argv[0], "--restart", save);
+    child(argv[0], "--picked", save);
     snprintf(path, sizeof path, "%s.users", save); FILE *f = fopen(path, "w"); assert(f); fputs("broken registry\n", f); fclose(f);
     child(argv[0], "--corrupt", save);
     unlink(path);
     snprintf(path, sizeof path, "%s/missing/save", root); child(argv[0], "--unwritable", path);
     rmdir(root);
-    puts("t_account: OK (selection, sessions, concurrent closes, fresh-process persistence)");
+    puts("t_account: OK (selection, sessions, concurrent closes, fresh-process persistence, the active user)");
     return 0;
 }

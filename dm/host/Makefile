@@ -18,12 +18,17 @@ include ../mac/min_os.mk
 # -O2 as the other native code here (libvpx, dav1d, the launcher; the iOS host builds at Xcode Release's -Os). Not -O3 (no measured gain over -O2) and not -flto, which moves
 # hle_bigstack.c's inline-assembly entry apart from its return path (SIGBUS in dm_bigstack_enter on Breath of the Wild, PR #556)
 CFLAGS=-O2 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
+# Static, source-hash-pinned libcrypto for explicit private-PKI verification.
+# Metadata targets do not build it; Apple targets select their own SDK archive.
+DM_OPENSSL_ROOT ?= $(shell python3 ../tools/apple_crypto.py $(if $(filter iphoneos,$(MSL_SDK)),ios,macos))
+PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
 # One job per core unless the command line sets -j: the host and the libraries below build one object per source (GNU make 3.81, the system's, takes -j from MAKEFLAGS set here)
 ifeq ($(filter -j%,$(MAKEFLAGS)),)
 MAKEFLAGS += -j$(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 endif
-# Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
-SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m audio_input.c audio_input_mac.m pad_switch2_apple.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
+# Service-layer takeover hle_*.c/hle_*.m files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
+SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m audio_input.c audio_input_mac.m pad_switch2_apple.m $(sort $(wildcard hle_*.c hle_*.m)) front_mac.m web_apple.m entry.S
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
 # Sources under dm/gfx, dm/gfx/nvn, dm/gfx/tex, dm/gfx/vk and dm/gfx/gl are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
 GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m ../gfx/vk/*.m ../gfx/gl/*.m))
@@ -69,13 +74,17 @@ game_profile: $(GAME_H)
 $(GAME_H): $(GAME_DIR)/game.tsv ../games/game.py FORCE
 	@python3 ../games/game.py header $(GAME) $@
 .PHONY: FORCE
+# The Mac Nextendo sign-in tool: make -C dm/host nextendo_login, then dm/host/nextendo_login sign-in (status, sign-out). dmhost reads the sign-in it keeps
+# (hle_nextendo_login_apple.m, nextendo_login_apple.inc)
+nextendo_login: ../tools/nextendo_login.m nextendo_login_apple.inc
+	clang -O1 -g -fobjc-arc -Wall -Wextra -mmacosx-version-min=$(MACOS_MIN) -o $@ ../tools/nextendo_login.m -framework Foundation -framework Security -framework AppKit
 FORCE:
 # The host: one object per source in gen/<id>/obj (dm.h includes the profile header, so every game has its own), compiled on every core, then linked into gen/<id>/dmhost with
 # the same flags (as clang's one-step compile and link gives each of its jobs the whole line) and its dSYM made from the objects, as clang does after its own link. Each object
 # lists the headers its source read (-MMD; -MP: a removed header is no error), so an edit rebuilds the objects that include it and the link; the Makefile (CFLAGS, these lines)
 # rebuilds them all. The generated headers come first (order-only: the dependency files name them for the sources that read them). The NSP script builds gen/<id>/dmhost and takes it
-HOST_CFLAGS = $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc
-HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework AVFAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+HOST_CFLAGS = $(CFLAGS) $(PRIVATE_PKI_FLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc
+HOST_FRAMEWORKS = -framework Security -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework AVFAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
 HOST_SRC = $(SRC) $(GFX)
 ifneq ($(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))),)
 $(error host sources outside dm/host and dm/gfx need an object rule: $(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))))
@@ -83,15 +92,16 @@ endif
 OBJ_DIR = gen/$(GAME)/obj
 HOST_OBJ = $(foreach s,$(HOST_SRC),$(if $(filter ../gfx/%,$(s)),$(OBJ_DIR)/gfx/$(s:../gfx/%=%).o,$(OBJ_DIR)/host/$(s).o))   # the line's order: the link lays code out in it
 HOST_BIN = gen/$(GAME)/dmhost
-$(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+$(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk ../tools/apple_crypto.py | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
-$(OBJ_DIR)/gfx/%.o: ../gfx/% Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+$(OBJ_DIR)/gfx/%.o: ../gfx/% Makefile ../mac/min_os.mk ../tools/apple_crypto.py | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
-$(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk
-	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS)
+$(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk ../tools/apple_crypto.py
+	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(PRIVATE_PKI_LIB) -lz $(HOST_FRAMEWORKS)
 	dsymutil $@
+	./$@ --validate-hle
 ifneq ($(strip $(GAME)),)
 -include $(HOST_OBJ:.o=.d)
 endif

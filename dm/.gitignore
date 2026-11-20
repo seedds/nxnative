@@ -1,4 +1,5 @@
 host/dmhost
+host/nextendo_login
 host/dmhost_*
 host/*.dSYM/
 *.bin

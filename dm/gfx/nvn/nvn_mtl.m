@@ -7268,7 +7268,8 @@ static void treg_sparse_notes(void) {
     os_unfair_lock_lock(&g_rmu);
     for (size_t i = 0; i < g_ntreg_sp; i++) {
         int id_ = g_treg_sp[i]; treg_t *rp = &g_treg[id_];
-        if (!rp->ok || !rp->t.pool || !nvn_sparse_pool(rp->t.pool)) { rp->sp = 0; continue; }
+        // Pool finalization marks its descriptors gone under g_rmu before the object may be freed.
+        if (!rp->ok || rp->gone || !rp->t.pool || !nvn_sparse_pool(rp->t.pool)) { rp->sp = 0; continue; }
         g_treg_sp[w++] = id_;
         uint64_t lo = (uint64_t)(uintptr_t)rp->t.mem, hi = lo + rp->t.L.size;
         int hit = n < 0;

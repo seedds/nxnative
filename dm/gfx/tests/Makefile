@@ -754,6 +754,9 @@ check_t_gl_imports: t_gl_imports
 	MTL_DEBUG_LAYER=1 ./t_gl_imports --stubs
 gl-arguments: t_gl_imports
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 ../../tools/tests/test_gl_shaders.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_gl_imports --fixture "$$work"
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; mkdir "$$work/capture"; \
+	    MTL_DEBUG_LAYER=1 DM_MSL_DIR="$$work" DM_TEMP="$$work" DM_GL_CAPTURE="$$work/capture" \
+	    DM_GL_CAPTURE_COMPILER="$(abspath ../tools/gl_shaders.py)" ./t_gl_imports --capture
 gl-imports: check_t_gl_imports
 gl-imports-cpu: t_gl_imports
 	MTL_DEBUG_LAYER=1 ./t_gl_imports --cpu

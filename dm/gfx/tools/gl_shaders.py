@@ -26,6 +26,7 @@
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
+#        gl_shaders.py --capture-shader <vert|frag> <source file> <out dir>   (one Mac shader for the capture host)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -362,8 +363,25 @@ def metallib(msls, out, sdk, extra):
     subprocess.run(['xcrun', '-sdk', sdk, 'metallib', *airs, '-o', lib], check=True)
     return lib
 
+def capture_shader(stage, path, out):
+    if stage not in ('vert', 'frag'):
+        red(f'invalid capture stage: {stage}')
+    with open(path, 'rb') as f:
+        src = text_of(f.read())
+    key = hashlib.sha256(src).hexdigest()[:16]
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        result = translate(src, stage, key, tmp)
+        if isinstance(result, str):
+            red(f'{key}.{stage}: {result}')
+        msl, fields = result
+        metallib([msl], out, 'macosx', [MAC_MIN_FLAG])
+        with open(os.path.join(out, 'gl_shaders.tsv'), 'w') as f:
+            f.write(TABLE_ABI + '\n' + '\t'.join((key, stage, ' '.join(fields))) + '\n')
+
 def main():
     a = sys.argv[1:]
+    if len(a) == 4 and a[0] == '--capture-shader':
+        return capture_shader(*a[1:])
     ios = None
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
     fixed = '--fixed-function' in a

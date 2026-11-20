@@ -15,7 +15,7 @@
 //     texture the GPU may still read goes through a blit in command order, any other is a CPU write;
 //   · shaders come from the offline library built by dm/gfx/tools/gl_shaders.py (<DM_MSL_DIR>/gl/): a shader is found by the hash of its source and its stage; its table row lists the
 //     vertex inputs, the members of its default uniform block (glUniform* writes CPU copies, snapshotted into transient buffers) and its samplers. Each stage reads all its
-//     resources through one argument buffer at buffer(0), independent of GL's binding numbers and Metal's 16 direct sampler slots.
+//     resources through one argument buffer at buffer(0), independent of GL's binding numbers and Metal's 16 direct sampler slots. Mac capture uses the same compiler for missing stages.
 //     glGetAttribLocation returns the Metal attribute index of the input, so the game's attribute index is the Metal one; vertex buffers are at slot 30 − index.
 // Environment: DM_GL_LOG=1 logs object creation and the deletion of shaders and programs; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
@@ -24,13 +24,19 @@
 #include "gl_aliases.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
-#include <ctype.h>
+#include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
+#if TARGET_OS_OSX
+#include <crt_externs.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#endif
 
 int mtl_fps_target(void);
 int mtl_link_active(void); int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // nvn_mtl.m
@@ -141,6 +147,7 @@ static id<MTLSharedEvent> g_ev;                  // signalled with a command buf
 static id<MTLTexture> g_tex0, g_cube0, g_tex3d0, g_arr0;   // bound where a sampler's unit has no texture (or an unusable one): opaque black, as GL samples an incomplete texture
 static id<MTLSamplerState> g_samp0;
 static id<MTLLibrary> g_lib, g_util;             // the game's shaders; the layer's own (clears)
+static const char *g_capture_dir, *g_capture_compiler;
 static uint64_t g_serial = 1;                    // serial of the command buffer being recorded (g_cb); committed ones have lower serials
 static _Atomic uint64_t g_done;                  // highest serial whose command buffer has completed
 static id<MTLCommandBuffer> g_cb;
@@ -168,53 +175,77 @@ typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;          
 typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
 static shinfo *g_sh; static int g_nsh;
 static int sh_cmp(const void *a, const void *b) { int c = memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); return c ? c : ((const shinfo *)a)->frag - ((const shinfo *)b)->frag; }
+static int sh_read_abi(FILE *f) {
+    const char abi[] = "# GL shader ABI 2\n";
+    char line[sizeof abi];
+    return fgets(line, sizeof line, f) && !strcmp(line, abi);
+}
+static void sh_free(shinfo *s) { free(s->a); free(s->u); free(s->t); free(s->b); }
+static int sh_read_row(char *line, shinfo *s) {
+    char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");
+    if (!key || !stage || strlen(key) != 16 || (strcmp(stage, "vert") && strcmp(stage, "frag"))) return 0;
+    *s = (shinfo){.frag = !strcmp(stage, "frag"), .ub_slot = -1, .arg_slot = -1, .nargs = -1};
+    memcpy(s->key, key, 16);
+    if (!res || sscanf(res, "r:%d:%d", &s->arg_slot, &s->nargs) != 2 || s->nargs < 0 || s->nargs > 512 || (s->nargs ? s->arg_slot != 0 : s->arg_slot != -1)) {
+        GLOG("[RED] shader %s: invalid argument buffer in the GL shader table", s->key);
+        return 0;
+    }
+    int na = 0, nu = 0, nt = 0, nb = 0;
+    for (const char *c = res; *c; c++) if (c == res || c[-1] == ' ') { na += *c == 'a'; nu += *c == 'u'; nt += *c == 't'; nb += *c == 'n'; }
+    s->a = zalloc((na + 1) * sizeof *s->a); s->u = zalloc((nu + 1) * sizeof *s->u); s->t = zalloc((nt + 1) * sizeof *s->t); s->b = zalloc((nb + 1) * sizeof *s->b);
+    int bad = 0;
+    char *save;
+    for (char *t = strtok_r(res, " ", &save); t; t = strtok_r(NULL, " ", &save)) {
+        char nm[64], ty[32]; unsigned a1, a2, a3; int sa;
+        if (t[0] == 'a' && (unsigned)s->na < (unsigned)na && sscanf(t, "a:%63[^=]=%u:%31s", nm, &a1, ty) == 3 && a1 < 16) {
+            shattr *x = &s->a[s->na++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty);
+        } else if (t[0] == 'u' && (unsigned)s->nu < (unsigned)nu && sscanf(t, "u:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &a2, &a3) == 5) {
+            shuni *x = &s->u[s->nu++]; strlcpy(x->name, nm, sizeof x->name); x->off = a1; x->type = tcode(ty); x->count = a2; x->stride = a3;
+        } else if (t[0] == 't' && (unsigned)s->nt < (unsigned)nt && sscanf(t, "t:%63[^=]=%u:%d:%31s", nm, &a1, &sa, ty) == 4) {
+            if (a1 >= (unsigned)s->nargs || sa < -1 || sa >= s->nargs) { bad = 1; continue; }
+            shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->sampler = sa; x->type = tcode(ty);
+        } else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) {
+            if (a1 >= (unsigned)s->nargs) { bad = 1; continue; } s->ub_slot = a1; s->ub_size = a2;
+        } else if (t[0] == 'n' && (unsigned)s->nb < (unsigned)nb && sscanf(t, "n:%63[^=]=%u:%u", nm, &a1, &a2) == 3) {
+            if (a1 >= (unsigned)s->nargs) { bad = 1; continue; }
+            shblk *x = &s->b[s->nb++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->size = a2;
+        }
+    }
+    if (bad) { GLOG("[RED] shader %s: invalid argument IDs in the GL shader table", s->key); sh_free(s); }
+    return !bad;
+}
+static id<MTLLibrary> sh_library(const char *path) {
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&err];
+    if (!lib) GLOG("[RED] shader library failed to load %s: %s", path, err.localizedDescription.UTF8String);
+    return lib;
+}
+static id<MTLFunction> sh_function(id<MTLLibrary> lib, const shinfo *s) {
+    return [lib newFunctionWithName:[NSString stringWithFormat:@"gl_%s_%c", s->key, s->frag ? 'f' : 'v']];
+}
 static void sh_load(void) {
     const char *d = getenv("DM_MSL_DIR"); char p[1024];
     if (!d) { GLOG("[RED] DM_MSL_DIR not set: the GL shader library cannot be found"); return; }
     snprintf(p, sizeof p, "%s/gl/gl_shaders.tsv", d);
     FILE *f = fopen(p, "r");
-    if (!f) { GLOG("[RED] cannot open %s (run dm/gfx/tools/gl_shaders.py first)", p); return; }
+    if (!f) {
+        if (!g_capture_compiler || errno != ENOENT) GLOG("[RED] cannot open %s (run dm/gfx/tools/gl_shaders.py first)", p);
+        return;
+    }
     static char line[65536]; int cap = 0;
-    if (!fgets(line, sizeof line, f) || strcmp(line, "# GL shader ABI 2\n")) {
+    if (!sh_read_abi(f)) {
         GLOG("[RED] GL shader table has an incompatible ABI; rebuild with dm/gfx/tools/gl_shaders.py"); fclose(f); return;
     }
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
-        char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");
-        if (!key || !stage || strlen(key) != 16) continue;
+        shinfo s; if (!sh_read_row(line, &s)) continue;
         if (g_nsh == cap) { cap = cap ? cap * 2 : 1024; g_sh = realloc(g_sh, cap * sizeof *g_sh); }
-        shinfo *s = &g_sh[g_nsh++]; memset(s, 0, sizeof *s);
-        memcpy(s->key, key, 16); s->frag = !strcmp(stage, "frag"); s->ub_slot = -1; s->arg_slot = -1; s->nargs = -1;
-        if (!res || sscanf(res, "r:%d:%d", &s->arg_slot, &s->nargs) != 2 || s->nargs < 0 || s->nargs > 512 || (s->nargs ? s->arg_slot != 0 : s->arg_slot != -1)) {
-            GLOG("[RED] shader %s: invalid argument buffer in the GL shader table", s->key); g_nsh--; continue;
-        }
-        int na = 0, nu = 0, nt = 0, nb = 0;
-        for (char *c = res; c && *c; c++) if (c == res || c[-1] == ' ') { na += *c == 'a'; nu += *c == 'u'; nt += *c == 't'; nb += *c == 'n'; }
-        s->a = zalloc((na + 1) * sizeof *s->a); s->u = zalloc((nu + 1) * sizeof *s->u); s->t = zalloc((nt + 1) * sizeof *s->t); s->b = zalloc((nb + 1) * sizeof *s->b);
-        int bad = 0;
-        for (char *t = strtok(res, " "); t; t = strtok(NULL, " ")) {
-            char nm[64], ty[32]; unsigned a1, a2, a3; int sa;
-            if (t[0] == 'a' && sscanf(t, "a:%63[^=]=%u:%31s", nm, &a1, ty) == 3 && a1 < 16) { shattr *x = &s->a[s->na++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty); }
-            else if (t[0] == 'u' && sscanf(t, "u:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &a2, &a3) == 5) {
-                shuni *x = &s->u[s->nu++]; strlcpy(x->name, nm, sizeof x->name); x->off = a1; x->type = tcode(ty); x->count = a2; x->stride = a3;
-            } else if (t[0] == 't' && sscanf(t, "t:%63[^=]=%u:%d:%31s", nm, &a1, &sa, ty) == 4) {
-                if (a1 >= (unsigned)s->nargs || sa < -1 || sa >= s->nargs) { bad = 1; continue; }
-                shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->sampler = sa; x->type = tcode(ty);
-            } else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) {
-                if (a1 >= (unsigned)s->nargs) { bad = 1; continue; } s->ub_slot = a1; s->ub_size = a2;
-            } else if (t[0] == 'n' && sscanf(t, "n:%63[^=]=%u:%u", nm, &a1, &a2) == 3) {
-                if (a1 >= (unsigned)s->nargs) { bad = 1; continue; }
-                shblk *x = &s->b[s->nb++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->size = a2;
-            }
-        }
-        if (bad) { GLOG("[RED] shader %s: invalid argument IDs in the GL shader table", s->key); free(s->a); free(s->u); free(s->t); free(s->b); g_nsh--; }
+        g_sh[g_nsh++] = s;
     }
     fclose(f);
     qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);
     snprintf(p, sizeof p, "%s/gl/gl_shaders.metallib", d);
-    NSError *err = nil;
-    g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
-    if (!g_lib) GLOG("[RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
+    g_lib = sh_library(p);
 }
 static const shinfo *sh_find(const char *key, int frag) { shinfo k; memcpy(k.key, key, 16); k.frag = frag; return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
 
@@ -222,6 +253,11 @@ static const shinfo *sh_find(const char *key, int frag) { shinfo k; memcpy(k.key
 static void dev_init_once(void) {
     @autoreleasepool {
         g_log = getenv("DM_GL_LOG") && atoi(getenv("DM_GL_LOG"));
+        g_capture_dir = getenv("DM_GL_CAPTURE");
+#if TARGET_OS_OSX
+        if (g_capture_dir) g_capture_compiler = getenv("DM_GL_CAPTURE_COMPILER");
+#endif
+        if (g_capture_dir) GLOG("shader capture → %s", g_capture_dir);
         g_dev = (__bridge id<MTLDevice>)mtl_device_classic();
         g_q = [g_dev newCommandQueueWithMaxCommandBufferCount:64]; g_q.label = @"gl";
         g_ev = [g_dev newSharedEvent];
@@ -383,7 +419,7 @@ typedef struct { char name[48]; int slot[2]; uint32_t size, binding; } pblk_t;
 // vs, fs: the attached shaders, each counted in its refs; deleted: glDeleteProgram flagged it while current (it goes at the next glUseProgram of another);
 // what the link took from them (si, fn, the uniform table) is the program's own, so attaching, detaching or deleting a shader later leaves the linked program as it is
 typedef struct {
-    GLuint vs, fs; int linked, deleted, validated, capture_uniforms; char validation_log[160]; const shinfo *si[2]; __strong id<MTLFunction> fn[2];
+    GLuint vs, fs; int linked, deleted, validated; char validation_log[160]; const shinfo *si[2]; __strong id<MTLFunction> fn[2];
     int nu; puni_t *u; uint8_t *ub[2]; uint64_t ub_gen[2]; uint32_t serial;
     __strong id<MTLArgumentEncoder> ae[2]; __strong id<MTLBuffer> ub_buf[2]; size_t ub_off[2]; uint64_t ub_serial[2], ub_written_gen[2];
     pent_t *pc; int npc, cappc;
@@ -397,7 +433,7 @@ static shader_t *shader_of(GLuint n) { return n && n < g_nsps && g_sps[n] && !g_
 static prog_t *prog_of(GLuint n) { return n && n < g_nsps && g_sps[n] && g_sps[n]->is_prog ? &g_sps[n]->p : NULL; }
 // GL's error flag: the first error since the last glGetError, which returns it and clears it; another error is not recorded while one is (GL lets an implementation keep
 // one flag). Recorded only where GL requires an error and the host does what GL does: a call or a value the host does not implement says so in a red line instead and
-// records nothing, so a game is never told of the host's own gaps. A link the library cannot serve still reports success (GL_LINK_STATUS), its draws skipped and reported
+// records nothing. A link the offline library cannot serve still reports success and its draws are skipped. The capture compiler reports the actual compile and link outcomes.
 // The first 8 errors are logged with the call that recorded them (a game's misuse, not a host fault: no red line)
 static GLenum g_gl_error;
 static void gl_error_at(GLenum e, const char *fn) {
@@ -2632,17 +2668,94 @@ GLB(glGetTexImage, void, GLenum target, GLint level, GLenum format, GLenum type,
 
 // ---------- Shaders and programs ----------
 static int g_compiles;   // glCompileShader calls so far (renderprogs_job runs after the game's first)
-static const char *g_capture_dir;
-static void sh_capture(const shader_t *s) {
-    static int init;
-    if (!init) { init = 1; g_capture_dir = getenv("DM_GL_CAPTURE"); if (g_capture_dir) GLOG("shader capture → %s", g_capture_dir); }
-    if (!g_capture_dir) return;
-    char p[1024]; snprintf(p, sizeof p, "%s/%s.%s", g_capture_dir, s->key, s->type == GL_VERTEX_SHADER ? "vert" : "frag");
-    if (access(p, F_OK) == 0) return;
-    char t[1100]; snprintf(t, sizeof t, "%s.%d.tmp", p, getpid());
-    FILE *f = fopen(t, "wb"); if (!f) { RED1("shader capture cannot write to %s", g_capture_dir); return; }
-    int ok = fwrite(s->src, 1, s->len, f) == s->len; ok &= fclose(f) == 0;
-    if (ok) rename(t, p); else unlink(t);   // whole files only: a capture run may be killed at any time
+#if TARGET_OS_OSX
+// A program holds its stage's reflection pointer after the shader is deleted or recompiled.
+// Each captured stage has a stable address and is shared by every later use of the same key and stage.
+typedef struct capture_stage {
+    shinfo info;
+    __strong id<MTLFunction> fn;
+    struct capture_stage *next;
+} capture_stage;
+static capture_stage *g_capture_stages;
+
+static int sh_run_compiler(const char *stage, const char *src, const char *out) {
+    const char *python = getenv("DM_GL_CAPTURE_PYTHON");
+    if (!python) python = "python3";
+    char *argv[] = {(char *)python, (char *)g_capture_compiler, "--capture-shader", (char *)stage, (char *)src, (char *)out, NULL};
+    // The host handles SIGTERM through GCD and ignores its ordinary disposition. The compiler needs the default to stop with the capture.
+    sigset_t defaults;
+    sigemptyset(&defaults); sigaddset(&defaults, SIGTERM);
+    posix_spawnattr_t attr;
+    int error = posix_spawnattr_init(&attr);
+    pid_t child;
+    if (!error) {
+        error = posix_spawnattr_setsigdefault(&attr, &defaults);
+        if (!error) error = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF);
+        if (!error) error = posix_spawnp(&child, argv[0], NULL, &attr, argv, *_NSGetEnviron());
+        posix_spawnattr_destroy(&attr);
+    }
+    if (error) { GLOG("[RED] cannot start the GL capture compiler: %s", strerror(error)); return 0; }
+    int status;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void sh_compile_capture(shader_t *s, const char *stage, const char *source) {
+    int frag = s->type == GL_FRAGMENT_SHADER;
+    for (capture_stage *c = g_capture_stages; c; c = c->next) {
+        if (c->info.frag == frag && !strcmp(c->info.key, s->key)) { s->si = &c->info; s->fn = c->fn; return; }
+    }
+    const char *tmp = getenv("DM_TEMP");
+    if (!tmp || !tmp[0]) tmp = NSTemporaryDirectory().fileSystemRepresentation;
+    char work[PATH_MAX];
+    if (snprintf(work, sizeof work, "%s/gl-shader.XXXXXX", tmp) >= (int)sizeof work || !mkdtemp(work)) {
+        GLOG("[RED] cannot create GL capture compiler directory in %s", tmp);
+        return;
+    }
+    char table[sizeof work + 32], library[sizeof work + 32];
+    snprintf(table, sizeof table, "%s/gl_shaders.tsv", work);
+    snprintf(library, sizeof library, "%s/gl_shaders.metallib", work);
+    if (sh_run_compiler(stage, source, work)) {
+        FILE *f = fopen(table, "r");
+        static char line[65536];
+        shinfo info;
+        if (f && sh_read_abi(f) && fgets(line, sizeof line, f) && sh_read_row(line, &info)) {
+            id<MTLFunction> fn = info.frag == frag && !strcmp(info.key, s->key) ? sh_function(sh_library(library), &info) : nil;
+            if (fn) {
+                capture_stage *c = zalloc(sizeof *c);
+                c->info = info; c->fn = fn; c->next = g_capture_stages; g_capture_stages = c;
+                s->si = &c->info; s->fn = c->fn;
+                GLOG("compiled capture shader %s.%s", s->key, stage);
+            } else sh_free(&info);
+        }
+        if (f) fclose(f);
+    }
+    if (!s->fn) GLOG("[RED] failed to compile capture shader %s.%s", s->key, stage);
+    unlink(table); unlink(library); rmdir(work);
+}
+#endif
+
+static void sh_capture(shader_t *s) {
+    const char *stage = s->type == GL_VERTEX_SHADER ? "vert" : "frag";
+    char path[PATH_MAX], temp[sizeof path + 32];
+    if (snprintf(path, sizeof path, "%s/%s.%s", g_capture_dir, s->key, stage) >= (int)sizeof path) {
+        RED1("shader capture path too long: %s", g_capture_dir);
+        return;
+    }
+    int fresh = access(path, F_OK) != 0;
+    if (fresh) {
+        snprintf(temp, sizeof temp, "%s.%d.tmp", path, getpid());
+        FILE *f = fopen(temp, "wb");
+        if (!f) { RED1("shader capture cannot write to %s", g_capture_dir); return; }
+        int ok = fwrite(s->src, 1, s->len, f) == s->len;
+        if (fclose(f) != 0 || !ok) { unlink(temp); RED1("shader capture cannot write to %s", g_capture_dir); return; }
+    }
+#if TARGET_OS_OSX
+    if (!s->fn && g_capture_compiler) sh_compile_capture(s, stage, fresh ? temp : path);
+#endif
+    // The packer can stop the run once it sees the last complete file.
+    if (fresh && rename(temp, path) != 0) { unlink(temp); RED1("shader capture cannot rename %s", path); }
 }
 GL(glCreateShader, GLuint, GLenum type) {
     GLuint n = name_new((void ***)&g_sps, &g_nsps, &g_capsps, sizeof(sp_t)); g_sps[n]->s.type = type; return n;
@@ -2667,18 +2780,21 @@ GLB(glCompileShader, void, GLuint sh) {
     g_compiles++;
     uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(s->src, (CC_LONG)s->len, h);
     for (int i = 0; i < 8; i++) snprintf(s->key + 2 * i, 3, "%02x", h[i]);
-    sh_capture(s);
     int frag = s->type == GL_FRAGMENT_SHADER;
-    s->si = sh_find(s->key, frag); s->compiled = 1;
-    @autoreleasepool { s->fn = s->si && g_lib ? [g_lib newFunctionWithName:[NSString stringWithFormat:@"gl_%s_%c", s->key, frag ? 'f' : 'v']] : nil; }
-    if (!s->fn) { static int n; if (n++ < 50) GLOG("[RED] %s shader %s (%zu bytes of GLSL) is not in the library (DM_GL_CAPTURE collects it)", s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", s->key, s->len); }
-    else OLOG("CompileShader %s", s->key);
+    s->si = sh_find(s->key, frag);
+    @autoreleasepool {
+        s->fn = s->si && g_lib ? sh_function(g_lib, s->si) : nil;
+        if (g_capture_dir) sh_capture(s);
+    }
+    s->compiled = s->fn != nil;
+    if (s->fn) OLOG("CompileShader %s", s->key);
+    else if (!g_capture_compiler) { static int n; if (n++ < 50) GLOG("[RED] %s shader %s (%zu bytes of GLSL) is not in the library (DM_GL_CAPTURE collects it)", s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", s->key, s->len); }
 }
 GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
     if (!SP_CHECK(sh, 0)) { *v = 0; return; }
     shader_t *s = shader_of(sh);
     switch (p) {
-        case GL_COMPILE_STATUS: *v = 1; return;   // a shader the library lacks still compiles: its program's draws are skipped (and reported)
+        case GL_COMPILE_STATUS: *v = g_capture_compiler ? s->compiled : 1; return;   // normal runs report missing library entries without aborting the game
         case GL_INFO_LOG_LENGTH: *v = 0; return;
         case GL_SHADER_TYPE: *v = s->type; return;
         case GL_SHADER_SOURCE_LENGTH: *v = (GLint)s->len + 1; return;
@@ -2718,59 +2834,8 @@ static void prog_clear(prog_t *p) {
     p->validated = 0; p->validation_log[0] = 0;
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
     free(p->pc); p->pc = NULL; p->npc = p->cappc = 0;
-    free(p->u); p->u = NULL; p->nu = 0; free(p->ub[0]); free(p->ub[1]); p->ub[0] = p->ub[1] = NULL; p->fn[0] = p->fn[1] = nil; p->linked = p->capture_uniforms = 0;
+    free(p->u); p->u = NULL; p->nu = 0; free(p->ub[0]); free(p->ub[1]); p->ub[0] = p->ub[1] = NULL; p->fn[0] = p->fn[1] = nil; p->linked = 0;
     for (int st = 0; st < 2; st++) { p->ae[st] = nil; p->ub_buf[st] = nil; p->ub_serial[st] = p->ub_written_gen[st] = 0; }
-}
-static const char *capture_skip(const char *s) {
-    for (;;) {
-        while (isspace((unsigned char)*s)) s++;
-        if (*s == '#' || !strncmp(s, "//", 2)) s += strcspn(s, "\n");
-        else if (!strncmp(s, "/*", 2)) { const char *end = strstr(s + 2, "*/"); if (!end) return s + strlen(s); s = end + 2; }
-        else return s;
-    }
-}
-static size_t capture_word(const char **src, char *word, size_t size) {
-    const char *s = capture_skip(*src);
-    size_t n = strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
-    *src = s + n;
-    if (n >= size) { word[0] = 0; return n; }
-    memcpy(word, s, n); word[n] = 0;
-    return n;
-}
-// Capture boots with no library. Approximate simple uniform declarations so loaders can keep compiling shaders (MojoShader requires a location for vpFlip).
-// These locations have no backing executable or storage. Normal runs rely on the translated shader's reflection.
-static void capture_uniforms(prog_t *p, const shader_t *s) {
-    if (!s || !s->compiled || !s->src) return;
-    const char *src = s->src;
-    while (*(src = capture_skip(src))) {
-        char type[32], name[sizeof p->u[0].name];
-        if (!capture_word(&src, type, sizeof type)) { src++; continue; }
-        if (strcmp(type, "uniform")) continue;
-        capture_word(&src, type, sizeof type);
-        if (!strcmp(type, "lowp") || !strcmp(type, "mediump") || !strcmp(type, "highp")) capture_word(&src, type, sizeof type);
-        int t = tcode(type);
-        if (t == T_OTHER || !capture_word(&src, name, sizeof name) || !name[0]) continue;
-        src = capture_skip(src);
-        unsigned long count = 0;
-        if (*src == '[') {
-            const char *start = capture_skip(src + 1);
-            char *end;
-            if (!isdigit((unsigned char)*start)) continue;
-            count = strtoul(start, &end, 10);
-            if (!count || count > 4096 || *(src = capture_skip(end)) != ']') continue;
-            src = capture_skip(src + 1);
-        }
-        if (*src != ';') continue;
-        int i = 0;
-        while (i < p->nu && strcmp(p->u[i].name, name)) i++;
-        if (i != p->nu) continue;
-        puni_t *grown = realloc(p->u, (p->nu + 1) * sizeof *p->u);
-        if (!grown) return;
-        p->u = grown;
-        puni_t *u = &p->u[p->nu++];
-        *u = (puni_t){.type = (uint8_t)t, .count = (uint16_t)count, .off = {-1, -1}, .slot = {-1, -1}, .sampler = {-1, -1}};
-        strlcpy(u->name, name, sizeof u->name);
-    }
 }
 // Uniforms are merged by name over both stages, as GL links them; a location is (uniform index + 1) × 4096 + array element (uni_loc, uni_of)
 GLB(glLinkProgram, void, GLuint pr) {
@@ -2783,7 +2848,6 @@ GLB(glLinkProgram, void, GLuint pr) {
     // drawn with colour writes off). Its fragment stage is the empty one here, and its pipelines have no fragment function and write no colour (pso_get)
     if (!vs || !vs->fn || (fs && !fs->fn)) {
         RED1("program %u: a shader is missing from the library, its draws are skipped", pr);
-        if (g_capture_dir) { p->capture_uniforms = 1; capture_uniforms(p, vs); capture_uniforms(p, fs); }
         return;
     }
     static const shinfo nofrag = {.key = "none", .frag = 1, .ub_slot = -1, .arg_slot = -1};
@@ -2855,7 +2919,7 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
     if (!SP_CHECK(pr, 1)) { *v = 0; return; }
     prog_t *x = prog_of(pr);
     switch (p) {
-        case GL_LINK_STATUS: *v = 1; return;   // as glGetShaderiv's compile status
+        case GL_LINK_STATUS: *v = g_capture_compiler ? x->linked : 1; return;
         case GL_VALIDATE_STATUS: *v = x->validated; return;
         case GL_INFO_LOG_LENGTH: *v = x->validation_log[0] ? (GLint)strlen(x->validation_log) + 1 : 0; return;
         case GL_ACTIVE_UNIFORMS: *v = x->nu; return;
@@ -2917,7 +2981,7 @@ GL(glGetProgramInfoLog, void, GLuint pr, GLsizei size, GLsizei *len, GLchar *log
 // The uniforms in the order of the program's table (both stages merged, samplers among them): an array's name ends in [0], as GL reports it (LÖVE's mapActiveUniforms)
 GL(glGetActiveUniform, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len, GLint *count, GLenum *type, GLchar *name) {
     prog_t *p = prog_of(pr);
-    if (!p || (!p->linked && !p->capture_uniforms) || index >= (GLuint)p->nu) { if (len) *len = 0; if (name && size > 0) name[0] = 0; return; }
+    if (!p || !p->linked || index >= (GLuint)p->nu) { if (len) *len = 0; if (name && size > 0) name[0] = 0; return; }
     const puni_t *u = &p->u[index]; char nm[64];
     snprintf(nm, sizeof nm, "%s%s", u->name, u->count ? "[0]" : "");
     if (name && size > 0) strlcpy(name, nm, (size_t)size);
@@ -2939,7 +3003,7 @@ static int uni_of(const prog_t *p, GLint loc, int *el) {   // the uniform index 
     return loc / 4096 - 1;
 }
 GL(glGetUniformLocation, GLint, GLuint pr, const GLchar *name) {
-    prog_t *p = prog_of(pr); if (!p || (!p->linked && !p->capture_uniforms)) return -1;
+    prog_t *p = prog_of(pr); if (!p || !p->linked) return -1;
     char nm[64]; strlcpy(nm, name, sizeof nm); int elem = 0;
     char *br = strchr(nm, '[');
     if (br) { elem = atoi(br + 1); *br = 0; }

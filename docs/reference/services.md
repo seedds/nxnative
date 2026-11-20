@@ -497,6 +497,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536), on the Mac with the keyboard and `DM_KEYS`: after the fix the applet is not opened once in 220 s, and Play leads to its one-controller screen ("press the button") and into a doubles Tennis match at its serve prompt.
 - **Check:** `t_hid` (`t_unsupported_style`).
 
+### Handheld controls at the docked resolution (`DM_NPAD_HANDHELD`)
+
+- **Symptom:** docked, Pokémon: Let's Go, Eevee! never throws a Poké Ball with the keyboard: A does nothing at the throw, and Space (`DM_BTN_SHAKE`) does not throw either. Handheld mode (`DM_OPMODE=0`) throws with A, but renders at 720p.
+- **Cause:** docked, the game takes single Joy-Cons held upright (Handheld | JoyLeft | JoyRight | Palma, `0x5a`) and throws only on a forward flick of that Joy-Con. The host's shake is a side-to-side wobble, and the six-axis handle (`0x10007`, a right Joy-Con's on No1) was connected: the game read the sensor and ignored the wobble. On the Handheld npad the same game throws with A and aims with the sensor. Docked, player 1 was always on No1 (`connected_id`).
+- **Fix:** `DM_NPAD_HANDHELD=1` puts player 1 on the Handheld npad in console mode too (`handheld_npad`, `hle_hid.c`): the game keeps its console-mode resolution and takes its handheld controls, two six-axis sensors included. Players 2..8 stay on No2..No8; a front end's Joy-Cons on player 1 are not split, as in handheld mode. Off by default; nothing else changes. Touch input still follows the console mode (none docked). Let's Go Recomp ([raulzrrs/letsgo-recomp](https://github.com/raulzrrs/letsgo-recomp), MIT, `runtime/hle/input.c`) shows its game the Handheld npad while docked the same way. A `[RED] hid six-axis handle … read as not connected` line now names a sensor read whose handle does not match the npad's current style.
+- **Open:** the docked flick throw itself. A flick in the upright Joy-Con frame for the host's shake (`six_sample`) would let the keyboard throw on single Joy-Cons; the game's throw test was not located. The aim stays centred with no motion source: the host answers `IsSixAxisSensorAtRest` with yes, and the game then stops reading the sensor (Let's Go Recomp's `docs/HISTORICO.md` #32).
+- **Found on:** Pokémon: Let's Go, Eevee! (`0100187003A36000`, v131072, provisional profile), Mac app with the keyboard: with `DM_NPAD_HANDHELD=1`, docked at 1080p, A throws in a wild catch. Without it the game read `GetSixAxisSensorState` 137 times in the session (`DM_HLECOUNT`) and took no throw from Space.
+- **Check:** `t_hid` (`t_npad_handheld`).
+
 ### Live controller motion
 
 - **Symptom:** motion controls do nothing with a controller that has a gyroscope (Breath of the Wild: aiming with its Motion Controls option on); the six-axis sensor always lies flat.

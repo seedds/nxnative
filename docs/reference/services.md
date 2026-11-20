@@ -1520,6 +1520,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the game's `main` defines its own `operator new` / `delete` (Unity's memory manager) and `sdk` has a copy forwarding to `malloc` / `free`.
 - **Fix:** symbols are resolved globally in load order (the first module's definition wins, also for a module's references to its own exports); only local / non-default-visibility symbols bind to the module itself (`loader.c`). The loader logs how many references bind to an earlier module.
 
+### Module initializers run dependencies first
+
+- **Symptom:** a crash during `main`'s static initializers, before `nnMain`: `CRASH sig=11 addr=0xffffffffffffffe8 pc=sdk+0x46d880 lr=main+0x164410` — a null-vptr read inside the sdk module's `std::ostream::write`, called from a game log helper that `std::cout.write`s its first line.
+- **Cause:** `run_module_inits` called each module's DT_INIT in forward order of the load list (main, subsdk0, sdk). The list puts dependents first and dependencies last: `main`'s initializers already write to `std::cout`, which the sdk module's DT_INIT (libc++'s `ios_base::Init`) constructs, so the game wrote to a not-yet-constructed `cout`.
+- **Fix:** the DT_INITs run in reverse load order (`loader.c`), so a module's dependencies initialize before it; the timing is unchanged (after `nninitStartup` and `_init_libc2`, before `nnMain`).
+- **Found on:** Little Busters! Converted Edition (`0100943010310000`, 1.0.0, SDK 8.3.2), a provisional profile, no note (not in the games table). With the fix the game passes all module inits and boots; If My Heart Had Wings (`01001AC00ED72000`) boots unchanged with the same host.
+
 ### Undefined weak imports bind to 0
 
 - **Symptom:** a weakly imported function the game calls although nothing defines it: an `UNIMPL` line, then an abort.

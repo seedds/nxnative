@@ -119,8 +119,25 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// audout takes 0 or 48000 and refuses any other rate with 0x699 (ResultInvalidSampleRate). Mega Man Legacy Collection (SDK 3.7) asks for 44.1 kHz first and opens again with the
+// defaults when refused: the refused open leaves no output and the guest AudioOut as it was, and the second one opens at 48 kHz
+static int test_rate_refused(void) {
+    uint32_t out[16] = {0}; uint8_t prm[16];
+    h_au_InitParam(prm); *(int32_t *)prm = 44100;
+    Result r = h_au_OpenDef0(out, prm);
+    if (r != 0x699 || objmap_get(out) || out[0] || out[1]) { printf("FAIL 44.1 kHz open: result %#x, output %p, guest fields %u %u (0x699, none, 0 0 expected)\n", r, objmap_get(out), out[0], out[1]); return 1; }
+    for (int k = 0; k < AOMAX; k++) if (g_aos[k]) { puts("FAIL 44.1 kHz open: a consumer is registered"); return 1; }
+    *(int32_t *)prm = 0;
+    if (h_au_OpenDef0(out, prm) || out[0] != RATE || h_au_Rate(out) != RATE) { puts("FAIL the open with the default rate after the refusal"); return 1; }
+    h_au_Close(out);
+    *(int32_t *)prm = RATE;
+    if (h_au_OpenDef0(out, prm)) { puts("FAIL a 48 kHz open"); return 1; }
+    h_au_Close(out);
+    puts("AudioOut rate: 44.1 kHz refused with 0x699 and nothing opened; 0 and 48000 open at 48 kHz");
+    return 0;
+}
 int main(void) {
-    if (test_buffer_layout() || test_surround_output() || test_output_lifetime()) return 1;
+    if (test_buffer_layout() || test_surround_output() || test_output_lifetime() || test_rate_refused()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; aout_buf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;
@@ -196,3 +213,5 @@ int main(void) {
     printf("device stall: released %d/20 in order=%d in %.0f ms (expected 1900-5000), AudioUnit restarted and calling back again=%d (silent sink stood in %d times, %.0f ms) %s\n", got3, order3, total3, back, standins, waited3, ok3 ? "✓" : "✗");
     return !ok3;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

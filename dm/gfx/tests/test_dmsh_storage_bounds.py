@@ -13,7 +13,7 @@ from test_dmsh_nvn2_buffers import EXIT as A_EXIT, SUATOM_R5, ULDC64_C0_10, inst
 from test_dmsh_storage_offset import iadd_c, ldg, mov_c, shl_i   # noqa: E402
 from test_dmsh_hull_cbe import stg   # noqa: E402
 sys.path.insert(0, str(TOOLS))
-import dmsh_abi as abi   # noqa: E402
+import dmsh_abi as abi, dmsh_chain   # noqa: E402
 
 # Ampere (hi, lo)
 S2R_R5 = (0x000e260000002100, 0x0000000000057919)       # S2R R5, SR_TID.X
@@ -36,7 +36,7 @@ class StorageBounds(unittest.TestCase):
             res = json.loads((work / 'k.res.json').read_text())
             import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '30100', '--msl-argument-buffers', '--msl-texture-buffer-native', str(work / 'k.spv')],
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native', str(work / 'k.spv')],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             import dmsh_reflect

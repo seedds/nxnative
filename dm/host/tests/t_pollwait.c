@@ -96,10 +96,10 @@ static void sleep_run(int64_t ns, int steps, int expect_backoff) {
 }
 static void *signaller(void *unused) {
     (void)unused;
-    pthread_mutex_lock(&G);
-    while (!waiter_ready) pthread_cond_wait(&ready_cv, &G);
+    g_lock();
+    while (!waiter_ready) g_cond_wait(&ready_cv, NULL);
     assert(g_wait && g_wait->wkind == 2 && g_wait->wkey == (uint64_t)&condition_key);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     uint64_t r[32] = {(uint64_t)&condition_key, 1}; svc_thread(0x1D, r);
     return NULL;
 }

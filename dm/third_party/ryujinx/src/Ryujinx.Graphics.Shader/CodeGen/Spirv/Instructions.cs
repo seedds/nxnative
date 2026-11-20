@@ -4,6 +4,7 @@ using Ryujinx.Graphics.Shader.Translation;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Numerics;
 using static Spv.Specification;
 
@@ -12,7 +13,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
     using SpvInstruction = Spv.Generator.Instruction;
     using SpvLiteralInteger = Spv.Generator.LiteralInteger;
 
-    static class Instructions
+    static partial class Instructions
     {
         private const MemorySemanticsMask DefaultMemorySemantics =
             MemorySemanticsMask.ImageMemory |
@@ -53,6 +54,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.BitwiseNot,               GenerateBitwiseNot);
             Add(Instruction.BitwiseOr,                GenerateBitwiseOr);
             Add(Instruction.Call,                     GenerateCall);
+            Add(Instruction.RayQueryTrace,            GenerateRayQueryTrace);
             Add(Instruction.Ceiling,                  GenerateCeiling);
             Add(Instruction.Clamp,                    GenerateClamp);
             Add(Instruction.ClampU32,                 GenerateClampU32);
@@ -93,6 +95,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.FindMSBU32,               GenerateFindMSBU32);
             Add(Instruction.Floor,                    GenerateFloor);
             Add(Instruction.FusedMultiplyAdd,         GenerateFusedMultiplyAdd);
+            Add(Instruction.HalfFusedMultiplyAdd,     GenerateHalfFusedMultiplyAdd);
             Add(Instruction.GroupMemoryBarrier,       GenerateGroupMemoryBarrier);
             Add(Instruction.ImageAtomic,              GenerateImageAtomic);
             Add(Instruction.ImageLoad,                GenerateImageLoad);
@@ -593,6 +596,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             return GenerateTernary(context, operation, context.Delegates.GlslFma, null);
         }
 
+        private static OperationResult GenerateHalfFusedMultiplyAdd(CodeGenContext context, AstOperation operation)
+        {
+            context.AddCapability(Capability.Float16);
+            SpvInstruction half = context.TypeFloat(16);
+            SpvInstruction a = context.FConvert(half, context.GetFP32(operation.GetSource(0)));
+            SpvInstruction b = context.FConvert(half, context.GetFP32(operation.GetSource(1)));
+            SpvInstruction c = context.FConvert(half, context.GetFP32(operation.GetSource(2)));
+            SpvInstruction result = context.GlslFma(half, a, b, c);
+
+            // Widen the already rounded result exactly for the existing half-pair modifiers and packing.
+            return new OperationResult(AggregateType.FP32, context.FConvert(context.TypeFP32(), result));
+        }
+
         private static OperationResult GenerateGroupMemoryBarrier(CodeGenContext context, AstOperation operation)
         {
             context.MemoryBarrier(context.Constant(context.TypeU32(), Scope.Workgroup), context.Constant(context.TypeU32(), DefaultMemorySemantics));
@@ -625,11 +641,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         // end as before, so a bounds check of the view's size (the atomics') and Metal's own drop it. An array of buffer textures has an entry per element, and an access
         // reads the entry of the element it indexes (its first source, as GenerateSampledImageLoad reads it). One without a table entry (an array of images, or past the
         // table) is accessed unchanged
-        private static SpvInstruction BufferBias(CodeGenContext context, AstTextureOperation texOp)
+        private static SpvInstruction BufferBias(CodeGenContext context, AstTextureOperation texOp, bool rowWidth = false)
         {
             bool isImage = texOp.Inst.IsImage();
 
-            if (!(isImage ? context.Properties.BufferImageBiases : context.Properties.BufferTextureBiases).TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
+            if (!(rowWidth ? context.Properties.BufferRowWidths : isImage ? context.Properties.BufferImageBiases : context.Properties.BufferTextureBiases).TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
             {
                 return null;
             }
@@ -1407,6 +1423,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 pCoords = BiasBufferImageCoordinate(context, texOp, pCoords);   // nxnative: a buffer texture (see BiasBufferImageCoordinate)
             }
 
+            if (intCoords && texOp.Flags.HasFlag(TextureFlags.RowWrap))
+            {
+                SpvInstruction u32 = context.TypeU32();
+                SpvInstruction x = context.CompositeExtract(context.TypeS32(), pCoords, 0);
+                SpvInstruction y = context.CompositeExtract(context.TypeS32(), pCoords, 1);
+                SpvInstruction linear = context.BitwiseOr(u32, context.Bitcast(u32, x), context.ShiftLeftLogical(u32, context.Bitcast(u32, y), context.Constant(u32, 14)));
+                SpvInstruction moved = context.Bitcast(u32, BiasBufferImageCoordinate(context, texOp, context.Bitcast(context.TypeS32(), linear)));
+                if (BufferBias(context, texOp, true) is SpvInstruction width)
+                {
+                    SpvInstruction valid = context.LogicalOr(context.TypeBool(), context.IEqual(context.TypeBool(), width, context.Constant(u32, 0)), context.ULessThan(context.TypeBool(), linear, width));
+                    moved = context.Select(u32, valid, moved, context.Constant(u32, uint.MaxValue));
+                }
+                pCoords = context.CompositeConstruct(context.TypeVector(context.TypeS32(), 2),
+                    context.Bitcast(context.TypeS32(), context.BitwiseAnd(u32, moved, context.Constant(u32, 0x3fff))),
+                    context.Bitcast(context.TypeS32(), context.ShiftRightLogical(u32, moved, context.Constant(u32, 14))));
+            }
+
             if (!intCoords)
             {
                 SpvInstruction nfFp32 = context.TypeFP32();
@@ -1744,6 +1777,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 if (dimensions != 1)
                 {
                     result = context.CompositeExtract(context.TypeS32(), result, texOp.Index);
+                }
+
+                if (texOp.Index == 0 && BufferBias(context, texOp, true) is SpvInstruction logicalWidth)
+                {
+                    // Zero marks an ordinary 1D texture: keep Metal's width.
+                    result = context.Select(context.TypeS32(), context.INotEqual(context.TypeBool(), logicalWidth, context.Constant(context.TypeU32(), 0)), context.Bitcast(context.TypeS32(), context.Select(context.TypeU32(), context.ULessThan(context.TypeBool(), logicalWidth, context.Constant(context.TypeU32(), 16384)), logicalWidth, context.Constant(context.TypeU32(), 16384))), result);
                 }
 
                 return new OperationResult(AggregateType.S32, result);
@@ -2127,12 +2166,26 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 context.Constant(s32, 0),
                 context.Constant(s32, sizeIndex >> 2),
                 context.Constant(s32, sizeIndex & 3));
-            SpvInstruction sizeWords = context.ShiftRightLogical(u32, context.Load(u32, sizePointer), context.Constant(u32, 2u));
-
+            SpvInstruction size = context.Load(u32, sizePointer);
             SpvInstruction vec = context.Get(AggregateType.S32, vecNode);
             SpvInstruction elem = context.Get(AggregateType.S32, elemNode);
-            SpvInstruction word = context.BitwiseOr(u32, context.ShiftLeftLogical(u32, context.Bitcast(u32, vec), context.Constant(u32, 2u)), context.Bitcast(u32, elem));
-            SpvInstruction inBounds = context.ULessThan(context.TypeBool(), word, sizeWords);
+            SpvInstruction row = context.Bitcast(u32, vec);
+            SpvInstruction inBounds;
+
+            if (UniformElementInRow(elemNode))
+            {
+                // The host's size table is rounded to 256 bytes, so every
+                // row is entirely in or out of bounds. The direct comparison
+                // also prevents the word calculation from wrapping.
+                SpvInstruction sizeRows = context.ShiftRightLogical(u32, size, context.Constant(u32, 4u));
+                inBounds = context.ULessThan(context.TypeBool(), row, sizeRows);
+            }
+            else
+            {
+                SpvInstruction sizeWords = context.ShiftRightLogical(u32, size, context.Constant(u32, 2u));
+                SpvInstruction word = context.BitwiseOr(u32, context.ShiftLeftLogical(u32, row, context.Constant(u32, 2u)), context.Bitcast(u32, elem));
+                inBounds = context.ULessThan(context.TypeBool(), word, sizeWords);
+            }
 
             SpvInstruction pointer = context.AccessChain(
                 context.TypePointer(StorageClass.Uniform, type),
@@ -2150,6 +2203,24 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             result = new OperationResult(varType, context.Select(type, inBounds, context.Load(type, pointer), zero));
             return true;
+        }
+
+        private static bool UniformElementInRow(IAstNode elem)
+        {
+            if (elem is AstOperand { Type: OperandType.Constant } constant)
+            {
+                return (uint)constant.Value < 4;
+            }
+
+            if (elem is AstOperand { Type: OperandType.LocalVariable, AddressTaken: false } local &&
+                local.Defs.Count == 1 && local.Defs.First() is AstAssignment assignment)
+            {
+                elem = assignment.Source;
+            }
+
+            return elem is AstOperation { Inst: Instruction.BitwiseAnd, SourcesCount: 2 } mask &&
+                (mask.GetSource(0) is AstOperand { Type: OperandType.Constant, Value: >= 0 and <= 3 } ||
+                 mask.GetSource(1) is AstOperand { Type: OperandType.Constant, Value: >= 0 and <= 3 });
         }
 
         private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)

@@ -748,6 +748,14 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? be_wait_acq : be_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    // DM_DETCLOCK: the GPU takes no guest time (vk_commands.c report_det writes a report's time at its record), so a fenced sync has always completed by the time the guest looks:
+    // wait for the host's GPU without a limit, holding the clock, and answer as a GPU that finished. A timeout counted in wall time, a poll among them, answered by how far the
+    // host's GPU had got, a different answer in each run (docs/reference/threads.md, "Two runs under DM_DETCLOCK part from the boot")
+    if (dm_detclock_enabled()) {
+        uint64_t t0 = now_ns(); w(o->fence, UINT64_MAX); atomic_fetch_add(&g_sync_ns, now_ns() - t0);
+        static _Atomic int once; if (timeout != UINT64_MAX && !atomic_exchange(&once, 1)) LOG("DM_DETCLOCK: nvnSyncWait with a timeout of %llu ns waited for the GPU (first case)", (unsigned long long)timeout);
+        return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    }
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }

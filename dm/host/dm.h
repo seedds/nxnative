@@ -114,9 +114,19 @@ uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);   // hle_thread.c: DM_DETCLOCK's clock runs again (the end of a freeze): the threads due wake, and blocked ones may jump it
-void dm_detclock_presented(void);     // hle_thread.c: a present under DM_DETCLOCK (which may have moved the clock): the threads due wake; the calling thread is the one that presents
-// hle_thread.c: hle_os.c hands over DM_DETCLOCK's idle jump when the switch takes the clock over (the first present), with the vsync times origin + k × step
+void dm_detclock_presented(uint64_t frame, int itv);   // hle_thread.c: a present under DM_DETCLOCK (which may have moved the clock): the threads due wake; the calling thread is the one that presents
+extern _Atomic int dm_detclock_tracing;   // hle_thread.c: DM_DETCLOCK_TRACE is open (docs/reference/threads.md)
+void dm_detclock_trace_read(void);        // hle_thread.c: the guest read the clock under the switch with the trace open (the first reading after host code let a thread go is traced)
+void dm_detclock_trace_input(char kind, uint64_t buttons, uint64_t axes);   // hle_thread.c: a scripted input change (I) or the game's first reading of one (K), traced
+// hle_thread.c: hle_os.c hands over DM_DETCLOCK's idle jump when the switch takes the clock over (the host's start), with the vsync times origin + k × step
 void dm_detclock_set_jump(uint64_t (*jump)(uint64_t to), uint64_t origin, uint64_t step);
+// hle_thread.c: under DM_DETCLOCK a host-owned guest thread (its ThreadType) runs on the guest clock from now on, counted as a game thread (the audio renderer's render thread,
+// hle_audren.c; the movie decoder's deferred events, hle_movie.c): it waits for each period's start with dm_detclock_period_wait (0 when it is not paced: it paces itself as
+// before), or until a time on the guest clock (0: none) or a wake with dm_detclock_paced_sleep / dm_detclock_paced_wake
+int dm_detclock_pace_thread(void *tt, uint64_t period);
+int dm_detclock_period_wait(void);
+void dm_detclock_paced_sleep(uint64_t at);
+void dm_detclock_paced_wake(void *tt);
 void dm_detclock_vsync_event(void *ev);   // hle_thread.c: vi's vsync event, bound: under DM_DETCLOCK the guest clock signals it at each vsync time (hle_sdk16.c)
 void dm_detclock_display_wait(uint64_t at);   // hle_thread.c: under DM_DETCLOCK the thread that presents waits for the display until guest time at (hle_nvn.c's acquire)
 void dm_detclock_present_paced(int itv);   // hle_os.c: the next present is NVN's at this interval, whose acquire waits for the display: under DM_DETCLOCK it moves no clock

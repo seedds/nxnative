@@ -195,20 +195,26 @@ static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
 // The movie player's dispatcher and worker must also finish their requests before the posting thread continues; the shared SVC wake handoff supplies that ordering (hle_thread.c).
 // g_dfmu and each decoder's dmu are held while guest code signals events, so guest threads take them with dm_host_lock: a thread waiting for one counts as blocked, and the
 // signaller's handoff does not wait for it (Kirby and the Forgotten Land froze at its first guide movie: the handoff waited for the input thread, which waited for dmu)
+// Under DM_DETCLOCK the deferred events and the withheld inputs (MD_STALE_NS) count on the guest clock (md_now), and the deferred thread runs on it (hle_thread.c
+// dm_detclock_pace_thread): it sleeps there until the next due time or a new entry (dm_detclock_paced_sleep / paced_wake) and holds the clock while it signals. It waited 2 ms of
+// wall time before, so the game's movie threads woke at a guest time the host's pace chose, and Mario vs. Donkey Kong's frame after its opening movie took 1 ms more in one run
+// (docs/reference/threads.md, "Two runs under DM_DETCLOCK part from the boot")
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
 void dm_host_lock(pthread_mutex_t *m);   // hle_thread.c
+static uint64_t md_now(void) { return dm_detclock_enabled() ? guest_ns() : now_ns(); }
 static pthread_mutex_t g_dfmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_dfcv = PTHREAD_COND_INITIALIZER;
-static struct { void *d; int ev; uint64_t due; } g_dfq[64]; static int g_ndfq, g_dfthr;
+static struct { void *d; int ev; uint64_t due; } g_dfq[64]; static int g_ndfq, g_dfthr, g_dfdet; static void *g_dftt;   // g_dfdet: the thread is on the guest clock
 static void md_defer_body(void *arg);
 static void md_defer_at(void *d, int ev, uint64_t due) {
     dm_host_lock(&g_dfmu);
-    if (!g_dfthr) { g_dfthr = 1; dm_guest_thread_spawn(md_defer_body, NULL, 16, 64 << 10); }
+    if (!g_dfthr) { g_dfthr = 1; g_dftt = dm_guest_thread_spawn(md_defer_body, NULL, 16, 64 << 10); g_dfdet = dm_detclock_pace_thread(g_dftt, 0); }
     for (int i = 0; i < g_ndfq; i++) if (g_dfq[i].d == d && g_dfq[i].ev == ev && g_dfq[i].due <= due) { pthread_mutex_unlock(&g_dfmu); return; }   // already due by then
     if (g_ndfq < 64) g_dfq[g_ndfq++] = (__typeof__(g_dfq[0])){d, ev, due};
     else LOG("[RED] movie: deferred event queue full, dropping one");
-    pthread_cond_signal(&g_dfcv); pthread_mutex_unlock(&g_dfmu);
+    pthread_cond_signal(&g_dfcv); if (g_dfdet) dm_detclock_paced_wake(g_dftt);
+    pthread_mutex_unlock(&g_dfmu);
 }
-static void md_defer(void *d, int ev) { md_defer_at(d, ev, now_ns() + 2000000); }
+static void md_defer(void *d, int ev) { md_defer_at(d, ev, md_now() + 2000000); }
 static void md_defer_drop(void *d) {
     dm_host_lock(&g_dfmu);
     int n = 0; for (int i = 0; i < g_ndfq; i++) if (g_dfq[i].d != d) g_dfq[n++] = g_dfq[i];
@@ -219,7 +225,7 @@ static void md_defer_body(void *arg) {
     (void)arg;
     dm_host_lock(&g_dfmu);
     for (;;) {
-        uint64_t now = now_ns(), next = 0; int k = -1;
+        uint64_t now = md_now(), next = 0; int k = -1;
         for (int i = 0; i < g_ndfq && k < 0; i++) { if (g_dfq[i].due <= now) k = i; else if (!next || g_dfq[i].due < next) next = g_dfq[i].due; }
         if (k >= 0) {
             mdec_t *d = g_dfq[k].d; int e = g_dfq[k].ev;
@@ -227,6 +233,7 @@ static void md_defer_body(void *arg) {
             if (d->started) md_event(d, e);   // not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down)
             continue;
         }
+        if (g_dfdet) { pthread_mutex_unlock(&g_dfmu); dm_detclock_paced_sleep(next); dm_host_lock(&g_dfmu); continue; }   // DM_DETCLOCK (above)
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
 #if defined(__APPLE__)
         else { uint64_t w = next - now; struct timespec ts = { (time_t)(w / 1000000000u), (long)(w % 1000000000u) }; pthread_cond_timedwait_relative_np(&g_dfcv, &g_dfmu, &ts); }
@@ -675,7 +682,7 @@ static void md_reset(mdec_t *d, int close) {
     dm_host_mutex_lock(&d->mu);
     // Every input goes back to the free list, as with MediaCodec, but one the client holds may still be sent: Big Brain Academy: Brain vs. Brain's event thread acquires inputs while its
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
-    uint64_t now = now_ns();
+    uint64_t now = md_now();   // the guest clock under DM_DETCLOCK (md_now)
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
     d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
@@ -714,7 +721,7 @@ HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: ac
     // No input after an end-of-stream packet until Flush / Stop either, as with MediaCodec, which movie::Decoder wraps (ACodec keeps the input buffers once the input port saw EOS).
     // DRAGON QUEST XI S's movie player sends an end-of-stream packet (length 0, time 0) for every input it gets once its extractor is done, until the game stops the movie: when the
     // prologue movie was skipped, each became an end-of-stream output, the player made each one an audio sample, and 2.25 GB were mapped within seconds (the allocator then broke)
-    uint64_t now = now_ns(), wake = 0; int k = -1;
+    uint64_t now = md_now(), wake = 0; int k = -1;   // the guest clock under DM_DETCLOCK (md_now)
     for (int j = 0; j < d->ninfree && k < 0; j++) { int x = d->infree[j]; if (!d->instale[x] || now - d->instale[x] >= MD_STALE_NS) k = j; }
     if (d->in_eos) k = -1;
     if (k >= 0 && d->started) {

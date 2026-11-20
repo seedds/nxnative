@@ -57,9 +57,13 @@ void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t 
     if (!p) shake_note();
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
+// DM_DETCLOCK_TRACE (hle_thread.c): a scripted input change, and the game's first reading of it (fill); the host's trace stands in where a unit test includes this file alone
+__attribute__((weak)) void dm_detclock_trace_input(char kind, uint64_t buttons, uint64_t axes) { (void)kind; (void)buttons; (void)axes; }
+static _Atomic uint64_t g_sc_seq, g_sc_seen;   // scripted changes so far, and the count the game's last reading saw
 static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_sc_btn, buttons); atomic_fetch_or(&g_sc_latch, buttons & ~old); atomic_store(&g_sc_axes, pack(lx, ly, rx, ry));
     shake_note();
+    atomic_fetch_add(&g_sc_seq, 1); dm_detclock_trace_input('I', buttons, pack(lx, ly, rx, ry));
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,
@@ -80,14 +84,23 @@ static const char *hold_text(const key_step *st, char *buf, size_t n) {
     if (st->hold_frames) snprintf(buf, n, "%ld frames from frame %llu", st->hold_frames, (unsigned long long)dm_guest_frame()); else snprintf(buf, n, "%.2f s", st->hold);
     return buf;
 }
+// Under DM_DETCLOCK a frame's changes are made where the guest is quiescent after that frame's present, held there until the next frame to wait for is set (hle_thread.c
+// dm_detclock_frame_wait; docs/reference/threads.md, "Two runs under DM_DETCLOCK part from the boot"): the game reads each change at the same guest time in every run. The host's
+// hle_thread.c gives both; these stand in where a unit test includes this file alone (the waits below poll then, as without the switch)
+__attribute__((weak)) int dm_detclock_frame_wait(uint64_t frame) { (void)frame; return 0; }
+__attribute__((weak)) void dm_detclock_frame_release(void) {}
 // Waits out a step's hold: its seconds, or until that many more frames have been presented
 static void step_hold(const key_step *st) {
-    if (!st->hold_frames) { usleep((useconds_t)(st->hold * 1e6)); return; }
-    for (uint64_t until = dm_guest_frame() + (uint64_t)st->hold_frames; dm_guest_frame() < until;) usleep(1000);
+    if (!st->hold_frames) { dm_detclock_frame_release(); usleep((useconds_t)(st->hold * 1e6)); return; }
+    uint64_t until = dm_guest_frame() + (uint64_t)st->hold_frames;
+    if (dm_detclock_frame_wait(until)) return;
+    while (dm_guest_frame() < until) usleep(1000);
 }
 static void *keys_main(void *arg) {
     (void)arg; struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < g_nsteps; i++) {
+        if (g_steps[i].frame && (double)dm_guest_frame() < g_steps[i].at) dm_detclock_frame_wait((uint64_t)g_steps[i].at);   // DM_DETCLOCK: at that frame's quiescent point
+        else if (!g_steps[i].frame) dm_detclock_frame_release();
         for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
                    if (g_steps[i].frame ? (double)dm_guest_frame() >= g_steps[i].at : el >= g_steps[i].at) break; usleep(5000); }
         char hb[64]; LOG("DM_KEYS: %s%.2f press %#llx (hold %s)", g_steps[i].frame ? "frame " : "", g_steps[i].at, (unsigned long long)g_steps[i].btn, hold_text(&g_steps[i], hb, sizeof hb));
@@ -95,6 +108,7 @@ static void *keys_main(void *arg) {
         script_set(g_steps[i].btn, g_steps[i].lx, g_steps[i].ly, g_steps[i].rx, g_steps[i].ry); step_hold(&g_steps[i]); script_set(0, 0, 0, 0, 0);
         if (g_steps[i].tap) dm_touch_set(NULL, 0);
     }
+    dm_detclock_frame_release();
     return NULL;
 }
 // The keys of one step, "key[+key]" (the hold and repeat already cut off), into st
@@ -189,6 +203,7 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
                     float x0, y0, x1, y1, s = 0.3f; if (sscanf(line + 5, "%f %f %f %f %f", &x0, &y0, &x1, &y1, &s) < 4) { LOG("[RED] DM_CTL drag wants x0 y0 x1 y1 [seconds]"); continue; }
                     int n = (int)(s / 0.008f); if (n < 2) n = 2;
+                    dm_detclock_frame_release();   // a drag runs in seconds of wall time
                     LOG("DM_CTL: drag (%.3f,%.3f) → (%.3f,%.3f) over %.2f s", x0, y0, x1, y1, s);
                     for (int i = 0; i <= n; i++) { dm_touch t = {0, x0 + (x1 - x0) * (float)i / (float)n, y0 + (y1 - y0) * (float)i / (float)n}; dm_touch_set(&t, 1); usleep((useconds_t)(s * 1e6f / (float)n)); }
                     dm_touch_set(NULL, 0); continue;
@@ -202,6 +217,7 @@ static void *ctl_main(void *arg) {
             }
         }
         if (f) fclose(f);
+        dm_detclock_frame_release();   // DM_DETCLOCK: no line left, the guest goes on (step_hold held it at the last frame)
         usleep(100000);
     }
     return NULL;
@@ -301,8 +317,10 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     uint32_t src = pl ? 1u << pl : 1u | merged_players();
     uint64_t b = 0; int32_t a[4] = {0};
     if (!pl) {
+        uint64_t sq = atomic_load(&g_sc_seq);
         b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
         uint64_t k = atomic_load(&g_axes), c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(ax(k, i), ax(c, i));
+        if (sq != atomic_load(&g_sc_seen) && atomic_exchange(&g_sc_seen, sq) != sq) dm_detclock_trace_input('K', b, c);   // the first reading of a scripted change
     }
     for (int p = 0; p < DM_PLAYERS; p++) if (src >> p & 1) {
         b |= atomic_load(&g_pad_btn[p]) | atomic_exchange(&g_pad_latch[p], 0);

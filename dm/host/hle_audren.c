@@ -118,6 +118,15 @@ HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererPar
 static void *g_handle[2];                    // AudioRendererHandle (renderer object, client state)
 static _Atomic int g_open;
 static void *g_render_tt;                    // the render thread (ThreadType from dm_guest_thread_spawn): Close joins it before the SDK tears the renderer down
+// DM_DETCLOCK (docs/reference/threads.md): the render thread renders one frame every frame of guest time (samples per frame / rate, 5 ms), as a Switch's DSP does, not when the
+// output hands a buffer back on the wall clock: the game's audio thread, which its renderer event wakes, then wakes at the same guest time in every run. A frame the output has no
+// free buffer for is not played (the switch is for replays and tests). ar_open paces the thread before it returns to the game (hle_thread.c dm_detclock_pace_thread), and the thread
+// starts its loop once that is done (g_render_go); g_det: paced. The host's hle_os.c and hle_thread.c give these functions; the stand-ins serve a unit test that includes this file alone
+__attribute__((weak)) int dm_detclock_enabled(void) { return 0; }
+__attribute__((weak)) int dm_detclock_pace_thread(void *tt, uint64_t period) { (void)tt; (void)period; return 0; }
+__attribute__((weak)) int dm_detclock_period_wait(void) { return 0; }
+static _Atomic int g_render_go, g_det;
+static uint64_t g_frame_ns = 5000000;        // the renderer's frame (OpenAudioRenderer: samples per frame / rate)
 static int16_t g_frame[FRAME_MAX * 2]; static int g_frame_n;   // the latest frame (stereo int16)
 static _Atomic uint64_t g_frames, g_nonsilent;
 enum { CQ = 4 }; static int16_t g_cq[CQ][FRAME_MAX * 2]; static int g_cq_n[CQ]; static _Atomic uint32_t g_cq_head, g_cq_tail;   // output queue of catch-up frames
@@ -132,20 +141,28 @@ static void render_main(void *arg) {
     static int16_t data[NBUF][FRAME_MAX * 2]; static gbuf bufs[NBUF]; gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { bufs[i] = (gbuf){data[i], sizeof data[i], 0}; free_list[i] = &bufs[i]; }
     dm_pcmout_start(out);
-    LOG("audren: render thread started (%d buffers in flight, paced by the output)", NBUF);
+    while (dm_detclock_enabled() && !atomic_load(&g_render_go)) plat_sleep_ns(50000);   // DM_DETCLOCK: ar_open has paced this thread
+    int det = atomic_load(&g_det);
+    LOG("audren: render thread started (%d buffers in flight, paced by %s)", NBUF, det ? "the guest clock (DM_DETCLOCK)" : "the output");
     while (atomic_load(&g_open)) {
-        while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
+        if (det) {   // DM_DETCLOCK: the next frame's time on the guest clock; the buffers the output finished meanwhile come back without a wait
+            dm_detclock_period_wait();
+            if (!atomic_load(&g_open)) break;
+            for (gbuf *b; nfree < NBUF && (b = dm_pcmout_released(out)); ) free_list[nfree++] = b;
+        }
+        while (!det && !nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             gbuf *b = dm_pcmout_released(out);
             if (b) { free_list[nfree++] = b; break; }
             dm_pcmout_wait(out, 10);
             if (!atomic_load(&g_open)) break;
         }
-        if (!nfree) break;
+        if (!det && !nfree) break;
         const int16_t *src; int got;
         uint32_t h = atomic_load(&g_cq_head);
         if (h != atomic_load(&g_cq_tail)) { src = g_cq[h % CQ]; got = g_cq_n[h % CQ]; atomic_store(&g_cq_head, h + 1); cq_popped(); }   // play queued catch-up output first
         else { g_frame_n = 0; GUEST_CALL(exec, g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
+        if (!nfree) continue;   // DM_DETCLOCK: no free buffer, the frame is not played
         gbuf *b = free_list[--nfree];
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
         b->size = (uint64_t)n * 4;
@@ -199,7 +216,11 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     }
     if (atomic_load(&g_open)) { LOG("[RED] audren: a second renderer (the host drives only one)"); return r; }
     g_handle[0] = handle[0]; g_handle[1] = handle[1]; atomic_store(&g_open, 1);
+    int rate = *(const int32_t *)param, samples = *(const int32_t *)(param + 4);
+    if (rate > 0 && samples > 0) g_frame_ns = (uint64_t)samples * 1000000000ull / (uint64_t)rate;
+    atomic_store(&g_render_go, 0);
     g_render_tt = dm_guest_thread_spawn(render_main, NULL, 9, 0x10000);
+    atomic_store(&g_det, dm_detclock_pace_thread(g_render_tt, g_frame_ns)); atomic_store(&g_render_go, 1);   // DM_DETCLOCK: on the guest clock from here (above)
     return r;
 }
 HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm", "open the renderer (with event): CPU rendering + manual execution, the host starts a render thread",
@@ -466,7 +487,9 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
         uint64_t c = atomic_fetch_add(&g_catchups, 1) + 1;
         if (c <= 3) LOG("audren: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&g_cq_tail);
-        if (t - atomic_load(&g_cq_head) >= CQ) {   // queue full: wait for the render thread to play one (every 5 ms), so catch-up frames keep real time; at most 50 ms (an output that stopped)
+        // queue full: wait for the render thread to play one (every 5 ms), so catch-up frames keep real time; at most 50 ms (an output that stopped). Not under DM_DETCLOCK: the
+        // render thread plays one at its next frame on the guest clock, which cannot come while this thread waits (it holds the clock)
+        if (!atomic_load(&g_det) && t - atomic_load(&g_cq_head) >= CQ) {
             struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 50000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
             pthread_mutex_lock(&g_cq_mu);
             while (atomic_load(&g_open) && t - atomic_load(&g_cq_head) >= CQ && !pthread_cond_timedwait(&g_cq_cv, &g_cq_mu, &dl)) {}

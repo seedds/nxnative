@@ -17,7 +17,21 @@
 //  4. A game whose main thread works while its presenting thread waits for the display (in NVN's acquire, or where the main thread waits on vi's vsync event) and presents, and
 //     which reads its CPU span against the tick: the span is the job it waited for, shorter than a step, the frames one step each at interval 1 and two at 2, the same values in
 //     every run. Before, every present moved the clock a step, inside the span (docs/reference/threads.md, the DM_DETCLOCK entry's Note).
-// t_detclock <n> runs only scenario n after the common start (to show one scenario's failure on an older host).
+// Scenarios 5 to 9 are the sources that parted two runs of Mario vs. Donkey Kong from its boot (docs/reference/threads.md, "Two runs under DM_DETCLOCK part from the boot"), each
+// driven by host work at a random wall-clock pace while a worker sleeps 1 ms at a time on the guest clock (so any wait that lets the clock move runs it on at the host's pace);
+// every value read must be the exact guest time, the same in every run:
+//  5. Before the first present: the clock reads its origin, and a sleep's end is the kernel's deadline from it (the wall clock before, so seeds and timer phases taken in a boot
+//     differed in every run).
+//  6. The audio renderer's render thread (hle_audren.c render_main: a guest thread the host made for itself) renders every 5 ms and signals the renderer's event, which the
+//     game's audio thread waits on: it reads the clock at each 5 ms of guest time (it read whatever time the idle jumps had reached when 5 ms of wall time had passed).
+//  7. The movie decoder's deferred event (hle_movie.c md_defer_body): a game thread asks for its event 2 ms later and waits on it: it reads exactly 2 ms more (2 ms of wall time
+//     before).
+//  8. A game thread that waits for a host lock (dm_host_lock) a host thread holds: the clock does not move until it has the lock (it moved on with the worker's sleeps before).
+//  9. Frame-counted input (hle_hid.c's DM_CTL thread): a host thread changes the input after every third frame's present; the game reads each change in the next frame, at the
+//     same guest time in two runs (the thread polled the frame counter and changed the input whenever it saw it move, before or after the game's reading).
+// The trace (DM_DETCLOCK_TRACE, in TMPDIR) is checked at the end: its origin line, idle jumps, presents, blocks and thread starts, the host threads' signals of scenarios 2
+// and 9 and none from the paced threads of scenarios 6 and 7.
+// t_detclock <n> runs only scenario n after the common start (to show one scenario's failure on an older host); 5 runs before the first present.
 #include "../hle_os.c"
 #include "../hle_thread.c"
 #include <signal.h>
@@ -234,7 +248,7 @@ enum { PFRAMES = 8, PRUNS = 2 };
 static test_event e_vs, e_ready, e_presented, e_job, e_jobdone;
 static uint64_t s4_pres[PFRAMES][2];   // the clock before and after each present
 static _Atomic int s4_stop, s4_itv, s4_vsync;   // the present interval; 4b
-static uint64_t g_v0;   // the vsync times: g_v0 + k × STEP (the clock at the first present)
+static uint64_t g_v0;   // the vsync times: g_v0 + k × STEP (the clock's origin)
 static void presenter4(uint64_t arg) {
     uint64_t last = arg;   // the previous present's clock
     for (int f = 0; f < PFRAMES; f++) {
@@ -290,9 +304,106 @@ static void scenario4(const char *name, int vsync, int itv) {
            name, PRUNS, PFRAMES, itv, (unsigned long long)out[0][0][1], (unsigned long long)(STEP * 12 / 625));
 }
 
+// ---- Scenarios 5 to 9: host work at a random wall-clock pace ----
+#define ORIGIN 60000000000ull   // hle_os.c DET_ORIGIN_NS
+static unsigned rnd(unsigned n) {   // a different pace in every run
+    static _Atomic unsigned s; unsigned x = atomic_fetch_add(&s, 0x9E3779B9u) ^ (unsigned)now_ns();
+    x ^= x >> 15; x *= 0x2c1b3c6du; x ^= x >> 12; x *= 0x297a2d39u; x ^= x >> 15; return x % n;
+}
+static _Atomic int p_stop;
+static void poller(uint64_t arg) { (void)arg; while (!atomic_load(&p_stop)) sleep_guest(1 * MS); }   // a worker that polls with 1 ms sleeps: the idle jumps' pace
+static uint32_t poller_start(void) { atomic_store(&p_stop, 0); return thread_new(poller, 0); }
+static void thread_join(uint32_t h) { uint64_t r[32] = {0, (uint64_t)(uintptr_t)&h, 1, (uint64_t)-1}; CHECK(svc_thread(0x18, r) && r[0] == 0, "wait for thread %#x's exit failed", h); }
+static void poller_stop(uint32_t h) { atomic_store(&p_stop, 1); thread_join(h); }
+// 5
+static test_event e5;
+static uint64_t b5[2];
+static void boot5(uint64_t arg) { (void)arg; sleep_guest(5 * MS); b5[0] = guest_ns(); sleep_guest(3 * MS); b5[1] = guest_ns(); event_signal(e5); }
+// 6: the render thread as hle_audren.c's: paced by its opener (dm_detclock_pace_thread) before it starts its loop, else by the output's 5 ms of wall time
+enum { R6 = 12, R6RUNS = 2 };
+static test_event e_rend6, e_done6;
+static uint64_t r6_read[R6];
+static _Atomic int r6_go, r6_det;
+static int r6_tt[R6RUNS];   // stand for the render thread's ThreadType: its CreateThread argument (thr_t.arg), as the SDK passes it
+static void renderer6(uint64_t arg) {
+    (void)arg; dm_thread_mark_host();
+    while (!atomic_load(&r6_go)) plat_sleep_ns(50000);
+    int det = atomic_load(&r6_det);
+    for (int k = 0; k < R6; k++) {
+        if (!det || !dm_detclock_period_wait()) plat_sleep_ns(5 * MS);   // not paced: the output hands a buffer back every 5 ms of wall time
+        plat_sleep_ns((uint64_t)rnd(2000) * 1000);                       // the render's host work
+        event_signal(e_rend6);                                            // the SDK's render signals the game's renderer event
+    }
+}
+static void audio6(uint64_t arg) {   // the game's audio thread, on the renderer's event
+    (void)arg;
+    for (int k = 0; k < R6; k++) {
+        CHECK(event_wait(e_rend6, -1) == 0, "6: the audio thread's wait failed"); event_reset(e_rend6);
+        r6_read[k] = guest_ns(); plat_sleep_ns((uint64_t)rnd(300) * 1000);   // its update: host work
+    }
+    event_signal(e_done6);
+}
+// 7: the deferred event as hle_movie.c's md_defer / md_defer_body: a host-owned thread signals it once its due time comes, on the guest clock when paced
+enum { R7 = 8 };
+static pthread_mutex_t q7_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t q7_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t q7_due; static int q7_n, q7_stop, q7_det, q7_tt;
+static test_event e7;
+static uint64_t q7_now(void) { return q7_det ? guest_ns() : now_ns(); }   // hle_movie.c md_now
+static void defer7(uint64_t arg) {
+    (void)arg; dm_thread_mark_host();
+    dm_host_lock(&q7_mu);
+    while (!q7_stop) {
+        uint64_t now = q7_now();
+        if (q7_n && q7_due <= now) { q7_n = 0; plat_sleep_ns((uint64_t)rnd(1000) * 1000); event_signal(e7); continue; }   // the signal is guest code, at a random pace
+        uint64_t next = q7_n ? q7_due : 0;
+        if (q7_det) { pthread_mutex_unlock(&q7_mu); dm_detclock_paced_sleep(next); dm_host_lock(&q7_mu); continue; }
+        if (!next) { pthread_cond_wait(&q7_cv, &q7_mu); continue; }
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); uint64_t w = next > now ? next - now : 0;
+        ts.tv_sec += (time_t)(w / 1000000000u); ts.tv_nsec += (long)(w % 1000000000u); if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&q7_cv, &q7_mu, &ts);
+    }
+    pthread_mutex_unlock(&q7_mu);
+}
+static void ask7(uint64_t in) {   // hle_movie.c md_defer_at: the event `in` ns from now
+    dm_host_lock(&q7_mu);
+    q7_due = q7_now() + in; q7_n = 1;
+    pthread_cond_signal(&q7_cv); if (q7_det) dm_detclock_paced_wake(&q7_tt);
+    pthread_mutex_unlock(&q7_mu);
+}
+// 8: a host lock a host thread holds for a random 1 to 4 ms of wall time
+enum { R8 = 8 };
+static pthread_mutex_t hl8 = PTHREAD_MUTEX_INITIALIZER;
+static plat_sema *s8_take, *s8_taken;
+static void *holder8(void *arg) {
+    (void)arg;
+    for (int k = 0; k < R8; k++) {
+        plat_sema_wait(s8_take, -1); pthread_mutex_lock(&hl8); plat_sema_signal(s8_taken);
+        plat_sleep_ns((1000 + (uint64_t)rnd(3000)) * 1000); pthread_mutex_unlock(&hl8);
+    }
+    return NULL;
+}
+
+// 9: frame-counted input from a host thread (hle_hid.c's DM_CTL thread: a change after a given frame's present), at a random wall-clock pace after it; the thread signals a
+// host event at its end, which the game waits for (a kernel wait: the guest stays quiescent where the thread holds it)
+enum { K9 = 6, N9 = 3 * K9 + 4 };
+static _Atomic int in9;
+static test_event e9;
+static void *control9(void *arg) {
+    uint64_t base = (uint64_t)(uintptr_t)arg;
+    for (int k = 1; k <= K9; k++) {
+        uint64_t f = base + 3 * (uint64_t)k;
+        if (!dm_detclock_frame_wait(f)) while (dm_guest_frame() < f) plat_sleep_ns(1 * MS);   // without the hold: as the control thread polled the frame counter
+        plat_sleep_ns((uint64_t)rnd(500) * 1000);
+        atomic_store(&in9, k);
+    }
+    dm_detclock_frame_release();
+    hle_signal_system_event(&e9);
+    return NULL;
+}
+
 static void timeout(int sig) { (void)sig; const char m[] = "[RED] t_detclock: timed out: a thread waits on the guest clock and nothing moves it\n"; write(2, m, sizeof m - 1); _exit(99); }
 int main(int argc, char **argv) {
-    int only = argc > 1 ? atoi(argv[1]) : 0;   // one scenario (3, 1, 2, 4 or 5) after the common start; all by default
+    int only = argc > 1 ? atoi(argv[1]) : 0;   // one scenario (3, 1, 2, 4, 5 to 9) after the common start; all by default
 #if !defined(_WIN32)
     signal(SIGALRM, timeout); alarm(30);
 #else
@@ -300,6 +411,9 @@ int main(int argc, char **argv) {
 #endif
     setenv("DM_DETCLOCK", "16666667", 1);
     setenv("DM_PREEMPT", "0", 1);
+    char trace[512]; const char *tmp = getenv("TMPDIR");
+    snprintf(trace, sizeof trace, "%s/t_detclock_%d.dtrace", tmp && *tmp ? tmp : ".", (int)getpid());
+    setenv("DM_DETCLOCK_TRACE", trace, 1);
     svc_thread_main_init();
     e_go = event_new(); e_done = event_new(); e_never = event_new();
     hle_bind_system_event(&e_audio, 1); hle_bind_system_event(&e_vsync, 1);   // bound like the service-layer events (the audio renderer's)
@@ -307,9 +421,22 @@ int main(int argc, char **argv) {
     until_state(hp, 2, 1); until_state(ha, 1, 4); until_state(hr, 3, 1);
     uint32_t hw = thread_new(worker, 0);
     until_state(hw, 1, 4);   // waiting for the first frame
-    dm_guest_frame_tick();   // the first present: the switch takes the clock over
+
+    // 5, before the first present: the clock starts at its origin, and a sleep ends at the kernel's deadline from it
+    if (!only || only == 5) {
+        uint64_t g = guest_ns();
+        CHECK(dm_detclock_enabled() && g == ORIGIN, "5, before the first present: the clock reads %llu ns%s, expected its origin %llu: not virtual time from the start (the wall "
+              "clock's values differ in every run)", (unsigned long long)g, dm_detclock_enabled() ? "" : " and DM_DETCLOCK is not on", (unsigned long long)ORIGIN);
+        e5 = event_new(); thread_new(boot5, 0);
+        CHECK(event_wait(e5, -1) == 0, "5: wait for the sleeping thread failed"); event_reset(e5);
+        uint64_t w0 = kdl(ORIGIN, 5 * MS), w1 = kdl(w0, 3 * MS);
+        CHECK(b5[0] == w0 && b5[1] == w1, "5: sleeps of 5 and 3 ms before the first present ended at %llu and %llu ns, expected %llu and %llu", (unsigned long long)b5[0],
+              (unsigned long long)b5[1], (unsigned long long)w0, (unsigned long long)w1);
+        printf("5, before the first present: the clock starts at %.0f s, sleeps of 5 and 3 ms end at the kernel's deadlines from it\n", ORIGIN / 1e9);
+    }
+    dm_guest_frame_tick();   // the first present
     CHECK(dm_detclock_enabled(), "DM_DETCLOCK is not on after the first present");
-    g_v0 = g_base = guest_ns();
+    g_base = guest_ns(); g_v0 = ORIGIN;   // the vsync times count from the clock's origin
 
     // 3, while every other thread waits
     if (!only || only == 3) {
@@ -382,12 +509,116 @@ int main(int argc, char **argv) {
         atomic_store(&s4_stop, 1); pthread_join(vt, NULL);
     }
 
+    // 6: the audio renderer's render thread, paced by the thread that opened the renderer (hle_audren.c ar_open), at a random wall-clock pace, twice
+    if (!only || only == 6) {
+        e_rend6 = event_new(); e_done6 = event_new();
+        for (int run = 0; run < R6RUNS; run++) {
+            uint32_t hpl = poller_start(), ha6 = thread_new(audio6, 0);
+            until_state(ha6, 1, 4);
+            atomic_store(&r6_go, 0);
+            uint64_t t0 = guest_ns();
+            uint32_t hr6 = thread_new(renderer6, (uint64_t)(uintptr_t)&r6_tt[run]);
+            atomic_store(&r6_det, dm_detclock_pace_thread(&r6_tt[run], 5 * MS)); atomic_store(&r6_go, 1);
+            CHECK(event_wait(e_done6, -1) == 0, "6: wait for the audio thread failed"); event_reset(e_done6);
+            thread_join(hr6); thread_join(ha6); poller_stop(hpl);
+            for (int k = 0; k < R6; k++)
+                CHECK(r6_read[k] == t0 + (uint64_t)k * 5 * MS, "6, run %d: the audio thread read %llu ns after the renderer started at its wake %d, expected %llu (each renderer frame at 5 ms "
+                      "of guest time)", run, (unsigned long long)(r6_read[k] - t0), k, (unsigned long long)k * 5 * MS);
+        }
+        printf("6, the audio renderer: %d runs, the game's audio thread woke at each 5 ms of guest time while the render thread worked at a random wall-clock pace\n", R6RUNS);
+    }
+
+    // 7: the movie decoder's deferred event, its thread paced by the thread that made it (hle_movie.c md_defer_at)
+    if (!only || only == 7) {
+        e7 = event_new();
+        uint32_t hpl = poller_start();
+        pthread_mutex_lock(&q7_mu);   // md_defer_at holds the queue's lock while it makes and paces the thread
+        uint32_t hd7 = thread_new(defer7, (uint64_t)(uintptr_t)&q7_tt);
+        q7_det = dm_detclock_pace_thread(&q7_tt, 0);
+        pthread_mutex_unlock(&q7_mu);
+        for (int k = 0; k < R7; k++) {
+            uint64_t a = guest_ns(); ask7(2 * MS);
+            CHECK(event_wait(e7, -1) == 0, "7: wait for the deferred event failed"); event_reset(e7);
+            uint64_t b = guest_ns();
+            CHECK(b == a + 2 * MS, "7: the deferred event %d came %llu ns after it was asked for, expected 2 ms of guest time", k, (unsigned long long)(b - a));
+            sleep_guest(1 * MS + (uint64_t)k * 100000);
+        }
+        dm_host_lock(&q7_mu); q7_stop = 1; pthread_cond_signal(&q7_cv); dm_detclock_paced_wake(&q7_tt); pthread_mutex_unlock(&q7_mu);
+        thread_join(hd7); poller_stop(hpl);
+        printf("7, the movie decoder's deferred event: %d events, each 2 ms of guest time after it was asked for, its thread signalling at a random wall-clock pace\n", R7);
+    }
+
+    // 8: a host lock a host thread holds
+    if (!only || only == 8) {
+        s8_take = plat_sema_create(0); s8_taken = plat_sema_create(0);
+        uint32_t hpl = poller_start();
+        pthread_t ht; CHECK(!pthread_create(&ht, NULL, holder8, NULL), "pthread_create failed");
+        for (int k = 0; k < R8; k++) {
+            plat_sema_signal(s8_take); plat_sema_wait(s8_taken, -1);
+            uint64_t a = guest_ns(); dm_host_lock(&hl8); uint64_t b = guest_ns(); pthread_mutex_unlock(&hl8);
+            CHECK(b == a, "8: the clock moved %llu ns while the thread waited %d for a host lock (the host's work, not a guest time)", (unsigned long long)(b - a), k);
+            sleep_guest(1 * MS);
+        }
+        pthread_join(ht, NULL); poller_stop(hpl);
+        printf("8, a host lock: the clock held while a game thread waited %d times for a host thread's 1 to 4 ms of wall time\n", R8);
+    }
+
+    // 9: frame-counted input: a game that waits for the display, reads its input and presents, frame after frame, while a host thread changes the input after every third
+    // frame's present; each change must be read in the frame after that present, at the same guest time, twice
+    if (!only || only == 9) {
+        uint64_t when[2][K9 + 1] = {{0}};
+        hle_bind_system_event(&e9, 1);
+        for (int run = 0; run < 2; run++) {
+            uint64_t base = dm_guest_frame(), last = guest_ns(), t0 = last; int prev = 0; atomic_store(&in9, 0);
+            pthread_t ct; CHECK(!pthread_create(&ct, NULL, control9, (void *)(uintptr_t)base), "pthread_create failed");
+            // as hle_hid.c's thread, which starts before the game's first frame: its first frame is set before the game goes on (at most 1 s: the code before the change has no hold)
+            for (int i = 0; i < 1000; i++) { pthread_mutex_lock(&G); int set = g_bar_frame == base + 3; pthread_mutex_unlock(&G); if (set) break; plat_sleep_ns(1 * MS); }
+            for (int f = 1; f <= N9; f++) {
+                dm_detclock_display_wait(last + STEP);
+                int v = atomic_load(&in9);
+                if (v != prev) {
+                    CHECK(v == prev + 1 && dm_guest_frame() == base + 3 * (uint64_t)v, "9, run %d: input %d read after frame %llu's present, expected %d after frame %llu's (the change "
+                          "after its frame's present, read in the next)", run, v, (unsigned long long)(dm_guest_frame() - base), prev + 1, (unsigned long long)(3 * v));
+                    when[run][v] = guest_ns() - t0; prev = v;
+                }
+                dm_detclock_present_paced(1); dm_guest_frame_tick(); last = guest_ns();
+            }
+            CHECK(event_wait(e9, -1) == 0, "9: wait for the control thread failed"); event_reset(e9);
+            pthread_join(ct, NULL);
+            CHECK(prev == K9, "9, run %d: %d of %d input changes read", run, prev, K9);
+        }
+        for (int k = 1; k <= K9; k++)
+            CHECK(when[0][k] == when[1][k], "9: input %d read %llu ns after the first frame in one run, %llu in the other", k, (unsigned long long)when[0][k], (unsigned long long)when[1][k]);
+        printf("9, frame-counted input: %d changes, each read in the frame after its frame's present, at the same guest time in two runs\n", K9);
+    }
+
     // The end: every thread let go
     atomic_store(&finish, 1);
     pthread_mutex_lock(&park_mu); pthread_cond_broadcast(&park_cv); pthread_mutex_unlock(&park_mu);
     hle_signal_system_event(&e_audio);
     (void)hw;
-    puts("the deterministic guest clock: sleeps and timeouts on it end where Horizon's kernel ends them, run on while the presenting thread waits for them, at exact virtual "
-         "times; the display's pace is a wait on it; no jump while a thread runs or the presenting thread waits for a host-signalled event");
+
+    // The trace: its origin, idle jumps and presents, scenario 2's host signals and wakes, and nothing from the threads on the guest clock of scenarios 6 and 7
+    if (!only) {
+        pthread_mutex_lock(&g_dt_mu); CHECK(g_dtf && !fflush(g_dtf), "the trace %s was not written", trace); pthread_mutex_unlock(&g_dt_mu);
+        FILE *f = fopen(trace, "r"); CHECK(f, "cannot read the trace %s", trace);
+        char line[256], want[64]; int n[128] = {0}, first = 1, ok_origin = 0, hostsrc = 0;
+        snprintf(want, sizeof want, "O 0 0 %llu %llu", (unsigned long long)ORIGIN, (unsigned long long)STEP);
+        while (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\n")] = 0;
+            if (first) { ok_origin = !strcmp(line, want); first = 0; }
+            n[(unsigned char)line[0] & 127]++;
+            if ((line[0] == 'E' || line[0] == 'H') && strcmp(line + strlen(line) - 5, " host")) hostsrc++;   // a host-owned thread named as the source
+        }
+        fclose(f); remove(trace);
+        CHECK(ok_origin, "the trace does not start with \"%s\"", want);
+        CHECK(n['J'] > 100 && n['P'] > 30 && n['B'] > 100 && n['T'] > 10, "the trace has %d idle jumps, %d presents, %d blocks, %d thread starts", n['J'], n['P'], n['B'], n['T']);
+        CHECK(n['E'] == VFRAMES + 2 && n['H'] >= 1 && n['R'] >= 1, "the trace has %d host signals (scenario 2's %d and scenario 9's 2), %d host wakes, %d first readings", n['E'], VFRAMES, n['H'], n['R']);
+        CHECK(!hostsrc, "%d host signals or wakes are the paced threads' (scenarios 6 and 7: the guest's own)", hostsrc);
+        printf("the trace: %d idle jumps, %d presents, %d blocks, %d thread starts, %d host signals and %d host wakes (the host threads of scenarios 2 and 9)\n", n['J'], n['P'], n['B'], n['T'], n['E'], n['H']);
+    }
+    puts("the deterministic guest clock: virtual time from its origin; sleeps and timeouts on it end where Horizon's kernel ends them, run on while the presenting thread waits "
+         "for them, at exact virtual times; the display's pace is a wait on it; the host's threads that feed the game (the audio renderer, the movie decoder's deferred events) "
+         "run on it, and a wait for a host lock holds it; no jump while a thread runs or the presenting thread waits for a host-signalled event");
     return 0;
 }

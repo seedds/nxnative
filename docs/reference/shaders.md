@@ -1020,6 +1020,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the iOS libraries are compiled with `-fmetal-math-mode=relaxed` (`dm/ios/tools/ios_metal.py`; the Vulkan and GL libraries in `vk_shaders.py` and `gl_shaders.py` too). Relaxed keeps fast math's reassociation but not that assumption.
 - **Found on:** listed among the mechanisms first met in [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md); the source gives the 8,337 of 12,809 count without naming the game.
 
+### Mac math mode (relaxed)
+
+- **Symptom:** the Mac draws the menus, but every 3D object is black. The colour target before tonemapping shows the full scene. The tonemap pass writes zeros.
+- **Cause:** the tonemap's dither term multiplies by `as_type<float>(0x7f800000u)`, the infinity constant from the Maxwell code, and uses an `isnan` select. Metal's default fast mode lets the compiler assume inputs and results are finite. It folded the select and the tonemap wrote zeros.
+- **Fix:** `mac_metal()` in `dm/gfx/tools/dmsh_chain.py` passes `-fmetal-math-mode=relaxed` for every Mac NVN shader, matching the [iOS compile](#ios-math-mode-relaxed).
+- **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`, update 131072). [PR #3024](https://github.com/seedds/nxnative/pull/3024) records the gameplay checks.
+
 ### Front end at -O1: Apple's control-flow lowering
 
 - **Symptom:** making a pipeline archive prints `Max Unstruct ID 758 in function agc.main in shader 13941 exceeds supported limit`, and one pipeline takes many minutes, in `metal-tt` offline or in the host's prebuild on the device (`Preparing pipelines` holding one count for minutes). The line is a note, not an error: `metal-tt` goes on, exits 0 and writes that pipeline into the archive.

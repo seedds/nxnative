@@ -558,20 +558,33 @@ own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use
 // A submitted descriptor and a queue binding hold the compiled program by its immutable initialization serial. Retaining it must not mint serial aliases:
 // alias churn invalidates texture tables and changes composite-program keys
 typedef struct { unsigned refs, retired; } prog_pin;
-static nvn_hmap g_prog_pins = {.klen = 8};   // protected by the submission lock
+// The pins have a lock of their own: a streamed submission pins on the game's thread without the submission lock (nvn_queue.inc). Release and unpin still run under the
+// submission lock, which serial_del needs; they decide under the pin lock and drop the serial after it
+static nvn_hmap g_prog_pins = {.klen = 8};
+static os_unfair_lock g_prog_pin_lk = OS_UNFAIR_LOCK_INIT;
 void mtl_prog_release(prog_t *p) {
     if (!p->serial) return;
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
-    if (pin) pin->retired = 1; else serial_del(p->serial);
+    if (pin) pin->retired = 1;
+    os_unfair_lock_unlock(&g_prog_pin_lk);
+    if (!pin) serial_del(p->serial);
 }
 void mtl_prog_unpin(prog_t *p) {
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
-    if (pin && !--pin->refs) { nvn_hm_del(&g_prog_pins, &p->serial); if (pin->retired) serial_del(p->serial); free(pin); }
+    if (!pin || --pin->refs) { os_unfair_lock_unlock(&g_prog_pin_lk); return; }
+    nvn_hm_del(&g_prog_pins, &p->serial);
+    os_unfair_lock_unlock(&g_prog_pin_lk);
+    if (pin->retired) serial_del(p->serial);
+    free(pin);
 }
 void own_prog_pin(uint64_t serial) {
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &serial);
     if (!pin) { pin = calloc(1, sizeof *pin); if (!pin) ODIE("program retention allocation failed"); nvn_hm_put(&g_prog_pins, &serial, pin); }
     pin->refs++;
+    os_unfair_lock_unlock(&g_prog_pin_lk);
 }
 
 own_alias_unheld own_alias_unheld_locked(void) {

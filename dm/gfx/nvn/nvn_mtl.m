@@ -7199,11 +7199,22 @@ static uint8_t prog_stage_mask(const prog_t *p) {
     if (ser) smc[h] = (smc_ent){ser, gen, m};
     return m;
 }
+// The submit thread reads the switch under g_sub_mu and latches it for the job.
+int mtl_sub_stream_on(void) {
+    static int mode = -1;
+    if (mode < 0) mode = getenv("DM_NVN_CAPTURE") ? 0 : sw_mode("DM_NVN_SUB_STREAM", 1);
+    return sw_on(mode);
+}
 // A submitted descriptor and a queue binding pin the program by its serial (own_prog_pin; mtl_prog_release and mtl_prog_unpin are nvn_owner.m's)
-void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
-    prog_get(source); *copy=*source;
+// Replay can resolve a program from the owned serial and shader keys.
+void mtl_prog_snapshot_pin(prog_t *copy,const prog_t *source) {
+    *copy=*source;
     if(!source->serial) MDIE("cannot retain a program without an initialization serial");
     own_prog_pin(source->serial);
+}
+void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
+    prog_get(source);
+    mtl_prog_snapshot_pin(copy,source);
 }
 
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------

@@ -75,6 +75,7 @@ def build(gid, patched, control, other_programs=()):
         return macros[name].strip('"')
 
     def shown(cond, n):
+        if '&' in cond: return all(shown(c, n) for c in cond.split('&'))   # every condition holds (platform:mac&DM_GAME_SPATIAL_AUDIO!=0)
         if cond == 'always': return True
         if cond == 'mac-mic': return mac_mic
         if cond == 'languages>1': return len(langs) > 1

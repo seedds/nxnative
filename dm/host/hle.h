@@ -132,7 +132,7 @@ typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf; 
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
 void dm_audio_route_changed(void);   // the output route changed: recreate units whose route-dependent channel count changed (hle_audio.c)
-int dm_audio_output_channels(void);   // the output route: 6 when the device takes six channels, else 2 (hle_audio.c); reads the device on a host stack
+int dm_audio_output_channels(void);   // the channels the game is told on the output route: 6 when the device takes six, or a spatial path renders 5.1 for it (audio_route.h), else 2 (hle_audio.c); reads the device on a host stack
 int dm_audio_route(void);             // cached route, initialized on the calling host stack (hle_audio.c)
 // In-process DeviceSink PCM: L R C LFE Ls Rs, followed by the stereo fold made before clamping/resampling.
 // Both representations stay queued together; a device route change selects one without losing the original mix.

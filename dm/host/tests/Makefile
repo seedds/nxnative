@@ -74,6 +74,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
 	$(B)/t_ctrl_prompt
+	$(B)/t_audio_route
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
 	$(B)/t_jc1
@@ -208,6 +209,20 @@ audio-live: $(B)/t_audio_live   # real output on DM_AUDIO_DEVICE: not in `run`
 audio-device: $(B)/t_audio_device
 	$(B)/t_audio_device
 run: audio-device
+# The spatial stages offline (real AudioToolbox, no output unit, nothing played): AUSpatialMixer's formats, level and pull through the host's queue
+$(B)/t_audio_spatial: t_audio_spatial.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../audio_route.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spatial.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+.PHONY: audio-spatial
+audio-spatial: $(B)/t_audio_spatial
+	$(B)/t_audio_spatial
+run: audio-spatial
+# The system renderer's set-up and enqueue with the real AVFoundation, its clock never started (nothing played)
+$(B)/t_audio_sbar: t_audio_sbar.m ../audio_spatial_mac.m ../audio_sbar.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_audio_sbar.m ../audio_spatial_mac.m -framework Foundation -framework AVFoundation -framework CoreMedia -framework CoreAudio
+.PHONY: audio-sbar
+audio-sbar: $(B)/t_audio_sbar
+	$(B)/t_audio_sbar
+run: audio-sbar
 $(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 $(B)/t_audio_input: t_audio_input.c ../audio_input.c ../audio_input.h | $(B)
@@ -303,6 +318,9 @@ $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c
+run: $(B)/t_audio_route
+$(B)/t_audio_route: t_audio_route.c ../audio_route.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I.. -o $@ t_audio_route.c
 run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_pad_hid_mac $(B)/t_jc1
 $(B)/t_jc1: t_jc1.c ../pad_jc1.h ../pad_pro.h ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_jc1.c

@@ -241,6 +241,7 @@ def header_one(g):
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
          f'#define DM_GAME_SCREEN_ASPECT {("off", "on").index(g.get("screen_aspect", "off"))}',   # stubs that follow a screen taller than 16:9 (DM_SCREEN_ASPECT): off / on
+         f'#define DM_GAME_SPATIAL_AUDIO {("off", "on").index(g.get("spatial_audio", "off"))}',   # the game mixes real 5.1 when told six channels (hle_audio.c, audio_route.h, DM_SPATIAL_AUDIO's default auto): off / on
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',

@@ -81,6 +81,14 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
+    def test_spatial_audio_only_on_the_mac_for_a_game_that_mixes_surround(self):   # DM_SPATIAL_AUDIO (hle_audio.c, audio_route.h): the profile's spatial_audio key (Ocarina of Time), the Mac's outputs
+        oot = '0400486024DEC000'
+        s = build(oot, 'nvn', 'mac')['DM_SPATIAL_AUDIO']
+        self.assertEqual((s['kind'], s['default'], s['options'], s['section']), ('choice', 'auto', [['auto', 'On'], ['0', 'Off']], 'Game'))
+        self.assertIn('0.15 s', s['note'])   # the system renderer's pre-roll is the setting's cost
+        self.assertNotIn('DM_SPATIAL_AUDIO', build(oot, 'nvn', 'ios'))   # the spatial paths are the Mac host's
+        self.assertNotIn('DM_SPATIAL_AUDIO', build(BOTW, 'nvn', 'mac'))   # no spatial_audio in its profile
+
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
         for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):

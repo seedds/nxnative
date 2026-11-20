@@ -73,6 +73,7 @@ This 4.04b profile has no `patches.py`. For region `0100BFE00E9CA000` 3.7 (v3276
 
 ## Found on this game
 
+- Host fix awaiting in-game verification: thin strokes disappeared from UI text on 4.04d. The same shader is present in 4.04b → [The reserved sampler at pool slot zero](../../../docs/reference/nvn-objects.md#the-reserved-sampler-at-pool-slot-zero).
 - Open: sunlit surfaces stay white after NaN enters eye adaptation. The 3.7 trace and shader replay confirm the clear-to-fill race. A single-barrier test in the reported 4.04d scene is pending → [Compute histogram clear races its atomic fill](../../../docs/reference/rendering.md#compute-histogram-clear-races-its-atomic-fill).
 - Resolved: the split found 563 shaders, none of them a material, lighting, hull, domain or compute shader → [REDengine 3 shader caches](../../../docs/reference/shaders.md#redengine-3-shader-caches).
 - Resolved: a black screen; 245 of the 602 shaders a session drew did not load (`B binding fp_t_cb720898_2000005ASmplr has no resolved slot number`) → [A separate sampler ID in a uniform buffer (handle type 2)](../../../docs/reference/shaders.md#a-separate-sampler-id-in-a-uniform-buffer-handle-type-2).

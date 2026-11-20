@@ -153,6 +153,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Check:** `check_t_vpool_first_map` (a 4,000-entry pool, IDs 4095 and 300). In the game, Super Mario Party's opening, `sampler ID 4095 outside the pool (capacity 4000)`, no red line.
 - **Found on:** Super Mario Party (`010036B0034E4000`, no profile yet), [#2513](https://github.com/seedds/nxnative/issues/2513): one sampler pool of 4,000 entries.
 
+### The reserved sampler at pool slot zero
+
+- **Symptom:** thin strokes disappear from UI text. Fragment shader `bfd75fb65cc56ac0` samples a 1024×1024 glyph atlas with sampler ID 0. A Mac comparison in [#3049](https://github.com/seedds/nxnative/issues/3049) restored the strokes with linear filtering.
+- **Cause:** replay treated the sampler part of the handle as an empty binding and supplied its nearest-filtered dummy. The driver initializes slot 0 of every sampler pool. Mario vs. Donkey Kong’s SDK 15.3.0 writes the descriptor in `SamplerPoolInitialize` (`sdk+0x45c880`), using the encoder at `sdk+0x47d380`. The [Maxwell descriptor fields](https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/3d/clb197tex.h#L1924-L1988) give linear min/mag, no mip filtering, and clamp-to-edge on all axes. Metroid Dread’s SDK 11.4.3 and Donkey Kong Bananza’s NVN2 SDK 20.5.19 write the same sampling state.
+- **Fix:** `nvn_mtl.m` resolves pool slot 0 to a Metal sampler with that state. Sampler tables and populated combined handles can select it. Empty bindings and invalid sampler IDs still use the dummy. A shader’s samplerless texel fetch still reads only its texture.
+- **Found on:** [The Witcher 3: Wild Hunt — Complete Edition](../../dm/games/0100A0800E9C4000/README.md) (reported on 4.04d, with the same shader in the 4.04b profile).
+
 ### The sparse tile layout of a texture
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnTextureBuilderGetSparseTileLayout`, then an out-of-memory abort in Unreal's allocator (`Failed to allocate 1879113728 bytes from Standard Allocator`, on `DM_DBG=1`).

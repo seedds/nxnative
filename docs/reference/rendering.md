@@ -1888,14 +1888,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Vulkan layer
 
-The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galaxy needed the additions below, each found from a red line or a screenshot on the route to the Star Festival.
+The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galaxy exposed gaps in graphics replay, and Re:ZERO exercised compute dispatch and larger descriptor sets.
 
 ### Vulkan triangle fans
 
 - **Symptom:** `[RED] primitive topology 5 not implemented`; a fan draws disconnected triangles or omits its later wedges.
 - **Cause:** Metal has no triangle-fan primitive. Selecting its triangle-list topology without expanding the vertices changes primitive assembly.
 - **Fix:** each fan triangle `i` is drawn as `(i+1, i+2, 0)`, Vulkan's order, so its first (provoking) vertex is the rim's and flat attributes match. `vkCmdDraw` indexes one shared, growing list with `firstVertex` as the base vertex, which keeps `VertexIndex` and `BaseVertex`. `vkCmdDrawIndexed` fans are converted on the GPU (`dm/gfx/msl/vk_fan.metal`), as copies earlier in the submission may write their indices: when a render encoder starts (a pass begins, or resumes after a copy inside it), one compute pass converts every indexed fan up to the next command that may end the encoder, into one buffer, and each draws from it by indirect arguments. A restart index ends a fan before `vertexOffset` is added; the conversion compacts the runs and writes the list's length. Index, binding and `firstIndex` offsets, vertex offsets and base instances are kept. `t_vk_fan` compares fans with explicit lists (pixels, primitive IDs, occlusion counts, GPU-copied indices, restart, base vertex) and checks that fans do not split a pass.
-- **Cost and limits:** a draw without indices costs nothing beyond the draw. Indexed fans cost one compute pass per stretch of a render pass that has any (one thread per triangle; one thread scanning the indices with restart on) and no extra encoder: converting at each draw would store and load every attachment once per draw. Games without fan pipelines skip the scan. Vulkan indirect draws are not implemented by this layer.
+- **Indirect draws:** the draw count, index range and base arguments can come from earlier GPU work. Replay completes that Metal prefix before reading the argument records, sizes the index scratch from their actual counts, then uses the same shared indices or GPU conversion. `t_vk_cmds` writes both kinds of indirect arguments with a GPU transfer and checks that each four-vertex fan covers all 16 pixels of the target.
+- **Cost and limits:** a direct draw without indices costs nothing beyond the draw. Direct indexed fans use one compute pass per stretch of a render pass with fans (one thread per triangle or a serial scan with restart). Indirect fans split the pass and wait for the encoded prefix once per indirect command. Games without fan pipelines skip the scan.
 - **Found on:** KINGDOM HEARTS II FINAL MIX's Gummi missions, [issue #1026](https://github.com/seedds/nxnative/issues/1026). The collection's profile is not registered here; its other bring-up and loader issues remain separate.
 
 ### Vulkan shaders generated at run time
@@ -2082,7 +2083,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** Vulkan leaves an attachment opened with `VK_ATTACHMENT_LOAD_OP_DONT_CARE` undefined; the Switch keeps what the image held, so a game can draw over it. NVIDIA's Vulkan driver, which the game ships (`subsdk1`, 421.03), has no explicit colour discard on the path examined: render-pass begin and end do nothing for a colour DONT_CARE, and for depth they only drop the ZCULL hints. The macro the driver runs at every begin and end (MME `0xB2`, macro index 0x59, called with `(0x13, 0)` and `(0x15, 0)`) reads its second parameter and exits when it is zero: it sends no method and writes no memory. The submit-time processing of the driver's last-use table is not decoded, so this is what the examined path does (read statically, no console run), not a promise, and no claim about every side effect in the hardware. Re:ZERO's post chain copies the scene into a target, then blends its effects layer over it in the next pass, and draws the HUD over the frame in the swap chain image, each pass opening its colour target with DONT_CARE (its engine's render-target wrapper can only ask for CLEAR or DONT_CARE). The layer opened them with `MTLLoadActionDontCare`, which starts Apple's tile memory undefined (empty in practice), so the copy and the frame were lost. Switch emulators (Ryujinx, yuzu, Eden, Hydra) never see a load op and always load the game's render targets.
 - **Fix:** attachments opened with DONT_CARE are loaded (`load_a` in `hle_vk.m`), colour, depth and stencil alike, as on the Switch. Depth and stencil matter too: Re:ZERO's particle pass reopens the half-res depth with DONT_CARE and STORE, draws nothing, and the pfx pass samples that depth to upsample its effects layer. With depth at Metal's DontCare that pass stores whatever the tiles held: run once with the attachment filled with a pattern and once loaded, it stored a different value in every texel, every frame checked. On an M4 Pro, loading depth and stencil as well cost nothing measurable in Re:ZERO (88 paired cycles, GPU p50 −0.00 ms, quartiles −0.09 … +0.04) for 9 MB more loaded a frame.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_vk_dontcare` clears an image to red, then blends a transparent triangle over it in a pass that opens it with DONT_CARE, LOAD or CLEAR to green: red, red and green; and reopens a depth-stencil image cleared to 0.25 / `0x5a` with DONT_CARE in a pass without draws: 0.25 / `0x5a`. It tests this layer's policy, not Vulkan, which promises nothing for DONT_CARE. The check runs with `MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1`, which fills every DontCare load with a pattern (before the fix the colour case read back magenta, the depth case 0.5 / `0xaa`), so it does not depend on what the tile memory happens to hold.
-- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne: its map scenes, found from a dump of the frame's Vulkan commands and readbacks of its targets.
+- **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), from a dump of the map's Vulkan commands and target readbacks.
 
 ### 1D images drawn into
 
@@ -2103,8 +2104,44 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Symptom:** `vk_shaders.py` stops with `spirv-cross failed: SPIRV-Cross threw an exception: Entry point does not exist.` A shader with push constants has no `p:` row. Metal rejects a generated dual-source variant of a shader with ordinary render targets.
 - **Cause:** DXC uses entry-point names such as `PSMain`. The tool always tried to rename `main`. SPIRV-Cross changes the dots in `type.PushConstant.<name>` to underscores in MSL, so looking for the reflected type name misses the push-constant argument. A second color output can be a separate render target, such as Re:ZERO's `float2` beside a `float4`.
 - **Fix:** Rename the sole entry point reported by reflection and look up the push-constant argument under the sanitized MSL type name. Generate the dual-source variant only when the only color outputs are locations 0 and 1 with the same type.
-- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`0100D800117F4000`, The Forge renderer on Vulkan, SDK 9.5.0).
+- **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md) (`0100D800117F4000`, The Forge renderer on Vulkan, SDK 9.5.0).
 - **Check:** `test_vk_shaders.py` translates synthetic SPIR-V for named entry points, 1D sampling, push constants beside a uniform buffer, and dual-source and ordinary color outputs.
+
+### Commands reached through the Vulkan loader
+
+- **Symptom:** Vulkan command lookup returns null for recorded commands. A pipeline requesting a missing fragment shader runs as depth-only and leaves the picture black.
+- **Cause:** the command recorder lacked several operations, and Metal accepts a graphics pipeline without a fragment function.
+- **Fix:** replay indirect draws, buffer fills and updates, whole-level resolves, same-size blits, secondary buffers, event set and reset, dynamic blend constants and depth bias, and [query copies](#vulkan-query-copies-consumed-by-the-gpu). Refuse to draw a pipeline whose requested fragment shader is missing and count its skipped draws. Explicit depth-only pipelines still work.
+- **Limits:** scaled or mirrored blits, partial resolves, subpass advancement, and clear-attachments commands are reported and skipped. Queue submission is serial. GPU waits on events and barriers between draws in one render pass remain unsupported.
+- **Check:** `t_vk_cmds` reads results back under Metal validation and distinguishes a missing fragment function from an intentional depth-only pipeline.
+- **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), [PR #1371](https://github.com/seedds/nxnative/pull/1371).
+
+### Vulkan query copies consumed by the GPU
+
+- **Symptom:** a GPU copy after `vkCmdCopyQueryPoolResults` and a transfer barrier reads the old bytes. The CPU reads the new result after the submission completes.
+- **Cause:** the draft replay wrote the destination from a completion callback, after every command in the submission had run. The host gathers Metal visibility counts at completion and uses command-buffer completion time for timestamp queries.
+- **Fix:** collect query writes from the completed Metal prefix when the copy needs its results. Encode the values through a staging buffer at the copy's position so later GPU commands see the write. Results already available can be copied without splitting the command buffer. Finish each logical submission and signal its Vulkan fence at the final Metal command buffer.
+- **Limits and cost:** a copy that needs a pending query in the current Metal command buffer splits and waits for the prefix. Timestamps retain the host's completion-time approximation. Stage-boundary counter sampling returned data through Metal's CPU resolver on the Apple M6, while a GPU resolve in the same command buffer returned zero.
+- **Check:** `t_vk_cmds` compares the query destination with an ordered transfer out of it in the same submission and checks the unavailable entries.
+- **Found on:** a synthetic GPU readback while checking [PR #1371](https://github.com/seedds/nxnative/pull/1371).
+
+### Vulkan compute dispatch
+
+- **Symptom:** `vkCreateComputePipelines` and dispatch commands are missing, or a clustered-light kernel reads the wrong texture type.
+- **Cause:** the Vulkan host previously replayed graphics and transfers. SPIRV-Cross's default texel-buffer emulation uses a 2D texture, while the host binds a native Metal buffer texture.
+- **Fix:** translate compute stages with their reflected workgroup size and native texel buffers. Replay direct and indirect dispatch with separate compute and graphics bindings, and apply push-constant writes only to their declared stages. Close the compute encoder before rendering or blitting. Advertise storage-image formats supported by the Metal read-write texture tier.
+- **Limits:** workgroup sizes selected by specialization constants and nonzero base dispatch groups remain unsupported. A pipeline that exceeds Metal's threadgroup limit is refused.
+- **Check:** `test_vk_shaders.py` checks the workgroup size and texel-buffer type. `t_vk_compute` reads back dispatches, stage-specific push constants, producer-consumer work, and storage images.
+- **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), [PR #1539](https://github.com/seedds/nxnative/pull/1539).
+
+### Vulkan descriptor arrays over Metal's direct limits
+
+- **Symptom:** shaders with large descriptor arrays exceed Metal's direct slots. An argument buffer with a texture array at Vulkan binding 0 and a sampler at binding 1 can fail Metal compilation with overlapping IDs.
+- **Cause:** one Vulkan array occupies one binding. A Metal argument-buffer array occupies an ID for every element.
+- **Fix:** move sets into Tier 2 argument buffers when direct slots run out. Allocate Metal IDs per set, retain the original Vulkan binding in the shader table, and use the Metal ID to encode the element. Hold descriptors and mark resources resident for each encoder. Re-encode a set when it changes.
+- **Limits:** at most two argument buffers per stage. Combined image samplers in an argument buffer remain unsupported. The device's sampler limit also applies to argument-buffer samplers.
+- **Check:** `test_vk_shaders.py` translates adjacent Vulkan bindings. `t_vk_argbuf` reads pixels using a table whose Vulkan bindings differ from the Metal IDs, and checks that descriptor updates refresh the encoded data.
+- **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md) uses arrays of 512 textures and 64 samplers. The adjacent-binding collision was verified with a synthetic shader.
 
 ## OpenGL layer
 

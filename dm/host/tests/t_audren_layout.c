@@ -5,6 +5,7 @@
 #include "../hle.h"
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <sys/wait.h>
 #include <unistd.h>
 static int wait_for_render(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
@@ -49,9 +50,9 @@ int dm_pcmout_append(void *k, void *b) {
     (void)k;
     if (pace.rate) {
         const aout_buf *block = b;
-        const int16_t *pcm = block->ptr;
+        const float *pcm = block->ptr;
         assert(block->size == SAMPLES * DM_AUDIO_SINK_CHANNELS * sizeof *pcm);
-        int expected = pace.appended + 1;
+        float expected = (float)(pace.appended + 1) * SINK_SCALE;   // the frame number, as float samples (1.0 = 32768)
         for (int i = 0; i < SAMPLES; i++, pcm += DM_AUDIO_SINK_CHANNELS)
             assert(pcm[0] == expected && pcm[1] == -expected && pcm[6] == expected && pcm[7] == -expected);
         assert(pace.appended - pace.released < NBUF);
@@ -135,7 +136,7 @@ static void test_headers(void) {
         }
     }
     g_hdr6 = g_hdr21 = 0;
-    int16_t out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
+    float out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
     for (size_t n = 0; n < 0x20; n++) assert(capture(&g_ar[0], list, n, out) == 0);
 }
 
@@ -143,7 +144,7 @@ static void test(int sdk, int incomplete) {
     // render_once starts with ID 0x14 for SDK 20+ (the Span version of GenerateCommand), 0x13 otherwise.
     g_sink_id = sdk == 21 ? 0x14 : 0x13;
     for (int s = 0; s < SAMPLES; s++) { mix[s] = 1000; mix[SAMPLES + s] = -1000; }
-    int16_t out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
+    float out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
 
     // An empty startup list must not choose a layout either.
     size_t n = build(sdk, NCMD);
@@ -171,7 +172,7 @@ static void test(int sdk, int incomplete) {
     assert(g_hdr6 == (sdk <= 6) && g_hdr21 == (sdk == 21) && g_sink4 == (sdk <= 5) && g_sink5 == (sdk == 5));
     assert(g_sink_id == (sdk <= 5 ? 0xf : sdk == 6 ? 0x10 : sdk == 21 ? 0x14 : 0x13));
     assert(got == SAMPLES);
-    for (int s = 0; s < SAMPLES; s++) assert(out[DM_AUDIO_SINK_CHANNELS * s + 6] == 1000 && out[DM_AUDIO_SINK_CHANNELS * s + 7] == -1000);
+    for (int s = 0; s < SAMPLES; s++) assert(out[DM_AUDIO_SINK_CHANNELS * s + 6] == 1000 * SINK_SCALE && out[DM_AUDIO_SINK_CHANNELS * s + 7] == -1000 * SINK_SCALE);
     n = build(sdk, NCMD);
     assert(capture(&g_ar[0], list, n, out) == SAMPLES);   // detection stays valid for later full frames
 }
@@ -180,7 +181,7 @@ static void test(int sdk, int incomplete) {
 // and must never produce PCM, even when a valid sink precedes the malformed tail.
 static void test_malformed(int sdk, int bad) {
     g_sink_id = sdk == 21 ? 0x14 : 0x13;
-    int16_t out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
+    float out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
     size_t n = build(sdk, NCMD);
     *(uint32_t *)(list + 4) = 1;
     assert(capture(&g_ar[0], list, 0x20 + 0x40, out) == 0);   // select the layout without a sink or histogram
@@ -188,7 +189,7 @@ static void test_malformed(int sdk, int bad) {
     n = build(sdk, NCMD);
     if (bad < 2) memset(list + 0x20 + (size_t)bad * 0x40, 0, 0x40);
     else { *(uint32_t *)(list + 4) = NCMD + 1; memset(list + n, 0, 0x40); n += 0x40; }
-    for (size_t i = 0; i < sizeof out / sizeof *out; i++) out[i] = 1234;
+    for (size_t i = 0; i < sizeof out / sizeof *out; i++) out[i] = 1234.0f;
 
     FILE *log = tmpfile(); assert(log);
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
@@ -200,13 +201,13 @@ static void test_malformed(int sdk, int bad) {
     assert(!strstr(text, "by command ID:"));
     assert(strstr(text, "malformed"));
     assert(g_sink_id == sink_id && !g_sink4 && !g_sink5);
-    for (size_t i = 0; i < sizeof out / sizeof *out; i++) assert(out[i] == 1234);
+    for (size_t i = 0; i < sizeof out / sizeof *out; i++) assert(out[i] == 1234.0f);
 
     // A subsequent valid full list still discovers the SDK 4/5 sink and yields stereo.
     n = build(sdk, NCMD);
     for (int i = 0; i < SAMPLES; i++) { mix[i] = 700; mix[SAMPLES + i] = -900; }
     assert(capture(&g_ar[0], list, n, out) == SAMPLES);
-    for (int i = 0; i < SAMPLES; i++) assert(out[DM_AUDIO_SINK_CHANNELS * i + 6] == 700 && out[DM_AUDIO_SINK_CHANNELS * i + 7] == -900);
+    for (int i = 0; i < SAMPLES; i++) assert(out[DM_AUDIO_SINK_CHANNELS * i + 6] == 700 * SINK_SCALE && out[DM_AUDIO_SINK_CHANNELS * i + 7] == -900 * SINK_SCALE);
     // Validation also applies after the histogram has already been logged.
     *(uint32_t *)(list + 4) = NCMD + 1; memset(list + n, 0, 0x40);
     assert(capture(&g_ar[0], list, n + 0x40, out) == 0);
@@ -223,7 +224,7 @@ static void test_histogram(void) {
     FILE *log = tmpfile(); assert(log);
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
-    int16_t out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS]; assert(capture(&g_ar[0], cl, len, out) == 0);
+    float out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS]; assert(capture(&g_ar[0], cl, len, out) == 0);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     const char *hist = strstr(text, "by command ID:"); assert(hist);
@@ -244,24 +245,24 @@ static void test_two_renderers(void) {
     assert(ar_of_sys(&y) == &g_ar[1]);
     assert(ar_of_sys(&z) == NULL);   // no renderer left to be it
     // The 3:2 upsampler's history is each renderer's own: frames of one do not reach the other's output
-    int32_t quiet[2 * 160] = {0}, loud[2 * 160], out[2 * 240];
-    for (int i = 0; i < 2 * 160; i++) loud[i] = 20000;
+    float quiet[2 * 160] = {0}, loud[2 * 160], out[2 * 240];
+    for (int i = 0; i < 2 * 160; i++) loud[i] = 0.6f;
     memset(g_ar, 0, sizeof g_ar);
     assert(up_3_2(&g_ar[0], loud, 160, out, 2) == 240);
     assert(up_3_2(&g_ar[1], quiet, 160, out, 2) == 240);
     for (int i = 0; i < 2 * 240; i++) assert(out[i] == 0);
     // Six channels (the 5.1 route): each channel resamples on its own; an LFE-only block stays on the LFE
-    int32_t six_in[6 * 160] = {0}, six_out[6 * 240];
-    for (int i = 0; i < 160; i++) six_in[6 * i + 3] = 20000;
+    float six_in[6 * 160] = {0}, six_out[6 * 240];
+    for (int i = 0; i < 160; i++) six_in[6 * i + 3] = 0.6f;
     memset(g_ar, 0, sizeof g_ar);
     assert(up_3_2(&g_ar[2], six_in, 160, six_out, 6) == 240);
     for (int m = 0; m < 240; m++) for (int j = 0; j < 6; j++) if (j != 3) assert(six_out[6 * m + j] == 0);
-    assert(six_out[6 * 100 + 3] == 20000);
+    assert(fabsf(six_out[6 * 100 + 3] - 0.6f) < 1e-6f);   // DC through the normalized filter
     memset(g_ar, 0, sizeof g_ar);
 }
 
-// Six channels (the 5.1 route, SDK 16's layout): the sink's six inputs come out in order, six int16 per sample; an output of 2 keeps the stereo downmix
-static void test_stereo_unchanged(void);
+// Six channels (the 5.1 route, SDK 16's layout): the sink's six inputs come out in order, six float per sample at 1.0 = 32768; an output of 2 keeps the stereo downmix
+static void test_fold_reference(void);
 static void test_six_channels(void) {
     g_sink_id = 0x13;
     for (int j = 0; j < 6; j++) for (int s = 0; s < SAMPLES; s++) mix[j * SAMPLES + s] = 1000 * (j + 1);
@@ -269,55 +270,67 @@ static void test_six_channels(void) {
     uint8_t *sink = list + 0x20 + (NCMD - 1) * 0x40;   // build() puts the sink after NCMD - 1 filler commands
     *(uint32_t *)(sink + 0x130) = 6;
     for (int j = 0; j < 6; j++) ((int16_t *)(sink + 0x134))[j] = (int16_t)j;
-    static int16_t out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
+    static float out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
     assert(capture(&g_ar[0], list, n, out) == SAMPLES);
     assert(!g_hdr6 && !g_hdr21 && !g_sink4);
-    for (int s = 0; s < SAMPLES; s++) for (int j = 0; j < 6; j++) assert(out[DM_AUDIO_SINK_CHANNELS * s + j] == 1000 * (j + 1));
+    for (int s = 0; s < SAMPLES; s++) for (int j = 0; j < 6; j++) assert(out[DM_AUDIO_SINK_CHANNELS * s + j] == 1000 * (j + 1) * SINK_SCALE);
     // A mono sink on the six-channel output: on the front pair, as on stereo; the other four silent
     *(uint32_t *)(sink + 0x130) = 1;
     assert(capture(&g_ar[0], list, n, out) == SAMPLES);
-    for (int s = 0; s < SAMPLES; s++) for (int j = 0; j < 6; j++) assert(out[DM_AUDIO_SINK_CHANNELS * s + j] == (j < 2 ? 1000 : 0));
-    // A center above PCM16 range must cancel the front before stereo clipping.
+    for (int s = 0; s < SAMPLES; s++) for (int j = 0; j < 6; j++) assert(out[DM_AUDIO_SINK_CHANNELS * s + j] == (j < 2 ? 1000 * SINK_SCALE : 0));
+    // A center above PCM16 range cancels the front in the fold, and nothing is clamped: the center stays 60000/32768 = 1.83, the right fold 0.707 × 1.83 = 1.29
     for (int j = 0; j < 6; j++) for (int i = 0; i < SAMPLES; i++) mix[j * SAMPLES + i] = j == 0 ? -30000 : j == 2 ? 60000 : 0;
     *(uint32_t *)(sink + 0x130) = 6;
     assert(capture(&g_ar[0], list, n, out) == SAMPLES);
-    assert(out[0] == -30000 && out[2] == 32767 && out[6] == 12420 && out[7] == 32767);
-    test_stereo_unchanged();
+    assert(out[0] == -30000 * SINK_SCALE && out[2] == 60000 * SINK_SCALE);
+    assert(fabsf(out[6] - (-30000.0f + 60000.0f * 23167.0f / 32768.0f) / 32768.0f) < 1e-6f && fabsf(out[7] - 60000.0f * 23167.0f / 32768.0f / 32768.0f) < 1e-6f);
+    assert(out[2] > 1.8f && out[7] > 1.29f);   // above full scale: the device's conversion is the only clip
+    test_fold_reference();
     puts("audren six channels: the sink's six inputs in order, six per sample; a mono sink on the front pair");
 }
 
-// Golden PCM from current main's stereo-only capture, over three frames with cancellation and clipping.
-// This locks down mixing, 32 kHz resampling history and final clamp order independently of the new surround path.
-static void test_stereo_unchanged(void) {
-    const uint64_t golden[] = {0xb2c91fe377e1ac44ull, 0x9dfef1ca9df24ea6ull};
+// The float fold against a double-precision reference of the downmix (front 1.0, center and back 23167/32768, LFE 8224/32768), over three frames of a loud mix with
+// cancellation (inputs up to ±60000, nearly 2× PCM16 full scale): the six exact, the fold within float rounding, peaks above 1.0 kept, at 48 kHz. At 32 kHz the 3:2 resampler sees
+// the same float frames (its history carried across frames), checked on a DC input: every output of the second and third frames equals the input. Until 2026-11 these were golden
+// hashes of int16 output, clamped at ±32767
+static void test_fold_reference(void) {
     for (int r = 0; r < 2; r++) {
         int rate = r ? 32000 : 48000, count = r ? 160 : 240;
-        ar_t a = {0}; uint64_t hash = 14695981039346656037ull;
+        ar_t a = {0}; float peak = 0; double worst = 0;
         for (int frame = 0; frame < 3; frame++) {
             g_sink_id = 0x13; size_t n = build(16, NCMD);
             *(uint32_t *)(list + 0x14) = (uint32_t)count; *(uint32_t *)(list + 0x18) = (uint32_t)rate;
             uint8_t *sink = list + 0x20 + (NCMD - 1) * 0x40; *(uint32_t *)(sink + 0x130) = 6;
             for (int c = 0; c < 6; c++) {
                 ((int16_t *)(sink + 0x134))[c] = (int16_t)c;
-                for (int i = 0; i < count; i++) mix[c * count + i] = ((frame * 977 + c * 7919 + i * 613) % 120001) - 60000;
+                for (int i = 0; i < count; i++) mix[c * count + i] = r ? 20000 * (c + 1) - 50000 : ((frame * 977 + c * 7919 + i * 613) % 120001) - 60000;
             }
-            int16_t out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
+            float out[FRAME_MAX * DM_AUDIO_SINK_CHANNELS];
             assert(capture(&a, list, n, out) == 240);
-            for (int i = 0; i < 240; i++) for (int j = 6; j < 8; j++) {
-                uint16_t v = (uint16_t)out[i * DM_AUDIO_SINK_CHANNELS + j];
-                hash = (hash ^ (v & 255)) * 1099511628211ull; hash = (hash ^ (v >> 8)) * 1099511628211ull;
+            for (int i = 0; i < 240; i++) {
+                const float *f = out + i * DM_AUDIO_SINK_CHANNELS;
+                if (r) {   // DC: the resampler's normalized taps return it once its history is full (the first frame starts from silence)
+                    if (frame) for (int j = 0; j < 6; j++) assert(fabsf(f[j] - (20000.0f * (j + 1) - 50000.0f) / 32768.0f) < 1e-5f);
+                    continue;
+                }
+                double ch[6]; for (int j = 0; j < 6; j++) ch[j] = mix[j * count + i] / 32768.0;
+                double c = ch[2] * 23167.0 / 32768.0 + ch[3] * 8224.0 / 32768.0;
+                double l = ch[0] + c + ch[4] * 23167.0 / 32768.0, rr = ch[1] + c + ch[5] * 23167.0 / 32768.0;
+                for (int j = 0; j < 6; j++) assert(f[j] == (float)mix[j * count + i] * SINK_SCALE);
+                double e = fmax(fabs(f[6] - l), fabs(f[7] - rr)); if (e > worst) worst = e;
+                peak = fmaxf(peak, fmaxf(fabsf(f[6]), fabsf(f[7])));
             }
         }
-        assert(hash == golden[r]);
+        if (!r) assert(worst < 2e-6 && peak > 2.0f);   // the fold of four loud channels peaks far above 1.0, kept as is
     }
-    puts("audren stereo: 48 kHz and 32 kHz PCM match the pre-surround golden output, including clipping and resampler history");
+    puts("audren fold: the float fold matches the double reference within 2e-6 with peaks above full scale unclamped; 32 kHz DC resamples to itself");
 }
 
 // Issue #1336: AudioOut queues a block's pointer and copies its samples when the sound card asks, so a block is the renderer's own until it comes back released.
 // Renderer 0 queues all its blocks and none plays; renderer 1 then renders (blocks_exec marks each frame with its renderer) and renderer 0's blocks must still hold its samples
 static void blocks_exec(void *obj, void *state) {
     (void)obj; (void)state;
-    for (int i = 0; i < SAMPLES * DM_AUDIO_SINK_CHANNELS; i++) t_ar->frame[i] = (int16_t)(ar_index(t_ar) + 1);
+    for (int i = 0; i < SAMPLES * DM_AUDIO_SINK_CHANNELS; i++) t_ar->frame[i] = (float)(ar_index(t_ar) + 1);
     t_ar->frame_n = SAMPLES;
 }
 static void test_renderer_blocks(void) {
@@ -332,8 +345,8 @@ static void test_renderer_blocks(void) {
     for (int r = 0; r < 2; r++) {
         assert(blocks_n[r] == NBUF);
         for (int i = 0; i < NBUF; i++) {
-            const int16_t *s = blocks[r][i]->ptr;
-            assert(blocks[r][i]->size == SAMPLES * DM_AUDIO_SINK_CHANNELS * sizeof(int16_t));
+            const float *s = blocks[r][i]->ptr;
+            assert(blocks[r][i]->size == SAMPLES * DM_AUDIO_SINK_CHANNELS * sizeof(float));
             for (int j = 0; j < SAMPLES * DM_AUDIO_SINK_CHANNELS; j++) assert(s[j] == r + 1);
         }
     }

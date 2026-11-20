@@ -35,7 +35,7 @@ static AudioObjectPropertyListenerProc system_route_listener, device_route_liste
 static OSStatus mock_route_add(AudioObjectID id, const AudioObjectPropertyAddress *pa, AudioObjectPropertyListenerProc cb, void *ctx) {
     assert(!ctx);
     if (id == kAudioObjectSystemObject) { assert(pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice); system_route_listener = cb; }
-    else { assert(pa->mSelector == kAudioDevicePropertyStreamFormat); device_route_listener = cb; }
+    else { assert(pa->mSelector == kAudioDevicePropertyStreamFormat || pa->mSelector == kAudioDevicePropertyDataSource); device_route_listener = cb; }   // the same listener for both
     return noErr;
 }
 static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAddress *pa, AudioObjectPropertyListenerProc cb, void *ctx) {
@@ -43,6 +43,7 @@ static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAdd
 }
 #define AudioObjectAddPropertyListener mock_route_add
 #define AudioObjectRemovePropertyListener mock_route_remove
+#define DM_SBAR_EXTERNAL 1   // the system renderer is mocked below (test_system_route)
 #include "../hle_audio.c"
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 
@@ -55,8 +56,11 @@ static struct {
     unsigned writes, disposals, input_formats;
     OSStatus init_error;
     _Atomic int route_ch;                // the fixture changes the device's channel count while queued route checks may read it
+    _Atomic UInt32 transport, data_source;   // the device's transport type and data source (0: the device has none, the property read fails); atomic as route_ch
+    _Atomic AudioDeviceID sys_out;           // the system default output (0: SYS_OUT)
     int format_ch;                       // channels of the unit's input format, as last set
     AudioChannelLayoutTag layout_tag;    // the unit's input channel layout, as last set (0: none)
+    int format_float;                    // the unit's input format is 32-bit float, as last set
 } unit;
 static AudioUnit fake_au(void) { return (AudioUnit)&unit; }
 static int check_open_publication;
@@ -65,7 +69,8 @@ static void changed(AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitEleme
     if (cb) cb(&unit, fake_au(), id, scope, el);
 }
 static AudioComponent mock_find(AudioComponent c, const AudioComponentDescription *d) {
-    (void)c; assert(d->componentSubType == kAudioUnitSubType_DefaultOutput); return (AudioComponent)&unit;
+    (void)c; if (d->componentType == kAudioUnitType_Mixer) return NULL;   // no AUSpatialMixer here: t_audio_spatial makes the real one offline
+    assert(d->componentSubType == kAudioUnitSubType_DefaultOutput); return (AudioComponent)&unit;
 }
 static OSStatus mock_new(AudioComponent c, AudioComponentInstance *au) {
     if (check_open_publication) {
@@ -103,7 +108,9 @@ static OSStatus mock_set(AudioUnit au, AudioUnitPropertyID id, AudioUnitScope sc
     } else if (id == kAudioUnitProperty_StreamFormat) {
         const AudioStreamBasicDescription *f = data;
         assert(scope == kAudioUnitScope_Input && size == sizeof *f && f->mSampleRate == RATE && (f->mChannelsPerFrame == 1 || f->mChannelsPerFrame == 2 || f->mChannelsPerFrame == 6));
-        assert(f->mBytesPerFrame == 2 * f->mChannelsPerFrame);
+        unsigned bps = f->mFormatFlags & kAudioFormatFlagIsFloat ? 4 : 2;   // the host renderer's DeviceSink output is float, a guest's PCM16
+        assert(f->mBytesPerFrame == bps * f->mChannelsPerFrame && f->mBitsPerChannel == 8 * bps);
+        unit.format_float = bps == 4;
         unit.format_ch = (int)f->mChannelsPerFrame;
         unit.input_formats++; changed(id, scope, el); // the 48 kHz guest format is not the hardware rate
     } else if (id == kAudioUnitProperty_AudioChannelLayout) {
@@ -130,9 +137,12 @@ static OSStatus mock_remove(AudioUnit au, AudioUnitPropertyID id, AudioUnitPrope
 enum { SYS_OUT = 100 };
 static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *pa, UInt32 q, const void *qd, UInt32 *sz, void *data) {
     (void)q; (void)qd; (void)sz;
-    if (pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice) { assert(id == kAudioObjectSystemObject); *(AudioDeviceID *)data = SYS_OUT; return noErr; }
+    AudioDeviceID out = unit.sys_out ? unit.sys_out : SYS_OUT;
+    if (pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice) { assert(id == kAudioObjectSystemObject); *(AudioDeviceID *)data = out; return noErr; }
+    if (pa->mSelector == kAudioDevicePropertyTransportType && unit.transport) { assert(id == out); *(UInt32 *)data = unit.transport; return noErr; }
+    if (pa->mSelector == kAudioDevicePropertyDataSource && unit.data_source) { assert(id == out); *(UInt32 *)data = unit.data_source; return noErr; }
     if (pa->mSelector == kAudioDevicePropertyStreamFormat) {
-        assert(id == SYS_OUT && pa->mScope == kAudioObjectPropertyScopeOutput);
+        assert(id == out && pa->mScope == kAudioObjectPropertyScopeOutput);
         AudioStreamBasicDescription f = {.mChannelsPerFrame = (UInt32)unit.route_ch}; memcpy(data, &f, sizeof f); return noErr;
     }
     return kAudioHardwareUnknownPropertyError;   // no device name (DM_AUDIO_DEVICE is unset in this test)
@@ -145,12 +155,13 @@ static dispatch_semaphore_t start_entered, start_allowed, guest_returned, device
 static OSStatus start_result;
 static OSStatus mock_start(AudioUnit au) {
     assert(au == fake_au());
+    if (!start_entered) return noErr;   // after blocked_start: a start that returns at once (test_system_route's fold unit)
     dispatch_semaphore_signal(start_entered);
     dispatch_semaphore_wait(start_allowed, DISPATCH_TIME_FOREVER);
     return start_result;
 }
 static OSStatus mock_stop(AudioUnit au) {
-    assert(au == fake_au()); dispatch_semaphore_signal(device_stopped); return noErr;
+    assert(au == fake_au()); if (device_stopped) dispatch_semaphore_signal(device_stopped); return noErr;
 }
 static OSStatus mock_uninit(AudioUnit au) {
     assert(au == fake_au() && !unit.device_listener && !unit.format_listener); return noErr;
@@ -254,10 +265,10 @@ static void blocked_start(void *out) {
     assert(signaled(device_stopped, 1) && signaled(device_disposed, 2) && unit.disposals == 2);
     dispatch_release(device_disposed); device_disposed = NULL;
     dispatch_release(guest_closed);
-    dispatch_release(device_stopped);
+    dispatch_release(device_stopped); device_stopped = NULL;
     dispatch_release(guest_returned);
-    dispatch_release(start_allowed);
-    dispatch_release(start_entered);
+    dispatch_release(start_allowed); start_allowed = NULL;
+    dispatch_release(start_entered); start_entered = NULL;
 }
 
 // The route check runs on a queue and replaces the unit under g_aos_lock: read the output's unit count there
@@ -290,29 +301,139 @@ static void test_route_without_output(void) {
 static void test_sink_route(void) {
     unit.route_ch = 2; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
     void *key = dm_pcmout_open_sink(); aout *a = ao(key);
-    assert(a->sink_pcm && a->ch == DM_AUDIO_SINK_CHANNELS && a->dev_ch == 2);
-    int16_t pcm[257 * DM_AUDIO_SINK_CHANNELS];
-    for (int i = 0; i < 257; i++) for (int j = 0; j < DM_AUDIO_SINK_CHANNELS; j++) pcm[i * DM_AUDIO_SINK_CHANNELS + j] = (int16_t)(1000 * j + i);
+    assert(a->sink_pcm && a->ch == DM_AUDIO_SINK_CHANNELS && a->dev_ch == 2 && a->bps == 4 && unit.format_float && unit.format_ch == 2);
+    // Float blocks (hle_audren.c), values above full scale included: they reach the device unclamped
+    float pcm[257 * DM_AUDIO_SINK_CHANNELS];
+    for (int i = 0; i < 257; i++) for (int j = 0; j < DM_AUDIO_SINK_CHANNELS; j++) pcm[i * DM_AUDIO_SINK_CHANNELS + j] = 0.25f * (float)j + (float)i / 1024.0f;
     aout_buf b = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm}; assert(dm_pcmout_append(key, &b));
-    int16_t stereo[129 * 2], six[127 * 6];
+    float stereo[129 * 2], six[127 * 6];
     atomic_store(&a->state, STATE_STARTED);
     pull_device(a, (uint8_t *)stereo, sizeof stereo);
     atomic_store(&a->state, STATE_STOPPED);
-    for (int i = 0; i < 129; i++) for (int j = 0; j < 2; j++) assert(stereo[2 * i + j] == 1000 * (j + 6) + i);
-    unit.route_ch = 6; dm_audio_route_changed(); assert(a->dev_ch == 6 && unit.format_ch == 6);
+    for (int i = 0; i < 129; i++) for (int j = 0; j < 2; j++) assert(stereo[2 * i + j] == 0.25f * (float)(j + 6) + (float)i / 1024.0f);
+    assert(stereo[2 * 128 + 1] > 1.0f);   // 1.75 + 128/1024: above full scale, not clamped
+    unit.route_ch = 6; dm_audio_route_changed(); assert(a->dev_ch == 6 && unit.format_ch == 6 && unit.format_float && unit.layout_tag == kAudioChannelLayoutTag_MPEG_5_1_A);
     atomic_store(&a->state, STATE_STARTED);
     pull_device(a, (uint8_t *)six, sizeof six);
     atomic_store(&a->state, STATE_STOPPED);
-    for (int i = 0; i < 127; i++) for (int j = 0; j < 6; j++) assert(six[6 * i + j] == 1000 * j + i + 129);
+    for (int i = 0; i < 127; i++) for (int j = 0; j < 6; j++) assert(six[6 * i + j] == 0.25f * (float)j + (float)(i + 129) / 1024.0f);
     dm_audio_suspend(1);
     unit.route_ch = 2; dm_audio_route_changed(); assert(a->dev_ch == 6);   // the cache changes in the background; the unit waits for resume
     dm_audio_suspend(0); assert(a->dev_ch == 2 && unit.format_ch == 2);
     atomic_store(&a->state, STATE_STARTED);
-    pull_device(a, (uint8_t *)stereo, sizeof(int16_t) * 2);
+    pull_device(a, (uint8_t *)stereo, sizeof(float) * 2);
     atomic_store(&a->state, STATE_STOPPED);
-    assert(stereo[0] == 6256 && stereo[1] == 7256 && dm_pcmout_released(key) == &b);
+    assert(stereo[0] == 1.5f + 256.0f / 1024.0f && stereo[1] == 1.75f + 256.0f / 1024.0f && dm_pcmout_released(key) == &b);
     dm_pcmout_close(key);
     assert(!object.key);
+}
+// The system renderer, mocked (audio_sbar.h): a clock that runs from dm_sbar_play in real time, so the pump paces itself against it as against the real synchronizer
+static struct {
+    _Atomic int available, made, destroyed, plays, stops, ch, status, enqueued, nonzero, refuse;
+    _Atomic int64_t pts; _Atomic uint64_t t0; _Atomic int playing;
+    float first[6];                      // the first enqueued frame that is not silence (the pump's pre-roll and hold are)
+    _Atomic double max_lead;             // the largest lead seen at an enqueue once playing
+} sbm;
+int dm_sbar_available(void) { return atomic_load(&sbm.available); }
+dm_sbar *dm_sbar_create(int ch, double rate, char *why, size_t whyn) {
+    if (atomic_load(&sbm.refuse)) { snprintf(why, whyn, "refused by the test"); return NULL; }
+    (void)why; (void)whyn; assert(rate == 48000); atomic_store(&sbm.ch, ch); atomic_fetch_add(&sbm.made, 1); atomic_store(&sbm.pts, 0); atomic_store(&sbm.playing, 0); return (dm_sbar *)&sbm;
+}
+double dm_sbar_lead(dm_sbar *s) {
+    assert(s == (dm_sbar *)&sbm);
+    double played = atomic_load(&sbm.playing) ? (now_ns() - atomic_load(&sbm.t0)) / 1e9 : 0;
+    return atomic_load(&sbm.pts) / 48000.0 - played;
+}
+int dm_sbar_enqueue(dm_sbar *s, const float *x, int n) {
+    assert(s == (dm_sbar *)&sbm && n == 240);
+    if (atomic_load(&sbm.playing)) { double l = dm_sbar_lead(s); if (l > atomic_load(&sbm.max_lead)) atomic_store(&sbm.max_lead, l); }
+    for (int i = 0; i < n && !atomic_load(&sbm.nonzero); i++) if (x[6 * i]) { memcpy(sbm.first, x + 6 * i, sizeof sbm.first); atomic_store(&sbm.nonzero, 1); }
+    atomic_fetch_add(&sbm.pts, n); atomic_fetch_add(&sbm.enqueued, 1); return 0;
+}
+int dm_sbar_play(dm_sbar *s) { assert(s == (dm_sbar *)&sbm); atomic_store(&sbm.t0, now_ns()); atomic_store(&sbm.playing, 1); atomic_fetch_add(&sbm.plays, 1); return 0; }
+void dm_sbar_stop(dm_sbar *s) { assert(s == (dm_sbar *)&sbm); atomic_store(&sbm.playing, 0); atomic_store(&sbm.pts, 0); atomic_fetch_add(&sbm.stops, 1); }
+int dm_sbar_status(dm_sbar *s, char *why, size_t whyn) { assert(s == (dm_sbar *)&sbm); snprintf(why, whyn, "mock"); return atomic_exchange(&sbm.status, SBAR_OK); }
+void dm_sbar_destroy(dm_sbar *s) { assert(s == (dm_sbar *)&sbm && !atomic_load(&sbm.playing)); atomic_fetch_add(&sbm.destroyed, 1); }
+static int wait_for(_Atomic int *v, int want, int ms) {
+    uint64_t until = now_ns() + (uint64_t)ms * 1000000;
+    while (atomic_load(v) < want) { if (now_ns() > until) return 0; usleep(1000); }
+    return 1;
+}
+// AirPods (Bluetooth, two channels) with DM_SPATIAL_AUDIO=auto: the game is told 6 and the renderer's six go to the system renderer, pumped from the queue at its clock with
+// 150 ms of lead; the route then moves to the built-in speakers (no AUSpatialMixer in this mock: the fold, told 2), back to Bluetooth, to another Bluetooth device (a new
+// renderer), and the renderer fails (the silent sink keeps the game's blocks moving). Close stops the pump before the renderer goes
+static void test_system_route(void) {
+    if (spatial_pref() != SPATIAL_PREF_AUTO) { puts("system route: skipped (the profile's DM_SPATIAL_AUDIO default is 0)"); return; }
+    atomic_store(&sbm.available, 1);
+    unit.route_ch = 2; unit.transport = 'blue'; unit.data_source = 0; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
+    dm_audio_route_changed();
+    assert(dm_audio_route() == 6);   // the game mixes 5.1 on AirPods
+    unsigned disposals = unit.disposals;
+    void *key = dm_pcmout_open_sink(); aout *a = ao(key);
+    assert(a->sb && !a->au && a->path == AP_SYSTEM && a->dev_ch == 6 && atomic_load(&sbm.made) == 1 && atomic_load(&sbm.ch) == 6);
+    // Float blocks, each channel its own value: the six reach the renderer as they are (MPEG_5_1_A order), the fold is not used. Each goes back in the queue as it returns
+    enum { NB = QMAX - 1 };
+    static float pcm[NB][240 * DM_AUDIO_SINK_CHANNELS]; static aout_buf bb[NB];
+    for (int b = 0; b < NB; b++) for (int i = 0; i < 240; i++) for (int j = 0; j < DM_AUDIO_SINK_CHANNELS; j++) pcm[b][i * DM_AUDIO_SINK_CHANNELS + j] = 0.1f * (float)(j + 1);
+    for (int b = 0; b < NB; b++) { bb[b] = (aout_buf){.ptr = pcm[b], .cap = sizeof pcm[b], .size = sizeof pcm[b]}; assert(dm_pcmout_append(key, &bb[b])); }
+    uint64_t t0 = now_ns();
+    dm_pcmout_start(key);
+    assert(wait_for(&sbm.plays, 1, 2000) && wait_for(&sbm.nonzero, 1, 3000));
+    for (int j = 0; j < 6; j++) assert(sbm.first[j] == 0.1f * (float)(j + 1));
+    // Steady state: the game's blocks come back at the renderer's real-time pace, the lead stays near 150 ms (the blocks the silent sink released during the start go first)
+    usleep(50000);
+    for (aout_buf *r; (r = dm_pcmout_released(key));) assert(dm_pcmout_append(key, r));   // every block back in the queue as it returns: it never runs dry
+    int released = 0; uint64_t t1 = now_ns();
+    while (released < 100 && now_ns() - t1 < 3000000000ull) {
+        aout_buf *r = dm_pcmout_released(key);
+        if (r) { released++; assert(dm_pcmout_append(key, r)); } else usleep(500);
+    }
+    double secs = (now_ns() - t1) / 1e9;
+    printf("system route: first sound %.0f ms after start, 100 blocks (500 ms) released in %.0f ms, the largest lead %.1f ms\n", (now_ns() - t0) / 1e6 - secs * 1000, secs * 1000, atomic_load(&sbm.max_lead) * 1000);
+    assert(released == 100 && secs > 0.45 && secs < 0.60);
+    assert(atomic_load(&sbm.max_lead) >= 0.140 && atomic_load(&sbm.max_lead) < 0.165);
+    pthread_mutex_lock(&g_aos_lock); assert(a->backend == BK_AU); pthread_mutex_unlock(&g_aos_lock);   // the watchdog took the pump's pulls as callbacks
+    // To the built-in speakers: no mixer component in this mock, so the fold on a unit, told 2; the pump stopped before its renderer went
+    unit.transport = 'bltn'; unit.data_source = 'ispk'; unit.device = 1;
+    dm_audio_route_changed();
+    assert(dm_audio_route() == 2 && wait_dev_ch(a, 2));
+    pthread_mutex_lock(&g_aos_lock); assert(!a->sb && a->au && a->path == AP_FOLD && unit.format_float && unit.format_ch == 2); pthread_mutex_unlock(&g_aos_lock);
+    assert(atomic_load(&sbm.destroyed) == 1 && atomic_load(&sbm.stops) >= 1);
+    // Back to Bluetooth: a new renderer, told 6 again
+    unit.transport = 'blue'; unit.data_source = 0;
+    dm_audio_route_changed();
+    assert(dm_audio_route() == 6 && wait_dev_ch(a, 6) && atomic_load(&sbm.made) == 2);
+    pthread_mutex_lock(&g_aos_lock); assert(a->sb && !a->au); pthread_mutex_unlock(&g_aos_lock);
+    // Another Bluetooth device: same path and count, but the renderer follows the device it was made on, so a new one
+    unit.sys_out = SYS_OUT + 1;
+    dm_audio_route_changed();
+    assert(atomic_load(&sbm.made) == 3 && atomic_load(&sbm.destroyed) == 2);
+    // The renderer fails: the pump stops pulling, the watchdog stands the silent sink in, the game's blocks keep coming back
+    assert(wait_for(&sbm.playing, 1, 3000));   // the new renderer pre-rolled and runs (one stopped before its pump's first pass never plays)
+    atomic_store(&sbm.status, SBAR_FAILED);
+    for (uint64_t t = now_ns(); now_ns() - t < 300000000ull;) { aout_buf *r = dm_pcmout_released(key); if (r) assert(dm_pcmout_append(key, r)); else usleep(500); }
+    int after = 0; uint64_t t2 = now_ns();
+    while (after < 20 && now_ns() - t2 < 1000000000ull) { aout_buf *r = dm_pcmout_released(key); if (r) { after++; assert(dm_pcmout_append(key, r)); } else usleep(500); }
+    assert(after == 20);
+    // The watchdog stands the silent sink in on its own schedule (a stall, or the 1 s start timeout), and its stop makes a new renderer for the retry, which plays again
+    assert(wait_for(&sbm.made, 4, 5000));
+    for (uint64_t t = now_ns(); !atomic_load(&sbm.playing) && now_ns() - t < 5000000000ull;) { aout_buf *r = dm_pcmout_released(key); if (r) assert(dm_pcmout_append(key, r)); else usleep(500); }
+    assert(atomic_load(&sbm.playing));
+    dm_pcmout_close(key);
+    assert(atomic_load(&sbm.destroyed) == atomic_load(&sbm.made) && unit.disposals == disposals + 1);   // every renderer released; the one fold unit, between
+    // A renderer that cannot be made: the fallback (AUSpatialMixer, none in this mock, so the fold) plays, but the output keeps the decided path, so the notifications its own
+    // unit sends (the buffer write) do not remake it every 80 ms; only a new decision does
+    atomic_store(&sbm.refuse, 1); unit.sys_out = SYS_OUT + 2;
+    void *kf = dm_pcmout_open_sink(); aout *f = ao(kf);
+    pthread_mutex_lock(&g_aos_lock); assert(!f->sb && f->au && f->path == AP_SYSTEM && f->dev_ch == 2 && f->want_ch == 6); pthread_mutex_unlock(&g_aos_lock);
+    unsigned d0 = unit.disposals;
+    changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    usleep(ROUTE_SETTLE_MS * 1000 + 120000); dm_audio_route_changed(); dm_audio_route_changed();
+    assert(unit.disposals == d0);
+    dm_pcmout_close(kf); atomic_store(&sbm.refuse, 0);
+    unit.transport = 0; unit.data_source = 0; unit.sys_out = 0; atomic_store(&sbm.available, 0);
+    dm_audio_route_changed(); assert(dm_audio_route() == 2);
+    puts("system route: the six to the system renderer at its clock, live to the fold and back, a new renderer per device, a failed renderer covered by the silent sink");
 }
 int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
@@ -363,7 +484,7 @@ int main(void) {
     uint32_t out6[16] = {0}; uint8_t prm6[16]; h_au_InitParam(prm6); *(uint16_t *)(prm6 + 4) = 6;
     assert(h_au_OpenDef0(out6, prm6) == RES_OK);
     aout *six = ao(out6);
-    assert(six->ch == 6 && six->dev_ch == 6 && unit.format_ch == 6 && unit.layout_tag == kAudioChannelLayoutTag_MPEG_5_1_A);
+    assert(six->ch == 6 && six->dev_ch == 6 && unit.format_ch == 6 && !unit.format_float && unit.layout_tag == kAudioChannelLayoutTag_MPEG_5_1_A);   // a guest's PCM16 stays PCM16
     static int16_t six_pcm[240 * 6];
     for (int i = 0; i < 240; i++) for (int j = 0; j < 6; j++) six_pcm[6 * i + j] = (int16_t)(1000 * (j + 1) + i);
     aout_buf blk = {.ptr = six_pcm, .cap = sizeof six_pcm, .size = sizeof six_pcm};
@@ -415,7 +536,7 @@ int main(void) {
     assert(wait_dev_ch(rt, 6) && unit.format_ch == 6 && unit.layout_tag == kAudioChannelLayoutTag_MPEG_5_1_A && unit.disposals == 6);
     // A notification that leaves the route's count alone keeps the unit (the queued check, then the same check run here)
     changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
-    usleep(100000); dm_audio_route_changed(); assert(unit.disposals == 6);
+    usleep(ROUTE_SETTLE_MS * 1000 + 120000); dm_audio_route_changed(); assert(unit.disposals == 6);
     // A new unit that cannot be made leaves the output silent until the next route change, which tries again
     unit.route_ch = 2; unit.init_error = kAudioUnitErr_FailedInitialization;
     dm_audio_route_changed();
@@ -431,9 +552,10 @@ int main(void) {
     // A stereo output stays stereo on a six-channel route (the guest writes two channels): a route change leaves its unit alone
     uint32_t outs[16] = {0};
     assert(h_au_OpenDef0(outs, prm) == RES_OK && ao(outs)->dev_ch == 2 && unit.format_ch == 2);
+    usleep(ROUTE_SETTLE_MS * 1000 + 120000);   // the route check the new unit's own format notification queued has run (it reads unit.route_ch, written next)
     unit.route_ch = 2; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
-    usleep(100000); dm_audio_route_changed(); unit.route_ch = 6; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
-    usleep(100000); dm_audio_route_changed(); assert(ao(outs)->dev_ch == 2 && unit.disposals == 10);
+    usleep(ROUTE_SETTLE_MS * 1000 + 120000); dm_audio_route_changed(); unit.route_ch = 6; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    usleep(ROUTE_SETTLE_MS * 1000 + 120000); dm_audio_route_changed(); assert(ao(outs)->dev_ch == 2 && unit.disposals == 10);
     h_au_Close(outs);
     assert(!object.key && unit.disposals == 11);
     // A mono output goes to a mono unit as the guest writes it, on either route (it is not downmixed as six channels)
@@ -455,8 +577,13 @@ int main(void) {
     // Failure after listener registration follows the same cleanup path as Close.
     unit.device = 1; unit.rate = 48000; unit.init_error = kAudioUnitErr_FailedInitialization;
     aout failed = {.ch = 2};
-    assert(au_create(&failed, 2) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 13);
+    audio_route_decision stereo = audio_route_decide(SPATIAL_PREF_OFF, AT_UNKNOWN, 0, 2, 0);
+    assert(au_create(&failed, &stereo) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 13);
     unit.init_error = 0; test_sink_route();
+    // DM_SPATIAL_AUDIO is read once (the profile's default here) and never written: a later environment change and every route read above leave it
+    int pref = spatial_pref(); assert(pref == (DM_GAME_SPATIAL_AUDIO ? SPATIAL_PREF_AUTO : SPATIAL_PREF_OFF));
+    setenv("DM_SPATIAL_AUDIO", pref ? "0" : "auto", 1); unit.route_ch = 2; dm_audio_route_changed(); assert(spatial_pref() == pref); unsetenv("DM_SPATIAL_AUDIO");
+    test_system_route();
     puts("audio device: buffer configuration, blocked start, callback handoff, retry and lifecycle passed");
     return 0;
 }

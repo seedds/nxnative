@@ -46,3 +46,7 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# Spatial Audio (hle_audio.c, audio_route.h, DM_SPATIAL_AUDIO): the game mixes real 5.1 at 48 kHz through one six-input DeviceSink whenever GetActiveAudioDeviceChannelCountForOutput
+# says 6, and asks again on its output-device notification (fn 0xf52c10: 6 → its 5.1 mode, live through fn 0x36d4cb0); the host reports 6 on AirPods and the built-in speakers too
+# and renders the 5.1 for them (the system's Spatial Audio, AUSpatialMixer), so DM_SPATIAL_AUDIO defaults to auto for this game
+spatial_audio	on

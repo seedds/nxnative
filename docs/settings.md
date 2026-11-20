@@ -234,6 +234,17 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Spatial Audio
+
+**On** by default, for a game that mixes surround sound itself (Ocarina of Time). The game is told it plays on a 5.1 system wherever the Mac can render one, and its surround mix plays the way each output does best, switched live when the output changes (the setting stays as you chose it):
+
+- **AirPods and other headphones** (Bluetooth or the headphone jack): through macOS's own Spatial Audio. The Sound menu in the menu bar (or Control Center) then offers **Spatial Audio** for the game: **Fixed**, **Head Tracked** or **Off**, with your personalized profile. The sound comes about 0.15 s later than without it (on top of the AirPods' own delay), which you may notice in timing-heavy moments.
+- **A MacBook's speakers**: as virtual surround, Apple's rendering for the built-in speakers.
+- **A Studio Display or a 5.1 system over HDMI** (six or more channels): the 5.1 as it is, on the device's own speakers.
+- Anything else (USB or AirPlay speakers, virtual devices): stereo, as before.
+
+**Off** plays stereo except on a device with six or more channels, as before. In an `env.txt`: `DM_SPATIAL_AUDIO=auto` or `0`.
+
 ### Switch 2 controllers
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.
@@ -273,6 +284,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
+| Spatial Audio (Mac) | `DM_SPATIAL_AUDIO` | `auto` the game's 5.1 on every output the Mac can render it for: macOS's Spatial Audio on headphones, virtual surround on a MacBook's speakers, as it is on six or more channels (default for a game that mixes surround), `0` stereo except on six or more channels |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |

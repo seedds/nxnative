@@ -168,6 +168,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** an image slot the shader declares as uint / int now gets a view of the same texel size in that class (`img_fit` in `nvn_mtl.m`). The format-view usage costs lossless compression, so a texture gets it only when a shader needs such a view: it is upgraded (copied into a texture with the usage) before the next draw pass opens, as the copy cannot run inside the draw's own pass; until then that one draw reads it as before.
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the last passes have no render target; fragment shaders composite each UI layer into the window texture with image stores, blending in software (`uirender.tec`, `4cf1975ed1e36590`).
 
+### Float views for integer buffer images
+
+- **Symptom:** a buffer image appears in both integer atomic and float load/store arguments. The float argument's format differs from the shader declaration.
+- **Cause:** `img_binding` adapted only slots declared as integers. Metal leaves reads and writes through a mismatched texture declaration undefined. The game uses the same histogram bytes through `texture_buffer<uint>` atomics and `texture_buffer<float>` loads and stores.
+- **Fix:** `img_fit` takes a same-width float view of 32-bit integer buffer images using `tbuf_view_format`. The view shares the storage and the original coordinate bias. `check_t_buffer_image_bias` verifies the format, the offset and the original bits through both views under Metal validation.
+- **Found on:** LEGO Star Wars: The Skywalker Saga. Clear `9a6b21facc9b346d`, accumulation `fd31a0e4ff650684`, and reduction `823aeb9661fb80eb` share the 36-word R32Uint histogram.
+
 ### Image views of the type a shader declares
 
 - **Symptom:** a compute pass's image stores are lost with no red line: the levels or layers it writes stay as they were. With `DM_NVN_PASSDUMP`, its `W` lines read `target=3 shader wants target 2` (a 2D array in a slot the shader declares 2D).

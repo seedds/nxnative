@@ -3,6 +3,7 @@ movie drawn into the whole frame, so on a taller screen the stub keeps its viewp
 
 Optional dependency: unicorn. On macOS its JIT needs execution outside the sandbox.
 """
+import importlib
 import importlib.util
 from pathlib import Path
 import struct
@@ -12,12 +13,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
-    import unicorn as uc
-    from unicorn import arm64_const as arm
+    uc = importlib.import_module('unicorn')
+    arm = importlib.import_module('unicorn.arm64_const')
 except ImportError:
     uc = arm = None
 
 spec = importlib.util.spec_from_file_location('ocarina_patches', Path(__file__).resolve().parents[2] / 'games/0400486024DEC000/patches.py')
+assert spec is not None and spec.loader is not None
 patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
 OTHERS = patch.MATCH_FRAME_STEP['main'][0]['others']
 
@@ -27,7 +29,7 @@ class Placement(unittest.TestCase):
         # the movie's draw is one of the screen shape's functions, and its stub replaces the instruction after the viewport is built (ldp x9, x8, [x19, #0x18] at +0x64)
         self.assertEqual(OTHERS['movie draw']['size'], 0x158)
         sites = {}
-        ctx = types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: sites.__setitem__(off, orig), put=lambda off, words, why: None,
+        ctx = types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=sites.__setitem__, put=lambda off, words, why: None,
                                     state=0x9000000, render_scale=0, step_max=0, base=0x100000, others={k: None for k in OTHERS} | {'movie draw': 0x200000}, capabilities=set())
         patch.screen_shape(ctx)
         self.assertEqual(sites, {0x200064: '69a241a9'})
@@ -39,6 +41,8 @@ class MovieViewport(unittest.TestCase):
     fn = 0x3b5c710
 
     def setUp(self):
+        assert uc is not None and arm is not None
+        self.arm = arm
         self.u = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
         for a, n in ((self.base, 0x4000000), (self.state, 0x1000), (self.frame, 0x1000)):
             self.u.mem_map(a, n)
@@ -57,11 +61,11 @@ class MovieViewport(unittest.TestCase):
     def run_viewport(self, oh, rect):
         self.u.mem_write(self.state + 0x48, struct.pack('<I', oh))
         self.u.mem_write(self.frame + 0x100 - 0x28 + 8, struct.pack('<4f', *rect))
-        self.u.reg_write(arm.UC_ARM64_REG_X29, self.frame + 0x100)
-        self.u.reg_write(arm.UC_ARM64_REG_X19, self.frame + 0x800)
+        self.u.reg_write(self.arm.UC_ARM64_REG_X29, self.frame + 0x100)
+        self.u.reg_write(self.arm.UC_ARM64_REG_X19, self.frame + 0x800)
         end = self.base + self.fn + 0x68
         self.u.emu_start(self.base + self.fn + 0x64, end, count=100)
-        self.assertEqual(self.u.reg_read(arm.UC_ARM64_REG_PC), end)
+        self.assertEqual(self.u.reg_read(self.arm.UC_ARM64_REG_PC), end)
         return struct.unpack('<4f', self.u.mem_read(self.frame + 0x100 - 0x28 + 8, 16))
 
     def test_taller_screens_keep_the_movie_16_9(self):

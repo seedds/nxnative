@@ -17,6 +17,14 @@
 // DM_FRAMEGEN_OWNPREV=0: the reprojection goes through the game's own previous view, not the host's record of the last frame's view-projection (see fg_frame).
 // DM_FRAMEGEN_SHOT=<dir>:<a>-<b> saves the generated and the real picture of frames a..b (slow: it waits for the GPU).
 #if FG_PART == 0
+// FG_HDR: this build has the game's HDR output (seedds/nxnative#3009: nvn/hdr.h, which nvn_mtl.m includes before this file, with present_pq, present_variant and
+// dm_hdr_paper_white). Then a generated frame is composed and presented in the window texture's encoding (fg_comp_params, present_gen). Without it nothing here
+// differs from the SDR code: the HDR lines are not compiled
+#ifdef HDR_PAPER_WHITE_DEFAULT
+#define FG_HDR 1
+#else
+#define FG_HDR 0
+#endif
 static int g_fg_mode = -1;   // -1 unread, 0 off, 1 on
 static int fg_on(void); static void fg_cam_bind(int stage, int reg, uint64_t addr, uint64_t size); static void fg_depth_note(MTL4RenderPassDescriptor *pd);
 static void fg_shown(int gen, double tt, double tin);
@@ -148,8 +156,14 @@ static NSString *const FG_MSL = @"#include <metal_stdlib>\nusing namespace metal
     "      for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) { float z = vz(pd.read(uint2(qq + int2(x, y)))); zmin = min(zmin, z); zmax = max(zmax, z); nr = nr || fabs(z - ze) <= ze * 0.01; }\n"
     "      still = (zmax <= zmin * 1.05 ? (ze >= zmin * 0.99 && ze <= zmax * 1.01) : nr) ? 1 : 0; } }\n"
     "  if (still == 0) m = 0.0; if (any(isnan(m)) || any(isinf(m))) m = 0.0; return float4(m, 0.0, 0.0); }\n"
-    "struct CP { int2 org; int2 csize; int flip; int view; int encode; int pad; };\n"
+    "struct CP { int2 org; int2 csize; int flip; int view; int encode; float pw; };\n"
     "static float3 oetf(float3 c) { c = saturate(c); return mix(12.92 * c, 1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), c)); }\n"
+    // HDR (encode 2, set only on a build with the game's HDR output, seedds/nxnative#3009: FG_HDR below): the window texture holds HDR10, PQ (SMPTE ST 2084) codes of BT.2020
+    // colours. The scene is linear BT.709 with 1.0 = paper white, so its code is PQ(BT.709 -> BT.2020 x paper white / 10000 nits); pw = paper white / 10000
+    "static float3 pq_oetf(float3 l) { const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0, c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;\n"
+    "  float3 q = pow(clamp(l, 0.0, 1.0), m1); return pow((c1 + c2 * q) / (1.0 + c3 * q), m2); }\n"
+    "static float3 hdr_enc(float3 c, float pw) { c = max(c, 0.0);\n"
+    "  return pq_oetf(float3(dot(float3(0.627404, 0.329283, 0.043313), c), dot(float3(0.069097, 0.919540, 0.011362), c), dot(float3(0.016391, 0.088013, 0.895595), c)) * pw); }\n"
     // The generated frame's window picture: win = the real frame's window texture (encoded bytes), gen = the generated scene upscaled (linear), cv = the canvas now (with the HUD),
     // cv0 = the canvas right after the real frame's upscale. A canvas pixel that changed is HUD: it keeps the real frame's picture. Any other takes the real picture plus the
     // difference between the generated and the real scene, both encoded, so a still scene comes out exactly as the real frame whatever the game's last pass does to the colour
@@ -161,6 +175,7 @@ static NSString *const FG_MSL = @"#include <metal_stdlib>\nusing namespace metal
     "  if (hud && p->view != 1) return w;\n"
     "  float3 c = gen.read(uint2(q)).rgb;\n"
     "  if (p->encode == 0) return float4(c, w.a);\n"
+    "  if (p->encode == 2) { if (p->view == 1) return float4(hdr_enc(c, p->pw), w.a); return float4(saturate(w.rgb + (hdr_enc(c, p->pw) - hdr_enc(b, p->pw))), w.a); }\n"
     "  if (p->view == 1) return float4(oetf(c), w.a);\n"
     "  return float4(saturate(w.rgb + oetf(c) - oetf(b)), w.a); }\n";
 static int fg_pipes(void) {
@@ -397,7 +412,13 @@ static int fg_win_prep(const tex_t *t, const int crop[4], id<MTLTexture> *raw_, 
 }
 static void fg_comp_params(id<MTLBuffer> buf, const NSUInteger r[4], id<MTLTexture> raw) {
     int32_t *p = (int32_t *)buf.contents; p[0] = (int32_t)r[0]; p[1] = (int32_t)r[1]; p[2] = (int32_t)FG.ow; p[3] = (int32_t)FG.oh; p[4] = g_fg_flip; p[5] = g_fg_view;
+    // The window picture's encoding: 1 the sRGB curve (8-bit), 0 the linear value as it is, and on a build with the game's HDR output (FG_HDR) 2 = HDR10: the game's RGB10A2
+    // window texture once it has been told HDR (the present's own test, present_pq), composed in PQ codes so a generated frame is an HDR10 picture like a real one and the
+    // same present shows both. p[7]: paper white / 10000 nits, a float, for case 2. Without FG_HDR this is the code as it was
     p[6] = raw.pixelFormat == MTLPixelFormatRGBA8Unorm || raw.pixelFormat == MTLPixelFormatBGRA8Unorm; p[7] = 0;
+#if FG_HDR
+    if (!p[6] && present_pq(raw)) { float pw = dm_hdr_paper_white() / 10000.0f; p[6] = 2; memcpy(&p[7], &pw, sizeof pw); }
+#endif
 }
 static void fg_q_barrier(id<MTL4CommandBuffer> cb) {
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
@@ -641,9 +662,13 @@ static int present_gen(const tex_t *t, double hold, const int crop[4]) {
     if (!layer) return 0;
     g_fg_real_on_q = 1; id<MTL4CommandQueue> pq = g_fg_overlap ? fg_present_q(layer) : nil; g_fg_real_on_q = 0;   // overlap: behind the job that draws the picture, on its queue
     if (!pq) { pq = g_q4; if (g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; } }
+#if FG_HDR
+    present_pipeline(layer.pixelFormat, present_variant(present_pq(src), layer.pixelFormat));   // the variant by the picture's encoding, as present_now
+#else
     present_pipeline(layer.pixelFormat);
+#endif
     uint64_t seq = ++g_fg_pseq; int i = (int)(seq & 1);
-    if (!g_fg_palloc[i]) { g_fg_palloc[i] = [g_dev newCommandAllocator]; g_fg_pcb[i] = [g_dev newCommandBuffer]; g_fg_puv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    if (!g_fg_palloc[i]) { g_fg_palloc[i] = [g_dev newCommandAllocator]; g_fg_pcb[i] = [g_dev newCommandBuffer]; g_fg_puv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_fg_palloc[i] || !g_fg_pcb[i] || !g_fg_puv[i]) { g_fg_palloc[i] = nil; return 0; }
         res_add(g_fg_puv[i]); }
     res_commit();

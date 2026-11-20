@@ -505,8 +505,8 @@
 
 - **Symptom:** Finder shows `Version 1.0` for a Mac app whose game is at another version.
 - **Cause:** the app packer got its version from the game's NACP. A dump or NUP can have no NACP, leaving the bundle packer to write its default even when another source identifies the version.
-- **Fix:** Mac apps and IPAs take the packed version's NACP first, then the base game's NACP, then the numeric version from the packed build's profile row, then the selected NUP package's version label. The build can read the base NACP from the NUP even when it only extracts the update. With no usable value the app defaults to `1.0`.
-- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The author rebuilt the Mac app from a NUP whose selected update was labelled `1.1.1` and checked both version fields in `Info.plist`. The runtime row remains `v131072`. [PR #2822](https://github.com/seedds/nxnative/pull/2822)
+- **Fix:** Mac apps and IPAs take the packed version's NACP first, then the numeric version from the packed build's profile row, then the base game's NACP, then the selected NUP package's version label. The build can read the base NACP from the NUP even when it only extracts the update. With no usable value the app defaults to `1.0`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The author rebuilt the Mac app from a NUP whose selected update was labelled `1.1.1` and checked both version fields in `Info.plist`. The local NUP has neither a NACP nor a display label. The profile registers `1.1.1` for its verified v131072 build ID, which gives the local build the same app version. [PR #2822](https://github.com/seedds/nxnative/pull/2822)
 - **Check:** `dm/tools/tests/test_nsp_nup.py` exercises the app fallback through the packing entry point with a synthetic NUP and the registered Ocarina of Time build IDs.
 
 ### No Game language row in an app packed from a NUP or a dump

@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (`0400486024DEC000`)
 
-A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the rewriter's patches are a frame-step stub and one cut ([`patches.py`](patches.py)). Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
+A Switch 2 game: update 1.1.1 (v131072), SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the rewriter's patches are a frame-step stub and one cut ([`patches.py`](patches.py)). Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
 
 ## What it needs
 
@@ -236,7 +236,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
-- [An app packed without control data says version 1.0](../../../docs/reference/packing.md#an-app-packed-without-control-data-says-version-10).
+- [An app packed without control data says version 1.0](../../../docs/reference/packing.md#an-app-packed-without-control-data-says-version-10). The local NUP has no NACP or display label. The registered v131072 build row supplies 1.1.1 to the packer and the host. On an Apple M6 with macOS 27.2.1, the rebuilt host reached the title menu and the game called `GetDisplayVersion` during boot.
 - [Inlining mesh helpers with subgroup inputs can crash the Metal compiler](../../../docs/reference/shaders.md#inlining-mesh-helpers-with-subgroup-inputs-can-crash-the-metal-compiler). The subgroup helper workaround clears the isolated foliage pipeline and the 164-row offline matrix at the supported deployment minimums.
 - [Missing required functions at the render pipeline API](../../../docs/reference/rendering.md#missing-required-functions-at-the-render-pipeline-api). The device API now returns an error for missing functions. The abort inside a bundled archive lookup remains open.
 

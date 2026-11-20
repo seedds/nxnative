@@ -3175,14 +3175,15 @@ def app_icon(given, spare, *dirs):
 
 
 def app_version_of(game, base, g, pkg_ver, nup_label='', *, nup_base=None):
-    """Use packed or base control data first, then the packed build's bundle version and its NUP label."""
+    """Prefer the packed version's NACP or registered version, then fall back to base control data or the selected NUP label."""
     if version := nacp.version(game / 'control.nacp'): return version
+    if version := nacp.bundle_version(g.builds().get(pkg_ver, {}).get('display', '')): return version
     if nup_base is not None:
         # The base NUP package can carry a NACP even when the build extracts only the update.
         version = nacp.version_data(nup_base.meta().get(pack_nup.T_NACP, b''))
     elif base is not None and base != game:
         version = nacp.version(base / 'control.nacp')
-    return version or nacp.bundle_version(g.builds().get(pkg_ver, {}).get('display', '')) or nup_label
+    return version or nup_label
 
 
 def say_game(app, name, version, bundle_id, out, icon):

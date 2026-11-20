@@ -702,11 +702,14 @@ class Main(Base):
         base_label = tlv([(pack_nup.T_DISPLAY, b'1.0.0')])
         update_nacp = tlv([(pack_nup.T_NACP, control_nacp('Test Game', '', '2.3.4'))])
         sources = {'graphics': ('gl', 'test'), 'gl_capture': (False, '')}
-        for expected, base_meta, update_meta in (('1.1.1', base_label, label), ('1.0', base_label, b''),
-                                                 ('1.2.3', META, label), ('2.3.4', META, label + update_nacp)):
-            with self.subTest(expected=expected):
+        registered = row['display']
+        for expected, display, base_meta, update_meta in (('1.1.1', '?', base_label, label), ('1.0', '?', base_label, b''),
+                                                          ('1.2.3', '?', META, label), ('1.1.1', registered, META, label),
+                                                          ('1.1.1', registered, b'', b''), ('2.3.4', registered, META, label + update_nacp)):
+            with self.subTest(expected=expected, display=display):
                 write_nup(self.path, [(0, tid, 0, version(tid=tid), base_meta), (1, tid, ver, update, update_meta)])
-                with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+                with mock.patch.object(Game, 'builds', return_value={f'v{ver}': {**row, 'display': display}}), \
+                     mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
                      mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'build_sources', return_value=sources), \
                      mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'say_game', side_effect=Stop) as app:
                     with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--platform', 'ios']))

@@ -26,6 +26,7 @@
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
+#        gl_shaders.py --capture-shader <vert|frag> <source file> <out dir>   (one Mac shader for the capture host)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -216,6 +217,28 @@ def es100(t, stage, renamed=None):
     t = rename_identifier(t, 'texture', 'dm_texture', renamed, keep_calls=True)
     return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
 
+def legacy_desktop_io(t, stage):
+    """Lower the compatibility varyings used by programmable GLSL 1.10/1.20 stages after expanding preprocessor macros."""
+    direction = 'out' if stage == 'vert' else 'in'
+    color = 'gl_FrontColor' if stage == 'vert' else 'gl_Color'
+    secondary = 'gl_FrontSecondaryColor' if stage == 'vert' else 'gl_SecondaryColor'
+    decl = []
+    for old, name, ty in ((color, 'dm_LegacyColor', 'vec4'), (secondary, 'dm_LegacySecondaryColor', 'vec4'),
+                          ('gl_FogFragCoord', 'dm_LegacyFog', 'float')):
+        t, n = re.subn(rf'\b{old}\b', name, t)
+        if n: decl.append(f'{direction} {ty} {name};')
+    arrays = [('gl_TexCoord', 'dm_LegacyTexCoord', f'{direction} vec4')]
+    if stage == 'frag': arrays.append(('gl_FragData', 'dm_LegacyFragData', 'out vec4'))
+    for old, name, qualifier in arrays:
+        pattern = rf'\b{old}\s*\[\s*(0|[1-9][0-9]*)\s*\]'
+        for i in sorted(set(re.findall(pattern, t)), key=int):
+            layout = f'layout(location = {i}) ' if old == 'gl_FragData' else ''
+            decl.append(f'{layout}{qualifier} {name}{i};')
+        t = re.sub(pattern, lambda m, prefix=name: prefix + m[1], t)
+    # The promoted source starts with the ES version and two precision declarations; insert after those.
+    head, precision_float, precision_int, body = t.split('\n', 3)
+    return '\n'.join((head, precision_float, precision_int, *decl, body))
+
 # The game's names that the rewrite renames (es100, fixups): the table rows give them back as the game wrote them, since the host finds attributes, uniforms and samplers by the
 # game's name (glGetAttribLocation, glGetUniformLocation); the key is the hash of the game's own source
 def game_names(f, renamed):
@@ -262,12 +285,15 @@ def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1'); renamed = {}
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
-    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage, renamed).encode('latin1')
+    desktop_legacy = bool(v and v.group(1) in ('110', '120'))
+    if not v or v.group(1) == '100' or desktop_legacy:
+        src = es100(t.replace(v.group(0), '', 1) if v else t, stage, renamed).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
+    if desktop_legacy: pre = legacy_desktop_io(pre, stage)
     open(g, 'w').write(fixups(pre, stage, renamed))
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
@@ -337,8 +363,25 @@ def metallib(msls, out, sdk, extra):
     subprocess.run(['xcrun', '-sdk', sdk, 'metallib', *airs, '-o', lib], check=True)
     return lib
 
+def capture_shader(stage, path, out):
+    if stage not in ('vert', 'frag'):
+        red(f'invalid capture stage: {stage}')
+    with open(path, 'rb') as f:
+        src = text_of(f.read())
+    key = hashlib.sha256(src).hexdigest()[:16]
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        result = translate(src, stage, key, tmp)
+        if isinstance(result, str):
+            red(f'{key}.{stage}: {result}')
+        msl, fields = result
+        metallib([msl], out, 'macosx', [MAC_MIN_FLAG])
+        with open(os.path.join(out, 'gl_shaders.tsv'), 'w') as f:
+            f.write(TABLE_ABI + '\n' + '\t'.join((key, stage, ' '.join(fields))) + '\n')
+
 def main():
     a = sys.argv[1:]
+    if len(a) == 4 and a[0] == '--capture-shader':
+        return capture_shader(*a[1:])
     ios = None
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
     fixed = '--fixed-function' in a
@@ -365,8 +408,9 @@ def main():
         if fixed:
             tsv.append('# Fixed-function OpenGL uses the host Metal shaders')
         else:
+            spirv = subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)
             tsv.append('# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
-                       + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split()))
+                       + ' '.join((spirv.stdout + spirv.stderr).split()))
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
         dirs = [(os.path.join(out, 'gl'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', list(IOS_FLAGS)))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler

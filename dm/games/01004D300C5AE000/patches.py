@@ -27,6 +27,13 @@ CUTS = {
     (0x533d5c, '28058a92', '88028592', 'pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815'),
     (0x533d60, '28e0bff2', '08f0bff2', 'pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16'),
     (0x532f34, '0001221e', '00fd021e', 'pacer: scvtf s0, w8 → scvtf s0, w8, #1 (the measured 1/120 s units halved into the step in 1/60 s)'),
+    # The pacer's own wait goes: the host's display link paces the frames (the frame step's hold), and the game only measures them. The wait (a loop of 10 µs sleeps until
+    # [+0x64]*[+0x3c] units have passed on the game's grid, anchored at boot) and the display link are two clocks that drift apart: while the grid's ticks fell just after
+    # the link's, each frame waited for both, two ticks of 1/120 s, so a 4 ms frame came late at 120 fps and the host held 60 for minutes (the hub, standing still), then 120
+    # again once the phase moved on. The measure counts the grid's ticks crossed since the last frame, exact over time; a frame that crosses none (its start near a grid tick)
+    # steps 0 and the next 2, where the clamp to 1 had made it 1 and 2: the step the game takes is the mean of the last 4 ([+0x44] = 4), 1 again
+    (0x533dc0, '8a000054', '04000014', "pacer's own wait: b.ge main+0x533dd0 → b (the host's display link paces the frames)"),
+    (0x532f30, '08c59f1a', '1f2003d5', 'pacer: csinc w8, w8, wzr, gt → nop (a frame that crosses no grid tick steps 0, not 1: the mean of 4 stays exact)'),
     # Distant animations: the branch past a distance test ([x26+0x7c] squared against s3) is taken always, so distant animations run every frame, as theboy181's "Full" variant
     # describes it (1.0.0 0x7F0D1C; the function is an exact match across the builds, main+0x7f0a30 → main+0x7f5bc0)
     (0x7f5eac, '25020054', '11000014', 'distant animations: b.pl main+0x7f5ef0 → b (they animate every frame)'),

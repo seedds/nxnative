@@ -2378,7 +2378,8 @@ __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests 
 __attribute__((weak)) int dm_fps_step_max;   // loader.c: the largest step the stubs give the game (0 = FSTEP_MAX)
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
 static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for graphics unit tests (t_nvn sets it)
-__attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main
+__attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }
+__attribute__((weak)) int dm_fps_lock_measured(void) { return 0; }   // hle_fpslock.c: the game steps by each frame's measured length   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main
 __attribute__((weak)) void dm_ue_cvar_tick(void) {}   // hle_uecvar.c: Unreal's texture streaming pool (profile ue_texture_pool)
 __attribute__((weak)) int dm_movie_hz(void) { return 0; }   // hle_movie.c: the picture rate of the movie playing, 0 when none; graphics unit tests have no movie decoder
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
@@ -2431,8 +2432,10 @@ __attribute__((weak)) int dm_power_saving_now(void) { return 0; }
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), saving = dm_power_saving_now(), cap = ok && !movie && !thermal_capped() && !saving ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : saving ? "on battery or in Low Power Mode" : "thermal state serious"); was = cap; }
+    // A screen between 60 and 120 Hz (a 100 Hz monitor) shows 120 fps as a frame each refresh: there only for a game that steps by each frame's measured length, which keeps
+    // its speed at 100 fps; a game that steps by its target would run at 100/120 of its speed
+    int shz = front_screen_max_fps(), ok = !win || shz >= 120 || (shz > 60 && dm_fps_lock_measured()), movie = dm_movie_hz(), saving = dm_power_saving_now(), cap = ok && !movie && !thermal_capped() && !saving ? 120 : 60;
+    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? (shz && shz < 120 ? "a frame each refresh of the screen below 120 Hz" : "the screen shows it") : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : saving ? "on battery or in Low Power Mode" : "thermal state serious"); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -2600,6 +2603,8 @@ static void fstep_tick(const win_t *o, int c) {
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
     int hz = front_screen_max_fps(); g_fs.shown_slack = hz > fstep_hz() && hz % fstep_hz() && mtl_link_active() ? (double)fstep_hz() / hz : 0;
+    // At 120 fps on a screen between 60 and 120 Hz (high_cap_tick), a frame held k ticks shows k refreshes: k × 120 / hz ticks, 2.4 at hold 2 on 100 Hz
+    if (fps_high() && hz > 60 && hz < fstep_hz() && mtl_link_active()) g_fs.shown_slack = 2 * ((double)fstep_hz() / hz - 1);
     int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, &g_fs, kmin) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
@@ -2608,10 +2613,10 @@ static void fstep_tick(const win_t *o, int c) {
     // 18.9 ms frames at hold 1 missed one refresh in 7, never three in a row, and ran at a jittering 53 fps with a payback every few frames instead of a steady 30
     if (mtl_snap_on() && mtl_link_active() && !mtl_link_stalled() && o->presents > 9) {   // (frames the stall fallback drops say nothing about the game: judged by cost then)
         uint64_t pn = o->presents - 8; double a = mtl_presented_time(pn), b = mtl_presented_time(pn - 1);
-        if (a < 0) g_fs.screen = 2; else if (a > 0 && b > 0) g_fs.screen = (a - b) * 1e3 > 1.25 * pres_expect_ms(pn) ? 2 : 1;
+        if (a < 0) g_fs.screen = 2; else if (a > 0 && b > 0) g_fs.screen = (a - b) * 1e3 > 1.25 * pres_expect_ms(pn) + g_fs.shown_slack * 1e3 / fstep_hz() ? 2 : 1;   // a refresh more on a screen whose rate is not a multiple (shown_slack)
         static uint16_t slow_bits; static int slow_k; int k = g_fs.k ? g_fs.k : kmin;
         if (k != slow_k) { slow_k = k; slow_bits = 0; }   // judged against the hold in force, not the frames before a step
-        slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE));
+        slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE + g_fs.shown_slack));   // at 120 fps on 100 Hz every frame shows 1.2 or 2.4 ticks: 12 of 16 such were 50 fps for good
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames

@@ -261,6 +261,9 @@ static void lock_find(void) {
 // Without one, and without a frame step state page, nothing makes the game follow the cap, so the graphics layer keeps the game's own present interval (hle_nvn.c fps_present_cap):
 // presenting at a cap the game does not step by runs a fixed-step game fast or slow (Tears of the Kingdom 1.4.2 at 2x with DM_FPS_TARGET=60)
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n || uq.base; }
+// Whether the game measures each frame's real length and steps by it (a TICKS120_I32 row: Kirby's pacer counts its 1/120 s ticks crossed since the last frame, its own wait
+// cut), so a frame held longer than its target keeps the game's speed: a screen between 60 and 120 Hz may show 120 fps as one frame a refresh (hle_nvn.c high_cap_tick)
+int dm_fps_lock_measured(void) { pthread_once(&g_found, lock_find); for (int r = 0; r < nrow; r++) if (rows[r]->kind == TICKS120_I32) return 1; return 0; }
 int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap

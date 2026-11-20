@@ -287,6 +287,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md#frame-rate) 1.1.0.
 - **Check:** `t_fpslock` (the pacer's units following the hold, which this cap lowers); the battery itself is not run on a Mac yet.
 
+### A 120 fps game on a screen between 60 and 120 Hz
+
+- **Symptom:** a game at 120 fps holds 60 on a 100 Hz monitor, and with the 120 cap allowed there, 50: every frame counted as late.
+- **Cause:** the 120 fps cap (`hle_nvn.c` `high_cap_tick`) asked for a screen of 120 Hz or more, since a game that steps by its target would run at 100/120 of its speed at 100 fps. On such a screen a frame held k ticks of 1/120 s shows k refreshes, 1.2 ticks at hold 1 and 2.4 at hold 2, and the frame step's lateness (`shown_slack` 0), the screen's verdict on the interval of a frame 8 presents back, and its count of slow frames (12 of 16) all called that late, so the hold went to 2 ticks: two refreshes, 50 fps.
+- **Fix:** a lock row whose game measures each frame's real length (`TICKS120_I32`, `hle_fpslock.c` `dm_fps_lock_measured`) allows the 120 cap on a screen above 60 Hz: one frame each refresh. There `shown_slack` is 2 × (120 / Hz − 1) ticks (0.4 at 100 Hz, the two holds' extra), and the screen's verdict and the slow-frame count take it too. A game that steps by its target keeps 60 there.
+- **Found on:** [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md#frame-rate) 1.1.0 on a 100 Hz MSI monitor: 100.0 fps, frame time p50 10.0 ms.
+- **Check:** on the Mac, the `120 fps: cap 0 → 120 fps (a frame each refresh of the screen below 120 Hz)` line and the `power` lines' fps.
+
 ### Unreal's frame limit and present interval, found by name
 
 - **Symptom:** an Unreal Engine game holds 30 fps with spare CPU and GPU time and asks for present interval 2; `present_interval display` alone does not help, as the engine's game thread sleeps out its own frame limit.

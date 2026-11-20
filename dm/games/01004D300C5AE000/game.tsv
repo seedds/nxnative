@@ -29,8 +29,12 @@ zip_store	.bfstm:.cmpbin:.opus:.webm:.metallib
 # 120 fps where the screen shows it, else 60: the rewriter's cuts put the game's frame pacer in 1/120 s units and keep its step in 1/60 s (patches.py), and the host writes the
 # pacer's units a frame (hle_fpslock.c: 1 at 120, 2 at 60) from the hold, which falls to 60 when frames do not fit, on a screen below 120 Hz and, on a Mac, on battery or in Low Power Mode.
 # Speed played the same at 60 and 120 (README.md, Frame rate). DM_FPS_TARGET=60 holds 60, 30 holds 30
+# The pacer's own wait is cut, so only the host paces and the game measures each frame: on a 100 Hz screen it runs at 100 (docs/reference/frame-rate.md)
 fps_target	120
 fps_max	120
+# Present snapshots: the game's next frame starts while the last one waits for the screen. Without them its CPU and GPU time added up at 120 (about 2 + 6 ms, plus the
+# present, against 8.3) and the hub held 60 for minutes standing still; with them 120 there (README.md, Frame rate)
+present_snap	on
 
 # ---- Memory ----
 # The NPDM declares no system resource, so there is no virtual address memory: the game sets a heap of the pool less 64 MB of used memory (3.14 GB, measured), which fits the

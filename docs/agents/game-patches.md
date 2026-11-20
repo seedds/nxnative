@@ -68,7 +68,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 10 | 0 | 0 | `game`, `build` → `game` |
-| [Kirby and the Forgotten Land](#kirby-and-the-forgotten-land) | 19 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
+| [Kirby and the Forgotten Land](#kirby-and-the-forgotten-land) | 21 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Kirby's Dream Buffet](#kirbys-dream-buffet) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -375,6 +375,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x533d5c`: pacer unit 1/60 → 1/120 s, negated: mov x8, #-0x502a → #-0x2815
   - cut `+0x533d60`: pacer unit 1/60 → 1/120 s, negated: movk x8, #0xff01 → #0xff80, lsl #16
   - cut `+0x532f34`: pacer: scvtf s0, w8 → scvtf s0, w8, #1 (the measured 1/120 s units halved into the step in 1/60 s)
+  - cut `+0x533dc0`: pacer's own wait: b.ge main+0x533dd0 → b (the host's display link paces the frames)
+  - cut `+0x532f30`: pacer: csinc w8, w8, wzr, gt → nop (a frame that crosses no grid tick steps 0, not 1: the mean of 4 stays exact)
   - cut `+0x7f5eac`: distant animations: b.pl main+0x7f5ef0 → b (they animate every frame)
   - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: Kirby frame pacer (ticks of 1/120 s)
 

@@ -55,8 +55,11 @@ static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAdd
 // The device is mocked, so drive its watchdog ticks too. Real scheduler delays must not
 // reset the no-callback deadline while this fixture waits for a timeout it assumes is fixed.
 static int mock_once(pthread_once_t *once, void (*init)(void)) {
-    (void)once; assert(init == au_watchdog_start); return 0;
+    if (init == au_watchdog_start) return 0;
+    return pthread_once(once, init); // route listeners and other initialization retain real once semantics
 }
+static unsigned other_init_calls;
+static void other_init(void) { other_init_calls++; }
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 
 static struct {
@@ -310,7 +313,8 @@ static void blocked_start(void *out) {
     AudioBufferList drain = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof drained, drained}}};
     au_render(a, NULL, NULL, 0, RATE, &drain);
     assert(h_au_Released(out) == &next);
-    gbuf resumed = {pcm, sizeof pcm, sizeof pcm};
+    // Keep the same descriptor layout as b; any SDK linkage fields remain zero.
+    __typeof__(b) resumed = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm};
     assert(h_au_Append(out, &resumed));
     dm_audio_suspend(1);
     assert(signaled(device_stopped, 1));
@@ -581,6 +585,10 @@ static void test_sink_route(void) {
     assert(!object.key);
 }
 int main(void) {
+    static pthread_once_t other_once = PTHREAD_ONCE_INIT;
+    assert(!mock_once(&other_once, other_init));
+    assert(!mock_once(&other_once, other_init));
+    assert(other_init_calls == 1);
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
     test_route_without_output();
     test_same_channel_route();

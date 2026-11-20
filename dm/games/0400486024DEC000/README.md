@@ -236,6 +236,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [An app packed without control data says version 1.0](../../../docs/reference/packing.md#an-app-packed-without-control-data-says-version-10).
 - [Inlining mesh helpers with subgroup inputs can crash the Metal compiler](../../../docs/reference/shaders.md#inlining-mesh-helpers-with-subgroup-inputs-can-crash-the-metal-compiler). The subgroup helper workaround clears the isolated foliage pipeline and the 164-row offline matrix at the supported deployment minimums.
 - [Missing required functions at the render pipeline API](../../../docs/reference/rendering.md#missing-required-functions-at-the-render-pipeline-api). The device API now returns an error for missing functions. The abort inside a bundled archive lookup remains open.
 

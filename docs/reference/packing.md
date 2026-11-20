@@ -490,9 +490,24 @@
 
 - **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
 - **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
-- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build. The selected package's numeric label can supply the version when those sources have no answer.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
 - **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
+
+### An unregistered NUP build loses its numeric version label
+
+- **Symptom:** the title menu of a game packed from a NUP with a version label shows `version: ?`.
+- **Cause:** the NUP has no NACP and the profile has no matching build. The packer discarded the NUP label and wrote `?` into the derived build row that `nn::oe::GetDisplayVersion` reads.
+- **Fix:** the survey, derived profile and app read the selected package's version label from the NUP. The label accepts one to three ASCII numeric components, an optional `v` and up to 15 version bytes. A label equal to the package's `v<number>` tag is ignored. The label stays with its package and is read again on each build.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0. The reporter rebuilt the game and verified the title menu. Reading the local NUP and deriving its profile also gave `1.8.0` for both the build row and bundle metadata. [Issue #2902](https://github.com/seedds/nxnative/issues/2902)
+
+### An app packed without control data says version 1.0
+
+- **Symptom:** Finder shows `Version 1.0` for a Mac app whose game is at another version.
+- **Cause:** the app packer got its version from the game's NACP. A dump or NUP can have no NACP, leaving the bundle packer to write its default even when another source identifies the version.
+- **Fix:** Mac apps and IPAs take the packed version's NACP first, then the base game's NACP, then the numeric version from the packed build's profile row, then the selected NUP package's version label. The build can read the base NACP from the NUP even when it only extracts the update. With no usable value the app defaults to `1.0`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The author rebuilt the Mac app from a NUP whose selected update was labelled `1.1.1` and checked both version fields in `Info.plist`. The runtime row remains `v131072`. [PR #2822](https://github.com/seedds/nxnative/pull/2822)
+- **Check:** `dm/tools/tests/test_nsp_nup.py` exercises the app fallback through the packing entry point with a synthetic NUP and the registered Ocarina of Time build IDs.
 
 ### No Game language row in an app packed from a NUP or a dump
 

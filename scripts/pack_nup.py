@@ -4,6 +4,7 @@
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
 # publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
+# The build script can use a numeric display version label from the selected package after checking control data and the profile.
 # A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
 # leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
@@ -20,7 +21,7 @@
 # or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # Usage: pack_nup.py <game.nup> [--version N] [--program N] [--work-dir DIR]   (exit 1 on error)
-import argparse, hashlib, mmap, os, shutil, struct, sys
+import argparse, hashlib, mmap, os, re, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
@@ -43,7 +44,7 @@ NO_DIR = 0xFFFFFFFF
 BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
-T_NACP, T_ICON, T_LICONS = 2, 3, 10
+T_NACP, T_ICON, T_DISPLAY, T_LICONS = 2, 3, 4, 10
 ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
@@ -384,6 +385,14 @@ def localized(payload):   # the localized icons record (TLV 0x000A) → {lowerca
 def pick(tags, code):   # the record for a language code: the exact tag, then its primary subtag
     code = code.lower()
     return tags.get(code) or tags.get(code.split('-')[0])
+
+
+def display_label(k):
+    """The selected package's numeric display label, bounded to the console's 15 version bytes."""
+    raw = k.meta().get(T_DISPLAY, b'')
+    if raw == f'v{k.version}'.encode('ascii'): return ''   # a package version tag, e.g. v131072
+    label = raw.removeprefix(b'v')
+    return label.decode('ascii') if len(label) <= 15 and re.fullmatch(rb'[0-9]+(?:\.[0-9]+){0,2}', label) else ''
 
 
 def app_package(n):   # the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package

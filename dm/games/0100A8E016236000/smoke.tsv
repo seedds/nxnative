@@ -1,0 +1,8 @@
+# Empty-save intro through natural completion into the title; no movie skip.
+save	new
+secs	60
+quick	55
+reach	2500@55
+window	45	10
+shots	45,55
+prebuild	on

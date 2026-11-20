@@ -37,7 +37,50 @@ def bahs():
     return bytes(d)
 
 
+def bahs_with_payload_entry():
+    """Two binary records and descriptor-shaped payload outside their entry slots."""
+    d = bytearray(0x700)
+    struct.pack_into('<II', d, 0x18, 0x200, 0x500)
+    struct.pack_into('<II', d, 0x40, 0x408, 2)
+    for rec, off in ((0x48, 0), (0x248, 0x100)):
+        struct.pack_into('<II', d, rec, 0x200, 0)
+        ent, ctl = rec + 0x10, rec + 0x78
+        struct.pack_into('<IIIi', d, ent, off, 0, 0xe0, ctl - ent)
+        d[ctl:ctl + 0xe0] = nvn2_ctl(0)
+        struct.pack_into('<I', d, 0x500 + off, 0x000c0481)
+    struct.pack_into('<IIIi', d, 0x1c0, 0x100, 0, 0xe0, 0x100)
+    return d
+
+
 class ControlWordsAreNoEntry(unittest.TestCase):
+    def test_descriptor_shaped_payload_outside_the_binary_records(self):
+        got = ss.bahs_shaders(bahs_with_payload_entry(), 'payload.sharcb')
+        self.assertEqual([w for w, *_ in got], ['payload.sharcb#BAHS@0x58', 'payload.sharcb#BAHS@0x258'])
+
+    def test_unrecognized_binary_array_keeps_the_scan_candidates(self):
+        # Filtering is safe only after the entire size-delimited array validates.
+        for field, value in ((0x40, 0), (0x40, 0xffff), (0x44, 0), (0x48, 0x10), (0x248, 0x1fc)):
+            with self.subTest(field=hex(field), value=value):
+                d = bahs_with_payload_entry()
+                struct.pack_into('<I', d, field, value)
+                got = ss.bahs_shaders(d, 'unknown.sharcb')
+                self.assertEqual([w for w, *_ in got], ['unknown.sharcb#BAHS@0x58', 'unknown.sharcb#BAHS@0x1c0', 'unknown.sharcb#BAHS@0x258'])
+
+    def test_empty_binary_array_keeps_the_only_scan_candidate(self):
+        d = bahs_with_payload_entry()
+        struct.pack_into('<II', d, 0x40, 8, 0)
+        d[0x1c0:0x1d0] = bytes(16)
+        d[0x258:0x268] = bytes(16)
+        got = ss.bahs_shaders(d, 'empty.sharcb')
+        self.assertEqual([w for w, *_ in got], ['empty.sharcb#BAHS@0x58'])
+
+    def test_binary_array_overlapping_code_keeps_the_scan_candidates(self):
+        d = bahs_with_payload_entry()
+        struct.pack_into('<I', d, 0x40, 0x4c8)   # array ends at 0x508, code starts at 0x500
+        struct.pack_into('<I', d, 0x248, 0x2c0)  # the final binary record ends with the array
+        got = ss.bahs_shaders(d, 'overlap.sharcb')
+        self.assertEqual([w for w, *_ in got], ['overlap.sharcb#BAHS@0x58', 'overlap.sharcb#BAHS@0x1c0', 'overlap.sharcb#BAHS@0x258'])
+
     def test_only_the_two_programs(self):
         got = ss.bahs_shaders(bahs(), 'f.sharcb')
         self.assertEqual([w for w, *_ in got], ['f.sharcb#BAHS@0x100', 'f.sharcb#BAHS@0x238'])

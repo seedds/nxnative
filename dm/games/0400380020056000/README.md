@@ -53,6 +53,9 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
+- [Optional stage byte in short NVN2 control sections](../../../docs/reference/shaders.md#optional-stage-byte-in-short-nvn2-control-sections): the offline build's `IndexError` on a short agl vertex record is resolved, 2026-11-17.
+
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution that never moved, then held low by the GPU's idle gaps
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [A GPU fault at address 0](../../../docs/reference/rendering.md#a-gpu-fault-at-address-0): open, the address fault above; the host names the zero addresses it hands Metal.

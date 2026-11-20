@@ -34,6 +34,10 @@ No rewriter cut, build-keyed host row or profile switch: everything below is the
 
 Work folder `<NSP folder>/010029D00E740000-work`: `host.sh` builds the host from a worktree into `d3host` (`REPO=`), `boot.sh <run> [seconds] [VAR=value …]` boots with window and HUD (`SAVE=<dir>` copies a save in, `D3HOST=` another host; every shader it compiles goes to the build's capture folder), `ctl.sh <run> <line> …` drives it through `DM_CTL` (`shot <name>`, `wait <s>`).
 
+The [`smoke.tsv`](smoke.tsv) regression route starts a new game and waits for the opening cutscene to finish before comparing the standing hangar view at 190 and 205 s. Shots at 120 and 140 s compared different moments of the moving camera and were unsuitable for regression comparisons. On an M4 Pro (macOS 27.2.1), update v327680 reached 12,301 frames in 210 s on both the baseline and the host with the general GL validation, clear, name-restoration and EGL-ownership fixes: 59.8 versus 59.7 fps, matching standing screenshots, no new red-log messages, and the same 66 translated shaders and MSL. Combat and later levels remain unverified.
+
+The [GL argument-buffer host](../../../docs/reference/rendering.md#gl-resources-exceed-the-direct-metal-sampler-table) also passes this route against main `5d54b885`: 66/66 shaders on both, matching standing screenshots, 12,300 frames reached, no red-log messages, and 59.9 versus 60.0 fps on the same M4 Pro with Xcode 27.2. This covers its named uniform blocks, vertex-only shadow programs and frame copies with the new resource layout; iPhone gameplay remains untested.
+
 - From a fresh save: A at the title (about 18 s), A Campaign, A New Game, A Doom 3, A Marine; A about 25 s later skips the intro movie; the hangar has loaded and its cutscene plays about 30 s after that. Plus is the pause menu (Save Game, Load Game).
 - `save_ref` in the work folder: a save and the autosave in Mars City Hangar. Its campaign menu has Continue Game first; d-pad Up moves the cursor (the left stick does not), Load Game lists the autosave first.
 - Play: the left stick moves, the right stick turns.

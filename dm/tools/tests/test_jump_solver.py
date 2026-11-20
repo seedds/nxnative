@@ -141,6 +141,21 @@ class Bounds(Solver):
         self.assertEqual(jump_solver._widen(old, new, r)[3:], (2, 5))
         self.assertEqual(jump_solver._widen(new, jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, 0, 9), r), jump_solver._default(r))
 
+    def test_guard_root_keeps_w_register_width_during_widening(self):
+        # Timespinner: sub w10,w14,#1; cmp w10,#3; b.hi. The taken interval cannot be inverted across the wrap.
+        m = jump_solver.M32
+        value = ('s', ('d', 0, 14, 32), (('add', -1, 32),))
+        state = jump_solver.State([value] * 31, {}, None)
+        self.assertTrue(jump_solver._refine(state, value, 10, ('cmp', 'hi', 3, 32, True), (4, m)))
+        narrowed = state.regs[10]
+        root = narrowed[1]
+        self.assertNotEqual(narrowed, value)
+        prior = jump_solver._mk(4, 100, jump_solver.FULL, 4, 100)
+        state.cons[root] = jump_solver._widen(prior, state.con(root), root)
+        widened = jump_solver._eval(state, narrowed)
+        assert widened is not None
+        self.assertEqual(widened.hi, m)
+
     def test_zero_extended_after_the_check(self):
         # Mario Tennis Aces main+0x35837c: cmp w8,#4; b.hi; and x18,x8,#0xffffffff
         t = [40 + 4 * i for i in range(5)]; self.table(t)
@@ -173,6 +188,11 @@ class Bounds(Solver):
             with self.subTest(guard=hex(guard)):
                 w[4] = guard
                 self.assertIsNone(self.site(w))
+        for bit in (0, 1):   # and wI,wS,#2^(t+1)-1; tbnz wS,#t: 2^t entries, the next one poisoned
+            with self.subTest(bit=bit):
+                t = [40 + 4 * i for i in range(1 << bit)]; self.table(t)
+                w[3:5] = [and_w(13, 17, bit + 1), tbnz(17, bit, 16, 40)]
+                self.assertEqual(self.site(w), t)
 
     def test_check_on_a_mask_made_in_another_block(self):
         # FINAL FANTASY CRYSTAL CHRONICLES Remastered main+0x2d103cc: and x6,x17,#0x7ff; cbz ... in the predecessor; and w18,w17,#0x7ff; cmp w18,#3; b.hi; ldrsw x18,[x27,x6,lsl #2]

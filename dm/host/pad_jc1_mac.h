@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-enum { JC1_HANDSHAKE_STEPS = 8 };
+enum { JC1_HANDSHAKE_STEPS = JC1_HANDSHAKE_SUBS + 1 };   // the subcommands, then the lights
 static const uint64_t JC1_STEP_NS = 60000000, JC1_WAIT_NS = 1000000000, JC1_WAIT_MAX_NS = 8000000000;
 #define JC1_RUMBLE_TICK_NS 15000000ull
 typedef struct jc1_pad jc1_pad;
@@ -85,26 +85,14 @@ static void jc1_lights(jc1_dev *d) {
     if (d->lights == pat) return;
     d->lights = pat; jc1_send(d, JC1_SUB_LEDS, &pat, 1);
 }
-// The order matters (report mode before the sensor, and the controller drops a subcommand that comes too soon): device info, standard full mode, EnableIMU, the vibration, the
-// factory IMU calibration read, the stick calibrations (factory, then the user's), then the player lights, 60 ms apart as the console's. Each step is its own main-queue block, so
-// the run loop (the front end's input among it) never waits on the controller; a device removed in between is no longer found by its id.
+// The console's handshake (jc1_handshake_report), then the player lights, 60 ms apart as the console's. Each step is its own main-queue block, so the run loop (the front end's
+// input among it) never waits on the controller; a device removed in between is no longer found by its id.
 static void jc1_step(uint64_t id) {
     jc1_dev *d = jc1_by_id(id);
     if (!d || !d->steps) return;
-    const uint8_t mode = JC1_INPUT_MODE_FULL, on = 1;
-    const uint8_t imu[5] = {(uint8_t)(JC1_SPI_IMU_CAL & 0xff), (uint8_t)(JC1_SPI_IMU_CAL >> 8 & 0xff), 0, 0, JC1_IMU_CAL_LEN};
-    const uint8_t fac[5] = {(uint8_t)(PAD_PRO_SPI_FACTORY & 0xff), (uint8_t)(PAD_PRO_SPI_FACTORY >> 8 & 0xff), 0, 0, PAD_PRO_SPI_FACTORY_LEN};
-    const uint8_t usr[5] = {(uint8_t)(PAD_PRO_SPI_USER & 0xff), (uint8_t)(PAD_PRO_SPI_USER >> 8 & 0xff), 0, 0, PAD_PRO_SPI_USER_LEN};
-    switch (JC1_HANDSHAKE_STEPS - d->steps--) {
-    case 0: jc1_send(d, JC1_SUB_DEVICE_INFO, NULL, 0); break;
-    case 1: jc1_send(d, JC1_SUB_INPUT_MODE, &mode, 1); break;
-    case 2: jc1_send(d, JC1_SUB_ENABLE_IMU, &on, 1); break;
-    case 3: jc1_send(d, JC1_SUB_VIBRATION, &on, 1); break;
-    case 4: jc1_send(d, JC1_SUB_SPI_READ, imu, sizeof imu); break;
-    case 5: jc1_send(d, JC1_SUB_SPI_READ, fac, sizeof fac); break;
-    case 6: jc1_send(d, JC1_SUB_SPI_READ, usr, sizeof usr); break;
-    default: d->lights = -1; jc1_lights(d); break;
-    }
+    uint8_t out[JC1_REPORT_LEN], sub = jc1_handshake_report(JC1_HANDSHAKE_STEPS - d->steps--, d->counter++, out);
+    if (sub) jc1_write(d, out, sizeof out, sub);
+    else { d->lights = -1; jc1_lights(d); }
     if (d->steps) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)JC1_STEP_NS), dispatch_get_main_queue(), ^{ jc1_step(id); });
 }
 static void jc1_handshake(jc1_dev *d) {
@@ -213,7 +201,7 @@ static void jc1_rumble_tick(void) {
             if (jc1_vibration_on(&v)) d->rumble_off = 3;
             else if (d->rumble_off > 0) d->rumble_off--;
             else continue;
-            uint8_t s[4], out[JC1_REPORT_LEN] = {0}; jc1_rumble_encode(&v, s); jc1_rumble_report(out, d->counter++, s);
+            uint8_t s[4], out[JC1_REPORT_LEN] = {0}; jc1_rumble_encode(&v, s); jc1_rumble_report(out, d->counter++, s, s);
             jc1_write(d, out, sizeof out, 0);   // padded to the output report's 49 bytes, as SDL sends it over Bluetooth
         }
     }

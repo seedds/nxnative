@@ -4,13 +4,28 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Telltale effect packs in ttarch2 archives
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`, with `shaders: 0`, on a Telltale Tool game whose RomFS is `.ttarch2` archives and whose `main` names `*.t3fxpack`. No BNSH, BAHS or control-section magic appears in the compressed files.
+- **Cause:** the archives use `NCTT` or `ZCTT` wrappers. A `ZCTT` block has version `0x10000`, a chunk count and `count + 1` 64-bit offsets, followed by raw-deflate chunks. The effect packs contain unaligned records: a code area, a 32-bit control length, then the control section. Compute code areas can be headerless. Existing BNSH and whole-GLSLC readers cannot reach these records.
+- **Fix:** `ttarch2_shaders` detects the wrapper by magic, checks compressed-block ranges and inflates shader archives identified by `.t3fxpack` in their initial directory data. It takes the code area immediately before each control-length word and retains only pairs accepted by `glslc_stage` and `check()`. No title, build or profile switch selects the reader.
+- **Check:** `test_ttarch2.py` covers deflate chunks, both wrappers, unaligned and headerless compute records, inconsistent control lengths, non-shader archives and file-scanner dispatch with the original shader bytes preserved. A real-archive A/B check against the pre-integration splitter finds zero keys without the reader and 24,243 with it; the keys exactly match [PR #1965](https://github.com/seedds/nxnative/pull/1965).
+- **Found on:** [Sam & Max: The Devil's Playhouse 1.8.0](../../dm/games/0100D5501857E000/README.md), a provisional Mac profile with a successful user playtest; episode completion and save/reload remain unvalidated.
+
+### RenderDragon material shaders
+
+- **Symptom:** the packer finds no loose SPIR-V files, although the game creates its modules from assets it ships.
+- **Cause:** RenderDragon places bgfx vertex and fragment v5 and compute v3 shader records in `renderer/materials/*.material.bin`. Its built-in graphics shader records are in the main NSO. Each record has a uniform table and a length-prefixed SPIR-V payload.
+- **Fix:** `vk_shaders.py` checks the material and bgfx headers, bounds-checks the uniform records and shader length, and requires the SPIR-V instruction stream to occupy that length exactly. It deduplicates by the same hash of the payload that the runtime uses. Compute rows include their workgroup size. Fragment shaders with three or more color outputs keep their normal MRT layout, which Metal cannot compile as dual-source blending.
+- **Found on:** [Minecraft for Nintendo Switch](../../dm/games/0100D71004694000/README.md) 1.26.62, with 1,784 unique graphics and 44 compute modules, including 11 built-in modules in `main`.
+
 ### L.A. Noire WAD and VFP shader arrays
 
 - **Symptom:** the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials.
 - **Cause:** `out.wad.nx` has a span table and a name table. Its `.vfp.nx` members store the GLSLC headers, control sections and code in separate arrays.
 - **Fix:** the splitter maps `out.wad.nx` with the `WAD\x01` signature and reads its `.vfp.nx` members. It checks the name table and shader member ranges, requires non-empty code and complete coverage of the VFP arrays, then passes the original control and code bytes to the existing shader checks. The VFP arrays give individual stages. Their vertex and pixel pairing is unknown.
 - **Check:** `dm/gfx/tests/test_noire_shader.py` checks keys and bytes in both RomFS forms, the signature and basename gate, and rejection of truncated directories, invalid names and malformed spans. On M4 Pro/macOS 27.2.1, the WAD yielded zero shaders with `a6aaf66d` and 8,933 with the reader. A full split with the reader and the startup captures found 8,968 shaders, all of which compiled for the Mac.
-- **Found on:** L.A. Noire 1.2 (`0100830004FB6000`), [NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386). The Mac build with the [direct `irs` service fix](services.md#direct-irs-connection-and-status-memory) loaded the 8,968-entry map. Captures show the officers' faces, uniforms and badges in the opening patrol-car scene and on foot at the first intersection. In “Upon Reflection,” the player confirmed that the alley characters' materials rendered correctly and the notebook pages were readable on the same M4 Pro/macOS 27.2.1 build.
+- **Found on:** [L.A. Noire 1.2](../../dm/games/0100830004FB6000/README.md#mac-validation) ([NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386)).
 
 ### Firaxis CIVBSF shader libraries
 
@@ -222,6 +237,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): 257 whole GLSLC outputs in the engine's technique files (`*.tec`: `resources_nx/release/master/shader/*.tec`, magic `TEC\0`, each output whole after a table of parameter names) beside 49 in `main`.
   - [Absolum](../../dm/games/0100A83022A22000/README.md): 163 GLSLC outputs in `shaders.nx.bin` (`rom:/shaders.nx.bin`: a u32 count, then per entry a u32 hash, a u32 size and one whole output): 162 unique shaders, 83 pixel and 79 vertex, every vertex shader paired with the single-stage cover ([Single-stage programs paired with a cover](#single-stage-programs-paired-with-a-cover)). Its `.xnb` effects are XNA's D3D9 effects, MOJOSHADER linked in, which the GPU does not run.
   - [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): 3,050 loose files in `data/shaders_binary` (`*.vs` / `*.ps`, one stage each, one output per file), read like FINAL FANTASY TACTICS' technique files; its vertex shaders are in two parts ([VertexA and VertexB parts merged into one vertex shader](#vertexa-and-vertexb-parts-merged-into-one-vertex-shader)).
+
+### SHARC archives in GIANTS Engine
+
+- **Symptom:** the shader split finds no shaders in main or the RomFS, which keeps them in `shared/shader_switch.sharc`.
+- **Cause:** SHARC v11 (`RAHS`) puts three entry tables after its `0x2c`-byte header, then the metadata and shader payloads. Each shader member contains one GLSLC output compressed with raw LZMA1, preceded by a five-byte property and dictionary header.
+- **Fix:** `shader_split.py` (`sharc_shaders`) checks the table and member spans, including the side records and length-prefixed names. The LZMA members omit end markers, so the reader checks each decoded GLSLC output against its declared length and requires it to pass the GLSLC parser. A short member fails the archive read even if earlier members decoded.
+- **Found on:** [Farming Simulator 26: Nintendo Switch Edition](../../dm/games/0100D440269E8000/README.md), update 1.0.1.0. Removing one to eight bytes from the final compressed member left its GLSLC output short even when the compressed size was adjusted to match.
 
 ### GLSLC outputs holding several stages
 

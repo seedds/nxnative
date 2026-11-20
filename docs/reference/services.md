@@ -852,7 +852,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Transfer memory.** Firmware commands 308 and 316 mapped their copied transfer-memory handle before returning. Injecting a mapping failure returned `0x19acd`. The host's SVC `0x15` creates a typed handle for the caller's backed region, size and owner permission. IRS holds an in-place service mapping for each camera until suspend, stop or applet deactivation. That mapping keeps the backing available independently of the guest handle's lifetime. With a disconnected camera, the image buffer receives no samples.
 - **Check:** `t_sf` covers valid and invalid processor starts and checks the shared status after those starts. `t_svc_memory` checks mapping metadata, physical-map conflicts, unmap/reuse and transfer-buffer backing. `t_system_event` checks typed transfer-handle lookup and close. Rayman Legends's legacy audio client called SVC `0x15` once in each 25-second baseline and candidate boot and reached its frame loop in both on M4 Pro/macOS 27.2.1. L.A. Noire 1.2 reached the frame loop with audio in the windowed startup test. Its command 307 request (player index 0, gain 2) returned `0` on the Mac host and in both firmware replays. A headless boot with the other start handlers enabled also reached the frame loop.
 - `t_sf` also covers the four state and control requests, including the untouched receive buffer, per-camera pending checks and function level, and release on suspend, stop and deactivation. `t_svc_memory` checks that closing the guest handle leaves the service mapping live and that releasing the mapping lets the backing be unmapped. L.A. Noire 1.2 reached the frame loop in a 25-second headless boot on M4 Pro/macOS 27.2.1 with the state and control handlers enabled. Its startup exercised commands 302, 304, 307 and 311.
-- **Found on:** L.A. Noire 1.2 ([NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386)).
+- **Found on:** [L.A. Noire 1.2](../../dm/games/0100830004FB6000/README.md) ([NX2Apple issue #1386](https://github.com/LNPANDY/NX2Apple/issues/1386)).
 
 ## Software keyboard and applets
 
@@ -1112,7 +1112,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the host's `UserPresence::Initialize` returned `RES_FAIL` like the other friends calls. The game's start-up takes the failure as fatal and stops before it mounts its save, so the loading screen waits for a scene that is never asked for. A presence is the game's own object until the friends service publishes it, so failing to set one up is not what an offline console reports.
 - **Fix:** `UserPresence::Initialize`, `SetDescription` and `Commit` succeed and publish nothing (`hle_friends.c`). The calls that need the service (friend lists, notification queue, online play sessions, invitations) still fail.
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_friends`.
-- **Found on:** Twelve Minutes (`0100CD701434C000`, Unity 2019.4.31f1 IL2CPP, SDK 12.3.7; seedds/nxnative#217). Its profile and game note are pending in [PR #2904](https://github.com/seedds/nxnative/pull/2904).
+- **Found on:** [Twelve Minutes](../../dm/games/0100CD701434C000/README.md) (`0100CD701434C000`, Unity 2019.4.31f1 IL2CPP, SDK 12.3.7; seedds/nxnative#217).
 
 ### The network account check is cancelled offline
 

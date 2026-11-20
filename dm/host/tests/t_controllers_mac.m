@@ -165,9 +165,17 @@ void dm_motion_set_hid(int p, const float a[3], const float r[3], uint64_t t) { 
 void dm_motion_clear_hid(int p) { (void)p; }
 static uint32_t joy_sides[DM_PLAYERS];
 static unsigned joy_releases[DM_PLAYERS][2];
+static jc1_sample joy_motion[DM_PLAYERS][2];
+static unsigned joy_motion_samples[DM_PLAYERS][2];
 void dm_joy_attach(int p, uint32_t sides) { joy_sides[p] = sides; }
 void dm_joy_set(int p, int side, uint64_t buttons, int32_t x, int32_t y) {
     assert(!buttons && !x && !y); joy_releases[p][side]++;
+}
+void dm_motion_set_joy(int p, int side, const float a[3], const float r[3], uint64_t t) {
+    assert(p >= 0 && p < DM_PLAYERS && side >= 0 && side < 2 && t);
+    jc1_sample *sample=&joy_motion[p][side];
+    memcpy(sample->acc,a,sizeof sample->acc); memcpy(sample->rot,r,sizeof sample->rot); sample->ns=t;
+    joy_motion_samples[p][side]++;
 }
 void dm_motion_clear_joy(int p, int side) { assert(p >= 0 && p < DM_PLAYERS && side >= 0 && side < 2); }
 static dm_motion motions[DM_PLAYERS]; static int motion_present[DM_PLAYERS];
@@ -365,6 +373,16 @@ static void test_original_joycon_registry(void) {
     front_controllers_window(1); assert(received[p] == DM_BTN_A && g_jc1_active);
     ctrl_prompt prompt={0}; int a,b;
     assert(front_controllers_applet_buttons(&prompt,&a,&b) && a && !b);
+    // A normal left Joy-Con report reaches the per-side motion sink unchanged.
+    jc1_unit_init(&left.unit); left.said=1;
+    uint8_t report[JC1_REPORT_LEN]={0x30, 1};
+    report[7]=report[10]=8; report[8]=report[11]=128; // both sticks centered
+    for (int k=0; k<JC1_IMU_SAMPLES; k++) report[14+12*k]=0x10; // +X acceleration: 1 G
+    jc1_report(&left,kIOReturnSuccess,NULL,kIOHIDReportTypeInput,0x30,report,sizeof report);
+    assert(joy_motion_samples[p][0] == JC1_IMU_SAMPLES && !joy_motion_samples[p][1]);
+    const jc1_sample *sample=&joy_motion[p][0];
+    assert(sample->acc[0] == 0 && sample->acc[1] == -1 && sample->acc[2] == 0);
+    assert(sample->rot[0] == 0 && sample->rot[1] == 0 && sample->rot[2] == 0 && sample->ns <= now_ns());
     jc1pad_detach(&pad); assert(!received[p] && !players && !sampled_sink[p]);
     g_jc1_pads=NULL; g_jc1_devs=NULL; CFRelease(g_jc1_manager); g_jc1_manager=NULL;
     g_slots=(pad_slots){0};

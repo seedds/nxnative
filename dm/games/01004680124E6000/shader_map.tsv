@@ -1,0 +1,7 @@
+# kind: evidence  Bloodstained: Curse of the Moon 2 shaders (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+vs_other.bin	0	vertex	dcc2a1113e97f865	/glslc_capture/3dbee2f31c9f4438.glslc#GLSLC@0x0
+ps_other.bin	0	pixel	ae2c9fb1ae0bb696	/glslc_capture/7ecde6926d18e020.glslc#GLSLC@0x0
+vs_other.bin	1	vertex	4b40768904055a3f	/glslc_capture/d57c22dc20d11f52.glslc#GLSLC@0x0
+ps_other.bin	1	pixel	d255f4f688829ab9	/glslc_capture/ee68541de78edbf1.glslc#GLSLC@0x0

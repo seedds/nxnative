@@ -14,6 +14,7 @@ typedef struct { const char *name; void *fn; } hle_ent;
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
 #define RES_OK 0u
 #define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
+enum { DM_APPLET_RESOURCE_USER_ID = 0x80 };   // identity of the game's applet in the single-process host
 
 // Guest address → host object side table
 void *objmap_get(const void *guest);
@@ -23,11 +24,11 @@ uint64_t now_ns(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
+void dm_host_lock(pthread_mutex_t *m);  // contention on a host mutex releases the guest core
 void dm_thread_service_connect(void);   // an HLE call that stands for connecting to a service on Horizon: threads started so far get to run (hle_thread.c)
 void dm_thread_service_request(void);   // an HLE call that is a blocking service request on Horizon: the caller gives up its core (hle_thread.c)
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
-void dm_guest_clock_advanced(void);
 uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
 void guest_clock_freeze(int on);
 void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation

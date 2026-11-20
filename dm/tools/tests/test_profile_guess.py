@@ -108,6 +108,44 @@ class HeapCheckAddressSpace(unittest.TestCase):
 
 
 class GlslSources(unittest.TestCase):
+    def test_fixed_function_detection_preserves_shader_and_api_evidence(self):
+        egl = {'eglCreateWindowSurface'}
+        for image, imports in ((b'glVertexPointer\0', egl), (b'', egl | {'glMatrixMode'}),
+                               (('glEnableClientState' + '\0').encode('utf-16-le'), egl)):
+            self.assertTrue(pg.gl_fixed_calls(image, imports))
+        self.assertFalse(pg.gl_fixed_calls(b'glVertexPointerSomething\0', egl))
+        shaderless = pg.shader_sources(egl, 0, [], 0, 0, gl_fixed_calls=True)
+        self.assertEqual(shaderless['graphics'][0], 'gl')
+        self.assertTrue(shaderless['gl_fixed'][0])
+        self.assertFalse(shaderless['gl_capture'][0])
+        for evidence in ('gl_names', 'gl_src', 'gl_files', 'nro_imports'):
+            with self.subTest(evidence=evidence):
+                with_shaders = pg.shader_sources(
+                    egl, 0, [], 0, 0, gl_fixed_calls=True,
+                    gl_names=int(evidence == 'gl_names'), gl_src=int(evidence == 'gl_src'), gl_files=int(evidence == 'gl_files'),
+                    nro_imports=frozenset({'glShaderSource'}) if evidence == 'nro_imports' else frozenset(),
+                )
+                self.assertEqual(with_shaders['graphics'][0], 'gl')
+                self.assertFalse(with_shaders['gl_fixed'][0])
+        for imports, api in ((egl | {'vkCreateInstance'}, 'vulkan'), (egl | {'nvnBootstrapLoader'}, 'nvn')):
+            other = pg.shader_sources(imports, 0, [], 0, 0, gl_fixed_calls=True)
+            self.assertEqual(other['graphics'][0], api)
+            self.assertFalse(other['gl_fixed'][0])
+
+    def test_survey_detects_a_managed_gl_loader(self):
+        managed = 'glShaderSource'.encode('utf-16-le')
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'main').write_bytes(b'NSO0')
+            manifest = root / 'romfs_manifest.tsv'
+            manifest.write_text('# Empty RomFS\n')
+            imports = [('eglCreateWindowSurface', False, 1)]
+            with mock.patch.object(pg, 'nso', return_value=(managed, '', [0, 0, 0], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', return_value=imports):
+                facts = pg.facts_of(root, manifest)
+            self.assertEqual(facts['gl_names'], 1)
+            self.assertEqual(pg.gl_name_count(b'\0glShaderSource\0' + managed, {'eglCreateWindowSurface'}), 2)
+            self.assertEqual(pg.gl_name_count(managed, set()), 0)
+
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)
 

@@ -23,7 +23,7 @@ if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_A
     sys.exit(f'[RED] Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {shlex.join([sys.executable, "-m", "pip", "install", "capstone>=5,<6"])}')
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
-import nso, nso_asm
+import nso, nso_asm, nso_syms
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
 # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
@@ -53,9 +53,8 @@ BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
 # SPLIT is also no lower than the lowest site the back area reaches with the same margin (BACK_MIN): when ro, data and bss after the text are large (Hello Kitty Party Land: 151.8 MB
 # of text, 98 MB more before BACK_OFF), a 16 MB front area would hand the back area sites more than 128 MB below it, so the front area's first pass takes the gap up to BACK_MIN instead
 TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
-# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072, 185 MB of text and 90 MB of ro, data and bss after it, so BACK_MIN is 148.5 MB), no split puts every site
-# in reach of its area: the front area keeps its 16 MB and its split, and the sites between the split and BACK_MIN take the back area, each branch that does not reach going through a hop
-# (reach_via(): one b in the alignment padding between two functions, within reach of both ends)
+# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072), branches that cannot reach their area go through a hop in function alignment padding.
+# The gap's sites are split between the two areas according to how many hop locations each area can reach. Putting them all at the back exhausts its padding on Minecraft 1.26.62.
 BACK_MIN, GAP = 0, False   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
@@ -358,6 +357,65 @@ def site_plain(ins):
     emit(STRX(S, T))                 # Always write back: capstone can miss reporting a write (the adds w18 instance)
     emit(LDP(S, T, 31, save - dlt)); emit(BX(here(), ins.address + 4))
     return start
+
+def select_x18(ins):
+    """A CSEL with one guest x18 source and a normal register destination."""
+    word = struct.unpack('<I', ins.bytes)[0]
+    rd, rn, rm, cond = word & 31, (word >> 5) & 31, (word >> 16) & 31, (word >> 12) & 15
+    if word & 0x7FE00C00 != 0x1A800000 or rd in (18, 31) or (rn == 18) == (rm == 18) or cond >= 14: return None
+    return rd, (rm if rn == 18 else rn), (cond ^ (rn == 18)), bool(word >> 31)
+
+
+# Only these instructions can carry a proof of a dead register across them. The first operand of a writer is a full xN/wN definition unless the instruction
+# also reads it (including as an address register). A wN definition zeros the high half of xN. Stores, compares and NOP can never end a register's lifetime.
+SELECT_WRITES = set('adr adrp add adds and ands asr bic csel eor ldr ldrb ldrh ldrsb ldrsh ldrsw ldur lsl lsr mov movn movz mul orn orr sbfx sub subs ubfx'.split())
+SELECT_READS = {'cmp', 'cmn', 'tst', 'nop', 'str', 'strb', 'strh', 'stur', 'sturb', 'sturh'}
+
+
+def select_scratch(at, by_address, function_end, rd):
+    """One dead AAPCS64 temporary for a select, or None. The old value must be overwritten before a read on every path, or reach a normal return
+    inside the same unwind function. Keep x0–x8, callee-saved registers and LR out of the search. Calls, unknown instructions, outgoing branches and
+    an exhausted search budget give no proof."""
+    budget = 64
+
+    def dead_after(pc, pending):
+        nonlocal budget
+        if not pending or budget == 0 or pc >= function_end or (ins := by_address.get(pc)) is None: return set()
+        budget -= 1
+        m = ins.mnemonic
+        if m == 'ret' and not ins.op_str: return pending
+        if m == 'b': return dead_after(ins.operands[-1].imm, pending)
+        if m.startswith('b.') or m in ('cbz', 'cbnz', 'tbz', 'tbnz'):
+            pending = pending - regs_in(ins)
+            return dead_after(pc + 4, pending) & dead_after(ins.operands[-1].imm, pending)
+        if m not in SELECT_WRITES and m not in SELECT_READS: return set()
+        dead = set()
+        if m in SELECT_WRITES and not ins.writeback:
+            dst, _, sources = ins.op_str.partition(',')
+            dst_n = num(dst)
+            if dst_n in pending:
+                reads, _ = regset(ins)
+                if not any(num(name) == dst_n for name in reads | set(re.findall(r'\b[xw]\d+\b', sources))):
+                    dead.add(dst_n)
+        return dead | dead_after(pc + 4, pending - regs_in(ins))
+
+    return min(dead_after(at + 4, set(range(9, 18)) - {rd}), default=None)
+
+
+def site_select(ins, args, temp):
+    """Split CSEL on its original flags. Only the arm selecting x18 needs the key page. In that arm the destination's old value is dead,
+    so the destination and one dead temporary can load K18 without touching the guest stack."""
+    rd, other, other_cond, wide = args
+    start, skip = here(), len(patch)
+    emit(NOP)  # filled with the conditional branch once the other arm's address is known
+    emit(MRS_TPIDRRO(temp)); emit_slot_addr(temp, rd, 'K18')
+    emit(LDRX(rd, temp) if wide else 0xB9400000 | (temp << 5) | rd)  # ldr wD,[xT] zero-extends the result
+    emit(BX(here(), ins.address + 4))
+    struct.pack_into('<I', patch, skip, BEQ(start, here()) | other_cond)
+    if not wide or rd != other: emit(MOVX(rd, other) if wide else MOVX(rd, other) & 0x7FFFFFFF)
+    emit(BX(here(), ins.address + 4))
+    return start
+
 
 def site_sp(ins):
     """Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
@@ -1182,13 +1240,21 @@ def half_pads(fa, fb, insl, at, base):
     tgt, _ = table_at(fa, fb, insl, at)
     if not tgt or any(t < base or (t - base) % 4 for t in tgt): return None
     return max(t - base for t in tgt) // 4 + 1
+selects = {}
+function_ends = dict(nso_code.fde_ranges(IMG))
 for fa, fb in funcs:
     insl = disasm_fn(fa, fb)
+    by_address = None
     ws = find_windows(insl)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
         if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
     for j, ins in enumerate(insl):
+        if ins.mnemonic == 'csel' and fa in function_ends and ins.address < function_ends[fa] <= fb and ins.address not in done:
+            if args := select_x18(ins):
+                if by_address is None: by_address = {p.address: p for p in insl}
+                temp = select_scratch(ins.address, by_address, function_ends[fa], args[0])
+                if temp is not None: selects[ins.address] = args, temp
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
             # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
@@ -1278,6 +1344,20 @@ if new_mid:
             dest = at + 4 * d
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
+if GAP:
+    _holes = hop_holes()
+    front_holes = bisect.bisect_right(_holes, PATCH_OFF + REACH)
+    back_holes = len(_holes) - bisect.bisect_left(_holes, BACK_MIN - 0x100000)
+    gap_sites = sorted(a for a in (
+        *(w[0].address for w in windows), *(p[0][0][0].address for p in retries),
+        *(a for a in kinds if a not in done),
+    ) if SPLIT <= a < BACK_MIN)
+    if gap_sites and front_holes:
+        toward_front = len(gap_sites) * front_holes // (front_holes + back_holes)
+        SPLIT = gap_sites[toward_front] if toward_front < len(gap_sites) else BACK_MIN
+        print(f'{NAME}: {len(gap_sites)} sites in the branch gap, split at {SPLIT:#x} ({front_holes} front and {back_holes} back padding words)', flush=True)
+
+
 def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))
 for wseg in windows:
     use_area(wseg[0].address); st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
@@ -1297,6 +1377,7 @@ for a in sorted(kinds):
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
         elif casp_pair18(ins): st = site_casp(ins); stat('casp')
+        elif a in selects: st = site_select(ins, *selects[a]); stat('select')
         elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
@@ -1787,8 +1868,32 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) 
 else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
+def movie_native_color_keys():
+    # NintendoSDK_movie 7.3.2 rotates hw-buf-ColorSpace right by five, then accepts values 1 through 4 as-is.
+    # SDK 4.4.1 adds one. Match the reviewed converter at its export and verify what key the result is written to.
+    key = b'nv12-colorspace\0'
+    symbol = '_ZN5movie25convertMessageToMediaDataERKN7android2spINS0_8AMessageEEEPNS_9MediaDataE'
+    if IMG.find(key, RO_OFF, DATA_OFF) < 0 or IMG.find(symbol.encode() + b'\0', RO_OFF, DATA_OFF) < 0:
+        return False
+    start, size = nso_syms.defined(IMG).get(symbol, (0, 0))
+    if not 0 < start < start + size <= TEXT_END:
+        return False
+    signature = struct.pack('<4I', 0x13881508, 0x51000509, 0x7100113f, 0x1a9f3102)
+    at = ORIG_TEXT.find(signature, start, start + size)
+    if at < 0 or at % 4 or at + 24 > start + size or ORIG_TEXT.find(signature, at + 4, start + size) >= 0:
+        return False
+    pair = list(md.disasm(ORIG_TEXT[at + 16:at + 24], at + 16))
+    if len(pair) != 2 or pair[0].mnemonic != 'adrp' or pair[1].mnemonic != 'add':
+        return False
+    page, low = pair[0].operands, pair[1].operands
+    if (len(low) != 3 or low[2].type != ARM64_OP_IMM or low[2].shift.value or
+            any(md.reg_name(op.reg) != 'x1' for op in (page[0], low[0], low[1]))):
+        return False
+    target = page[1].imm + low[2].imm
+    return RO_OFF <= target < DATA_OFF and IMG[target:target + len(key)] == key
+
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, monolith_fps.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, nso_syms.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, monolith_fps.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
@@ -1802,6 +1907,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n# UE_FIXED_RATE_FLAG\t{UE_FIXED_FLAG:#x}\n')   # Unreal's GEngine, UEngine::FixedFrameRate and bUseFixedFrameRate (ue_fixed_rate.py)
     if 'target' in UNITY_FPS: f.write(f"# UNITY_TARGET_FPS\t{UNITY_FPS['target']:#x}\n")   # Unity's Application.targetFrameRate (unity_fps.py)
     if 'qs' in UNITY_FPS: f.write(''.join(f'# UNITY_QS_{k}\t{v:#x}\n' for k, v in zip(('PTR', 'IDX', 'ARR', 'SIZE', 'VSYNC'), UNITY_FPS['qs'])))   # its QualitySettings' vSyncCount (unity_fps.py)
+    if movie_native_color_keys(): f.write('# MOVIE_NATIVE_COLOR_KEYS\t0x1\n')
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
     if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
         assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'

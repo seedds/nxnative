@@ -5,10 +5,13 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(REPO / 'dm/tools'), str(REPO / 'dm/gfx/tools')]
+sys.path[:0] = [str(REPO / 'dm/tools'), str(REPO / 'dm/gfx/tools'), str(REPO / 'dm/games')]
 import gl_shaders   # noqa: E402
+import profile_guess as pg   # noqa: E402
+import romfs_image   # noqa: E402
 
 PREFIX = ('#version 150\n#define PC\n'
           'vec4 tex2D( sampler2D sampler, vec2 texcoord ) { return texture( sampler, texcoord.xy ); }\n'
@@ -75,6 +78,36 @@ class GameNames(unittest.TestCase):
 
 
 class Sources(unittest.TestCase):
+    def test_packer_and_translator_use_the_same_standalone_pairs(self):
+        vertex = b'attribute vec4 p;\nvoid main() { gl_Position = p; }\n'
+        fragment = b'precision mediump float;\nvoid /* entry */ main (void) { gl_FragColor = vec4(1.0); }\n'
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'ExeFS').mkdir()
+            image = root / 'RomFS.img'
+            # These are distinct RomFS directories even on a case-insensitive Mac volume.
+            entries = [[b'', None, True, 1, 5],
+                       [b'Effect', None, True, 6, 1], [b'effect', None, True, 7, 1],
+                       [b'love', None, True, 8, 1], [b'snippets', None, True, 9, 2], [b'standalone', None, True, 11, 0],
+                       [b'vertex.vs', vertex, False, 0, 0], [b'frag.fs', fragment, False, 0, 0], [b'CRT.fs', fragment, False, 0, 0],
+                       [b'frag.fs', b'// void main() {}\nvoid main();\n', False, 0, 0], [b'vertex.vs', vertex, False, 0, 0]]
+            managed = 'glShaderSource'.encode('utf-16-le')
+            imports = [('eglCreateWindowSurface', False, 1)]
+            with mock.patch.object(pg, 'nso', return_value=(managed, '', [0, 0, 0], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', return_value=imports):
+                Path(romfs_image.write(entries, str(image), lambda data, out: out.write(data))).replace(image)
+                romfs = pg.source(root)
+                capture = pg.build_sources(root / 'ExeFS', romfs, ['main'])
+                self.assertEqual(capture['graphics'][0], 'gl')
+                self.assertTrue(capture['gl_capture'][0])
+                self.assertEqual(list(gl_shaders.sources([romfs])), [])
+
+                entries[5][4] = 2
+                entries.extend([[b'fragShader.FS', fragment + b'\0', False, 0, 0], [b'vertexShader.vs', vertex, False, 0, 0]])
+                Path(romfs_image.write(entries, str(image), lambda data, out: out.write(data))).replace(image)
+                offline = pg.build_sources(root / 'ExeFS', romfs, ['main'])
+                self.assertFalse(offline['gl_capture'][0])
+                self.assertEqual(list(gl_shaders.sources([romfs])), [(fragment, 'frag', '/standalone/fragShader.FS'), (vertex, 'vert', '/standalone/vertexShader.vs')])
+
     def test_glsl_files_are_read_with_no_stage(self):   # Mega Man Legacy Collection: shaders/nx/*.glsl, whose names say nothing of the stage
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'shaders').mkdir()
@@ -170,6 +203,18 @@ class Translate(unittest.TestCase):
             self.assertIsInstance(r, tuple, r)
             self.assertIn('t:texture=0:1:sampler2D', r[1])
             self.assertTrue(any(x.startswith('u:sample=') for x in r[1]), r[1])
+
+    def test_legacy_desktop_varyings_link_after_macro_expansion(self):
+        vert = b'#version 120\nattribute vec4 p;\n#define COLOR gl_FrontColor\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_Position = p; COLOR = p; TEX(0) = p; }\n'
+        frag = b'#version 110\n#define COLOR gl_Color\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_FragData[0] = COLOR * TEX(0); }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            for source, stage in ((vert, 'vert'), (frag, 'frag')):
+                r = gl_shaders.translate(source, stage, '1864' + stage, tmp)
+                self.assertIsInstance(r, tuple, r)
+                msl = Path(r[0]).read_text()
+                self.assertIn('[[user(dm_LegacyColor)]]', msl)
+                self.assertIn('[[user(dm_LegacyTexCoord0)]]', msl)
+                if stage == 'frag': self.assertIn('[[color(0)]]', msl)
 
 
 class MainStrings(unittest.TestCase):

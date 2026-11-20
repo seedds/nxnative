@@ -139,6 +139,21 @@ static void copied_read_end(void) {
     uint64_t r[32] = {copy}; assert(svc_thread(0x16, r) && !r[0]);
     g_lock(); assert(!h_peek(copy, O_EVENT_R)); g_unlock();
 }
+static void transfer_memory_handles(void) {
+    uint32_t handle = hle_new_transfer_memory((hle_transfer_memory){0x4000, 0x1000, 0});
+    uint32_t other = hle_new_transfer_memory((hle_transfer_memory){0x8000, 0x2000, 1});
+    uint32_t event = hle_new_event(NULL);
+    hle_transfer_memory memory;
+    assert(handle && other && event && handle != other && other != event && handle != event);
+    assert(!hle_get_transfer_memory(event, &memory));
+    assert(hle_get_transfer_memory(handle, &memory) && memory.address == 0x4000 && memory.size == 0x1000 && memory.owner_perm == 0);
+    uint64_t regs[32] = {handle};
+    assert(svc_thread(0x16, regs) && !regs[0]);
+    assert(!hle_get_transfer_memory(handle, &memory));
+    assert(hle_get_transfer_memory(other, &memory) && memory.address == 0x8000 && memory.size == 0x2000 && memory.owner_perm == 1);
+    regs[0] = other; assert(svc_thread(0x16, regs) && !regs[0]);
+    regs[0] = event; assert(svc_thread(0x16, regs) && !regs[0]);
+}
 // Resolve exactly the SDK imports the service watcher calls, through the host's normal force-hook table.
 static void *purchase_hook(const char *name) {
     extern const struct mach_header_64 _mh_execute_header;
@@ -182,8 +197,8 @@ static void purchased_event(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     struct rlimit lim = {0, 0}; setrlimit(RLIMIT_CORE, &lim);
-    void (*tests[])(void) = {duplicate, capacity, reuse, rebind, host_signal, copied_read_end, purchased_event};
-    const char *names[] = {"duplicate vi registration", "rapid vi event replacement", "storage and handle reuse by another service", "vi rebind at reused storage", "host skip and guest lazy binding", "copied read end of a bound event", "offline purchased-item watcher"};
+    void (*tests[])(void) = {duplicate, capacity, reuse, rebind, host_signal, copied_read_end, purchased_event, transfer_memory_handles};
+    const char *names[] = {"duplicate vi registration", "rapid vi event replacement", "storage and handle reuse by another service", "vi rebind at reused storage", "host skip and guest lazy binding", "copied read end of a bound event", "offline purchased-item watcher", "typed transfer-memory handles"};
     int failed = 0;
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         pid_t pid = fork(); assert(pid >= 0);

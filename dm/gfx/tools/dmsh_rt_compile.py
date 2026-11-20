@@ -16,7 +16,6 @@ import subprocess
 
 import dmsh_abi as abi
 import dmsh_atomic
-import dmsh_fetch
 import dmsh_reflect
 import dmsh_rewrite
 import dmsh_wide
@@ -155,7 +154,7 @@ def rewrite(source: str) -> str:
     """The shared memory/resource rewrites applicable to native RT functions."""
     source = dmsh_atomic.check_msl(source)
     for transform in (dmsh_rewrite.precise, dmsh_rewrite.bit0_mask,
-                      dmsh_fetch.select_guards, dmsh_rewrite.mul_extended, dmsh_rewrite.float_add_msl,
+                      dmsh_rewrite.select_guards, dmsh_rewrite.mul_extended, dmsh_rewrite.float_add_msl,
                       dmsh_rewrite.gather_offsets, dmsh_rewrite.hmma_msl, dmsh_rewrite.shared_store_msl,
                       dmsh_reflect.pool_arrays, dmsh_wide.wide_loads, dmsh_rewrite.tg_fence,
                       dmsh_rewrite.border_emu, dmsh_rewrite.uniform_tests):

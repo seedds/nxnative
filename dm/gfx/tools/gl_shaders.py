@@ -6,6 +6,7 @@
 #   · an NSO (a file that starts with NSO0, the game's main): every NUL-terminated string that starts with '#version' (its built-in post effects, movie and shadow shaders);
 #   · capture folders (the Mac host's DM_GL_CAPTURE): <key>.vert / <key>.frag, what the game really compiled, for sources it puts together at run time.
 #   · loose source files: *.vert / *.frag, and *.glsl, whose name says nothing of its stage (Mega Man Legacy Collection's shaders/nx/*.glsl, read and compiled as they are).
+#     libGDX's *.vs / *.fs are read where the directory has a complete source of each stage (Slay the Spire).
 # Per shader:
 #   · key = sha256(the source text up to its first NUL)[:16] (hex), as the host hashes the strings glShaderSource gets; the Metal function is gl_<key>_v or gl_<key>_f;
 #   · the stage: a capture's extension, an archive file's _vp / _fp; a string in main or a .glsl file says nothing of its stage, so it is translated as each stage that compiles (one of
@@ -25,6 +26,7 @@
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
+#        gl_shaders.py --capture-shader <vert|frag> <source file> <out dir>   (one Mac shader for the capture host)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -55,6 +57,24 @@ def nso_strings(path):
     texts = (text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img))
     return [t for t in texts if GL_ENTRY.search(t)]
 
+
+PAIR_STAGES = {'.vs': 'vert', '.fs': 'frag'}
+GL_COMMENTS = re.compile(rb'/\*.*?\*/|//[^\r\n]*', re.DOTALL)
+GL_MAIN_DEF = re.compile(rb'\bvoid\s+main\s*\(\s*(?:void\s*)?\)\s*\{')
+
+
+def paired_sources(folder, names):
+    """Find standalone vertex and fragment sources in one directory. The packer uses the same evidence before skipping capture."""
+    candidates = {name: PAIR_STAGES[ext] for name in names if (ext := os.path.splitext(name)[1].lower()) in PAIR_STAGES}
+    if len(set(candidates.values())) != 2: return {}   # LÖVE's .fs files, for example, are assembled at run time
+    found = {}
+    for name, stage in candidates.items():
+        with open(os.path.join(folder, name), 'rb') as f: source = text_of(f.read())
+        if not re.search(rb'[\x00-\x08\x0e-\x1f\x7f]', source) and GL_MAIN_DEF.search(GL_COMMENTS.sub(b' ', source)):
+            found[name] = (source, stage)
+    return found if len({stage for _, stage in found.values()}) == 2 else {}
+
+
 def sources(roots):
     """(source bytes, stage or None, where) for every shader in the input paths"""
     for r in roots:
@@ -64,6 +84,7 @@ def sources(roots):
                 for k, s in enumerate(nso_strings(r)): yield s, None, f'{os.path.basename(r)}#{k}'
             continue
         for d, _, fs in os.walk(r):
+            paired = paired_sources(d, fs)
             for fn in sorted(fs):
                 p = os.path.join(d, fn)
                 if fn.endswith('.mvgl'):
@@ -77,6 +98,9 @@ def sources(roots):
                     with open(p, 'rb') as f: source = text_of(f.read())
                     ext = fn.rsplit('.', 1)[1]
                     yield source, None if ext == 'glsl' else ext, '/' + os.path.relpath(p, r)
+                elif fn in paired:
+                    source, stage = paired[fn]
+                    yield source, stage, '/' + os.path.relpath(p, r)
 
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
@@ -193,6 +217,28 @@ def es100(t, stage, renamed=None):
     t = rename_identifier(t, 'texture', 'dm_texture', renamed, keep_calls=True)
     return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
 
+def legacy_desktop_io(t, stage):
+    """Lower the compatibility varyings used by programmable GLSL 1.10/1.20 stages after expanding preprocessor macros."""
+    direction = 'out' if stage == 'vert' else 'in'
+    color = 'gl_FrontColor' if stage == 'vert' else 'gl_Color'
+    secondary = 'gl_FrontSecondaryColor' if stage == 'vert' else 'gl_SecondaryColor'
+    decl = []
+    for old, name, ty in ((color, 'dm_LegacyColor', 'vec4'), (secondary, 'dm_LegacySecondaryColor', 'vec4'),
+                          ('gl_FogFragCoord', 'dm_LegacyFog', 'float')):
+        t, n = re.subn(rf'\b{old}\b', name, t)
+        if n: decl.append(f'{direction} {ty} {name};')
+    arrays = [('gl_TexCoord', 'dm_LegacyTexCoord', f'{direction} vec4')]
+    if stage == 'frag': arrays.append(('gl_FragData', 'dm_LegacyFragData', 'out vec4'))
+    for old, name, qualifier in arrays:
+        pattern = rf'\b{old}\s*\[\s*(0|[1-9][0-9]*)\s*\]'
+        for i in sorted(set(re.findall(pattern, t)), key=int):
+            layout = f'layout(location = {i}) ' if old == 'gl_FragData' else ''
+            decl.append(f'{layout}{qualifier} {name}{i};')
+        t = re.sub(pattern, lambda m, prefix=name: prefix + m[1], t)
+    # The promoted source starts with the ES version and two precision declarations; insert after those.
+    head, precision_float, precision_int, body = t.split('\n', 3)
+    return '\n'.join((head, precision_float, precision_int, *decl, body))
+
 # The game's names that the rewrite renames (es100, fixups): the table rows give them back as the game wrote them, since the host finds attributes, uniforms and samplers by the
 # game's name (glGetAttribLocation, glGetUniformLocation); the key is the hash of the game's own source
 def game_names(f, renamed):
@@ -239,12 +285,15 @@ def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1'); renamed = {}
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
-    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage, renamed).encode('latin1')
+    desktop_legacy = bool(v and v.group(1) in ('110', '120'))
+    if not v or v.group(1) == '100' or desktop_legacy:
+        src = es100(t.replace(v.group(0), '', 1) if v else t, stage, renamed).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
+    if desktop_legacy: pre = legacy_desktop_io(pre, stage)
     open(g, 'w').write(fixups(pre, stage, renamed))
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
@@ -314,17 +363,37 @@ def metallib(msls, out, sdk, extra):
     subprocess.run(['xcrun', '-sdk', sdk, 'metallib', *airs, '-o', lib], check=True)
     return lib
 
+def capture_shader(stage, path, out):
+    if stage not in ('vert', 'frag'):
+        red(f'invalid capture stage: {stage}')
+    with open(path, 'rb') as f:
+        src = text_of(f.read())
+    key = hashlib.sha256(src).hexdigest()[:16]
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        result = translate(src, stage, key, tmp)
+        if isinstance(result, str):
+            red(f'{key}.{stage}: {result}')
+        msl, fields = result
+        metallib([msl], out, 'macosx', [MAC_MIN_FLAG])
+        with open(os.path.join(out, 'gl_shaders.tsv'), 'w') as f:
+            f.write(TABLE_ABI + '\n' + '\t'.join((key, stage, ' '.join(fields))) + '\n')
+
 def main():
     a = sys.argv[1:]
+    if len(a) == 4 and a[0] == '--capture-shader':
+        return capture_shader(*a[1:])
     ios = None
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
-    if len(a) < 2: sys.exit('usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]')
+    fixed = '--fixed-function' in a
+    if fixed: a.remove('--fixed-function')
+    if len(a) < 2: sys.exit('usage: gl_shaders.py <input path>... <out dir> [--ios <dir>] [--fixed-function]')
     roots, out = a[:-1], a[-1]
     items, seen_src = [], set()
     for s, st, where in sources(roots):
         if (s, st) in seen_src: continue
         seen_src.add((s, st)); items.append((s, st, where))
-    if not items: red(f'no GLSL shaders in {" ".join(roots)}')
+    if fixed and items: red('GLSL sources found in a fixed-function build')
+    if not fixed and not items: red(f'no GLSL shaders in {" ".join(roots)}')
     with tempfile.TemporaryDirectory() as tmp:
         with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = [r for rs in ex.map(lambda it: one(it, tmp), items) for r in rs]
         seen, failed = {}, []
@@ -333,14 +402,23 @@ def main():
             if (key, stage) not in seen: seen[(key, stage)] = (stage, f, msl, where)
         for key, where, errs in failed:
             if not any(k == key for k, _ in seen): print(f'[RED] {where} ({key}) does not translate: {" / ".join(errs)}')
+        if not fixed and not seen: red('no GLSL shaders translated')
         tsv = [TABLE_ABI, '# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
-               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs',
-               '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
-               + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
+               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs']
+        if fixed:
+            tsv.append('# Fixed-function OpenGL uses the host Metal shaders')
+        else:
+            spirv = subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)
+            tsv.append('# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
+                       + ' '.join((spirv.stdout + spirv.stderr).split()))
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
         dirs = [(os.path.join(out, 'gl'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', list(IOS_FLAGS)))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler
         msls = [v[2] for v in seen.values()]
+        if fixed:
+            placeholder = os.path.join(tmp, 'empty.metal')
+            with open(placeholder, 'w') as f: f.write('#include <metal_stdlib>\n')
+            msls.append(placeholder)
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
             open(os.path.join(d, 'gl_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')

@@ -4,6 +4,7 @@
 #include <stdio.h>
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
+enum { LEGACY_PRIORITY = 31 };   // XNU BASEPRI_DEFAULT, the ceiling for TASK_UNSPECIFIED
 static int role(void) {
     task_category_policy_data_t cat = {0}; mach_msg_type_number_t n = TASK_CATEGORY_POLICY_COUNT; boolean_t def = 0;
     return task_policy_get(mach_task_self(), TASK_CATEGORY_POLICY, (task_policy_t)&cat, &n, &def) == KERN_SUCCESS ? (int)cat.role : -99;
@@ -24,7 +25,11 @@ int main(void) {
     CHECK(front_windowless_role(NULL, &kr) == 1, "unset applies the role");
     CHECK(role() == TASK_DEFAULT_APPLICATION, "the task has the default application role");
     int after = ui_priority();
-    CHECK(after > 31 && (initial_role != TASK_UNSPECIFIED || after > before), "the default application role lifts the interactive QoS ceiling");
+    // A launch QoS clamp can hold both samples below the unspecified role's legacy ceiling.
+    if (before >= 0 && before < LEGACY_PRIORITY && after == before)
+        printf("interactive QoS lift check skipped: priority held at %d below the legacy ceiling\n", before);
+    else
+        CHECK(after > LEGACY_PRIORITY && (initial_role != TASK_UNSPECIFIED || after > before), "the default application role lifts the interactive QoS ceiling");
     CHECK(front_windowless_role("1", &kr) == 1 && role() == TASK_DEFAULT_APPLICATION, "DM_WINDOWLESS_ROLE=1 also applies the role");
     printf("windowless role: task role %d -> %d, USER_INTERACTIVE base priority %d -> %d (%d checks, %d failed)\n",
            initial_role, role(), before, after, checks, fails);

@@ -187,6 +187,41 @@ def screen_shape(ctx):
         emit(B(here(), dev_site + 4))
         fs_put(dev_site, [B(dev_site, start)], 'Device projection aspect and Vert+ fovyTan scaled by (16/9) / aspect when screen aspect is active')
 
+    # The movie's draw (main+0x3b5c710, the title screen's background and the opening): its sead::Viewport at x29 - 0x28 (min x, y at +0x8, +0xc, max x, y at +0x10, +0x14) is
+    # the whole frame buffer, so the 16:9 movie (1920x1080, 2560x1440 after the upscale) filled a 2560x1920 frame at 4:3, 1.33x taller (an oval moon). At +0x64, after the viewport
+    # is built and before main+0x2846e0 applies it (viewport and scissor), a rect taller than 16:9 becomes 16:9 about its centre; the frame is already cleared to black above and
+    # below. x16 / x17 and s0-s7 are free there (x8 / x9 are loaded by the original instruction, the next call's arguments after it)
+    movie_fn = ctx.others.get('movie draw')
+    if movie_fn is not None:
+        movie_site = movie_fn + 0x64
+        fs_site(movie_site, '69a241a9')   # ldp x9, x8, [x19, #0x18]
+        start = here()
+        emit(0xa941a269)
+        emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (0xb9404a11,   # ldr w17, [x16, #0x48]   oh (0 = 16:9)
+                  0x34000271,   # cbz w17, out
+                  0xd100a3b1,   # sub x17, x29, #0x28     the viewport
+                  0x2d410620,   # ldp s0, s1, [x17, #0x8]
+                  0x2d420e22,   # ldp s2, s3, [x17, #0x10]
+                  0x1e203844,   # fsub s4, s2, s0         width
+                  0x1e213865,   # fsub s5, s3, s1         height
+                  0x52a7e210,   # mov w16, #0x3f100000    9 / 16
+                  0x1e270206,   # fmov s6, w16
+                  0x1e260886,   # fmul s6, s4, s6         the 16:9 height
+                  0x1e2620a0,   # fcmp s5, s6
+                  0x5400012d,   # b.le out                not taller
+                  0x1e2638a7,   # fsub s7, s5, s6
+                  0x52a7e010,   # mov w16, #0x3f000000    0.5
+                  0x1e270204,   # fmov s4, w16
+                  0x1e2408e7,   # fmul s7, s7, s4         half the extra height
+                  0x1e272821,   # fadd s1, s1, s7
+                  0x1e273863,   # fsub s3, s3, s7
+                  0xbd000e21,   # str s1, [x17, #0xc]
+                  0xbd001623):  # str s3, [x17, #0x14]
+            emit(w)
+        emit(B(here(), movie_site + 4))   # out
+        fs_put(movie_site, [B(movie_site, start)], 'Movie draw viewport kept 16:9 about its centre on a taller screen when screen aspect is active')
+
 
     # Layout2 pane matrix (main+0x14e9980): for fullscreen PicturePanes (width >= 1000, height >= 700, ~16:9), scales Y matrix row by state +0x5c (k = (16/9) / aspect) so full-screen faders cover the expanded canvas without letterboxing.
     calc_fn = ctx.others.get('layout calc matrix')
@@ -262,7 +297,8 @@ MATCH_FRAME_STEP = {'main': [
                 'camera update': {'size': 0x1648, 'fingerprints': ['66a50abf2237dee694c40d6a2371071d62e91379d40b643869d680f597bfab02']},
                 'device proj': {'size': 0x3b0, 'fingerprints': ['ab5c2809cdbc7f9e30b966872350ac69301aa246a9169610d038ea9480bde910']},   # main+0x3485cc0
                 'layout calc matrix': {'size': 0x208, 'fingerprints': ['0e057804c3c8c7d14ff833983335d834e0bd7505e05263e9c065472b9d206c74']},   # main+0x14e9980
-                'pane global matrix': {'size': 0x46c, 'fingerprints': ['4eba5ac4bdf9d227e40612fa426d39fbe1abaf00fc069d5d6ba382809b5c5a5c']}}},   # main+0x152caa0
+                'pane global matrix': {'size': 0x46c, 'fingerprints': ['4eba5ac4bdf9d227e40612fa426d39fbe1abaf00fc069d5d6ba382809b5c5a5c']},   # main+0x152caa0
+                'movie draw': {'size': 0x158, 'fingerprints': ['cc1ca04feb1ca4e553a6c7a4f36f99b13f56977185eea8ef5cd8dd3dbbdcdbcd']}}},   # main+0x3b5c710
 ]}
 
 # The movie player's pictures per frame. Once a frame the player's update (main+0x3b5ca60 on v131072) adds the frame's time (the time object's +0x18, the frame ratio / 60 s, times

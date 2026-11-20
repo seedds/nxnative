@@ -92,7 +92,7 @@ def is_image(path):
 
 
 def _resolve(path):
-    p = _os.path.abspath(_os.fsdecode(path))
+    p = _os.path.abspath(_os.fsdecode(path)).replace(_os.sep, '/')
     parts = p.split('/')
     for i, part in enumerate(parts):
         if not part.endswith('.img'): continue
@@ -115,7 +115,7 @@ _fd_ranges = {}
 
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        self.fd = _os.open(image.path, _os.O_RDONLY | getattr(_os, 'O_BINARY', 0))
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)
@@ -129,7 +129,10 @@ class _File(io.RawIOBase):
         self.pos = pos; return pos
     def readinto(self, buffer):
         size = min(len(buffer), max(0, self.length - self.pos))
-        data = _os.pread(self.fd, size, self.start + self.pos)
+        if hasattr(_os, 'pread'): data = _os.pread(self.fd, size, self.start + self.pos)
+        else:
+            _os.lseek(self.fd, self.start + self.pos, _os.SEEK_SET)
+            data = _os.read(self.fd, size)
         buffer[:len(data)] = data; self.pos += len(data)
         return len(data)
     def close(self):

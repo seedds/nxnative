@@ -264,10 +264,16 @@ static hid_pad *hidpad_unlink(hid_pad **list, IOHIDDeviceRef hid) {
 }
 // Whether GameController lists a controller of this name with the profile front_mac.m reads (vendorName is the HID product string). A second pad of the same model counts as listed with the first
 static int hidpad_gc_listed(const char *name) { for (GCController *c in GCController.controllers) if (c.extendedGamepad && c.vendorName && !strcmp(c.vendorName.UTF8String, name)) return 1; return 0; }
-// The vendors whose pads GameController supports itself (Xbox, PlayStation, Switch controllers). The name match cannot vouch for them: a DualShock 4's HID product string is
-// "Wireless Controller", and combined Joy-Cons are one GCController for two HID devices, so each would also be read as HID after the wait and take a player of its own
-static int hidpad_gc_native(int vid) { return vid == 0x045e || vid == 0x054c || vid == 0x057e; }
-static int hidpad_twin_able(const hid_pad *d) { return hidpad_is_pro(d) || !hidpad_gc_native(d->vid); }
+// The pads GameController supports itself (Xbox, PlayStation, Switch controllers). The name match cannot vouch for them: a DualShock 4's HID product string is
+// "Wireless Controller", and combined Joy-Cons are one GCController for two HID devices, so each would also be read as HID after the wait and take a player of its own.
+// Sony's vendor ID is also on licensed pads GameController does not list (a "PS4 Wired Gamepad", 054c:05c5, beside a DualShock 4: only the DualShock was listed, and the other
+// pad was read by neither), so for Sony only its own models count: DualShock 4 (05c4, 09cc, the wireless adapter 0ba0), DualSense (0ce6), DualSense Edge (0df2), Access (0e5f).
+// Another Sony pad waits for a GCController of its name like any vendor's, and is read as HID (PAD_HID_SONY) without one
+static int hidpad_gc_native(int vid, int pid) {
+    if (vid == 0x054c) return pid == 0x05c4 || pid == 0x09cc || pid == 0x0ba0 || pid == 0x0ce6 || pid == 0x0df2 || pid == 0x0e5f;
+    return vid == 0x045e || vid == 0x057e;
+}
+static int hidpad_twin_able(const hid_pad *d) { return hidpad_is_pro(d) || !hidpad_gc_native(d->vid, d->pid); }
 // Its reading stops: no callback is left with it
 static void hidpad_stop(hid_pad *d) {
     IOHIDDeviceRegisterInputValueCallback(d->hid, NULL, NULL);
@@ -298,7 +304,9 @@ static void hidpad_use(hid_pad *d) {
     // HID has no standard button numbering: the default map is 8BitDo's, so another vendor's pad may have its buttons in other places
     if (d->st.layout == PAD_HID_NINTENDO) {
         if (!d->proto) LOG("controller '%s' (HID, %04x:%04x): buttons in Nintendo's report 0x3F: read with its numbering", d->name, d->vid, d->pid);
-    } else if (d->st.layout == PAD_HID_X360)
+    } else if (d->st.layout == PAD_HID_SONY)
+        LOG("controller '%s' (HID, %04x:%04x): GameController does not list this Sony pad: read with the DualShock 4's numbering", d->name, d->vid, d->pid);
+    else if (d->st.layout == PAD_HID_X360)
         LOG("controller '%s' (HID, %04x:%04x): Xbox 360 layout (Z / Rz triggers, Rx / Ry right stick)", d->name, d->vid, d->pid);
     else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
@@ -334,7 +342,7 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     d->gc_hint = [GCController supportsHIDDevice:hid];   // once per device: the call is not cheap
     if (!d->gc_hint) { hidpad_use(d); return; }
     NSNumber *virt = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVirtualHIDevice));
-    if ((!virt.intValue && hidpad_gc_native(d->vid)) || hidpad_gc_listed(d->name)) { hidpad_keep_gc(d); hidpad_models_changed(); return; }   // front_mac.m reads it through its GCController
+    if ((!virt.intValue && hidpad_gc_native(d->vid, d->pid)) || hidpad_gc_listed(d->name)) { hidpad_keep_gc(d); hidpad_models_changed(); return; }   // front_mac.m reads it through its GCController
     d->next = g_hidpads_waiting; g_hidpads_waiting = d;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HIDPAD_GC_WAIT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         hid_pad *w = hidpad_unlink(&g_hidpads_waiting, hid); if (!w) return;   // removed meanwhile
@@ -369,7 +377,7 @@ static int hidpad_same_model(const hid_pad *a, const hid_pad *b) { return a->vid
 static int hidpad_gc_is_model(GCController *c, const hid_pad *d) {
     if (!c.extendedGamepad) return 0;
     if (hidpad_is_pro(d)) return [c.productCategory isEqualToString:@"Switch Pro Controller"];
-    return !hidpad_gc_native(d->vid) && c.vendorName && !strcmp(c.vendorName.UTF8String, d->name);
+    return !hidpad_gc_native(d->vid, d->pid) && c.vendorName && !strcmp(c.vendorName.UTF8String, d->name);
 }
 static int hidpad_gc_count(const hid_pad *d, GCController *gone) { int n = 0; for (GCController *c in GCController.controllers) if (c != gone && hidpad_gc_is_model(c, d)) n++; return n; }
 // IOKit's pads of its model, the entries with a pad behind them (hidpad_live); read: how many of them are twins already; all: every entry of the model

@@ -186,6 +186,7 @@ static void gc_fallback(void) {
     for (TestDev *d in virtuals) hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
     // Missing and false virtual flags both retain physical-controller trust, including a HID name that differs from GameController's.
     NSArray *physical = @[pro(0x41, 104, @"Bluetooth"), virtual_pad(@"Wireless Controller", 0x054c, 105), virtual_pad(@"Xbox pad", 0x045e, 106)];
+    ((TestDev *)physical[1]).pid = 0x09cc;   // a DualShock 4 (GameController lists Sony's own models)
     for (TestDev *d in physical) { d.virtualDevice = d.vid == 0x054c ? @NO : nil; hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d)); assert(find(d) && !d.valueCallback); }
     // Apple's synthetic devices stay excluded; a device removed during the wait must never acquire a reader.
     TestDev *synthetic = virtual_pad(@"Synthetic pad", 0x045e, 107); synthetic.synthetic = YES;

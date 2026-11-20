@@ -72,10 +72,22 @@ int main(void) {
     uint8_t has[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RX] = 1, [PH_RY] = 1, [PH_RZ] = 1};
     CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_X360);
     CHECK(pad_hid_layout_for(0, 0x045e, 0x02ea, has) == PAD_HID_DEFAULT);
-    CHECK(pad_hid_layout_for(0, 0x054c, 0x028e, has) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(0, 0x1234, 0x028e, has) == PAD_HID_DEFAULT);
     CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x045e, 0x028e, has) == PAD_HID_NINTENDO);
     has[PH_RX] = 0; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_DEFAULT);
     has[PH_RX] = 1; has[PH_ACCEL] = 1; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_DEFAULT);
+    {   // a licensed Sony pad GameController does not list: the DualShock 4's numbering, by position
+        uint8_t has[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RZ] = 1, [PH_RX] = 1, [PH_RY] = 1};
+        CHECK(pad_hid_layout_for(0, 0x054c, 0x05c5, has) == PAD_HID_SONY);
+        pad_hid_init(&h, NULL, PAD_HID_SONY);
+        h.buttons = 1u << 2; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // circle
+        h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_B);   // cross
+        h.buttons = 1u << 3; CHECK(pad_hid_buttons(&h) == DM_BTN_X);   // triangle
+        h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_Y);   // square
+        h.buttons = 1u << 4 | 1u << 7; CHECK(pad_hid_buttons(&h) == (DM_BTN_L | DM_BTN_ZR));
+        h.buttons = 1u << 9 | 1u << 8; CHECK(pad_hid_buttons(&h) == (DM_BTN_PLUS | DM_BTN_MINUS));
+        h.buttons = 1u << 10 | 1u << 11; CHECK(pad_hid_buttons(&h) == (DM_BTN_LS | DM_BTN_RS));
+    }
     pad_hid_init(&h, NULL, PAD_HID_X360);
     { static const unsigned usage[] = {1, 2, 4, 3, 10, 9, 5, 6, 12, 15, 13, 14};
       static const uint64_t want[] = {DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_Y, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_L, DM_BTN_R, DM_BTN_UP, DM_BTN_RIGHT, DM_BTN_DOWN, DM_BTN_LEFT};

@@ -8,6 +8,8 @@
 // which such a pad sends until then or when it does not answer, has its own button numbering (pad_hid_nin_map) and carries the sticks raw (pad_hid_raw_axis).
 // Steam Link's virtual Xbox 360 pad, GamePad-N (045e:028e, GitHub issue #2465), delivers Xbox button usages and six Generic Desktop axes:
 // X / Y left stick, Rx / Ry right stick, Z / Rz the two triggers (pad_hid_axis_for). Select that layout only for the matching ID and axes.
+// Sony's vendor ID on a pad GameController does not list (a licensed "PS4 Wired Gamepad", 054c:05c5): the DualShock 4's report, whose buttons are 1 square, 2 cross, 3 circle,
+// 4 triangle, 5 / 6 L1 / R1, 7 / 8 L2 / R2, 9 share, 10 options, 11 / 12 stick clicks, 13 PS, 14 touchpad; sticks X / Y and Z / Rz, the triggers' travel on Rx / Ry (PAD_HID_SONY).
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -18,7 +20,7 @@
 
 #define PAD_HID_DEFAULT_VENDOR 0x2DC8   // 8BitDo, whose numbering the default map is (another vendor's pad gets a log line saying so, pad_hid_mac.h)
 enum { PH_X, PH_Y, PH_Z, PH_RX, PH_RY, PH_RZ, PH_BRAKE, PH_ACCEL, PH_AXES };
-enum pad_hid_layout { PAD_HID_DEFAULT, PAD_HID_NINTENDO, PAD_HID_X360 };
+enum pad_hid_layout { PAD_HID_DEFAULT, PAD_HID_NINTENDO, PAD_HID_X360, PAD_HID_SONY };
 typedef struct {
     uint32_t buttons;          // bit u - 1: HID button usage u held (usages 1..32)
     int hat;                   // -1 centered, 0 up, then clockwise to 7 up-left
@@ -48,12 +50,15 @@ static const uint8_t pad_hid_nin_map[16] = {2, 1, 4, 3, 11, 12, 5, 6, 7, 8, 10, 
 // Xbox 360 usages as macOS delivers Steam Link's virtual pad's values (measured one button at a time; not the descriptor's own order): 1 A (bottom), 2 B (right), 3 X (left),
 // 4 Y (top), 5 / 6 LB / RB, 7 / 8 stick clicks, 9 start, 10 back, and the d-pad as buttons 12 up, 13 down, 14 left, 15 right; the triggers are axes
 static const uint8_t pad_hid_x360_map[16] = {2, 1, 4, 3, 7, 8, 5, 6, 0, 0, 9, 10, 14, 12, 15, 13};
+// By position as the others: circle (right) A, cross (bottom) B, triangle (top) X, square (left) Y; options plus, share minus
+static const uint8_t pad_hid_sony_map[16] = {3, 2, 4, 1, 11, 12, 5, 6, 7, 8, 10, 9};
 
 // has records the descriptor's axes before applying any layout. A virtual pad can reuse the Xbox ID with dedicated Brake / Accelerator usages.
 static enum pad_hid_layout pad_hid_layout_for(int nin, int vid, int pid, const uint8_t has[PH_AXES]) {
     if (nin & PAD_NIN_SIMPLE) return PAD_HID_NINTENDO;
     if (vid == 0x045e && pid == 0x028e && has[PH_X] && has[PH_Y] && has[PH_RX] && has[PH_RY] &&
         has[PH_Z] && has[PH_RZ] && !has[PH_BRAKE] && !has[PH_ACCEL]) return PAD_HID_X360;
+    if (vid == 0x054c && has[PH_X] && has[PH_Y] && has[PH_Z] && has[PH_RZ] && has[PH_RX] && has[PH_RY]) return PAD_HID_SONY;   // the DualShock 4's six axes
     return PAD_HID_DEFAULT;
 }
 
@@ -67,7 +72,7 @@ static inline int pad_dupes_want(int n, int listed, int read, int due) { return 
 static void pad_hid_init(pad_hid *h, const char *map, enum pad_hid_layout layout) {
     static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
     memset(h, 0, sizeof *h); h->hat = -1; h->layout = layout;
-    memcpy(h->map, layout == PAD_HID_NINTENDO ? pad_hid_nin_map : layout == PAD_HID_X360 ? pad_hid_x360_map : def, sizeof h->map);
+    memcpy(h->map, layout == PAD_HID_NINTENDO ? pad_hid_nin_map : layout == PAD_HID_X360 ? pad_hid_x360_map : layout == PAD_HID_SONY ? pad_hid_sony_map : def, sizeof h->map);
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;

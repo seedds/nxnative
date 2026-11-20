@@ -211,30 +211,64 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
     return resolve_import(m, name);
 }
 
+static const char k_language_list[] = "_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi";
+static const char k_language_count[] = "_ZN2nn8settings29GetAvailableLanguageCodeCountEv";
+
+// The public list/count exports in these Ounce SDKs only read the SDK's own table. Check the SDK revision and both exports
+// together so an unknown or incomplete SDK keeps both settings-service fallbacks. See docs/reference/services.md.
+static int sdk_has_local_language_list(void) {
+    static const char prefix[] = "FS_ACCESS: { sdk_version: ";
+    static const char *const reviewed[] = {
+        "20.5.19, spec: Ounce }", "20.5.25, spec: Ounce }", "21.4.0, spec: Ounce }",
+        "21.4.1, spec: Ounce }", "22.2.8, spec: Ounce }", "22.2.10, spec: Ounce }",
+    };
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (strcmp(m->name, "sdk") || m->ro_off >= m->data_off || m->data_off > m->size ||
+            !module_sym(m, k_language_list) || !module_sym(m, k_language_count)) continue;
+        const uint8_t *p = m->base + m->ro_off, *end = m->base + m->data_off;
+        while ((p = memmem(p, (size_t)(end - p), prefix, sizeof prefix - 1))) {
+            p += sizeof prefix - 1;
+            for (size_t j = 0; j < sizeof reviewed / sizeof *reviewed; j++) {
+                size_t len = strlen(reviewed[j]);
+                if ((size_t)(end - p) >= len && !memcmp(p, reviewed[j], len)) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
+static const unsigned k_force_disabled = UINT_MAX;
 static void force_init(void) {
     unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
     g_fidx = calloc(cap, sizeof *g_fidx); g_fmask = cap - 1;
-    for (unsigned i = 0; i < g_nforce; i++)   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+    int native_language_list = sdk_has_local_language_list();
+    for (unsigned i = 0; i < g_nforce; i++) {   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+        if (native_language_list && (!strcmp(g_force[i].name, k_language_list) || !strcmp(g_force[i].name, k_language_count)))
+            g_force_hits[i] = k_force_disabled;
         for (unsigned j = sym_hash(g_force[i].name) & g_fmask;; j = (j + 1) & g_fmask) {
             if (!g_fidx[j]) { g_fidx[j] = i + 1; break; }
             if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
         }
+    }
     for (unsigned i = 0; i < g_nforce; i++)   // an alias binds to the guest's definition: a target the host takes over would bypass that take-over
         if (g_force[i].to)
             for (unsigned j = sym_hash(g_force[i].to) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask)
-                if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].to)) die("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
+                if (g_force_hits[g_fidx[j] - 1] != k_force_disabled && !strcmp(g_force[g_fidx[j] - 1].name, g_force[i].to))
+                    die("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
 }
 static void *force_lookup(const char *name) {
     if (!g_fmask) return NULL;
     for (unsigned j = sym_hash(name) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask) {
         unsigned i = g_fidx[j] - 1;
         if (!strcmp(g_force[i].name, name)) {
+            if (g_force_hits[i] == k_force_disabled) return NULL;   // let normal guest symbol resolution bind it
             if (g_force[i].to) {   // a guest alias (hle.h HLE_FORCE_ALIAS); the caller holds g_modules_mu or is relocating at startup, as for resolve_sym
                 void *p = loaded_sym(g_force[i].to);
                 if (!g_force_hits[i]++) {
@@ -251,11 +285,12 @@ static void *force_lookup(const char *name) {
 }
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
-    unsigned unused = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
+    unsigned unused = 0, disabled = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
     for (unsigned i = 0; i < g_nforce; i++)
-        if (!g_force_hits[i]) { if (strict || g_flag.imports) LOG("forced takeover entry with no reference at all: %s", g_force[i].name); unused++; }
+        if (g_force_hits[i] == k_force_disabled) disabled++;
+        else if (!g_force_hits[i]) { if (strict || g_flag.imports) LOG("forced takeover entry with no reference at all: %s", g_force[i].name); unused++; }
     if (unused && strict) die("forced takeover list is wrong");
-    LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused, unused);
+    LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused - disabled, unused);
 }
 
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
@@ -279,6 +314,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+        else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
@@ -916,10 +952,13 @@ void load_modules(const char *dir, const char **names, int n) {
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
 
-// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
+// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT. The order is reverse of the load list:
+// modules later in the list are the ones the earlier ones depend on, so the sdk module's DT_INIT, which constructs the
+// libc++ globals (std::cout and friends), runs before main's static initializers, which already write to them. Forward
+// order crashed Little Busters! Converted Edition at its first log line (std::ostream::write on an unconstructed cout).
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
-    for (int i = 0; i < g_nmod; i++) {
+    for (int i = g_nmod - 1; i >= 0; i--) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);

@@ -276,6 +276,16 @@ def memo_digest(*files):   # the files' bytes (None: missing), as the memo's key
     return h.hexdigest()
 
 
+CHAIN_LABEL = re.compile(rb'("chain"\s*:\s*")[^"]*"')   # a reflection's chain version, as dmsh_build.py writes it (and writes it again in an output it restores from its cache)
+
+
+def memo_reflection(data):
+    """A reflection json's bytes as the memo's key takes them (None: missing): without the chain version it names. Neither tool reads that (c1_guard.py takes the c1 data's length,
+    cb_extent.py the bindings), and after a chain change every reflection names the new one: every digest missed, and both analyses ran whole on shaders whose MSL and reflection
+    were otherwise what they had been (Ocarina of Time, 42,848 shaders: 86 s of the build after each chain change)"""
+    return None if data is None else CHAIN_LABEL.sub(rb'\1"', data, count=1)
+
+
 def memo_answer(files, compute):   # (digest, answer): the memo's when it holds the files, else compute()'s; no digest without a memo
     if _memo is None: return None, compute()
     digest = memo_digest(*files)
@@ -315,7 +325,7 @@ def unproven(job):
     key = name[:-len("_b.metal")] if name.endswith("_b.metal") else name[:-6]
     with romfs.open(os.path.join(version_dir, name), "rb") as stream: metal = stream.read()
     reflection = read_bytes(os.path.join(version_dir, key + "_b.json"))
-    digest, answer = memo_answer((metal, reflection), lambda: "u" if unproven_in(text_of(metal), reflection) else "-")
+    digest, answer = memo_answer((metal, memo_reflection(reflection)), lambda: "u" if unproven_in(text_of(metal), reflection) else "-")
     return digest, answer, key if answer == "u" else None
 
 

@@ -1,0 +1,11 @@
+# Development save: title, Championship menus, then vehicle selection.
+# Stop before the race: timed screenshots otherwise compare different race clocks.
+save	run
+keys	f600:L+R~f30,f780:A,f900:A,f1020:A
+secs	45
+quick	45
+reach	1800@40
+window	30	10
+shots	35,42
+hang	25
+prebuild	off

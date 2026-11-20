@@ -13,7 +13,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from c1_guard import Interval, definitions_of, known, memo_answer, memo_map, outputs, read_bytes, text_of   # noqa: E402  (memo_map: DMSH_TABLE_MEMO, see c1_guard.py)
+from c1_guard import Interval, definitions_of, known, memo_answer, memo_map, memo_reflection, outputs, read_bytes, text_of   # noqa: E402  (memo_map: DMSH_TABLE_MEMO, see c1_guard.py)
 import dmsh_abi as abi   # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import shader_lib   # noqa: E402
@@ -84,7 +84,7 @@ def tokens(reflection, metal):
 
 def memo_row(path):   # (memo digest, answer, the table line or None) for one shader's reflection json: c1_guard.py memo_map's worker
     reflection, metal = read_bytes(path), read_bytes(path[:-5] + ".metal")
-    digest, answer = memo_answer((reflection, metal), lambda: tokens(reflection, metal) or "-")
+    digest, answer = memo_answer((memo_reflection(reflection), metal), lambda: tokens(reflection, metal) or "-")
     return digest, answer, os.path.basename(path)[:-len("_b.json")] + "\t" + answer if answer != "-" else None
 
 

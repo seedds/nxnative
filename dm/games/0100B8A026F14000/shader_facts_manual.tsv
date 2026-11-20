@@ -1,4 +1,5 @@
-# Retained from PR #289 (1842ed09); the uint output also supplied by PR #304 (3b32d7d6).
+# Retained from PR #289 (1842ed09). The unsigned output row PR #304 (3b32d7d6) added went on 2026-11-16: every pixel shader has the typed-output entry point
+# (docs/reference/shaders.md, Typed outputs for every pixel shader).
 # Hand-written facts the machine code cannot give (merged over the generated table by shader_split.py): the texture type of the handles the shaders read from a
 # constant buffer (a texture list) and of the images they write.  Without an answer the translator assumes 2D and the host then finds a type mismatch at run time.
 0647a88c955fcc6e	{"tex":{"128":"buffer","129":"buffer"}}
@@ -30,7 +31,6 @@ b37b185efd89db7f	{"tex":{"128":"buffer","129":"buffer","130":"buffer"}}
 bb3615c8b5248329	{"tex":{"128":"buffer","129":"buffer","130":"buffer"}}
 bd0c385cb99a8e2c	{"tex":{"128":"buffer","129":"buffer"}}
 c0a487a5afca4bb9	{"img":{"0":"buffer"},"tex":{"128":"buffer"}}
-c254eaa40e0c4f1e	{"fout":{"0":"uint"}}
 c55d54c8f41b1520	{"tex":{"130":"buffer","131":"buffer","132":"buffer","133":"buffer","134":"buffer","135":"buffer"}}
 e486541c2d07e22b	{"tex":{"128":"buffer"}}
 e9167e494d8581fc	{"tex":{"129":"buffer"}}

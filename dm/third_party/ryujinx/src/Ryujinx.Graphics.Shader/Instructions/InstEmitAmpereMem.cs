@@ -312,10 +312,60 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (!x.Bit(77) && x.Ra != RegisterConsts.RegisterZeroIndex)
             {
+                if (x.Bit(76))
+                {
+                    // AST.P addresses the patch map, including the six tessellation factors at 0..0x17. Welcome Tour's Bezel hull shader writes
+                    // its outer factor at InvocationId * 4 (Ra), then its inner factor at 0x10. The ordinary attribute path only takes a fixed offset.
+                    Operand address = GetSrcReg(context, x.Ra);
+
+                    for (int i = 0; i <= x.Bits(74, 76) && x.Rb + i <= RegisterConsts.RegisterZeroIndex; i++)
+                    {
+                        AStorePatchIndexed(context, context.IAdd(address, Const(x.Bits(40, 50) + i * 4)), GetSrcReg(context, x.Rb + i));
+                    }
+
+                    return;
+                }
+
                 throw AFail(context, "AST with an offset register and an address");
             }
 
             EmitAst(context, x.Ra, x.Rb, x.Bits(40, 50), x.Bits(74, 76), x.Bit(76), x.Bit(77));
+        }
+
+        private static void AStorePatchIndexed(EmitterContext context, Operand address, Operand value)
+        {
+            Operand end = Label();
+            Operand inner = Label();
+            Operand user = Label();
+            Operand word = context.ShiftRightU32(address, Const(2));
+
+            context.BranchIfFalse(inner, context.ICompareLessUnsigned(word, Const(4)));
+            context.Store(StorageKind.OutputPerPatch, IoVariable.TessellationLevelOuter, null, word, value);
+            context.Branch(end);
+            context.MarkLabel(inner);
+
+            context.BranchIfFalse(user, context.ICompareLessUnsigned(word, Const(6)));
+            context.Store(StorageKind.OutputPerPatch, IoVariable.TessellationLevelInner, null, context.ISubtract(word, Const(4)), value);
+            context.Branch(end);
+            context.MarkLabel(user);
+
+            // A location must be constant in the SPIR-V interface, while its vector component may be indexed. Dispatch by location, with the
+            // final half-vector bounded by the patch map's end (0x200). Addresses outside the map have no output, as for an invalid fixed offset.
+            context.BranchIfTrue(end, context.ICompareGreaterOrEqualUnsigned(address, Const(AttributeConsts.UserAttributePerPatchEnd)));
+            Operand relative = context.ISubtract(address, Const(AttributeConsts.UserAttributePerPatchBase));
+            Operand location = context.ShiftRightU32(relative, Const(4));
+            Operand component = context.BitwiseAnd(context.ShiftRightU32(relative, Const(2)), Const(3));
+
+            for (int i = 0; i < (AttributeConsts.UserAttributePerPatchEnd - AttributeConsts.UserAttributePerPatchBase + 15) / 16; i++)
+            {
+                Operand next = Label();
+                context.BranchIfFalse(next, context.ICompareEqual(location, Const(i)));
+                context.Store(StorageKind.OutputPerPatch, IoVariable.UserDefined, null, Const(i), component, value);
+                context.Branch(end);
+                context.MarkLabel(next);
+            }
+
+            context.MarkLabel(end);
         }
 
         // ---- global memory ----
@@ -1067,6 +1117,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                             Operand fetchX = sources[^1];
                             sources[^1] = context.BitwiseAnd(fetchX, Const(0x3FFF));
                             sources.Add(context.ShiftRightU32(fetchX, Const(14)));
+                            flags |= TextureFlags.RowWrap;
                             context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle);
                         }
                         else

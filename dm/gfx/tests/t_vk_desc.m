@@ -56,7 +56,7 @@ int main(void) {
         for (int i = 0; i < 4096; i++) { size_t n = 8 + 8 * (i % 8); junk[i] = malloc(n); memset(junk[i], 0xa5, n); }
         CHECK(wtex && wsmp && wbuf, "the descriptors keep the texture, sampler state and buffer alive");
         const desc_t *e = &ds->d[L->b[L->idx[0]].base + 1], *u = &ds->d[L->b[L->idx[1]].base];
-        CHECK(e->tex == wtex && e->smp == wsmp, "element 1 holds the view's texture and the sampler state");
+        CHECK(e->tex == wtex && e->smp && e->smp.state == wsmp, "element 1 holds the view's texture and its sampler wrapper's state");
         CHECK(u->buf == wbuf && u->off == 512 + 64, "the buffer descriptor holds the memory's buffer at the buffer's offset plus its own");
 
         // A fragment shader taking c:0.0=0*8 and u:0.1=0, bound for a draw as pre_draw does
@@ -64,9 +64,10 @@ int main(void) {
         td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
         MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         rpd.colorAttachments[0].texture = [g_dev newTextureWithDescriptor:td]; rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-        shinfo si = {.key = "t_vk_desc", .frag = 1, .nres = 2, .res = {{'c', 0, 0, 8, 0}, {'u', 0, 0, 1, 1}}};
+        static shres si_res[] = {{'c', 0, 0, 8, 0}, {'u', 0, 0, 1, 1}};
+        shinfo si = {.key = "t_vk_desc", .frag = 1, .nres = 2, .res = si_res};
         rs_t s = {0}; s.cb = [g_q commandBuffer]; s.re = [s.cb renderCommandEncoderWithDescriptor:rpd]; s.set[0].s = ds;
-        bind_res(&s, &si, 1);
+        bind_res(&s, NULL, &si, ST_FRAG);
         [s.re endEncoding]; s.re = nil; [s.cb commit]; [s.cb waitUntilCompleted];
         CHECK(s.cb.status == MTLCommandBufferStatusCompleted, "the bound pass completed");
         s.cb = nil;
@@ -108,19 +109,19 @@ int main(void) {
         h_vkCreateDescriptorPool(dev, &pci, NULL, &cp);
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = cp, .descriptorSetCount = 2, .pSetLayouts = Ls};
         VkDescriptorSet sets[2]; h_vkAllocateDescriptorSets(dev, &ai, sets);
-        CHECK(sets[1]->d[0].smp == sb->s, "the destination starts with its immutable sampler");
+        CHECK(sets[1]->d[0].smp.state == sb->s, "the destination starts with its immutable sampler");
         VkDescriptorImageInfo ii = {sa, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = sets[0], .descriptorCount = 1,
                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
         VkCopyDescriptorSet c = {.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, .srcSet = sets[0], .dstSet = sets[1], .descriptorCount = 1};
         h_vkUpdateDescriptorSets(dev, 1, &w, 1, &c);
-        CHECK(sets[0]->d[0].tex == view->tex && sets[0]->d[0].smp == sa->s, "the source holds the view and its own sampler");
+        CHECK(sets[0]->d[0].tex == view->tex && sets[0]->d[0].smp.state == sa->s, "the source holds the view and its own sampler");
         CHECK(sets[1]->d[0].tex == view->tex, "the copy takes the source's image");
-        CHECK(sets[1]->d[0].smp == sb->s, "the copy keeps the destination's immutable sampler");
+        CHECK(sets[1]->d[0].smp.state == sb->s, "the copy keeps the destination's immutable sampler");
         c.srcSet = sets[1]; c.dstSet = sets[0]; ii.sampler = NULL;
         w.dstSet = sets[0]; h_vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);   // the source sampler cleared, then the immutable one copied back into the mutable binding
         h_vkUpdateDescriptorSets(dev, 0, NULL, 1, &c);
-        CHECK(sets[0]->d[0].smp == sb->s, "a copy out of an immutable binding carries its sampler into a mutable one");
+        CHECK(sets[0]->d[0].smp.state == sb->s, "a copy out of an immutable binding carries its sampler into a mutable one");
         // An array copy that runs on into the next binding (Vulkan's consecutive bindings): source elements 1-3 of one mutable binding of 4, each with its own image and
         // sampler, into the last element of an immutable binding of 2 and the 2 of the mutable binding after it: per element, the immutable one keeps its sampler
         VkImageView views[4]; VkSampler smp[4];
@@ -136,10 +137,10 @@ int main(void) {
         VkWriteDescriptorSet aw = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = as[0], .descriptorCount = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = infos};
         VkCopyDescriptorSet ac = {.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, .srcSet = as[0], .srcArrayElement = 1, .dstSet = as[1], .dstBinding = 0, .dstArrayElement = 1, .descriptorCount = 3};
         h_vkUpdateDescriptorSets(dev, 1, &aw, 1, &ac);
-        CHECK(as[1]->d[0].tex == nil && as[1]->d[0].smp == sb->s, "element 0 of the immutable binding, not copied into, is untouched");
-        CHECK(as[1]->d[1].tex == views[1]->tex && as[1]->d[1].smp == sb->s, "element 1 of the immutable binding takes source element 1's image and keeps its sampler");
-        CHECK(as[1]->d[2].tex == views[2]->tex && as[1]->d[2].smp == smp[2]->s, "the copy runs on into the next binding, which takes source element 2's image and sampler");
-        CHECK(as[1]->d[3].tex == views[3]->tex && as[1]->d[3].smp == smp[3]->s, "and source element 3's");
+        CHECK(as[1]->d[0].tex == nil && as[1]->d[0].smp.state == sb->s, "element 0 of the immutable binding, not copied into, is untouched");
+        CHECK(as[1]->d[1].tex == views[1]->tex && as[1]->d[1].smp.state == sb->s, "element 1 of the immutable binding takes source element 1's image and keeps its sampler");
+        CHECK(as[1]->d[2].tex == views[2]->tex && as[1]->d[2].smp.state == smp[2]->s, "the copy runs on into the next binding, which takes source element 2's image and sampler");
+        CHECK(as[1]->d[3].tex == views[3]->tex && as[1]->d[3].smp.state == smp[3]->s, "and source element 3's");
         h_vkDestroyDescriptorPool(dev, ap, NULL);
         for (int k = 0; k < 4; k++) { h_vkDestroyImageView(dev, views[k], NULL); h_vkDestroySampler(dev, smp[k], NULL); }
         h_vkDestroyDescriptorPool(dev, cp, NULL); h_vkDestroyImageView(dev, view, NULL); h_vkDestroyImage(dev, im, NULL);

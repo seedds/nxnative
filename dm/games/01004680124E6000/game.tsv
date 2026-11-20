@@ -1,0 +1,35 @@
+# Bloodstained: Curse of the Moon 2 1.3.2 (v327680), SDK 10.6.0, NVN.
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	01004680124E6000
+program_id	01004680124E6000
+
+# ---- App ----
+name	Bloodstained: Curse of the Moon 2
+ipa	BloodstainedCurseOfTheMoon2.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v327680	1.3.2	main=5afa62cc9513dbccaf10e965afa99d56	subsdk0=b7b77217cbf6b12d160220bbb766f8cc	sdk=bbc88b74cd99a89dda01ee7be4691612
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# subsdk0 compiles the game's embedded GLSL at boot.
+modules	main subsdk0 sdk
+romfs_marker	GROUP_DEBUG.bigrp
+zip_store	.bigrp:.metallib
+
+# ---- Memory ----
+# The game takes a 3.14 GB heap within this 3.25 GB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource, so virtual address memory is disabled.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/glslc_capture/=other
+shader_note	Bloodstained: Curse of the Moon 2 shaders

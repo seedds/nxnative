@@ -53,9 +53,8 @@ BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
 # SPLIT is also no lower than the lowest site the back area reaches with the same margin (BACK_MIN): when ro, data and bss after the text are large (Hello Kitty Party Land: 151.8 MB
 # of text, 98 MB more before BACK_OFF), a 16 MB front area would hand the back area sites more than 128 MB below it, so the front area's first pass takes the gap up to BACK_MIN instead
 TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
-# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072, 185 MB of text and 90 MB of ro, data and bss after it, so BACK_MIN is 148.5 MB), no split puts every site
-# in reach of its area: the front area keeps its 16 MB and its split, and the sites between the split and BACK_MIN take the back area, each branch that does not reach going through a hop
-# (reach_via(): one b in the alignment padding between two functions, within reach of both ends)
+# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072), branches that cannot reach their area go through a hop in function alignment padding.
+# The gap's sites are split between the two areas according to how many hop locations each area can reach. Putting them all at the back exhausts its padding on Minecraft 1.26.62.
 BACK_MIN, GAP = 0, False   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
@@ -1344,6 +1343,20 @@ if new_mid:
             else: continue
             dest = at + 4 * d
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
+
+if GAP:
+    _holes = hop_holes()
+    front_holes = bisect.bisect_right(_holes, PATCH_OFF + REACH)
+    back_holes = len(_holes) - bisect.bisect_left(_holes, BACK_MIN - 0x100000)
+    gap_sites = sorted(a for a in (
+        *(w[0].address for w in windows), *(p[0][0][0].address for p in retries),
+        *(a for a in kinds if a not in done),
+    ) if SPLIT <= a < BACK_MIN)
+    if gap_sites and front_holes:
+        toward_front = len(gap_sites) * front_holes // (front_holes + back_holes)
+        SPLIT = gap_sites[toward_front] if toward_front < len(gap_sites) else BACK_MIN
+        print(f'{NAME}: {len(gap_sites)} sites in the branch gap, split at {SPLIT:#x} ({front_holes} front and {back_holes} back padding words)', flush=True)
+
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))
 for wseg in windows:

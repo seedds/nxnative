@@ -560,6 +560,15 @@ static void rec_start(void) {
     LOG("DM_REC: recording player 1's input to %s as DM_KEYS steps in presented frames", e);
 }
 
+// Each stick held inside the circle of radius DM_STICK_MAX, as Horizon's hid reports it: a Switch stick's calibrated value never leaves that
+// circle, while a Mac or iPhone controller's axes each reach ±1 on their own, so a diagonal read up to about 1.15 of full tilt (a DualSense
+// through GameController). A game that takes the magnitude as at most full tilt got more than it could; the direction is kept
+static void stick_circle(int32_t a[4]) {
+    for (int i = 0; i < 4; i += 2) {
+        double m = hypot((double)a[i], (double)a[i + 1]);
+        if (m > DM_STICK_MAX) { a[i] = (int32_t)lrint(a[i] * DM_STICK_MAX / m); a[i + 1] = (int32_t)lrint(a[i + 1] * DM_STICK_MAX / m); }
+    }
+}
 // Stick direction pseudo-buttons (NpadButton 16..23) from the sticks' values
 static uint64_t stick_dirs(const int32_t a[4]) {
     uint64_t b = 0;
@@ -580,6 +589,7 @@ static void fill_joy(NpadState *s, npad_ref r) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
     }
+    stick_circle(a);
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
     s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);
@@ -609,6 +619,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
+    stick_circle(a);
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;

@@ -1,4 +1,5 @@
 // Exercise the production watchdog with a silent display link and a controlled clock; no GPU or game files. --metal also checks real layer ownership.
+// Checks: startup_rescue: a callback that enters during rescue leaves the stall clock and the ticks alone, the acquire after it returns, and a link published after the last enqueue keeps the layer until run-loop invalidation and then releases it.
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <QuartzCore/CAMetalLayer.h>
 @interface SilentDisplayLink : NSObject
@@ -21,6 +22,11 @@
 - (instancetype)initWithMetalLayer:(CAMetalLayer *)layer { (void)layer; return [super init]; }
 - (void)addToRunLoop:(NSRunLoop *)loop forMode:(NSRunLoopMode)mode { (void)mode; [loop addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode]; }
 - (void)invalidate { self.invalidated = YES; }
+@end
+@interface RescueUpdate : NSObject
+@property CFTimeInterval targetPresentationTimestamp;
+@end
+@implementation RescueUpdate
 @end
 #define CAMetalDisplayLink SilentDisplayLink
 #define nvn_game_fps test_game_fps_now   // hle_nvn.c, linked here, has the strong nvn_game_fps; t_present_rescue_focus.c sets the rate
@@ -100,6 +106,26 @@ static void lifecycle(void) {
     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
     CHECK("rescue invalidates the link before releasing the layer", link.invalidated && !g_link && !g_link_owns_layer);
     g_link_started = 0;
+}
+static void startup_rescue(void) {
+    reset(); g_link_started = 1; g_link_rl = CFRunLoopGetCurrent();
+    test_fullscreen = 1; test_screen_hz = 144;
+    link_sync();   // link_main owns the layer but has not published the link yet
+    SilentDisplayLink *link = [SilentDisplayLink new];
+    link.preferredFrameRateRange = link_range(g_link_mode);
+    wait_frame(); link_sync();   // rescue requested before the first mode has been applied
+    g_link = link;
+    uint64_t tick = g_link_tick_n, last = g_link_tick_ns;
+    RescueUpdate *update = [RescueUpdate new]; update.targetPresentationTimestamp = CACurrentMediaTime();
+    [[NvMetalDisplayLinkDelegate new] metalDisplayLink:(id)link needsUpdate:(id)update];
+    CHECK("a callback during rescue keeps the watchdog stalled", g_stall_t0 && g_link_tick_ns == last && g_link_tick_n == tick);
+    wait_frame();   // the next acquire must return before there can be another enqueue
+    test_screen_hz = 120;
+    link_sync();
+    CHECK("the newly published link still owns the layer until invalidated", g_link_owns_layer);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+    CHECK("rescue releases a link published after the last enqueue", link.invalidated && !g_link && !g_link_owns_layer);
+    g_link_started = 0; g_link = nil; test_fullscreen = test_screen_hz = 0;
 }
 static void latency(void) {   // Only variable-refresh fullscreen needs the latency-2 workaround; a new link takes the current policy as link_main does.
     reset(); test_fullscreen = 0; test_variable_refresh = 1; g_present_latency = 0;
@@ -190,7 +216,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency(); thirty(); vrr120();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

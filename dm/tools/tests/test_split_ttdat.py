@@ -1,9 +1,10 @@
-"""CC4 name/hash mapping and bounded OODL reads, without game files."""
+"""CC4 name/hash mapping and bounded chunk reads, without game files."""
 import contextlib
 import io
 import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -74,6 +75,38 @@ class Ttdat(unittest.TestCase):
         decoder = mock.Mock(return_value=b'decoded123')
         self.assertEqual(ttdat.read(io.BytesIO(payload), ('test', 0, len(payload), 14), decoder), b'decoded123last')
         decoder.assert_called_once_with(b'cmp', 10)
+
+    def test_dflt_shader_reaches_the_splitter(self):
+        ctl, code = fz.VS
+        raw = ctl + code
+        encoder = zlib.compressobj(wbits=-15, strategy=zlib.Z_FIXED)
+        packed = encoder.compress(raw) + encoder.flush()
+        self.assertEqual(packed[0] & 7, 3)
+        payload = struct.pack('<4sII', b'DFLT', len(packed), len(raw)) + packed
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'DLC.DAT'
+            path.write_bytes(archive(payload, raw=len(raw)))
+            self.assertFalse(ttdat.needs_oodle(path))
+            jobs, _ = ss.ttdat_jobs([(str(path), path.name)])
+            rel, keys, pairs, extra = ss.scan_file(jobs[0])
+            self.assertEqual(list(keys), [ss.skey(ctl, code)])
+            self.assertEqual((rel, pairs, extra), ('DLC.DAT', set(), {}))
+
+    def test_dflt_dynamic_block_and_invalid_streams(self):
+        raw = bytes(range(64)) * 512
+        encoder = zlib.compressobj(wbits=-15)
+        packed = encoder.compress(raw) + encoder.flush()
+        self.assertEqual(packed[0] & 7, 5)
+        packed = bytes([packed[0] & ~4]) + packed[1:]
+
+        def read(chunk, size):
+            payload = struct.pack('<4sII', b'DFLT', len(chunk), size) + chunk
+            return ttdat.read(io.BytesIO(payload), ('test', 0, len(payload), size), None)
+
+        self.assertEqual(read(packed, len(raw)), raw)
+        for chunk, size in ((packed[:-1], len(raw)), (packed + b'!', len(raw)), (packed, len(raw) - 1)):
+            with self.subTest(length=len(chunk), size=size), self.assertRaisesRegex(ValueError, 'DFLT'):
+                read(chunk, size)
 
     def test_invalid_chunks_never_publish_partial_member(self):
         good = struct.pack('<4sII', b'OODL', 3, 10) + b'cmp'

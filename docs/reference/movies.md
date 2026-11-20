@@ -114,6 +114,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Found on:** Mario Strikers: Battle League 1.3.2 (no profile), with a frame-stamped `DM_KEYS` script that skips the intro and changes menus (`f150:A~f5,f210:A~f7,f270:L-0.2/-0.9~f3,f280:L-0.2/-0.9~f3,f300:A~f5,f350:A~f5`), on two Macs: 3 of 4 runs crashed before; with the decoder's thread, 0 of 30 on one and 2 of 12 on the other ([seedds/nxnative#762](https://github.com/seedds/nxnative/pull/762)). Its provisional profile had `core_preempt on`; that key alone did not stop the crash.
 - **Check:** `t_movie_avc`: after a decode, the output event is queued for the deferred thread, due at once, not signalled on the decoding thread.
 
+### A completed video batch needs another output event
+
+- **Symptom:** Super Mario Sunshine freezes at the first M graffiti while music continues. Hagi waits for frame 286 of `EX128x144_q0.mp4` with 14 pictures and an end-of-stream output ready in the host.
+- **Cause:** the host coalesces deferred video events. Hagi takes one output per auto-cleared event, and a completed AVC drain has no further decode work to signal the outputs still queued.
+- **Fix:** after a successful video acquisition, `h_movie_AcqOut` re-arms the deferred output event if more outputs are ready. `t_movie_avc` takes one output per event through the end of a synthetic drain.
+- **Found on:** [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) in [issue #2990](https://github.com/seedds/nxnative/issues/2990).
+
 ### `Flush`, `Stop` and `Start`
 
 - **Fix:** as with MediaCodec, `Flush` announces nothing, and no input or output index is handed out while the decoder is stopped. The "input available" after `Start` is signalled about 2 ms later from a guest thread, as the SDK's codec thread would. Pending signals are dropped at `Stop`, `Flush` and destruction.

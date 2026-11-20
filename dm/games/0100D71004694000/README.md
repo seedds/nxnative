@@ -18,6 +18,7 @@ The Mac brings up the title panorama, the first-run dialog and a local world. Pr
 - [Vulkan functions looked up by name](../../../docs/reference/rendering.md#vulkan-functions-looked-up-by-name) and [RenderDragon material shaders](../../../docs/reference/shaders.md#renderdragon-material-shaders).
 - [RenderDragon's unsigned bone indices](../../../docs/reference/rendering.md#renderdragons-unsigned-bone-indices).
 - [Vulkan shader resource tables truncated](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated).
+- [Vulkan partial attachment clears](../../../docs/reference/rendering.md#vulkan-partial-attachment-clears-skipped).
 - [Distributing branch hops between patch areas](../../../docs/reference/rewriter.md#distributing-branch-hops-between-patch-areas).
 
 ## Bone-index layout
@@ -30,8 +31,28 @@ The [shader repair](../../../docs/reference/rendering.md#renderdragons-unsigned-
 
 ## Resource bindings
 
-Resolved: 198 ForwardPBR fragment shaders have 25–29 resource entries, and the host's old 24-entry storage dropped 522 samplers. All omitted samplers have shader-body uses: previous-frame luminance, caustics, scattering, shadow cascades and specular IBL. A representative 29-entry shader uses 5 buffers, 12 textures and 12 samplers, within the separate Metal argument-table limits. The [general loader fix](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated) retains the full list without changing shader assets. A synthetic 25-resource GPU readback verifies the binding failure and its correction; the affected ForwardPBR modes have not been checked in gameplay.
+Resolved: 198 ForwardPBR fragment shaders have 25–29 resource entries, and the host's old 24-entry storage dropped 522 samplers. All omitted samplers have shader-body uses: previous-frame luminance, caustics, scattering, shadow cascades and specular IBL. A representative 29-entry shader uses 5 buffers, 12 textures and 12 samplers, within the separate Metal argument-table limits. The [general loader fix](../../../docs/reference/rendering.md#vulkan-shader-resource-tables-truncated) retains the full list without changing shader assets. A synthetic 25-resource GPU readback verifies the binding failure and its correction.
+
+On main build `84306c1f3543e39becef959079766644`, these affected actor ForwardPBR materials are unreachable through the normal shipped settings and material paths. The actor selector (`main+0xe1cbb70`, called at `+0xe438568` and `+0xe43efe8`) chooses them only for blended materials in backend mode 1, the deferred/Vibrant Visuals path. The game's [graphics-mode gates](#graphics-modes) reject that mode before passing it to the framebuilder. Backend mode 2 is RTX/ray tracing and does not enter this selector branch.
+
+No additional Minecraft gameplay validation is pending for this loader fix on this build: normal world play cannot exercise the rejected path. Complete-table, sanitizer and synthetic GPU checks cover the loader contract, and the full Hades regression passed. The general host fix remains valid independently of this build's unused shader assets.
+
+## Graphics modes
+
+Resolved on main build `84306c1f3543e39becef959079766644` (1.26.62): backend mode 1 is deferred/Vibrant Visuals, and mode 2 is RTX/ray tracing. The renderer selection at `main+0xe401b60` constructs `VibrantVisualsFrameRenderer` for mode 1 and `RTXMinecraftFrameRenderer` for mode 2, confirmed by the constructed objects' RTTI.
+
+Neither advanced mode is available through this build's normal settings. Mode 1 requires `RayTracingHardwareOptions` byte `+0x19`, which the hardware constructor and client refresh unconditionally clear at `+0x5e34d5c` and `+0x427acf4`. Mode 2 uses the separate hardware byte `+0x18`, populated from the framebuilder's capability query (`+0xe40c2a4`). That query reads the `Ray_Tracing` capability, bit 31 of the graphics caps' low word, through `+0xe8be910`; neither shipped Vulkan backend advertises that bit.
+
+The client renderer update (`+0x422e5a0`) checks the corresponding capability and replaces either unsupported request with mode 0 before passing it to the framebuilder. Saved settings cannot bypass these checks. This is a static trace of the original NSO, corroborated by focused Ghidra decompilation and Capstone inspection, not a physical Switch runtime observation. It does not establish availability in a separate native Switch 2 executable.
+
+## Attachment clears
+
+Resolved in the general host: [partial attachment clears](../../../docs/reference/rendering.md#vulkan-partial-attachment-clears-skipped) now preserve exact regions, view-relative layers and unselected aspects. The API defect was demonstrated with synthetic color and depth GPU readbacks, not a Minecraft screenshot failure.
+
+On the unmodified host, a menu-to-world investigation reached 30,900 frames without an unsupported-clear diagnostic. The first 20 sampled calls at `main+0xe9533cc` cleared full 1920×1080 rectangles, base layer 0, count 1. Native code at `+0xe9530fc..+0xe953184` computes the rectangle from view bounds rather than a fixed full-image constant. This bounded runtime observation does not prove that partial clears are unreachable in other scenes or modes.
+
+Focused GPU checks and the full Hades regression passed on Apple M6. No additional Minecraft gameplay validation is pending for this API fix: its clear semantics are checked directly, and the observed Minecraft route did not exercise the partial path. iOS remains untested.
 
 ## Open
 
-Online services and graphics modes beyond the default renderer remain unverified. Clear rectangles smaller than an attachment still report unsupported operations.
+Online services remain unverified.

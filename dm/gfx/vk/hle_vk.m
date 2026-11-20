@@ -1639,7 +1639,7 @@ typedef struct {
     id<MTLCommandBuffer> cb; id<MTLRenderCommandEncoder> re; id<MTLBlitCommandEncoder> be; id<MTLComputeCommandEncoder> ce;
     const chdr *cmd; const uint8_t *cmd_end;   // the command being replayed and the end of its command buffer (fan_prepare scans ahead)
     id<MTLBuffer> fan_out; fan_job *fj; uint32_t nfj, fjcap, fji; const void *fan_from, *fan_to;   // the indexed fans of the current stretch of the pass, and the commands its scan covered
-    VkPipeline pipe, applied, cpipe; uint32_t rt_w, rt_h;   // cpipe: the compute pipeline bound
+    VkPipeline pipe, applied, cpipe; uint32_t rt_w, rt_h, rt_layers;   // cpipe: the compute pipeline bound
     struct { VkDescriptorSet s; uint32_t dyn[16]; } set[8], cset[8];   // graphics and compute bind points have separate sets
     VkBuffer vb[14]; VkDeviceSize vbo[14];
     VkBuffer ib; VkDeviceSize ibo; MTLIndexType it; uint32_t isz;
@@ -1745,10 +1745,13 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         }
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
-    if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
+    if (s->sq->vis) {
+        d.visibilityResultBuffer = s->sq->vis;
+        d.visibilityResultType = MTLVisibilityResultTypeAccumulate;   // Reset clears earlier encoders' slots too; the submit initialized this buffer to zero
+    }
     fan_prepare(s, (const chdr *)((const uint8_t *)s->cmd + s->cmd->size));
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->enc_id = ++g_enc_id;
-    s->applied = NULL; s->rt_w = w; s->rt_h = h;
+    s->applied = NULL; s->rt_w = w; s->rt_h = h; s->rt_layers = fb->layers;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
     // Resetting them at every pass drew Super Mario Galaxy's handheld UI 1.5x too big: it sets a 1280x720 viewport once and then draws through several passes into its 1920x1080 swapchain
     s->vp_dirty = s->sc_dirty = 1;
@@ -2320,34 +2323,121 @@ static void resolve_image(rs_t *s, const c_resolve *x) {
         }
     }
 }
-static int clear_covers_texture(id<MTLTexture> texture, const VkClearRect *r) {
-    return texture && r->baseArrayLayer == 0 && r->layerCount == 1 && r->rect.offset.x == 0 && r->rect.offset.y == 0 &&
-        r->rect.extent.width == texture.width && r->rect.extent.height == texture.height;
+static int clear_covers_attachment(MTLRenderPassAttachmentDescriptor *a, const VkClearRect *rects, uint32_t n) {
+    if (!a.texture) return 1;   // VK_ATTACHMENT_UNUSED and an absent depth / stencil aspect have no effect
+    for (uint32_t i = 0; i < n; i++) {
+        const VkClearRect *r = &rects[i];
+        if (!r->baseArrayLayer && r->layerCount == 1 && !r->rect.offset.x && !r->rect.offset.y &&
+            r->rect.extent.width == MAX(a.texture.width >> a.level, 1u) && r->rect.extent.height == MAX(a.texture.height >> a.level, 1u)) return 1;
+    }
+    return 0;
+}
+// vkCmdClearAttachments is independent of all game graphics state. A load action handles whole attachments; otherwise use the host's precompiled clear triangle in a
+// separate load/store pass for each selected view layer. The game's encoder resumes through reopen_rp, restoring its bindings and allocating a new occlusion-query slot.
+// Helper passes have no visibility buffer: Vulkan permits clears to contribute to occlusion queries, but does not require them to do so.
+typedef struct { uint32_t color, depth, stencil, samples, kind; } attachment_clear_key;
+static id<MTLRenderPipelineState> attachment_clear_pso(MTLRenderPassDescriptor *d, const fmt_t *f) {
+    id<MTLTexture> color = d.colorAttachments[0].texture, depth = d.depthAttachment.texture, stencil = d.stencilAttachment.texture;
+    id<MTLTexture> t = color ?: depth ?: stencil;
+    attachment_clear_key k = {(uint32_t)color.pixelFormat, (uint32_t)depth.pixelFormat, (uint32_t)stencil.pixelFormat, (uint32_t)t.sampleCount,
+        f && f->kind == K_INT ? (fmt_is_signed_int(f) ? 2u : 1u) : 0u};
+    static NSMutableDictionary<NSData *, id<MTLRenderPipelineState>> *cache;
+    NSData *key = [NSData dataWithBytes:&k length:sizeof k]; id<MTLRenderPipelineState> pso = cache[key]; if (pso) return pso;
+    static id<MTLLibrary> lib; static int failed;
+    if (failed) return nil;
+    NSError *e = nil;
+    if (!lib) lib = host_msl_lib(g_dev, nil, "clear", &e);
+    if (!lib) { failed = 1; LOG("[vk] [RED] attachment clear shaders: %s", e.localizedDescription.UTF8String); return nil; }
+    MTLRenderPipelineDescriptor *p = [MTLRenderPipelineDescriptor new];
+    p.vertexFunction = [lib newFunctionWithName:@"clr_vs"];
+    if (color) {
+        static const char *types[] = {"float", "uint", "int"};
+        p.fragmentFunction = [lib newFunctionWithName:[NSString stringWithFormat:@"clr_fs_0_%s", types[k.kind]]];
+        p.colorAttachments[0].pixelFormat = color.pixelFormat;
+    }
+    p.depthAttachmentPixelFormat = depth.pixelFormat; p.stencilAttachmentPixelFormat = stencil.pixelFormat; p.rasterSampleCount = t.sampleCount;
+    pso = [g_dev newRenderPipelineStateWithDescriptor:p error:&e];
+    if (!pso) { LOG("[vk] [RED] attachment clear pipeline (%u/%u/%u, %u samples): %s", k.color, k.depth, k.stencil, k.samples, e.localizedDescription.UTF8String); return nil; }
+    if (!cache) cache = [NSMutableDictionary new]; cache[key] = pso; return pso;
+}
+static id<MTLDepthStencilState> attachment_clear_dss(int depth, int stencil) {
+    static id<MTLDepthStencilState> cache[2][2];
+    if (cache[depth][stencil]) return cache[depth][stencil];
+    MTLDepthStencilDescriptor *d = [MTLDepthStencilDescriptor new]; d.depthCompareFunction = MTLCompareFunctionAlways; d.depthWriteEnabled = depth;
+    if (stencil) {
+        MTLStencilDescriptor *st = [MTLStencilDescriptor new]; st.stencilCompareFunction = MTLCompareFunctionAlways; st.depthStencilPassOperation = MTLStencilOperationReplace;
+        st.writeMask = 0xff; d.frontFaceStencil = d.backFaceStencil = st;
+    }
+    return cache[depth][stencil] = [g_dev newDepthStencilStateWithDescriptor:d];
+}
+static void attachment_clear_layer(MTLRenderPassAttachmentDescriptor *dst, MTLRenderPassAttachmentDescriptor *src, uint32_t layer) {
+    dst.texture = src.texture; dst.level = src.level;
+    if (src.texture.textureType == MTLTextureType3D) dst.depthPlane = src.depthPlane + layer;
+    else dst.slice = src.slice + layer;   // src.texture is already the Vulkan view, including its base mip and array layer
+    dst.loadAction = MTLLoadActionLoad; dst.storeAction = MTLStoreActionStore;
+}
+static void clear_attachment_rects(rs_t *s, const VkClearAttachment *a, const VkClearRect *rects, uint32_t n) {
+    MTLRenderPassDescriptor *source = s->rpd;
+    BOOL color = a->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT;
+    BOOL depth = (a->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) && source.depthAttachment.texture;
+    BOOL stencil = (a->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) && source.stencilAttachment.texture;
+    MTLRenderPassAttachmentDescriptor *at = color ? source.colorAttachments[a->colorAttachment] : depth ? source.depthAttachment : source.stencilAttachment;
+    if (!at.texture || (!color && !depth && !stencil)) return;
+    const fmt_t *f = color ? s->rt_color[a->colorAttachment] : NULL;
+    float z = depth ? a->clearValue.depthStencil.depth : 0;
+    for (uint32_t layer = 0; layer < s->rt_layers; layer++) {
+        BOOL selected = NO;
+        for (uint32_t j = 0; j < n; j++) if (layer >= rects[j].baseArrayLayer && layer - rects[j].baseArrayLayer < rects[j].layerCount) { selected = YES; break; }
+        if (!selected) continue;
+        MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+        if (color) attachment_clear_layer(d.colorAttachments[0], at, layer);
+        else {
+            // Bind both planes when present, preserving the plane this clear does not write.
+            if (source.depthAttachment.texture) attachment_clear_layer(d.depthAttachment, source.depthAttachment, layer);
+            if (source.stencilAttachment.texture) attachment_clear_layer(d.stencilAttachment, source.stencilAttachment, layer);
+        }
+        id<MTLRenderPipelineState> pso = attachment_clear_pso(d, f); if (!pso) return;
+        id<MTLRenderCommandEncoder> en = [s->cb renderCommandEncoderWithDescriptor:d];
+        [en setRenderPipelineState:pso]; [en setDepthStencilState:attachment_clear_dss(depth, stencil)];
+        [en setVertexBytes:&z length:sizeof z atIndex:0];
+        if (color) [en setFragmentBytes:&a->clearValue.color length:sizeof a->clearValue.color atIndex:0];   // retain integer bits, including values above INT32_MAX
+        if (stencil) [en setStencilReferenceValue:a->clearValue.depthStencil.stencil];
+        [en setViewport:(MTLViewport){0, 0, MAX(at.texture.width >> at.level, 1u), MAX(at.texture.height >> at.level, 1u), 0, 1}];
+        [en setCullMode:MTLCullModeNone];
+        for (uint32_t j = 0; j < n; j++) {
+            const VkClearRect *r = &rects[j];
+            if (layer < r->baseArrayLayer || layer - r->baseArrayLayer >= r->layerCount) continue;
+            [en setScissorRect:(MTLScissorRect){r->rect.offset.x, r->rect.offset.y, r->rect.extent.width, r->rect.extent.height}];
+            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        }
+        [en endEncoding];
+    }
 }
 static void clear_attachments(rs_t *s, const c_cleara *x) {
     MTLRenderPassDescriptor *d = s->rpd;
     if ((!s->re && !s->cut) || !d) { RED1("vkCmdClearAttachments outside a render pass"); return; }
+    if (!x->n || !x->rects) return;
     const VkClearRect *rects = (const void *)(x->attachments + x->n);
+    BOOL whole = s->rt_layers == 1 && d.renderTargetArrayLength <= 1;
     for (uint32_t i = 0; i < x->n; i++) {
         const VkClearAttachment *a = &x->attachments[i];
         NSUInteger color = a->colorAttachment;
-        BOOL whole = NO;
-        for (uint32_t j = 0; j < x->rects; j++) {
-            const VkClearRect *r = &rects[j];
-            if ((a->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && color < 8 && clear_covers_texture(d.colorAttachments[color].texture, r)) ||
-                (a->aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT && clear_covers_texture(d.depthAttachment.texture, r)) ||
-                (a->aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT && clear_covers_texture(d.stencilAttachment.texture, r)) ||
-                (a->aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) &&
-                 clear_covers_texture(d.depthAttachment.texture, r) && clear_covers_texture(d.stencilAttachment.texture, r))) { whole = YES; break; }
-        }
-        if (!whole || d.renderTargetArrayLength > 1) { RED1("vkCmdClearAttachments region requires a partial attachment clear"); return; }
+        if (a->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && color >= 8) { RED1("vkCmdClearAttachments color attachment exceeds the host limit"); return; }
+        if (a->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT && !clear_covers_attachment(d.colorAttachments[color], rects, x->rects)) whole = NO;
+        if ((a->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) && !clear_covers_attachment(d.depthAttachment, rects, x->rects)) whole = NO;
+        if ((a->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) && !clear_covers_attachment(d.stencilAttachment, rects, x->rects)) whole = NO;
     }
     if (s->re) end_rp(s, 0);
     load_rp(s);
+    if (!whole) {
+        for (uint32_t i = 0; i < x->n; i++) clear_attachment_rects(s, &x->attachments[i], rects, x->rects);
+        reopen_rp(s); return;
+    }
     for (uint32_t i = 0; i < x->n; i++) {
         const VkClearAttachment *a = &x->attachments[i];
         if (a->aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
             MTLRenderPassColorAttachmentDescriptor *color = d.colorAttachments[a->colorAttachment];
+            if (!color.texture) continue;
             color.loadAction = MTLLoadActionClear;
             color.clearColor = fmt_clear_color(s->rt_color[a->colorAttachment], &a->clearValue.color);
         }

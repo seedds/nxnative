@@ -1566,8 +1566,32 @@ static void t_unsupported_style(void) {
     g_mode = 0; CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "Handheld only, handheld mode: the Handheld npad"); g_mode = 1;
     h_hid_SetStyles(STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "JoyDual | JoyLeft | JoyRight: JoyDual");
-    h_hid_SetStyles(STYLE_JOYLEFT | STYLE_JOYRIGHT);
-    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "JoyLeft | JoyRight only: no style with a whole controller's buttons supported, full-key as before");
+    h_hid_SetStyles(1u << 5);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "no style a whole controller can be shown as: full-key as before");
+
+    // Single Joy-Cons only (Pokémon: Let's Go, Eevee!: Handheld | JoyLeft | JoyRight | Palma, 0x5a): docked, the keyboard is one right Joy-Con on No1
+    g_signals = 0; h_hid_SetStyles(0x5a);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYRIGHT && g_signals == 1 && g_signalled == ev0, "0x5a: player 1's controller is a JoyRight npad on No1, its style event signalled");
+    dm_input_set(DM_BTN_A | DM_BTN_PLUS, -20000, 5000, 0, 0);
+    st = npad_of(0, STYLE_JOYRIGHT);
+    CHECK((st.buttons & 0xffff) == (DM_BTN_A | DM_BTN_PLUS) && st.lx == 0 && st.ly == 0 && st.rx == -20000 && st.ry == 5000 && st.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN),
+          "its JoyRight state: the face buttons, the left stick moved to the right stick, the right half connected");
+    CHECK((st.buttons & (1u << 20)) && !(st.buttons & (1u << 16)), "the stick's direction bits follow it to the right stick");
+    dm_input_set(DM_BTN_DOWN | DM_BTN_MINUS | DM_BTN_ZL, 0, 0, 0, 0);
+    CHECK((npad_of(0, STYLE_JOYRIGHT).buttons & 0xffff) == (DM_BTN_B | DM_BTN_PLUS | DM_BTN_ZR), "the left half's buttons in the right half's places (Down B, Minus Plus, ZL ZR)");
+    CHECK(!npad_of(0, STYLE_FULLKEY).attributes, "no full-key state for it");
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1);
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && (h[0] & 0xff) == 7, "one JoyRight vibration handle, type 7");
+    { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 1, "it reaches player 1's right motor"); }
+    dm_haptics_init(NULL, 0);
+    CHECK(h_hid_SixHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && h[0] == 0x10007 && six_connected(h[0]), "one JoyRight six-axis sensor, connected");
+    g_mode = 0; CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "0x5a, handheld mode: the Handheld npad, unchanged"); g_mode = 1;
+    h_hid_SetStyles(STYLE_JOYLEFT);
+    dm_input_set(DM_BTN_A | DM_BTN_R, 0, 0, 7000, -9000);
+    st = npad_of(0, STYLE_JOYLEFT);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYLEFT && (st.buttons & 0xffff) == (DM_BTN_RIGHT | DM_BTN_L) && st.lx == 7000 && st.ly == -9000 && st.rx == 0 && st.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN),
+          "JoyLeft only: a left Joy-Con, A on Right, R on L, the stick on the left");
+    dm_input_set(0, 0, 0, 0, 0); npad_of(0, STYLE_JOYLEFT);
     h_hid_SetStyles(0xffffffffu); pthread_mutex_lock(&g_style_lock); g_style_ev[0] = NULL; pthread_mutex_unlock(&g_style_lock);
 }
 

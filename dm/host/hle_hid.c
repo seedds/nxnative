@@ -1,7 +1,7 @@
 // nn::hid (controller): on the real device shared memory is read through the hid service; the host takes the current state written by the front end (Mac keyboard / controller, iOS virtual gamepad / controller).
 // Generic, game-independent version: player 1 is always connected, as the handheld controller (Npad id 0x20) with DM_OPMODE=0 (handheld), otherwise as the 1P full-key controller (id 0);
 // players 2..8 are full-key controllers on No2..No8 (ids 1..7), in either mode. A controller on No1..No8 is shown as a dual Joy-Con pair instead when the game supports JoyDual but not
-// full-key (pad_style); the Handheld npad stays Handheld. Players 2..8 are on No2..No8 while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
+// full-key, or as one Joy-Con (JoyRight, else JoyLeft) when the game supports only single Joy-Cons there (pad_style); the Handheld npad stays Handheld. Players 2..8 are on No2..No8 while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
 // of its own, front_mac.m). A player whose npad the game does not support (SetSupportedNpadIdType) is not reported: in a one-player game it feeds player 1, otherwise it is not used.
 // Six-axis sensor: one per connected controller (two for handheld), at rest lying flat, player 1's shaken side to side while the front end holds DM_BTN_SHAKE (see the six-axis section below).
 // Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected, and leaves out those past the game's maximum.
@@ -370,12 +370,18 @@ static npad_ref npad_resolve(uint32_t id) {
 // The hid service connects a controller only in a style the game supports (SetSupportedNpadStyleSet), and games test the style before anything else: Nintendo Switch Sports Resort
 // supports Handheld | JoyDual (0x6) in its lobby (main+0xa9e940), and its player check (main+0x58d0f0) found no player 1 on a full-key No1, so it opened the controller applet
 // again every frame (main+0x3f9d264), 7,162 times in 3 minutes. On No1..No8 (docked, and players 2..8 in handheld mode), a full-key controller the game does not support is shown as a
-// JoyDual pair instead, the supported style that has all its buttons and both sticks; no other style has them, so a game that supports neither keeps full-key, as before. The
-// Handheld npad stays Handheld
+// JoyDual pair instead, the supported style that has all its buttons and both sticks. A game that supports neither but takes single Joy-Cons gets it as one Joy-Con, JoyRight
+// first (its A / B / X / Y are the controller's own), else JoyLeft: Pokémon: Let's Go, Eevee! supports Handheld | JoyLeft | JoyRight | Palma (0x5a, main+0x1400bc) with single
+// assignment on No1..No3, so docked the keyboard on a full-key No1 took no input at all. fill moves the stick and the face buttons to that Joy-Con's side (single_joy_fold).
+// A game that supports none of these keeps full-key, as before. The Handheld npad stays Handheld
 static uint32_t pad_style(uint32_t id) {
     if (id == NPAD_HANDHELD) return STYLE_HANDHELD;
     uint32_t s = atomic_load(&g_styles_supported);
-    return !(s & STYLE_FULLKEY) && (s & STYLE_JOYDUAL) ? STYLE_JOYDUAL : STYLE_FULLKEY;
+    if (s & STYLE_FULLKEY) return STYLE_FULLKEY;
+    if (s & STYLE_JOYDUAL) return STYLE_JOYDUAL;
+    if (s & STYLE_JOYRIGHT) return STYLE_JOYRIGHT;
+    if (s & STYLE_JOYLEFT) return STYLE_JOYLEFT;
+    return STYLE_FULLKEY;
 }
 static uint32_t kind_style(npad_ref r, uint32_t id) {
     uint32_t two = r.pad >= 0 && r.pad < DM_PLAYERS && atomic_load(&g_joy_two[r.pad]) ? atomic_load(&g_styles_supported) : 0;
@@ -584,6 +590,21 @@ static void fill_joy(NpadState *s, npad_ref r) {
     s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
     s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);
 }
+// A whole controller shown as one Joy-Con (pad_style): that Joy-Con has one stick and half the buttons, so the more deflected stick goes to its side's field and the other half's
+// buttons take their place there: the d-pad as the face buttons in the same positions (Right A, Down B, Up X, Left Y), Minus / L / ZL / the stick click as Plus / R / ZR /
+// the right stick click (and the other way round for JoyLeft). A Joy-Con state never carries the other half's buttons. b: buttons 0..15
+enum { NB_A = 1u << 0, NB_B = 1u << 1, NB_X = 1u << 2, NB_Y = 1u << 3, NB_LS = 1u << 4, NB_RS = 1u << 5, NB_L = 1u << 6, NB_R = 1u << 7, NB_ZL = 1u << 8, NB_ZR = 1u << 9,
+       NB_PLUS = 1u << 10, NB_MINUS = 1u << 11, NB_LEFT = 1u << 12, NB_UP = 1u << 13, NB_RIGHT = 1u << 14, NB_DOWN = 1u << 15 };
+static void single_joy_fold(int right, uint64_t *b, int32_t a[4]) {
+    static const uint32_t rmap[][2] = {{NB_A, NB_RIGHT}, {NB_B, NB_DOWN}, {NB_X, NB_UP}, {NB_Y, NB_LEFT}, {NB_RS, NB_LS}, {NB_R, NB_L}, {NB_ZR, NB_ZL}, {NB_PLUS, NB_MINUS}};
+    uint64_t in = *b, out = 0;
+    for (size_t i = 0; i < sizeof rmap / sizeof rmap[0]; i++) if (in & (rmap[i][0] | rmap[i][1])) out |= rmap[i][!right];
+    *b = out;
+    int64_t ml = (int64_t)a[0] * a[0] + (int64_t)a[1] * a[1], mr = (int64_t)a[2] * a[2] + (int64_t)a[3] * a[3];
+    int32_t x = ml >= mr ? a[0] : a[2], y = ml >= mr ? a[1] : a[3];
+    memset(a, 0, 4 * sizeof a[0]);
+    a[right ? 2 : 0] = x; a[right ? 3 : 1] = y;
+}
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
@@ -609,8 +630,10 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
-    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
+    uint32_t shown = kind_style(ref, id);
+    if (shown == STYLE_JOYRIGHT || shown == STYLE_JOYLEFT) single_joy_fold(shown == STYLE_JOYRIGHT, &b, a);
+    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
     if (s->ly > STICK_THRESH) b |= 1u << 17;
     if (s->lx > STICK_THRESH) b |= 1u << 18;
@@ -620,7 +643,8 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     if (s->rx > STICK_THRESH) b |= 1u << 22;
     if (s->ry < -STICK_THRESH) b |= 1u << 23;
     s->buttons = b;
-    s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+    s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED
+                                      : shown == STYLE_JOYRIGHT ? ATTR_RIGHT_CONN : shown == STYLE_JOYLEFT ? ATTR_LEFT_CONN : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
 }
 // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
 // (the keyboard / touch source's bits included) plus the eight stick-direction pseudo buttons of the merged axes —
@@ -1534,6 +1558,10 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
     uint32_t pad_players = p == 0 ? 1u | merged_players() : p > 0 ? 1u << p : 0;   // a whole controller's motors: player 1's merged controllers too
     if (type >= 5) {
         if (type == 5 && r.kind == KIND_PAD && kind_style(r, id) == STYLE_JOYDUAL) return dm_haptics_available() & pad_players;   // a controller shown as a pair (pad_style)
+        if (type != 5 && r.kind == KIND_PAD && kind_style(r, id) == (type == 6 ? STYLE_JOYLEFT : STYLE_JOYRIGHT)) {   // a controller shown as one Joy-Con: its motor on that side
+            if (dev) return 0;
+            *motor = type == 7; return dm_haptics_available() & pad_players;
+        }
         if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
         if (type != 5) *motor = type == 7;
         return dm_haptics_available() & (1u << r.pad);
@@ -1591,7 +1619,8 @@ HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiR
     uint32_t st = kind_style(r, *id);   // the handle's type follows the reported style (a whole controller may be shown as a pair, pad_style)
     uint32_t type = st & STYLE_JOYDUAL ? 5u : st & STYLE_JOYLEFT ? 6u : st & STYLE_JOYRIGHT ? 7u : st & STYLE_HANDHELD ? 4u : 3u;
     uint32_t base = (*id << 8) | type;
-    int count = n < (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2) ? n : (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2);
+    int one = type == 6 || type == 7;   // a single Joy-Con, or a whole controller shown as one: one motor
+    int count = n < (one ? 1 : 2) ? n : (one ? 1 : 2);
     for (int i = 0; i < count; i++) h[i] = base | (uint32_t)i << 16;
     if (getenv("DM_RUMBLE_LOG")) LOG("rumble: game asked for vibration handles of npad %u style %#x: %d, first %#x", *id, style, count, h[0]);
     return count;

@@ -76,7 +76,7 @@ def bit0_mask(msl):
     return out if out != msl else msl
 
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
-TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')   # tg_fence looks for the name 'dmsh_tg_fence' before it runs this: a change of the name here is one there too
 def tg_fence(src):
     """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
     at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
@@ -85,6 +85,7 @@ def tg_fence(src):
     threadgroup-scope fence on every memory (MSL 3.2); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
     an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
     fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    if 'dmsh_tg_fence' not in src: return src   # every helper match needs its name; let the pattern check its declaration
     m = TG_FENCE_FN.search(src)
     if not m: return src
     return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
@@ -124,17 +125,95 @@ def mul_extended(msl):
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
+# A read of a game uniform slot at a computed offset, as the translator bounds it (TranslationFlags.MetalUniformBounds, GitHub issue #1860): the value when the slot's bound size
+# (the size table, bank DMSH_CBSIZE_BANK) holds its index, else 0, and out of bounds the read's index is row 0, so it stays inside the binding
+# (bool _5 = word < size; _5 ? c[_5 ? _3 : 0][_4] : 0.0). Reads at fixed offsets are not bounded in the shader: the host gives a binding shorter than they reach zeros up to there
+# (the reflection's "fixed", nvn_mtl.m ub_padded; GitHub issue #2066).
+# The translator's bounded read is a load and a choice (OpLoad, then OpSelect: the word is read wherever the size says, and only its value is chosen), but spirv-cross writes OpSelect
+# on a scalar as a conditional expression and forwards the load into it, cond ? read : 0, which reads only when the condition holds: Metal's compiler makes a branch, a load inside it
+# and a phi of every bounded read (seen in its LLVM IR at -O1 and -O2), where select(0, read, cond) is one load and a select. select_guards writes every bounded read as that select,
+# the translator's own meaning.
+# The branches are also what an M1's compiler gets wrong (GitHub PR #2127, macOS 26 on an M1 Pro, when reads at fixed offsets were bounded so too): OCTOPATH TRAVELER's tree material
+# (pixel shader 040208cd98c2ac2f) wrote a wrong volumetric lightmap word to G-buffer target 5 whenever a tree dither-faded, with every guard true; the lighting made NaN of it and
+# depth of field spread that into blue, green and white blocks. Which compiler step fails is not known (the same source was right at -O0, without the guards and with select; not
+# seen on newer Macs or an iPhone).
+# A bounded read select_guards cannot write as a select is an error (ValueError), so a change in what spirv-cross writes cannot bring the branches back unseen
+_GSIZE = r'\(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> (?:2|4)u\)' % abi.CBSIZE_BANK   # a slot's size in words or vec4 rows
+_GZERO = r'0(?:\.0|u)?'
+def _gchoice(cond, read):   # cond ? read : 0 as spirv-cross writes it, in parentheses (those after a name or > are a call's) or not as the expression around it needs
+    return re.compile('|'.join(form % (n, cond, n, read % n, n, _GZERO) for n, form in
+                               ((1, r'(?<![\w>])\((?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)\)'), (2, r'(?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)(?![\w.])'))))
+# The comparisons start with the text "bool ", which re skips to: with \b first it tried them at every character of every source. The lookbehind takes that text in and is the \b
+# (no word character before it), so the matches are the same (test_shader_rewrites.py GuardScans)
+_GBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
+_GROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\](?:\[[^\]\n]+\]|\.[xyzw])')
+_GLEFT = re.compile(r'%s\) \?' % _GSIZE)
+# A bounded storage buffer's read (TranslationFlags.MetalStorageBounds, GitHub issue #2618): the same choice, the word when it lies in the memory the host bound there (the length table,
+# bank DMSH_SBLEN_BANK: bool _5 = (uint(idx) + before) < total) else 0, and out of bounds the index is word 0, inside the binding (_5 ? buf[_5 ? idx : 0] : 0u). Written as a select too:
+# the load needs no branch, and its words stay plain for wide_loads (dmsh_wide.py)
+_STABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
+_SBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
+_SROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_s\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\]')
+_GNAME = re.compile(r'(?<!\[)\b(_\d+) \?')   # a choice on a name; a read's index has its own, after the bracket
+# _GROW, _SROW and _GNAME have no text to skip to (an alternation, a lookbehind), and re tried them at every character of a source with bounded reads. Each is tried only where
+# one of its matches can start, found from text every match holds, and the pattern itself decides there: the matches, their order and the result are those of sub and finditer
+# (GuardScans)
+_GREAD = ' ? (*spvDescriptorSet0.'   # follows the condition of every choice of a read
+
+def _gsub(pat, repl, msl):
+    """pat.sub(repl, msl) for a _gchoice pattern: a match starts at its condition, the last _ before a _GREAD, or at the parenthesis before that"""
+    k = msl.find(_GREAD)
+    if k < 0: return msl
+    out, pos, low = [], 0, 0   # copied up to pos; no match starts before low (the end of the last match, or past a _GREAD that began none)
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = (pat.match(msl, s - 1) if s > pos and msl[s - 1] == '(' else None) or (pat.match(msl, s) if s >= 0 else None)
+        if m: out += (msl[pos:m.start()], repl(m)); pos = low = m.end()
+        else: low = k + 1
+        k = msl.find(_GREAD, low)
+    out.append(msl[pos:])
+    return ''.join(out)
+
+def _gleft(msl, conds):
+    """The first match of _GNAME whose name is in conds, or None: a match ends with a " ?" and starts at the last _ before it"""
+    k, low = msl.find(' ?'), 0
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = _GNAME.match(msl, s) if s >= 0 else None
+        if m and m.group(1) in conds: return m
+        low = k + 2; k = msl.find(' ?', low)
+    return None
+
+def select_guards(msl):
+    if 'spvDescriptorSet0' not in msl: return msl
+    bools, sbools = set(_GBOOL.findall(msl)), set(_SBOOL.findall(msl))
+    def select(m, conds):
+        n = '1' if m.group('q1') else '2'; c = m.group('q' + n)
+        if c not in conds or m.group('i' + n) != c: return m.group(0)
+        return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
+    if bools: msl = _gsub(_GROW, lambda m: select(m, bools), msl)
+    if sbools: msl = _gsub(_SROW, lambda m: select(m, sbools), msl)
+    left = _GLEFT.search(msl)
+    conds = bools | sbools   # no condition names: no choice can be left over from one, so only the scan below is skipped (the size test above always runs)
+    if not left and conds: left = _gleft(msl, conds)
+    if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
+    return msl
+
 # A game uniform word tested against integer constants, as the translator writes a GLSL switch (Ryujinx's structurizer: one test of the word per case, flags for the fall-throughs,
 # the cases nested in each other): bool _5 = as_type<int>((*spvDescriptorSet0.fp_c5)._m0[16].w) != 102. The Metal front end's SimplifyCFG (at -O1 too) folds a chain of blocks
 # that each hold only such a test of one value into a switch, whose cases jump into the nested blocks past their joins. Apple's GPU compiler then takes a pixel shader with dozens of
 # such switches for hours and tens of gigabytes (applegpu-nt, metal-tt 32023.922): Nintendo Switch Sports Resort's material pixel shader 692008b305ce264f (42 switches) ran past
 # 10 minutes and 13 GB alone where it had taken 7 s, and the Mac app's pipeline archive spent 15 hours on four pipelines. The reads were plain since the host pads a short binding
-# (dmsh_fetch.select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
+# (select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
 # (dm_uword), which the front end can neither merge with the next test's nor move out of its block, so no chain is folded; a uniform load per test is less than the bounds test
 # each read had then. Only words of the game's uniform slots (c3 and up) tested against a constant more than once: a single test is no chain, and the driver's banks (c0 to c2)
 # are left as written, since later rewrites look for their reads (dmsh_entry.vs_base_instance) and the host fills them. Returns the shader unchanged when there are none
-_UTEST_READ = r'as_type<(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # game slots c3 and up, not the driver's banks
-_UTEST = re.compile(r'(?<![\w.])%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= )%s' % (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
+_UTEST_READ = r'(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # after as_type<: game slots c3 and up, not the driver's banks
+# A literal start lets re skip to casts. The lookbehinds include that consumed prefix, so they still check the characters before the cast; spans and groups stay the same.
+# The prefix is written three times, at the start and in both lookbehinds: a change to one is a change to all three (test_shader_rewrites.py UniformMatchScan holds this
+# pattern to the one it replaced, match by match)
+_UTEST = re.compile(r'as_type<(?:(?<![\w.]as_type<)%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= as_type<)%s)' %
+                   (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
 _UTEST_LEFT = re.compile(r'(?<![\w.])-?\d+u? [!=]= $')
 UWORD = ('#ifndef DM_UWORD\n#define DM_UWORD\ntemplate<typename T, int N> static inline __attribute__((always_inline)) T dm_uword(const constant vec<T, N>& v, int i) '
          '{ return ((const volatile constant T*)&v)[i]; }\n#endif\n')
@@ -242,6 +321,141 @@ def block_end(src, start):   # the index of the brace closing the block opened a
         depth += 1 if b.group() == '{' else -1
         if depth == 0: return b.start()
     raise ValueError('dmsh_hmma16816_f16: block not closed')
+
+# Compute loop containment, based on uncraftablexd / FifteenPen's #2254 and computerguy526 / uncraftablexd's #2709. A platform workaround, not the runaway's cause's fix:
+# committed GPU work can survive process exit and wedge the Mac (#2664). The per-function budget also counts nested and consecutive loops; legitimate work can exhaust it.
+# Only compute is guarded. A GPU-written abort word shortens the submission's other loops; CPU writes to a running kernel were unreliable. Helpers carry the same state, but
+# have their own function budget. A loop containing an execution barrier (also through calls) has a fresh private budget, only raises the abort, and never reads it:
+# differing work before or inside it must not make threads leave its barriers on different iterations. Cap hits record a loop site separately
+# for each kernel, so a kernel shortened by another's abort is not blamed. Source sites are written into the reflection; the host reports hits after completion, once per kernel.
+LOOP_CAP = 1 << 18
+LOOP_ABORT_EVERY = 1024
+_LOOP = re.compile(r'\b(for|while)\s*\(')
+_LOOP_COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.S)
+
+
+def compute_loops(msl):
+    """(MSL, loop sites): cap compute entry functions and their reachable helpers, carrying the submission's abort and kernel's hit record through callers.
+    SPIRV-Cross's function braces stand alone; loop bodies may be compact (the chain's matrix helpers). Other stages and loop-free compute shaders are unchanged."""
+    if not re.search(r'^kernel\s+void\s+main0\s*\(', msl, re.M): return msl, []
+    fns = []
+    for m in FUNC_OPEN.finditer(msl):
+        close = m.start() - 1
+        if close < 0 or msl[close] != ')': continue
+        depth, op = 1, close
+        while depth and op:
+            op -= 1; depth += (msl[op] == ')') - (msl[op] == '(')
+        name = re.search(r'(\w+)\s*$', msl[:op])
+        if not name: continue
+        start = msl.rfind('\n', 0, op) + 1
+        body = m.end() + 2
+        end = block_end(msl, body - 1)
+        fns.append((name[1], start, op, close, body, end))
+    names = {f[0] for f in fns}
+    calls = {n: set() for n in names}
+    bodies = {n: '' for n in names}
+    def code(text): return _LOOP_COMMENT.sub(lambda m: re.sub(r'[^\n]', ' ', m[0]), text)
+    for n, _, _, _, b, e in fns: bodies[n] += code(msl[b:e])
+    def uses(text, n): return re.search(rf'\b{re.escape(n)}\s*(?:<[^;\n()]*>)?\s*\(', text)
+    for n in names: calls[n] = {c for c in names if uses(bodies[n], c)}
+    def grow(seed, edges):
+        found = set(seed)
+        while True:
+            more = {n for n in names if edges(n, found)} - found
+            if not more: return found
+            found |= more
+    reach = grow({'main0'}, lambda n, s: any(n in calls[c] for c in s))
+    loops = {n for n in reach if _LOOP.search(bodies[n])}
+    guarded = grow(loops, lambda n, s: bool(calls[n] & s)) & reach
+    if not loops: return msl, []
+    if re.search(rf'\[\[buffer\({abi.LOOP_SLOT}\)\]\]', msl): raise ValueError(f'compute buffer {abi.LOOP_SLOT} is taken')
+    barriers = grow({n for n in names if re.search(r'\b(?:threadgroup|simdgroup)_barrier\s*\(', bodies[n])}, lambda n, s: bool(calls[n] & s))
+    edits, sites = [], []
+    def call_edits(text):
+        out = []
+        for c in guarded:
+            for call in re.finditer(rf'\b{re.escape(c)}\s*(?:<[^;\n()]*>)?\s*\(', code(text)):
+                tail = dmsh_side._close(text, call.end(), '(', ')')
+                if tail < 0: raise ValueError(f'loop containment: unclosed call to {c}')
+                out.append((tail - 1, (', ' if text[call.end():tail - 1].strip() else '') + 'dm_loop'))
+        return out
+    for n, _, op, close, b, e in fns:
+        if n not in guarded: continue
+        param = 'device dm_loop_state& dm_loop' + (f' [[buffer({abi.LOOP_SLOT})]]' if n == 'main0' else '')
+        edits.append((close, close, (', ' if msl[op + 1:close].strip() else '') + param))
+        body, conditions = msl[b:e], []
+        masked = code(body)
+        if n in loops: edits.append((b, b, '\n    uint dm_lg = 0u;'))
+        for loop in _LOOP.finditer(masked):
+            close = dmsh_side._close(masked, loop.end(), '(', ')') - 1
+            if close < 0: raise ValueError(f'loop containment: unclosed condition in {n}')
+            lo, hi = loop.end(), close
+            if loop[1] == 'for':
+                semis = [m.start() for m in re.finditer(';', masked[lo:hi])]
+                if len(semis) != 2: raise ValueError(f'loop containment: unknown loop in {n}')
+                lo, hi = lo + semis[0] + 1, lo + semis[1]
+            after = close + 1
+            while after < len(masked) and masked[after].isspace(): after += 1
+            before = masked[:loop.start()].rstrip()
+            begin = loop.start()
+            if loop[1] == 'while' and after < len(masked) and masked[after] == ';' and before.endswith('}'):
+                # A do/while: locate its body backwards, including any nested blocks.
+                depth, start = 1, len(before) - 1
+                while depth and start:
+                    start -= 1; depth += (masked[start] == '}') - (masked[start] == '{')
+                do = re.search(r'\bdo\s*$', masked[:start])
+                if not do: raise ValueError(f'loop containment: no do in {n}')
+                begin, end = do.start(), after + 1
+                inside = masked[start:len(before)]
+            elif after < len(masked) and masked[after] == '{':
+                end = block_end(masked, after) + 1
+                inside = masked[after:end]
+            else:
+                end = masked.find(';', after)
+                if end < 0: raise ValueError(f'loop containment: no loop body in {n}')
+                inside = masked[after:end]
+                end += 1
+            context = masked[loop.end():close] + inside
+            barrier = bool(re.search(r'\b(?:threadgroup|simdgroup)_barrier\s*\(', context)) or any(uses(context, c) for c in barriers)
+            site = len(sites) + 1
+            sites.append({'site': site, 'function': n, 'line': msl.count('\n', 0, b + loop.start()) + 1, 'barrier': barrier})
+            counter = f'dm_lg_b{site}' if barrier else 'dm_lg'
+            if barrier:
+                edits.extend(((b + begin, b + begin, f'{{ uint {counter} = 0u; '), (b + end, b + end, ' }')))
+            check = f'dm_lg_{"cap" if barrier else "go"}({counter}, dm_loop, {site}u)'
+            out = body[lo:hi].strip() or 'true'
+            for at, text in sorted(call_edits(out), reverse=True): out = out[:at] + text + out[at:]
+            edits.append((b + lo, b + hi, f'({out}) && {check} /* dm_loop_site {site}: {n} */'))
+            conditions.append((lo, hi))
+        # Calls inside conditions were rewritten with their condition; the remaining calls include loop-free wrappers and nested calls in ordinary statements.
+        for at, text in call_edits(body):
+            if not any(lo <= at <= hi for lo, hi in conditions): edits.append((b + at, b + at, text))
+    for a, b, text in sorted(edits, reverse=True): msl = msl[:a] + text + msl[b:]
+    head = re.search(r'^using namespace metal;\s*\n', msl, re.M)
+    if not head: raise ValueError('loop containment: no metal namespace')
+    helper = f'''
+struct dm_loop_state
+{{
+    device atomic_uint* abort;
+    atomic_uint hit;
+}};
+static inline __attribute__((always_inline)) bool dm_lg_cap(thread uint& n, device dm_loop_state& s, uint site)
+{{
+    if (++n < {LOOP_CAP}u) return true;
+    if (n == {LOOP_CAP}u)
+    {{
+        atomic_fetch_min_explicit(&s.hit, site, memory_order_relaxed);
+        atomic_store_explicit(s.abort, 1u, memory_order_relaxed);
+    }}
+    return false;
+}}
+static inline __attribute__((always_inline)) bool dm_lg_go(thread uint& n, device dm_loop_state& s, uint site)
+{{
+    if (!dm_lg_cap(n, s, site)) return false;
+    return (n & {LOOP_ABORT_EVERY - 1}u) != 0u || atomic_load_explicit(s.abort, memory_order_relaxed) == 0u;
+}}
+'''
+    return msl[:head.end()] + helper + msl[head.end():], sites
 
 # B kept in the SIMD-group (hmma_bslots). The lanes hold B in registers and the matrix hardware fills its matrices only from memory: a lane writing its elements through
 # thread_elements() from SIMD shuffles (the 8x8 lane layout measured on an M6: lane l holds row (l/16)*4 + (l/2)%4, columns 2(l%2) + 4((l/8)%2) and the next) took a chain of
@@ -517,13 +731,17 @@ def gather_quad(off):
 # took 1.9 s to compile cold on an M2 Air (25 s for the route's 54 at the first start), while the GPU waited at its first draw (Native mesh pipelines compiled at their first draw).
 # Written noinline, it is one function the misses branch to. Only the search: the last entry's check and the access stay inline, since keeping the whole access helper apart
 # put the last entry and the vector words behind the call at every access (2.5 ms of a 15 ms frame on an M4 Pro)
-RAW_FIND = re.compile(r'\nstatic inline __attribute__\(\(always_inline\)\)\n(\w+ dmsh_raw_find\w*\()')
-def raw_noinline(msl):
-    return RAW_FIND.sub(lambda m: '\nstatic __attribute__((noinline))\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
+# Workaround for Apple's M1/M2 mesh compiler: some mesh programs calling this helper crash in MachineOperand::setReg. Keep the search inline in every final mesh library,
+# including one composed from vertex/geometry sources already rewritten noinline. Other stages retain one search; the compiler defect itself remains open.
+RAW_FIND = re.compile(r'\nstatic (?:inline __attribute__\(\(always_inline\)\)|__attribute__\(\(noinline\)\))\n(\w+ dmsh_raw_find\w*\()')
+def raw_noinline(msl, stage='cs'):
+    attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
+    return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 
 def gather_offsets(msl):
+    if 'spvGather' not in msl: return msl   # both gather helper names need this prefix
     if not re.search(r'\bspvGather(Compare)?ConstOffsets\(spvDesc|= spvGather(Compare)?ConstOffsets\(', msl): return msl
     arrays = {}
     for m in re.finditer(r'\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);', msl):

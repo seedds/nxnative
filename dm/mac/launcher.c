@@ -37,6 +37,7 @@ extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
 int dm_mac_settings_available(void);   // Launcher.swift: 1 = the settings window can be shown while the game runs
 int dm_mac_launcher_wait(pid_t pid);   // Launcher.swift: waits for the host with the run loop that shows it (the game's Settings…); waitpid's status, -1 on failure
+int dm_mac_microphone_consent(void);
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -197,6 +198,26 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// Run after either launch path has applied its choices, before spawning dmhost. The bundle
+// owns the OS permission request. Denial disables capture for this run, without changing the saved choice.
+static void microphone_at_launch(void) {
+    const char *enabled = getenv("DM_MIC");
+    if (!enabled || strcmp(enabled, "1")) return;
+    if (!CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(), CFSTR("NSMicrophoneUsageDescription")) ||
+        !dm_mac_microphone_consent()) {
+        setenv("DM_MIC", "0", 1);
+        return;
+    }
+    const char *ignore = getenv("DM_SAVED_CHOICES");
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    if (getenv("DM_MIC_DEVICE") || (ignore && !strcmp(ignore, "0")) || !domain) return;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("launcher.DM_MIC_DEVICE"), domain);
+    char uid[256];
+    if (value && CFGetTypeID(value) == CFStringGetTypeID() && CFStringGetCString(value, uid, sizeof uid, kCFStringEncodingUTF8) && *uid)
+        setenv("DM_MIC_DEVICE", uid, 0);
+    if (value) CFRelease(value);
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -258,6 +279,7 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     saved_choices(shown == 1);   // the window applied its settings; the controls are not among them
     cloud_saves_folder();
+    microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);

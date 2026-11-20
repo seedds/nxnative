@@ -7,6 +7,9 @@ game still needs a workaround; enrolling a patch requires checking that assumpti
 A rule covers one function ({name, size, fingerprints, cuts}) or several that must change
 together ({name, functions: [{size, fingerprints, cuts}, ...]}): a multi-function rule
 applies only when every one of its functions matches, never in part.
+A rule can identify a short callee through a direct call in a uniquely matched
+caller ({called_by: {size, fingerprints, call}}), checking the callee's own
+fingerprint and original bytes at the resolved target.
 A frame-step rule ({name, size, fingerprints, stub}; patch_nso.py MATCH_FRAME_STEP) locates
 one function the same way and hands its start to the stub, which writes its sites there.
 An anchored frame-step rule ({name, calls, find, stub, reviewed}) locates instead the one function that
@@ -207,7 +210,18 @@ class Image:
 
     def match(self, rule):
         validate(rule)
-        start = self.locate(rule['size'], rule['fingerprints'])
+        caller = rule.get('called_by')
+        if caller is None:
+            start = self.locate(rule['size'], rule['fingerprints'])
+        else:
+            site = self.locate(caller['size'], caller['fingerprints']) + caller['call']
+            word, = struct.unpack_from('<I', self.image, site)
+            if word & 0xfc000000 != 0x94000000:
+                raise MatchError(f'expected a direct call at {site:#x}')
+            start = site + 4 * _signed(word & 0x3ffffff, 26)
+            if (self.functions.get(start) != start + rule['size']
+                    or self.fingerprint(start) not in rule['fingerprints']):
+                raise MatchError(f'callee at {start:#x} does not match')
         cuts = []
         for delta, old, new, reason in rule['cuts']:
             off = start + delta
@@ -338,11 +352,21 @@ def validate(rule):
         if set(rule) != {'name', 'functions'}: raise ValueError('a patch of several functions needs only name and functions')
         if not isinstance(rule['functions'], (list, tuple)) or len(rule['functions']) < 2: raise ValueError('a patch of several functions needs at least two')
         for fn in rule['functions']:
-            if 'name' in fn or 'functions' in fn: raise ValueError('a function of a patch has size, fingerprints and cuts only')
+            if 'name' in fn or 'functions' in fn: raise ValueError('a function of a patch has size, fingerprints, cuts and optional called_by')
             validate(dict(fn, name=rule['name']))
         return
-    if set(rule) != {'name', 'size', 'fingerprints', 'cuts'}: raise ValueError('function patch needs name, size, fingerprints and cuts')
+    required = {'name', 'size', 'fingerprints', 'cuts'}
+    if not required <= set(rule) <= required | {'called_by'}:
+        raise ValueError('function patch needs name, size, fingerprints and cuts')
     validate_function(rule)
+    if 'called_by' in rule:
+        caller = rule['called_by']
+        if not isinstance(caller, dict) or set(caller) != {'size', 'fingerprints', 'call'}:
+            raise ValueError('called_by needs the caller size, fingerprints and call offset')
+        validate_function(dict(caller, name=rule['name']))
+        call = caller['call']
+        if not isinstance(call, int) or call % 4 or not 0 <= call < caller['size']:
+            raise ValueError('invalid function-relative call')
     if not rule['cuts']: raise ValueError('function patch has no cuts')
     used = set()
     for delta, old, new, reason in rule['cuts']:

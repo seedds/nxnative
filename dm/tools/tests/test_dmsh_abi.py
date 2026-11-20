@@ -102,7 +102,7 @@ class Build(unittest.TestCase):
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_every_kind_is_written_by_the_build(self):
-        build = [REPO / 'dm/gfx/tools' / f for f in ('dmsh_build.py', 'dmsh_reflect.py', 'dmsh_rewrite.py', 'dmsh_entry.py')]   # the build and the modules that write its reflection
+        build = [REPO / 'dm/gfx/tools' / f for f in ('dmsh_build.py', 'dmsh_reflect.py', 'dmsh_rewrite.py', 'dmsh_entry.py', 'dmsh_rt_compile.py')]   # the build and the modules that write its reflection
         for p in build[:3]: self.assertRegex(p.read_text(), r'(?m)^import .*\bdmsh_abi as abi\b', p.name)   # dmsh_entry.py writes no binding
         src = ''.join(p.read_text() for p in build)
         unused = [k for k in abi.VALUES if k.startswith('KIND_') and f'abi.{k}' not in src]

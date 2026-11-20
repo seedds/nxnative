@@ -284,6 +284,45 @@ static void test_compressed_arrays(void) {
     h_glDeleteTextures(1, &name);
 }
 
+static void test_packed_uploads(void) {
+    static const struct { GLenum internal, format, type; MTLPixelFormat metal; } cases[] = {
+        {GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, MTLPixelFormatRGB10A2Unorm},
+        {GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, MTLPixelFormatRG11B10Float},
+    };
+    // Two one-pixel rows, with an unused packed word between them. Alignment 1 exposes a three-byte source layout.
+    const uint8_t src[] = {0x12, 0x34, 0x56, 0x78, 0xee, 0xee, 0xee, 0xee, 0xaa, 0xbb, 0xcc, 0xdd};
+    const uint8_t want[][8] = {
+        {0x12, 0x34, 0x56, 0x78, 0xaa, 0xbb, 0xcc, 0xdd},
+        {0x78, 0x56, 0x34, 0x12, 0xdd, 0xcc, 0xbb, 0xaa},
+    };
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 2);
+    h_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    int failures = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        GLuint name;
+        h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D, name);
+        for (int swap = 0; swap <= 1; swap++) {
+            h_glPixelStorei(0xcf0, swap);   // GL_UNPACK_SWAP_BYTES
+            h_glTexImage2D(GL_TEXTURE_2D, 0, cases[i].internal, 1, 2, 0, cases[i].format, cases[i].type, src);
+            assert(h_glGetError() == GL_NO_ERROR);
+            tex_t *t = tex_of(name);
+            assert(t && tex_make(t, 0) && t->tex.pixelFormat == cases[i].metal);
+            uint8_t got[sizeof want[0]];
+            [t->tex getBytes:got bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 2) mipmapLevel:0];
+            if (memcmp(got, want[swap], sizeof got)) {
+                fprintf(stderr, "GL packed upload type %#x, GL_UNPACK_SWAP_BYTES=%d: wrong bytes\n", cases[i].type, swap);
+                failures++;
+            }
+        }
+        h_glDeleteTextures(1, &name);
+    }
+    h_glPixelStorei(0xcf0, 0);
+    h_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    assert(!failures);
+    puts("GL packed uploads (RGB10_A2, R11F_G11F_B10F): OK");
+}
+
 // What DOOM 3's renderer (id Tech 4's BFG Edition) needs of the layer: its ARB names and extension check, named uniform blocks bound by range, two-sided stencil, frame copies into
 // a texture, streamed compressed images, byte-swapped 16-bit images, programs with a vertex shader alone, sync queries and wireframe
 static void test_doom3(void) {
@@ -391,7 +430,16 @@ static void test_doom3(void) {
     assert(d[0] == 255 && d[1] == 0 && d[2] == 0 && d[3] == 255 && d[4] == 0 && d[5] == 255 && d[6] == 0 && d[7] == 255);
     h_glDeleteTextures(1, &a);
 
-    // GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green)
+    // Sync queries, wireframe and its polygon offset enable
+    void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
+    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
+    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
+}
+
+// GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green).
+// Hardware check: sampler LOD-bias readback fails on CI's virtual Metal device.
+static void test_lod_bias(void) {
+    NSError *err = nil; GLuint a; tex_t *ta;
     static const char *bsrc = "#include <metal_stdlib>\n using namespace metal;\n struct V { float4 p [[position]]; float2 uv; };\n"
         "vertex V bv(uint i [[vertex_id]]) { float2 q = float2((i << 1) & 2, i & 2); V o; o.p = float4(q * 2 - 1, 0, 1); o.uv = q; return o; }\n"
         "fragment float4 bf(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, in.uv); }\n";
@@ -418,11 +466,6 @@ static void test_doom3(void) {
         assert(px[5] == (bias ? green[0] : red[0]));
     }
     h_glDeleteTextures(1, &a);
-
-    // Sync queries, wireframe and its polygon offset enable
-    void *sy = h_glFenceSync(0x9117, 0); assert(h_glIsSync(sy) && !h_glIsSync(NULL)); h_glDeleteSync(sy);
-    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b01); assert(S.lines); h_glEnable(0x2a02); assert(S.poffset_line);
-    h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
 }
 
 // A 4x4 texture of two levels (red, then green) drawn 1:1 into a 4x4 target with the sampler a unit would use: the colour of a middle texel
@@ -450,7 +493,7 @@ static uint32_t draw_texel(tex_t *t, id<MTLSamplerState> s) {
 }
 
 // GL sampler objects (Mega Man Legacy Collection sets its filters and wraps on one per unit, none on its textures), and uniform locations, of which none is 0
-static void test_sampler_objects(void) {
+static void test_sampler_objects(int gpu) {
     const uint32_t red = 0xff0000ffu, green = 0xff00ff00u;
     uint32_t l0[16], l1[4]; for (int i = 0; i < 16; i++) l0[i] = red; for (int i = 0; i < 4; i++) l1[i] = green;
     GLuint t; h_glGenTextures(1, &t); h_glActiveTexture(GL_TEXTURE0 + 2); h_glBindTexture(GL_TEXTURE_2D, t);
@@ -466,13 +509,13 @@ static void test_sampler_objects(void) {
     h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_FUNC, 0x206); assert(o->sp.cfunc == 0x206 && !o->sp.cmode);   // a function set before the mode is kept
     h_glSamplerParameteri(s[0], GL_TEXTURE_COMPARE_MODE, 0); assert(o->sp.ws == GL_CLAMP_TO_EDGE && o->sp.border[3] == 1 && o->sp.lodbias == 1);
     // the texture's own parameters read level 0; the sampler bound to its unit (a mipmap filter, a bias of 1) level 1; unbound, level 0 again
-    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     h_glBindSampler(2, s[0]); assert(S.units[2].samp == s[0] && !S.units[0].samp);
-    assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
-    assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
-    h_glBindSampler(2, 0); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == green);
+    if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[0].samp)) == red);   // another unit keeps the texture's own
+    h_glBindSampler(2, 0); if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     // a sampler's MAX_LOD below 1 keeps level 0 whatever the bias
-    h_glSamplerParameterf(s[0], GL_TEXTURE_MAX_LOD, 0); h_glBindSampler(2, s[0]); assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
+    h_glSamplerParameterf(s[0], GL_TEXTURE_MAX_LOD, 0); h_glBindSampler(2, s[0]); if (gpu) assert(draw_texel(ta, tex_sampler(ta, S.units[2].samp)) == red);
     // deleting a bound sampler unbinds it
     h_glDeleteSamplers(1, &s[0]); assert(!so_of(s[0]) && !S.units[2].samp && !h_glIsSampler(s[0]));
     h_glDeleteSamplers(1, &s[1]); h_glDeleteTextures(1, &t); h_glActiveTexture(GL_TEXTURE0);
@@ -550,6 +593,45 @@ static void test_program_validation(void) {
     h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
 }
 
+static void test_active_attributes(void) {
+    void (*active)(GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, GLchar *) = import("glGetActiveAttrib");
+    assert(active && h_eglGetProcAddress("glGetActiveAttrib") == (void *)active);
+    assert(h_eglGetProcAddress("glGetActiveAttribARB") == (void *)active);
+    static shattr attrs[] = {{.name = "position", .slot = 0, .type = T_VEC3}, {.name = "uv", .slot = 2, .type = T_VEC2}};
+    static shinfo vsi = {.ub_slot = -1, .na = 2, .a = attrs};
+    GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER);
+    GLint value;
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &value); assert(value == 0);
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = (id)[NSObject new];
+    h_glAttachShader(pr, vs); h_glBindAttribLocation(pr, 7, "position"); h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTES, &value); assert(value == 2);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &value); assert(value == sizeof "position");
+    assert(h_glGetAttribLocation(pr, "position") == 7);
+
+    GLsizei length; GLint count; GLenum type; char name[16];
+    active(pr, 0, sizeof name, &length, &count, &type, name);
+    assert(length == 8 && count == 1 && type == GL_FLOAT_VEC3 && !strcmp(name, "position"));
+    active(pr, 1, 2, &length, &count, &type, name);
+    assert(length == 1 && count == 1 && type == GL_FLOAT_VEC2 && !strcmp(name, "u"));
+    active(pr, 0, 0, &length, NULL, NULL, name);
+    assert(length == 0 && !strcmp(name, "u") && h_glGetError() == GL_NO_ERROR);
+
+    length = 23; count = 42; type = GL_INT;
+    active(pr, 2, sizeof name, &length, &count, &type, name);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    active(pr, 0, -1, &length, &count, &type, name);
+    assert(h_glGetError() == GL_INVALID_VALUE);
+    active(vs, 0, sizeof name, &length, &count, &type, name);
+    assert(h_glGetError() == GL_INVALID_OPERATION);
+    assert(length == 23 && count == 42 && type == GL_INT && !strcmp(name, "u"));
+
+    h_glDetachShader(pr, vs); h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTES, &value); assert(value == 0);
+    h_glGetProgramiv(pr, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, &value); assert(value == 0);
+    h_glDeleteProgram(pr); h_glDeleteShader(vs);
+    puts("GL attribute reflection: count, maximum length, enumeration, truncation and errors: OK");
+}
+
 static void test_fate_calls(void) {
     assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
     assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
@@ -595,10 +677,258 @@ static void test_fate_calls(void) {
     h_glDeleteTextures(1, &t);
 }
 
+// Generated GLSL, reflected table and metallib through the real compile/link/draw path. Seventeen distinct sampler states, vertex attribute 15, a texture shared by both
+// stages and a named uniform block: three draws in one command buffer must retain their own uniforms, sampler units and block ranges.
+static void test_argument_buffers(const char *dir) {
+    __typeof__(S) was = S;
+    GLuint pr = h_glCreateProgram(), shaders[2];
+    for (int st = 0; st < 2; st++) {
+        char path[1024]; snprintf(path, sizeof path, "%s/resource.%s", dir, st ? "frag" : "vert");
+        FILE *f = fopen(path, "rb"); assert(f); assert(fseek(f, 0, SEEK_END) == 0);
+        long len = ftell(f); assert(len >= 0); assert(fseek(f, 0, SEEK_SET) == 0);
+        char *source = calloc((size_t)len + 1, 1); assert(source); assert(fread(source, 1, (size_t)len, f) == (size_t)len); fclose(f);
+        shaders[st] = h_glCreateShader(st ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        const char *s = source; h_glShaderSource(shaders[st], 1, &s, NULL); free(source); h_glCompileShader(shaders[st]);
+        assert(shader_of(shaders[st])->fn); h_glAttachShader(pr, shaders[st]);
+    }
+    h_glLinkProgram(pr); assert(prog_of(pr)->linked && prog_of(pr)->ae[0] && prog_of(pr)->ae[1]); h_glUseProgram(pr);
+    GLuint textures[17], samplers[17], vao, vb, ub, target, fb;
+    h_glGenTextures(17, textures); h_glGenSamplers(17, samplers);
+    for (int i = 0; i < 17; i++) {
+        uint8_t pixels[8] = {(uint8_t)(32 + i * 4), i ? 0 : 64, 0, 255, (uint8_t)(128 + i * 4), i ? 0 : 64, 0, 255};
+        h_glActiveTexture(0x84c0 + i); h_glBindTexture(GL_TEXTURE_2D, textures[i]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        h_glSamplerParameteri(samplers[i], GL_TEXTURE_MIN_FILTER, GL_NEAREST); h_glSamplerParameteri(samplers[i], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        h_glSamplerParameteri(samplers[i], GL_TEXTURE_WRAP_S, i & 1 ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+        h_glSamplerParameterf(samplers[i], GL_TEXTURE_LOD_BIAS, (float)i / 16);   // distinct even when filter and wrap match
+        h_glBindSampler(i, samplers[i]);
+        char name[32]; snprintf(name, sizeof name, "tex%d", i); GLint loc = h_glGetUniformLocation(pr, name); assert(loc >= 0); h_glUniform1i(loc, i);
+    }
+    h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glGenBuffers(1, &vb); h_glBindBuffer(GL_ARRAY_BUFFER, vb);
+    const float vertices[] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    h_glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, 0); h_glVertexAttribPointer(15, 4, GL_FLOAT, 0, 16, NULL); h_glEnableVertexAttribArray(15);
+    float blocks[128] = {0}; blocks[0] = blocks[64] = -0.25f; blocks[1] = 1; blocks[65] = 0.5f; blocks[2] = blocks[66] = 0.125f;
+    h_glGenBuffers(1, &ub); h_glBindBuffer(GL_UNIFORM_BUFFER, ub); h_glBufferData(GL_UNIFORM_BUFFER, sizeof blocks, blocks, 0);
+    h_glUniformBlockBinding(pr, h_glGetUniformBlockIndex(pr, "Block"), 5); h_glBindBufferRange(GL_UNIFORM_BUFFER, 5, ub, 0, 16);
+    h_glUniform4f(h_glGetUniformLocation(pr, "shift"), 0.25f, 0.25f, 0, 0);
+    GLint weight = h_glGetUniformLocation(pr, "weight"), last = h_glGetUniformLocation(pr, "tex16"); assert(weight >= 0 && last >= 0);
+    h_glActiveTexture(0x84c0 + 31); h_glGenTextures(1, &target); h_glBindTexture(GL_TEXTURE_2D, target);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 51, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb); h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST); h_glColorMask(1, 1, 1, 1);
+    for (int draw = 0; draw < 3; draw++) {
+        h_glViewport(17 * draw, 0, 17, 1); h_glUniform4f(weight, draw ? 0.5f : 1, 1, 1, 1);
+        if (draw == 1) h_glUniform1i(last, 0);
+        if (draw == 2) h_glBindBufferRange(GL_UNIFORM_BUFFER, 5, ub, 256, 16);
+        h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    uint8_t got[51 * 4]; h_glReadPixels(0, 0, 51, 1, GL_RGBA, GL_UNSIGNED_BYTE, got);
+    for (int draw = 0; draw < 3; draw++) for (int i = 0; i < 17; i++) {
+        int unit = draw && i == 16 ? 0 : i, expected = (unit & 1 ? 128 : 32) + unit * 4;
+        expected /= draw == 2 ? 4 : draw == 1 ? 2 : 1;
+        assert(abs((int)got[4 * (17 * draw + i)] - expected) <= 1);
+        assert(abs((int)got[4 * (17 * draw + i) + 1] - (draw == 2 ? 48 : 96)) <= 1);   // vertex default and named uniforms both contribute
+    }
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glUseProgram(0); h_glDeleteProgram(pr); h_glDeleteShader(shaders[0]); h_glDeleteShader(shaders[1]);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(1, &target); h_glDeleteTextures(17, textures); h_glDeleteSamplers(17, samplers);
+    h_glDeleteBuffers(1, &vb); h_glDeleteBuffers(1, &ub); h_glDeleteVertexArrays(1, &vao); S = was;
+    puts("GL argument buffers: 17 samplers, both stages, uniforms and block ranges: OK");
+}
+
+static void test_rg_texture_uploads(void) {
+    GLuint name;
+    h_glGenTextures(1, &name);
+    h_glBindTexture(GL_TEXTURE_2D, name);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 3);
+    h_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
+    // GL_RGB storage, as in Layton. Each row has two pixels, a skipped third pixel and two alignment bytes.
+    const uint8_t rg[] = {10, 20, 30, 40, 91, 92, 93, 94, 50, 60, 70, 80};
+    const uint8_t rgba[] = {10, 20, 0, 255, 30, 40, 0, 255, 50, 60, 0, 255, 70, 80, 0, 255};
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2, 2, 0, GL_RG, GL_UNSIGNED_BYTE, rg);
+    const level_t *level = &tex_of(name)->pend[0][0];
+    assert(level->pitch == 8 && !memcmp(level->data, rgba, sizeof rgba));
+
+    // Replace one column with big-endian 16-bit red. Input row pitch is eight bytes, and alpha stays opaque.
+    const uint8_t red[] = {0x40, 0, 9, 10, 11, 12, 13, 14, 0x80, 0};
+    const uint8_t patched[] = {10, 20, 0, 255, 64, 0, 0, 255, 50, 60, 0, 255, 128, 0, 0, 255};
+    h_glPixelStorei(0xcf0, 1);
+    h_glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 0, 1, 2, GL_RED, GL_UNSIGNED_SHORT, red);
+    assert(!memcmp(level->data, patched, sizeof patched));
+    h_glPixelStorei(0xcf0, 0);
+    h_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    h_glDeleteTextures(1, &name);
+
+    const float float_rg[] = {0.25f, 0.75f};
+    const uint8_t rgba8[] = {64, 191, 0, 255};
+    const float rgba32f[] = {0.25f, 0.75f, 0, 1};
+    h_glGenTextures(1, &name);
+    h_glBindTexture(GL_TEXTURE_2D, name);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RG, GL_FLOAT, float_rg);
+    level = &tex_of(name)->pend[0][0];
+    assert(level->pitch == 4 && !memcmp(level->data, rgba8, sizeof rgba8));
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RG, GL_FLOAT, float_rg);
+    float uploaded[4];
+    assert(level->pitch == sizeof uploaded);
+    memcpy(uploaded, level->data, sizeof uploaded);
+    for (int i = 0; i < 4; i++) assert(uploaded[i] == rgba32f[i]);
+    h_glDeleteTextures(1, &name);
+    puts("GL texture uploads: RED/RG expansion, typed components, row length and byte swapping: OK");
+}
+
+static void test_fixed_function(int gpu) {
+    const EGLint core[] = {0x3098, 3, 0x30fb, 2, 0x3038};
+    const EGLint compat[] = {0x3098, 3, 0x30fb, 2, 0x30fd, 2, 0x3038};
+    const EGLint gl31[] = {0x3098, 3, 0x30fb, 1, 0x3038};
+    const EGLint forward[] = {0x3098, 3, 0x30fc, 2, 0x3038};
+    h_eglCreateContext(NULL, NULL, NULL, core); assert(!g_ctx_fixed);
+    h_eglCreateContext(NULL, NULL, NULL, gl31); assert(!g_ctx_fixed);
+    h_eglCreateContext(NULL, NULL, NULL, forward); assert(!g_ctx_fixed);
+    h_eglCreateContext(NULL, NULL, NULL, compat);
+    GLint profile; h_glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile); assert(g_ctx_fixed && profile == 2);
+    h_eglCreateContext(NULL, NULL, NULL, NULL); assert(g_ctx_fixed);
+
+    __typeof__(S) saved = S;
+    h_glActiveTexture(GL_TEXTURE0);
+    const GLfloat color[] = {-1, 0.25f, 0.5f, 2};
+    h_glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, color);
+    assert(F.envc[0][0] == 0 && F.envc[0][1] == 0.25f && F.envc[0][2] == 0.5f && F.envc[0][3] == 1);
+    h_glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, 0.5f); assert(h_glGetError() == GL_INVALID_ENUM);
+    h_glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, 1); assert(h_glGetError() == GL_INVALID_ENUM);
+    assert(F.envc[0][1] == 0.25f && F.envc[0][3] == 1);
+    h_glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, NAN); assert(h_glGetError() == GL_INVALID_ENUM && F.env[0] == GL_MODULATE);
+    h_glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE); assert(F.env[0] == GL_REPLACE);
+    h_glMatrixMode(GL_TEXTURE);
+    h_glActiveTexture(GL_TEXTURE0 + 1);
+    h_glTranslatef(0.5f, 0, 0);
+    assert(F.texture[0].m[0][12] == 0 && F.texture[1].m[0][12] == 0.5f);
+    h_glMatrixMode(GL_MODELVIEW);
+
+    if (gpu) {
+        GLuint tex[2], fb, vao;
+        h_glGenTextures(2, tex);
+        h_glBindTexture(GL_TEXTURE_2D, tex[0]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+        h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, tex[1]);
+        const uint8_t green[8] = {0, 255, 0, 255, 0, 255, 0, 255};
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+        h_glEnable(GL_TEXTURE_2D);
+
+        h_glUseProgram(0); h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glBindBuffer(GL_ARRAY_BUFFER, 0);
+        const GLfloat vertices[] = {-1, -1, 3, -1, -1, 3};
+        const uint8_t red[9] = {255, 0, 0, 255, 0, 0, 255, 0, 0};
+        h_glVertexPointer(2, GL_FLOAT, 0, vertices); h_glEnableClientState(GL_VERTEX_ARRAY);
+        h_glColorPointer(3, GL_UNSIGNED_BYTE, 0, red); h_glEnableClientState(GL_COLOR_ARRAY);
+        h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST);
+        h_glColorMask(1, 1, 1, 1);
+        h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);   // default mip filter, incomplete image: use vertex color
+        h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        h_glViewport(1, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);   // complete image: GL_REPLACE uses the sampled color
+        uint8_t pixels[8];
+        h_glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(pixels[0] == 255 && pixels[1] == 0 && pixels[3] == 255);
+        assert(pixels[4] == 0 && pixels[5] == 255 && pixels[7] == 255);
+
+        h_glBlendFunc(0x8001 /* CONSTANT_COLOR */, GL_ZERO);
+        h_glBlendColor(0, 0.5f, 0, 1);
+        h_glEnable(GL_BLEND);
+        h_glDrawArrays(GL_TRIANGLES, 0, 3);
+        h_glReadPixels(1, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(pixels[1] >= 127 && pixels[1] <= 128 && pixels[3] == 255);
+        h_glDisable(GL_BLEND);
+
+        GLuint q;
+        h_glGenQueries(1, &q);
+        h_glBeginQuery(GL_SAMPLES_PASSED, q);
+        // More passes than the original fixed segment array could track. Each draw covers exactly one pixel.
+        for (int i = 0; i < 40; i++) {
+            h_glClear(GL_COLOR_BUFFER_BIT);
+            h_glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        h_glEndQuery(GL_SAMPLES_PASSED);
+        GLuint result;
+        h_glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, &result); assert(result == 0);
+        h_glGetQueryObjectuiv(q, GL_QUERY_RESULT, &result); assert(result == 40);
+        h_glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, &result); assert(result == 1);
+        h_glDeleteQueries(1, &q);
+
+        h_glClearColor(0, 0, 1, 1); h_glClear(GL_COLOR_BUFFER_BIT);
+        h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[1], 0);
+        h_glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(!memcmp(pixels, green, sizeof green));
+        h_glBindTexture(GL_TEXTURE_2D, tex[0]);
+        const uint8_t blue[8] = {0, 0, 255, 255, 0, 0, 255, 255};
+        h_glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(!memcmp(pixels, blue, sizeof blue));
+
+        h_glDeleteVertexArrays(1, &vao); h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(2, tex);
+    }
+    assert(h_glGetError() == GL_NO_ERROR);
+    S = saved;
+    h_eglCreateContext(NULL, NULL, NULL, core);
+    puts("GL fixed-function context, texture environment and draw: OK");
+}
+
+static int test_capture_shaders(void) {
+    dev_init();
+    assert(g_capture_dir && g_capture_compiler && !g_lib);
+    const GLchar *vert = "#version 120\nattribute vec2 position; uniform float vpFlip;\n"
+                         "void main() { gl_Position = vec4(position.x, position.y * vpFlip, 0.0, 1.0); }";
+    const GLchar *frag = "#version 120\nuniform vec4 color;\nvoid main() { gl_FragColor = color; }";
+    const GLchar *invalid = "#version 120\nuniform float guess;\nvoid main() { invalid; }";
+    GLuint vs = h_glCreateShader(GL_VERTEX_SHADER), fs = h_glCreateShader(GL_FRAGMENT_SHADER), pr = h_glCreateProgram();
+    GLint status;
+    h_glShaderSource(vs, 1, &invalid, NULL); h_glCompileShader(vs); h_glAttachShader(pr, vs); h_glLinkProgram(pr);
+    h_glGetShaderiv(vs, GL_COMPILE_STATUS, &status); assert(!status);
+    h_glGetProgramiv(pr, GL_LINK_STATUS, &status); assert(!status);
+    assert(h_glGetUniformLocation(pr, "guess") == -1);
+
+    h_glShaderSource(vs, 1, &vert, NULL); h_glCompileShader(vs);
+    const shinfo *info = shader_of(vs)->si;
+    h_glGetShaderiv(vs, GL_COMPILE_STATUS, &status); assert(status && info);
+    h_glCompileShader(vs); assert(shader_of(vs)->si == info);
+    h_glShaderSource(fs, 1, &frag, NULL); h_glCompileShader(fs); h_glAttachShader(pr, fs);
+    h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, GL_LINK_STATUS, &status); assert(status);
+    GLint flip = h_glGetUniformLocation(pr, "vpFlip"), color = h_glGetUniformLocation(pr, "color");
+    assert(flip > 0 && color > 0);
+    h_glDetachShader(pr, vs); h_glDetachShader(pr, fs); h_glDeleteShader(vs); h_glDeleteShader(fs);
+    h_glUseProgram(pr); h_glUniform1f(flip, 1); h_glUniform4f(color, 0, 1, 0, 1);
+    GLuint vao, vb, fb, target;
+    h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glGenBuffers(1, &vb); h_glBindBuffer(GL_ARRAY_BUFFER, vb);
+    const float vertices[] = {-1, -1, 3, -1, -1, 3};
+    GLuint pos = h_glGetAttribLocation(pr, "position"); assert(pos < 16);
+    h_glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, 0);
+    h_glVertexAttribPointer(pos, 2, GL_FLOAT, 0, 0, NULL); h_glEnableVertexAttribArray(pos);
+    h_glGenTextures(1, &target); h_glBindTexture(GL_TEXTURE_2D, target);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint8_t pixel[4], green[] = {0, 255, 0, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    assert(!memcmp(pixel, green, sizeof green) && h_glGetError() == GL_NO_ERROR);
+    h_glUseProgram(0); h_glDeleteProgram(pr);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(1, &target); h_glDeleteBuffers(1, &vb); h_glDeleteVertexArrays(1, &vao);
+    puts("GL fresh capture: compile failure, legacy link, cache reuse, uniform writes and GPU readback: OK");
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    (void)argv;
-    int stubs = argc > 1;
+    if (argc == 2 && !strcmp(argv[1], "--capture")) return test_capture_shaders();
+    int stubs = 0, cpu = 0; const char *fixture = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--stubs")) stubs = 1;
+        else if (!strcmp(argv[i], "--cpu")) cpu = 1;
+        else if (!strcmp(argv[i], "--fixture") && i + 1 < argc) fixture = argv[++i];
+        else { fprintf(stderr, "usage: %s [--cpu] [--stubs] [--fixture DIR] or %s --capture\n", argv[0], argv[0]); return 2; }
+    }
+    if (fixture) setenv("DM_MSL_DIR", fixture, 1);
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
+    test_rg_texture_uploads();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
     assert((void *)create == (void *)h_glCreateShader);
@@ -697,14 +1027,19 @@ int main(int argc, char **argv) {
     delprog(pr4); delete(vs4); delete(fs4); assert(geterr() == GL_NO_ERROR);
 
     test_vertex_binding();
-    test_literal_stride_fetch();
+    if (!cpu) test_literal_stride_fetch();
     test_uniform_buffer();
     test_compressed_arrays();
     test_doom3();
-    test_sampler_objects();
+    test_packed_uploads();
+    if (!cpu) test_lod_bias();
+    test_sampler_objects(!cpu);
     test_extension_names_and_egl();
     test_program_validation();
+    test_active_attributes();
     test_fate_calls();
+    test_fixed_function(!cpu);
+    if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
@@ -724,6 +1059,7 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, a binding's stride 0 drawn, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs, LOD bias), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL rendering (stride 0, texture LOD bias, sampler objects): %s\n", cpu ? "not run (--cpu)" : "OK");
     return 0;
 }

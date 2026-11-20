@@ -8,9 +8,37 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
+static void borrowed_texture_retirement(void) {
+    enum { WIDTH = 8, HEIGHT = 4, ROW_BYTES = WIDTH * sizeof(uint32_t) };
+    tex_t t = {.magic = MAGIC('T','E','X',0), .serial = 99299};
+    t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = WIDTH, .height = HEIGHT, .depth = 1, .levels = 1, .samples = 1};
+    nvn_tex_layout(&t.d, &t.L);
+    uint32_t pixels[WIDTH * HEIGHT]; for (int i = 0; i < WIDTH * HEIGHT; i++) pixels[i] = 0x44332211u;
+    MTLSize size = MTLSizeMake(WIDTH, HEIGHT, 1);
+    MTLOrigin origin = MTLOriginMake(0, 0, 0);
+    id<MTLBuffer> src = [g_dev newBufferWithBytes:pixels length:sizeof pixels options:MTLResourceStorageModeShared]; res_add(src);
+    id<MTLBuffer> dst = [g_dev newBufferWithLength:sizeof pixels options:MTLResourceStorageModeShared]; res_add(dst);
+    __weak id retired = nil;
+    mtl_sub_begin(); mtl_tex_init(&t);
+    @autoreleasepool {
+        void *ref = tex_mtl_replay_ref(&t);
+        retired = (__bridge id)ref;
+        enc_b_copy_buffer_texture(blit(), src, 0, ROW_BYTES, sizeof pixels, size, (__bridge id)ref, 0, 0, origin);
+        id<MTLTexture> next = tex_upgrade_pfv(&t, (__bridge id)ref, MTLPixelFormatR32Uint);
+        CHECK(next && (__bridge void *)next != ref, "the serial now owns a different texture");
+    }
+    @autoreleasepool {
+        id<MTLTexture> texture = retired;
+        CHECK(texture && [g_res_objects containsObject:texture], "the retired texture stays resident before commit");
+        if (texture) enc_b_copy_texture_buffer(blit(), texture, 0, 0, origin, size, dst, 0, ROW_BYTES, sizeof pixels);
+    }
+    mtl_sub_commit(); mtl_drain();
+    CHECK(!memcmp(dst.contents, pixels, sizeof pixels), "the GPU reads the retired texture through the replay fence");
+    mtl_tex_release(&t);
+}
 int main(void) { @autoreleasepool {
     setenv("DM_TBUF_ALIGN", "16", 1);   // every Mac viewed at the M4 Pro's alignment (tbuf_align reads it once): the buffer texture below is 2 R32 elements past a boundary
-    mtl_init(); mtl_sub_begin();
+    mtl_init(); borrowed_texture_retirement(); mtl_sub_begin();
     tex_t a = {.magic=MAGIC('T','E','X',0), .serial=99301};
     a.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
     nvn_tex_layout(&a.d, &a.L); tex_t b = a, ghost = a;

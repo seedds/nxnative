@@ -8,7 +8,7 @@ fedcba9876543210_bf.metallib (main0_f, cut from the shader's compile as the buil
 pixel-position shader fb_pos.metal with fedcba9876543211_bf.metallib and pos.json, and the output-mapping-only fedcba9876543212_bf.metallib with om.json"""
 import json, pathlib, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_abi, dmsh_fetch, dmsh_side, pso_offline
+import dmsh_abi, dmsh_fetch, dmsh_rewrite, dmsh_side, pso_offline
 
 # Breath of the Wild's decal vertex shader 095cd6ad97fd779a as spirv-cross writes it, cut down (a full-screen triangle with w = 2 in place of the decal box), and a branch first,
 # as Tears of the Kingdom's bb19fab2f950e587 has
@@ -252,16 +252,16 @@ COMPUTED = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c
 class UniformBounds(unittest.TestCase):
     def test_select_guards_at_a_computed_offset(self):   # a load and a select (GitHub PR #2127); the index keeps its row-0 choice, so the load is inside the binding without a branch
         row = '(*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0]'
-        got = dmsh_fetch.select_guards(COMPUTED)
+        got = dmsh_rewrite.select_guards(COMPUTED)
         self.assertEqual(got.split('\n')[1], 'float _6 = select(0.0, %s[_4], _5);' % row)
-        self.assertEqual(dmsh_fetch.select_guards(got), got, 'a second pass changes nothing')
+        self.assertEqual(dmsh_rewrite.select_guards(got), got, 'a second pass changes nothing')
         for why, a, b in (('in parentheses', 'float _6 = _5 ? %s[_4] : 0.0;' % row, 'float _6 = _7 * (_5 ? %s[_4] : 0.0);' % row),
                           ('a fixed component', '[_4] : 0.0;', '.z : 0.0;'), ('an unsigned word', '[_4] : 0.0;', '[_4] : 0u;')):
             with self.subTest(why=why):
-                got = dmsh_fetch.select_guards(COMPUTED.replace(a, b))
+                got = dmsh_rewrite.select_guards(COMPUTED.replace(a, b))
                 self.assertNotIn(' : 0.0', got); self.assertNotIn(' : 0u', got); self.assertEqual(got.count('select('), 1)
         other = COMPUTED + '\nfloat _9 = _8 ? (*spvDescriptorSet0.fp_c14)._m0[_8 ? _3 : 0][_4] : 0.0;'   # _8 is no size comparison: the game's own choice
-        self.assertTrue(dmsh_fetch.select_guards(other).endswith(other.split('\n')[2]))
+        self.assertTrue(dmsh_rewrite.select_guards(other).endswith(other.split('\n')[2]))
 
     def test_select_guards_leaves_none(self):   # a bounded read in a form it does not know is an error, not a branch left in the shader
         fixed = '((117u < ((*spvDescriptorSet0.fp_c%d)._m0[0].x >> 2u)) ? (*spvDescriptorSet0.fp_c5)._m0[29].y : 0.0)' % dmsh_abi.CBSIZE_BANK   # the translator bounds no fixed offset now
@@ -270,22 +270,24 @@ class UniformBounds(unittest.TestCase):
                          ('another zero', COMPUTED.replace(': 0.0', ': -0.0')),
                          ('a size comparison used as a choice elsewhere', COMPUTED + '\nfloat _9 = _5 ? _7 : 0.0;')):
             with self.subTest(why=why):
-                with self.assertRaisesRegex(ValueError, 'not written as a select'): dmsh_fetch.select_guards(src)
-        self.assertEqual(dmsh_fetch.select_guards('float _1 = _2 ? _3 : 0.0;'), 'float _1 = _2 ? _3 : 0.0;', 'no descriptor set')
+                with self.assertRaisesRegex(ValueError, 'not written as a select'): dmsh_rewrite.select_guards(src)
+        self.assertEqual(dmsh_rewrite.select_guards('float _1 = _2 ? _3 : 0.0;'), 'float _1 = _2 ? _3 : 0.0;', 'no descriptor set')
         bare = 'float _1 = (*spvDescriptorSet0.fp_c5)._m0[29].y;'
-        self.assertEqual(dmsh_fetch.select_guards(bare), bare, 'a read at a fixed offset is left as it is')
+        self.assertEqual(dmsh_rewrite.select_guards(bare), bare, 'a read at a fixed offset is left as it is')
+        other = bare + '\nfloat _9 = _8 ? _1 : 0.0;'
+        self.assertEqual(dmsh_rewrite.select_guards(other), other, 'an ordinary choice without any size comparison is left as it is')
 
     def test_select_guards_a_bounded_storage_read(self):   # TranslationFlags.MetalStorageBounds (GitHub issue #2618): the same choice, the index word 0 out of bounds
         t = '(*spvDescriptorSet0.cp_c%d)._m0[1]' % dmsh_abi.SBLEN_BANK
         src = ('int _96 = int(_49);\nbool _100 = (uint(_96) + %s.z) < %s.w;\nfloat _51 = as_type<float>(_100 ? (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] : 0u);\n'
                'uint _52 = _100 ? (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] : 0u;\nif (_100)\n{\n    (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] = _52;\n}') % (t, t)
-        got = dmsh_fetch.select_guards(src)
+        got = dmsh_rewrite.select_guards(src)
         self.assertIn('float _51 = as_type<float>(select(0u, (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0], _100));', got)
         self.assertIn('uint _52 = select(0u, (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0], _100);', got)
         self.assertIn('if (_100)\n{\n    (*spvDescriptorSet0.cp_s3)._m0[_100 ? _96 : 0] = _52;', got, 'a store stays inside its test')
-        self.assertEqual(dmsh_fetch.select_guards(got), got, 'a second pass changes nothing')
+        self.assertEqual(dmsh_rewrite.select_guards(got), got, 'a second pass changes nothing')
         with self.assertRaisesRegex(ValueError, 'not written as a select'):
-            dmsh_fetch.select_guards(src.replace('[_100 ? _96 : 0] : 0u);', '[_96] : 0u);', 1))   # an index without its choice would read outside the binding
+            dmsh_rewrite.select_guards(src.replace('[_100 ? _96 : 0] : 0u);', '[_96] : 0u);', 1))   # an index without its choice would read outside the binding
 
 class ScreenVaryings(unittest.TestCase):
     def test_both_spellings_after_a_branch(self):

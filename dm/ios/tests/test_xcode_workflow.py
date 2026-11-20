@@ -265,8 +265,23 @@ class ImageStaging(unittest.TestCase):
                 result = subprocess.run(['bash', str(ios / 'tools/stage_resources.sh')], env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             stage(packed)
-            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img']); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'library file')
-            packed.write_bytes(b'newer'); stage(packed); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'newer')
+            staged_romfs, staged_shaders = app / 'romfs.img', app / 'msl/b-abc.img'
+            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
+            self.assertEqual(staged_shaders.read_bytes(), b'library file')
+            romfs_inode, shader_inode = staged_romfs.stat().st_ino, staged_shaders.stat().st_ino
+            stage(packed)
+            self.assertEqual(staged_romfs.stat().st_ino, romfs_inode)
+            self.assertEqual(staged_shaders.stat().st_ino, shader_inode)
+
+            previous = image.stat()
+            (source / 'marker').write_text('updated!')
+            romfs_image.pack(source, image)
+            self.assertEqual(image.stat().st_size, previous.st_size)
+            os.utime(image, ns=(previous.st_atime_ns, previous.st_mtime_ns + 2_000_000_000))
+            packed.write_bytes(b'newer')
+            stage(packed)
+            self.assertEqual(staged_romfs.read_bytes(), image.read_bytes())
+            self.assertEqual(staged_shaders.read_bytes(), b'newer')
             stage(folder); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc']); self.assertEqual((app / 'msl/b-abc/k_b.metallib').read_text(), 'loose')
             stage(packed); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
 

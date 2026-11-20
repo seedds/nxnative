@@ -44,6 +44,14 @@ int main(void) {
     CHECK(nier_dr_ms(nvn_timestamp_from_ns(16000000)) == 16.0f, "NieR sees a 16 ms GPU report as 16 ms");
     CHECK(nier_dr_ms(nvn_timestamp_from_ns(1000000000)) == 1000.0f, "NieR sees a 1 second GPU report as 1000 ms");
     CHECK(nier_dr_ms(307200) == 0.5f, "old 19.2 MHz report of 16 ms was read as 0.5 ms");
+    // NVN2 (the Switch 2): reports record nanoseconds. nn::gfx's NVN2 GetDuration (Welcome Tour main+0x613610) is the raw difference, taken as a TimeSpan
+    const uint64_t at = UINT64_C(988357000000000), frame = 16666667;
+    nvn_timestamp_ns = 1;
+    for (unsigned i = 0; i < sizeof ns / sizeof *ns; i++)
+        CHECK(nvn_timestamp_from_ns(ns[i]) == ns[i] && nvn_timestamp_to_ns(ns[i]) == ns[i], "NVN2: raw timestamps are nanoseconds both ways");
+    CHECK(nvn_timestamp_from_ns(at + frame) - nvn_timestamp_from_ns(at) == frame, "NVN2: nn::gfx's raw difference reads a 60 fps frame as 16.67 ms");
+    nvn_timestamp_ns = 0;
+    CHECK(nvn_timestamp_from_ns(at + frame) - nvn_timestamp_from_ns(at) == 10240000, "the 614.4 MHz report read raw as ns gave 10.24 ms (0.6144 of it)");
     printf("timestamp: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

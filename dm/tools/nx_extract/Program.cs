@@ -50,6 +50,7 @@ static class P {
         }
         try { return Run(a); }
         catch (KeysMissing e) { Console.WriteLine($"[RED] {e.Message}"); return 6; }
+        catch (PackageDamaged e) { Console.WriteLine($"[RED] the NSP is damaged: {e.Message}"); return 3; }
         // The tables a filesystem opens from fail the hash check (Mario & Luigi: Brothership's update: its Program NCA does not match its content ID): no file can be listed, so no file can be
         // named or written as read. Exit code 3, as for damaged files, not an unhandled exception's stack trace
         catch (HorizonResultException e) when (HashError(e)) {
@@ -275,6 +276,7 @@ static class P {
         }
     }
 
+    sealed class PackageDamaged : Exception { public PackageDamaged(string m) : base(m) { } }
     internal static IStorage PackageStorage(IStorage source) {
         source.GetSize(out long size).ThrowIfFailure();
         if (size < 16) throw new InvalidDataException("truncated PFS0 header");
@@ -287,6 +289,13 @@ static class P {
         byte[] header = new byte[(int)headerSize + 1];
         source.Read(0, header.AsSpan(0, (int)headerSize)).ThrowIfFailure();
         for (int i = 0; i < count; i++) {
+            ulong fileOffset = BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(16 + 24 * i));
+            ulong fileSize = BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(16 + 24 * i + 8));
+            ulong available = (ulong)(size - headerSize);
+            // Check against the original payload before the optional virtual NUL is inserted.
+            // Subtraction avoids wrapping a damaged 64-bit offset/size into an apparently valid range.
+            if (fileOffset > available || fileSize > available - fileOffset)
+                throw new InvalidDataException($"PFS0 entry {i} lies outside the package payload (offset {fileOffset}, size {fileSize}, available {available})");
             uint offset = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(16 + 24 * i + 16));
             if (offset >= strings) throw new InvalidDataException("PFS0 file-name offset outside the string table");
         }
@@ -305,13 +314,17 @@ static class P {
     // first 0x4000 bytes (the NCA header and section headers, which nsz keeps as they were): enough for the key check, not for reading
     static List<Nca> OpenNsp(KeySet ks, string path, ContentMetaType? only = null, ulong? id = null, bool ncz = false) {
         IFileSystem pfs; var st0 = new LocalStorage(path, FileAccess.Read);
-        byte[] magic = new byte[4]; st0.Read(0x100, magic).ThrowIfFailure();
+        st0.GetSize(out long packageSize).ThrowIfFailure();
+        byte[] magic = new byte[4]; if (packageSize >= 0x104) st0.Read(0x100, magic).ThrowIfFailure();
         if (System.Text.Encoding.ASCII.GetString(magic) == "HEAD") {   // XCI: the card header's magic at 0x100
             var xci = new Xci(ks, st0);
             if (!xci.HasPartition(XciPartitionType.Secure)) throw new Exception($"no secure partition in {path}");
             pfs = xci.OpenPartition(XciPartitionType.Secure);
         } else {
-            var p = new PartitionFileSystem(); p.Initialize(PackageStorage(st0)).ThrowIfFailure(); pfs = p;
+            IStorage storage;
+            try { storage = PackageStorage(st0); }
+            catch (InvalidDataException e) { throw new PackageDamaged($"{Path.GetFileName(path)}: {e.Message}; copy or download the complete package again"); }
+            var p = new PartitionFileSystem(); p.Initialize(storage).ThrowIfFailure(); pfs = p;
         }
         var ncas = new List<Nca>(); var ids = new List<string>();   // ids: content IDs (the file names' hex)
         foreach (DirectoryEntryEx e in pfs.EnumerateEntries("*", SearchOptions.Default)) {

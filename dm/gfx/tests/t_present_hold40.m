@@ -1,6 +1,6 @@
-// The display link's hold (nvn_mtl.m g_link_hold_until, HOLD_PERIOD_MIN) on a 120 Hz link: a present of 25 ms (40 fps, Ocarina of Time's frame step in ticks of 1/120 s) stays on
-// screen exactly three ticks while the next present already waits (the game runs ahead of the screen), 33.3 ms four, and 16.7 ms is not held (the next present is taken at the
-// next tick, as before). Real Metal 4 queue and offscreen drawables; the link's callback is called by hand with target times 1/120 s apart (no window, no game files)
+// The display link's hold (nvn_mtl.m g_link_hold_until: the whole ticks of the frame's period) on a 120 Hz link: a present of 25 ms (40 fps, Ocarina of Time's frame step in ticks
+// of 1/120 s) stays on screen exactly three ticks while the next present already waits (the game runs ahead of the screen), 33.3 ms four, and 16.7 ms two (60 fps on the 120 Hz
+// link). Real Metal 4 queue and offscreen drawables; the link's callback is called by hand with target times 1/120 s apart (no window, no game files)
 #include "../nvn/nvn_mtl.m"
 @interface FakeLinkUpdate : NSObject
 @property id<CAMetalDrawable> drawable;
@@ -67,7 +67,7 @@ int main(void) { @autoreleasepool {
     n = ticks_held(&a, &b, 4.0 / 120);
     snprintf(name, sizeof name, "30 fps (40 fps falling back, 4 ticks): 33.3 ms stays 4 ticks (%d)", n); CHECK(name, n == 4);
     n = ticks_held(&a, &b, 2.0 / 120);
-    snprintf(name, sizeof name, "60 fps: a 16.7 ms present is not held, the next is taken at the next tick (%d)", n); CHECK(name, n == 1);
+    snprintf(name, sizeof name, "60 fps: a 16.7 ms present stays 2 ticks of the 120 Hz link (%d)", n); CHECK(name, n == 2);
     // A present of 25 ms whose tick comes up to 2 ms early (the link's own jitter) still ends the hold at the third tick: the tolerance is the hold's
     for (int i = 0; i < 6; i++) tick();
     present_enqueue(&a, 3.0 / 120, NULL, 0, NULL); tick(); uint64_t first = shown(); present_enqueue(&b, 3.0 / 120, NULL, 0, NULL);

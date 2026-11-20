@@ -160,6 +160,15 @@ to a visible defect is not established.
 
 ## Validation
 
+- **2026-11-17: recorded viewport-origin regression.** The full 65-second
+  fresh-save route into the King Crustip tutorial passes on main `cc7a9df5`
+  and with the [recording-device origin correction](../../../docs/reference/rendering.md#viewport-origin-belongs-to-the-recording-device)
+  (Apple M6, macOS 27.2, Xcode 27.2). Both reach the route's frame target;
+  screenshots at 46 and 58 seconds have identical perceptual hashes and
+  mean RGB thumbnail differences of 0.07/255. Both run at 30.1 fps with 33.28 ms p99
+  frame time, and there are no new red diagnostics. This checks the game's
+  viewport replay and independent queue raster origin; the cross-device
+  movie case is covered by the synthetic fixture, not by this game's route.
 - Python tool suite: 292 tests pass, 16 skipped. The complete Metal graphics
   suite passes. The queue-origin fixture passes 389 checks in each encoding
   mode, including actual culling, fragment facing and attachment coverage.

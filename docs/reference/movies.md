@@ -118,12 +118,12 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 - **Symptom:** Super Mario Sunshine freezes at the first M graffiti while music continues. Hagi waits for frame 286 of `EX128x144_q0.mp4` with 14 pictures and an end-of-stream output ready in the host.
 - **Cause:** the host coalesces deferred video events. Hagi takes one output per auto-cleared event, and a completed AVC drain has no further decode work to signal the outputs still queued.
-- **Fix:** after a successful video acquisition, `h_movie_AcqOut` re-arms the deferred output event if more outputs are ready. `t_movie_avc` takes one output per event through the end of a synthetic drain.
+- **Fix:** after a successful acquisition, `h_movie_AcqOut` re-arms the deferred output event if more outputs are ready. Before delivery, the guest-thread signaller checks that the decoder is started and the output queue remains nonempty. Pictures, timestamps and EOS flags retain their order. The [Flush/Stop fence](#flush-stop-and-start) excludes delivery from the old queue after those calls return. `t_movie_avc` takes one output per event through the end of a synthetic drain.
 - **Found on:** [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) in [issue #2990](https://github.com/seedds/nxnative/issues/2990).
 
 ### `Flush`, `Stop` and `Start`
 
-- **Fix:** as with MediaCodec, `Flush` announces nothing, and no input or output index is handed out while the decoder is stopped. The "input available" after `Start` is signalled about 2 ms later from a guest thread, as the SDK's codec thread would. Pending signals are dropped at `Stop`, `Flush` and destruction.
+- **Fix:** as with MediaCodec, `Flush` announces nothing, and no input or output index is handed out while the decoder is stopped. The "input available" after `Start` is signalled about 2 ms later from a guest thread, as the SDK's codec thread would. Pending signals are dropped at `Stop`, `Flush` and destruction. An output re-announcement checked after Flush empties the queue is discarded. A signal already admitted may finish while Flush runs; after resetting the queue and releasing decoder locks, Flush waits for that delivery to finish before returning. This fence does not drop newly produced notifications. Stop likewise excludes delivery after it returns. The additional concurrent-delivery behavior is checked synthetically; the updated Sunshine route and iOS remain unverified.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md): the game ends a movie with `Flush`, `Flush`, `Stop`, destroy, and calls `Start` after a `Flush` when it loops.
 
 ### Input indices returned by a flush while a client holds them

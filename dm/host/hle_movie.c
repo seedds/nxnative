@@ -271,7 +271,13 @@ static void md_defer_body(void *arg) {
         if (k >= 0) {
             mdec_t *d = g_dfq[k].d; int e = g_dfq[k].ev;
             memmove(g_dfq + k, g_dfq + k + 1, (size_t)(--g_ndfq - k) * sizeof *g_dfq);
-            if (d->started) md_event(d, e);   // not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down)
+            // Stop takes these locks in the same order. An acquisition can re-arm
+            // after Flush cleared the queue; discard that empty output notice.
+            // If Flush clears it after this check, its final fence waits for us.
+            dm_host_mutex_lock(&d->mu);
+            int ready = d->started && (e != 1 || d->noutq);
+            pthread_mutex_unlock(&d->mu);
+            if (ready) md_event(d, e);
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
@@ -809,6 +815,10 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
+    // A signaller may have checked the old queue after the initial drop. Let
+    // that delivery finish before returning, with mu/dmu already released.
+    // Do not drop again: a new packet may have produced a valid notification.
+    dm_host_lock(&g_dfmu); pthread_mutex_unlock(&g_dfmu);
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: acquire a free input index", int, h_movie_AcqIn, void **self, int *idx, int *left) {
@@ -895,11 +905,10 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) {
-        dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
-        // Deferred notifications coalesce. A client taking one output per event still needs a wake for the rest of the batch.
-        if (*left) md_pump_ev(d, 1);
-    }
+    // An EOS drain can queue several pictures under one coalesced event. Keep
+    // availability announced for clients taking one output per auto-cleared event.
+    if (!r && *left) md_defer_at(d, 1, now_ns());
+    if (!r && !MD_AUDIO(d)) dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }

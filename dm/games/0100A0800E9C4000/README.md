@@ -23,7 +23,7 @@ On an iPad Pro 13-inch (M4, 16 GB, iPadOS 27.2) and an iPhone Air (2026-11-12, t
 | `pso_manifest.tsv` | the profile | 1,031 prewarm rows (588 shaders, 434 render pipelines, 9 compute) from two Mac sessions in White Orchard |
 | `modules main sdk`, the memory rows, `shader_groups` | `game.tsv` | the provisional profile's guesses, kept |
 
-No code patches (no `patches.py`).
+This 4.04b profile has no `patches.py`. For region `0100BFE00E9CA000` 3.7 (v327680), copy [the histogram repair](histogram_37.py) to `<build folder>/profile/0100BFE00E9CA000/patches.py` in its provisional profile, then rerun the NSP build. The rewriter applies the repair to main build `4ffb62f1cd9e17f87e4e019731bfb0c4`.
 
 ## Frame rate
 
@@ -35,6 +35,9 @@ No code patches (no `patches.py`).
 
 - **720p.** Docked and handheld both render 1280×720: `bin/config/platform/nx/rendering.ini` sets `Resolution="1280x720"` and `ForcedRendererResolution*`, with no docked variant, and the size is also fixed in code. The dynamic resolution only lowers it when the GPU is late. A larger render size needs code patches (a separate proposal).
 - **Handheld** (`DM_OPMODE=0`, checked on the fork): the game switches to its larger handheld HUD and draws a little less scene detail (118 render passes in a White Orchard frame against 132 docked).
+- **Open: exposure validation** ([#3048](https://github.com/seedds/nxnative/issues/3048)). The reporter's other region, `01003D100E9C6000` 4.04d, has a concurrent histogram clear and fill and exposure stuck at maximum. The reporter's `DM_NVN_DISPATCH_BARRIER=full` A/B corrected the picture at the same 60 fps on M2 Pro. This 4.04b profile contains the same five exposure shaders, and the histogram reducer hit its loop cap in [two of four runs](https://github.com/seedds/nxnative/pull/2494#issuecomment-6983864880). Both regions still need a test of the clear-to-fill boundary alone ([finding](../../../docs/reference/rendering.md#compute-histogram-clear-races-its-atomic-fill)).
+- **3.7 comparison.** In region `0100BFE00E9CA000`, live startup traced clear (`265d0ac1fad2877a`), fill (`0cac2751729c3f1c`) and reduce (`e32b3a98a677d10b`) sharing SSBO 0, 1,024 bytes, from the NVN dispatch call at `main+0x2101164`. There was no barrier between clear and fill in the same concurrent encoder. The reducer walks 256 bins until the count exceeds a percentile of the expected pixel count. Metal 4 replay on M6 lost counts in 24 of 800 concurrent runs with a fixed 640×360 input. The worst histogram held 168,364 of 230,400 counts, below the controlled test's 90% threshold. An execution-only clear-to-fill barrier preserved every count in 400 runs. A barrier that also flushes to device memory preserved every count in 800 runs, and the original reducer returned finite luminance (1.249832). The connection to the 4.04b reducer's loop cap is open.
+- **3.7 repair checked locally.** The game calls its compute wrapper for the fill at `main+0x1c50ef4` and records barrier `0x21` after it at `main+0x1c50fcc`. The rewriter patch makes the same NVN barrier call just before the fill, preserves the fill's arguments and return address, and checks the original instructions at both call sites. Startup replay showed clear, barrier, fill, barrier, reduce, with all 24,336 samples on the M6. The 4.04 build's corresponding fill site is still open.
 - **Open: terrain material mip copy** (vertex `ff4b69b477ff89e6`, fragment `2dcecea911db30ef`). The older iOS build refused a `float4` output into `R16Uint`, and the Mac logged an integer-target warning. The November 18 Mac build prepared the pipeline with the typed-output side library and the warning was gone. The route reached other draws using the same fragment shader but never sampled the `R16Uint` texture, so the texture read and resulting mip values still need a capture.
 
 ## Not checked
@@ -70,6 +73,7 @@ No code patches (no `patches.py`).
 
 ## Found on this game
 
+- Open: sunlit surfaces stay white after NaN enters eye adaptation. The 3.7 trace and shader replay confirm the clear-to-fill race. A single-barrier test in the reported 4.04d scene is pending → [Compute histogram clear races its atomic fill](../../../docs/reference/rendering.md#compute-histogram-clear-races-its-atomic-fill).
 - Resolved: the split found 563 shaders, none of them a material, lighting, hull, domain or compute shader → [REDengine 3 shader caches](../../../docs/reference/shaders.md#redengine-3-shader-caches).
 - Resolved: a black screen; 245 of the 602 shaders a session drew did not load (`B binding fp_t_cb720898_2000005ASmplr has no resolved slot number`) → [A separate sampler ID in a uniform buffer (handle type 2)](../../../docs/reference/shaders.md#a-separate-sampler-id-in-a-uniform-buffer-handle-type-2).
 - Resolved: no ground in White Orchard, `primitive type 14 not implemented` → [Tessellation stages drawn without a Metal tessellator](../../../docs/reference/shaders.md#tessellation-stages-drawn-without-a-metal-tessellator).

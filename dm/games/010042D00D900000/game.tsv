@@ -29,6 +29,11 @@ app_pool	0xCD500000
 # The NPDM declares zero system resource.
 sys_resource	0x0
 
+# ---- Frame rate ----
+# The engine steps by elapsed time. Its NVN present interval is the only FPS cap.
+fps_target	60
+present_interval	display
+
 # ---- Shader split ----
 depth_mode	zero
 shader_groups	/=romfs

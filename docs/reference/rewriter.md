@@ -105,6 +105,13 @@ To enroll a cut for any game's own module:
 - **Check:** `dm/tools/tests/test_jump_solver.py`: each form with its game's instructions, the refusals, and the driver on synthetic modules. On the newest build of every supported game (457 modules of 150 games, rewritten by the old recognizers and by the solver), 453 rewrite byte-identically and four differ only where the solver proves a halfword table the recognizers left at 65,536 pads: Animal Crossing: New Horizons 3.0.3 `main` (six tables, now 608–929 pads), Pikmin 4 1.1.1 `main` (two, 451 and 562), Tears of the Kingdom 1.4.3 `main+0x680528` (667) and PRAGMATA `main` (three, 417–2,504). Manual Samuel `main` matches the rewrite of PR #2695's own patch. Rewrite time over the corpus: 12,430 s of CPU before, 10,591 s after.
 - **Limits:** a `br` it cannot read (an indirect tail call) is taken to leave the function, and code no path, table or landing pad reaches is dead to it, as both are to the rewriter's own sites. A 32-bit compare bounds a 64-bit index only where the upper half is known to be zero.
 
+### A guard on a wrapping 32-bit jump-table index
+
+- **Symptom:** `jump table 2c0a220: the index reaches 0xffffffffffffffff` stops the rewrite.
+- **Cause:** the guard on `sub w10,w14,#1` cannot always be inverted across the wrap. Its fallback creates a root for the narrowed result. Giving that root a 64-bit range let later loop joins and widening lose the proof that the 32-bit write zeroed the upper half of `x10`.
+- **Fix:** carry the expression's width to the new root. The existing dataflow follows the copied table base, and the 32-bit compare can bound the full index. A compare on the low half of an index with unknown upper bits still cannot prove the table.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)). A full Mac rewrite resolves six dispatches in one function to four targets each.
+
 ### Offset jump tables through x18 read at rewrite time
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py`, in a Unity / IL2CPP `main`.

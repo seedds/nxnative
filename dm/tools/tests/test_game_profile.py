@@ -66,10 +66,23 @@ def macros(shader_map):
 
 class UpscalerKeys(unittest.TestCase):
     def test_from_shader_map(self):
-        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', '#define DM_GAME_UPSCALER_CHAIN ""']   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,805f2de96bd6d78d,c2fc2ddd604c25e7,c56db3d5a0f1b5af,ddc729bcdb4c8df9,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 6'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,805f2de96bd6d78d,c2fc2ddd604c25e7,c56db3d5a0f1b5af,ddc729bcdb4c8df9,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 6', '#define DM_GAME_UPSCALER_CHAIN ""'])
+
+    def test_chain(self):
+        rc, out = header('upscaler_chain\tnot-a-key\n')
+        self.assertNotEqual(rc, 0)
+        self.assertIn('upscaler_chain takes', out)
+        keys = 'a' * 16 + ',' + 'b' * 16 + '>' + 'c' * 16 + '|' + 'd' * 16
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + 'upscaler_chain\t' + keys + '\n')
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')],
+                           env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True, text=True)
+            text = (Path(d, ID) / 'game.h').read_text()
+        self.assertIn('#define DM_GAME_UPSCALER_CHAIN "%s"' % keys, text)
 
 
 if __name__ == '__main__':

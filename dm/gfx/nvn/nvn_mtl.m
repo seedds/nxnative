@@ -16628,6 +16628,40 @@ static id<MTLComputePipelineState> dispatch_pso(NvShader *cs) {
     }
     return ps;
 }
+// A profile upscaler_chain (<stage>,<stage>...><last>[|<last>...], DM_GAME_UPSCALER_CHAIN). With DM_UPSCALER=metalfx the stages before the last are skipped and MetalFX
+// scales the first stage's input into the last stage's image. Role 2 is the first stage (its texture is remembered), 1 a middle stage, 3 one of the last stages
+static int g_up_chain_in, g_up_chain_refused;
+static int up_mfx_named(NvShader *cs);
+static int up_mfx_on(void);
+static int up_mfx_encode(NvShader *cs);
+static int up_chain_role(NvShader *cs) {
+    const char *c = DM_GAME_UPSCALER_CHAIN, *last = strchr(c, '>');
+    if (!*c || !cs->key[0] || !last) return 0;
+    for (const char *l = last + 1; strlen(l) >= 16; l += 17) {
+        if (!strncmp(l, cs->key, 16)) return 3;
+        if (l[16] != '|') break;
+    }
+    for (const char *k = c; k < last; k += 17) if (!strncmp(k, cs->key, 16)) return k == c ? 2 : 1;
+    return 0;
+}
+static int up_chain_dispatch(NvShader *cs, const p_dispatch *dp) {
+    int role = up_mfx_on() && !g_up_chain_refused ? up_chain_role(cs) : 0;
+    if (role == 2) {
+        g_up_chain_in = 0;
+        for (int i = 0; i < cs->rf.nb; i++) if (cs->rf.b[i].kind == NVN_RB_TEX) { g_up_chain_in = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[i].reg) & 0xfffff); break; }
+    }
+    if ((role == 1 || role == 2) && g_up_chain_in) return 1;
+    if (role == 3) {
+        if (g_up_chain_in && !dp->ind && up_mfx_encode(cs)) { g_up_chain_in = 0; return 1; }
+        if (g_up_chain_in) { g_up_chain_refused = 1; MLOG("[RED] upscaler chain: MetalFX refused the last stage %s; the game's chain runs from the next frame on", cs->key); }
+        g_up_chain_in = 0;
+    }
+    if (!role && g_up_chain_in && up_mfx_named(cs)) {
+        g_up_chain_refused = 1; g_up_chain_in = 0;
+        MLOG("[RED] upscaler chain: %s is not the profile's last stage; the game's chain runs from the next frame on", cs->key);
+    }
+    return 0;
+}
 static void dispatch_(const p_dispatch *dp) {
     // An empty direct grid invokes no shader and changes no resources. Metal
     // rejects it; indirect counts belong to the GPU and are left untouched.
@@ -16641,6 +16675,7 @@ static void dispatch_(const p_dispatch *dp) {
     NvProg *pr = prog_get(S.cprog);
     NvShader *cs = pr->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    if (up_chain_dispatch(cs, dp)) return;   // DM_UPSCALER=metalfx: skip an upscaler chain's earlier stages and scale the first stage's input (up_chain_dispatch)
     if (dp->ind) ind_fly_put(cs->key, dp->ind, io, ib);
     if (passdump()) { uint32_t n[3] = {0, 0, 0}; if (dp->ind && nvn_host_readable(dp->ind, 12)) memcpy(n, (const void *)(uintptr_t)dp->ind, 12);
         PD("g %llu dispatch %s %ux%ux%u indirect=%#llx (now %u %u %u)", g_stat_pass, cs->key, dp->x, dp->y, dp->z, (unsigned long long)dp->ind, n[0], n[1], n[2]); }
@@ -18739,7 +18774,7 @@ static int up_mfx_on(void) {
 // A third shape converts by squaring: Ocarina of Time's agl_ndsr_vr.pck and agl_ndsr_vr_light.pck networks read colour a pass before them square-rooted (gamma 2, into RGB9E5) and
 // write their result squared with its sign kept, x * |x| (FMUL in _vr, HMUL2 in _vr_light; up_mfx_squares), into R11G11B10F: square-rooted input, linear output, with no power and no
 // curve constant. Drawn as linear, MetalFX left the result root-encoded (a washed-out picture, PR #1459); its input is squared on the copy into the scaler's RGBA16F texture instead
-// (COPY_T2T_SQUARE), then HDR mode. Of the two packs' 37 compute shaders in that game: 18 square-rooted networks (10 in _vr, 8 in _vr_light), 12 that square and then encode (the curve
+// (COPY_T2T_SQUARE), then HDR mode. A chain that skips those passes feeds the linear colour they read (up_mfx_encode, chain_linear), and that copy does not square. Of the two packs' 37 compute shaders in that game: 18 square-rooted networks (10 in _vr, 8 in _vr_light), 12 that square and then encode (the curve
 // in floats with its powers: kept) and 7 small pre-passes. Any other shape keeps the game's shader, a variant with no curve and no square among them: nothing in its code says
 // what its colour is (Ocarina of Time's pre-passes square-root with MUFU.SQRT and no constant)
 enum { UP_COLOR_UNREAD, UP_COLOR_LINEAR, UP_COLOR_SRGB, UP_COLOR_KEEP, UP_COLOR_ROOT };   // linear in and out: HDR mode; sRGB in, linear out: perceptual mode, then decoded; square-rooted in,
@@ -18860,6 +18895,9 @@ static int up_mfx_encode(NvShader *cs) {
     for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind; if (k == NVN_RB_TEX && ti < 0) ti = i; else if (k == NVN_RB_IMG && oi < 0) oi = i; else if (k == NVN_RB_TEX || k == NVN_RB_IMG) return 0; }
     if (ti < 0 || oi < 0) { static int once; if (!once++) MLOG("[RED] upscaler %s: not one texture and one image; the shader draws", cs->key); return 0; }
     int tin = (int)(bound_tex(5, cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(bound_img(5, cs->rf.b[oi].reg) & 0xfffff) : 0;
+    // The chain skipped the square-root passes and named the colour they read, which is still linear. The network's code squares its own input, and applying that to this texture collapses values below 1
+    int chain_linear = g_up_chain_in && up_chain_role(cs) == 3;
+    if (chain_linear) tin = g_up_chain_in;
     tex_t dout = {0}; id<MTLTexture> in, out;
     os_unfair_lock_lock(&g_rmu);
     int ok = tin > 0 && tin < g_ntreg && g_treg[tin].ok && tout > 0 && tout < g_ntreg && g_treg[tout].ok;
@@ -18876,7 +18914,7 @@ static int up_mfx_encode(NvShader *cs) {
     if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
         fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
         orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
-    int srgb = cs->up_color == UP_COLOR_SRGB, root = cs->up_color == UP_COLOR_ROOT;
+    int srgb = cs->up_color == UP_COLOR_SRGB, root = cs->up_color == UP_COLOR_ROOT && !chain_linear;   // the chain's input was never square-rooted, so the copy must not square it
     // Each side is the game's own texture when MetalFX can take it as it is: the rectangle is the whole texture (MetalFX reads and writes from the origin) and the format is not sRGB (as the
     // copies, which keep its decode). The input in any format MetalFX takes, unless it is square-rooted: only the copy squares it (COPY_T2T_SQUARE). The output, private, only in the
     // scaler's own: MetalFX's own writes of R11G11B10F come out about two steps of its mantissa low (2.0 as 1.94, 0.5 as 0.484), where its RGBA16F output drawn back gives 1.98 and 0.496
@@ -18918,7 +18956,7 @@ static int up_mfx_encode(NvShader *cs) {
     g_up_mfx_straight[0] += sin; g_up_mfx_straight[1] += sout;
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu, %s) → %dx%d at %d,%d of %lux%lu (format %lu, %s)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, sin ? "straight" : "copied", orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width,
-                            (unsigned long)out.height, (unsigned long)out.pixelFormat, sout ? "straight" : "drawn back", srgb ? ", decoded from sRGB" : root ? ", squared from its square roots" : "");
+                            (unsigned long)out.height, (unsigned long)out.pixelFormat, sout ? "straight" : "drawn back", srgb ? ", decoded from sRGB" : root ? ", squared from its square roots" : chain_linear ? ", the chain's linear colour" : "");
     return 1;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it

@@ -46,3 +46,5 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The NDSR upscaler is a chain: square-root pre-passes, then one of several networks. With DM_UPSCALER=metalfx the pre-passes are skipped and MetalFX scales the linear colour the first of them read
+upscaler_chain	f8965bffbdf51d78,d17eefaff4f0bc23,a335c1db6270c355>aad7ea7e5c02f41d|b106afba1a18faa9|fa3033d05c0a41d6|04135bb812a0d66e|8df148d58b7cbe8e

@@ -2148,9 +2148,17 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galax
 - **Symptom:** Vulkan command lookup returns null for recorded commands. A pipeline requesting a missing fragment shader runs as depth-only and leaves the picture black.
 - **Cause:** the command recorder lacked several operations, and Metal accepts a graphics pipeline without a fragment function.
 - **Fix:** replay indirect draws, buffer fills and updates, resolves, blits, secondary buffers, event set and reset, dynamic blend constants and depth bias, and [query copies](#vulkan-query-copies-consumed-by-the-gpu). Refuse to draw a pipeline whose requested fragment shader is missing and count its skipped draws. Explicit depth-only pipelines still work. The [RenderDragon port](#vulkan-functions-looked-up-by-name) adds 2D scaled blits and partial resolves.
-- **Limits:** subpass advancement and partial attachment clears are reported and skipped. Queue submission is serial. GPU waits on events remain unsupported.
+- **Limits:** subpass advancement is reported and skipped. Queue submission is serial. GPU waits on events remain unsupported. [Partial attachment clears](#vulkan-partial-attachment-clears-skipped) use clear draws.
 - **Check:** `t_vk_cmds` reads results back under Metal validation and distinguishes a missing fragment function from an intentional depth-only pipeline.
 - **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), [PR #1371](https://github.com/seedds/nxnative/pull/1371).
+
+### Vulkan partial attachment clears skipped
+
+- **Symptom:** `vkCmdClearAttachments region requires a partial attachment clear`; pixels retain their old color or depth. A 2×2 clear in a 4×4 image changed no pixels instead of four on the Mac.
+- **Cause:** replay only implemented whole-attachment clears with Metal load actions. One partial rectangle or a layered framebuffer discarded the entire command, including its other attachments. Metal's default visibility-result reset also erased earlier encoder slots when a pass resumed.
+- **Fix:** retain the load-action path for whole attachments. For partial clears, reuse the precompiled host clear shaders with cached float/uint/int pipelines and exact scissors in load/store helper passes for the selected attachment-view layers. Preserve other pixels, mip levels, layers and depth/stencil aspects, then resume the game's pass with its state restored. Visibility passes accumulate into the submit's zero-initialized buffer so results survive encoder splits. Clears need no transfer usage or game shader. [Vulkan clear contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdClearAttachments.html), [view-relative layers](https://docs.vulkan.org/refpages/latest/refpages/source/VkClearRect.html), [Metal visibility results](https://developer.apple.com/documentation/metal/mtlrenderpassdescriptor/visibilityresulttype).
+- **Check:** `check_t_vk_clear_attachments` reads back full and partial typed clears (including `0x80000000` and `0xffffffff`), sRGB, multiple rectangles and subpass attachment slots, mip/array views, MSAA, independent depth/stencil planes, secondary-buffer clears, and draw–clear–draw order with preserved scissor and occlusion counts.
+- **Found on:** investigated for [Minecraft 1.26.62](../../dm/games/0100D71004694000/README.md#attachment-clears). The host defect was reproduced synthetically; no unsupported-clear call or visible Minecraft failure was reproduced in the tested menu-to-world route.
 
 ### Vulkan query copies consumed by the GPU
 

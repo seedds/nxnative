@@ -1,4 +1,4 @@
-# Game profile of Rhythm Heaven Groove (Switch, base game v0 = 1.0.0). In bring-up: on the Mac it plays from boot through the setup and its TV latency calibration into the first rhythm game (Hoop Trundling), with sound; handheld with Boost (no TV calibration)
+# Game profile of Rhythm Heaven Groove (Switch, base game v0 = 1.0.0). Plays on the Mac; handheld with Boost (no TV calibration)
 # Format: see dm/games/README.md
 # Nintendo's own engine, SDK 21.4.0 (the newest so far), NVN; no packaged textures: each texture file (graph/**/*.tex, raw BC7 or linear R8 with its description in the .spr beside it)
 #   is read into memory and gets a memory pool the CPU cannot access (tex_init_fill in nvn_mtl.m). Audio is the SDK's AudioRenderer (sound/sm/**/*.cwv), whose SDK 21 command list hle_audren.c reads.

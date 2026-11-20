@@ -831,12 +831,63 @@ static void test_fixed_function(int gpu) {
         h_glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         assert(pixels[0] == 255 && pixels[1] == 0 && pixels[3] == 255);
         assert(pixels[4] == 0 && pixels[5] == 255 && pixels[7] == 255);
+
+        h_glBlendFunc(0x8001 /* CONSTANT_COLOR */, GL_ZERO);
+        h_glBlendColor(0, 0.5f, 0, 1);
+        h_glEnable(GL_BLEND);
+        h_glDrawArrays(GL_TRIANGLES, 0, 3);
+        h_glReadPixels(1, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(pixels[1] >= 127 && pixels[1] <= 128 && pixels[3] == 255);
+        h_glDisable(GL_BLEND);
+
+        GLuint q;
+        h_glGenQueries(1, &q);
+        h_glBeginQuery(GL_SAMPLES_PASSED, q);
+        // More passes than the original fixed segment array could track. Each draw covers exactly one pixel.
+        for (int i = 0; i < 40; i++) {
+            h_glClear(GL_COLOR_BUFFER_BIT);
+            h_glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        h_glEndQuery(GL_SAMPLES_PASSED);
+        GLuint result;
+        h_glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, &result); assert(result == 0);
+        h_glGetQueryObjectuiv(q, GL_QUERY_RESULT, &result); assert(result == 40);
+        h_glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, &result); assert(result == 1);
+        h_glDeleteQueries(1, &q);
+
+        h_glClearColor(0, 0, 1, 1); h_glClear(GL_COLOR_BUFFER_BIT);
+        h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[1], 0);
+        h_glReadPixels(0, 0, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(!memcmp(pixels, green, sizeof green));
+        h_glBindTexture(GL_TEXTURE_2D, tex[0]);
+        const uint8_t blue[8] = {0, 0, 255, 255, 0, 0, 255, 255};
+        h_glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        assert(!memcmp(pixels, blue, sizeof blue));
+
         h_glDeleteVertexArrays(1, &vao); h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(2, tex);
     }
     assert(h_glGetError() == GL_NO_ERROR);
     S = saved;
     h_eglCreateContext(NULL, NULL, NULL, core);
     puts("GL fixed-function context, texture environment and draw: OK");
+}
+
+static void test_capture_uniforms(void) {
+    GLuint vs = h_glCreateShader(GL_VERTEX_SHADER), pr = h_glCreateProgram();
+    const GLchar *source = "#version 120\n/* uniform vec4 hidden; */ uniform highp float vpFlip; uniform vec4 rows[2];\n"
+                           "void main() { gl_Position = vec4(vpFlip); }";
+    h_glShaderSource(vs, 1, &source, NULL); h_glCompileShader(vs); h_glAttachShader(pr, vs);
+    h_glLinkProgram(pr);
+    assert(h_glGetUniformLocation(pr, "vpFlip") == -1);
+    g_capture_dir = ".";
+    h_glLinkProgram(pr);
+    assert(!prog_of(pr)->linked);
+    assert(h_glGetUniformLocation(pr, "vpFlip") > 0);
+    assert(h_glGetUniformLocation(pr, "rows[1]") > 0);
+    assert(h_glGetUniformLocation(pr, "rows[2]") == -1);
+    assert(h_glGetUniformLocation(pr, "hidden") == -1);
+    g_capture_dir = NULL;
+    h_glDeleteProgram(pr); h_glDeleteShader(vs);
 }
 
 int main(int argc, char **argv) {
@@ -959,6 +1010,7 @@ int main(int argc, char **argv) {
     test_program_validation();
     test_active_attributes();
     test_fate_calls();
+    test_capture_uniforms();
     test_fixed_function(!cpu);
     if (fixture) test_argument_buffers(fixture);
 

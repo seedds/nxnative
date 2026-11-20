@@ -2418,6 +2418,29 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `test_idtech4_programs.py` (a synthetic module laid out as the renderer's code, a synthetic container).
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): 82 programs (42 vertex, 40 fragment) give 66 distinct GLSL texts, since some share their source; the capture has them all at the first frame, about 1 s into a headless boot. A run that played into the first level had 62 of them (all but `motionBlur` and `stereoInterlace`), byte for byte the same.
 
+### Desktop GLSL 1.10 and 1.20 from runtime generators
+
+- **Symptom:** captured desktop GLSL fails with `Desktop shaders for Vulkan SPIR-V require version 140 or higher` or with an undeclared `gl_TexCoord` or `gl_Color`.
+- **Cause:** MojoShader emits desktop compatibility GLSL 1.20 and names its built-in varyings through macros.
+- **Fix:** promote explicit desktop versions 110 and 120 through the existing GLSL ES 1.00 compatibility rewrite. After preprocessing, make the front colors, fog coordinate and constant-index texture coordinates explicit, with matching names across stages. Constant-index fragment outputs keep their locations.
+- **Limits:** this covers the programmable varyings used by MojoShader. Fixed-function vertex inputs, back-face color selection and dynamically indexed legacy arrays are outside this path.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)).
+
+### Capture can supply uniforms without a shader library
+
+- **Symptom:** a GL capture stops with `vs_flip_loc != -1` in `MOJOSHADER_glProgramViewportFlip`.
+- **Cause:** the capture starts without translated shaders, so even declared uniforms have no location and the loader aborts before compiling the remaining shaders.
+- **Fix:** during `DM_GL_CAPTURE`, supply locations for simple uniform declarations of a program that has no executable. This capture workaround keeps the loader running and the program's draws skipped. Normal runs use translated reflection.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)). The Mac capture collected all 14 shaders.
+
+### GL entry points required by FNA
+
+- **Symptom:** FNA stops during startup with `NoSuitableGraphicsDeviceException` and names `glBlendColor` as the first missing entry point.
+- **Cause:** FNA checks the loader's pointers for its GL device before it renders. The host lacked blend color, indexed masks, range draws, texture and buffer readback, occlusion queries, and framebuffer attachment queries.
+- **Fix:** use Metal's dynamic blend color and reuse existing indexed drawing and pixel readback. Report the default attachment sizes consistently with EGL. Occlusion queries collect the Metal visibility count across the render passes they cover and wait only when a requested result is pending.
+- **Limits:** texture readback covers RGBA8 and BGRA8 with RGBA unsigned-byte output for 2D textures and cube faces. Sample-mask state has no effect on the host's single-sample attachments. Query support here is for occlusion.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)).
+
 ### The GL core profile and persistently mapped buffers
 
 - LÖVE reads `GL_CONTEXT_PROFILE_MASK`; on a core profile it streams vertices through persistently mapped buffers (`glBufferStorage` + `glMapBufferRange` of a 3-frame ring, a `glFenceSync` per frame and `glClientWaitSync` three frames later), on a compatibility one from client memory, which Metal cannot draw from. The layer answers core: the mapping is the shared `MTLBuffer`'s memory, a fence is the serial of the command buffer being recorded, and a wait on a fence of that command buffer commits it first. The shaders then come as `#version 330 core`.
@@ -2486,6 +2509,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - `glBufferData` on a buffer the GPU may still read gets a new `MTLBuffer`, as GL drivers orphan it. A whole-framebuffer clear becomes the next pass's load action; a scissored or masked one is a quad.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md).
+
+### A pending GL clear follows the old attachment
+
+- **Symptom:** scene layers disappear after the game clears a texture and changes the framebuffer's attachment without an intervening draw.
+- **Cause:** a whole-framebuffer clear waits to become a Metal load action. The framebuffer name stays the same, so the clear can land on the replacement image.
+- **Fix:** encode the pending clear before changing an attachment of that framebuffer. Unchanged attachments still allow the clear to fold into the next draw pass.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)). Empty layers were clearing the texture where the earlier layers had already been composed.
 
 ### GL draws and framebuffers
 

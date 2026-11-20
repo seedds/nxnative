@@ -1760,9 +1760,8 @@ def boot_mac(host, patched, henv, rd, log, secs, done=lambda: False, *, group=Fa
     t0 = time.time()
     with open(log, 'w') as f, contextlib.ExitStack() as stack:
         args = [str(host), str(patched)]
-        options = dict(env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)
-        run_group = stack.enter_context(proc_group.Group(args, **options)) if group else None
-        p = run_group.p if run_group else subprocess.Popen(args, **options)
+        run_group = stack.enter_context(proc_group.Group(args, env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)) if group else None
+        p = run_group.p if run_group else subprocess.Popen(args, env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)
         try:
             while not done() and p.poll() is None and time.time() - t0 < secs: time.sleep(0.25)
         finally:

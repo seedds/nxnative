@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """One copy of a raw global memory lookup's search (dmsh_rewrite.py raw_noinline): the translator's dmsh_raw_find (GlobalToStorage GetRawFindFunction), as spirv-cross writes it, is
-marked noinline; the access helpers that check the last entry and call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with
-xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the translator's own lookups on the GPU in both forms."""
+marked noinline outside mesh stages; final mesh code keeps it inline, including composed code whose inputs were already rewritten. The access helpers that check the last entry and
+call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the
+translator's own lookups on the GPU in both forms."""
 from pathlib import Path
 import re
 import shutil
@@ -72,6 +73,18 @@ def attribute(src, name):
 
 
 class RawNoinline(unittest.TestCase):
+    def test_mesh_keeps_the_search_inline(self):
+        for source in (SRC, raw_noinline(SRC)):
+            with self.subTest(already_noinline=source != SRC):
+                out = raw_noinline(source, stage='ms')
+                self.assertEqual(out, SRC)
+                self.assertEqual(raw_noinline(out, stage='ms'), out)
+
+    def test_other_stages_keep_one_search(self):
+        for stage in ('ts', 'vs', 'ps', 'cs', 'rt'):
+            with self.subTest(stage=stage):
+                self.assertEqual(raw_noinline(SRC, stage=stage), raw_noinline(SRC))
+
     def test_marks(self):
         out = raw_noinline(SRC)
         self.assertEqual(attribute(out, 'dmsh_raw_find'), NOINLINE)

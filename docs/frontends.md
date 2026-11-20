@@ -6,6 +6,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
+- [Microphone input on Mac](#microphone-input-on-mac)
 - [Following main](#following-main)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
@@ -62,6 +63,14 @@ Settings a player chose in a front end and wants kept, also for a start from Fin
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.
 
+## Local users and the account selector
+
+The account applet uses `front_user_select()` (`dm/host/front.h`) on the guest thread; the front end presents native UI on its main thread and blocks the caller until a choice or cancellation. The built-in Mac dialog accepts mouse/keyboard input, and the iOS dialog accepts touches. Show the host-supplied users (including their in-use labels), and Add user / Skip only when allowed. Return the user's slot or the named `FRONT_USER_*` action. A front end without an interactive surface returns `FRONT_USER_CANCEL`; it must not guess an account from the number of controllers. The host validates the answer, owns registration and session state, and applies the game's exclusions and permitted automatic selection.
+
+User 1 keeps the original UID, `DM_NICK`, and `DM_SAVE` directory. Additional local users have stable UIDs and `Player N` names; their saves are sibling directories `<DM_SAVE>_userN` (N = 2 through 8). Registered slots are stored in `<DM_SAVE>.users` (a small `nxnative-users-1` record with a hexadecimal slot mask); do not edit it while the game runs. Registration is atomic and separate from save commits. Open sessions are never persisted.
+
+When moving, backing up or restoring an app's local saves, preserve the registry and all of these committed account directories together, as well as the existing device save. The transaction work directories (`.work` / `.new`) are not committed saves. The current cloud-sync package still covers only the primary account and device save: additional local users and their saves do not sync. A primary-save-only export does not contain the other users' progress.
+
 ## Saved choices
 
 Each app keeps the player's choices in its own preferences domain, its bundle ID (`CFBundleIdentifier` in `Info.plist`, `org.nxnative.<title ID>` unless the app was packed with another): one string per setting, under the key `launcher.<env>` (`launcher.DM_FPS_TARGET` = `"30"`). The iPhone app's settings screen keeps them there, and a Mac app's launcher (`dm/mac/launcher.c`) reads them at every start, so a start from Finder or the Dock has them too. A front end writes the same keys (`CFPreferencesSetAppValue` with the app's bundle ID, or `defaults write org.nxnative.<title ID> launcher.DM_FPS_TARGET -string 30`), and a settings window inside the app would too: there is one set of choices, and every view of it agrees.
@@ -108,6 +117,14 @@ An app that links the host and the front end's game view into its own process (a
 
 - **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
+
+An iOS front end that supplies its own audio-session lifecycle also implements `int dm_ios_output_channels(void)`, returning its active `AVAudioSession.outputNumberOfChannels`. After activating a session or changing routes, request six output channels when `maximumOutputNumberOfChannels` permits them. On `AVAudioSessionRouteChangeNotification`, apply that preference before calling `dm_audio_route_changed()`; keep the existing suspend/resume and media-services-reset calls. The bundled `front_ios.m` implements this contract. The Mac host watches its output routes itself. See [Output channels](reference/audio.md#output-channels).
+
+## Microphone input on Mac
+
+A packed Mac app exposes `DM_MIC` in its settings list when a game imports the supported SDK input stream. Its default is off. The app requests macOS permission before it starts the host on the first enabled launch, including with `DM_LAUNCHER=0`. A denied request starts the game with input disabled. Front ends that spawn the host themselves must request consent in their own app and include `NSMicrophoneUsageDescription` in its Info.plist.
+
+The Mac launcher stores a selected input device's Core Audio UID as the string `launcher.DM_MIC_DEVICE` in the app's preferences. A `DM_MIC_DEVICE` set at launch or in an env file takes precedence. Use `default` to follow the system input. `DM_MIC_GAIN` uses the saved choices described above.
 
 ## Following main
 

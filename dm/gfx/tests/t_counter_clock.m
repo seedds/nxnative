@@ -1,5 +1,10 @@
 // Feed a delayed CPU/GPU sample to the production counter replay without a Metal device.
+#define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#undef nvn_game_fps
+#define g_ft g_ft_hle
+#include "../nvn/hle_nvn.c"
+#undef g_ft
 
 module_t *g_mod;
 int g_nmod;
@@ -8,7 +13,6 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NULL; }
 void *guest_sym(const char *name) { (void)name; return NULL; }
 void svc_thread_dump(void) {}
-void dm_guest_clock_advanced(void) {}
 
 static unsigned checks, failures;
 #define CHECK(label, condition) do { checks++; if (!(condition)) { failures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
@@ -148,11 +152,18 @@ int main(void) {
         CHECK("invalid feedback is rejected", gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
 
         setenv("DM_DETCLOCK", "1000000", 1);
-        dm_guest_frame_tick();
+        // A synthetic window with no textures exercises the present's clock accounting without submitting a GPU job.
+        NVNwindow window = {0};
+        h_nvnWindowSetPresentInterval(&window, 1);
+        h_nvnQueuePresentTexture(NULL, &window, 0);
         uint64_t deterministic = guest_ns();
+        uint64_t frame = dm_guest_frame();
         CHECK("deterministic projection uses the current guest frame", guest_ns_at_host_time(host) == deterministic);
-        dm_guest_frame_tick();
-        CHECK("deterministic projection advances by the configured step", guest_ns_at_host_time(host) == deterministic + 1000000);
+        h_nvnQueuePresentTexture(NULL, &window, 0);
+        CHECK("an interval-1 present advances one frame and one step", dm_guest_frame() == frame + 1 && guest_ns_at_host_time(host) == deterministic + 1000000);
+        h_nvnWindowSetPresentInterval(&window, 2);
+        h_nvnQueuePresentTexture(NULL, &window, 0);
+        CHECK("an interval-2 present advances one frame and one step", dm_guest_frame() == frame + 2 && guest_ns_at_host_time(host) == deterministic + 2000000);
     }
     printf("counter clock: %u checks, %u failed\n", checks, failures);
     return failures != 0;

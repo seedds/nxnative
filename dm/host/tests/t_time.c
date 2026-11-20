@@ -1,5 +1,5 @@
 // Clock snapshot arithmetic (hle_time.c, from PR #36): CalculateSpanBetween and CalculateStandardUserSystemClockDifferenceByUser looked up by their mangled names in the real swforce
-// registrations, run on both host snapshot entries and on edited copies
+// registrations, run on both host snapshot entries and on edited copies; the C library's local-time functions, UTC as on a Switch, against nn::time's local conversion (issue #2784)
 #include "../hle_time.c"
 #include <mach-o/getsect.h>
 
@@ -14,6 +14,29 @@ static void *hook(const char *name) {
     for (size_t i = 0; e && i < bytes / sizeof *e; i++) if (!strcmp(e[i].name, name)) { count++; fn = (void *)e[i].fn; }
     CHECK(count == 1 && fn, name);
     return count == 1 ? fn : NULL;
+}
+static void *section_fn(const char *sect, const char *name, unsigned *count) {
+    unsigned long bytes = 0; void *fn = NULL; *count = 0;
+    const hle_ent *e = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", sect, &bytes);   // hle_force_ent and hle_ent both begin {name, fn}
+    size_t step = !strcmp(sect, "swforce") ? sizeof(hle_force_ent) : sizeof(hle_ent);
+    for (size_t i = 0; e && i < bytes / step; i++) { const hle_ent *x = (const hle_ent *)((const char *)e + i * step); if (!strcmp(x->name, name)) { ++*count; fn = x->fn; } }
+    return fn;
+}
+// The C library's local time is UTC (the SDK's own functions run; the pass-through table maps to the host's UTC ones), nn::time's is the host zone's
+static void check_utc_libc(void) {
+    static const char *names[] = {"localtime", "localtime_r", "mktime"}; unsigned n;
+    for (int i = 0; i < 3; i++) { section_fn("swforce", names[i], &n); CHECK(n == 0, "the SDK's localtime / localtime_r / mktime are not taken over"); }
+    setenv("TZ", "Asia/Seoul", 1); tzset();
+    int64_t (*mk)(struct tm *) = section_fn("swhle", "mktime", &n);
+    struct tm *(*lt)(const int64_t *, struct tm *) = section_fn("swhle", "localtime_r", &n);
+    const int64_t save = 1794761043;   // Hades II's save header time, 2026-11-15 16:44:03 UTC
+    struct tm u; time_t sv = (time_t)save; gmtime_r(&sv, &u);
+    CHECK(mk && mk(&u) == save, "mktime of a UTC struct tm gives the time back unchanged (TZ=Asia/Seoul)");
+    struct tm l; CHECK(lt && lt(&save, &l) == &l && l.tm_hour == 16 && l.tm_min == 44 && l.tm_gmtoff == 0, "localtime_r is UTC (TZ=Asia/Seoul)");
+    Result (*cal)(CalendarTime *, CalendarAdditionalInfo *, const int64_t *) = hook("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE");
+    CalendarTime ct; CalendarAdditionalInfo ai;
+    CHECK(cal && cal(&ct, &ai, &save) == RES_OK && ct.day == 16 && ct.hour == 1 && ct.minute == 44 && ai.offset == 9 * 3600, "ToCalendarTime converts in the host zone (01:44 KST)");
+    setenv("TZ", "UTC", 1); tzset();
 }
 // The SDK's detail:: periodic benefit claim, as guest_sym finds it: records what the host's public entry passed on and answers 7
 static const void *claim_args[5];
@@ -30,6 +53,7 @@ int main(void) {
     Result (*adj_snap)(uint8_t *) = hook("_ZN2nn4time13ClockSnapshot31CreateWithAdjustableSystemClockEPS1_");
     unsigned (*span)(int64_t *, const uint8_t *, const uint8_t *) = hook("_ZN2nn4time20CalculateSpanBetweenEPNS_8TimeSpanERKNS0_13ClockSnapshotES5_");
     int64_t (*udiff)(const uint8_t *, const uint8_t *) = hook("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_13ClockSnapshotES3_");
+    check_utc_libc();
     if (!snap || !adj_snap || !span || !udiff) { printf("time: %d checks, %d failed\n", checks, fails); return 1; }
     uint8_t a[0xd0], b[0xd0], c[0xd0]; int64_t ts = -1;
     // Before the first snapshot: h_time_GetCurrentTime reads DM_FIXED_TIME once and caches it

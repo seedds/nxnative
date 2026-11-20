@@ -36,6 +36,17 @@ static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payloa
     *field=(uintptr_t)o->data;return 1;
 }
 static const cap_ops nq_snapshot_ops={nq_snapshot_address,nq_snapshot_object};
+static void *nq_copy_cpu(nq_job *j,const void *src,uint64_t count,size_t stride) {
+    if(!count)return NULL;
+    if(!src || count>(SIZE_MAX-sizeof(nq_owned))/stride)die("invalid acceleration-structure descriptor array");
+    size_t n=(size_t)count*stride;nq_owned *o=calloc(1,sizeof *o+n);if(!o)die("AS descriptor snapshot allocation failed");
+    o->next=j->owned;j->owned=o;memcpy(o->data,src,n);return o->data;
+}
+static void nq_as_snapshot(nq_job *j,p_as_build *p) {
+    nvn_as_build *builds=nq_copy_cpu(j,p->builds,p->count,sizeof *builds);p->builds=builds;
+    for(uint64_t i=0;i<p->count;i++)builds[i].geometries=nq_copy_cpu(j,builds[i].geometries,builds[i].count,sizeof(nvn_as_geometry));
+    p->post=nq_copy_cpu(j,p->post,p->post_count,sizeof(nvn_as_post));
+}
 typedef struct nq_queue {
     struct nq_queue *next; uint64_t serial, physical, present, copy, wait_passed; int origin;   // wait_passed: guest ns a wait it held for passed (mtl_sub_ready)
     nq_job *first, *last; nq_receipt *tail;
@@ -189,7 +200,22 @@ static void *nq_worker(void *unused) {
 }
 static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NULL)) die("NVN queue worker failed"); pthread_detach(t); }
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
-static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { n->capacity=(n->length+length+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
+// Grow geometrically so flattening a large submission does not reallocate its command records at every page.
+static void nq_bytes(nq_node *n, const void *bytes, size_t length) {
+    if (length > SIZE_MAX - n->length) die("queue commands allocation overflow");
+    size_t want = n->length + length;
+    if (want > n->capacity) {
+        size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
+        cap = cap < want ? want : cap;
+        if (cap < 4096) cap = 4096;
+        void *grown = realloc(n->bytes, cap);
+        if (!grown) die("queue commands allocation failed");
+        n->bytes = grown;
+        n->capacity = cap;
+    }
+    memcpy(n->bytes + n->length, bytes, length);
+    n->length = want;
+}
 static void nq_signal_add(nq_node *n,nq_signal s) {
     if(!(n->signal_count&(n->signal_count-1))) { n->signals=realloc(n->signals,(n->signal_count?2*n->signal_count:1)*sizeof *n->signals); if(!n->signals) die("queue signals allocation failed"); } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
     n->signals[n->signal_count++]=s;
@@ -209,6 +235,10 @@ static void nq_record_one(nq_job *j,const uint8_t *p,op_hdr h) {
     } else {
         nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
         size_t offset=n->length; nq_bytes(n,p,h.size); if(!n->bytes) die("queue commands: a record of %u bytes",h.size);
+        if(h.op==OP_AS_BUILD) {
+            if(h.size<8+sizeof(p_as_build))die("invalid acceleration-structure command size");
+            nq_as_snapshot(j,(p_as_build *)(n->bytes+offset+8));
+        }
         if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
         if(h.op==OP_SIGNAL_EVENT) {
             nq_signal sig; memcpy(&sig.event,a,8); memcpy(&sig.mode,a+8,4); memcpy(&sig.value,a+12,4); nq_signal_add(n,sig);

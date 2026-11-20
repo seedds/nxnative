@@ -40,6 +40,8 @@ The layer was written for this game (Super Mario Galaxy extended it later: [0100
 
 - `DM_KEYS="f800:A,f1000:A,f1200:A,f1500:A,f1900:A"` goes through the title and the intro into Tartarus.
 
+- 2026-11-17, MacBook Pro M4 Pro, macOS 27.2.1: full `regress.py check` of the [shared output-route rework](../../../docs/reference/audio.md#stereo-only-on-a-51-system), against main `2925d7af`, PASS on 1.0.38233. The 95 s Tartarus route uses its two-channel AudioOut with `DM_AUDIO=0`; 60.1 to 59.8 fps and 2,435 to 2,438 MB peak, with no new red line. This is a compatibility check, not a surround or audible-output test.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:

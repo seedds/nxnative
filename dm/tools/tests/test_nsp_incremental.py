@@ -403,6 +403,20 @@ class DeriveProfile(Base):
         g = check(AssertionError('a value set by hand is checked, not worked out again'))
         self.assertEqual(g.get('stdalloc_cap'), '0xa0000000')
 
+    def test_the_heap_checks_stdalloc_cap_survives_the_region_check(self):   # issue #2830: the heap check limits StandardAllocator's region, not the pool the game reads as its memory
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x118000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0xCD500000\nsys_resource\t0x3000000\n')
+        self.derive(); patched = self.tmp / 'work/patched_v65536'; key = patched.with_name(patched.name + '.key')
+        key.parent.mkdir(parents=True); key.write_text('a' * 64 + '\n')
+        g = self.check_boot('heap', '>>> nnMain\n[dm] [mem] alias region mapped up to +4.26 GB (alias region 4.38 GB)\n')
+        self.assertEqual((g.get('stdalloc_cap'), g.get('app_pool')), ('0x40000000', '0xCD500000'))
+        self.assertFalse(nsp.checked_cap(g))   # the region check checks it as a value set by hand rather than working it out again (and taking it out)
+        logs = self.tmp / 'logs'
+        def boot(*args): (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text('0x4000000\t0x40000000\tmain+0x10\t0\t-\t-\t0\n'); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), \
+             mock.patch.object(nsp.pg, 'stdalloc_cap_needed', side_effect=AssertionError('a value the heap check set is checked, not worked out again')):
+            g = nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        self.assertEqual(g.get('stdalloc_cap'), '0x40000000')
+
     def test_provisional_run_invalidates_derivation(self):
         self.derive()
         key = nsp.derived_key(self.pdir)
@@ -1068,6 +1082,46 @@ class ShaderProfileKey(Base):   # the shader step's key takes the profile's shad
             with self.subTest(what):
                 before = self.key(); change(); self.assertNotEqual(self.key(), before)
 
+
+
+class BuildSources(unittest.TestCase):   # profile_guess.py build_sources reads the head of every file of the RomFS: 19 s of every build of Ocarina of Time, kept beside the image
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t)
+        self.game = self.t / 'v0'; (self.game / 'ExeFS').mkdir(parents=True)
+        (self.game / 'ExeFS/main').write_bytes(b'code'); (self.game / 'RomFS.img').write_bytes(b'image')
+        self.reader = self.t / 'reader.py'; self.reader.write_text('# the readers\n')
+        self.calls, self.src = [], {'graphics': ('nvn', 'main imports nvnBootstrapLoader'), 'glslc_capture': (False, ''), 'ue_decode': (0, 'no shader code archive'), 'modules': (['main'], '')}
+        def read(exefs, romfs, mods): self.calls.append((exefs, romfs, list(mods))); return dict(self.src)
+        for patch in (mock.patch.object(nsp, 'pg', mock.Mock(build_sources=read)), mock.patch.object(nsp, 'python_tool_files', lambda *a: [self.reader])):
+            patch.start(); self.addCleanup(patch.stop)
+
+    def sources(self, mods=('main',)): return nsp.build_sources(REPO, self.game, list(mods))
+
+    def test_kept_while_the_image_the_modules_and_the_readers_are_the_same(self):
+        self.assertEqual(self.sources(), self.src)
+        self.assertEqual(self.calls, [(self.game / 'ExeFS', nsp.rfs.source(self.game), ['main'])])
+        got = self.sources(); self.assertEqual(len(self.calls), 1)   # from RomFS.img.sources
+        self.assertEqual(got, self.src); self.assertEqual(got['graphics'][0], 'nvn'); self.assertIs(got['glslc_capture'][0], False)
+        changes = (lambda: (self.game / 'RomFS.img').write_bytes(b'another image'), lambda: (self.game / 'ExeFS/main').write_bytes(b'c0de'),
+                   lambda: (self.game / 'ExeFS/subsdk0').write_bytes(b'more'), lambda: self.reader.write_text('# other readers\n'),
+                   lambda: (self.game / 'RomFS.img.sources').write_text('not what it wrote'))
+        for n, change in enumerate(changes, 2):
+            with self.subTest(change=n):
+                change(); self.assertEqual(self.sources(), self.src); self.assertEqual(len(self.calls), n)
+                self.sources(); self.assertEqual(len(self.calls), n)
+        self.sources(('main', 'sdk')); self.assertEqual(len(self.calls), 7)   # the modules the profile loads
+        st = (self.game / 'RomFS.img').stat(); os.utime(self.game / 'RomFS.img', ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))   # the image written again, the same size
+        self.sources(('main', 'sdk')); self.assertEqual(len(self.calls), 8)
+
+    def test_a_romfs_folder_is_read_each_time(self):
+        (self.game / 'RomFS.img').unlink(); (self.game / 'RomFS').mkdir()
+        self.sources(); self.sources(); self.assertEqual(len(self.calls), 2)
+        self.assertEqual(sorted(p.name for p in self.game.iterdir()), ['ExeFS', 'RomFS'])
+
+    def test_what_json_does_not_give_back_is_not_kept(self):
+        self.src['nro_imports'] = (frozenset({'glslcCompile'}), '')
+        self.assertEqual(self.sources(), self.src); self.assertEqual(self.sources(), self.src); self.assertEqual(len(self.calls), 2)
+        self.assertFalse((self.game / 'RomFS.img.sources').exists())
 
 
 if __name__ == '__main__': unittest.main()

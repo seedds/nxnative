@@ -418,6 +418,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the first boot crashed in `oe::DisableAlbumImageTakenNotification`: a null read at `sdk+0x338070`, the first call in `nnMain` (`main+0x6b188c`); enabling those notifications also gives a null read at `sdk+0x33b0f0` (Xenoblade Chronicles 3); other `oe` calls that reach am, found in the imports before they were met. → [oe calls answered without an applet proxy](../reference/services.md#oe-calls-answered-without-an-applet-proxy)
 - a null read at `sdk+0x36ec60` in `oe::EnableAlbumImageTakenNotification`, called from `nnMain` (`main+0x286268`). → [oe calls answered without an applet proxy](../reference/services.md#oe-calls-answered-without-an-applet-proxy)
 - a null read at `sdk+0x32daa0` (`x0=0`) in `oe::SwitchLcdBacklightOn`, leaving Super Smash Bros. Ultimate's Vault > Sounds or opening My Music. → [oe calls answered without an applet proxy](../reference/services.md#oe-calls-answered-without-an-applet-proxy)
+- a null read in the SDK's `nn::oe::DisableCrashReport` during startup. → [Application crash-report switches](../reference/services.md#application-crash-report-switches)
 - a Switch 2 game renders smaller docked than handheld, or smaller than console footage: Star Fox's scene was 768x432 docked (DLSS network resized to it at boot, its window 1920x1080) and 960x540 handheld; Ocarina of Time drew 2048x1152 docked, its 3D at no more than 1536x864; Donkey Kong Bananza's docked frame buffer was 2304x1296 on a 2880x1620 swap chain. → [The graphics scale does not follow the operation mode](../reference/services.md#the-graphics-scale-does-not-follow-the-operation-mode)
 - abort in `nn::sm::Initialize` under `nn::oe::FinishStartupLogo`, right after the first frames. → [The startup logo](../reference/services.md#the-startup-logo)
 - SDK 21 `oe::EnableStartupLogoDisappearedMessage` reads null at `sdk+0x403fe0`, after `am::GetCommonStateGetter` returns null (Fit Boxing 3 2.0.0). → [The startup logo](../reference/services.md#the-startup-logo)
@@ -880,6 +881,9 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
+- a direct zero-sized grid changes replay state or reaches Metal's invalid empty-grid dispatch API. → [Direct compute dispatches with an empty grid](../reference/rendering.md#direct-compute-dispatches-with-an-empty-grid)
+- Shader Validation aborts with `Texture is not resident` in a fragment sampling copy even though the texture's heap is resident. → [Views of placed textures need their parent resident](../reference/rendering.md#views-of-placed-textures-need-their-parent-resident)
+- a compressed texture's Metal copy and guest storage disagree after a GPU copy. FIFA 23 shows a corrupt checkerboard in place of the controller-button glyph before Select. → [GPU copies into compressed IMAGE textures](../reference/rendering.md#gpu-copies-into-compressed-image-textures)
 - clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`. → [Null textures in diagnostic logs](../reference/rendering.md#null-textures-in-diagnostic-logs)
 - Metal aborts on a texture descriptor with an absurd size (`height (1869367126) greater than … 16384`). → [Texture objects copied into command records](../reference/rendering.md#texture-objects-copied-into-command-records)
 - a decoded movie stays black even though its YUV textures contain the picture; disabling its depth test makes it visible. → [New textures start as zero](../reference/rendering.md#new-textures-start-as-zero)
@@ -1184,6 +1188,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- the shader splitter cannot reach an EA title's shader programs inside its BIG4 archives. A reader that imports PyCryptodome only on encountering EASF instead fails late in a clean tool environment. → [EA BIG4, EASF and NXSHADER archives](../reference/shaders.md#ea-big4-easf-and-nxshader-archives)
 - `[RED] the shader split found no shaders in main or the RomFS`, with `shaders: 0`, on a Telltale Tool game whose RomFS is `.ttarch2` archives and whose `main` names `*.t3fxpack`. No BNSH, BAHS or control-section magic appears in the compressed files. → [Telltale effect packs in ttarch2 archives](../reference/shaders.md#telltale-effect-packs-in-ttarch2-archives)
 - the packer finds no loose SPIR-V files, although the game creates its modules from assets it ships. → [RenderDragon material shaders](../reference/shaders.md#renderdragon-material-shaders)
 - the split finds only a few dozen shaders. The notebook pages render black, and game scenes have missing materials. → [L.A. Noire WAD and VFP shader arrays](../reference/shaders.md#la-noire-wad-and-vfp-shader-arrays)

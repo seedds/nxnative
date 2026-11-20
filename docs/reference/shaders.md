@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### EA BIG4, EASF and NXSHADER archives
+
+- **Symptom:** the shader splitter cannot reach an EA title's shader programs inside its BIG4 archives. A reader that imports PyCryptodome only on encountering EASF instead fails late in a clean tool environment.
+- **Cause:** these archives wrap NXSHADER programs in chunkzip raw-deflate blocks and EASF AES-CBC encryption. Existing Frostbite readers use different layouts. EASF's eight-byte ID identifies an `id[8], key[16]` registry entry in the matching main NSO; the header verifies the first 32 plaintext bytes.
+- **Fix:** `easf` reads members by signature, validates ranges and decoded sizes, finds and verifies the registry key, and passes control/code records to normal package, fact and pairing generation. Archive jobs use their version's main, with the newest main for DLC, and the normal worker/unreadable-file path. CBC decryption shares `dm/tools/aes.py` with the existing Unreal and RPF6 ECB readers, so no extra Python crypto dependency is introduced.
+- **Check:** synthetic fixtures cover key discovery, bad candidates, compressed NSOs, archive bounds, compute offsets, version separation, DLC, directory/image IO and package export while PyCryptodome is unavailable. Independent AES known-answer vectors and existing encrypted Unreal/RPF6 fixtures check the shared helper. The current-main split of FIFA 23 reproduces all 386 expected shader keys and its full Mac shader build succeeds.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), [PR #1696](https://github.com/seedds/nxnative/pull/1696).
+
 ### Telltale effect packs in ttarch2 archives
 
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`, with `shaders: 0`, on a Telltale Tool game whose RomFS is `.ttarch2` archives and whose `main` names `*.t3fxpack`. No BNSH, BAHS or control-section magic appears in the compressed files.

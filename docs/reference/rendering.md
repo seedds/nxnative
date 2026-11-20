@@ -4,6 +4,30 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Textures and formats
 
+### Direct compute dispatches with an empty grid
+
+- **Symptom:** a direct zero-sized grid changes replay state or reaches Metal's invalid empty-grid dispatch API.
+- **Cause:** NVN permits zero work, but replay advanced its write epochs and resolved the program before checking the direct group counts. Indirect counts are GPU-owned and cannot be inspected this way.
+- **Fix:** return from direct empty dispatches before replay state changes or encoding. Indirect dispatch handling remains unchanged.
+- **Check:** `t_dispatch_zero` covers each zero dimension and confirms that no program, encoder or write state is required or changed. The fixture fails on main and passes with the guard.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), [PR #1696](https://github.com/seedds/nxnative/pull/1696).
+
+### Views of placed textures need their parent resident
+
+- **Symptom:** Shader Validation aborts with `Texture is not resident` in a fragment sampling copy even though the texture's heap is resident.
+- **Cause:** heap residency covers the placed storage, but a sampled view also needs its parent texture descriptor. `res_add_at` registered only the heap.
+- **Fix:** register both heap and texture descriptor. The current owner, heap recycler and queued residency commits already retire them safely: Metal calls run outside the residency-data lock, and retained queue objects are released after the commit lock is unlocked. No additional heap-retirement queue or older ownership code is needed.
+- **Check:** the placed-texture fragment-copy case in `t_image_alias` aborts on main and passes with the fix under Shader Validation, with deferred encoding off/on. Its two allocation-threshold assertions fail identically on unchanged main (337 checks) and with the added case (340 checks); those thresholds were not relaxed. `t_upload_budget` separately passes all 261 checks in both encoder modes on current main without the proposed upload-residency replacement.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), [PR #1696](https://github.com/seedds/nxnative/pull/1696). Checks: Apple M6, macOS 27.2.1, Xcode 27.2.
+
+### GPU copies into compressed IMAGE textures
+
+- **Symptom:** a compressed texture's Metal copy and guest storage disagree after a GPU copy. FIFA 23 shows a corrupt checkerboard in place of the controller-button glyph before Select.
+- **Cause:** `tex_storage_ok` correctly allows compressed IMAGE textures to take CPU uploads, because shaders cannot write a block-compressed format. `tex_storage_dst` instead excluded every IMAGE texture from storage writes. GPU copies therefore left stale bytes in the storage that subsequent reads or uploads can use.
+- **Fix:** apply the same format rule at the write boundary: IMAGE excludes uncompressed shader-writable textures, but not block-compressed textures. Existing storage ownership and the GPU's `gsb_store` path remain in use. No cache flush, re-upload, profile switch or ownership rewrite is added.
+- **Check:** `t_compressed_copy` fails the guest-storage comparison on main (38 checks, one failure). With the fix it passes all 38 under API Validation and Shader Validation, each with deferred encoding off/on, on Apple M6/macOS 27.2.1/Xcode 27.2. The fixture checks compressed IMAGE off/on, GPU content, deswizzled guest bytes and a subsequent pool-chunk creation. With only this predicate changed, the FIFA menu capture and user retest show the correct button icons.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), [PR #1696](https://github.com/seedds/nxnative/pull/1696).
+
 ### Null textures in diagnostic logs
 
 - **Symptom:** clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`.
@@ -97,7 +121,8 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** with `MTL_SHADER_VALIDATION=1`, `Invalid Metal usage: Texture is not resident` for a texture allocated in `tex_fit`; without validation those reads are undefined.
 - **Cause:** Metal takes a view's residency from the texture it was made from. `tex_fit` made its view of the texture the binding resolved to, which is often a view itself (the view cache's, a level and layer range or a swizzle), so the new view hung under a texture that is not in the residency set although the texture under both is.
-- **Fix:** `tex_fit` makes the view from the texture at the bottom of the chain, with the bound view's level and layer offsets, level count and swizzle (`t_tex_fit_root`).
+- **Fix:** `tex_fit` makes the view from the texture at the bottom of the chain, with the bound view's level and layer offsets, level count and swizzle (`t_tex_fit_root`). Registered views and scaling/format-converting copies do the same, composing nonzero mip/slice offsets. The existing view cache remains keyed by its Metal base texture and parameters.
+- **Check:** the nested depth/stencil copy in `t_stencil_view` aborts under Shader Validation on main and passes all 20 checks with the fix in both encoder modes. `t_view_levels` checks the nested registered range through the current owner API (48 checks, all pass). The tests cover nonzero parent-relative coordinates.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): a 64x64 environment cube read from a 2D-array view, 7 draws in the outdoors frame replayed with `nvn_replay` under shader validation.
 
 ### 1D textures as one-row 2D textures

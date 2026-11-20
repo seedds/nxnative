@@ -103,5 +103,21 @@ class Alias(unittest.TestCase):
         self.assertEqual(game.Game(out).builds()['v0']['display'], '?')
 
 
+    def test_unregistered_build_uses_numeric_package_label_after_authoritative_version(self):
+        d = self.tmp / 'extract/v0'; nso(d / 'ExeFS/main', UPD_BID)
+        g = game.load(f'{PROFILE:016X}'); out = self.tmp / 'derived' / g.id
+        (d / 'display_version.txt').write_text('1.8.0\n')
+        self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '1.8.0')
+        self.assertEqual(game.Game(out).builds()['v0']['display'], '1.8.0')
+        nso(d / 'ExeFS/main', BID)
+        self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '1.0.0')
+        (d / 'control.nacp').write_bytes(bytes(0x3060) + b'2.3.4' + bytes(0x1000))
+        self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '2.3.4')
+        (d / 'control.nacp').unlink(); nso(d / 'ExeFS/main', UPD_BID)
+        for label in ('not a version', '1.8.0 beta', '1.2.3.4', '1' * 16):
+            (d / 'display_version.txt').write_text(label)
+            self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '?')
+
+
 if __name__ == '__main__':
     unittest.main()

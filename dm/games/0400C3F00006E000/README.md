@@ -140,6 +140,8 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 
 ## Found on this game
 
+- [An unregistered NUP build loses its numeric version label](../../../docs/reference/packing.md#an-unregistered-nup-build-loses-its-numeric-version-label)
+
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - [Relative thread waits can hold back the replay clock](../../../docs/reference/threads.md#relative-thread-waits-can-hold-back-the-replay-clock): v0 stalled at frame 2 in `SleepThread` ([PR #2027](https://github.com/seedds/nxnative/pull/2027)). On 1.8.0 the main thread at `main+0x8ec38` waited indefinitely in `WaitForAddress` while a BaseProcExecutor worker was in `SleepThread` waiting for the replay clock. In the 60 s Mac smoke (Apple M6, macOS 27.2, Xcode 27.2, `DM_DETCLOCK=16666667 DM_DETCLOCK_PACE=1`), main `4b92e232` stalled at frame 20 and the fix reached frame 875. The candidate's frame median over seconds 55–60 was 17.55 ms. The clock-off main control reached the same texture CPU-fallback warning, and resident memory at frame 600 was 7,918 MB on that control and 7,735 MB on the candidate.
 - [Pipeline look-ahead must leave future attachments unresolved](../../../docs/reference/shaders.md#pipeline-look-ahead-must-leave-future-attachments-unresolved): the direct Metal startup crash.

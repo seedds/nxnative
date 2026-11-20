@@ -199,6 +199,44 @@ class Read(Base):
         self.assertIsNone(nsp.nup_file(self.dir))   # the packages win, as over a dump's layout
 
 
+class DisplayLabel(Base):
+    def pack_label(self, meta, fallback=b''):
+        # A real synthetic NUP and the production extraction path, not a hand-written sidecar.
+        packages = [(0, TID, 0, version(), meta)] if not fallback else [
+            (0, 0, 0, {}, fallback), (1, TID, VER, version(), meta)]
+        write_nup(self.path, packages, update_flags=pack_nup.STANDALONE if fallback else 0)
+        n = self.open(); app, base, versions, _ = pack_nup.scan(n)
+        out = self.dir / 'out'
+        pack_nup.pack_version(n, versions[VER] if fallback else base, base, app, out, say=lambda s: None)
+        return out
+
+    def test_numeric_display_label_survives_extraction_without_control_data(self):
+        for raw, expected in ((b'v1.8.0', '1.8.0'), (b'2.1', '2.1'), (b'4', '4')):
+            with self.subTest(raw=raw):
+                out = self.pack_label(tlv([(4, raw)]))
+                self.assertEqual((out / 'display_version.txt').read_text().strip(), expected)
+                self.assertFalse((out / 'control.nacp').exists())
+
+    def test_control_data_wins_and_old_label_is_removed(self):
+        out = self.pack_label(tlv([(4, b'v1.8.0')]))
+        self.pack_label(tlv([(4, b'v9.9.9'), (2, control_nacp('Game', '', '2.3.4'))]))
+        self.assertEqual(nacp.version(out / 'control.nacp'), '2.3.4')
+        self.assertFalse((out / 'display_version.txt').exists())
+
+    def test_invalid_or_missing_label_removes_previous_version(self):
+        for raw in (b'', b'HWAoI', b'v1.8.0 beta', b'1.2.3.4', b'1.2\x00', b'1.2\xff', b'1' * 16):
+            with self.subTest(raw=raw):
+                out = self.pack_label(tlv([(4, b'v1.8.0')]))
+                self.pack_label(tlv([(4, raw)]) if raw else b'')
+                self.assertFalse((out / 'display_version.txt').exists())
+
+    def test_update_does_not_take_base_version_label(self):
+        out = self.pack_label(b'', tlv([(4, b'v1.0.0')]))
+        self.assertFalse((out / 'display_version.txt').exists())
+        out = self.pack_label(tlv([(4, b'v1.8.0')]), tlv([(4, b'v1.0.0')]))
+        self.assertEqual((out / 'display_version.txt').read_text().strip(), '1.8.0')
+
+
 class Head(Base):
     def test_first_bytes_of_stored_and_compressed_files(self):   # the survey's manifest: a file of 200 bytes or more is zstd-compressed here, a shorter one stored
         n = self.open(); base = next(k for k in n.packages if k.kind == pack_nup.BASE)

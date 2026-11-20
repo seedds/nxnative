@@ -3,7 +3,7 @@
 # a .nup file, or a folder that holds one, and goes on with its other steps; run on its own, this script does only this step.
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
-# publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
+# publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile. A numeric version label is kept only as a fallback after control data and a registered build's version.
 # A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
 # leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
@@ -12,6 +12,7 @@
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
 #   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
+#   extract/v<version>/display_version.txt   a numeric version label when this package has no NACP (never borrowed from another version)
 #   extract/v<version>/romfs_programs/<index>.img   for an application of several programs (a Switch 2 Edition of a Switch 1 game), the RomFS of each program not packed, which the
 #                                       packed one mounts by program index (nn::fs::MountRom(name, index, ...), hle_fs.c); --program picks the program, default the highest index
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − the NACP's AddOnContentBaseId, else − base title ID − 0x1000), the host's DM_AOC_DIR
@@ -23,7 +24,7 @@
 import argparse, hashlib, mmap, os, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
-import romfs_image
+import nacp, romfs_image
 try: from compression import zstd
 except ImportError:
     try: from backports import zstd   # pyright: ignore[reportMissingImports]  # an optional package, only Python before 3.14 needs it
@@ -43,7 +44,7 @@ NO_DIR = 0xFFFFFFFF
 BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
-T_NACP, T_ICON, T_LICONS = 2, 3, 10
+T_NACP, T_ICON, T_VERSION, T_LICONS = 2, 3, 4, 10
 ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
@@ -396,7 +397,9 @@ def control(k, out, fallback=None):   # the package's control data beside its Ex
     nacp_bytes = meta.get(T_NACP)
     icons = localized(meta.get(T_LICONS, b''))
     icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
-    for name, data in (('control.nacp', nacp_bytes), ('icon.jpg', icon)):
+    # A base/application label cannot describe an update: only keep the selected package's own version label.
+    label = nacp.version_label(k.meta().get(T_VERSION, b'')) if not nacp_bytes else ''
+    for name, data in (('control.nacp', nacp_bytes), ('icon.jpg', icon), (nacp.LABEL_VERSION, (label + '\n').encode() if label else None)):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
 

@@ -40,6 +40,23 @@ def version(path):
     return m.group().decode() if m else ''
 
 
+LABEL_VERSION = 'display_version.txt'   # pack_nup's numeric package label, only a fallback for missing control/build metadata
+
+
+def version_label(data):
+    """A packer's version label, not arbitrary text: an optional v and up to three ASCII numeric components, fitting the console's 16-byte string."""
+    data = data.removeprefix(b'v')
+    return data.decode('ascii') if len(data) <= 15 and re.fullmatch(rb'[0-9]+(?:\.[0-9]+){0,2}', data) else ''
+
+
+def label_version(folder):
+    p = Path(folder) / LABEL_VERSION
+    try:
+        with p.open('rb') as f: data = f.read(18)
+    except FileNotFoundError: return ''
+    return version_label(data.removesuffix(b'\n'))
+
+
 def languages(path):
     """The language codes the game supports (the u32 SupportedLanguageFlag at 0x302C, one bit per language in LANGUAGES order; Horizon picks the game language among them), in that order;
     a missing file or no flag returns an empty list"""

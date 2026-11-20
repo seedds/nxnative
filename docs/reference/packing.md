@@ -461,9 +461,16 @@
 
 - **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
 - **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
-- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, then a numeric NUP version label, and `?` only when none of these sources supplies a version.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
 - **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
+
+### An unregistered NUP build loses its numeric version label
+
+- **Symptom:** a NUP without control data packs an unregistered update with `?` as its display version, even though the selected package carries a version label such as `v1.8.0`.
+- **Cause:** `pack_nup` discarded version labels, leaving the survey and derived profile with neither control data nor a registered version for the exact main build. The host answers `GetDisplayVersion` from that derived build row.
+- **Fix:** extraction keeps a numeric label from the selected package in `display_version.txt`; the survey, derived profile and app metadata use it after control data and an exact registered build version. A label accepts one to three ASCII numeric components, optionally prefixed by `v`, and at most 15 version bytes. Arbitrary names, suffixes, embedded NULs and oversized labels are ignored. An update never takes the base package's label, and extraction removes an obsolete label when control data is present or the label is no longer valid.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), update 1.8.0, reported in [#2902](https://github.com/seedds/nxnative/issues/2902). The metadata path is covered with synthetic NUPs and NSO headers; the reported game was not run for this change.
 
 ### No Game language row in an app packed from a NUP or a dump
 

@@ -563,6 +563,164 @@ class Pack(Base):
         self.assertEqual((aoc / '1.img').read_bytes(), b'from the NSP')
 
 
+ICON = b'\xff\xd8 icon'
+BUILD_ID = bytes(range(32))
+# a whole meta block in SPEC §5's numbers: NPDM 1, NACP 2, icon 3, display version 4, title 5, publisher 6, build ID 7 (32 bytes), source name 8
+FULL = [(1, npdm(TID)), (2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON), (4, b'1.2.3'), (5, b'TG'), (6, b'Pub'), (7, BUILD_ID), (8, b'game.nsp')]
+
+
+def shifted(recs):   # the block as nup writes it since its PR #20 (merged 2026-11-04): every type one too low (NPDM 0 … localized icons 9)
+    return tlv([(t - 1, v) for t, v in recs])
+
+
+class ShiftedMeta(Base):
+    """NUPs whose meta block numbers every record one too low (nup since its PR #20): told apart by the rule of nup PR #32 (a record of type 0, or one of type 7 that is not
+    32 bytes) and read one type up; a block in SPEC §5's numbers is read as it is. A "NACP" that is not 0x4000 bytes is left out, never saved as control.nacp"""
+    def out(self): return self.dir / 'out'
+
+    def pack(self, meta):   # a base game with this meta block, packed; returns the lines said
+        write_nup(self.path, [(0, TID, 0, version(), meta)])
+        n = self.open(); app, base, _, _ = pack_nup.scan(n)
+        said = []
+        pack_nup.pack_version(n, base, base, app, self.out(), say=said.append)
+        return said
+
+    def control(self):
+        return nacp.name(self.out() / 'control.nacp'), nacp.version(self.out() / 'control.nacp'), (self.out() / 'icon.jpg').read_bytes()
+
+    def test_shifted_block_read_one_type_up(self):
+        for what, recs in (('whole block', FULL), ('marked by its NPDM (type 0) alone', [r for r in FULL if r[0] != 8]),
+                           ('marked by its source name (type 7, not 32 bytes) alone', [r for r in FULL if r[0] != 1])):
+            with self.subTest(what):
+                said = self.pack(shifted(recs))
+                self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))   # it was the icon JPEG as control.nacp and the display version as icon.jpg
+                lines = [s for s in said if 'one too low' in s]
+                self.assertEqual(len(lines), 1, said)
+                self.assertTrue(lines[0].startswith('game.nup (base): '), lines[0])
+
+    def test_shifted_localized_icons(self):   # localized icons (SPEC 10, shifted 9) with no default icon: the American English one
+        local = b''.join(bytes([len(t)]) + t + struct.pack('<I', len(i)) + i for t, i in ((b'ja', b'ja icon'), (b'en-US', b'us icon')))
+        self.pack(shifted([(1, npdm(TID)), (2, control_nacp('Test Game', 'テス', '1.2.3')), (10, local)]))
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', b'us icon'))
+
+    def test_spec_block_read_as_it_is(self):   # older nup: SPEC numbers, a 32-byte build ID at type 7 and no type 0
+        for what, recs in (('whole block', FULL), ('build ID only', [r for r in FULL if r[0] in (2, 3, 7)])):
+            with self.subTest(what):
+                said = self.pack(tlv(recs))
+                self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+                self.assertFalse([s for s in said if 'one too low' in s or 'NACP' in s], said)
+
+    def test_type_7_record_decides(self):   # the same records without an NPDM: a 32-byte type 7 is SPEC's build ID, another size the shifted source name
+        for source, expected_type in ((BUILD_ID, 7), (b'game.nsp', 8)):
+            with self.subTest(source=source):
+                write_nup(self.path, [(0, TID, 0, version(), tlv([(7, source)]))])
+                with pack_nup.Nup(self.path) as n:
+                    self.assertEqual(n.packages[0].meta(), {expected_type: source})
+
+    def test_wrong_size_nacp_left_out(self):   # a NACP record of another size is no NACP: never saved as control.nacp (the icon at SPEC's type 3 keeps the block as it is)
+        for size in (0, 0x3FFF, 0x4001):
+            with self.subTest(size=size):
+                said = self.pack(tlv([(2, bytes(size)), (3, ICON), (5, b'TG')]))
+                self.assertFalse((self.out() / 'control.nacp').exists())
+                self.assertEqual((self.out() / 'icon.jpg').read_bytes(), ICON)
+                self.assertEqual([s for s in said if 'NACP' in s], [f'game.nup (base): its NACP record is {size:,} bytes, not 16,384 (0x4000): it is not a NACP, left out'])
+
+    def test_wrong_size_nacp_cannot_supply_scan_ids(self):
+        for size in (0x3FFF, 0x4001):
+            with self.subTest(size=size):
+                payload = bytearray(size)
+                struct.pack_into('<QQ', payload, pack_nup.NACP_AOC_BASE, TID + 0x5000, TID + 0x4000)
+                records = tlv([(pack_nup.T_NACP, bytes(payload))])
+                dlc_id = TID + 0x1001
+                write_nup(self.path, [(0, TID, 0, version(), records),
+                                      (2, dlc_id, 0, {'romfs': {'addon': b'data'}}, b'')])
+                with pack_nup.Nup(self.path) as n:
+                    app, base, _, dlc = pack_nup.scan(n)
+                    self.assertEqual((app, n.application, n.aoc_base, list(dlc)), (TID, TID, TID + 0x1000, [dlc_id]))
+                    pack_nup.pack_version(n, base, base, app, self.out(), say=lambda s: None)
+                self.assertFalse((self.out() / 'control.nacp').exists())
+
+    def test_nacp_title_starting_with_meta(self):
+        payload = control_nacp('METAL', 'テス', '1.2.3')
+        for records in ([(2, payload), (7, bytes(20))], [(1, payload)]):
+            with self.subTest(record_type=records[0][0]):
+                self.pack(tlv(records))
+                self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'METAL')
+
+    def test_records_decide_before_the_rule(self):
+        """nup PR #32's rule misses a shifted block with no type 0 or 7 record, and takes a SPEC block with a type 0 record or a type 7 record of another size than 32 for a shifted one:
+        where the NACP (0x4000 bytes) or the icon (a JPEG or PNG) is decides first, the rule only when they cannot"""
+        nacp_ = control_nacp('Test Game', 'テス', '1.2.3')
+        png = b'\x89PNG\r\n\x1a\n icon'
+        for what, recs, shifted_, icon in (
+                ('shifted, no type 0 or 7 (an update with no NPDM)', [(1, nacp_), (2, ICON), (3, b'1.2.3')], True, ICON),
+                ('shifted, no type 0 or 7, icon only', [(2, png), (3, b'1.2.3'), (4, b'TG')], True, png),
+                ('shifted, a NACP of the wrong size: the icon decides', [(1, b'short'), (2, ICON), (3, b'1.2.3')], True, ICON),
+                ('SPEC, with a packer\'s own type 0', [(0, b'vendor'), (2, nacp_), (3, ICON)], False, ICON),
+                ('SPEC, a 64-character build ID at type 7', [(1, npdm(TID)), (2, nacp_), (3, ICON), (7, b'ab' * 32)], False, ICON),
+                ('SPEC, no NACP, a 20-byte build ID: the icon decides', [(1, npdm(TID)), (3, ICON), (7, bytes(20))], False, ICON),
+                ('SPEC, an NPDM of 0x4000 bytes is no NACP', [(1, npdm(TID) + bytes(0x4000 - 0x100)), (2, nacp_), (3, ICON), (7, bytes(20))], False, ICON),
+                ('neither place holds a NACP or an icon: the rule', [(0, npdm(TID)), (3, b'TG')], True, None),
+                ('shifted, no NACP, an icon of 0x4000 bytes is no NACP', [(0, npdm(TID)), (2, ICON + bytes(0x4000 - len(ICON))), (3, b'1.2.3')], True, ICON + bytes(0x4000 - len(ICON))),
+                ('SPEC, no NACP, an icon of 0x4000 bytes', [(1, npdm(TID)), (3, ICON + bytes(0x4000 - len(ICON))), (4, b'1.2.3')], False, ICON + bytes(0x4000 - len(ICON)))):
+            with self.subTest(what):
+                said = self.pack(tlv(recs))
+                self.assertEqual(len([s for s in said if pack_nup.SHIFTED in s]), int(shifted_), said)
+                if not shifted_ and any(t == 0 or t == 7 and len(v) != 32 for t, v in recs):   # the rule said shifted, the records not: a line says so
+                    self.assertTrue(any('read as it is' in s for s in said), said)
+                got = self.out() / 'icon.jpg'
+                self.assertEqual(got.read_bytes() if got.exists() else None, icon)
+                if any(v == nacp_ for _, v in recs): self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Test Game')
+                else: self.assertFalse((self.out() / 'control.nacp').exists())
+
+    def test_duplicate_and_odd_records(self):   # the first record of a type counts; an empty record is no icon; a truncated record is a clear error, not a misread
+        self.pack(tlv([(2, control_nacp('First', 'テス', '1.0.0')), (2, control_nacp('Second', 'テス', '2.0.0')), (3, b''), (3, ICON)]))
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'First')
+        self.assertFalse((self.out() / 'icon.jpg').exists())
+        self.pack(tlv([(2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON)]) + b'\3\0\0')   # a trailing scrap shorter than a record header is ignored
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+        cut = tlv([(2, control_nacp('Test Game', 'テス', '1.2.3')), (3, ICON)])[:-2]
+        with self.assertRaisesRegex(pack_nup.Error, r'package 0: meta record 0x3 runs past its block'): self.pack(cut)
+
+    def test_huge_icon(self):   # an icon of 48 MiB is copied as it is (sips scales it), in seconds
+        big = ICON + bytes(48 << 20)
+        self.pack(tlv([(2, control_nacp('Test Game', 'テス', '1.2.3')), (3, big)]))
+        self.assertEqual((self.out() / 'icon.jpg').stat().st_size, len(big))
+
+    def test_wrong_size_nacp_falls_back_to_the_base_records(self):   # a standalone update's own bad NACP leaves the empty base record's good one in place
+        write_nup(self.path, [(0, 0, 0, {}, tlv([(2, control_nacp('Test Game', 'テス', '1.2.3'))])), (1, TID, VER, version(), tlv([(2, b'short'), (3, ICON)]))])
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        said = []
+        pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=said.append)
+        self.assertEqual(self.control(), ('Test Game', '1.2.3', ICON))
+        self.assertEqual(len([s for s in said if 'not a NACP' in s]), 1, said)
+
+    def test_said_once_per_package(self):   # the survey and the extraction both read a version's control data
+        write_nup(self.path, [(0, TID, 0, version(), shifted(FULL))])
+        n = self.open(); _, base, _, _ = pack_nup.scan(n)
+        said = []
+        for _ in range(2): pack_nup.control(base, self.dir, say=said.append)
+        self.assertEqual(len(said), 1, said)
+
+    def test_build_says_the_line(self):   # the NSP script's extraction keeps the packing quiet, not the lines about the control data (a profile: no survey)
+        write_nup(self.path, [(0, TID, 0, version(), shifted(FULL)), (1, TID, VER, version(main=b'new code'), tlv([(1, b'short'), (2, ICON)]))])
+        said = []
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+             mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'say', side_effect=said.append), mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), \
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')):
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path)]))
+        self.assertEqual([s for s in said if 'one too low' in s or 'not a NACP' in s], [f'game.nup (update {VER}): {pack_nup.SHIFTED}',
+                         f'game.nup (update {VER}): its NACP record is 5 bytes, not 16,384 (0x4000): it is not a NACP, left out'])
+
+    def test_survey_reads_a_shifted_block(self):   # the NSP script's survey (a NUP with no profile) saves the same control data, and says the line through its own output
+        write_nup(self.path, [(0, NEW, 0, version(tid=NEW), shifted(FULL))])
+        n = self.open(); _, base, _, _ = pack_nup.scan(n)
+        said = []
+        with mock.patch.object(nsp, 'say', side_effect=said.append): nsp.survey_nup(n, base, base, self.dir / 'survey')
+        self.assertEqual(nacp.name(self.dir / 'survey/control.nacp'), 'Test Game')
+        self.assertTrue(any('one too low' in s for s in said), said)
+
+
 class Stop(Exception): pass
 
 

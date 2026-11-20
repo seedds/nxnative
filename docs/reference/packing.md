@@ -54,6 +54,13 @@
 - **Check:** `test_nsp_nup` Read.test_folder_cycle_refused: a folder made its own parent, then a cycle of two folders, each with the TOC hash fixed up, are refused, and the script exits 1 with no traceback. Without the check the container opens.
 - **Found on:** a code audit; no damaged NUP of this kind is known.
 
+### A NUP icon is written as control data
+
+- **Symptom:** the JPEG icon in a NUP is written as `control.nacp` and the display version is written as `icon.jpg`. A wrong-size NACP can also supply incorrect application and DLC IDs during scanning.
+- **Cause:** [nup PR #20](https://github.com/a55uka/nup/pull/20) replaced explicit TLV values with an enum that starts at 0. SPEC §5 starts at 1, so each type in a block produced by that writer is one too low. The upstream writer fix in [nup PR #22](https://github.com/a55uka/nup/pull/22) starts the enum at 1. In nxnative, scanning used the offsets of the ID fields as its only NACP size check.
+- **Fix:** `Package.meta()` normalizes a shifted block at read time. NACP and icon payloads determine the numbering when they can, with type 0 or a non-32-byte type 7 as fallback markers ([nup PR #32](https://github.com/a55uka/nup/pull/32)). The same reader omits NACP records whose size differs from `0x4000` before scanning or extraction uses them. Extraction reports these decisions once per package.
+- **Found on:** a sample written with upstream `nup` at `a4840f06` reproduced the swapped files. A Resident Evil 4 archive confirmed shifted numbering. A Super Mario Bros. Wonder archive contained a valid NACP at type 2 alongside shifted records.
+
 ### A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"
 
 - **Symptom:** `[RED] <file>.nup: 2 base packages`, `base program ID 040015100B514001 is not a base title ID`, or `010015100B515001 is not a DLC of 040015100B514001`, from a NUP of a Switch 1 game's Nintendo Switch 2 Edition ([PR #2692](https://github.com/seedds/nxnative/pull/2692)). Packed by hand on its own RomFS, the Switch 2 program crashed within a second of `nnMain` on a null `this` in a constructor: with no heap sizes the engine's heaps were never made. With an add-on older than the program: `[RED] game asks to show an error: its upgrade add-on content is older than this program needs`, then `CRASH sig=4` at the game's own trap (before the hook, a crash in `sdk` under `nn::applet::StartLibraryAppletImmediately`).

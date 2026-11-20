@@ -836,7 +836,7 @@ def survey_nup(n, k, base, out):
                 with open(o, 'wb') as f: n.copy(i, f)
     try:
         for d in [pack_nup.romfs_of(k, base), *pack_nup.sibling_romfs(n, k).values()]: walk(d, '')   # then the other programs' RomFS, which this one mounts by program index (a Switch 2 Edition's game data is its Switch 1 program's)
-        pack_nup.control(k, out, pack_nup.app_package(n) if base is None else base)   # what an update lacks, from its base game (or the metadata record, as pack_version takes it)
+        pack_nup.control(k, out, pack_nup.app_package(n) if base is None else base, say=say)   # what an update lacks, from its base game (or the metadata record)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
@@ -1405,7 +1405,7 @@ def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its bas
         except OSError: return None
     try:
         PROG.stage(f'unpack {name}', poll=poll, unit='B', total=pack_nup.romfs_bytes(n, k, base), est=True)
-        how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
+        how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s), note=say)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
     return dst

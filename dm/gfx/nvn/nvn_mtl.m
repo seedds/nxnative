@@ -142,6 +142,7 @@ static id<MTL4CommandQueue> g_q4;
 static _Atomic int g_classic_ok;   // mtl_device_classic permits fallback while initialization is in progress
 static int g_classic;   // the device has no Metal 4 and only the classic part started
 static dispatch_queue_t g_feedback_q;
+static dispatch_group_t g_present_readbacks;   // Asynchronous screenshot and luminance work on the classic queue
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
 enum { ALLOC_SHARE = 64 };   // submissions one allocator serves before the next takes another (see g_alloc_fence)
@@ -184,6 +185,8 @@ static _Atomic int g_link_drain_req; static _Atomic uint64_t g_link_blocked_ns, 
 static uint64_t g_link_waiter, g_link_latched, g_link_latch_out; static unsigned g_link_latch_misses; static int g_link_waiter_end;
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
+static _Atomic int g_link_presenting;   // Display-link callbacks that have taken a frame but have not finished handing it off
+static _Atomic int g_present_suspended;
 static NSMutableArray *g_ext_retire;   // Under g_pq_mu: released external textures (mtl_ext_tex_release) waiting for the presents in flight; retired when g_pq_inflight reaches 0
 static void ext_retire(NSArray *textures);
 #define EXT_SERIAL (1ull << 62)   // mtl_ext_tex's serials: external producers' textures, which the present path owns (never pinned, never on the deferred-release queue)
@@ -839,6 +842,7 @@ static void mtl_init_once(void) {
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
     g_q = [g_dev newCommandQueue];
+    g_present_readbacks = dispatch_group_create();
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
     // run-time shader capture needs (the NSP script's capture_shaders boots headless; GitHub issue #112: Balatro's capture aborted here)
@@ -2927,8 +2931,18 @@ void mtl_present_flush(void);
 // took 78 s on the iPhone (5 s windowless on the Mac). A swapchain texture is not handed back before its previous present is processed (AcquireTexture waits for that ticket)
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
-static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+static void present_suspend_wait(void);
+static void snap_drain(int strict);
+void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(1); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+void mtl_suspend_drain(void) {
+    @autoreleasepool {
+        mtl_init();
+        present_suspend_wait();
+        snap_drain(0);
+        dispatch_group_wait(g_present_readbacks, DISPATCH_TIME_FOREVER);
+        do { mtl_finish_gpu(); } while (mtl_completed_fence() < mtl_last_fence());
+    }
+}
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -9806,7 +9820,7 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
 }
 static ArchEpoch *g_ep; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;   // the current period
 static _Atomic uint64_t g_ep_t0;   // when the current period began (bp_now): a prewarm's timer flush hands it over once it is old enough (arch_warm_flush_due)
-static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
+static _Atomic int g_arch_cap;   // Published once the archive is ready for saves from another thread
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
@@ -10477,9 +10491,12 @@ static void pso4_init(void) {
         NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
         if (!g_comp4) MLOG("[RED] no Metal 4 compiler (%s): render pipelines are built through the MTLDevice", ce.localizedDescription.UTF8String);
         else if (g_arch_dir) {
-            g_ep = ep_new(); g_arch_cap = g_ep != nil; atomic_store(&g_ep_t0, bp_now());
-            if (g_arch_cap) atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
-            if (!g_ep) MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
+            g_ep = ep_new();
+            atomic_store(&g_ep_t0, bp_now());
+            if (g_ep) {
+                atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
+                atomic_store(&g_arch_cap, 1);
+            } else MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
         }
     });
 }
@@ -18113,7 +18130,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     if (!buf) { MLOG("[RED] full-window screenshot: cannot create output (%zux%zu)", w, h); cb(NULL); return; }
     // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion.
     void (^readback)(int) = ^(int ok) {
-        if (!ok) { cb(NULL); return; }
+        if (!ok || atomic_load(&g_present_suspended)) { cb(NULL); dispatch_group_leave(g_present_readbacks); return; }
         id<MTLCommandBuffer> cb2 = q_cb(); id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
         [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
         [b endEncoding];
@@ -18121,13 +18138,15 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
             CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
             CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; cb(img);
-            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); }];
+            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+            dispatch_group_leave(g_present_readbacks); }];
         [cb2 commit];
     };
-    if (g_q4) { if (!present_offscreen_m4(src, crop, out, readback)) cb(NULL); }
+    dispatch_group_enter(g_present_readbacks);
+    if (g_q4) { if (!present_offscreen_m4(src, crop, out, readback)) readback(0); }
     else {
         id<MTLCommandBuffer> draw = q_cb();
-        if (!present_encode(draw, src, out, crop)) { cb(NULL); return; }
+        if (!present_encode(draw, src, out, crop)) { readback(0); return; }
         [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { readback(c.status == MTLCommandBufferStatusCompleted); }]; [draw commit];
     }
 }
@@ -18964,13 +18983,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
         [b endEncoding];
         unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        dispatch_group_enter(g_present_readbacks);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
             for (NSUInteger k = 0; k < w * h; k++) sum += q[4 * k] + q[4 * k + 1] + q[4 * k + 2];
             pthread_mutex_lock(&rlmu); fprintf(rlf, "%llu\t%llu\t%.4f\t", n, tns, sum / (3.0 * w * h));
             for (NSUInteger k = 0; k < ng; k++) fprintf(rlf, "%02x", g[k]);
-            fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); }];
+            fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu);
+            dispatch_group_leave(g_present_readbacks); }];
         [cb commit];
     }
     // DM_NVN_SHOT=frame number[,frame number...]:path (%d in the path is replaced with the frame number)
@@ -18985,7 +19006,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { present_shot(src, g_shotq[i].path, crop, ev_val, &shot_ready); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
     pthread_mutex_unlock(&g_shotq_mu);
 
-    if (atomic_load(&g_gpu_lost)) return 0;   // the display command buffer would be ignored too: take no drawable from the screen the front end is about to close
+    if (atomic_load(&g_gpu_lost) || atomic_load(&g_present_suspended)) return 0;
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
 #if TARGET_OS_OSX
@@ -19003,6 +19024,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pthread_mutex_unlock(&g_pq_mu);
     }
+    if (atomic_load(&g_present_suspended)) return 0;
     [g_present_alloc4[alloc_i] reset];
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
@@ -19183,7 +19205,7 @@ static struct timespec link_deadline(uint64_t ns);
             if (g_pq_in > in0) { g_link_latched++; g_link_latch_misses = 0; } else { g_link_latch_out++; g_link_latch_misses++; }
         }
     }
-    if (g_pq_read == g_pq_in) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (g_pq_read == g_pq_in || atomic_load(&g_present_suspended)) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
     if (hold) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
@@ -19193,6 +19215,7 @@ static struct timespec link_deadline(uint64_t ns);
     if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
     g_pq_read = ticket;
+    atomic_fetch_add(&g_link_presenting, 1);
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
     if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
@@ -19211,11 +19234,15 @@ static struct timespec link_deadline(uint64_t ns);
     }
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
-    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
+    @autoreleasepool {
+        submitted = !atomic_load(&g_present_suspended) && present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, update.drawable, update.targetPresentationTimestamp);
+        mtl_tex_unpin(it.t.serial);
+    }
     g_link_hold_until = submitted && hold_ticks >= 2 ? tick_time + hold_ticks * tick_period : 0;
-    if (!submitted) {
+    atomic_fetch_sub(&g_link_presenting, 1);
+    if (!submitted || atomic_load(&g_present_suspended)) {
         pthread_mutex_lock(&g_pq_mu);
-        if (ticket > g_pq_done) g_pq_done = ticket;
+        if (!submitted && ticket > g_pq_done) g_pq_done = ticket;
         pthread_cond_broadcast(&g_pq_cv);
         pthread_mutex_unlock(&g_pq_mu);
     }
@@ -19331,17 +19358,39 @@ static void link_sync(void) {   // Called every frame by the game's present thre
 // Before going to the background (mtl_drain): when the display link drives presents, frames queued but not yet presented can only be taken by the display-link callback, and in the background the system no longer calls back --
 // waiting as-is for "the present queue to empty" would wait forever, the enter-background callback would not return, and the system would kill the process (the process disappears within 22 seconds after switching to another App).
 // These frames will not be seen anyway: discard them directly (accounted as dropped frames) and only wait for the one present already submitted to the GPU to finish.
+static uint64_t drop_queued_presents_locked(void) {
+    uint64_t n = g_pq_in - g_pq_read;
+    for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) {
+        g_pres[k % PRING] = (pres_ent){k, -1};
+        mtl_tex_unpin(g_pq[(k - 1) % PQ].t.serial);
+    }
+    g_link_dropped += n;
+    g_pq_read = g_pq_in;
+    return n;
+}
 static void present_drop_for_suspend(void) {
     pthread_mutex_lock(&g_pq_mu);
     if (g_link_owns_layer) {
-        uint64_t n = g_pq_in - g_pq_read;
-        for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
-        g_link_dropped += n; g_pq_read = g_pq_in;
+        uint64_t n = drop_queued_presents_locked();
         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         if (g_pq_done < g_pq_in) g_pq_done = g_pq_in;
         pthread_cond_broadcast(&g_pq_cv);
         if (n) MLOG("entering the background: dropping %llu queued frames not yet displayed (the display link does not fire in the background)", (unsigned long long)n);
     }
+    pthread_mutex_unlock(&g_pq_mu);
+}
+void mtl_set_present_suspended(int on) { atomic_store(&g_present_suspended, on != 0); }
+void mtl_drop_queued_presents(void) {
+    pthread_mutex_lock(&g_pq_mu);
+    drop_queued_presents_locked();
+    pthread_cond_broadcast(&g_pq_cv);
+    pthread_mutex_unlock(&g_pq_mu);
+}
+static void present_suspend_wait(void) {
+    pthread_mutex_lock(&g_pq_mu);
+    while (atomic_load(&g_link_presenting) || g_classic_busy || g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    g_pq_done = g_pq_in;
+    pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
 }
 static void *present_main(void *arg) {
@@ -19351,21 +19400,22 @@ static void *present_main(void *arg) {
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp); atomic_store(&g_present_qos, (uint32_t)qc);
     for (;;) {
         pthread_mutex_lock(&g_pq_mu);
-        while (g_pq_read == g_pq_in || g_link_owns_layer) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken
+        while (g_pq_read == g_pq_in || g_link_owns_layer || atomic_load(&g_present_suspended)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pq_item it = g_pq[g_pq_read % PQ];
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
-        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, nil, 0); mtl_tex_unpin(it.t.serial); }
-        pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
-        if (!submitted) {
-            pthread_mutex_lock(&g_pq_mu);
-            if (ticket > g_pq_done) g_pq_done = ticket;
-            pthread_cond_broadcast(&g_pq_cv);
-            pthread_mutex_unlock(&g_pq_mu);
-            pres_seen(ticket, -1);   // never reaches the screen: the screen wait must not wait for it
+        @autoreleasepool {
+            submitted = !atomic_load(&g_present_suspended) && present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, nil, 0);
+            mtl_tex_unpin(it.t.serial);
         }
+        pthread_mutex_lock(&g_pq_mu);
+        g_classic_busy = 0;
+        if (!submitted && ticket > g_pq_done) g_pq_done = ticket;
+        pthread_cond_broadcast(&g_pq_cv);
+        pthread_mutex_unlock(&g_pq_mu);
+        if (!submitted) pres_seen(ticket, -1);   // never reaches the screen: the screen wait must not wait for it
     }
     return NULL;
 }
@@ -19441,11 +19491,13 @@ int mtl_snap_on(void) {
     return v;
 }
 static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
-static void snap_drain(void) {
+static void snap_drain(int strict) {
     // Display tickets may have been dropped during suspend, but their copies still belong to the Metal 4 queue.
     uint64_t v = g_snap_v; if (!v) return;
     snap_commit_wait(v);
-    if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
+    while (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) {
+        if (strict) MDIE("present snapshots: GPU did not drain within 10 s");
+    }
 }
 uint64_t mtl_snap_acquire_wait(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
@@ -19522,7 +19574,7 @@ static uint64_t snap_take(const tex_t *t) {
 // copy (may be NULL): the g_snap_ev value of the snapshot copy this present took, 0 when it took none (mtl_present_wait_texture)
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val, uint64_t *copy) {
     atomic_store(&dm_present_ns, now_ns()); if (copy) *copy = 0;
-    if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
+    if (g_classic || atomic_load(&g_present_discard) || atomic_load(&g_present_suspended)) return 0;
     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
     // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.
     // Resolve it here, where the game queues the present, and commit the batch, so the display command buffer comes after the upload on the queue and the present thread finds it uploaded.
@@ -19546,7 +19598,17 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     }
     if (t->serial < EXT_SERIAL) mtl_tex_pin(t->serial);   // an external texture is the present path's until mtl_ext_tex_release, which waits for its presents (the unpins find no pin)
     pthread_mutex_lock(&g_pq_mu);
-    while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
+    while (g_pq_in - g_pq_done >= PQ && !atomic_load(&g_present_suspended)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    if (atomic_load(&g_present_suspended)) {
+        if (ss) {
+            g_snap[slot].ticket = 0;
+            atomic_fetch_add(&g_snap_next, 1);
+            if (copy) *copy = g_snap[slot].ev;
+        }
+        pthread_mutex_unlock(&g_pq_mu);
+        mtl_tex_unpin(t->serial);
+        return 0;
+    }
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, !ss && !ev_val && on_sub_thread() ? g_fence : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;

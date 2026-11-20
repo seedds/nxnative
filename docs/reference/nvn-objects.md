@@ -584,6 +584,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** the CPU-only `t_gfx_suspend` runs the real submit entry on two threads with a prepare step held by semaphores. It checks that the step runs outside the gate as host work, that the queued second submission is not in flight, that the suspend returns while the step holds the lock, that nothing commits in the background, and that both queued submissions execute after resume. It also suspends with an unresolved event, releases that event in the background, and verifies that its continuation executes only after resume. With the gate taken before the lock it fails before suspending.
 - **Found on:** no game named in the source (general: every NVN game with a prewarm list; a first start without the Metal cache takes longest). **Open:** not yet run by going to the background during a real game's prepare step on an iPhone.
 
+### Going to the background while graphics do not drain
+
+- **Symptom:** after the game freezes, going to the background leaves the log at the focus and audio messages without `[nvn] graphics suspended`. The callback can get stuck before iOS starts syncing committed saves.
+- **Cause:** the lifecycle caller synchronously waited for graphics calls, presents, and GPU work to finish. A successful drain still handed the archive over on that thread, which can wait for the Metal compiler. Cloud sync was behind both.
+- **Fix:** `dm_gfx_suspend` closes admission and waits up to three seconds for one drain worker. The worker drops queued frames and waits for existing graphics work. The same worker completes the drain if work returns later, and the graphics gate opens only when the latest request is for the foreground. An independent worker hands over the pipeline archive. iOS starts cloud sync before waiting for the drain.
+- **Check:** `t_gfx_suspend` holds the drain and archive handoff independently and overlaps lifecycle requests. `t_present_snap` checks that the real Metal drain still waits for snapshot commits and GPU copies.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), in NX18 on an iPhone 18 Pro Max. **Open:** the device report did not identify what stopped the GPU, and the revised lifecycle still needs an iOS device run.
+
 ### A GPU command buffer that never completes
 
 - **Symptom:** frames stop, no crash, the main thread sits in `nvnSyncWait(sync, -1)`, and the watchdog's wait-state line shows the main fence one short (`main fence submitted N / completed N-1`).

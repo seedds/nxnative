@@ -236,6 +236,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
+
 - [An app packed without control data says version 1.0](../../../docs/reference/packing.md#an-app-packed-without-control-data-says-version-10). The local NUP has no NACP or display label. The registered v131072 build row supplies 1.1.1 to the packer and the host. On an Apple M6 with macOS 27.2.1, the rebuilt host reached the title menu and the game called `GetDisplayVersion` during boot.
 - [Inlining mesh helpers with subgroup inputs can crash the Metal compiler](../../../docs/reference/shaders.md#inlining-mesh-helpers-with-subgroup-inputs-can-crash-the-metal-compiler). The subgroup helper workaround clears the isolated foliage pipeline and the 164-row offline matrix at the supported deployment minimums.
 - [Missing required functions at the render pipeline API](../../../docs/reference/rendering.md#missing-required-functions-at-the-render-pipeline-api). The device API now returns an error for missing functions. The abort inside a bundled archive lookup remains open.

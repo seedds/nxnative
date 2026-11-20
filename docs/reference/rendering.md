@@ -1824,6 +1824,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a barrier with `ORDER_FRAGMENTS` or `ORDER_FRAGMENTS_TILED` now ends the open pass when a draw in it wrote an image or a storage buffer (`swrite_note` in `nvn_mtl.m`), so the next draw opens a pass behind the full consumer barrier; reflection marks an image binding written when its type has write access (`nvn_refl.m`, which left `rw` unset for images).
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md).
 
+### Draw passes without fragment order read unfinished attachments, and the damage persists
+
+- **Symptom:** a growing bright or purple blob on a still scene. Present luma climbs in steps (29 → 66 → 105 → 119 against 41 on a clean run) and never recovers. In an in-run A/B (`DM_AB`) both phases show it, so per-phase picture checks read the arms as equal.
+- **Cause:** a diagnostic build dropped the Fragment stage from the barrier at each draw pass's end, and with it the alias start barrier (`All → Fragment`), which a game with live image heaps sets on most passes (`resource_vis()` includes `ResourceAlias`). With neither, a pass's fragments can read an earlier pass's attachment before it is finished. Each step in luma begins inside a phase with the switch on; the stale values land in state the game feeds back into later frames (history, exposure, accumulated caches), so the damage carries into every later phase.
+- **Fix:** none in the host: keep fragment-to-fragment order between draw passes. A safe relaxed form would keep the order wherever a pass reads an earlier pass's output and flush aliased memory at the producer's end, which needs a per-pass dependency map. On the M2 the Fragment bit is the whole cost of the relaxed end barrier, +5–10 µs a pass. To test such a switch, check the picture in a separate run per arm ([A/B in one run](../agents/05-debugging.md)).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), at Castle Town and Zora's Domain, on a test build of the relaxed barrier; the same build with the switch off was clean, with or without heavier GPU profiling or A/B switching.
+
 ### A segment committed after a buffer → texture copy
 
 - **Symptom:** a texture copied from a staging buffer shows another texture's blocks (Catherine: Full Body's cutscene subtitle band a hard-edged dark box with a magenta stroke through it).

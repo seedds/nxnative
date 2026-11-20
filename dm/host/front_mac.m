@@ -13,6 +13,8 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
+#include <IOKit/ps/IOPowerSources.h>
+#include <IOKit/ps/IOPSKeys.h>
 #include "dm.h"
 #include "front_role.h"
 #include "dm_input.h"
@@ -728,6 +730,27 @@ static void *guest_tramp(void *p) {
     static char alt[65536];                       // The signal alternate stack is per thread; crash printing must also work on the guest thread
     stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);
     ((guest_arg *)p)->fn(); LOG("guest thread finished"); exit(0);
+}
+
+// Power: on battery or in Low Power Mode a game at 120 fps is capped at 60 (hle_nvn.c high_cap_tick). Kept up to date on the main thread by the power source notification and
+// NSProcessInfo's power state notification, read by the present thread; DM_BATTERY_120=1 keeps 120 on battery too
+static _Atomic int g_power_saving;
+int dm_power_saving_now(void) { return g_power_saving; }
+static void power_refresh(void) {
+    static int keep = -1; if (keep < 0) { const char *e = getenv("DM_BATTERY_120"); keep = e && atoi(e) != 0; }
+    CFTypeRef info = IOPSCopyPowerSourcesInfo(); int battery = 0;
+    if (info) { CFStringRef src = IOPSGetProvidingPowerSourceType(info); battery = src && CFStringCompare(src, CFSTR(kIOPMBatteryPowerKey), 0) == kCFCompareEqualTo; CFRelease(info); }
+    int low = NSProcessInfo.processInfo.lowPowerModeEnabled, saving = !keep && (battery || low);
+    static int was = -1; if (saving != was || was < 0) LOG("front end: power %s%s%s", battery ? "on battery" : "from the adapter", low ? ", Low Power Mode on" : "",
+        keep ? " (DM_BATTERY_120: 120 fps stays)" : saving ? ": a 120 fps game runs at 60" : "");
+    was = saving; g_power_saving = saving;
+}
+static void power_changed(void *ctx) { (void)ctx; power_refresh(); }
+static void power_watch(void) {   // main thread, once
+    power_refresh();
+    CFRunLoopSourceRef src = IOPSNotificationCreateRunLoopSource(power_changed, NULL);
+    if (src) { CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopDefaultMode); CFRelease(src); }
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; power_refresh(); }];
 }
 
 // Frame-rate counter (DM_SHOW_FPS=1, as on iOS): the frames put on screen in the last second (nvn_mtl.m counts them for NVN and the Vulkan layer alike; frames the
@@ -1637,7 +1660,8 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
-        if (getenv("DM_SHOW_FPS") && atoi(getenv("DM_SHOW_FPS"))) front_mac_fps(g_layer);   // just the frame rate, top right (Apple's HUD shows much more)
+        if (getenv("DM_SHOW_FPS") && atoi(getenv("DM_SHOW_FPS"))) front_mac_fps(g_layer);
+        power_watch();   // just the frame rate, top right (Apple's HUD shows much more)
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);

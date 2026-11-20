@@ -2424,12 +2424,15 @@ static int fps_high(void) {
     return v;
 }
 static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the frame step counts in
+// A Mac on battery or in Low Power Mode (front_mac.m; DM_BATTERY_120=1 keeps 120 there): 120 fps costs about twice the GPU time of 60, so the cap is 60 until the power adapter is back.
+// The display link stays at the screen's 120 Hz, so the screen keeps its mode and 120 comes back at once. Off where the front end has none (iOS counts Low Power Mode in its screen rate)
+__attribute__((weak)) int dm_power_saving_now(void) { return 0; }
 // Once per present: what the screen and the game's state allow now, and a display link at the rate the screen can show (DM_PRESENT_LINK keeps its own choice)
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), cap = ok && !movie && !thermal_capped() ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : "thermal state serious"); was = cap; }
+    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), saving = dm_power_saving_now(), cap = ok && !movie && !thermal_capped() && !saving ? 120 : 60;
+    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : saving ? "on battery or in Low Power Mode" : "thermal state serious"); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }

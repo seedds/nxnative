@@ -279,6 +279,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [The Rogue Prince of Persia](../../dm/games/01008D9022462000/README.md): 8.33 ms frames through the first level at 120 (60 while the intro movie plays), the speed right by the user's play test. DRAGON BALL: Sparking! ZERO and Pikmin 4 bind the event too and reached 120 before, so they do not wait for it each frame. A/B at 120 (2026-11-08, hosts of `4f47d211` without and with this change, headless, the same saves and presses): the same frame times in every window (8.37 ms, 16.6 while a movie plays) and their scripted scenes (Sparking! ZERO's tutorial battle start, Pikmin 4's prologue narration and first dialogue) at the same seconds, so neither counts the event as time.
 - **Check:** none of its own; the hold and the cap are `t_fstep`'s, and the frame times are in the run log (`timing up to frame`).
 
+### A 120 fps cap follows the Mac's power
+
+- **Symptom:** a game at 120 fps on a MacBook keeps 120 on battery: the GPU works about twice as long a second as at 60 (Kirby and the Forgotten Land: about 6 ms a frame, 70 % busy at 120), and the battery runs down faster for a difference the player barely sees there.
+- **Cause:** the 120 fps cap (`hle_nvn.c` `high_cap_tick`) followed the screen, movies and the thermal state, not the power source; iOS counts Low Power Mode in its screen rate, the Mac had no such input.
+- **Fix:** `front_mac.m` keeps `dm_power_saving_now()` from the power source notification (`IOPSNotificationCreateRunLoopSource`, `IOPSGetProvidingPowerSourceType`) and `NSProcessInfoPowerStateDidChangeNotification`: on battery or in Low Power Mode the cap is 60 (`120 fps: cap 120 → 60 fps (on battery or in Low Power Mode)`), back to 120 when the adapter is connected again. The display link stays at the screen's 120 Hz, so the screen keeps its mode and 120 returns at once. `DM_BATTERY_120=1` keeps 120 on battery; the log names the power at the start and at every change (`front end: power …`). Other games at 120 fps follow it too; iOS is unchanged (a weak default of 0).
+- **Found on:** [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md#frame-rate) 1.1.0.
+- **Check:** `t_fpslock` (the pacer's units following the hold, which this cap lowers); the battery itself is not run on a Mac yet.
+
 ### Unreal's frame limit and present interval, found by name
 
 - **Symptom:** an Unreal Engine game holds 30 fps with spare CPU and GPU time and asks for present interval 2; `present_interval display` alone does not help, as the engine's game thread sleeps out its own frame limit.

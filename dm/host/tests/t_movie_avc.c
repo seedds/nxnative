@@ -4,10 +4,10 @@
 #include "../hle.h"
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
-#include "../hle_movie.c"
 #include <VideoToolbox/VideoToolbox.h>
 static OSStatus synthetic_decode(VTDecompressionSessionRef, CMSampleBufferRef, VTDecodeFrameFlags, void *, VTDecodeInfoFlags *);
 #define VTDecompressionSessionDecodeFrame synthetic_decode
+#include "../hle_movie.c"
 #include "../hle_movie_avc.c"
 #undef VTDecompressionSessionDecodeFrame
 #include <assert.h>
@@ -65,8 +65,8 @@ static OSStatus synthetic_decode(VTDecompressionSessionRef session, CMSampleBuff
         assert(len && len <= n - i);
         int type = bytes[i] & 31;
         if (type >= 1 && type <= 5) {
-            assert(len == 2 && (marker < 0 || marker == bytes[i + 1]));
-            marker = bytes[i + 1];   // multiple slices still produce one picture
+            assert(len >= 2 && (marker < 0 || marker == bytes[i + len - 1]));
+            marker = bytes[i + len - 1];   // multiple slices still produce one picture; the synthetic payload ends in its identity
         }
         i += len;
     }
@@ -82,7 +82,7 @@ static OSStatus synthetic_decode(VTDecompressionSessionRef session, CMSampleBuff
     return noErr;
 }
 static mavc *synthetic_avc(void) {
-    mavc *a = mavc_new(); a->depth = 4;
+    mavc *a = mavc_new(NULL); a->depth = 4;
     assert(!CMVideoFormatDescriptionCreate(NULL, kCMVideoCodecType_H264, 16, 16, NULL, &a->fd));
     a->vs = (VTDecompressionSessionRef)a;   // test-only sentinel; no hardware session
     return a;
@@ -108,7 +108,7 @@ static void annex_b_only(void) {
     assert(mavc_decode(a, none, sizeof none, 1000) == -1 && mavc_decode(a, none, 0, 1000) == 0 && mavc_queued(a) == 1);
     assert(mavc_take(a, 1, out, 16, 16, &pts) && out[0] == 50 && !mavc_queued(a));
     synthetic_free(a);
-    a = mavc_new(); writer w; uint8_t ps[64] = {0, 0, 0, 1}; size_t n = sps(&w, 100, 2, 1, 0); memcpy(ps + 4, w.p, n);
+    a = mavc_new(NULL); writer w; uint8_t ps[64] = {0, 0, 0, 1}; size_t n = sps(&w, 100, 2, 1, 0); memcpy(ps + 4, w.p, n);
     mavc_param_sets(a, ps, n + 4); assert(a->nsps == (int)n && a->depth == 0);
     size_t m = sps(&w, 100, 0, 1, 0); uint8_t len[64] = {0, 0, 0, (uint8_t)m}; memcpy(len + 4, w.p, m);   // a length-prefixed SPS
     a->dirty = 0; mavc_param_sets(a, len, m + 4); assert(!a->dirty && a->nsps == (int)n && a->depth == 0);
@@ -158,6 +158,158 @@ static void sequence_boundaries(void) {
         assert(!mavc_queued(a));
     }
     synthetic_free(a);
+}
+// Real SPS/PPS and slice-header syntax, synthetic decoded pixels. The SPS describes four frame buffers (1080p, level 4.1),
+// four sliding-window references, POC type 0 and a 4-bit POC/frame_num to exercise both wraps. No VUI restriction is needed.
+static size_t escaped_nal(writer *w, uint8_t *out) {
+    size_t n = 0; int zeros = 0;
+    for (unsigned i = 0; i < (w->bit + 7) / 8; i++) {
+        uint8_t v = w->p[i];
+        if (zeros == 2 && v <= 3) { out[n++] = 3; zeros = 0; }
+        out[n++] = v; zeros = v ? 0 : zeros + 1;
+    }
+    return n;
+}
+static void dpb_params(mavc *a, unsigned profile, int refs, int restriction, int reorder, int capacity) {
+    writer w = {0}; uint8_t nal[1024];
+    put(&w, 0x67, 8); put(&w, profile, 8); put(&w, 0, 8); put(&w, 41, 8); ue(&w, 0);
+    if (profile == 100) { ue(&w, 1); ue(&w, 0); ue(&w, 0); put(&w, 0, 2); } // chroma, bit depths, bypass, scaling list
+    ue(&w, 0); ue(&w, 0); ue(&w, 0); ue(&w, (unsigned)refs); put(&w, 0, 1);
+    ue(&w, 119); ue(&w, 67); put(&w, 1, 1); put(&w, 1, 1); put(&w, 0, 1);
+    put(&w, restriction, 1);
+    if (restriction) {
+        put(&w, 0, 8); put(&w, 1, 1); put(&w, 1, 1);
+        for (int i = 0; i < 4; i++) ue(&w, 0);
+        ue(&w, (unsigned)reorder); ue(&w, (unsigned)capacity);
+    }
+    put(&w, 1, 1); size_t n = escaped_nal(&w, nal); keep_ps(a, nal, n);
+    w = (writer){0}; put(&w, 0x68, 8); ue(&w, 0); ue(&w, 0); put(&w, 0, 2); ue(&w, 0);
+    ue(&w, 0); ue(&w, 0); put(&w, 0, 3); ue(&w, 0); ue(&w, 0); ue(&w, 0); put(&w, 0, 3); put(&w, 1, 1);
+    n = escaped_nal(&w, nal); keep_ps(a, nal, n); a->dirty = 0; // the sentinel session substitutes decompression only
+}
+static void dpb_picture(mavc *a, int idr, int reference, int frame, int poc, int marker, int64_t pts, int adaptive) {
+    writer w = {0}; uint8_t au[1024] = {0, 0, 0, 1};
+    put(&w, idr ? 0x65 : reference ? 0x41 : 1, 8);
+    ue(&w, 0); ue(&w, idr ? 2 : reference ? 0 : 1); ue(&w, 0); put(&w, (unsigned)frame & 15, 4);
+    if (idr) ue(&w, 0);
+    put(&w, (unsigned)poc & 15, 4);
+    if (!idr) {
+        if (!reference) put(&w, 1, 1); // B direct prediction
+        put(&w, 0, 1); put(&w, 0, 1); // reference override, list 0 modification
+        if (!reference) put(&w, 0, 1); // list 1 modification
+    }
+    if (reference) { put(&w, adaptive, 1); if (idr) put(&w, 0, 1); else if (adaptive) ue(&w, 0); }
+    put(&w, 1, 1); while (w.bit % 8) put(&w, 0, 1); put(&w, (unsigned)marker, 8);
+    size_t n = escaped_nal(&w, au + 4);
+    assert(!mavc_decode(a, au, (int)n + 4, pts));
+}
+static int64_t dpb_time(int frame, int cadence) {
+    if (cadence == 0) return 0; // POC still orders streams with no useful timestamps
+    if (cadence == 1) return frame <= 8 ? frame * 2000 : 16000 + (frame - 8) * 1000; // later intervals shrink: the PR released future pictures early
+    return frame * 4000; // a later sequence has a slower cadence
+}
+static void dpb_check_output(mavc *a, int flush, int cadence, int *got) {
+    uint8_t out[16 * 16 * 3 / 2]; int64_t pts;
+    while (mavc_take(a, flush, out, 16, 16, &pts)) {
+        assert(out[0] == 16 + *got && pts == dpb_time(*got, cadence)); (*got)++;
+    }
+}
+static void dpb_order(void) {
+    mavc *a = synthetic_avc(); dpb_params(a, 100, 4, 0, 0, 0);
+    assert(a->sp.valid && a->pp.valid && a->sp.refs == 4 && a->sp.dpb == 4 && a->sp.reorder == 4);
+    for (int cadence = 0; cadence < 3; cadence++) {
+        int got = 0, ref = 0;
+        // 73 pictures: both POC and frame_num wrap, and non-reference pictures precede their already decoded reference in output order.
+        dpb_picture(a, 1, 1, 0, 0, 16, 0, 0);
+        for (int group = 1; group <= 24; group++) {
+            int p = group * 3; ref++;
+            dpb_picture(a, 0, 1, ref, 2 * p, 16 + p, dpb_time(p, cadence), 0); dpb_check_output(a, 0, cadence, &got);
+            for (int b = p - 2; b < p; b++) {
+                dpb_picture(a, 0, 0, ref + 1, 2 * b, 16 + b, dpb_time(b, cadence), 0); dpb_check_output(a, 0, cadence, &got);
+            }
+        }
+        assert(a->ordered && got == 72 && mavc_queued(a) == 1 && !mavc_ready(a));
+        dpb_check_output(a, 1, cadence, &got); assert(got == 73);
+        if (cadence == 1) { mavc_drop(a); assert(!a->ordered && !mavc_ready(a)); }
+    }
+    synthetic_free(a);
+}
+// Another valid layout: three references leave room to retain a B-picture before a later decoded B-picture with a lower POC.
+// Odd POCs also rule out treating POC + 2 as a universal next-picture guarantee.
+static void dpb_reordered_b(void) {
+    mavc *a = synthetic_avc(); dpb_params(a, 100, 3, 0, 0, 0);
+    const int poc[] = {0, 5, 3, 1, 9, 7}, rank[] = {0, 3, 2, 1, 5, 4};
+    int frame = 0, got = 0; uint8_t out[16 * 16 * 3 / 2]; int64_t pts;
+    for (int i = 0; i < 6; i++) {
+        int reference = i == 0 || i == 1 || i == 4;
+        dpb_picture(a, !i, reference, i ? frame + 1 : 0, poc[i], 16 + rank[i], rank[i] * 1000, 0);
+        if (i && reference) frame++;
+        while (mavc_take(a, 0, out, 16, 16, &pts)) { assert(out[0] == 16 + got && pts == got * 1000); got++; }
+        if (i == 3) assert(got == 0); // no DPB bump was justified before the lower-POC B-picture arrived
+    }
+    assert(a->ordered && got == 3);
+    while (mavc_take(a, 1, out, 16, 16, &pts)) { assert(out[0] == 16 + got && pts == got * 1000); got++; }
+    assert(got == 6);
+    // An IDR with no_output_of_prior_pics_flag discards the preceding sequence's pending output.
+    dpb_picture(a, 1, 1, 0, 0, 32, 0, 0);
+    dpb_picture(a, 0, 1, 1, 4, 33, 1000, 0); assert(mavc_queued(a) == 2);
+    dpb_picture(a, 1, 1, 0, 0, 48, 0, 1); assert(mavc_queued(a) == 1);
+    assert(mavc_take(a, 1, out, 16, 16, &pts) && out[0] == 48 && !pts);
+    synthetic_free(a);
+}
+static void dpb_limits(void) {
+    mavc *a = synthetic_avc(); dpb_params(a, 100, 4, 1, 1, 4);
+    assert(a->sp.valid && a->sp.reorder == 1);
+    dpb_picture(a, 1, 1, 0, 0, 16, 0, 0);
+    dpb_picture(a, 0, 1, 1, 6, 19, 3000, 0);
+    uint8_t out[16 * 16 * 3 / 2]; int64_t pts;
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == 0 && !mavc_ready(a));
+    // A future reference at 3000 is not next merely because earlier PTS gaps were 3000.
+    dpb_picture(a, 0, 0, 2, 2, 17, 1000, 0);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == 1000 && !mavc_ready(a));
+    dpb_picture(a, 0, 0, 2, 4, 18, 2000, 0);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == 2000 && !mavc_ready(a));
+    // An IDR drains the old sequence and starts its own DPB, even with restarting PTS.
+    dpb_picture(a, 1, 1, 0, 0, 32, 0, 0);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == 3000 && !mavc_ready(a));
+    // Adaptive marking and reference-number gaps must not continue a sliding-window approximation.
+    dpb_picture(a, 0, 1, 1, 6, 33, 1000, 1); assert(!a->ordered);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == 0 && !mavc_ready(a));
+    mavc_drop(a); dpb_picture(a, 1, 1, 0, 0, 16, 0, 0); assert(a->ordered);
+    dpb_picture(a, 0, 1, 3, 6, 19, 3000, 0); assert(!a->ordered);
+    mavc_drop(a); dpb_params(a, 100, 4, 1, 5, 4); assert(!a->sp.valid); // reorder exceeds capacity
+    dpb_params(a, 100, 4, 1, 2, 3); assert(!a->sp.valid); // capacity cannot hold the declared four references
+    dpb_params(a, 100, 4, 1, 2, 5); assert(!a->sp.valid); // exceeds the level limit
+    // Baseline stays immediate even when its complete SPS has POC type 0 and no VUI reorder restriction.
+    dpb_params(a, 66, 4, 0, 0, 0); assert(a->sp.valid && a->sp.poc == 0 && a->sp.reorder == 4 && !a->depth);
+    dpb_picture(a, 1, 1, 0, 0, 16, 0, 0);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && out[0] == 16 && !mavc_queued(a));
+    dpb_picture(a, 0, 1, 1, 2, 17, 1000, 0);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && out[0] == 17 && pts == 1000 && !mavc_queued(a));
+    synthetic_free(a);
+}
+// Ready output without another input packet: all slots occupied, release, then resume until only the codec's pending reference remains.
+static void pump_due(void) {
+    static mdec_t d; d = (mdec_t){.type = MD_TYPE_AVC, .fmt = MD_FMT_NV12, .nout = 1, .started = 1, .w = 16, .h = 16};
+    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL); pthread_mutex_init(&d.wmu, NULL); pthread_cond_init(&d.wcv, NULL);
+    assert(!pthread_create(&d.wk, NULL, md_worker, &d));
+    d.avc = synthetic_avc(); dpb_params(d.avc, 100, 4, 0, 0, 0);
+    dpb_picture(d.avc, 1, 1, 0, 0, 16, 0, 0);
+    for (int g = 1; g <= 3; g++) {
+        dpb_picture(d.avc, 0, 1, g, 6 * g, 16 + 3 * g, g * 3000, 0);
+        for (int b = 3 * g - 2; b < 3 * g; b++) dpb_picture(d.avc, 0, 0, g + 1, 2 * b, 16 + b, b * 1000, 0);
+    }
+    assert(mavc_ready(d.avc)); d.out[0].used = d.out[0].cli = 1;
+    md_pump(&d); assert(!d.noutq && d.avc_due);
+    void *self[2] = {NULL, &d}; int idx = 0, left; int64_t pts; uint32_t flags;
+    for (int got = 0; got < 9; got++) {
+        assert(md_rel(&d, idx) && d.noutq == 1);
+        assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left) && d.out[idx].pic && pts == got * 1000 && !flags);
+    }
+    assert(!d.avc_due && mavc_queued(d.avc) == 1 && !mavc_ready(d.avc));
+    md_defer_drop(&d); synthetic_free(d.avc); d.avc = NULL;
+    md_job(&d, MDJ_QUIT); pthread_join(d.wk, NULL);
+    for (int i = 0; i < MD_NOUT; i++) free(d.out[i].frm);
 }
 // End of stream with three pictures held for reordering (POC type 0): an end-of-stream packet without data, nout output slots of which the client
 // returns each one it takes. Every picture comes out without the end-of-stream flag, then one output without a picture carries it with the packet's time
@@ -253,33 +405,102 @@ static void tex_slots(void) {
     assert(md_rel(&d, 2) && md_rel(&d, 3) && !md_rel(&d, 3));   // a second release changes nothing
     take(&d, 1); md_reset(&d, 0); assert(!d.out[1].used && !d.out[1].rnd && d.tex_rel);
 }
+// Native output buffers describe an opaque NVN object, not a byte allocation.
+static int native_texture, native_copies;
+typedef struct { void *object; size_t capacity; } native_buffer;
+static void *native_data(const void *b) { return ((const native_buffer *)b)->object; }
+static size_t native_capacity(const void *b) { return ((const native_buffer *)b)->capacity; }
+void *guest_sym(const char *name) { (void)name; return NULL; }
+int nvn_host_signal_sync(void *sync) { (void)sync; return 0; }
+int nvn_host_write_texture(const void *tex, const void *src, int w, int h, size_t row, int *tw, int *th) {
+    if (tex != &native_texture) return -1;
+    if (tw) *tw = 2;
+    if (th) *th = 2;
+    if (src) { assert(w == 2 && h == 2 && row == 8); native_copies++; }
+    return 0x25;
+}
+static void native_buffers(void) {
+    mdec_t d = { .type = MD_TYPE_AVC, .mode = MD_MODE_TEX, .nout = 1, .w = 2, .h = 2 };
+    uint8_t pixels[16] = {0};
+    pthread_mutex_init(&d.mu, NULL);
+    d.out[0].pic = 1; d.out[0].frm = pixels;
+    G.data = native_data; G.cap = native_capacity;
+    native_buffer b = { &native_texture, 0 };
+    assert(!md_out_tex(&d, 0, &b) && native_copies == 1); // MK11
+    b.capacity = 8;
+    assert(!md_out_tex(&d, 0, &b) && native_copies == 2); // Dread
+    b.object = NULL;
+    assert(md_out_tex(&d, 0, &b) == 0x100b && native_copies == 2);
+    b.object = pixels;
+    assert(md_out_tex(&d, 0, &b) == 0x100b && native_copies == 2);
+    pthread_mutex_destroy(&d.mu);
+}
+static void save_color_key(void *md, const char *key, int value) {
+    if (!strcmp(key, "nv12-colorspace")) *(int *)md = value;
+}
+static void ignore_rect(void *md, const char *key, int l, int t, int r, int b) {
+    (void)md; (void)key; (void)l; (void)t; (void)r; (void)b;
+}
+static void color_keys(void) {
+    mdec_t d = {.type = MD_TYPE_AVC, .fmt = MD_FMT_NV12, .w = 1920, .h = 1080, .avc = mavc_new(NULL)};
+    G.set_i32 = save_color_key;
+    G.set_rect = ignore_rect;
+    int key = -1;
+    md_format(&d, &key);
+    assert(key == 3);   // SDK 4.4.1, BT.709 limited
+    G.native_color_keys = 1;
+    md_format(&d, &key);
+    assert(key == 2);   // SDK 7.3.2, same planes
+    d.h = 480;
+    md_format(&d, &key);
+    assert(key == 4);   // BT.601 limited
+    mavc_free(d.avc);
+    d.avc = NULL;
+    d.type = MD_TYPE_VP9;
+    d.vpx_full = 1;
+    d.vpx_cs = VPX_CS_BT_601;
+    md_format(&d, &key);
+    assert(key == 1);   // BT.601 full
+    d.vpx_cs = VPX_CS_BT_709;
+    md_format(&d, &key);
+    assert(key == 3);   // BT.709 full
+    G.native_color_keys = 0;
+    md_format(&d, &key);
+    assert(key == 4);
+    puts("movie NV12 metadata: SDK 4.4.1 and 7.3.2 keys match the matrix and delivered range");
+}
+
 int main(void) {
+    dpb_order(); dpb_reordered_b(); dpb_limits(); pump_due();
+    puts("AVC DPB: reference occupancy drives output, with variable/zero PTS, POC and frame_num wraps, IDR/Flush, reordered B-pictures, bounds, unsupported marking and slot-release pumping");
     loop_order(1); loop_order(0);
     puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with 3- and 4-byte start codes");
     annex_b_only();
     puts("AVC framing: leading zeros before the first start code are skipped; packets and parameter sets without a start code are refused, not read as NAL lengths");
     sequence_boundaries();
     puts("AVC boundaries: short sequences drain, non-IDR timestamps and SEI retain lookahead, Flush discards, zero-depth output stays immediate");
+    native_buffers();
+    puts("native texture buffers: zero and eight capacity accepted; null and invalid objects rejected");
     tex_slots();
     puts("native texture: a rendered slot waits for the client's release, or for its next GetOutputBuffer while it has never released one");
     writer w;
     for (unsigned profile = 100; profile <= 244; profile += 144) for (unsigned chroma = 0; chroma <= 3; chroma++) {
         for (int scaling = 0; scaling < 2; scaling++) {
             size_t n = sps(&w, profile, 2, chroma, scaling);
-            assert(avc_reorder_depth(w.p, n) == 0);
-            for (size_t cut = 0; cut < n; cut++) assert(avc_reorder_depth(w.p, cut) == 4);
+            assert(avc_read_sps(w.p, n).depth == 0);
+            for (size_t cut = 0; cut < n; cut++) assert(avc_read_sps(w.p, cut).depth == 4);
         }
     }
     for (unsigned poc = 0; poc <= 1; poc++) {
         size_t n = sps(&w, 100, poc, 1, 0);
-        assert(avc_reorder_depth(w.p, n) == 4);
+        assert(avc_read_sps(w.p, n).depth == 4);
     }
-    size_t n = sps(&w, 66, 0, 1, 0); assert(avc_reorder_depth(w.p, n) == 0);
+    size_t n = sps(&w, 66, 0, 1, 0); assert(avc_read_sps(w.p, n).depth == 0);
     memset(w.p, 0, sizeof w.p); w.p[0] = 0x67; w.p[1] = 100;
-    assert(avc_reorder_depth(w.p, sizeof w.p) == 4); // unterminated Exp-Golomb code
-    assert(avc_reorder_depth(w.p, sizeof w.p + 1) == 4);
+    assert(avc_read_sps(w.p, sizeof w.p).depth == 4); // unterminated Exp-Golomb code
+    assert(avc_read_sps(w.p, sizeof w.p + 1).depth == 4);
 
-    mavc *a = mavc_new(); uint8_t out[16 * 16 * 3 / 2]; int64_t pts = -1;
+    mavc *a = mavc_new(NULL); uint8_t out[16 * 16 * 3 / 2]; int64_t pts = -1;
     n = sps(&w, 100, 2, 1, 0); keep_ps(a, w.p, n); queue_picture(a);
     assert(a->depth == 0 && mavc_take(a, 0, out, 16, 16, &pts) == 1 && pts == 0 && !mavc_queued(a));
     assert(out[0] == 16 && out[256] == 128);
@@ -291,5 +512,6 @@ int main(void) {
     drain(MD_NOUT_VIDEO); drain(2);
     puts("AVC end of stream: every queued picture leaves without the flag, then an output without a picture carries it, also when the client holds the slots");
     terminal_inputs();
+    color_keys();
     puts("movie inputs: already-held inputs after EOS are returned once without another output; rejected sends keep the stream open, Flush accepts a new stream");
 }

@@ -27,6 +27,10 @@ On the Mac: the language list, the title screen, the opening story and the first
 
 - **Current:** 93 sources in [`gl_capture.tsv`](gl_capture.tsv) — the runner's sprite, text, lighting, fog and outline programs and their variants — captured on the Mac with `DM_GL_CAPTURE` and translated to one `.metallib` by `gl_shaders.py`. The set is stable from boot through the first room's dialog; a room with an effect no earlier scene used would add one, which the capture table makes the build report.
 
+## Regression coverage
+
+[`smoke.tsv`](smoke.tsv) starts from an empty save and advances through language selection and the opening into the first room's dialogue. Checked on update v196608 on an M4 Pro (macOS 27.2.1), comparing the GL host and shaders before and after the general name-restoration, validation, texture-clear and EGL-ownership fixes: both runs reached 6,901 frames in 120 s at 59.9 fps, with matching screenshots and no new red-log messages. The shader table and MSL stayed the same (93 shaders). Later rooms remain unverified.
+
 ## Audio
 
 - With `DM_AUDIO=1` on the Mac the first room's music plays: 0 underruns after the boot's first 194 padded callbacks.

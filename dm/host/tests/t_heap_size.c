@@ -27,6 +27,9 @@ int g_nmod;
 struct dm_flags g_flag;
 void hlecount_svc(int num) { (void)num; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { (void)handle; return NULL; }
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory) { (void)memory; return 0; }
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) { (void)handle; (void)memory; return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void guest_clock_read_wait(void) {}

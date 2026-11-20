@@ -60,8 +60,9 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 
 ## Found on this game
 
-General host changes first needed here; each applies to every game:
+General fixes and validation on this game.
 
+- On Apple M6 with macOS 27.2, the Olimar prologue exercised read-only storage promotion on chain `70572e88b08d`. At frame 3900, fragment shader `4cfa6a30de7eb7f2` drew with 256 bytes bound read-only to storage slot 0. The compiled `fp_s0` binding uses `constant` at Metal argument ID 11. Both this chain and main `e4b0d9b7` built all 15,727 shaders from the same refreshed package and map. Both runs reached the prologue with zero red lines and reported the same profile depth-mode mismatch. [Device loads from read-only storage buffers](../../../docs/reference/shaders.md#device-loads-from-read-only-storage-buffers)
 - **A network request kept on hold before it settles** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **Rewriter:** an `adrp` re-encoded inside a copied exclusive window (`window_adrp`) and gates before a `ret` (`scratch_dead`): [`adrp` inside an exclusive window](../../../docs/reference/rewriter.md#adrp-inside-an-exclusive-window), [Observation gates on any relocatable instruction](../../../docs/reference/rewriter.md#observation-gates-on-any-relocatable-instruction) (the `scratch_dead` rule, removed on 2026-10-31). Spin waits that store (`patch_nso.py` "Spin waits"): [development.md, Power](../../../docs/development.md#power).
 - **An Unreal engine region that `-SwitchVirtualAddressSpaceSize=` cannot size**, given what the alias region has room for at its default path's store (`dm/tools/ue_region.py`; a cut in this build's `patches.py` until 2026-10-31): [Unreal's engine address region and its options](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).

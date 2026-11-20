@@ -40,6 +40,10 @@ void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
+uint64_t hle_system_event_binding(void *ev) { return (uint64_t)(uintptr_t)ev; }
+int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 0; }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+int dm_audio_route(void) { return 2; }
 
 static void w16(uint8_t *p, unsigned v) { uint16_t x = (uint16_t)v; memcpy(p, &x, 2); }
 static void w32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }

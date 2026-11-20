@@ -14,8 +14,8 @@ static int checks, failed;
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
 
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
-typedef struct { dm_vstream_c s[16]; uint32_t attr[16]; } dm_vlayout_c;   // dmsh_pull.metal dm_vlayout
-_Static_assert(sizeof(dm_vlayout_c) == 320, "dm_vlayout");
+typedef struct { dm_vstream_c s[16]; uint32_t attr[32]; } dm_vlayout_c;   // dmsh_pull.metal dm_vlayout
+_Static_assert(sizeof(dm_vlayout_c) == 384, "dm_vlayout");
 static id<MTLCommandQueue> q; static id<MTLTexture> rt; static id<MTLLibrary> lib;
 static NSString *k_test = @"\n"
 "vertex void pull_test(constant dm_vlayout &L [[buffer(16)]], device uint4 *out [[buffer(1)]], constant uint &mode [[buffer(2)]], uint vid [[vertex_id]], uint iid [[instance_id]], uint bi [[base_instance]]) { out[mode ? iid : vid] = dm_fetch(L, 0, vid, iid, bi); }\n"
@@ -65,7 +65,28 @@ static int elem_size(int f) {   // bytes of one element of NVN format f
         default: return 4;
     }
 }
+static void conversion_selection(void) {
+    NvShader *vs=[NvShader new];vs->has_pull=1;vs->rf.nv=1;vs->rf.v[0].nvn=0;
+    state_reset();S.nattr=1;S.attr[0].fmt=0x14;
+    vs->rf.v[0].ct=NVN_CT_FLOAT;
+    EXPECT("integer bits into float use GPU fetch",1,pull_conversion(vs,NULL));
+    vs->rf.v[0].ct=NVN_CT_UINT;
+    EXPECT("matching integer input keeps native fetch",0,pull_conversion(vs,NULL));
+    vs->rf.v[0].ct=NVN_CT_INT;
+    EXPECT("opposite signedness uses GPU fetch",1,pull_conversion(vs,NULL));
+    S.attr[0].fmt=0x11;
+    EXPECT("half into integer uses GPU fetch",1,pull_conversion(vs,NULL));
+    vs->rf.v[0].ct=NVN_CT_FLOAT;
+    EXPECT("matching float input keeps native fetch",0,pull_conversion(vs,NULL));
+    S.attr[0].fmt=0x51;
+    EXPECT("integer to float conversion uses GPU fetch",1,pull_conversion(vs,NULL));
+    vs->has_pull=0;EXPECT("missing pulling library keeps CPU fallback",0,pull_conversion(vs,NULL));
+    vs->has_pull=1;vs->layer_out=1;EXPECT("layer-writing shader keeps its pipeline",0,pull_conversion(vs,NULL));
+    vs->layer_out=0;vs->rf.nv=0;EXPECT("no attributes keeps native fetch",0,pull_conversion(vs,NULL));
+    state_reset();
+}
 int main(void) { @autoreleasepool {
+    conversion_selection();
     mtl_init(); q = [g_dev newCommandQueue]; NSError *err = nil;
     NSString *fetch = [NSString stringWithContentsOfFile:@"../tools/dmsh_pull.metal" encoding:NSUTF8StringEncoding error:&err];
     if (!fetch) { fprintf(stderr, "dmsh_pull.metal: %s\n", err.localizedDescription.UTF8String); return 1; }
@@ -154,12 +175,14 @@ int main(void) { @autoreleasepool {
         id<MTLBuffer> one = [g_dev newBufferWithLength:sizeof(dm_vlayout_c) options:MTLResourceStorageModeShared], ref = [g_dev newBufferWithLength:NE * 16 options:MTLResourceStorageModeShared];
         for (int mis = 1; mis < 4; mis++) {
             int offs[4] = { mis & 1, 12 - mis, 13, 17 };   // element addresses base + mis + offset: even, a multiple of 4, odd, odd
-            state_reset(); S.nattr = 5; S.vbuf[2].address = (uint64_t)(uintptr_t)(mem + 64 + mis); S.stream[2].stride = ST;
+            state_reset(); S.nattr = 21; S.vbuf[2].address = (uint64_t)(uintptr_t)(mem + 64 + mis); S.stream[2].stride = ST;
             for (int a = 0; a < 4; a++) { S.attr[a].fmt = (uint32_t)fmts[a]; S.attr[a].offset = (uint32_t)offs[a]; S.attr[a].stream = 2; }
             S.attr[4].fmt = 0x2E; S.attr[4].stream = 5;   // stream 5 has no buffer
+            S.attr[20] = S.attr[1];   // NVN2's attributes past 15 go into the block as the first 16 do
             pull_layout P; pull_layout_fill(&P);
             EXPECT("base kept 4-byte aligned", 0, P.s[2].base & 3);
             EXPECT("attribute with no buffer reads zeros", 0, P.attr[4]);
+            EXPECT("attribute 20 has attribute 1's word", P.attr[1], P.attr[20]);
             for (int a = 0; a < 4; a++) {
                 uint32_t got[NE][4], want[NE][4];
                 dm_vlayout_c L1; memset(&L1, 0, sizeof L1); L1.s[2].base = P.s[2].base; L1.s[2].stride = P.s[2].stride; L1.attr[0] = P.attr[a]; memcpy(one.contents, &L1, sizeof L1);

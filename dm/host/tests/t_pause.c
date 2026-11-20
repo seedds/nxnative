@@ -71,9 +71,9 @@ static wk_t *worker_start(int mode) {
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     t->started = 1; t->prio = 44; t->core = 1; t->mask = 2;
     w->regs[99] = 0x7fff0000;   // the gate block's sp
-    pthread_mutex_lock(&G);
+    g_lock();
     t->handle = h_new(O_THREAD, t); t->all = g_all; g_all = t;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     if (pthread_create(&w->th, NULL, worker_main, w)) { perror("pthread_create"); exit(2); }
     t->pt = w->th;
     if (!WAIT_UNTIL(atomic_load(&w->ready), 2000)) { fprintf(stderr, "worker did not start\n"); exit(2); }
@@ -83,10 +83,10 @@ static void worker_end(wk_t *w) {
     atomic_store(&w->stop, 1);
     pthread_join(w->th, NULL);
     thr_t *t = &w->t;
-    pthread_mutex_lock(&G);
+    g_lock();
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
     g_h[t->handle - 0x1000].type = O_FREE; g_h[t->handle - 0x1000].obj = NULL;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv);
     free(w);
 }
@@ -116,7 +116,7 @@ static int pause_end(req_t *q, int ms, int64_t *rc) {
     int ok = WAIT_UNTIL(atomic_load(&q->done), ms);
     if (!ok) {
         activity(q->w, 0);
-        pthread_mutex_lock(&G); q->w->t.paused = 1; pthread_cond_broadcast(&q->w->t.pcv); pthread_mutex_unlock(&G);
+        g_lock(); q->w->t.paused = 1; pthread_cond_broadcast(&q->w->t.pcv); g_unlock();
         WAIT_UNTIL(atomic_load(&q->done), 2000);
     }
     pthread_join(q->th, NULL);
@@ -246,7 +246,7 @@ static int exit_and_close_during_pause(void) {
     if (!WAIT_UNTIL(atomic_load(&q->done), 2000)) fail(&c, "pause did not return after the target exited");
     else if (q->rc) fail(&c, "pause returned %#llx", (unsigned long long)q->rc);
     pthread_join(q->th, NULL); pthread_join(th, NULL);
-    pthread_mutex_lock(&G); for (thr_t *u = g_all; u; u = u->all) if (u == t) fail(&c, "the exited, closed thread was not freed"); pthread_mutex_unlock(&G);
+    g_lock(); for (thr_t *u = g_all; u; u = u->all) if (u == t) fail(&c, "the exited, closed thread was not freed"); g_unlock();
     pthread_cond_destroy(&q->t.cv); pthread_cond_destroy(&q->t.pcv); free(q);
     return finish(&c);
 }

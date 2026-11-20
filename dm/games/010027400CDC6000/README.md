@@ -12,6 +12,26 @@ The NSP script's provisional profile, with the memory split and depth mode measu
 | `mem_reserve 0x140000000`, `mem_alias 0x60000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | a 5 GB block; the measured heap request is `0xbd400000` (2.96 GB), so the heap region is 3 GB and the alias region 1.5 GB. The address-region checks reach alias +1.25–1.27 GB in the first 15 seconds of `nnMain` |
 | `sys_resource 0x200000` | `game.tsv` | the NPDM declares 2 MB of system resource, enabling virtual address memory |
 | `depth_mode zero` | `game.tsv` | the game sets near = 0 at boot; offline pipeline bases use the same convention |
+| `fps_target 60`, `present_interval display` | `game.tsv` | the general host present cap removes the game's interval-2 limit; the launcher's **Frame rate** offers 30 or 60 |
+
+## Frame rate
+
+**Current: 60 fps on the Mac**, with 30 available in the launcher's **Frame rate** (`DM_FPS_TARGET=30`). The game creates an interval-2 window. The existing [present cap in display mode](../../../docs/reference/frame-rate.md#a-present-interval-that-is-the-games-only-limit-in-display-mode) is sufficient to present every tick; no engine field, SDK patch, executable cut or build address is needed. The two profile keys have `game` binding, at goal: selecting a different present interval requires checking this game's timing, rather than changing NVN semantics for every game or assuming every Larian title steps the same way.
+
+The test save and runs are separate from the established autosave, under `010027400CDC6000-work/fps60` beside the NSPs. [`bench.tsv`](bench.tsv) records the Continue route and an equal-duration walk. Use `--env DM_FOCUS_KEEP=1` for automation: the game falls back to 30 fps after focus loss. The player's app retains normal focus handling.
+
+Measured on an Apple M6, macOS 27.2 (2026-11-15), with `scripts/bench.py`, the same opening-ship save, host, shader libraries and pipeline archive, one paired run (`fps60/bench6`), 20 seconds per variant:
+
+| Target | Frames/s | Frame p50 | Frame p99 | GPU p50 |
+|---|---:|---:|---:|---:|
+| 30 | 29.9 | 33.34 ms | 33.82 ms | 6.55 ms |
+| 60 | 59.8 | 16.67 ms | 17.04 ms | 5.95 ms |
+
+Both runs have zero red lines. The same one-second walk to the right (`LRight`) starts at map coordinates `(6, -311)` and ends at `(4, -308)`, with the same position relative to the operating tables. Movement speed matches. The camera tutorial is disabled only in the benchmark save (`TutorialBoxMode=2`); the player's save is untouched. Rendering twice as many frames means roughly twice the rendering work per second (estimate); GPU time per frame remains about 6 ms.
+
+Validation is limited to the title and opening ship on update 1.0.12. Combat, later areas and iPhone performance at 60 remain untested. Regression reach is low: only this game's profile changes, so no other game needs a regression run. The documentation, profile, settings, launcher-settings and patch checks pass (55 tests).
+
+The local Mac app was repacked with its existing tested host and `d254f45e8002` shader libraries, display pacing in the bundled environment and the refreshed launcher choice (60 by default). Its title scene has 16.67 ms median frames without an explicit frame-rate override, zero red lines, and a valid deep/strict code signature. The development `run/boot.sh` defaults to the same 60 setting and retains environment overrides. Future host builds take both defaults from the profile.
 
 ## Shaders
 
@@ -27,7 +47,7 @@ The work folder `010027400CDC6000-work` beside the NSPs holds `run/boot.sh <log>
 
 From a fresh save: A at the title, B to decline Steam cross-save, then Story, Single Player, a difficulty and Begin. Wait for each menu transition. Character creation's tutorial needs A held for about a second; Plus starts the game, followed by A to confirm. The opening leads to the ship and Magister Siwan. A advances dialogue; the left stick moves the character. Tutorial acknowledgements also need a held A.
 
-In the opening hold, the host's frame-5100 sample reports frame time p50 33.34 / p95 33.71 ms and GPU p50 6.45 ms, with about 1.93 GiB resident memory. These are diagnostic samples with sound and scripted frame captures, not a controlled performance comparison. Sound was enabled, but not listened to or dumped. The prewarm list records the menus, character creation and opening ship; later areas are not covered.
+Before the 60 fps setting, the opening hold's frame-5100 sample reported frame time p50 33.34 / p95 33.71 ms and GPU p50 6.45 ms, with about 1.93 GiB resident memory. These are diagnostic samples with sound and scripted frame captures, not a controlled performance comparison. Sound was enabled, but not listened to or dumped. The prewarm list records the menus, character creation and opening ship; later areas are not covered.
 
 ## Validation
 
@@ -46,10 +66,18 @@ After rebasing onto `f226affd`, the rebuilt Mac host reloads the autosave into t
 - [Larian LSPK packages and BSHD programs](../../../docs/reference/shaders.md#larian-lspk-packages-and-bshd-programs): black rendering with the executable's shaders alone.
 - [UDP loopback works offline](../../../docs/reference/services.md#udp-loopback-works-offline): New Game stayed on the loading artwork with an empty progress bar. Before the fix both socket attempts failed; afterward the first socket succeeded and the bind, send and receive calls executed, reaching the opening ship.
 - [Time zone rules, calendar conversion and the network clock](../../../docs/reference/services.md#time-zone-rules-calendar-conversion-and-the-network-clock): found earlier on the Android host fork; the Mac host already has the general fix.
+- [Alpha-test comparisons without an alpha export](../../../docs/reference/rendering.md#alpha-test-comparisons-without-an-alpha-export): the depth-pass warnings described below.
+
+## Alpha-test warnings
+
+**Resolved on the Mac (2026-11-15).** Character creation used to warn on `faca851c03a852eb`, `ATM_Wind_Tree_AlphaTest_2S_PBR_ST_DEP_NX.bshd`; directly reloading the ship warned on `7ffa2f2d8d5c5c26`, `Base_AlphaTest_PBR_ST_DEP_NX.bshd`. Both programs have an original output map of zero, no colour outputs and their own fragment discard. The host's comparison-eligibility check requested an alpha-test entry despite the absent alpha export. The general [output-map fix](../../../docs/reference/rendering.md#alpha-test-comparisons-without-an-alpha-export) leaves their shader bodies intact and needs no profile rule or shader rebuild.
+
+Fresh-save character creation and Continue into the opening ship both render with zero red lines. A one-frame pass dump from each scene confirms the affected shader actually draws. The test profile is separate from the established autosave; testing stayed under ten minutes. The Mac app was rebuilt and its signature verified.
+
+The expanded alpha replay passes 1,216 checks (168 failed before the fix), including an RGB-only export with padded MSL alpha and the unconditional `NEVER` case. The eight alpha Python tests compile the variants for Mac and iPhone; all pass, as do the 31 documentation/chain checks and Python lint. The full graphics suite passes its 167 native targets and two final Python targets; six optional reflection-cache sample checks are skipped because their fixtures are absent. Targeted LLVM 23.1.4 lint reports no new findings. Regression level is moderate because RGB-only exports with an existing side variant also change pipeline selection: a full Isaac comparison passes with all 19 shaders unchanged and no new red lines. This is the light local NVN regression game; the run was busy, so its timings are not performance evidence.
 
 ## Open
 
 - Later areas, combat, manual saving, multiplayer and online features are untested.
-- Character creation logs an alpha-test warning for `faca851c03a852eb`, `ATM_Wind_Tree_AlphaTest_2S_PBR_ST_DEP_NX.bshd`; directly reloading the ship logs the same warning for `7ffa2f2d8d5c5c26`, `Base_AlphaTest_PBR_ST_DEP_NX.bshd`. Both fragment programs write no colour and perform their own discard; the host has no fixed-function alpha-test side entry for them. The visible consequence is not established; no profile switch hides it.
 - No iPhone run or IPA yet. Later memory use in the alias region is unmeasured.
 - Only update 1.0.12 is registered; the base game alone is untested.

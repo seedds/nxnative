@@ -2,8 +2,13 @@
 the pools the replay keeps (nvn_mtl.m pool_gpu), declared with one element and read through a pointer to it with the run-time bound; the argument IDs are renumbered as the host lays the buffer out; 32-entry slot arrays stay; members with
 attributes after their id (raster_order_group) are read; a member or a use the rewrite cannot read stops the shader instead of leaving the host's argument buffer longer than the reflection."""
 from pathlib import Path
+import os
+import platform
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[2] / 'gfx/tools'
@@ -101,6 +106,109 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
 
     def test_unreadable_member(self):
         with self.assertRaises(ValueError): NS['reflect']('k', 'ps', MSL.replace('raster_order_group(0)', 'raster_order_group'), {'sbufs': [], 'cbufs': []})
+
+
+class CallablePools(unittest.TestCase):
+    TEXTURE = 'fp_t2d_cb0_40000000'
+    SAMPLER = 'fp_s_cb0_40000000'
+
+    def source(self):
+        header = MSL[:MSL.index('fragment ')]
+        parameters = f'constant array<texture2d<float>, 1048576>& {self.TEXTURE}, constant array<sampler, 4096>& {self.SAMPLER}'
+        return header + f'''float4 leaf(uint index, {parameters})
+{{
+    return {self.TEXTURE}[int(index + offsets[2])].sample({self.SAMPLER}[index], uv);
+}}
+float4 relay(uint index, {parameters})
+{{
+    return leaf(index, {self.TEXTURE}, {self.SAMPLER});
+}}
+fragment main0_out main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])
+{{
+    float4 value = relay(0u, d.{self.TEXTURE}, d.{self.SAMPLER});
+}}
+'''
+
+    def test_parameters_reads_and_nested_forwarding(self):
+        out = dmsh_reflect.pool_arrays(self.source())
+        self.assertEqual(out.count(f'constant spvPool_{self.TEXTURE}* {self.TEXTURE}'), 3)
+        self.assertEqual(out.count(f'constant spvPool_{self.SAMPLER}* {self.SAMPLER}'), 3)
+        self.assertIn(f'(&{self.TEXTURE}->e[0])[dm_pool_mark({self.TEXTURE}, min(uint(int(index + offsets[2])), {self.TEXTURE}->n))]', out)
+        self.assertIn(f'(&{self.SAMPLER}->e[0])[min(uint(index), {self.SAMPLER}->n)]', out)
+        self.assertIn(f'return leaf(index, {self.TEXTURE}, {self.SAMPLER});', out)
+        self.assertIn(f'relay(0u, d.{self.TEXTURE}, d.{self.SAMPLER});', out)
+        self.assertNotIn('constant array<texture2d<float>, 1048576>&', out)
+        self.assertIn(f'constant spvPool_{self.SAMPLER}* {self.SAMPLER} [[id(3)]];', out)
+
+    def test_uniform_handle_table_keeps_unmarked_indices(self):
+        source = self.source().replace(self.TEXTURE, 'cp_t2da_cb196612_10570000').replace(self.SAMPLER, 'cp_t2da_cb196612_10570000Smplr')
+        source = source.replace('texture2d<float>', 'texture2d_array<float>').replace('1048576', '8192').replace('4096', '8192')
+        out = dmsh_reflect.pool_arrays(source)
+        self.assertNotIn('dm_pool_mark', out)
+        self.assertIn('min(uint(index), cp_t2da_cb196612_10570000Smplr->n)', out)
+
+    def test_unsupported_parameter_forms(self):
+        source = self.source()
+        for old, new in [
+            ('constant array<texture2d<float>, 1048576>&', 'constant array<texture2d<float>, 8192>&'),
+            ('constant array<texture2d<float>, 1048576>&', 'constant array<texture2d<uint>, 1048576>&'),
+            ('constant array<texture2d<float>, 1048576>&', 'thread const array<texture2d<float>, 1048576>&'),
+        ]:
+            with self.subTest(new=new), self.assertRaises(ValueError):
+                dmsh_reflect.pool_arrays(source.replace(old, new))
+
+    def test_alias_unknown_callee_and_wrong_forwarding(self):
+        source = self.source()
+        bad = [
+            source.replace('return leaf(index,', f'auto alias = {self.TEXTURE}; return leaf(index,'),
+            source.replace('return leaf(index,', 'return unknown(index,'),
+            source.replace(f'return leaf(index, {self.TEXTURE}, {self.SAMPLER})', f'return leaf(index, {self.SAMPLER}, {self.TEXTURE})'),
+            source.replace(f'return leaf(index, {self.TEXTURE},', f'return leaf(index, reinterpret_cast<constant uint*>({self.TEXTURE}),'),
+            source.replace(f'return {self.TEXTURE}[', f'return (&{self.TEXTURE}[').replace('].sample(', '])->sample('),
+        ]
+        for index, text in enumerate(bad):
+            with self.subTest(index=index), self.assertRaises(ValueError): dmsh_reflect.pool_arrays(text)
+
+    @unittest.skipUnless(os.environ.get('DMSH_TEST_GPU') == '1', 'set DMSH_TEST_GPU=1 for Metal execution')
+    def test_resource_id_pools_through_nested_calls_on_gpu(self):
+        if platform.system() != 'Darwin' or not shutil.which('clang'):
+            self.skipTest('needs macOS and clang')
+        texture, sampler = self.TEXTURE, self.SAMPLER
+        parameters = f'constant array<texture2d<float>, 1048576>& {texture}, constant array<sampler, 4096>& {sampler}'
+        source = f'''#include <metal_stdlib>
+using namespace metal;
+struct spvDescriptorSetBuffer0
+{{
+    device float4* output [[id(0)]];
+    array<texture2d<float>, 1048576> {texture} [[id(1)]];
+    array<sampler, 4096> {sampler} [[id(1048577)]];
+}};
+float4 leaf(uint index, {parameters})
+{{
+    return {texture}[index].sample({sampler}[0], float2(0.5), level(0.0));
+}}
+float4 relay(uint index, {parameters})
+{{
+    return leaf(index, {texture}, {sampler});
+}}
+kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]], uint index [[thread_position_in_grid]])
+{{
+    d.output[index] = relay(index, d.{texture}, d.{sampler});
+}}
+'''
+        with tempfile.TemporaryDirectory(prefix='dm-callable-pools-') as temporary:
+            work = Path(temporary)
+            shader, executable = work / 'fixture.metal', work / 'fixture'
+            shader.write_text(dmsh_reflect.pool_arrays(source))
+            fixture = Path(__file__).parent / 'fixtures/pool_callables.m'
+            compile = subprocess.run(['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-fobjc-arc', str(fixture),
+                                      '-framework', 'Foundation', '-framework', 'Metal', '-o', str(executable)], capture_output=True, text=True)
+            self.assertEqual(compile.returncode, 0, compile.stdout + compile.stderr)
+            result = subprocess.run([str(executable), str(shader)], capture_output=True, text=True,
+                                    env=dict(os.environ, MTL_DEBUG_LAYER='1'))
+            if result.returncode == 77: self.skipTest('needs tier2 Metal argument buffers')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('nested forwarding, read bitmap and guards passed', result.stdout)
 
 
 if __name__ == '__main__':

@@ -147,6 +147,18 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// The screen the game opens on (docs/frontends.md, The screen): display.screen in the app's preferences, a screen's name (or part of it), as a front end's settings
+// write it, becomes DM_SCREEN (front_mac.m), unless the launch environment or an env file set that. A screen not connected leaves the game on the main one
+static void display_screen(void) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    if (getenv("DM_SCREEN") || !domain) return;
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("display.screen"), domain); char s[256];
+    if (v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8) && *s) {
+        setenv("DM_SCREEN", s, 1); fprintf(stderr, "launcher: screen %s (saved choice)\n", s);
+    }
+    if (v) CFRelease(v);
+}
+
 // Run after either launch path has applied its choices, before spawning dmhost. The bundle
 // owns the OS permission request. Denial disables capture for this run, without changing the saved choice.
 static void microphone_at_launch(void) {
@@ -227,6 +239,7 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    display_screen();
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game

@@ -5,6 +5,7 @@
 // with no overlay of its own takes the game's other mod folders (DM_ROMFS_OVERLAY), as add-on content does.
 // Expectations are written by hand.
 #include "../hle_fs.c"
+#include <ftw.h>
 
 struct dm_flags g_flag;
 uint64_t g_t0_ns;
@@ -16,8 +17,11 @@ static int fails;
 
 static void put(const char *dir, const char *name, const void *d, size_t n) {
     char p[1200]; snprintf(p, sizeof p, "%s/%s", dir, name);
-    FILE *f = fopen(p, "wb"); fwrite(d, 1, n, f); fclose(f);
+    FILE *f = fopen(p, "wb");
+    if (!f) { fprintf(stderr, "t_fs_archive: cannot write %s\n", p); exit(1); }
+    fwrite(d, 1, n, f); fclose(f);
 }
+static int rm_tree_entry(const char *p, const struct stat *st, int type, struct FTW *w) { (void)st; (void)type; (void)w; return remove(p); }
 static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static void put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
 
@@ -77,7 +81,8 @@ int main(void) {
     put(ov2, "cd", "", 0);   // an empty file (an entry an archive tool could not unpack): left out, /cd stays the game's
 
     {   // the parser alone
-        arh1_t a; CHECK(arh1_open(arh, an, &a) == 0, "ARH1 opens");
+        arh1_t a;
+        if (arh1_open(arh, an, &a)) { fprintf(stderr, "t_fs_archive: the synthetic ARH1 index does not open\n"); return 1; }
         CHECK(arh1_find(&a, "/ab") == 0 && arh1_find(&a, "/cd") == 1 && arh1_find(&a, "/d/ef") == 2 && arh1_find(&a, "/d/g") == 3, "members found: %lld %lld %lld %lld", (long long)arh1_find(&a, "/ab"), (long long)arh1_find(&a, "/cd"), (long long)arh1_find(&a, "/d/ef"), (long long)arh1_find(&a, "/d/g"));
         CHECK(arh1_find(&a, "/a") < 0 && arh1_find(&a, "/abc") < 0 && arh1_find(&a, "/xb") < 0 && arh1_find(&a, "/d") < 0 && arh1_find(&a, "/d/e") < 0 && arh1_find(&a, "/d/") < 0 && arh1_find(&a, "/d/gg") < 0 && arh1_find(&a, "") < 0, "other paths are not members");
         arh1_free(&a);
@@ -95,7 +100,8 @@ int main(void) {
     CHECK(read_all("none:/bf.ard", buf, sizeof buf, &size) == sizeof ard && size == sizeof ard, "and the archive");
 
     CHECK(read_all("mod:/bf.arh", buf, sizeof buf, &size) == an && size == (int64_t)an, "the index with mod files has the game's size");
-    arh1_t a; CHECK(arh1_open(buf, an, &a) == 0, "and is still ARH1");
+    arh1_t a;
+    if (arh1_open(buf, an, &a)) { fprintf(stderr, "t_fs_archive: the index with mod files is not ARH1 any more\n"); return 1; }
     uint8_t *e0 = arh1_entry(&a, buf, 0), *e1 = arh1_entry(&a, buf, 1), *e2 = arh1_entry(&a, buf, 2); uint64_t o0, o2; memcpy(&o0, e0, 8); memcpy(&o2, e2, 8);
     CHECK(o0 == 32 && arh1_u32(e0 + 8) == 8 && arh1_u32(e0 + 12) == 0 && arh1_u32(e0 + 16) == 0, "/ab: the first folder's 8 bytes at 32, stored as is (offset %llu size %u)", (unsigned long long)o0, arh1_u32(e0 + 8));
     CHECK(o2 == 48 && arh1_u32(e2 + 8) == 6 && arh1_u32(e2 + 16) == 1, "/d/ef from D/EF at 48, hidden flag kept (offset %llu)", (unsigned long long)o2);
@@ -121,7 +127,7 @@ int main(void) {
         unsetenv("DM_ROMFS_OVERLAY");
     }
 
-    char rm[1200]; snprintf(rm, sizeof rm, "rm -rf '%s'", root); if (system(rm)) fprintf(stderr, "t_fs_archive: %s left behind\n", root);
+    if (nftw(root, rm_tree_entry, 16, FTW_DEPTH | FTW_PHYS)) fprintf(stderr, "t_fs_archive: %s left behind\n", root);
     if (fails) { fprintf(stderr, "t_fs_archive: %d failed\n", fails); return 1; }
     printf("t_fs_archive: ok\n");
     return 0;

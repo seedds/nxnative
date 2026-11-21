@@ -39,3 +39,9 @@ shader_note	Mario + Rabbids® Sparks of Hope shaders (provisional profile)
 # ---- Input ----
 # Movement and camera use both sticks.
 pad_layout	full
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game asks for present interval 2 once and has no other limit; it steps by the time that passed (the battle intro's
+# flyover and a 2 s walk at the same seconds at 30 and 60, README.md Frame rate). Display mode presents at the cap by the present interval alone; the player's Frame rate picks 30 or 60
+fps_target	60
+present_interval	display

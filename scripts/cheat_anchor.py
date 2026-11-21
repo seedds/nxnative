@@ -181,12 +181,15 @@ class Build:
             with open(self.path, 'rb') as f: hdr = f.read(0x100)
         except OSError as e: raise AnchorError(f'{self.path.resolve()}: {e.strerror}') from e
         if hdr[:4] != b'NSO0': raise AnchorError(f'{self.path.resolve()}: not an NSO file')
-        self.img = bytes(load_nso(str(self.path)))   # the whole memory image, text at 0, bss included
+        self.img = bytes(load_nso(str(self.path)))   # text, ro and data at their memory offsets, text at 0; bss is not in it (dm/tools/nso.py)
         segs = [struct.unpack_from('<III', hdr, 0x10 + i * 0x10) for i in range(3)]   # file offset, memory offset, size
         self.text_end, self.ro_start = segs[0][2], segs[1][1]
-        # .data from its memory offset; .bss right after it up to the image's end (nso_syms.load sizes the image to
-        # data offset + data size + the bss size at 0x3C). where() keeps a data anchor inside its target's segment
+        # .data from its memory offset; .bss right after it, for the size at 0x3C. The loaded image stops at the end of
+        # .data, so the module's end is computed here: cheats keep most of their pointers' bases in .bss (Xenoblade
+        # Chronicles 2's 2.1.0, every one of its 23 cheats), which where() refused as outside the image while it took
+        # the image's length for the module's. where() keeps a data anchor inside its target's segment
         self.data_start, self.bss_start = segs[2][1], segs[2][1] + segs[2][2]
+        self.end = self.bss_start + struct.unpack_from('<I', hdr, 0x3c)[0]
         self.build_id = hdr[0x40:0x48].hex().upper()   # the first 8 bytes, as cheat files are named
         nacp_path = self.path.parent.parent / 'control.nacp'   # nx_extract writes it beside ExeFS
         self.version = nacp.version(nacp_path) if nacp_path.is_file() else ''
@@ -362,9 +365,9 @@ class Build:
     def where(self, off, n=1):
         """The segment of [off, off + n) of the image: 'text', 'pad' (the zero padding after the text), 'ro' (.rodata, up
         to .data), 'data', 'bss' (DATA_KINDS are the last three), or None outside the image or across a boundary."""
-        if off < 0 or off + n > len(self.img): return None
+        if off < 0 or off + n > self.end: return None
         for kind, lo, hi in (('text', 0, self.text_end), ('pad', self.text_end, self.ro_start), ('ro', self.ro_start, self.data_start),
-                             ('data', self.data_start, self.bss_start), ('bss', self.bss_start, len(self.img))):
+                             ('data', self.data_start, self.bss_start), ('bss', self.bss_start, self.end)):
             if lo <= off and off + n <= hi: return kind
         return None
 

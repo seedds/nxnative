@@ -11,7 +11,8 @@
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost; and the live serials of each memory pool
 //               (the pool recorded at initialization), whose entries the pool's Finalize ends (own_pool_finalize_locked)
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
-//   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
+//   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under g_prog_pin_lk; release and unpin also hold
+//               the submission lock, which serial_del needs). A streamed producer can pin without the submission lock.
 //   sharing     alias_key (pool, offset, description) → the texture that holds those bytes (own_alias_*): NVN textures over the same storage with the same description are one
 //               texture. Kept resident by the table; an entry goes when its pool is finalized (own_pool_finalize_locked), a new texture takes its bytes over (own_alias_publish)
 //               or another texture drew over them and it has not been used since (own_alias_dead_locked). The first and the last take the serial entries that name the
@@ -133,7 +134,7 @@ int own_tex_live_locked(uint64_t serial);
 int own_tex_live(uint64_t serial);
 int own_tex_end_locked(tex_t *t);   // a finalize: -1 when t is a copy and the object the texture was initialized in still holds it (nothing ends), else whether it was live (it is not now)
 
-// Program pins (the caller holds the submission lock); mtl_prog_release and mtl_prog_unpin (nvn_obj.h) are the other two
+// Program pins (takes its own lock); mtl_prog_release and mtl_prog_unpin (nvn_obj.h) also require the submission lock
 void own_prog_pin(uint64_t serial);
 
 // The change generation. g_ser_gen is read directly (an atomic load on the hot paths); only the owner's functions change it

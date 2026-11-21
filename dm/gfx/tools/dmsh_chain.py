@@ -25,7 +25,7 @@ FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
     'StructuredIr/ShaderProperties.cs', 'StructuredIr/AstOperand.cs', 'StructuredIr/AstOptimizer.cs', 'StructuredIr/StructuredProgram.cs',
     'Translation/Optimizations/BindlessElimination.cs', 'Translation/Optimizations/Optimizer.cs',
     'Translation/Optimizations/GlobalToStorage.cs', 'CodeGen/Spirv/SpirvGenerator.cs')]
-FILES += ['tools/' + f for f in ('dmsh_rt.py', 'dmsh_rt_build.py', 'dmsh_rt_compile.py', 'shader_split.py')]
+FILES += ['tools/' + f for f in ('dmsh_rt.py', 'dmsh_rt_build.py', 'dmsh_rt_compile.py', 'shader_split.py', 'dmsh_wrap.py')]
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
     'IGpuAccessor.cs', 'Decoders/DecoderAmpere.cs', 'Instructions/InstEmitAmpere.cs',
     'Instructions/InstEmitAmpereAlu.cs', 'Instructions/InstEmitAmpereMem.cs',
@@ -53,8 +53,10 @@ def mac_min():
 # 35785cddc971290c sign-extends a packed 16-bit vertex field as a = w * 65536, then (a >> 31) << 16 | uint(a) >> 16; without the flag the compiler took the sign bits from bits 15-30 of w,
 # so the lightmap / probe UV's x came out far too large and models drawn with mesh shaders took their ambient light from the wrong texels (the bright band on the Deku Tree's walls).
 # The flag also drops inbounds from pointer arithmetic (Metal's clang has no -fwrapv-pointer) and keeps loop bounds that may wrap (test_dmsh_wrapv.py)
+# -fmetal-math-mode=relaxed: as the iOS libraries (dm/ios/tools/ios_metal.py). The translated shaders write Maxwell's NaN and infinity behaviour as explicit selects and multiplies by an infinity
+# constant; the default fast mode lets the GPU compiler assume neither exists and folds them away (Godzilla: Destroy All Monsters Melee Remastered's tonemap pass drew black)
 # -mmacosx-version-min: the deployment target, above
-def mac_metal(): return ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', f'-mmacosx-version-min={mac_min()}', '-fpreserve-invariance', '-fwrapv']
+def mac_metal(): return ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', f'-mmacosx-version-min={mac_min()}', '-fpreserve-invariance', '-fwrapv', '-fmetal-math-mode=relaxed']
 def __getattr__(name) -> Any:   # MAC_MIN, MAC_MIN_FLAG and MAC_METAL as the module's constants (PEP 562), each read from min_os.mk when used
     if name == 'MAC_MIN': return mac_min()
     if name == 'MAC_MIN_FLAG': return f'-mmacosx-version-min={mac_min()}'

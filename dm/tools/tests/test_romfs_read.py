@@ -46,6 +46,27 @@ class ReadImage(unittest.TestCase):
         with romfs.open(self.root / 'output', 'wb') as f: f.write(b'normal output')
         self.assertEqual((self.root / 'output').read_bytes(), b'normal output')
 
+    def test_scan_reuses_descriptors_and_closes_the_backing_on_error(self):
+        with patch.object(romfs._os, 'dup', wraps=romfs._os.dup) as duplicate:
+            with self.assertRaisesRegex(RuntimeError, 'stop scan'), romfs.reuse_descriptors([self.image]):
+                with romfs.open(self.image / 'a', 'rb') as a, romfs.open(self.image / 'data/archive', 'rb') as b:
+                    self.assertNotEqual(a.fileno(), b.fileno())
+                    self.assertEqual((a.read(), b.read()), (b'prefix!', self.data))
+                self.assertEqual(duplicate.call_count, 2)
+                backing = duplicate.call_args.args[0]
+                self.assertEqual([call.args[0] for call in duplicate.call_args_list], [backing, backing])
+                raise RuntimeError('stop scan')
+            with self.assertRaises(OSError): os.fstat(backing)
+            self.assertEqual((self.virtual / 'a').read_bytes(), b'prefix!')
+            self.assertEqual(duplicate.call_count, 2)
+
+    def test_scan_does_not_use_a_replaced_images_backing_descriptor(self):
+        with romfs.reuse_descriptors([self.image]):
+            self.assertEqual((self.virtual / 'a').read_bytes(), b'prefix!')
+            (self.src / 'a').write_bytes(b'replaced')
+            romfs_image.pack(self.src, self.image)
+            self.assertEqual((self.virtual / 'a').read_bytes(), b'replaced')
+
     def test_scan_entries_answer_from_the_index_the_scan_found(self):
         for parent in (self.image, self.image / 'data'):
             with romfs.scandir(parent) as entries:
@@ -94,7 +115,7 @@ class ReadImage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('zstd'), 'zstd command required')
     def test_zstd_file_inside_an_image(self):
-        # Mario Wonder's .zs files: the zstd command cannot open a path inside the image, so unzs feeds it the bytes.
+        # Mario Wonder's .zs files are decompressed from the image entry's bytes.
         with patch.dict(os.environ, DM_GAME='010020D01AD24000'):
             import shader_split
         (self.src / 'data/table.byml.zs').write_bytes(subprocess.run(['zstd', '-c', '-q'], input=self.data, capture_output=True, check=True).stdout)

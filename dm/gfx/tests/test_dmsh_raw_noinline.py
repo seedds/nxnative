@@ -13,7 +13,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
-from dmsh_rewrite import raw_noinline   # noqa: E402
+from dmsh_rewrite import mesh_subgroup_noinline, raw_noinline   # noqa: E402
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -97,6 +97,21 @@ class RawNoinline(unittest.TestCase):
         plain = HEAD + OTHER + helper('_71', '_70') + MAIN
         self.assertEqual(raw_noinline(plain), plain)
         self.assertEqual(raw_noinline(raw_noinline(SRC)), raw_noinline(SRC))
+
+    def test_mesh_subgroup_noinline(self):
+        one_line = '\nstatic inline __attribute__((always_inline)) float dm_zsnap(float z) { return z; }\n'
+        body = '\nstatic inline __attribute__((always_inline)) void dm_stage_body(uint gl_SubgroupInvocationID) {}\n'
+        subgroup = SRC.replace('int _71(thread const int&', 'int _71(thread uint& gl_SubgroupInvocationID, thread const int&')
+        src = raw_noinline(subgroup, stage='ms') + one_line + body
+        out = mesh_subgroup_noinline(src)
+        self.assertEqual(attribute(out, 'dmsh_raw_find'), INLINE)
+        self.assertEqual(attribute(out, '_71'), NOINLINE)
+        for name in ('_63', '_64', '_70'):
+            self.assertEqual(attribute(out, name), INLINE, name)
+        self.assertIn(one_line, out)
+        self.assertIn(body, out)
+        self.assertEqual(mesh_subgroup_noinline(out), out)
+        self.assertEqual(out.replace(NOINLINE, INLINE), src)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):

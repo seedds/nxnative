@@ -162,6 +162,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** not run on an iPhone here: neither a listed file nor an offline start. The PR author's runs (its own 25 s wait): a planted `.save.dmsync.icloud` in a scratch folder timed out with nothing written, and a real iCloud fetch logged `downloaded in N s`.
 - **Found on:** Cadence of Hyrule on an iPhone (iPhone19,4), after a save from a Mac mini M2 Pro, macOS 26.6 ([PR #2180](https://github.com/seedds/nxnative/pull/2180)).
 
+### Replacing a cloud-save folder left its scope open on iOS
+
+- **Symptom:** switching the launcher's cloud-save folder or turning cloud saves off left the previous folder's sandbox grant open until the app exited.
+- **Cause:** `dm_cloud_saves_path` discarded the URL without stopping access and could replace it with a different URL for the same path. Clearing the bookmark left the grant held. The stale-bookmark refresh balances its own grant.
+- **Fix:** `CloudSaves.m` retains the exact URL that successfully started access and stops access when the selection is replaced, cleared, or no longer resolves. The launcher disables folder changes during the prelaunch save check so it can finish using the selected folder.
+- **Found on:** code review of the shared iOS launcher. The grant lifecycle was checked with synthetic URLs and bookmarks.
+
 ### A failed pull deleted this device's save
 
 - **Symptom:** `[RED] save sync: bringing the cloud's save in failed (errno=…): playing on with this device's`, and the game starts with the cloud's save; this device's is in neither its save folder nor `<save>-backups`.
@@ -264,7 +271,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** a save transaction clones the committed folder into its work folder with `clonefile` and publishes a commit with `renamex_np(RENAME_SWAP)`. Both need APFS: on HFS+ and exFAT disk images both fail with `ENOTSUP` (45), and neither format advertises `VOL_CAP_INT_CLONE` or `VOL_CAP_INT_RENAME_SWAP`, so copying the files instead of cloning them would still leave no atomic commit. The host already failed safely (the committed save mounted read-only, the iOS front end told); the line did not say why. The apps' own save folders are on APFS (the Mac app's `~/Library/Application Support/nxnative/<title ID>/save`, the iOS app's `Documents/save`); only a `DM_SAVE` set by hand or a development run's work folder can be elsewhere.
 - **Fix:** `hle_fs.c` names the cause when `clonefile` returns `ENOTSUP`: set `DM_SAVE` to a folder on an APFS volume (the RomFS and shader libraries may stay on the other drive). Recursive deletes (`rm_tree`, `CleanDirectoryRecursively`) now take each entry's type from `lstat`, not `d_type` (which a filesystem may report as unknown), unlink a symlink without entering it, and refuse a symlink given as the tree itself; a commit whose leftover `.new` cannot be cleared is refused with its own red line instead of failing in the clone.
 - **Check:** `dm/host/tests/t_fs.c` section 8 makes `clonefile` fail with `ENOTSUP` (read-only mount, one front-end notice, committed save unchanged, writable again once cloning works) and deletes save folders holding a symlink to a folder outside the save (the target keeps its files).
-- **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table): a development Mac run with its save folder on a Journaled HFS+ external drive.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) 1.05 during a Mac run with its save folder on a Journaled HFS+ external drive. [PR #662](https://github.com/seedds/nxnative/pull/662).
 
 ### Save data size queries
 
@@ -418,6 +425,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md); [Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md).
 - **Note:** Odyssey's six-axis history is read the same way ([Six-axis sensors](#six-axis-sensors)).
 
+### Mac controller sticks past full tilt on a diagonal
+
+- **Symptom:** with a DualSense on the Mac, both analog sticks move the character or camera erratically while the D-pad works (Persona 3 Portable 1.0.2).
+- **Cause:** a Switch stick's calibrated value stays inside the circle of radius `DM_STICK_MAX`, but a Mac or iPhone controller's axes each reach full tilt on their own through GameController, so a diagonal reads up to about 1.15 of full tilt. A game that takes the stick's magnitude as at most full tilt got more than it could.
+- **Fix:** `hle_hid.c` holds each stick inside that circle, keeping its direction, for every npad state it fills (`stick_circle`, in `fill` and `fill_joy`). A stick inside the circle is unchanged.
+- **Found on:** Persona 3 Portable ([#3050](https://github.com/seedds/nxnative/pull/3050)).
+- **Check:** `t_hid` puts a full-tilt diagonal on both sticks and checks that each stays inside the circle and keeps its direction. On the Mac, Persona 3 Portable's sticks move normally with a DualSense after the change.
+
 ### Npad style set update event
 
 - **Symptom:** the game never reads the controller (the title's "Press L+R" never sees a press; no `GetNpadState` call at all).
@@ -483,11 +498,12 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### A controller in a style the game does not support
 
-- **Symptom:** docked, the game opens the controller applet again every frame and never leaves the screen behind it. The log repeats `oe library applet: controller support`, `hid controller applet: 1 to 1 players wanted, 1 connected` and focus 2, then 1, thousands of times (7,162 in 3 minutes), after `hid supported controller styles 0x6`.
+- **Symptom:** docked, the game ignores keyboard input that works in handheld mode, or opens the controller applet again every frame. In the applet loop, the log repeats `oe library applet: controller support`, `hid controller applet: 1 to 1 players wanted, 1 connected` and focus 2, then 1, thousands of times (7,162 in 3 minutes), after `hid supported controller styles 0x6`.
 - **Cause:** the host showed every whole controller (the keyboard, a Pro-like pad, a Joy-Con pair the game supports no Joy-Con style for) as full-key on No1..No8, whatever styles the game supports. The hid service connects a controller only in a supported style, so a game may take any connected npad as one of its own. Nintendo Switch Sports Resort sets Handheld | JoyDual (0x6) for its Tennis lobby (`main+0xa9e940`); its player check (`main+0x58d0f0`) found no usable player 1 on a full-key No1, so its caller (`main+0x3f9d120`) opened `ShowControllerSupport` again, and the applet's answer (one player, No1) could not change that.
-- **Fix:** on No1..No8, a whole controller is shown as a JoyDual pair when the game supports JoyDual but not full-key (`pad_style`, `hle_hid.c`): JoyDual is the only other style with all its buttons and both sticks. Its JoyDual state, two six-axis sensors, type 5 vibration handles and the applet's selected npad follow; full-key handles taken earlier still reach its motors. A change of supported styles that changes an npad's style signals that npad's style update event. This holds in both modes: in handheld mode players 2..8 (No2..No8) are shown as JoyDual too, and only player 1's Handheld npad stays Handheld. A game that supports full-key, or neither style, is unchanged.
-- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536), on the Mac with the keyboard and `DM_KEYS`: after the fix the applet is not opened once in 220 s, and Play leads to its one-controller screen ("press the button") and into a doubles Tennis match at its serve prompt.
-- **Check:** `t_hid` (`t_unsupported_style`).
+- **Fix:** on No1..No8, `pad_style` (`hle_hid.c`) prefers FullKey, then JoyDual, then JoyRight or JoyLeft. JoyDual carries both sticks and all buttons. For one Joy-Con, `single_joy_fold` puts the more deflected stick on that side and maps the opposite half's buttons to the same positions on the chosen Joy-Con. The reported side has one sensor and one vibration handle. A cached FullKey vibration handle can still reach its exposed motor, as it can for a real Joy-Con. A change into or out of the single-Joy-Con mapping clears vibration on the affected pads before signalling their style events. The Handheld npad stays Handheld. If the game takes none of the four styles on No1..No8, the host keeps FullKey.
+- **Open:** the merged motion stream for a lone physical Joy-Con uses the sideways frame. An upright game can see that motion a quarter turn off. The docked keyboard test covers buttons and sticks.
+- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536), on the Mac with the keyboard and `DM_KEYS`: after the fix the applet is not opened once in 220 s, and Play leads to its one-controller screen ("press the button") and into a doubles Tennis match at its serve prompt. Pokémon: Let's Go, Eevee! (`0100187003A36000`, v131072, provisional profile) reports Handheld | JoyLeft | JoyRight | Palma (`0x5a`, `main+0x1400bc`). The PR author checked docked keyboard input on the Mac with the single-Joy-Con fallback.
+- **Check:** `t_hid` (`t_unsupported_style`, `t_single_joy_fallback`, `t_style_read_snapshot`).
 
 ### Live controller motion
 
@@ -607,6 +623,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_pad_hid_mac` drives the real discovery, value callbacks and handoff with fake IOKit devices and GameController controllers. It checks the mapped face button, triggers and right stick for the matching Xbox layout, dedicated triggers on a different layout with the same ID, and Nintendo's right-stick axes when report `0x3F` takes precedence. Unlisted virtual devices of all three trusted vendors and another vendor deliver button presses and releases through HID after the wait. Already listed and promptly published usable controllers stay with GameController. A matching controller without `extendedGamepad` cannot suppress HID or take it back, but a usable late controller does. Removal during the wait, the synthetic exclusion, physical-device trust with missing or false virtual flags, and the identical-pad and Nintendo-protocol cases are checked too.
 - **Open:** live Steam Link verification of the buttons and triggers is pending. The reporter's local Steam-specific repair restored input. The button map comes from one-at-a-time presses of a GameSir G8 through Steam Link on an iPhone, captured on the Mac, and `t_pad_hid` checks each. Both sticks worked in Donkey Kong Bananza with an earlier local version. Rumble and multiple remote players remain untested.
 - **Found on:** [Cult of the Lamb](../../dm/games/01002E7016C46000/README.md) 1.5.28 with four DLCs through Steam Link, built with engine `ccd834e0` (NX2Apple 1.4.0), reported in issue #2465.
+
+### A HORI Taiko Drum gets 8BitDo's button map
+
+- **Symptom:** on the Mac, a HORI Taiko Drum for Nintendo Switch (USB, `0f0d:00f0`, "Taiko Controller") is read as a raw HID pad, and the log says `buttons use 8BitDo's numbering`. Its buttons reach the game in the wrong places: A and R do nothing, Y acts as A, L as Y, ZL / ZR as L / R, and minus / plus as ZL / ZR.
+- **Cause:** GameController does not list the drum, so it reaches the raw HID fallback after the two-second wait. The fallback uses 8BitDo's D-input numbering by default. The drum uses HID usages 1 Y, 2 B, 3 A, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home and 14 Capture.
+- **Fix:** `pad_hid_layout_for` selects the Taiko Drum map for USB ID `0f0d:00f0`. The PS4-mode HORI Fighting Stick Alpha (`0f0d:011c`) also declares 14 button usages, so the count cannot identify the drum's map. Nintendo's report `0x3F` and the Xbox 360 layout take precedence. `DM_HID_MAP` still replaces button entries. [Fighting Stick descriptor capture](https://www.dreamcast-talk.com/forum/viewtopic.php?p=193790#p193790)
+- **Check:** `t_pad_hid` checks the drum's 14 usages and the layout selection. `t_pad_hid_mac` exercises discovery and value callbacks for the drum and a fixture based on the PS4-mode Fighting Stick descriptor. The reporter identified the drum in an IOKit probe and played Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, 6.2.0) with `DM_HID_MAP=Y=1,B=2,A=3,X=4,L=5,R=6,ZL=7,ZR=8,MINUS=9,PLUS=10,LS=11,RS=12`, which supplies the same map.
+- **Open:** a gameplay run with the physical drum and the revised host is pending.
+- **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, no profile in this repository) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
 
 ### A keyboard receiver that declares a gamepad takes player 1
 
@@ -822,6 +847,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** while the game window is key, `front_mac.m` holds a second activity with `NSActivityIdleDisplaySleepDisabled` (`display_awake`; `pmset -g assertions` shows `PreventUserIdleDisplaySleep` "NxNative active game window"). `input_release` lets go of it when the window loses focus or is minimized, `input_resume` takes it again, and startup takes it if the window became key before the focus observers were installed. Windowless runs never hold it. An explicit lock or sleep still works, and no input is synthesized.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) on the Mac, controller play; every game on the Mac (general); [PR #741](https://github.com/seedds/nxnative/pull/741).
 
+### Mac menu bar over the fullscreen game
+
+- **Symptom:** in fullscreen, the menu bar shows at the top of the game's screen whenever the game is the active app (a click on it, a controller in use), and goes away when another app on another screen is active. The system setting is "In Full Screen Only".
+- **Cause:** AppKit's default fullscreen presentation on the reported two-display setup showed the bar on the primary display when the game became active. AppKit's decision to reveal it on focus remains open.
+- **Fix:** PR #2850 works around the AppKit behavior by returning `FullScreen | HideDock | HideMenuBar` from `DmWinDelegate`. It applies at launch and when entering fullscreen later (⌃⌘F or the green button). It disables pointer access to the menu bar, including the Cheats menu. The author verified ⌘Q and ⌃⌘F with the bar hidden.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (M5, macOS 27.0.1, a 27-inch main screen and the built-in one); every game on the Mac (general).
+- **Open:** on an M4 Pro with one display (macOS 27.2.1), UnMetal logged `0x405` both as AppKit's proposal and as the explicit auto-hide return value (`FullScreen | AutoHideDock | AutoHideMenuBar`). The focus and Cheats comparison still needs the affected two-display setup.
+
 ### Mouse, keyboard and key code maps
 
 - **Symptom:** the first boot aborted in `hid::GetMouseState` (the SDK's mouse resource was never initialized).
@@ -960,6 +993,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the SDK's version dereferences vi service objects the host never made.
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
+
+### The display's largest layer from `vi::ListDisplays`
+
+- **Symptom:** A game draws into a 3840x2160 swapchain on a 4K display and sets `WindowCrop 0,0 1920x1080`.
+- **Cause:** The game sizes its docked window from the largest layer in `ListDisplays` (`DisplayInfo` +0x50 and +0x58), then caps it at `QueryDisplayBufferMaxResolution`. The host hardcoded 1920x1080 in the first call, so the 4K cap in the second call could not raise the window size.
+- **Fix:** `hle_vi.c` shares [the display's largest buffer](#the-displays-largest-buffer) between both replies for Switch 2 SDKs. Switch 1 SDKs get 1920x1080 from `ListDisplays`.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) ([issue #2895](https://github.com/seedds/nxnative/issues/2895)).
 
 ### `vi::InitializeWithVrrLfcEnabled`
 
@@ -1461,6 +1501,13 @@ Most service calls can be found before they crash, before the first boot or the 
   - The adjustable user clock (`time::AdjustableUserSystemClock::GetCurrentTime`, which the game's days follow) reads the time service's shared memory in the SDK (`MonotonicSystemClock::GetCurrentTime`, `sdk+0x4421cc`), which the host never maps, so it is the host's clock, as the user clock; `time::GetStandardSteadyClockCurrentTimePoint`, the free-function form of the steady clock ([Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) SDK 20.5.4, found in `main`'s imports before the first boot).
   - `time::StandardSteadyClock::now()`, the C++ clock form: a time point of seconds in `x0`. The SDK asks the steady-clock session `time::Initialize` opens and returns 0 without one (SDK 3.7.0, `sdk+0x16edf4` in [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md), which calls it from six sites in `main`); the host takes over `Initialize` and opens none, so the clock never moved. It is the host's monotonic seconds, as `GetCurrentTimePoint`. Reported in [PR #2729](https://github.com/seedds/nxnative/pull/2729).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md).
+
+### A game restart reports a user clock change
+
+- **Symptom:** after a normal game restart on the same Mac, Pokémon Brilliant Diamond can record a new time penalty and skip daily or weekly events.
+- **Cause:** the first user clock context in each process subtracts the whole-second steady time from the whole-second wall time. The result depends on the sampling phase and can vary by one second without a wall-clock adjustment. The context refresh also compared the wall time to guest ticks, which can stop while the steady clock keeps running.
+- **Fix:** bracket the wall-time read with steady-clock reads, subtract at nanosecond precision, and round the resulting offset to whole seconds. Use that clock pair for the snapshot and retain the existing in-process refresh threshold of more than one whole second. `t_time` runs the first sample at two phases in fresh processes and checks the threshold, forward and backward adjustments, and elapsed time while guest ticks are suspended.
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) 1.3.0 on macOS. The change covers game restarts on the same host boot.
 
 ### The adjustable network clock aborts in `Adjust`
 

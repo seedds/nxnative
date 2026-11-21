@@ -63,6 +63,7 @@ DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAME
 DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, searched after `dm/games`; the NSP script points it at a provisional or derived profile
 DM_GAMES_FIRST	switch	`=1` searches `DM_GAMES_DIR` before `dm/games`, so a provisional or derived profile wins over the game's own (the NSP script's `--provisional`)
 DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `getenv` returns, in place of the profile's `game_env` (`hle_os.c`); any other name goes to the SDK's empty environment
+DM_GAME_MENU_TEXT	switch	Localized labels for the iOS in-game gear menu, one per line ([Starting a game](frontends.md#starting-a-game)). An empty or missing line keeps the English label
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
 DM_GFX_SCALE	diagnostic	The graphics scale tier `oe::GetCurrentGraphicsScale` answers: `0` (default, both modes), or `1` or `2`, the reduced tiers at which a Switch 2 game renders smaller
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every supported GLSLC output the game compiles at run time. The splitter reads it (default `<version dir>/glslc_capture`). Use a separate folder for captures made while playing and pass it to the packer with `--glslc-play DIR`.

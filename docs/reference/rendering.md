@@ -2629,6 +2629,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** encode the pending clear before changing an attachment of that framebuffer. Unchanged attachments still allow the clear to fold into the next draw pass.
 - **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)). Empty layers were clearing the texture where the earlier layers had already been composed.
 
+### GL framebuffer sRGB conversion
+
+- **Symptom:** `GL_FRAMEBUFFER_SRGB` produces a red warning, and switching it off still stores sRGB-encoded colours in an sRGB attachment. Blending also linearizes the destination when conversion is disabled.
+- **Cause:** the enable was recorded but never used. Metal always converted writes and destination blend reads through the attachment's sRGB pixel format.
+- **Fix:** draws and clears use a cached linear view of the same attachment storage while conversion is off, and the original sRGB image while it is on. Changing the enable finishes deferred clears and the active pass before changing formats. New storage invalidates the cached view. Texture sampling keeps its own sRGB decoding, and linear attachments and alpha are unaffected.
+- **Found on:** [Tomb Raider I–III Remastered report #2416](https://github.com/seedds/nxnative/issues/2416). This fixes the framebuffer-state mechanism; the game's remaining GL imports, uniform-source failure and gameplay are unverified.
+
 ### GL draws and framebuffers
 
 - Batched quads share one 16-bit index buffer through `glDrawElementsBaseVertex`; canvases bind GL_FRAMEBUFFER (read and draw), check completeness, discard depth and stencil after use (`glInvalidateFramebuffer`) and clear with `glClearBufferfv`. `glBlitFramebuffer` (colour, same size) and `glReadPixels` (RGBA8) are there for multisample resolves and `Canvas:newImageData`, which the game does not use.

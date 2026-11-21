@@ -1,0 +1,7 @@
+# kind: evidence  CHRONO CROSS: THE RADICAL DREAMERS EDITION shaders (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_glslc.bin	0	pixel	8ef6462cf1474dcd	/glslc/shader_font.glslc#GLSLC@0x0#var
+vs_glslc.bin	0	vertex	c6d6fe3737238bb7	/glslc/shader_font.glslc#GLSLC@0x0#var
+ps_glslc.bin	1	pixel	117109ff800fbbce	/glslc/xyzrgbuv.glslc#GLSLC@0x0#var
+vs_glslc.bin	1	vertex	3629499a6f4ce410	/glslc/xyzrgbuv.glslc#GLSLC@0x0#var

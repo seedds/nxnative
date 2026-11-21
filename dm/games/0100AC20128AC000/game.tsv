@@ -1,0 +1,40 @@
+# Game profile of CHRONO CROSS: THE RADICAL DREAMERS EDITION (Switch, update v131072 = 1.0.2): program 0, the game-selection launcher, of one game of three programs. Plays on the Mac
+# SDK 13.3.0, NVN. Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100AC20128AC000
+program_id	0100AC20128AC000
+
+# ---- App ----
+name	CHRONO CROSS: THE RADICAL DREAMERS EDITION
+ipa	ChronoCrossTheRadicalDreamersEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=ebec2b1f2c43c4f35447aa8098786cf5	sdk=2bf3519216f5b9d3e8ce26863c2e98b6
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	data/font/large_font_kb_70_launcher.spritefont
+zip_store	.opus:.png:.spritefont:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data /glslc/=glslc
+shader_note	CHRONO CROSS: THE RADICAL DREAMERS EDITION shaders
+
+# ---- Programs ----
+# One game of three programs: this launcher starts Chrono Cross (1) or Radical Dreamers (2) with oe::ExecuteProgram(n) and no parameters.
+# Each has its own profile folder; the host is built over all of them (game.py header_multi) and the NSP script packs them as one Mac app or IPA
+programs	1=0100AC20128AC001 2=0100AC20128AC002

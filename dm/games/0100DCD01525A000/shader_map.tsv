@@ -1,0 +1,33 @@
+# kind: evidence  Persona 3 Portable shaders (BNSH / BAHS in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_sysdat.bin	0	pixel	111594163749a13a	/sysdat.cpk/shaders/P4G/clear_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	0	vertex	d2c42ed166e20381	/sysdat.cpk/shaders/P4G/clear_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	1	pixel	ed364b8d6526fa9e	/sysdat.cpk/shaders/P4G/effect_frag.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	2	pixel	4dc15c4d812fa997	/sysdat.cpk/shaders/P4G/effect_n_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	1	vertex	bf4bedee8fb07958	/sysdat.cpk/shaders/P4G/effect_n_vert.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	2	vertex	e850e6e7ee4ae62f	/sysdat.cpk/shaders/P4G/effect_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	3	pixel	3d9567f71c6f467b	/sysdat.cpk/shaders/P4G/movie_frag.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	4	pixel	12021c269c7082e8	/sysdat.cpk/shaders/P4G/shadow_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	3	vertex	e678cfaf14443617	/sysdat.cpk/shaders/P4G/shadow_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	5	pixel	23ce6ff9ae7210f2	/sysdat.cpk/shaders/P4G/sprite_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	4	vertex	ae1af53cd78edb07	/sysdat.cpk/shaders/P4G/sprite_vert.bnsh#BNSH@0x0#var0
+gs_sysdat.bin	0	geometry	989d02c2cbee58e9	/sysdat.cpk/shaders/system/custom_Prim3D_Flat_geom.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	5	vertex	1f8fd67ad5e3e355	/sysdat.cpk/shaders/system/custom_Prim3D_Flat_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	6	pixel	7065c4f4a4bb0616	/sysdat.cpk/shaders/system/custom_Prim_Flat_frag.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	7	pixel	1b3d5959e4211d6e	/sysdat.cpk/shaders/system/custom_Prim_Flat_frag.bnsh#BNSH@0x0#var1
+ps_sysdat.bin	8	pixel	3546b4017fcfae70	/sysdat.cpk/shaders/system/custom_Prim_Textured_frag.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	9	pixel	db9f2eeb4304f965	/sysdat.cpk/shaders/system/custom_Prim_Textured_frag.bnsh#BNSH@0x0#var1
+ps_sysdat.bin	10	pixel	37b56f79493cef56	/sysdat.cpk/shaders/system/posteffect/hdr/Final_2d___frag.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	11	pixel	b2ef55006d1b0b91	/sysdat.cpk/shaders/system/posteffect/hdr/Final___frag.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	12	pixel	3f30f46be7a20e58	/sysdat.cpk/shaders/system/posteffect/hdr/copy_fxaa_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	6	vertex	0f62d183ab0c7d8b	/sysdat.cpk/shaders/system/posteffect/hdr/copy_fxaa_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	13	pixel	91aa0bb6f6718599	/sysdat.cpk/shaders/system/posteffect/hdr/hdr_copy_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	7	vertex	402129f432b1e3eb	/sysdat.cpk/shaders/system/posteffect/hdr/hdr_copy_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	14	pixel	76327ae3cc1466d1	/sysdat.cpk/shaders/system/posteffect/hdr/lineaa_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	8	vertex	a9bbd9cfb90d08ca	/sysdat.cpk/shaders/system/posteffect/hdr/lineaa_vert.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	9	vertex	c176b228df7ae020	/sysdat.cpk/shaders/system/prim_2dFont_sys_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	15	pixel	5ce94c81af47e3d7	/sysdat.cpk/shaders/system/prim_2d_sys_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	10	vertex	4886cb95002dc18e	/sysdat.cpk/shaders/system/prim_2d_sys_vert.bnsh#BNSH@0x0#var0
+ps_sysdat.bin	16	pixel	c48242fd3f916295	/sysdat.cpk/shaders/system/sys_clear_frag.bnsh#BNSH@0x0#var0
+vs_sysdat.bin	11	vertex	312d2b07e65c3349	/sysdat.cpk/shaders/system/sys_clear_vert.bnsh#BNSH@0x0#var0

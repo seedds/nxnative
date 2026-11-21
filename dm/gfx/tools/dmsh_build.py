@@ -881,16 +881,20 @@ def finish(key, w, j, c1):
     if j['stage'] == 'vs' and PAIRS.get(key):   # outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
-    lay = None; discard = False
+    lay = None; discard = False; viewport_mask = False
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
-        capture = dmsh_geometry.capture(src)
+        try: src, unculled = dmsh_entry.vs_viewport_mask(src)
+        except ValueError as e: return 'vertex viewport mask failed', str(e), None
+        viewport_mask = src != unculled
+        capture = dmsh_geometry.capture(unculled)
         src, full = dmsh_entry.vs_depth(src)
+        layer_source = dmsh_entry.vs_depth(unculled)[1] if viewport_mask else full
         full += capture
         discard = dmsh_entry.vs_writes(src, dmsh_reflect.reflect(key, 'vs', src, res))
-        if discard: full += dmsh_entry.vs_discard(src)
-        if j.get('tf'): full += vs_tf(src, j['tf'])   # transform feedback capture (see vs_tf)
+        if discard: full += dmsh_entry.vs_discard(unculled)
+        if j.get('tf'): full += vs_tf(unculled, j['tf'])   # transform feedback capture (see vs_tf)
         plain = full
-        full, lay = dmsh_entry.vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
+        full, lay = dmsh_entry.vs_layer_entry(full, layer_source)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
         open(msl, 'w').write(full)
     if j['stage'] == 'ds' and tess and 'unsupported' not in tess:   # the domain is the last stage before the rasterizer: the two depth-convention entry points (see vs_depth)
         capture = dmsh_geometry.capture(src)   # and its capture entry, for a geometry shader after it (nvn_tess.inc, as a vertex shader's for nvn_geometry.inc)
@@ -924,6 +928,7 @@ def finish(key, w, j, c1):
                **({'entry_object': 'main0_o'} if mesh['kind'] == 'ms' and not mesh.get('task', True) else {})} if mesh else {}),
             **({'mesh_spill': 1} if mesh and mesh.get('spill') else {}),   # the mesh stage's array is a device slice: the host binds the scratch buffer at DMSH_MESH_SCRATCH_SLOT (dmsh_meshstage.py to_stage)
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}), **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'ds' and tess and 'unsupported' not in tess else {}),
+            **({'viewport_mask': True} if viewport_mask else {}),
             **({'layer_out': True} if j['stage'] == 'vs' and dmsh_entry.layer_out(src) else {}),   # main0 writes the layer (see layer_out)
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),

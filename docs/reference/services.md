@@ -1255,6 +1255,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### Play report upload status
+
+- **Symptom:** the game aborts at the end of a match: `[RED] sf: the game connects to service prepo:u itself`, then `game called nn::diag abort: Result 0xe15`, back trace through `prepo::GetTransmissionStatus` (`sdk+0x38c75c`, `GetTransmissionStatus+0x2c`).
+- **Cause:** `prepo::GetTransmissionStatus` asks the prepo service whether reports are waiting to be uploaded. The host has no service process, so the SDK's own call opens `prepo:u` through `sm`, fails, and the game aborts on the Result.
+- **Fix:** hooked in `hle_offline.c`: the host never queues a report (Save, Send and RequestImmediateTransmission report success and send nothing), so the status is 0, idle.
+- **Found on:** [Nintendo Switch Sports](../../dm/games/0100D2F00D5C0000/README.md) 1.5.0 (SDK 13.3.4): winning a Chambara match (`main+0xc853b8`).
+
 ### SDK 21 socket initialization and overloads
 
 - **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).

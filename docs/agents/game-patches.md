@@ -25,6 +25,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 | Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |
 |---|---|---|---|---|---|---|---|
+| `build` → `game` | font glyph cache height clamped to 16384 | rendering | gap | judgement | 1 | [Nintendo Switch Sports](../../dm/games/0100D2F00D5C0000/README.md) | Metal's 2D texture limit; a host-side rule could clamp any TextureCache InitializeArg height instead |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
@@ -74,6 +75,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
+| [Nintendo Switch Sports](#nintendo-switch-sports) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Ori and the Will of the Wisps](#ori-and-the-will-of-the-wisps) | 0 | 0 | 10 | 0 | 0 | `build` → `engine` |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
@@ -442,6 +444,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
   - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
+
+### Nintendo Switch Sports
+
+[Nintendo Switch Sports](../../dm/games/0100D2F00D5C0000/README.md), `0100D2F00D5C0000`, [patches.py](../../dm/games/0100D2F00D5C0000/patches.py).
+
+- **`build` → `game`**, rendering, gap, judgement: font glyph cache height clamped to 16384. Metal's 2D texture limit; a host-side rule could clamp any TextureCache InitializeArg height instead
+
+- **1.5.0 `main`** `2f6883e8…` ([patches.py:7](../../dm/games/0100D2F00D5C0000/patches.py#L7))
+  - cut `+0x238e5c`: font glyph cache height: ldr w8, [x22, #4] -> mov w8, #0x4000 (Metal 2D limit 16384)
 
 ### Ori and the Will of the Wisps
 

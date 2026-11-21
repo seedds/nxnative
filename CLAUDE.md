@@ -31,7 +31,7 @@ The user writes in Spanish: reply in Spanish. Code, comments, docs, log messages
   | Boundary | Where | Reference | Tests |
   |---|---|---|---|
   | Host (SVCs, SDK services) | `dm/host` | `docs/reference/services.md`, `threads.md`, `memory.md`, `audio.md`, `movies.md`, `frame-rate.md` | `make -C dm/host/tests GAME=<id> run` (Mac) |
-  | Platform layer of the port | `dm/host/plat/` (Phase 0, branch `multiplataforma-fase0-wip`) | `docs/design/migration-status.md` | CTest in `dm/host/CMakeLists.txt` (Docker) |
+  | Platform layer of the port | `dm/host/plat/` (Phase 0, on `multiplataforma`) | `docs/design/migration-status.md` | CTest in `dm/host/CMakeLists.txt` (Docker) |
   | Execution engine | native ARM64 on Apple (`dm/host/entry.S`, `dm/gfx/nvn/nvn_entry.S`, `nvn_thunks.S`, Mach state in `hle_thread.c`); AOT recompiler for x86-64 | `docs/design/aot-recompiler.md` | differential tests against dynarmic (Phase 2) |
   | NVN on Metal | `dm/gfx/nvn` | `docs/reference/rendering.md`, `nvn-objects.md`, `shaders.md` | `make -C dm/gfx/tests GAME=<id> run` (Mac) |
   | Vulkan and OpenGL layers | `dm/gfx/vk`, `dm/gfx/gl` | `docs/reference/rendering.md` (Vulkan layer and OpenGL layer sections) | same |

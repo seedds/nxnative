@@ -116,6 +116,20 @@ static int mii_host_save(void) {   // under g_mii_mu: the host's Miis, written t
     if (!ok) { unlink(t); LOG("[RED] mii: cannot write %s: the Mii is kept for this run only", p); }
     return ok;
 }
+// The Nextendo account's Mii (its profile's StoreData) joins the console's Miis in Nextendo mode, unless one of them has its create ID. hle_nextendo_social_apple.m has
+// the strong definition: 1 and the StoreData in Nextendo mode with a Mii on the account, else 0. A StoreData's data CRC is the CRC-16 of the bytes before the device CRC, big-endian, so those 0x42 bytes give 0 when
+// it is whole; the device CRC belongs to the console that made the Mii and is not checked
+__attribute__((weak)) int dm_nextendo_account_mii(uint8_t store[MII_STORE]) { (void)store; return 0; }
+static void mii_account_add(void) {
+    uint8_t sd[MII_STORE]; mii_charinfo c;
+    if (!dm_nextendo_account_mii(sd)) return;
+    if (mii_crc16(sd, MII_STORE - 2)) { LOG("[RED] mii: the Nextendo account's Mii fails its data CRC: it is not listed"); return; }
+    mii_from_store(&c, sd);
+    for (int i = 0; i < g_mii_n; i++) if (!memcmp(g_mii_db[i].create_id, c.create_id, sizeof c.create_id)) { LOG("mii: the Nextendo account's Mii is the console database's entry %d", i); return; }
+    if (g_mii_n >= MII_DB_MAX) { LOG("[RED] mii: the console's database is full: the Nextendo account's Mii is not listed"); return; }
+    g_mii_db[g_mii_n] = c; g_mii_own = ++g_mii_n;   // counted with the console's Miis, so the host's file never keeps it
+    LOG("mii: the Nextendo account's Mii is database entry %d", g_mii_n - 1);
+}
 static void mii_db_load(void) {
     char t[1024], p[1100]; const char *sys = dm_system_dir(t, sizeof t); g_mii_n = g_mii_own = 0;
     snprintf(p, sizeof p, "%s/save/8000000000000030/MiiDatabase.dat", sys);
@@ -127,6 +141,7 @@ static void mii_db_load(void) {
         if (r < 0) LOG("[RED] mii: %s is %s: the database stays empty", p, why[-r]);
         else { g_mii_n = g_mii_own = r; LOG("mii: %d Miis of the console's database from %s", r, p); }
     }
+    mii_account_add();
     if (!mii_host_path(p, sizeof p) || !(f = fopen(p, "rb"))) return;
     size_t cap = MII_HOST_HEAD + MII_DB_MAX * sizeof(mii_charinfo) + 1;
     uint8_t *b = malloc(cap); size_t n = b ? fread(b, 1, cap, f) : 0; fclose(f);

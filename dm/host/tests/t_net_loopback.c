@@ -9,6 +9,11 @@ void dm_guest_sleep_ns(int64_t ns) { struct timespec ts = {ns / 1000000000, ns %
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; pthread_cond_timedwait_relative_np(c, m, &ts); }
 uint64_t guest_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec; }
 int dm_detclock_enabled(void) { return 0; }
+void *guest_sym(const char *name) { (void)name; return NULL; }   // no game: a failed socket call keeps only the host's errno (hle_net.c dm_net_guest_errno)
+// As t_net_eventfd.c: hle_net.c sits on the socket backend, whose host waits need no guest bookkeeping here, and no guest call reaches entry.S's dm_hle_wait_enter
+void dm_guest_host_wait_begin(void) {}
+void dm_guest_host_wait_end(void) {}
+void dm_hle_wait_enter(void) { abort(); }
 
 static void address(uint8_t out[16], uint32_t ip, unsigned port) {
     uint8_t b[16] = {16, 2, (uint8_t)(port >> 8), (uint8_t)port, (uint8_t)(ip >> 24), (uint8_t)(ip >> 16), (uint8_t)(ip >> 8), (uint8_t)ip}; memcpy(out, b, sizeof b);

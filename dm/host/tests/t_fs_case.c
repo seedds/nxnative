@@ -12,6 +12,7 @@ static int fake_setxattr(const char *p, const char *name, const void *v, size_t 
 }
 #define setxattr fake_setxattr
 #include HLE_FS_SOURCE
+#include "bcat_absent.h" // standalone fixture: no calendar provider is linked
 #undef setxattr
 struct dm_flags g_flag; uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }

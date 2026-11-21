@@ -9,6 +9,8 @@ How the host meets each part of a Switch game, and every failure met so far, one
 | [memory.md](memory.md) | Guest layout, heap and application pool, virtual address memory and the alias region (the SDK's node area), engine allocators, mapping SVCs, running out of memory |
 | [threads.md](threads.md) | Thread creation and cores, address arbitration, yields and spin waits, events |
 | [services.md](services.md) | SDK calls and system services: sm connections, names that changed between SDKs, file system and saves, add-on content, input, keyboard and applets, display and operation mode, accounts and network, settings and fonts, C library and time, modules |
+| [online-services.md](online-services.md) | Optional native TLS, private service policy/NSD, and explicit account/social providers; no authorization UI |
+| [nextendo-bcat.md](nextendo-bcat.md) | Optional signed-eligibility calendar preparation, pre-guest refresh, immutable delivery snapshots and offline failure behavior |
 | [movies.md](movies.md) | The SDK's movie library: decoder lifecycle, output slots, native-texture output, demuxers and codecs, game movie players |
 | [audio.md](audio.md) | The audio renderer and its command lists by SDK, AudioOut and devices, codecs, timing |
 | [frame-rate.md](frame-rate.md) | The host's frame step, engine frame limiters, present intervals and display rates, CPU cost |

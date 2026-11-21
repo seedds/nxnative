@@ -765,15 +765,38 @@ def rd(o, enc):
     if app == 0x10: v += o
     if app == 0x30: v += ehs
     return v, sz
-_, penc, cenc, tenc = IMG[ehs:ehs + 4]
-o = ehs + 4
-_, s = rd(o, penc); o += s
-nfde, s = rd(o, cenc); o += s
 starts = set()
-for _ in range(nfde):
-    a, s = rd(o, tenc); o += s
-    _, s = rd(o, tenc); o += s
-    starts.add(a)
+if struct.unpack_from('<i', IMG, m0 + 20)[0] == struct.unpack_from('<i', IMG, m0 + 16)[0]:
+    # No .eh_frame_hdr (an empty range in MOD0): a module built with devkitA64's linker script (an exlaunch plugin) points both ends at .eh_frame itself. Its FDEs give the same
+    # function starts: walk the records, taking each CIE's 'R' augmentation as the encoding of the FDEs after it, up to the zero terminator
+    o, fenc = ehs, 0x1B
+    while o + 8 <= len(IMG):
+        ln = struct.unpack_from('<I', IMG, o)[0]
+        if ln in (0, 0xFFFFFFFF): break
+        if struct.unpack_from('<I', IMG, o + 4)[0] == 0:   # CIE: version, augmentation string, code / data alignment (uleb / sleb), return register, augmentation data
+            p = o + 9; aug = IMG[p:IMG.index(b'\0', p)].decode('latin1'); p += len(aug) + 1
+            for _ in range(2):
+                while IMG[p] & 0x80: p += 1
+                p += 1
+            p += 1
+            if aug.startswith('z'):
+                while IMG[p] & 0x80: p += 1
+                p += 1
+                for c in aug[1:]:
+                    if c == 'R': fenc = IMG[p]; p += 1
+                    elif c == 'P': p += 1 + rd(p + 1, IMG[p])[1]
+                    elif c == 'L': p += 1
+        else: starts.add(rd(o + 8, fenc)[0])
+        o += 4 + ln
+else:
+    _, penc, cenc, tenc = IMG[ehs:ehs + 4]
+    o = ehs + 4
+    _, s = rd(o, penc); o += s
+    nfde, s = rd(o, cenc); o += s
+    for _ in range(nfde):
+        a, s = rd(o, tenc); o += s
+        _, s = rd(o, tenc); o += s
+        starts.add(a)
 starts = sorted(x for x in starts if x < TEXT_END)
 
 # ---- Linear scan to find all rewrite points (not relying on register read/write reports) ----

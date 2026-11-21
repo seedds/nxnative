@@ -146,6 +146,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Metroid Dread](010093801237C000/README.md) | `010093801237C000` | 2.1.0 | 11.4.3 | MercurySteam's engine | NVN |
 | [Metroid Prime 4: Beyond](010019A01E2F2000/README.md) | `010019A01E2F2000` | 1.1.0 | 19.3.15 | Retro Studios' engine | NVN |
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN |
+| [Mina the Hollower](0100DCD01F306000/README.md) | `0100DCD01F306000` | 1.0.6 | 21.4.3 | Yacht Club Games | NVN |
 | [Minecraft Dungeons II](0100A7C01B792000/README.md) | `0100A7C01B792000` | 1.1.3.0 | 20.5.15 | Unreal Engine 5, Wwise, Havok | NVN |
 | [Minecraft for Nintendo Switch](0100D71004694000/README.md) | `0100D71004694000` | 1.26.62 | 20.5.14 | RenderDragon, FMOD | Vulkan |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN |

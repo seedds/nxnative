@@ -91,6 +91,16 @@ def online_sdk(body):   # the online SDK an NRO is (by its exports), or None
     return next((what for sym, what in ONLINE_SDKS.items() if sym in names), None)
 
 
+def fit_pages(body, name):
+    """The NRO with its data on a 16 KB page of its own (nro_layout.py): what the rewriter and the host get. nro.tsv keeps the original's SHA-256 and size, which the game hands nn::ro"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import nro_layout
+    try: out, D, notes = nro_layout.relayout(body)
+    except nro_layout.Error as e: sys.exit(f'[RED] {name}: {e}')
+    if D: print(f'{name}: ' + '; '.join(notes))
+    return out
+
+
 def main():
     args = [a for a in sys.argv[1:] if a != '--missing-ok']; missing_ok = len(args) != len(sys.argv) - 1
     romfs, out = args[0], args[1]
@@ -149,7 +159,7 @@ def main():
         if what:   # listed, not written: the host refuses to load it (hle_ro.c)
             rows.append(f'refused\t{h.hex()}\t{len(body)}\t{want[h]}\t{how} {where} ({what})'); refused += 1; continue
         name = f'nro{i}'; i += 1
-        open(os.path.join(out, name + '.nro'), 'wb').write(body)
+        open(os.path.join(out, name + '.nro'), 'wb').write(fit_pages(body, name))
         rows.append(f'{name}\t{h.hex()}\t{len(body)}\t{want[h]}\t{how} {where}')
     if refused: print(f'{refused} NRO(s) of an online SDK refused, not rewritten (listed as refused in nro.tsv)')
     open(os.path.join(out, 'nro.tsv'), 'w').write('# name\tsha256\tsize\tnrr\twhere\n' + '\n'.join(rows) + '\n')

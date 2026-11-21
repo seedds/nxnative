@@ -571,7 +571,12 @@ static void preload_nros(const char *dir, FILE *f) {
         module_t *m = &g_mod[g_nmod];
         strlcpy(m->name, name, sizeof m->name); m->nro = 1; m->nro_size = size;
         for (int k = 0; k < 32; k++) sscanf(hex + 2 * k, "%2hhx", &m->sha256[k]);
-        read_layout(m, dir); map_image(m, dir); parse_dynamic(m); register_gates(m, dir);
+        read_layout(m, dir);
+        // map_image seals [0, text_end rounded up to 16 KB) read + execute: data below that would be read-only, and the first relocation into it a SIGBUS in relocate()
+        // (FINAL FANTASY VIII Remastered's Math.nro: text, ro and data of 4 KB each). nro_collect.py moves such data up (nro_layout.py); stop here on a copy collected before that
+        if (m->data_off < ((m->text_end + 0x3FFF) & ~0x3FFFull))
+            die("NRO %s: data at %#llx shares a 16 KB page with code (text ends at %#llx): collect the NROs again so dm/tools/nro_layout.py moves it", m->name, (unsigned long long)m->data_off, (unsigned long long)m->text_end);
+        map_image(m, dir); parse_dynamic(m); register_gates(m, dir);
         // The NRO header gives initialized data separately from bss. Keep only those bytes: bss is known zero before the first load, even for FFX's 925 MB static heap.
         m->pristine_len = *(const uint32_t *)(m->base + 0x34);
         if (*(const uint32_t *)(m->base + 0x30) != m->data_off || m->pristine_len > m->key_page_off - m->data_off) die("%s: NRO data layout mismatch", m->name);

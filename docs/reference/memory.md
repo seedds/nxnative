@@ -71,6 +71,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); after the fix its startup heap is 3.08 GB.
 - **Check:** the memory SVC tests compare used-memory queries with an ordinary large-bss module and a larger NRO present together.
 
+### NRO data on the code's 16 KB page
+
+- **Symptom:** `CRASH sig=10 addr=nro<N>+0x… pc=relocate+…` with `lr=nro_load+…` under `h_ro_LoadModule`, at the game's first `nn::ro::LoadModule` of a small NRO; `x9` points at a RELA entry of type `0x403` (`R_AARCH64_RELATIVE`).
+- **Cause:** Horizon maps NROs at 4 KB, the hosts at 16 KB. `map_image` (loader.c) seals `[0, text_end rounded up to 16 KB)` read + execute, and `gen_embed.py` puts the same range in the iOS executable's text, so a module whose data starts below that boundary has read-only data, and the first relocation into it faults. FINAL FANTASY VIII Remastered's Math.nro is text, ro and data of 4 KB each (data at `0x2000`); its Platform.nro has data at `0x3000`.
+- **Fix:** `dm/tools/nro_layout.py`, run by `nro_collect.py` on every NRO it writes (and by `capture_nro` on a captured one), moves ro and data up by whole 4 KB pages until data starts on a 16 KB page of its own. Text takes the zero padding, so the segments stay back to back. It rewrites the NRO header, MOD0, the dynamic tags, symbol values, RELA / JMPREL / RELR, the text's `adrp` / `adr` / literal loads into the moved part, and `.eh_frame_hdr` / `.eh_frame`. `nro.tsv` keeps the original SHA-256 and size, which the game hands `LoadModule`. `preload_nros` stops with a message naming the module, not a SIGBUS, on a copy collected before the fix.
+- **Found on:** [FINAL FANTASY VIII Remastered](../../dm/games/01008B900DC0A000/README.md) (Math.nro and Platform.nro of its 14).
+- **Check:** `nro_layout.py <in> <out>` prints what moved. On both modules, disassembling the original and the moved copy and comparing every `adrp` / `adr` / literal target and the FDE ranges found no difference beyond the move (51 and 127 references); `dm/tools/tests/test_nro_layout.py` builds a module of the same shape.
+
 ### Thread stacks backed by active NRO data
 
 - **Symptom:** repeated `[RED] MapMemory refused (0xd401)` for a stack source inside a loaded NRO's writable data, then an abort in `MapAliasStack` / `CreateThread`.

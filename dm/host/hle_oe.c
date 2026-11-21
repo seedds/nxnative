@@ -101,6 +101,13 @@ void dm_focus_set(int st) {
 }
 static int opmode(void) { return dm_opmode(); }
 
+// oe::Initialize is replaced by the host, so SDK wrappers must never access its
+// uncreated am ApplicationFunctions. These two only toggle Horizon's crash-report
+// service (command 90), not process signal handling. There is no such service on
+// the host; native crash diagnostics remain enabled. Found on FIFA 23, SDK 13.3.5.
+HLE_FORCE("_ZN2nn2oe17EnableCrashReportEv", "Horizon crash-report service switch; no host service", void, h_oe_EnableCrashReport, void) {}
+HLE_FORCE("_ZN2nn2oe18DisableCrashReportEv", "Horizon crash-report service switch; no host service", void, h_oe_DisableCrashReport, void) {}
+
 // The SDK's backlight calls dereference am's absent CommonStateGetter.
 // The host does not control a Switch LCD; leave the host display on.
 HLE_FORCE("_ZN2nn2oe20SwitchLcdBacklightOnEv", "turn the handheld screen on (through am); the host has no Switch LCD", void, h_oe_LcdOn, void) {}

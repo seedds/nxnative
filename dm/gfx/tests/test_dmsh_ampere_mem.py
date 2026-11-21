@@ -132,6 +132,27 @@ class GuardedWrites(Translated):
         self.assertIn('cp_t_cb262147_10068006', msl)
 
 
+class GatherOffsets(Translated):
+    def test_runtime_per_texel_offsets_move_the_coordinates(self):
+        # MOV R16, c4[0]; MOV R17, c4[4]; TLD4.PTP R24, R6, R16. The atomic keeps a gather result live.
+        load0 = (0x000fe20000000f00, 0x0100000000107a02)
+        load1 = (0x000fe20000000f00, 0x0100010000117a02)
+        gather = (0x000f4600001e2f0e, 0x3000041006189b63)
+        # The depth-compare form has a third source in its second block, R18.
+        reference = (0x000fe20000000f00, 0x3f00000000127802)
+        gather_compare = (0x000f4600001e6f0e, 0x2000041006189b63)
+        use = (0x020ea200001ee000, 0x00000c18030c7593)
+        for call, body in (('.gather(', (gather,)), ('.gather_compare(', (reference, gather_compare))):
+            with self.subTest(call=call):
+                msl = self.translate(b''.join(inst(*op) for op in (load0, load1, *body, use, EXIT)))
+                self.assertIn('.get_width()', msl)
+                self.assertIn('.get_height()', msl)
+                self.assertEqual(msl.count(call), 4)
+                for line in msl.splitlines():
+                    if call in line:
+                        self.assertNotRegex(line, r', int2\((?!0\))')
+
+
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
         msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))

@@ -12,6 +12,9 @@
 // 16 DumpAllocatorStats, 17 IsInternallyThreadSafe, 18 ValidateHeap, 19 GetDescriptiveName, 20 OnMallocInitialized (main+0x5e4c0e8: TryMalloc / TryRealloc call +0x18 / +0x28, GCreateMalloc
 // calls +0x88 and +0xa0; Free is main+0x10, which reads the pool base as GetAllocationSize does). OCTOPATH TRAVELER II's vtable has no OnMallocInitialized, so the 21st word copied
 // is the next vtable's offset to top, which nothing calls
+// Unreal Engine 4.24 (DRAGON BALL Z: KAKAROT, getter at slot 17) has 18 slots. Its interface predates TryMalloc and TryRealloc.
+// Malloc 3 takes x1/w2, Realloc 4 takes x1/x2/w3, Free 5 uses x1, QuantizeSize 6 takes x1/w2, and GetAllocationSize 7 stores 64 bits at [x2].
+// Trim, TLS cache setup and teardown, and DumpAllocatorStats move to slots 8, 9, 10, and 14. The two words after the getter are the next vtable's header.
 // Unreal Engine 5.6 (FINAL FANTASY RESONANCE; the getter at slot 26) adds MallocZeroed / TryMallocZeroed after Free and two TLS cache calls after the setup, and two cached-memory queries at the end: 0-1 destructors,
 // 2-5 FExec, 6 Malloc, 7 TryMalloc, 8 Realloc, 9 TryRealloc, 10 Free, 11 MallocZeroed, 12 TryMallocZeroed, 13 QuantizeSize, 14 GetAllocationSize, 15 Trim, 16 SetupTLSCachesOnCurrentThread,
 // 17 MarkTLSCachesAsUsedOnCurrentThread, 18 MarkTLSCachesAsUnusedOnCurrentThread, 19 ClearAndDisableTLSCachesOnCurrentThread, 20 InitializeStatsMetadata, 21 UpdateStats, 22 GetAllocatorStats,
@@ -28,13 +31,14 @@
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
-enum { UE5, UE4_27, UE5_6, UE3 };
+enum { UE5, UE4_27, UE5_6, UE3, UE4_24 };
 // name: the slot of the name getter, which the rewriter reports (UE_MALLOC_SLOT); size32: the size arguments and results are 32-bit (UE3); try_malloc / try_realloc 0: no such slot
 static const struct { int name, nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; bool size32; } k_lay[] = {
     [UE5] = { 22, 26, 6, 7, 8, 9, 10, 11, 12, { 13, 14, 15, 19 } },      // Trim, the TLS cache setup and teardown, DumpAllocatorStats
     [UE4_27] = { 19, 21, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },
     [UE5_6] = { 26, 32, 6, 7, 8, 9, 10, 13, 14, { 15, 16, 17, 18, 19, 23 } },   // Trim, the four TLS cache calls, DumpAllocatorStats
     [UE3] = { -1, 25, 4, 0, 5, 0, 6, 3, 20, { 13, 21, 22 }, true },   // the TLS cache flush and setup, Trim
+    [UE4_24] = { 17, 18, 3, 0, 4, 0, 5, 6, 7, { 8, 9, 10, 14 } },
 };
 static const struct { const char *build, *what; int layout; uint64_t obj, vtable, cut; uint32_t cut_insn; } k_ue[] = {   // cut_insn: the instruction the cut leaves
     // Batman: Arkham Knight 1.0.5: the allocator object (main+0x51818c0, bss), its vtable (main+0x329a408, 25 slots), the cut (main+0x192ec14: a branch past the inlined constructor)

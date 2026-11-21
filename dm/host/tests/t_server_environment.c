@@ -1,12 +1,20 @@
-// Server environment queries offline (hle_offline.c, from PR #1199): the takeovers are looked up by their mangled names in the real swforce registrations, so a missing or misspelled
-// one fails, as it would fall through to the SDK's nsd client and abort on a host that serves no nsd service
+// Offline service takeovers are looked up by their SDK names in the real swforce registrations. A missing or misspelled name would let the SDK call its own service client.
+#define DM_LOG_IMPL
 #include "../hle_offline.c"
 #include <mach-o/getsect.h>
+#include <stdarg.h>
 
-static int unexpected, checks, failed;
+static int unexpected, checks, failed, enters, leaves;
+static char message[256];
+void dm_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(message, sizeof message, fmt, ap);
+    va_end(ap);
+}
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; unexpected++; }
-void dm_applet_enter(const char *name) { (void)name; unexpected++; }
-void dm_applet_leave(void) { unexpected++; }
+void dm_applet_enter(const char *name) { if (strcmp(name, "error")) unexpected++; enters++; }
+void dm_applet_leave(void) { leaves++; }
 // hle_offline.c's socket overloads go to the host's sockets (hle_net.c): none may run here
 int dm_sk_socket(int f, int t, int p) { (void)f; (void)t; (void)p; unexpected++; return -1; }
 int dm_sk_bind(int fd, const void *a, unsigned n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }
@@ -36,7 +44,7 @@ static void *hook(const char *name) {
     CHECK(count == 1 && fn, name);
     return count == 1 ? fn : NULL;
 }
-int main(void) {
+static void check_server_environment(void) {
     int (*type)(void) = hook("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv");
     void (*identifier)(char *) = hook("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE");
     if (type && identifier) {
@@ -48,7 +56,29 @@ int main(void) {
         // oe::ServerEnvironmentType 1 is lp1 (the game's enum-to-name table): the type agrees with the identifier. oe::GetServerEnvironmentType reaches it through the sdk's PLT
         CHECK(type() == 1, "the server environment type is retail lp1 (1)");
     }
-    CHECK(unexpected == 0, "environment queries need no event, applet or network operation");
-    printf("server environment: %d checks, %d failed\n", checks, failed);
+    Result (*status)(uint32_t *) = hook("_ZN2nn5prepo21GetTransmissionStatusEPNS0_18TransmissionStatusE");
+    if (status) {
+        uint32_t out = UINT32_MAX;
+        CHECK(status(&out) == RES_OK, "play report status succeeds offline");
+        CHECK(out == 0, "play report transmission is idle");
+    }
+}
+
+// The friend ID lists (Super Kirby Clash) are hle_friends.c's on this branch, where the Nextendo provider answers them: t_friends checks them offline
+static void check_network_error(void) {
+    void (*show)(Result) = hook("_ZN2nn3err23ShowNetworkServiceErrorENS_6ResultE");
+    if (show) {
+        show(0x8ad23u); // Result with module 291 and description 1110
+        CHECK(strstr(message, "module 291") && strstr(message, "description 1110"), "Result error logs its module and description");
+        CHECK(enters == 1 && leaves == 1, "error applet notification enters and leaves once");
+    }
+}
+
+int main(void) {
+    check_server_environment();
+    CHECK(enters == 0 && leaves == 0, "offline queries open no applet");
+    check_network_error();
+    CHECK(unexpected == 0, "offline handlers need no event binding or network operation");
+    printf("offline services: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }

@@ -95,6 +95,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     g_shmap = [NSMutableDictionary dictionary]; g_warm_started = 1;   // no shaders or prewarm tasks in this fixture
     EXPECT("fallback skips prebuild", -1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    id<MTLLibrary> lib = [MTLCreateSystemDefaultDevice() newLibraryWithSource:@"#include <metal_stdlib>\nvertex metal::float4 v() { return 0; }" options:nil error:nil];
+    d.vertexFunction = [lib newFunctionWithName:@"v"];
+    EXPECT("fixture vertex function", 1, d.vertexFunction != nil);
     EXPECT("render through the device", 1, pso_build(d, 1, NULL) == dev->pipeline);
     EXPECT("compute through the device", 1, cps_new(nil, NULL) == dev->pipeline);
     EXPECT("render device call", 1, dev->renders); EXPECT("compute device call", 1, dev->computes);

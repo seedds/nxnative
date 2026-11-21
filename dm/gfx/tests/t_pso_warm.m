@@ -314,6 +314,17 @@ static void native_mesh(NSString *dir) {
     pso_key depth = {.dfmt = MTLPixelFormatDepth32Float, .samples = 1};
     NSError *error = nil;
     EXPECT("depth-only native mesh pipeline uses the empty fragment", 1, mtk_build(&depth, nil, live, nil, &error, NULL) != nil);
+    MTLRenderPipelineDescriptor *no_vertex = [MTLRenderPipelineDescriptor new];
+    error = nil;
+    EXPECT("missing vertex function returns an error", 1, dev_rps(no_vertex, &error) == nil && error.code == 3);
+    MTLMeshRenderPipelineDescriptor *no_fragment = [MTLMeshRenderPipelineDescriptor new];
+    no_fragment.meshFunction = live->fn;
+    error = nil;
+    EXPECT("missing mesh fragment function returns an error", 1, dev_mps(no_fragment, &error) == nil && error.code == 3);
+    MTLMeshRenderPipelineDescriptor *no_mesh = [MTLMeshRenderPipelineDescriptor new];
+    no_mesh.fragmentFunction = fragment->fn;
+    error = nil;
+    EXPECT("missing mesh function returns an error", 1, dev_mps(no_mesh, &error) == nil && error.code == 3);
     g_mtk.ms = nil;
     g_warm_t0 = bp_now(); warm_finish();
 }

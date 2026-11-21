@@ -581,6 +581,14 @@ int dm_ios_output_channels(void) { return (int)AVAudioSession.sharedInstance.out
 // All of this runs on the main queue, like the scene callbacks
 static int g_audio_bg, g_audio_intr;
 static void front_ios_audio_apply(void) { dm_audio_suspend(g_audio_bg || g_audio_intr); }
+static BOOL front_ios_same_outputs(NSArray<AVAudioSessionPortDescription *> *previous, NSArray<AVAudioSessionPortDescription *> *current) {
+    if (previous.count != current.count) return NO;
+    for (NSUInteger i = 0; i < current.count; i++) {
+        AVAudioSessionPortDescription *a = previous[i], *b = current[i];
+        if (![a.UID isEqualToString:b.UID] || ![a.portType isEqualToString:b.portType]) return NO;
+    }
+    return YES;
+}
 static void front_ios_audio_watch(void) {
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
@@ -592,12 +600,20 @@ static void front_ios_audio_watch(void) {
         }
         front_ios_audio_apply();
     }];
-    // A new output (an HDMI adapter, AirPods, a dock) or one gone: ask for the channels the new route takes, then the host gives each output a unit at that count (dm_audio_route_changed)
+    // Reapply the channel preference first. A changed output can also interrupt callbacks at the same channel count.
     [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         NSUInteger reason = [n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
-        if (reason == AVAudioSessionRouteChangeReasonCategoryChange) return;   // our own setCategory at activation; the route is the same
-        LOG("audio session: route changed (reason %lu)", (unsigned long)reason);
-        front_ios_audio_channels(AVAudioSession.sharedInstance); dm_audio_route_changed();
+        AVAudioSession *session = AVAudioSession.sharedInstance;
+        AVAudioSessionRouteDescription *previous = n.userInfo[AVAudioSessionRouteChangePreviousRouteKey];
+        BOOL moved = previous ? !front_ios_same_outputs(previous.outputs, session.currentRoute.outputs)
+                              : reason != AVAudioSessionRouteChangeReasonCategoryChange;
+        if (!moved && reason == AVAudioSessionRouteChangeReasonCategoryChange) return;
+        int old_channels = dm_audio_route();
+        front_ios_audio_channels(session);
+        if (moved || (session.outputNumberOfChannels >= 6 ? 6 : 2) != old_channels) {
+            LOG("audio session: output route changed (reason %lu)", (unsigned long)reason);
+            dm_audio_route_changed();
+        }
     }];
     [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         (void)n; LOG("audio session: the media services were reset; setting the session and the outputs up again");
@@ -605,7 +621,7 @@ static void front_ios_audio_watch(void) {
     }];
 }
 
-// Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed).
+// Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active.
 // The screen stays on while the game is active: only touches reset the idle timer, so with a controller (or during a cutscene) the screen dimmed and locked mid-game
 // Cloud saves (save_sync.h): what the game committed goes out before iOS suspends the app, without the sender's quiet wait. iOS gives a background task about half a minute
 static void save_sync_background(void) {
@@ -623,7 +639,15 @@ void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
         case 0: dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); break;
-        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
+        case 1:
+            UIApplication.sharedApplication.idleTimerDisabled = NO;
+            dm_focus_set(3);
+            g_audio_bg = 1;
+            front_ios_audio_apply();
+            guest_clock_freeze_for(1, 1);
+            save_sync_background();
+            dm_gfx_suspend(1);
+            break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;

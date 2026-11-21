@@ -260,7 +260,30 @@ static void hid_layouts(void) {
     pad_hid_sticks(&find(nin)->st, s); assert(s[2] == DM_STICK_MAX && s[3] == -DM_STICK_MAX);
     for (TestDev *d in @[steam, other, nin]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d));
     assert(!attached && !g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
-    puts("t_pad_hid_mac: Xbox axis matching and Nintendo report precedence passed");
+
+    // The PS4-mode Fighting Stick Alpha (0f0d:011c) also declares button usages 1–14, in input report 1. See PR #3061 and docs/reference/services.md.
+    NSMutableArray *taiko_buttons = [NSMutableArray array], *ps4_buttons = [NSMutableArray array];
+    for (uint32_t u = 1; u <= 14; u++) {
+        [taiko_buttons addObject:elem(0, 0, kHIDPage_Button, u)];
+        [ps4_buttons addObject:elem(0, 1, kHIDPage_Button, u)];
+    }
+    TestDev *drum = virtual_pad(@"Taiko Controller", 0x0f0d, 116), *stick = virtual_pad(@"Fighting Stick Alpha (PS4 mode)", 0x0f0d, 117);
+    drum.pid = 0x00f0; stick.pid = 0x011c; drum.virtualDevice = stick.virtualDevice = nil;
+    drum.elements = [@[elem(0, 0, 1, 0x30), elem(0, 0, 1, 0x31), elem(0, 0, 1, 0x32), elem(0, 0, 1, 0x35), elem(0, 0, 1, 0x39)]
+        arrayByAddingObjectsFromArray:taiko_buttons];
+    stick.elements = [@[x, y, z, rz, elem(0, 1, 1, 0x39), rx, ry] arrayByAddingObjectsFromArray:ps4_buttons];
+    for (TestDev *d in @[drum, stick]) hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
+    wait_ms(2200);
+    push_value(drum, taiko_buttons[2], 1); assert(buttons == DM_BTN_A);
+    push_value(drum, taiko_buttons[2], 0); assert(buttons == 0);
+    push_value(drum, taiko_buttons[9], 1); assert(buttons == DM_BTN_PLUS);
+    push_value(drum, taiko_buttons[9], 0); assert(buttons == 0);
+    push_value(stick, ps4_buttons[2], 1); assert(buttons == 0);   // the default map has no usage 3
+    push_value(stick, ps4_buttons[0], 1); assert(buttons == DM_BTN_B);
+    push_value(stick, ps4_buttons[0], 0); assert(buttons == 0);
+    for (TestDev *d in @[drum, stick]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d));
+    assert(!attached && !g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
+    puts("t_pad_hid_mac: Xbox axis matching, Nintendo report precedence and Taiko Drum layout passed");
 }
 
 int main(void) { @autoreleasepool {

@@ -173,18 +173,19 @@ def build_rows(gs):   # {build ID: [(game, display version, module)]}
     return out
 
 
-OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's other functions, 16 MB apart, so their sites read as offsets in them; its patch area starts at 0x6000000,
-                          # within a b's reach (128 MB) of a main's sites below it and of up to six other functions above
+OTHER_STEP = 0x200000
+OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's other functions, 2 MB apart, so their sites read as offsets in them; its patch area starts at 0x6000000,
+                          # within a b's reach (128 MB) of a main's sites below it and of up to forty-eight other functions above
 
 
 def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
     pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
     def emit(w): pos[0] += 4
-    at = {label: OTHER_BASE + i * 0x1000000 for i, label in enumerate(others)}
+    at = {label: OTHER_BASE + i * OTHER_STEP for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
                                 others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0)
     fn(ctx)
-    in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + 0x1000000) for label, a in at.items()}
+    in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + OTHER_STEP) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
 
 
@@ -375,12 +376,13 @@ def page():
         sdk_lines.append(f'- **sdk** {short(bid)} ({link(SDK, lineno(sdk_text, repr(bid)))}): ' + (', '.join(shipped) if shipped else 'no profile registers this build: see the comment above it'))
         for off, ob, nb, why in cuts: sdk_lines.append(f'  - cut `+{off:#x}`: {why}')
     rule_lines, comment = [], ''
+    sdk_kinds = {'node': 'node area 1 GB → 62 MB', 'align': 'regions of 4 MB and more aligned to 2 MB, as SDK 20', 'vamm': sdk.old_vamm}
     block = sdk_text[sdk_text.find("MATCH_CUTS = {'sdk'"):]
     for line in block.split('\n')[1:]:
         s = line.strip()
         if s.startswith('#'): comment = (comment + ' ' if comment else '') + s.lstrip('# ')
-        elif s.startswith(('node(', 'align(')):
-            rule_lines.append(f'- {"node area 1 GB → 62 MB" if s.startswith("node(") else "regions of 4 MB and more aligned to 2 MB, as SDK 20"}: {comment}'); comment = ''
+        elif kind := sdk_kinds.get(s.partition('(')[0]):
+            rule_lines.append(f'- {kind}: {comment}'); comment = ''
         elif s.startswith(']}'): break
     n_rules = sum(len(v) for v in getattr(sdk, 'MATCH_CUTS', {}).values())
     assert len(rule_lines) == n_rules, f'sdk_patches.py MATCH_CUTS: {len(rule_lines)} commented rules of {n_rules}'

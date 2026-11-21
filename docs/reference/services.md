@@ -1045,7 +1045,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** with the SDR answer, a Switch 2 game that renders HDR on an HDR display never does: Ocarina of Time keeps an 8-bit window (`0x25`).
 - **Cause:** `nn::vi::QueryDisplayHdrStatus` (format, on, peak in nits) and `QueryDisplayHdrPaperWhite` are answered by the host at the public wrapper (`HLE_FORCE`, `hle_vi.c`), so the SDK's own `DefaultDisplay::QueryHdrStatus` (SDK 22.2.8, `sdk+0x5de630`), with its cached status and status event, never runs. A game that asks every frame (Ocarina of Time, `main+0x346c6e4`) gets the host's current answer every frame; there is no event to signal.
 - **Fix:** the answer is the present's (`nvn_mtl.m` `mtl_hdr_vi`): with `DM_HDR=2` (Game's HDR) on a screen with EDR headroom, HDR output (format 1) with a peak of the live headroom x 203 nits (smoothed, in 5 % steps), and paper white 203 nits (BT.2408); SDR otherwise and with `DM_HDR=1` (BT.2446). With `DM_HDR` off the answer is SDR and nothing is logged.
-- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072): it recreates its window as RGB10A2 holding PQ and follows a new peak on the same frame.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#hdr) (v131072): it recreates its window as RGB10A2 holding PQ and follows a new peak on the same frame.
 
 ### Layer frame numbers
 

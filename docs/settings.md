@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [HDR](#hdr), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -76,6 +76,17 @@ flowchart LR
 - **When to change it:** when the game falls short of its frame rate in busy scenes because of GPU time: Donkey Kong Bananza's upscaler is the largest single piece of a heavy frame on an M1 (3.5-5 ms of about 24 in handheld mode). Compare the look side by side before keeping it.
 - **Cost:** none in GPU time (it saves 2.5-4 ms a frame in that case); the picture is Apple's scaler's rather than the game's. Frames where the game renders at its output size are not upscaled and keep the game's shader either way. Devices without MetalFX keep the game's upscaler.
 - **Not the same as [Upscaling](#upscaling):** that one scales the finished picture, HUD included, to the screen; this one replaces the game's own step inside the frame. Both can be on.
+
+### HDR
+
+For a screen that shows HDR (Apple calls it EDR: a MacBook Pro's or an iPad Pro's XDR screen, an iPhone's, an HDR monitor). **Off**, the default, is the usual picture.
+
+- **BT.2446:** every game is told the screen is SDR, renders its usual picture, and the app brightens it (the BT.2446 Method A inverse tone map). The whole picture gets brighter, not only the highlights: white goes as bright as the screen allows, and mid tones rise with it. On a MacBook Pro's XDR screen at a low brightness setting (room for about 15 times the usual white), a mid grey goes from 0.18 to about 0.8 to 0.9 of the usual white, and white menus and text are as bright as the brightest highlight. No grey gets darker than with Off.
+- **Game's HDR:** a Switch 2 game that renders HDR (Ocarina of Time) is told the screen has HDR and shows its own HDR picture: highlights brighter than white, while its menus and text stay at the screen's usual white. A game that cannot render HDR (it never asks whether the display has it) runs as BT.2446.
+- **Brightness** follows the screen's brightness setting. With BT.2446, white goes to the top of the room the screen has above its usual white at that setting and mid tones rise with it, so less room gives less, and with no room left the picture is the same as with Off. With Game's HDR, a game that renders HDR keeps its menus and text at the screen's usual white, and its highlights go as far above it as the screen has room for. At a low brightness setting there is more room above white than at full brightness.
+- **On a screen without HDR** nothing changes: the picture is the same as with Off. Moving the window to such a screen goes back to SDR within about a second, and back to the chosen mode on an HDR screen.
+- **While you play (Mac):** Window › HDR switches between Off, BT.2446 and Game's HDR at once, and **Next HDR Mode** (⌃⌘H) steps through them. The current mode is ticked. Game's HDR is greyed out for a game that cannot render HDR, and both HDR modes and Next HDR Mode while the window is on a screen without HDR (your choice stays and comes back on an HDR screen). The choice is kept for the next start, as the settings window keeps it.
+- **Cost:** bright pictures use more of the screen's power, which matters on a battery; the GPU time is a fraction of a millisecond.
 
 ### Game language
 
@@ -284,6 +295,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+| HDR | `DM_HDR` | `0` Off, `1` BT.2446, `2` Game's HDR |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

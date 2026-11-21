@@ -125,7 +125,7 @@ int main(void) { @autoreleasepool {
     a.d.width = a.d.height = 8; a.d.depth = a.d.levels = a.d.samples = 1;
     a.d.target = NVN_TEXTURE_TARGET_2D; a.d.format = NVN_FORMAT_RGBA8;
     serial_put(a.serial, am); res_add(am); res_commit(); mark();
-    uint64_t copies = g_snap_v; present_enqueue(&a, 1. / 60, NULL, 0, NULL); snap_commit_wait(g_snap_v);
+    uint64_t copies = g_snap_v; present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); snap_commit_wait(g_snap_v);
     CHECK("the present was copied into a snapshot", g_snap_v == copies + 1 && [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
     expect("a present snapshot", 1, 1);
     CAMetalLayer *l = offscreen_layer(); g_t_layer_set = l.residencySet;

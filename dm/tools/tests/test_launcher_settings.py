@@ -46,6 +46,14 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', 'off'))
                 self.assertEqual(s['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
 
+    def test_hdr_is_opt_in_on_both_platforms(self):   # the host reads DM_HDR 1 and 2 (nvn_mtl.m hdr_mode, hle_vi.c); every graphics API presents through the same path
+        for platform in ('ios', 'mac'):
+            for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
+                with self.subTest(platform=platform, api=api):
+                    s = build(gid, api, platform)['DM_HDR']
+                    self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', '0'))
+                    self.assertEqual(s['options'], [['0', 'Off'], ['1', 'BT.2446'], ['2', "Game's HDR"]])
+
     def test_frame_buffering_by_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000'), ('', BOTW)]:
             with self.subTest(api=api):

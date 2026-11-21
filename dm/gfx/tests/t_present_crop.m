@@ -26,6 +26,7 @@ static int failed, cases;
 static const uint8_t colors[4][4]={{255,0,0,255},{0,255,0,255},{0,0,255,255},{255,255,0,255}};
 #ifndef CROP_LEGACY_HEADER
 extern int g_shape_w,g_shape_h;   // t_host_stubs.c: the last shape the present reported to the front end
+extern int g_layer_hdr,g_layer_hdr_calls;   // t_host_stubs.c: the HDR layer the present asked for (front_layer_hdr)
 #endif
 
 #ifndef CROP_LEGACY_HEADER
@@ -39,6 +40,222 @@ static int check_present_resize(id<MTLTexture> src, int w, int h) {
     [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,src,out,NULL,g_present_uv[0],&g_fx_present);[cb endCommandBuffer];
     [g_q4 commit:&cb count:1];[g_q4 signalEvent:ev value:1];
     EXPECT("resize present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);res_remove(out);return kind;
+}
+
+// ---------- HDR output (DM_HDR): the present's routes, its pipelines, the headroom vi and the inverse tone map take ----------
+// Reference values: a float64 port of present.metal's routes (BT.2446-A from mtld3d with P_SDR from its formula, L_HDR = min(headroom x 203, 10000), output / 203, the smooth
+// maximum of SDR and Method A in ln luminance (width min(0.12, L_HDR / 203 - 1)) through one ICtCp ratio; ST 2084), run in the work folder. In SDR-white
+// units, linear mid grey 0.18 -> 0.87218 at a headroom of 16, 0.83317 at 15, 0.53161 at 8, 0.37815 at 5, 0.37262 at 4.9, 0.32120 at 4, 0.25986 at 3, 0.19336 at 2, 0.18 at 1.5
+// and 1.0 (Method A darker than SDR there); white -> the headroom; at 60, L_HDR 10000 (PQ's limit): grey 1.91653, white 49.26126, BT.709 blue 1.0 (0.6998, 0, 18.1979).
+// L_HDR 710 / 1000 (Method A's design point) / 2000: grey 0.29102 / 0.37407 / 0.61741, white 3.49754 / 4.92611 / 9.85223. Code 118 (linear 0.181164): 0.32363 at 4.
+// Y 0.01 / 0.05 / 0.41 / 0.7: 0.01387 / 0.08385 / 1.01302 / 2.27328 at L_HDR 1000, 0.02378 / 0.16243 / 2.52156 / 6.25074 at a headroom of 15. BT.709
+// (0.5, 0.25, 0.125): (1.2015, 0.5590, 0.2579) at L_HDR 1000, (3.0117, 1.2866, 0.5381) at 15, its ICtCp hue angle kept.
+// At a headroom of 1.25, sRGB 226.8 / 230.8 / 234.8 (16-bit 58288 / 59316 / 60344): 0.78114 / 0.82268 / 0.86974.
+// PQ code 594/1023 = 202.9 nits, / 203 = 0.99958 (sRGB code 254.95). BT.709 linear (0.5, 0.25, 0.125) is BT.2020 (0.40144, 0.26585, 0.14215), PQ codes at 203 nits a unit
+// (499, 458, 398), which decode to sRGB codes (187.6, 137.1, 98.9)
+#define EXPECTF(n, w, v, tol) do { double a_=(w),b_=(v); int ok_=fabs(a_-b_)<=(tol); cases++; printf("%s expected %.5f → got %.5f %s\n",n,a_,b_,ok_?"✓":"✗");failed+=!ok_; } while(0)
+static id<MTLTexture> hdr_src(MTLPixelFormat pf, int w, int h, const void *texel, size_t bpp) {   // a window texture of one value
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> t=[g_dev newTextureWithDescriptor:d];uint8_t *b=malloc((size_t)w*h*bpp);
+    for(int i=0;i<w*h;i++)memcpy(b+i*bpp,texel,bpp);
+    [t replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:b bytesPerRow:w*bpp];free(b);res_add(t);res_commit();return t;
+}
+// The present of src (whole) into an out_pf target of n x n, as present_offscreen_wait draws captures and, with fx, MetalFX first; the centre pixel as floats (an 8-bit target as
+// codes 0-255, R G B). Returns the kind (PRESENT_*)
+static int hdr_present(id<MTLTexture> src, MTLPixelFormat out_pf, int n, double rgb[3]) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:out_pf width:n height:n mipmapped:NO];d.storageMode=MTLStorageModePrivate;
+    d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;   // what MetalFX needs to write it directly, which an HDR route must not do
+    id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];int bpp=out_pf==MTLPixelFormatRGBA16Float?8:4;
+    int kind=present_offscreen_wait(src,NULL,out);
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:(NSUInteger)n*n*bpp options:MTLResourceStorageModeShared];
+    if(!out||!rb){EXPECT("HDR route target and readback made",1,0);rgb[0]=rgb[1]=rgb[2]=-1;return PRESENT_FAILED;}
+    id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+    [bl copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:n*bpp destinationBytesPerImage:n*n*bpp];
+    [bl endEncoding];[cb commit];[cb waitUntilCompleted];
+    const uint8_t *p=(const uint8_t *)rb.contents+((size_t)(n/2)*n+n/2)*bpp;
+    if(bpp==8){const __fp16 *h=(const __fp16 *)p;for(int c=0;c<3;c++)rgb[c]=h[c];}
+    else for(int c=0;c<3;c++)rgb[c]=out_pf==MTLPixelFormatBGRA8Unorm?p[2-c]:p[c];
+    return kind;
+}
+static uint32_t rgb10a2(unsigned r,unsigned g,unsigned b) { return r|g<<10|b<<20|3u<<30; }
+static void hdr_checks(void) {
+    double v[3];
+    {   // P_SDR in the shader is BT.2446-A's formula at an SDR white of 100 nits (mtld3d's 5.4395 is 87 nits): the constants as written in present.metal
+        FILE *f=fopen("../msl/present.metal","r");char line[512];double p=0,lp=0;   // run from dm/gfx/tests (make check_t_present_crop), or from the repository's root
+        if(!f)f=fopen("dm/gfx/msl/present.metal","r");
+        EXPECT("present.metal found (the test runs from dm/gfx/tests or the repository's root)",1,f!=NULL);
+        while(f&&fgets(line,sizeof line,f)){char *q;if((q=strstr(line,"float P_SDR = ")))p=atof(q+14);if((q=strstr(line,"float LOG_P_SDR = ")))lp=atof(q+18);}
+        if(f)fclose(f);
+        double want=1+32*pow(100.0/10000,1/2.4);
+        EXPECTF("present.metal P_SDR is 1 + 32 * (100 / 10000)^(1/2.4)",want,p,1e-6);EXPECTF("present.metal LOG_P_SDR is log(P_SDR)",log(want),lp,1e-6);
+    }
+    // Routes by the window's format and the target's (a 10-bit window is PQ while vi reports HDR to the game)
+    EXPECT("8-bit window into BGRA8: the bytes as they are",ROUTE_COPY,present_route(MTLPixelFormatRGBA8Unorm,MTLPixelFormatBGRA8Unorm));
+    EXPECT("8-bit window into RGBA16Float: the inverse tone map",ROUTE_ITM,present_route(MTLPixelFormatBGRA8Unorm_sRGB,MTLPixelFormatRGBA16Float));
+    EXPECT("10-bit window of a game never told HDR into BGRA8: as 8-bit values",ROUTE_COPY,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatBGRA8Unorm));
+    uint32_t pq594=rgb10a2(594,594,594);id<MTLTexture> pqw=hdr_src(MTLPixelFormatRGB10A2Unorm,4,4,&pq594,4);
+    hdr_present(pqw,MTLPixelFormatBGRA8Unorm,4,v);EXPECTF("a 10-bit window of a game never told HDR keeps its raw value (594 of 1023 as 148 of 255)",594.0/1023*255,v[0],1);
+    atomic_store(&g_hdr_vi_on,1);
+    EXPECT("PQ window into BGRA8: decoded to SDR",ROUTE_PQ_SDR,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatBGRA8Unorm));
+    EXPECT("PQ window into RGBA16Float: linear",ROUTE_PQ_LINEAR,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatRGBA16Float));
+    {   // vi's answer back to SDR (Game's HDR, then BT.2446 or Off): a 10-bit window is 8-bit values again. t_present_vi, which present_now sets from the frame's
+        // pq_item.vi_hdr, wins over the last answer (the path from the game's queue present to the route: main, "real QueuePresent" HDR case)
+        atomic_store(&g_hdr_vi_on,0);
+        EXPECT("vi reports SDR again: a 10-bit window into BGRA8 is 8-bit values",ROUTE_COPY,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatBGRA8Unorm));
+        EXPECT("  into RGBA16Float: the inverse tone map",ROUTE_ITM,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatRGBA16Float));
+        t_present_vi=1;EXPECT("  t_present_vi 1 (the frame's answer was HDR): PQ",ROUTE_PQ_LINEAR,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatRGBA16Float));
+        atomic_store(&g_hdr_vi_on,1);t_present_vi=0;
+        EXPECT("vi reports HDR, t_present_vi 0 (the frame's answer was SDR): 8-bit values",ROUTE_COPY,present_route(MTLPixelFormatRGB10A2Unorm,MTLPixelFormatBGRA8Unorm));
+        t_present_vi=-1;
+    }
+    // PQ: the paper white vi reports (203 nits, code 594) is 1.0 on the linear route and the SDR route's white
+    hdr_present(pqw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("PQ 594 on the linear route: 1.0 (paper white)",0.99958,v[0],0.002);EXPECTF("  green",0.99958,v[1],0.002);
+    hdr_present(pqw,MTLPixelFormatBGRA8Unorm,4,v);EXPECTF("PQ 594 on the SDR route: white",255,v[0],1);EXPECTF("  blue",255,v[2],1);
+    // BT.2020 primaries: a BT.709 colour stored in BT.2020 comes back as itself on both routes: the linear route writes BT.709 values too, which the layer (the screen's own colour
+    // space, as for the inverse tone map) shows in the panel's primaries, the look of the SDR present. The codes' own rounding gives (0.5005, 0.2504, 0.1244)
+    uint32_t c2020=rgb10a2(499,458,398);id<MTLTexture> cw=hdr_src(MTLPixelFormatRGB10A2Unorm,4,4,&c2020,4);
+    hdr_present(cw,MTLPixelFormatBGRA8Unorm,4,v);EXPECTF("BT.2020 (0.401, 0.266, 0.142) on the SDR route: BT.709 red code",187.6,v[0],1.5);EXPECTF("  green",137.1,v[1],1.5);EXPECTF("  blue",98.9,v[2],1.5);
+    hdr_present(cw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("the same on the linear route: BT.709 red",0.5005,v[0],0.004);EXPECTF("  green",0.2504,v[1],0.003);EXPECTF("  blue",0.1244,v[2],0.002);
+    {   // DM_CTL "shot" and regression shots of a PQ window: drawn through the SDR route into an 8-bit picture
+        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"t_present_crop_pq_%d.png",getpid()]];
+        uint32_t px=rgb10a2(499,458,398);id<MTLTexture> sw=hdr_src(MTLPixelFormatRGB10A2Unorm,8,8,&px,4);
+        shot(sw,path.UTF8String,1,NULL);
+        CGImageSourceRef is=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path],NULL);CGImageRef img=is?CGImageSourceCreateImageAtIndex(is,0,NULL):NULL;
+        EXPECT("a screenshot of a PQ window is written",1,img!=NULL);
+        if(img){uint8_t o[4]={0};CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);CGContextRef cx=CGBitmapContextCreate(o,1,1,8,4,cs,kCGImageAlphaNoneSkipLast);
+            CGContextDrawImage(cx,CGRectMake(-4,-4,8,8),img);EXPECT("  as SDR: BT.709 (0.5, 0.25, 0.125) as sRGB codes (188, 137, 99)",1,abs(o[0]-188)<=2&&abs(o[1]-137)<=2&&abs(o[2]-99)<=2);
+            printf("  shot pixel %d %d %d\n",o[0],o[1],o[2]);CGContextRelease(cx);CGColorSpaceRelease(cs);CGImageRelease(img);}
+        if(is)CFRelease(is);unlink(path.UTF8String);res_remove(sw);
+    }
+    uint32_t red=rgb10a2(594,0,0);id<MTLTexture> rw=hdr_src(MTLPixelFormatRGB10A2Unorm,4,4,&red,4);
+    hdr_present(rw,MTLPixelFormatBGRA8Unorm,4,v);EXPECT("BT.2020 red outside BT.709 on the SDR route: clipped to red",1,v[0]>=254&&v[1]<=1&&v[2]<=1);
+    hdr_present(rw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  on the linear route: BT.709 red 1.66, above SDR white",1.6598,v[0],0.006);EXPECT("  green and blue clipped at 0",1,v[1]==0&&v[2]==0);
+    // The inverse tone map of an 8-bit window: exact greys and white from a 16-bit source (the same route), then an 8-bit window. Output in SDR-white units (EDR, 1.0 = 203 nits)
+    uint16_t grey16[4]={30235,30235,30235,65535},white16[4]={65535,65535,65535,65535};   // sRGB 0.461356: linear 0.18
+    id<MTLTexture> gw=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,grey16,8),ww=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,white16,8);
+    const struct { double headroom,grey,white; } itm[]={{16,0.87218,16},{15,0.83317,15},{8,0.53161,8},{5,0.37815,5},{4.9,0.37262,4.90001},{4,0.32120,4},{3,0.25986,3},{2,0.19336,2},
+                                                       {1.5,0.18,1.5},{1.0,0.18,1.0}};   // white at the headroom
+    for(unsigned i=0;i<sizeof itm/sizeof *itm;i++){char n[112];g_hdr_test_peak=itm[i].headroom;
+        hdr_present(gw,MTLPixelFormatRGBA16Float,4,v);snprintf(n,sizeof n,"inverse tone map: mid grey 0.18 at a headroom of %.1f",itm[i].headroom);EXPECTF(n,itm[i].grey,v[0],itm[i].grey*0.004);
+        hdr_present(ww,MTLPixelFormatRGBA16Float,4,v);snprintf(n,sizeof n,"  white at a headroom of %.1f",itm[i].headroom);EXPECTF(n,itm[i].white,v[1],itm[i].white*0.004);}
+    // L_HDR at 710, 1000 (Method A's design point) and 2000 nits: the headroom that gives it, L_HDR / 203, white at that headroom
+    g_hdr_test_peak=710.0/203;hdr_present(gw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("L_HDR 710 (a headroom of 3.50): mid grey",0.29102,v[0],0.0012);
+    hdr_present(ww,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  white",3.49754,v[1],0.014);
+    g_hdr_test_peak=1000.0/203;hdr_present(gw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("L_HDR 1000 (Method A's design point, a headroom of 4.93): mid grey",0.37407,v[0],0.0015);
+    hdr_present(ww,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  white",4.92611,v[1],0.02);
+    g_hdr_test_peak=2000.0/203;hdr_present(gw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("L_HDR 2000 (a headroom of 9.85): mid grey",0.61741,v[0],0.0025);
+    hdr_present(ww,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  white",9.85223,v[1],0.04);
+    {   // other greys at L_HDR 1000 (the design point) and at a headroom of 15, never below the SDR picture (each Y as its own 16-bit sRGB code)
+        const struct { uint16_t code; double lin,design,h15; } ys[]={{6544,0.01,0.01387,0.02378},{16240,0.050002,0.08385,0.16243},{44081,0.41,1.01302,2.52156},{55987,0.700002,2.27328,6.25074}};
+        for(unsigned i=0;i<sizeof ys/sizeof *ys;i++){uint16_t px[4]={ys[i].code,ys[i].code,ys[i].code,65535};id<MTLTexture> t=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,px,8);char n[96];
+            g_hdr_test_peak=1000.0/203;hdr_present(t,MTLPixelFormatRGBA16Float,4,v);snprintf(n,sizeof n,"inverse tone map at the design point: Y %.2f",ys[i].lin);EXPECTF(n,ys[i].design,v[0],ys[i].design*0.004);
+            g_hdr_test_peak=15;hdr_present(t,MTLPixelFormatRGBA16Float,4,v);snprintf(n,sizeof n,"  at a headroom of 15: Y %.2f",ys[i].lin);EXPECTF(n,ys[i].h15,v[0],ys[i].h15*0.004);res_remove(t);}
+    }
+    {   // a headroom of 60: L_HDR stops at PQ's 10000 nits (white 49.26 x SDR white), and a saturated primary stays finite through the PQ-domain ratio
+        g_hdr_test_peak=60;hdr_present(gw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("inverse tone map at a headroom of 60 (L_HDR 10000): mid grey",1.91653,v[0],1.91653*0.004);
+        hdr_present(ww,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  white",49.26126,v[1],49.26126*0.004);
+        uint16_t px[4]={0,0,65535,65535};id<MTLTexture> t=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,px,8);hdr_present(t,MTLPixelFormatRGBA16Float,4,v);res_remove(t);
+        EXPECT("  BT.709 blue: every channel finite",1,isfinite(v[0])&&isfinite(v[1])&&isfinite(v[2]));
+        EXPECTF("  blue's red",0.6998,v[0],0.006);EXPECT("  blue's green clipped at 0",1,v[1]==0);EXPECTF("  blue's blue",18.1979,v[2],18.1979*0.004);
+    }
+    {   // no crease where SDR and Method A cross: at a headroom of 1.25 they cross at sRGB 230.8; the hard maximum's slope went from 1.05 to 1.79 over 4 codes either side,
+        // the smooth maximum's goes from 1.34 to 1.49, and the crossing itself is lifted 3 % above both curves (0.82268 against 0.79917)
+        const uint16_t codes[3]={58288,59316,60344};const double ys[3]={0.766634,0.79755,0.829182},want[3]={0.78114,0.82268,0.86974};double o[3];g_hdr_test_peak=1.25;
+        for(int i=0;i<3;i++){uint16_t px[4]={codes[i],codes[i],codes[i],65535};id<MTLTexture> t=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,px,8);hdr_present(t,MTLPixelFormatRGBA16Float,4,v);o[i]=v[0];res_remove(t);
+            char n[96];snprintf(n,sizeof n,"smooth maximum at a headroom of 1.25: Y %.4f",ys[i]);EXPECTF(n,want[i],o[i],0.0015);}
+        double s1=(o[1]-o[0])/(ys[1]-ys[0]),s2=(o[2]-o[1])/(ys[2]-ys[1]);printf("  slopes %.4f -> %.4f\n",s1,s2);
+        EXPECT("  its slope changes by under 0.3 across the crossing (the hard maximum: 0.73), x 1000",1,fabs(s2-s1)<0.3);
+    }
+    {   // one PQ-domain ratio on I, Ct and Cp keeps the ICtCp hue angle and Ct / I: BT.709 (0.5, 0.25, 0.125) at the design point. In linear light the channels do not scale
+        // alike (2.40, 2.24, 2.06; 6.02, 5.15, 4.31 at a headroom of 15): a saturated highlight gains saturation, and a strong primary can leave the gamut and clip at 0
+        uint16_t px[4]={48192,35199,25465,65535};id<MTLTexture> t=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,px,8);
+        g_hdr_test_peak=1000.0/203;hdr_present(t,MTLPixelFormatRGBA16Float,4,v);
+        EXPECTF("inverse tone map of BT.709 (0.5, 0.25, 0.125) at the design point: red",1.2015,v[0],0.006);EXPECTF("  green",0.5590,v[1],0.003);EXPECTF("  blue",0.2579,v[2],0.0015);
+        g_hdr_test_peak=15;hdr_present(t,MTLPixelFormatRGBA16Float,4,v);
+        EXPECTF("  at a headroom of 15: red",3.0117,v[0],0.012);EXPECTF("  green",1.2866,v[1],0.006);EXPECTF("  blue",0.5381,v[2],0.003);res_remove(t);
+    }
+    {   // continuous in the headroom and never darker than SDR: mid grey from a headroom of 1 to 6 in steps of 0.05 rises in steps under 0.01 and never below 0.18
+        double last=-1,worst=0,lowest=1;
+        for(int k=0;k<=100;k++){g_hdr_test_peak=1+k*0.05;hdr_present(gw,MTLPixelFormatRGBA16Float,4,v);if(last>=0)worst=fmax(worst,v[0]-last<0?1:v[0]-last);last=v[0];lowest=fmin(lowest,v[0]);}
+        EXPECT("inverse tone map: mid grey rises with the headroom in steps under 0.01, x 1000",1,worst<0.01);printf("  largest step %.5f\n",worst);
+        EXPECTF("  and never below the SDR picture's 0.18",0.18,fmin(lowest,0.18),0.00015);
+    }
+    uint8_t g8[4]={118,118,118,255};id<MTLTexture> g8w=hdr_src(MTLPixelFormatRGBA8Unorm,4,4,g8,4);
+    g_hdr_test_peak=4;hdr_present(g8w,MTLPixelFormatRGBA16Float,4,v);EXPECTF("inverse tone map of an 8-bit window: code 118 at a headroom of 4",0.32363,v[0],0.0013);
+    // The pipelines: a capture into BGRA8 between presents into RGBA16Float makes no pipeline again
+    hdr_present(g8w,MTLPixelFormatBGRA8Unorm,4,v);hdr_present(pqw,MTLPixelFormatBGRA8Unorm,4,v);hdr_present(pqw,MTLPixelFormatRGBA16Float,4,v);
+    uint64_t made=g_present_pso_made;
+    for(int k=0;k<4;k++){hdr_present(g8w,MTLPixelFormatRGBA16Float,4,v);hdr_present(g8w,MTLPixelFormatBGRA8Unorm,4,v);hdr_present(pqw,MTLPixelFormatBGRA8Unorm,4,v);hdr_present(pqw,MTLPixelFormatRGBA16Float,4,v);}
+    EXPECT("alternating BGRA8 captures and RGBA16Float presents of both routes make no pipeline again",0,(int)(g_present_pso_made-made));
+    // MetalFX: the route comes from the window's format, not from the scaler's output; MetalFX never writes an HDR target directly
+    if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {
+        g_fx_mode=1;id<MTLTexture> pqb=hdr_src(MTLPixelFormatRGB10A2Unorm,64,64,&pq594,4),g8b=hdr_src(MTLPixelFormatRGBA8Unorm,64,64,g8,4);
+        int k=hdr_present(pqb,MTLPixelFormatRGBA16Float,128,v);printf("  MetalFX of a PQ window: kind %d (%s)\n",k,k==PRESENT_METALFX?"MetalFX":"standard: the scaler refused the format");
+        // the scaler moves a flat PQ value by about 0.1 % of its code (0.989 measured on an M5 Max), 1 % in linear; the inverse tone map of the PQ code would give about 0.3
+        EXPECTF("PQ window upscaled into RGBA16Float: still the linear route, paper white 1.0",0.99958,v[1],0.02);
+        k=hdr_present(g8b,MTLPixelFormatRGBA16Float,128,v);EXPECT("8-bit window upscaled into RGBA16Float goes through MetalFX",PRESENT_METALFX,k);
+        EXPECTF("  and then the inverse tone map, not a direct write of its bytes",0.32363,v[0],0.004);
+        k=hdr_present(pqb,MTLPixelFormatBGRA8Unorm,128,v);EXPECTF("PQ window upscaled into BGRA8: the SDR route's white",255,v[0],2);
+        g_fx_mode=0;res_remove(pqb);res_remove(g8b);
+    }
+    g_hdr_test_peak=0;
+    // The screen's headroom as vi and the inverse tone map take it: capability debounced by a second, the live headroom falling at once and rising over half a second, 5 % steps
+    pthread_mutex_lock(&g_hdr_mu);
+    uint64_t t0=now_ns();g_edr_pushed=0;g_hdr_cap=-1;g_hdr_s_at=0;
+    EXPECT("no front end yet: no EDR headroom",0,hdr_capable_locked(t0));
+    g_edr_pot=1;g_edr_live=1;g_edr_pushed=1;EXPECT("an SDR screen: none",0,hdr_capable_locked(t0));
+    g_edr_pot=16;g_edr_live=4;EXPECT("an EDR screen half a second later: still none",0,hdr_capable_locked(t0+500000000ull));
+    EXPECT("a second after the change: headroom",1,hdr_capable_locked(t0+1500000000ull));
+    g_edr_pot=1;EXPECT("a moment without it: still on",1,hdr_capable_locked(t0+1600000000ull));g_edr_pot=16;EXPECT("back: on",1,hdr_capable_locked(t0+1700000000ull));
+    EXPECT("no change counted from the moment",1,hdr_capable_locked(t0+3000000000ull));
+    EXPECTF("live headroom 4: taken in 5 % steps, 1.05^28",pow(1.05,28),hdr_headroom_locked(t0),1e-9);
+    g_edr_live=2;EXPECTF("live headroom 2: falls at once, 1.05^14",pow(1.05,14),hdr_headroom_locked(t0+1000000ull),1e-9);
+    g_edr_live=4;EXPECTF("back to 4: after 0.1 s part of the way, 1.05^23",pow(1.05,23),hdr_headroom_locked(t0+101000000ull),1e-9);
+    EXPECTF("after 0.6 s all of it",pow(1.05,28),hdr_headroom_locked(t0+601000000ull),1e-9);
+    g_edr_live=0.5f;EXPECTF("below 1.0: 1.0",1,hdr_headroom_locked(t0+602000000ull),1e-9);
+    g_edr_live=4;g_hdr_s_at=0;hdr_headroom_locked(t0);g_hdr_s_at=0;   // at 4 again, and the next real-time call takes the clock afresh
+    pthread_mutex_unlock(&g_hdr_mu);
+    uint16_t peak=0;
+    unsetenv("DM_HDR");EXPECT("DM_HDR unset: vi reports SDR",0,mtl_hdr_vi(&peak));EXPECT("  and the present takes it",0,atomic_load(&g_hdr_vi_on));
+    setenv("DM_HDR","2",1);
+    EXPECT("DM_HDR=2 (Game's HDR) on an EDR screen: vi reports HDR",1,mtl_hdr_vi(&peak));EXPECT("  peak: headroom 1.05^28 x 203 nits",(int)round(pow(1.05,28)*203),peak);
+    EXPECT("  and the present takes it",1,atomic_load(&g_hdr_vi_on));
+    g_hdr_test_peak=0;EXPECTF("  the inverse tone map's L_HDR: the headroom x 203",pow(1.05,28)*203,hdr_itm_lhdr(),1e-6);
+    g_hdr_test_peak=15;EXPECTF("  at a headroom of 15: 3045",3045,hdr_itm_lhdr(),1e-6);
+    g_hdr_test_peak=60;EXPECTF("  at a headroom of 60: PQ's 10000",10000,hdr_itm_lhdr(),1e-6);g_hdr_test_peak=0;
+    setenv("DM_HDR","1",1);EXPECT("DM_HDR=1 (BT.2446 for every game): vi reports SDR",0,mtl_hdr_vi(&peak));EXPECT("  and the present follows it",0,atomic_load(&g_hdr_vi_on));
+    setenv("DM_HDR","3",1);EXPECT("DM_HDR=3 is off",0,hdr_mode());setenv("DM_HDR","2",1);
+    pthread_mutex_lock(&g_hdr_mu);g_edr_pot=1;g_edr_live=1;g_hdr_cap=0;g_hdr_cap_raw=0;g_hdr_s_at=0;pthread_mutex_unlock(&g_hdr_mu);
+    EXPECT("DM_HDR=2 on an SDR screen: vi reports SDR",0,mtl_hdr_vi(&peak));
+    // The layer the present asks the front end for: one HDR layer (the screen's own colour space) for both HDR routes, once it has been wanted at two presents in a row
+    int calls=g_layer_hdr_calls;
+    hdr_layer_update(MTLPixelFormatRGBA8Unorm);hdr_layer_update(MTLPixelFormatRGBA8Unorm);EXPECT("an SDR screen: no new layer",calls,g_layer_hdr_calls);
+    pthread_mutex_lock(&g_hdr_mu);g_edr_pot=16;g_edr_live=4;g_hdr_cap=1;g_hdr_cap_raw=1;pthread_mutex_unlock(&g_hdr_mu);
+    hdr_layer_update(MTLPixelFormatRGBA8Unorm);EXPECT("an EDR screen, one present: not yet",calls,g_layer_hdr_calls);
+    hdr_layer_update(MTLPixelFormatRGBA8Unorm);EXPECT("two presents of an 8-bit window: the HDR layer",HDR_LAYER_HDR,g_layer_hdr);
+    hdr_layer_update(MTLPixelFormatRGB10A2Unorm);hdr_layer_update(MTLPixelFormatRGB10A2Unorm);EXPECT("a PQ window: the same layer, no new request",calls+1,g_layer_hdr_calls);
+    setenv("DM_HDR","1",1);hdr_layer_update(MTLPixelFormatRGBA8Unorm);hdr_layer_update(MTLPixelFormatRGBA8Unorm);EXPECT("DM_HDR=1 (BT.2446): the same HDR layer",calls+1,g_layer_hdr_calls);
+    EXPECT("  still asked as HDR",HDR_LAYER_HDR,g_layer_hdr);
+    unsetenv("DM_HDR");hdr_layer_update(MTLPixelFormatRGB10A2Unorm);hdr_layer_update(MTLPixelFormatRGB10A2Unorm);EXPECT("DM_HDR off: the SDR layer again",HDR_LAYER_SDR,g_layer_hdr);
+    // The modes a menu offers (the Mac's Window > HDR): Game's HDR for a game without HDR runs as BT.2446; a screen without EDR greys out both HDR modes and presents SDR,
+    // the chosen mode kept; the cycling shortcut steps through the allowed ones
+    EXPECT("Game's HDR asked for, a game without HDR: BT.2446 shown and run",1,mtl_hdr_mode_shown(2,0));EXPECT("Game's HDR, a game with HDR: Game's HDR",2,mtl_hdr_mode_shown(2,1));
+    EXPECT("BT.2446: shown as itself",1,mtl_hdr_mode_shown(1,1));EXPECT("  for a game without HDR too",1,mtl_hdr_mode_shown(1,0));EXPECT("Off: Off",0,mtl_hdr_mode_shown(0,0));
+    EXPECT("Game's HDR allowed: a game with HDR on an EDR screen",1,mtl_hdr_mode_allowed(2,1,1));EXPECT("  not for a game without HDR",0,mtl_hdr_mode_allowed(2,0,1));
+    EXPECT("BT.2446 allowed for a game without HDR",1,mtl_hdr_mode_allowed(1,0,1));
+    EXPECT("  BT.2446 not on a screen without EDR",0,mtl_hdr_mode_allowed(1,1,0));EXPECT("  Off always",1,mtl_hdr_mode_allowed(0,0,0));
+    EXPECT("cycle Off -> BT.2446",1,mtl_hdr_mode_next(0,1,1));EXPECT("cycle BT.2446 -> Game's HDR",2,mtl_hdr_mode_next(1,1,1));EXPECT("cycle Game's HDR -> Off",0,mtl_hdr_mode_next(2,1,1));
+    EXPECT("cycle without HDR in the game: Off -> BT.2446",1,mtl_hdr_mode_next(0,0,1));EXPECT("  and back to Off",0,mtl_hdr_mode_next(1,0,1));
+    EXPECT("cycle on a screen without EDR: not offered, Off stays",0,mtl_hdr_mode_next(0,1,0));EXPECT("  and Game's HDR is kept",2,mtl_hdr_mode_next(2,1,0));
+    EXPECT("  and BT.2446 is kept",1,mtl_hdr_mode_next(1,0,0));
+    atomic_store(&g_hdr_game_native,1);EXPECT("the game's HDR support as decided at load",1,mtl_hdr_game_native());
+    pthread_mutex_lock(&g_hdr_mu);g_edr_pot=1;g_edr_live=1;g_hdr_cap=0;g_hdr_cap_raw=0;pthread_mutex_unlock(&g_hdr_mu);
+    setenv("DM_HDR","2",1);hdr_layer_update(MTLPixelFormatRGB10A2Unorm);hdr_layer_update(MTLPixelFormatRGB10A2Unorm);
+    EXPECT("Game's HDR on a screen without EDR: the SDR layer",HDR_LAYER_SDR,g_layer_hdr);EXPECT("  the mode kept",2,mtl_hdr_requested());EXPECT("  vi reports SDR",0,mtl_hdr_vi(&peak));
+    pthread_mutex_lock(&g_hdr_mu);g_edr_pot=16;g_edr_live=4;g_hdr_cap=1;g_hdr_cap_raw=1;pthread_mutex_unlock(&g_hdr_mu);
+    hdr_layer_update(MTLPixelFormatRGB10A2Unorm);hdr_layer_update(MTLPixelFormatRGB10A2Unorm);EXPECT("  back on an EDR screen: the HDR layer again",HDR_LAYER_HDR,g_layer_hdr);
+    unsetenv("DM_HDR");hdr_layer_update(MTLPixelFormatRGBA8Unorm);hdr_layer_update(MTLPixelFormatRGBA8Unorm);atomic_store(&g_hdr_game_native,-1);
+    atomic_store(&g_hdr_vi_on,0);res_remove(pqw);res_remove(cw);res_remove(rw);res_remove(gw);res_remove(ww);res_remove(g8w);
 }
 #endif
 
@@ -314,6 +531,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("whole-window capture callback completes",0,(int)dispatch_semaphore_wait(grabbed,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC)));
         res_remove(big);g_fx_mode=0;
     } else printf("no Metal 4 MetalFX spatial scaler on this GPU: the MetalFX present is not checked\n");
+    hdr_checks();
 #endif
     int invalid[4][4]={{-1,0,4,4},{0,-1,4,4},{0,0,0,4},{7,0,4,4}};
     for(int i=0;i<4;i++) {
@@ -417,6 +635,34 @@ int main(int argc, char **argv) { @autoreleasepool {
         h_nvnWindowFinalize((NVNwindow *)&w3);
         EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
         res_remove(sw);
+    }
+    {   // HDR: a PQ frame queued through nvnQueuePresentTexture while vi's last answer was HDR keeps the PQ decode when the game gets an SDR answer before the queue worker replays
+        // it (Game's HDR, then BT.2446 or Off). A shot of that frame, taken in present_now through the present's route (dm_gfx_shot_at, as DM_CTL shot), shows the route: PQ 594
+        // decoded is white (255), the raw code as an 8-bit value 148
+        MTLTextureDescriptor *pd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGB10A2Unorm width:8 height:8 mipmapped:NO];pd.storageMode=MTLStorageModeShared;pd.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> pw=[g_dev newTextureWithDescriptor:pd];uint32_t px[64];for(int i=0;i<64;i++)px[i]=594u|594u<<10|594u<<20|3u<<30;
+        [pw replaceRegion:MTLRegionMake2D(0,0,8,8) mipmapLevel:0 withBytes:px bytesPerRow:8*4];res_add(pw);res_commit();
+        tex_t pt={.magic=MAGIC('T', 'E', 'X', 0), .serial =10003};pt.d.width=pt.d.height=8;pt.d.depth=pt.d.levels=1;pt.d.format=NVN_FORMAT_RGB10A2;pt.d.target=NVN_TEXTURE_TARGET_2D;serial_put(pt.serial,pw);
+        win_t w4={.ntex=1};w4.tex[0]=(NVNtexture *)&pt;
+        NSString *path=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"t_present_crop_vi_%d.png",getpid()]];
+        mtl_present_progress(&before,&done);
+        atomic_store(&g_hdr_vi_on,1);   // vi told the game HDR output
+        nvn_queue_test_hold(1);
+        present(&queue,(NVNwindow *)&w4,0);
+        atomic_store(&g_hdr_vi_on,0);   // the game's next query: SDR, before the worker replays the present
+        dm_gfx_shot_at(1,path.UTF8String);
+        nvn_queue_test_hold(0);
+        uint64_t t4=display_ticket(w4.ticket[0],before);
+        pthread_mutex_lock(&g_pq_mu);int kept=t4 && g_pq[(t4-1)%PQ].vi_hdr==1;pthread_mutex_unlock(&g_pq_mu);
+        EXPECT("real QueuePresent: the frame carries vi's answer from when the game queued it (HDR)",1,kept);
+        CGImageSourceRef is=CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path],NULL);CGImageRef img=is?CGImageSourceCreateImageAtIndex(is,0,NULL):NULL;
+        uint8_t o[4]={0};
+        if(img){CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);CGContextRef cx=CGBitmapContextCreate(o,1,1,8,4,cs,kCGImageAlphaNoneSkipLast);
+            CGContextDrawImage(cx,CGRectMake(-4,-4,8,8),img);CGContextRelease(cx);CGColorSpaceRelease(cs);CGImageRelease(img);}
+        if(is)CFRelease(is);unlink(path.UTF8String);
+        printf("  queued PQ frame shot pixel %d %d %d\n",o[0],o[1],o[2]);
+        EXPECT("  and the present decodes it as PQ: its shot is white, not the raw code 148",1,img!=NULL&&o[0]>=253&&o[1]>=253&&o[2]>=253);
+        h_nvnWindowFinalize((NVNwindow *)&w4);res_remove(pw);
     }
 #endif
     h_nvnQueueFinalize(&queue);

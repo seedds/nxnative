@@ -111,6 +111,7 @@ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewCont
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 1; }
 uint64_t mtl_present_count(void) { return 0; }
+void mtl_present_edr(float potential, float live) { (void)potential; (void)live; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_fstep_settle(void) {}

@@ -398,6 +398,42 @@ static void screen_refresh(void) {
     int was = atomic_exchange_explicit(&g_screen_hz, hz, memory_order_relaxed);
     if (was && was != hz) LOG("front end: screen %d Hz → %d Hz%s", was, hz, lpm ? " (Low Power Mode)" : "");
 }
+// HDR output (front.h front_layer_hdr, front_edr_poll; nvn_mtl.m, HDR output). The layer the present asks for, applied on the main thread: SDR is the layer as DmGameView makes it
+// (BGRA8Unorm, no colour space); HDR is RGBA16Float with extended range content and no EDR metadata, extended linear in the screen's gamut, for both HDR routes (the present
+// writes BT.709 values for a PQ window too). The headroom of the screen the game view is on (the phone's, or a TV's) goes to the present when the present asks, every 32
+// presents: UIScreen's potentialEDRHeadroom and currentEDRHeadroom (iOS 16), which UIKit reads on the main thread and posts no notification for
+void mtl_present_edr(float potential, float live);   // nvn_mtl.h
+static _Atomic int g_hdr_want;   // the mode the present asked for (front.h): 0 SDR, 1 HDR
+static int g_hdr_mode;   // main thread: the mode the layer has
+// The HDR layer's colour space: the gamut the SDR layer's bytes show in, so both HDR modes keep its look. sRGB for a game view on an sRGB screen (a TV), Display P3 otherwise
+static int hdr_srgb(void) { return (g_root.game ?: g_root.view).traitCollection.displayGamut == UIDisplayGamutSRGB; }
+static CGColorSpaceRef hdr_space(void) { return CGColorSpaceCreateWithName(hdr_srgb() ? kCGColorSpaceExtendedLinearSRGB : kCGColorSpaceExtendedLinearDisplayP3); }
+static void hdr_screen(void) {   // main thread: the screen's headroom to the present, and the HDR layer's colour space for that screen
+    UIScreen *s = (g_root.game ?: g_root.view).window.windowScene.screen;
+    if (s) mtl_present_edr((float)s.potentialEDRHeadroom, (float)s.currentEDRHeadroom);
+    if (!g_hdr_mode || !g_layer) return;
+    CGColorSpaceRef cs = hdr_space();
+    if (!g_layer.colorspace || !CFEqual(g_layer.colorspace, cs)) { g_layer.colorspace = cs; LOG("front end: HDR layer in %s extended linear", hdr_srgb() ? "sRGB" : "Display P3"); }
+    CGColorSpaceRelease(cs);
+}
+void front_layer_hdr(int mode) {
+    if (atomic_exchange(&g_hdr_want, mode) == mode) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        int m = g_hdr_want;
+        if (m == g_hdr_mode || !g_layer) return;
+        g_hdr_mode = m;
+        g_layer.wantsExtendedDynamicRangeContent = m != 0;
+        g_layer.pixelFormat = m ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+        CGColorSpaceRef cs = m ? hdr_space() : NULL;
+        g_layer.colorspace = cs; CGColorSpaceRelease(cs);   // SDR: none
+        LOG("front end: %s", m ? "HDR layer (RGBA16Float, extended linear)" : "SDR layer (BGRA8Unorm)");
+        hdr_screen();
+    });
+}
+void front_edr_poll(void) {
+    static _Atomic int pending; if (atomic_exchange(&pending, 1)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ atomic_store(&pending, 0); hdr_screen(); });
+}
 // Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
 // shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch
 void front_web_attach(UIView *box) {

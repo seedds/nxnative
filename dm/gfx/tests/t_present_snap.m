@@ -61,7 +61,7 @@ static void suspend_case(void) {
     gate_encoder();
     // The OS has stopped the display link before notifying the app to suspend.
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
-    present_enqueue(&t, 1. / 60, NULL, 0, NULL); mtl_present_discard(1);
+    present_enqueue(&t, 1. / 60, NULL, 0, 0, NULL); mtl_present_discard(1);
     suspend_started = dispatch_semaphore_create(0); suspend_done = dispatch_semaphore_create(0);
     pthread_t th; pthread_create(&th, NULL, suspend_thread, NULL);
     dispatch_semaphore_wait(suspend_started, DISPATCH_TIME_FOREVER);
@@ -112,17 +112,17 @@ static void pending_copy_case(void) {
     id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; if (!gpu_gate) abort(); [g_q4 waitForEvent:gpu_gate value:1];
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
     uint64_t v0 = g_snap_v;   // a snapshot keeps its present ticket (LNPANDY/NX2Apple#1117): the copy count tells a snapshot from a fallback
-    CHECK("first snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0, NULL) != 0 && g_snap_v == v0 + 1);
-    CHECK("second snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0, NULL) != 0 && g_snap_v == v0 + 2);
+    CHECK("first snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0, 0, NULL) != 0 && g_snap_v == v0 + 1);
+    CHECK("second snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0, 0, NULL) != 0 && g_snap_v == v0 + 2);
     present_drop_for_suspend();   // Tickets are free, but the GPU still owns both allocators.
-    uint64_t v = g_snap_v, start = now_ns(), ticket = present_enqueue(&t, 1. / 60, NULL, 0, NULL);
+    uint64_t v = g_snap_v, start = now_ns(), ticket = present_enqueue(&t, 1. / 60, NULL, 0, 0, NULL);
     CHECK("pending copy falls back without waiting", ticket != 0 && now_ns() - start < 50000000);
     CHECK("pending copy's allocator was not reused", g_snap_v == v);
     gpu_gate.signaledValue = 1; mtl_drain();
     CHECK("discarded copies finish before drain returns", g_snap_ev.signaledValue >= v);
     pixels(g_snap[0].tex, 73); pixels(g_snap[1].tex, 73);
 }
-static void snap_present(const tex_t *t) { present_enqueue(t, 1. / 60, NULL, 0, NULL); mtl_present_flush(); snap_commit_wait(g_snap_v); }
+static void snap_present(const tex_t *t) { present_enqueue(t, 1. / 60, NULL, 0, 0, NULL); mtl_present_flush(); snap_commit_wait(g_snap_v); }
 // A new presented size replaces the ring slot's texture while a present that sampled the old one may still be queued on the GPU (a gate holds the queue): the old texture stays
 // resident until the slot's next use, which comes only after the replacing copy, and with it everything queued before, has run
 static void resize_case(void) {
@@ -136,7 +136,7 @@ static void resize_case(void) {
     CHECK("slot 0's old texture is still resident", [g_snap_res containsAllocation:old0]);
     snap_present(&big);
     CHECK("slot 1's old texture is still resident", [g_snap_res containsAllocation:old1]);
-    uint64_t copies = g_snap_v; present_enqueue(&big, 1. / 60, NULL, 0, NULL); mtl_present_flush();
+    uint64_t copies = g_snap_v; present_enqueue(&big, 1. / 60, NULL, 0, 0, NULL); mtl_present_flush();
     CHECK("a present while slot 0's copy is queued falls back", g_snap_v == copies);
     CHECK("the old texture stays resident while the copy is queued", [g_snap_res containsAllocation:old0]);
     gpu_gate.signaledValue = 1;

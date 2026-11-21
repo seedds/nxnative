@@ -14,7 +14,7 @@ typedef struct nq_node {
     unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
     uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said; const sync_t *sync_source; nq_receipt *receipt;
     nq_signal *signals; unsigned signal_count;   // NQ_COMMANDS: every event signal it records, in order (nq_event_issued at its commit)
-    tex_t texture; double period; int crop[4];
+    tex_t texture; double period; int crop[4]; int vi_hdr;   // NQ_PRESENT: vi_hdr, vi's HDR answer when the game queued the frame (mtl_hdr_vi_answer)
 } nq_node;
 typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[]; } nq_owned;
 // An empty open job stays at the head of its queue until more nodes arrive.
@@ -197,7 +197,7 @@ static void *nq_worker(void *unused) {
                 mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
             } else {
                 nvn_cap_present(&n->texture,n->crop);
-                present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
+                present=mtl_present(&n->texture,n->period,n->crop,n->vi_hdr,&copy); mtl_tex_unpin(n->texture.serial);
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }
@@ -330,6 +330,7 @@ uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int cro
     j->receipt=nq_new(); j->frame=dm_nvn_frame_count(); { void mtl_present_recorded(uint64_t); mtl_present_recorded(j->frame); }   // the game's own present count, for the screen wait (nvn_mtl.m)
     nq_node *n=nq_append(j,NQ_PRESENT);
     n->texture=*t; mtl_tex_pin(t->serial); n->period=period; if(crop) memcpy(n->crop,crop,sizeof n->crop);
+    n->vi_hdr=mtl_hdr_vi_answer();   // here, not on the worker: the game may ask vi again, and get another answer, before the worker replays this present
     pthread_mutex_lock(&nq_mu); nq_publish_staged(j); j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu); return ticket;
 }

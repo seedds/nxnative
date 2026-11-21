@@ -623,6 +623,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Open:** live Steam Link verification of the buttons and triggers is pending. The reporter's local Steam-specific repair restored input. The button map comes from one-at-a-time presses of a GameSir G8 through Steam Link on an iPhone, captured on the Mac, and `t_pad_hid` checks each. Both sticks worked in Donkey Kong Bananza with an earlier local version. Rumble and multiple remote players remain untested.
 - **Found on:** [Cult of the Lamb](../../dm/games/01002E7016C46000/README.md) 1.5.28 with four DLCs through Steam Link, built with engine `ccd834e0` (NX2Apple 1.4.0), reported in issue #2465.
 
+### A HORI Taiko Drum gets 8BitDo's button map
+
+- **Symptom:** on the Mac, a HORI Taiko Drum for Nintendo Switch (USB, `0f0d:00f0`, "Taiko Controller") is read as a raw HID pad, and the log says `buttons use 8BitDo's numbering`. Its buttons reach the game in the wrong places: A and R do nothing, Y acts as A, L as Y, ZL / ZR as L / R, and minus / plus as ZL / ZR.
+- **Cause:** GameController does not list the drum, so it reaches the raw HID fallback after the two-second wait. The fallback uses 8BitDo's D-input numbering by default. The drum uses HID usages 1 Y, 2 B, 3 A, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home and 14 Capture.
+- **Fix:** `pad_hid_layout_for` selects the Taiko Drum map for USB ID `0f0d:00f0`. The PS4-mode HORI Fighting Stick Alpha (`0f0d:011c`) also declares 14 button usages, so the count cannot identify the drum's map. Nintendo's report `0x3F` and the Xbox 360 layout take precedence. `DM_HID_MAP` still replaces button entries. [Fighting Stick descriptor capture](https://www.dreamcast-talk.com/forum/viewtopic.php?p=193790#p193790)
+- **Check:** `t_pad_hid` checks the drum's 14 usages and the layout selection. `t_pad_hid_mac` exercises discovery and value callbacks for the drum and a fixture based on the PS4-mode Fighting Stick descriptor. The reporter identified the drum in an IOKit probe and played Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, 6.2.0) with `DM_HID_MAP=Y=1,B=2,A=3,X=4,L=5,R=6,ZL=7,ZR=8,MINUS=9,PLUS=10,LS=11,RS=12`, which supplies the same map.
+- **Open:** a gameplay run with the physical drum and the revised host is pending.
+- **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, no profile in this repository) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
+
 ### A keyboard receiver that declares a gamepad takes player 1
 
 - **Symptom:** on the Mac, with a keyboard and mouse receiver plugged in, the log shows `controller '<receiver>' (HID) connected: player 1` and the real controller as player 2; a one-player game takes no input from it and opens the controller applet again and again (`hid controller applet: 1 to 1 players wanted, 2 connected`).

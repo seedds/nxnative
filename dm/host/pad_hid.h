@@ -8,6 +8,7 @@
 // which such a pad sends until then or when it does not answer, has its own button numbering (pad_hid_nin_map) and carries the sticks raw (pad_hid_raw_axis).
 // Steam Link's virtual Xbox 360 pad, GamePad-N (045e:028e, GitHub issue #2465), delivers Xbox button usages and six Generic Desktop axes:
 // X / Y left stick, Rx / Ry right stick, Z / Rz the two triggers (pad_hid_axis_for). Select that layout only for the matching ID and axes.
+// HORI's Taiko Drum for Switch (0f0d:00f0, PR #3061) reports buttons in the console's order (pad_hid_taiko_map).
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -18,7 +19,7 @@
 
 #define PAD_HID_DEFAULT_VENDOR 0x2DC8   // 8BitDo, whose numbering the default map is (another vendor's pad gets a log line saying so, pad_hid_mac.h)
 enum { PH_X, PH_Y, PH_Z, PH_RX, PH_RY, PH_RZ, PH_BRAKE, PH_ACCEL, PH_AXES };
-enum pad_hid_layout { PAD_HID_DEFAULT, PAD_HID_NINTENDO, PAD_HID_X360 };
+enum pad_hid_layout { PAD_HID_DEFAULT, PAD_HID_NINTENDO, PAD_HID_X360, PAD_HID_TAIKO };
 typedef struct {
     uint32_t buttons;          // bit u - 1: HID button usage u held (usages 1..32)
     int hat;                   // -1 centered, 0 up, then clockwise to 7 up-left
@@ -48,12 +49,15 @@ static const uint8_t pad_hid_nin_map[16] = {2, 1, 4, 3, 11, 12, 5, 6, 7, 8, 10, 
 // Xbox 360 usages as macOS delivers Steam Link's virtual pad's values (measured one button at a time; not the descriptor's own order): 1 A (bottom), 2 B (right), 3 X (left),
 // 4 Y (top), 5 / 6 LB / RB, 7 / 8 stick clicks, 9 start, 10 back, and the d-pad as buttons 12 up, 13 down, 14 left, 15 right; the triggers are axes
 static const uint8_t pad_hid_x360_map[16] = {2, 1, 4, 3, 7, 8, 5, 6, 0, 0, 9, 10, 14, 12, 15, 13};
+// Taiko Drum usages: 1 Y, 2 B, 3 A, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture
+static const uint8_t pad_hid_taiko_map[16] = {3, 2, 4, 1, 11, 12, 5, 6, 7, 8, 10, 9};
 
 // has records the descriptor's axes before applying any layout. A virtual pad can reuse the Xbox ID with dedicated Brake / Accelerator usages.
 static enum pad_hid_layout pad_hid_layout_for(int nin, int vid, int pid, const uint8_t has[PH_AXES]) {
     if (nin & PAD_NIN_SIMPLE) return PAD_HID_NINTENDO;
     if (vid == 0x045e && pid == 0x028e && has[PH_X] && has[PH_Y] && has[PH_RX] && has[PH_RY] &&
         has[PH_Z] && has[PH_RZ] && !has[PH_BRAKE] && !has[PH_ACCEL]) return PAD_HID_X360;
+    if (vid == 0x0f0d && pid == 0x00f0) return PAD_HID_TAIKO;   // the PS4-mode HORI Fighting Stick Alpha also declares 14 button usages
     return PAD_HID_DEFAULT;
 }
 
@@ -65,9 +69,16 @@ static inline int pad_dupes_want(int n, int listed, int read, int due) { return 
 // DM_HID_MAP: comma-separated NAME=usage entries over the layout's map (an unknown name or a usage past 32 is skipped). Nintendo's report 0x3F uses
 // usages 1 B, 2 A, 3 Y, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture.
 static void pad_hid_init(pad_hid *h, const char *map, enum pad_hid_layout layout) {
-    static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
+    static const uint8_t default_map[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
+    const uint8_t *button_map = default_map;
+    switch (layout) {
+    case PAD_HID_NINTENDO: button_map = pad_hid_nin_map; break;
+    case PAD_HID_X360: button_map = pad_hid_x360_map; break;
+    case PAD_HID_TAIKO: button_map = pad_hid_taiko_map; break;
+    case PAD_HID_DEFAULT: break;
+    }
     memset(h, 0, sizeof *h); h->hat = -1; h->layout = layout;
-    memcpy(h->map, layout == PAD_HID_NINTENDO ? pad_hid_nin_map : layout == PAD_HID_X360 ? pad_hid_x360_map : def, sizeof h->map);
+    memcpy(h->map, button_map, sizeof h->map);
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;

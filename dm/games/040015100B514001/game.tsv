@@ -21,6 +21,10 @@ modules	main subsdk0 sdk
 romfs_marker	System/RegionLangMask.txt
 zip_store	.bwav:.zs:.metallib
 
+# ---- Frame rate ----
+# the frame step of patches.py: the host decides the interval in vsyncs (60 fps when the frames fit), in place of the game's own choice, which stayed at 30 fps on the Mac
+fps_target	60
+
 # ---- Memory ----
 mem_alias	0x118000000
 mem_stack	0x10000000

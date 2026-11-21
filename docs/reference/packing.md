@@ -774,3 +774,11 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+
+### Unreal 4.27 shaders with 8-byte hashes, an untagged record or a version 12 pak
+
+- **Symptom:** the shader split for an Unreal 4.27 game finds no shaders or stops on the shader library: `shader library chunk … does not parse`, `pak version 12, only … are read`, or `not an LSLG record`.
+- **Cause:** Godzilla: Destroy All Monsters Melee Remastered uses 8-byte xxHash64 values in its IoStore shader library. The reader supported 20-byte SHA-1 values, as used by FINAL FANTASY RESONANCE. Godzilla's Switch shader records omit the `LSLG` and stage tag, and its pak footer is version 12.
+- **Fix:** `uepak.py` tries 20-byte hashes first and switches to 8 only if the tables fail to parse with matching counts and consume the whole chunk. The version 2 archive stores each 8-byte hash with 12 zero bytes appended. Version 12 follows version 11's footer rules. For untagged Switch records, `raw_record` looks for a unique control section with matching code lengths and a `0x880`-byte control length. `shader_split.ue_shaders` takes the stage from the archive's frequency for those records.
+- **Check:** `test_uepak_iostore.py` covers both hash widths, a wrong-width parse that reaches the chunk's end, valid and legacy-position version 12 footers, and untagged records with code or control length mismatches or a copy of the control magic inside shader code. The [PR author](https://github.com/seedds/nxnative/pull/3022) built 6,878 Mac shaders for update 131072.
+- **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`).

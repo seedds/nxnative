@@ -24,8 +24,11 @@ static uint64_t g_rtld_page;
 
 void dm_exl_fake_rtld(void) {
     if (g_rtld || !g_nmod) return;
-    int plugin = 0;   // only with an exlaunch module loaded: its header carries this tag at +0x10 (lib/init/header.s), and no other game sees the stand-in
-    for (int i = 0; i < g_nmod && !plugin; i++) plugin = !g_mod[i].nro && g_mod[i].size >= 0x20 && !memcmp(g_mod[i].base + 0x10, "~~exlaunch uwu~~", 16);
+    // Only with an exlaunch module loaded, so no other game sees the stand-in. Its header tag (+0x10, "~~exlaunch uwu~~" in crt0.s) is renamed by some plugins
+    // (Compass: "compass_exlaunch"), so the module is known by exlaunch's own assert text for the walk this stand-in serves
+    static const char sig[] = "void exl::util::FindModules()";
+    int plugin = 0;
+    for (int i = 0; i < g_nmod && !plugin; i++) plugin = !g_mod[i].nro && memmem(g_mod[i].base + g_mod[i].ro_off, g_mod[i].key_page_off - g_mod[i].ro_off, sig, sizeof sig - 1) != NULL;
     if (!plugin) return;
     uint8_t *lowest = g_mod[0].base;
     for (int i = 1; i < g_nmod; i++) if (g_mod[i].base < lowest) lowest = g_mod[i].base;
@@ -65,7 +68,9 @@ uint64_t dm_exl_rtld_base(void) { return (uintptr_t)g_rtld; }
 uint64_t dm_exl_rtld_size(void) { return g_rtld ? 3 * g_rtld_page : 0; }
 
 // ---------- Writable views of module code (MapProcessMemory) ----------
-typedef struct { uint64_t dst, src, size; } view_t;
+// snap: the view as it was mapped. A view's changes are the words that differ from it, not from the code: exlaunch keeps a view of all of main open while it hooks through
+// short-lived ones, and that view's stale copy of each hooked word would otherwise be written back over the hook
+typedef struct { uint64_t dst, src, size; uint32_t *snap; } view_t;
 static view_t g_view[64];
 static int g_nview;
 static pthread_mutex_t g_view_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -118,13 +123,15 @@ int dm_exl_view_source_ok(uint64_t src, uint64_t size) {
 }
 void dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size) {
     pthread_mutex_lock(&g_view_mu);
-    if (g_nview < (int)(sizeof g_view / sizeof *g_view)) g_view[g_nview++] = (view_t){dst, src, size};
+    uint32_t *snap = malloc(size);
+    if (snap && g_nview < (int)(sizeof g_view / sizeof *g_view)) { memcpy(snap, (const void *)(uintptr_t)dst, size); g_view[g_nview++] = (view_t){dst, src, size, snap}; }
+    else if (!snap) LOG("[RED] exl: no memory for a %#llx-byte view's snapshot: the view at %#llx is not written back", (unsigned long long)size, (unsigned long long)dst);
     else LOG("[RED] exl: more than %d writable views of code at once: the one at %#llx is not written back", g_nview, (unsigned long long)dst);
     pthread_mutex_unlock(&g_view_mu);
 }
 
 // Writes the words a view changed back into its module's code; caller holds g_view_mu
-static void view_sync(const view_t *v) {
+static void view_sync(view_t *v) {
     module_t *m = module_of((void *)(uintptr_t)v->src);
     code_t *c = m ? code_of(m) : NULL;
     if (!c || !c->alias) return;
@@ -132,7 +139,8 @@ static void view_sync(const view_t *v) {
     uint64_t base = v->src - (uintptr_t)m->base;
     unsigned wrote = 0, refused = 0;
     for (uint64_t i = 0; i < v->size / 4; i++) {
-        if (nw[i] == old[i]) continue;
+        if (nw[i] == v->snap[i]) continue;
+        v->snap[i] = nw[i];
         uint64_t off = base + i * 4;
         if (changed_word(c, off)) {
             if (refused++ < 8) LOG("[RED] exl: a plugin writes %s+%#llx, which the rewriter changed or moved: not written", m->name, (unsigned long long)off);
@@ -140,6 +148,8 @@ static void view_sync(const view_t *v) {
         }
         *(volatile uint32_t *)(c->alias + off) = nw[i];
         sys_icache_invalidate((void *)(uintptr_t)(v->src + i * 4), 4);
+        if (old[i] != nw[i]) { if (refused++ < 8) LOG("[RED] exl: %s+%#llx written through the alias but the code still reads %#x", m->name, (unsigned long long)off, old[i]); continue; }
+        if (wrote < 4 && getenv("DM_EXL_TRACE")) LOG("exl: %s+%#llx = %#x", m->name, (unsigned long long)off, nw[i]);
         wrote++;
     }
     if (wrote || refused) LOG("exl: %u words written into %s+%#llx..+%#llx%s", wrote, m->name, (unsigned long long)base, (unsigned long long)(base + v->size),
@@ -149,7 +159,7 @@ static void view_sync(const view_t *v) {
 int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size) {
     pthread_mutex_lock(&g_view_mu);
     for (int i = 0; i < g_nview; i++) if (g_view[i].dst == dst && g_view[i].src == src && g_view[i].size == size) {
-        view_sync(&g_view[i]); g_view[i] = g_view[--g_nview];
+        view_sync(&g_view[i]); free(g_view[i].snap); g_view[i] = g_view[--g_nview];
         pthread_mutex_unlock(&g_view_mu); return 1;
     }
     pthread_mutex_unlock(&g_view_mu);

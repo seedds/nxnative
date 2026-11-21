@@ -1204,7 +1204,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
         _exit(42);
     }
-    case 0x1E: guest_clock_read_wait(); regs[0] = 0; regs[1] = guest_ticks(); return 0;   // GetSystemTick
+    // GetSystemTick: the kernel returns the tick in x0 (libnx and the SDK's svc::GetSystemTick read x0); x1 keeps it too, as answered before. 0 in x0 seeded exlaunch's
+    // std::mt19937_64 the same on every draw, and virtmemFindAslr drew the same address for ever (Pokémon Compass on Violet)
+    case 0x1E: { guest_clock_read_wait(); uint64_t t = guest_ticks(); regs[0] = t; regs[1] = t; return 0; }
     case 0x27: {  // OutputDebugString(str, len)
         if (g_flag.dbg) fprintf(stderr, "[guest] %.*s\n", (int)regs[1], (char *)regs[0]);
         regs[0] = 0; return 0;

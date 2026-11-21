@@ -26,6 +26,7 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
 // (when not NULL); SIZE_MAX when the span is untracked
 size_t nvn_dirty_since_except(const void *span, const void *addr, size_t len, uint64_t stamp, const uintptr_t (*ex)[2], int nex, uintptr_t *first);
 void nvn_dirty_frame(void);                                          // A frame was presented: write-pending pages (T-141) are protected again once a whole frame has passed since their write
+void nvn_dirty_changed(const void *addr, size_t len);                   // a reader re-read [addr, addr + len) for a real change: its hot pages go back to protection (T-141)
 void nvn_dirty_hot_stats(int *now, uint64_t *made, uint64_t *cooled);   // hot pages (compared, not protected): now, made hot, back to protection
 void nvn_dirty_pend_stats(uint64_t *pends, uint64_t *skips);         // Cumulative: write faults that made a page write-pending, protections that left a write-pending page writable
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps);           // Cumulative: number of page faults triggered by game writes, number of pages unprotected before host writes

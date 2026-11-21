@@ -34,7 +34,7 @@ enum { BLK_SHIFT = 10, BLK = 1 << BLK_SHIFT, NBLK = 256, MAX_RANGE = BLK * NBLK 
 // without a fault. A stamp older than born therefore counts as written (nvn_dirty_since_cached, nvn_dirty_since_except).
 // pins: the lock-free readers (the fault hook, the host pre-write hook, the dirty checks, describe) pin a slot before they read its fields past base and end, and add_range rewrites a
 // retired slot for the next pool only once none holds it (pin). base and end are read before the pin, to pass over slots that cannot hold the address, so they are atomic
-typedef struct { _Atomic uintptr_t base, end; uintptr_t mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; _Atomic(_Atomic uint8_t *) sparse; size_t cap; _Atomic int live, pins; _Atomic uint64_t born; _Atomic uint32_t *pend; _Atomic uint8_t *streak, *hotf; } range_t;   // pend: per page, write-pending since frame pend - 1 (0: not); streak, hotf: hot pages (below)   // pend: per page, write-pending since frame pend - 1 (0: not)   // sparse: per page, protected for a placement sparse tile (nvn_dirty_protect_sparse)
+typedef struct { _Atomic uintptr_t base, end; uintptr_t mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; _Atomic(_Atomic uint8_t *) sparse; size_t cap; _Atomic int live, pins; _Atomic uint64_t born; _Atomic uint32_t *pend; _Atomic uint8_t *streak, *hotf; _Atomic uint32_t *veto; } range_t;   // pend: per page, write-pending since frame pend - 1 (0: not); streak, hotf: hot pages (below)   // pend: per page, write-pending since frame pend - 1 (0: not)   // sparse: per page, protected for a placement sparse tile (nvn_dirty_protect_sparse)
 static inline uintptr_t rb(range_t *r) { return atomic_load_explicit(&r->base, memory_order_relaxed); }
 static inline uintptr_t re(range_t *r) { return atomic_load_explicit(&r->end, memory_order_relaxed); }
 static _Atomic(range_t *) g_blk[NBLK];
@@ -205,11 +205,13 @@ static void hot_set(range_t *r, uintptr_t p) { if (atomic_exchange(&r->gen[p], G
 // writable with its generation always newer than any stamp, so every reader checks it at each look and re-reads only what really changed (the edge check compares a texture's
 // bytes on the shared page). nvn_dirty_frame hashes each hot page once a frame; after HOT_QUIET frames with its bytes unchanged it goes back to protection (pending gives it a
 // fresh generation at the next protection). At most HOT_MAX pages are hot; past that a page is write-pending as before. DM_NVN_DIRTY_HOT=0: write-pending only
-enum { HOT_RUN = 4, HOT_GAP = 30, HOT_QUIET = 120, HOT_MAX = 256 };
+// A hot page whose texture really changes (a reader re-uploaded it: nvn_dirty_changed) goes back to protection at once and may not turn hot again for HOT_VETO frames:
+// a movie frame or a texture streamed in place is rewritten for real, and a byte compare at each use on top of the re-upload it needs anyway would only add cost
+enum { HOT_RUN = 4, HOT_GAP = 30, HOT_QUIET = 120, HOT_MAX = 256, HOT_VETO = 600 };
 static int g_hot_on = 1;
 typedef struct { range_t *r; uintptr_t p; uint64_t h; uint32_t quiet; } hot_ent;
 static hot_ent g_hot[HOT_MAX]; static int g_nhot;   // g_slot_mu
-static _Atomic uint64_t g_hot_made, g_hot_cooled, g_hot_full;
+static _Atomic uint64_t g_hot_made, g_hot_cooled, g_hot_full, g_hot_changed;
 static uint64_t page_hash(const void *page);
 static void hot_drop(int k) { g_hot[k] = g_hot[--g_nhot]; }
 void nvn_dirty_frame(void) {
@@ -225,8 +227,8 @@ void nvn_dirty_frame(void) {
     }
     pthread_mutex_unlock(&g_slot_mu);
     static uint64_t said; uint64_t m = atomic_load(&g_hot_made);
-    if (f % 600 == 0 && m != said) { said = m; LOG("[nvn-dirty] hot pages (compared, not protected): %d now, %llu made hot, %llu back to protection, %llu refused (table full); write-pending protections skipped %llu",
-        g_nhot, (unsigned long long)m, (unsigned long long)atomic_load(&g_hot_cooled), (unsigned long long)atomic_load(&g_hot_full), (unsigned long long)atomic_load(&g_pend_skips)); }
+    if (f % 600 == 0 && m != said) { said = m; LOG("[nvn-dirty] hot pages (compared, not protected): %d now, %llu made hot, %llu back to protection (%llu of them on a real change), %llu refused (table full); write-pending protections skipped %llu",
+        g_nhot, (unsigned long long)m, (unsigned long long)(atomic_load(&g_hot_cooled) + atomic_load(&g_hot_changed)), (unsigned long long)atomic_load(&g_hot_changed), (unsigned long long)atomic_load(&g_hot_full), (unsigned long long)atomic_load(&g_pend_skips)); }
 }
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
@@ -256,7 +258,8 @@ static int pending(range_t *r, uintptr_t p) {
     if (r->hotf && atomic_load(&r->hotf[p])) return 1;   // hot: compared, not protected (nvn_dirty_frame lets it go once quiet)
     uint32_t f = atomic_load(&r->pend[p]);
     if (f && atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1 - f < 2) return 1;
-    if (f && g_hot_on && r->streak && atomic_load(&r->streak[p]) >= HOT_RUN) {   // its faults keep coming back: hot instead of protected again
+    uint32_t vt = r->veto ? atomic_load(&r->veto[p]) : 0, fr = atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1;
+    if (f && g_hot_on && r->streak && atomic_load(&r->streak[p]) >= HOT_RUN && (!vt || fr - vt > HOT_VETO)) {   // its faults keep coming back: hot instead of protected again
         if (g_nhot < HOT_MAX) { g_hot[g_nhot++] = (hot_ent){r, p, page_hash((const void *)(rb(r) + (p << g_shift))), 0}; atomic_store(&r->hotf[p], 1); atomic_fetch_add(&g_hot_made, 1); return 1; }
         atomic_fetch_add(&g_hot_full, 1);
     }
@@ -384,15 +387,15 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     _Atomic uint64_t *gen = r->gen;
     if (r->cap < np) {
         free((void *)state); free((void *)gen); free((void *)atomic_load(&r->sparse));   // no reader holds them: none is pinned, and a reader pins before it reads the pointers
-        free((void *)r->pend); free((void *)r->streak); free((void *)r->hotf);
+        free((void *)r->pend); free((void *)r->streak); free((void *)r->hotf); free((void *)r->veto);
         state = calloc(np, 1); gen = calloc(np, sizeof *gen);
-        r->pend = calloc(np, sizeof *r->pend); r->streak = calloc(np, 1); r->hotf = calloc(np, 1);
-        if (!state || !gen || !r->pend || !r->streak || !r->hotf) die("dirty-page table allocation failed (%zu pages)", np);
+        r->pend = calloc(np, sizeof *r->pend); r->streak = calloc(np, 1); r->hotf = calloc(np, 1); r->veto = calloc(np, sizeof *r->veto);
+        if (!state || !gen || !r->pend || !r->streak || !r->hotf || !r->veto) die("dirty-page table allocation failed (%zu pages)", np);
         atomic_store(&r->sparse, NULL);   // sized for the old cap
         r->cap = np;
     } else {
         memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
-        memset((void *)r->pend, 0, np * sizeof *r->pend); memset((void *)r->streak, 0, np); memset((void *)r->hotf, 0, np);
+        memset((void *)r->pend, 0, np * sizeof *r->pend); memset((void *)r->streak, 0, np); memset((void *)r->hotf, 0, np); memset((void *)r->veto, 0, np * sizeof *r->veto);
         _Atomic uint8_t *sp = atomic_load(&r->sparse); if (sp) memset((void *)sp, 0, np);
     }
     atomic_store_explicit(&r->base, base, memory_order_relaxed); atomic_store_explicit(&r->end, end, memory_order_relaxed); r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
@@ -633,6 +636,23 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
     for (int i = 0; i < n; i++) active += live_at(i) != 0;
     *live = active; *used_slots = n; *adds_total = atomic_load(&g_adds_total);
+}
+// A reader found [addr, addr + len) really changed and read it again (nvn_mtl.m, a packaged texture's re-upload on pool content change): its hot pages go back to
+// protection now (at their next protection) and stay off the hot path for HOT_VETO frames
+void nvn_dirty_changed(const void *addr, size_t len) {
+    if (!g_hot_on || !len) return;
+    pthread_mutex_lock(&g_slot_mu);
+    range_t *r = find_span((uintptr_t)addr, len);
+    if (r && r->hotf) {
+        uint32_t fr = atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1;
+        for (uintptr_t i = ((uintptr_t)addr - rb(r)) >> g_shift, q = ((uintptr_t)addr + len - 1 - rb(r)) >> g_shift; i <= q; i++) {
+            atomic_store(&r->veto[i], fr ? fr : 1); atomic_store(&r->streak[i], 0);
+            if (!atomic_load(&r->hotf[i])) continue;
+            atomic_store(&r->hotf[i], 0); atomic_store(&r->pend[i], 0); atomic_fetch_add(&g_hot_changed, 1);
+            for (int k = 0; k < g_nhot; k++) if (g_hot[k].r == r && g_hot[k].p == i) { hot_drop(k); break; }
+        }
+    }
+    pthread_mutex_unlock(&g_slot_mu);
 }
 void nvn_dirty_hot_stats(int *now, uint64_t *made, uint64_t *cooled) { *now = g_nhot; *made = atomic_load(&g_hot_made); *cooled = atomic_load(&g_hot_cooled); }
 void nvn_dirty_pend_stats(uint64_t *pends, uint64_t *skips) { *pends = atomic_load(&g_pends); *skips = atomic_load(&g_pend_skips); }

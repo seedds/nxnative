@@ -23,9 +23,9 @@ static int kernel_writable(const void *p) { return page_writable((uintptr_t)p); 
 int main(void) {
     crash_install();
     size_t pg = (size_t)getpagesize();
-    volatile uint8_t *page = mmap(NULL, 6 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    volatile uint8_t *page = mmap(NULL, 8 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (page == MAP_FAILED) { perror("mmap"); return 2; }
-    nvn_dirty_add_range((const void *)page, 6 * pg);
+    nvn_dirty_add_range((const void *)page, 8 * pg);
     nvn_dirty_frame();
 
     // A write faults: the page is write-pending for this frame and the next
@@ -93,6 +93,25 @@ int main(void) {
         uint64_t f2h = atomic_load(&g_faults); hp[66] = 1;
         EXPECT("a write after it went back to protection faults again", 1, atomic_load(&g_faults) - f2h);
         EXPECT("and is seen", 1, nvn_dirty_since((const void *)hp, 16, st3));
+    }
+
+    // A hot page whose texture really changes (a reader re-uploads it) goes back to protection and may not turn hot again for HOT_VETO frames
+    {
+        volatile uint8_t *vp = page + 6 * pg;
+        for (int k = 0; k < HOT_RUN; k++) { nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)vp, pg); vp[128] = (uint8_t)k; }
+        nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)vp, pg);
+        EXPECT("veto: the page turned hot", 1, kernel_writable((const void *)vp) && atomic_load(&rg(0)->hotf[6]));
+        nvn_dirty_changed((const void *)vp, 64);   // a reader found its texture really changed
+        EXPECT("a real change takes it off the hot path", 0, (int)atomic_load(&rg(0)->hotf[6]));
+        nvn_dirty_protect((const void *)vp, pg);
+        EXPECT("and the next protection makes it read-only again", 0, kernel_writable((const void *)vp));
+        for (int k = 0; k < HOT_RUN + 2; k++) { nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)vp, pg); vp[129] = (uint8_t)k; }
+        nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)vp, pg);
+        EXPECT("within HOT_VETO frames, more quick faults do not make it hot again", 0, kernel_writable((const void *)vp));
+        for (int k = 0; k < HOT_VETO; k++) nvn_dirty_frame();
+        for (int k = 0; k < HOT_RUN; k++) { nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)vp, pg); vp[130] = (uint8_t)k; }
+        nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)vp, pg);
+        EXPECT("after HOT_VETO frames it can turn hot again", 1, kernel_writable((const void *)vp));
     }
 
     // DM_NVN_DIRTY_PENDING=0: protected again at once, as before

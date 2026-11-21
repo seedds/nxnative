@@ -974,6 +974,7 @@ NVN(nvnQueueFinish, void, NVNqueue *q) { nvn_queue_finish((queue_t *)q); }
 
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
 #define CB(c) ((cmd_t *)(c))
+#define SNAP_OFF(T) ((sizeof(T) + 7) & ~(size_t)7)
 // Command memory holds only the records; what strings them together is in the game's control memory (nvn_obj.h ctl_e), as NVN keeps a recording's end, the links between its
 // pieces of command memory and its calls of other recordings in control memory (the device reports control memory aligned to 8 bytes, item 0x14, and at least 256 of it, 0x16).
 // So nothing is ever written past what GetCommandMemoryUsed reported, which games size and place their command memory by:
@@ -1058,17 +1059,17 @@ static size_t hostseg_size(const cmd_t *o, int empty_pool, size_t want) {
 }
 // Take a segment of n bytes: origin = the current recording's guest bytes in the segment it ran short in, [own, write position), at least the byte at own; if the write pointer is already
 // in a host segment (overflowing again), keep that segment's origin. A recording that owns no byte there (it starts at the very end of the game's memory, and the game's callback added
-// none) has no range, and its segment is not reclaimed
-static uint8_t *hostseg_take(cmd_t *o, size_t n) {
+// none) has no range, and its segment is not reclaimed. An explicit anchor is the guest command slot for an expanded record kept in host memory.
+static uint8_t *hostseg_take(cmd_t *o, size_t n, const uint8_t *anchor, size_t anchor_size) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
-    if (o && o->recording) ctl_chunk_close(o);   // the records written so far count as written (hostseg_written) before a free segment is chosen
+    if (o && o->recording && !anchor) ctl_chunk_close(o);   // the records written so far count as written before a free segment is chosen
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
     int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
     for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!in_seg && o && o->recording && cur) {
-        uintptr_t own = cmd_own(o) && (uintptr_t)cmd_own(o) <= cur ? (uintptr_t)cmd_own(o) : cur < (uintptr_t)o->end ? cur : 0;
-        if (own) { lo = own; hi = cur > lo ? cur : lo + 1; }
+        uintptr_t own = anchor ? (uintptr_t)anchor : cmd_own(o) && (uintptr_t)cmd_own(o) <= cur ? (uintptr_t)cmd_own(o) : cur < (uintptr_t)o->end ? cur : 0;
+        if (own) { lo = own; hi = anchor ? lo + anchor_size : cur > lo ? cur : lo + 1; }
         else { static int once; if (!once++) LOG("[RED] NVN command memory: a recording ran short at the very end of the game's memory with no byte of its own there; the segment the host lends it is never reclaimed"); }
     }
     for (int i = 0; i < g_nhostseg && !m; i++)
@@ -1078,10 +1079,10 @@ static uint8_t *hostseg_take(cmd_t *o, size_t n) {
         g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi, o ? o->rec_id : 0 }; g_hostseg_bytes += n;
     }
     if (m && hi > lo) atomic_fetch_add_explicit(&g_hostseg_held, 1, memory_order_relaxed);
-    unsigned t = ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
+    unsigned t = anchor ? 0 : ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
-    if (t == 1 || t % 1024 == 0) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %d segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
+    if (t && (t == 1 || t % 1024 == 0)) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %d segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
     return m;
 }
 // Recording o wrote records at [p, p + n) (a piece it closes: ctl_chunk_close, cmd_alloc), or tried to write one at p (n = 1: cmd_alloc): segments of other recordings whose guest bytes
@@ -1101,7 +1102,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if (pl) __atomic_store_n(&CB(c)->cmd_size, n, __ATOMIC_RELAXED);   // GetCommandMemorySize: the memory the game added, whether the host records into it or into a segment it lends
     // Real grants may be only 40/56 bytes. Keep their guest storage so overflow has an origin to reclaim when another recording writes there, not merely on a regrant.
     // Accept a record header; cmd_alloc checks whether each full record fits.
-    if (!pl || n < sizeof(op_hdr)) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
+    if (!pl || n < sizeof(op_hdr)) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz, NULL, 0), sz); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     vpool_taken(pl);
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
@@ -1163,7 +1164,7 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
         if (!o->cb || tries == 2) {
             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size);
-            size_t sz = hostseg_size(o, 0, size); cmd_new_segment(o, hostseg_take(o, sz), sz); break;
+            size_t sz = hostseg_size(o, 0, size); cmd_new_segment(o, hostseg_take(o, sz, NULL, 0), sz); break;
         }
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
         { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ncb;
@@ -1257,6 +1258,11 @@ NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcom
         while (ctl_next(&it, &v))
             for (const uint8_t *p = ctl_addr(v), *pe = p + ctl_chunk_bytes(v); nvn_piece_record((const void *)(uintptr_t)h[i], v, p, pe, &r); p += r.size) {
                 uint8_t *d = cmd_alloc(o, r.size); memcpy(d, p, r.size); cs_op(r.op, r.size);
+                if (r.op == OP_COPY_B2T && r.size >= sizeof r + COPY_STRIDES_OFF) {
+                    p_copy_b2t *copy = (p_copy_b2t *)(d + sizeof r);
+                    if (copy->flags & DM_COPY_SNAPSHOT)
+                        copy->tex = (const tex_t *)((const uint8_t *)copy + SNAP_OFF(p_copy_b2t));
+                }
             }
     }
 }
@@ -1442,7 +1448,6 @@ static size_t rec_expand(const uint8_t *rec_, uint8_t *out) {
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *(const view_t *)v; }
 // Records with textures snapshot the texture objects (0x80 bytes each, after the record struct) and replay reads the snapshots: an NVN command no longer depends on the API object once recorded, and the game may finalize, free or reuse it before submitting.
 // Unity (Engage) does so when it changes scenes; only the object pointer used to be recorded, and replay read other data (a texture 1869367126 high, a Metal assertion abort).
-#define SNAP_OFF(T) ((sizeof(T) + 7) & ~(size_t)7)
 #define REC_SNAP(c, OP, T, K) ((T *)rec((c), (OP), SNAP_OFF(T) + (size_t)(K) * sizeof(tex_t)))
 static const tex_t *tex_snap(void *rec_, size_t off, int k, const NVNtexture *t, uint64_t ra) {
     if (!t) return NULL;
@@ -1698,9 +1703,56 @@ static p_copy_b2t *rec_copy(NVNcommandBuffer *c, uint32_t op) {
     if (st) { p_copy_strides cs = { o->copy_row, o->copy_image }; memcpy((uint8_t *)r + COPY_STRIDES_OFF, &cs, sizeof cs); }
     return r;
 }
+static int tex_copy_staging(uintptr_t ra) {
+    if (!DM_GAME_TEX_COPY_STAGING_PC) return 0;
+    const module_t *m = module_of((void *)ra);
+    return m && ra - (uintptr_t)m->base == DM_GAME_TEX_COPY_STAGING_PC &&
+           !strcmp(m->name, "main") && !strcmp(m->build_id, DM_GAME_TEX_COPY_STAGING_BUILD);
+}
+// Record-time CPU data has the lifetime of the recording, like UpdateUniformBuffer. Keep the expanded
+// copy in host command memory so the game's frame allocator only pays for its ordinary copy record.
+static void rec_staged_texture_upload(cmd_t *cb, p_copy_b2t *copy, size_t n) {
+    uint8_t *anchor = (uint8_t *)copy - sizeof(op_hdr);
+    op_hdr h; memcpy(&h, anchor, sizeof h);
+    const p_copy_strides strides = { cb->copy_row, cb->copy_image };
+    uint32_t size = (uint32_t)((sizeof h + COPY_STRIDES_OFF + sizeof strides + n + 7) & ~(size_t)7);
+    cb->chunk = NULL;   // the anchor owns memory, but the control entry points at the expanded copy
+    hostseg_written(cb, anchor, h.size);
+    uint8_t *dst = hostseg_take(cb, (size + 4095u) & ~(size_t)4095, anchor, h.size);
+    memcpy(dst, anchor, sizeof h + COPY_STRIDES_OFF);
+    put_hdr(dst, OP_COPY_B2T, size);
+    p_copy_b2t *staged = (p_copy_b2t *)(dst + sizeof h);
+    staged->tex = (const tex_t *)((const uint8_t *)staged + SNAP_OFF(p_copy_b2t));
+    staged->flags |= DM_COPY_SNAPSHOT;
+    uint8_t *data = (uint8_t *)staged + COPY_STRIDES_OFF;
+    memcpy(data, &strides, sizeof strides);
+    memcpy(data + sizeof strides, (const void *)(uintptr_t)staged->src, n);
+    staged->src = 0;
+    memset(data + sizeof strides + n, 0, (8 - (n & 7)) & 7);
+    ctl_push(cb, ctl_e(CTL_CHUNK, dst, CTL_ONE));
+    ctl_flush(cb);
+}
 NVN(nvnCommandBufferCopyBufferToTexture, void, NVNcommandBuffer *c, NVNbufferAddress src, const NVNtexture *t, const NVNtextureView *v,
     const NVNcopyRegion *r, int flags) {
-    p_copy_b2t *o = rec_copy(c, OP_COPY_B2T); o->src = src; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+    cmd_t *cb = CB(c);
+    size_t n = 0;
+    if (cb->recording && t && CTX(t)->magic == MAGIC('T', 'E', 'X', 0) && tex_copy_staging(ra)) {
+        int bw, bh;
+        int bpb = nvn_fmt_bpb(CTX(t)->d.format, &bw, &bh);
+        size_t row, img, rows, layers;
+        if (bpb && r->width > 0 && r->height > 0 && r->depth >= 0 && cb->copy_row >= 0 && cb->copy_image >= 0) {
+            row = cb->copy_row ? (size_t)cb->copy_row : ((r->width + (size_t)bw - 1) / bw) * bpb;
+            rows = (r->height + (size_t)bh - 1) / bh;
+            layers = r->depth ? (size_t)r->depth : 1;
+            if (cb->copy_image) img = (size_t)cb->copy_image;
+            else if (__builtin_mul_overflow(row, rows, &img)) img = 0;
+            if (__builtin_mul_overflow(img, layers, &n) || n > UINT32_MAX - 8192 || !mtl_addr_known(src, n)) n = 0;
+        }
+    }
+    if (n) ctl_chunk_close(cb);
+    p_copy_b2t *o = rec_copy(c, OP_COPY_B2T); o->src = src; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, ra); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
+    if (n) rec_staged_texture_upload(cb, o, n);
     if (o->tex) mtl_tex_gpu_written(o->tex);
 }
 NVN(nvnCommandBufferCopyTextureToBuffer, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r,

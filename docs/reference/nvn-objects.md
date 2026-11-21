@@ -1034,6 +1034,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** code review of the shared tracker, from a fork's compatibility commit `587d5206` ported through [PR #686](https://github.com/seedds/nxnative/pull/686). No game is known to hit it: a game normally finalizes a pool only after the GPU is done with it.
 - **Check:** `t_dirty_retire_race` retires the pool between protect's lookup and its first page-state exchange, then reads 16 bytes into the pool with `read()`. Without the fix, retirement completes first and the read fails with `EFAULT`; with it, retirement waits for protection, unregisters the pool and the read returns 16. `t_dirty_race` and `t_dirty_slots` cover page-state publication and shared / reused pool slots.
 
+### CPU staging recycled before a texture upload
+
+- **Symptom:** a scene's first load draws overbright effects or damaged UI textures, particularly while its pipelines are being built.
+- **Cause:** the game returns CPU staging blocks to its resource thread immediately after recording the uploads. The host queues the address and reads it later, when encoding or running the blit. A trace of Catherine's 512×512 BC1 effects texture found the correct bytes at recording and submission, and replacement bytes at encoding about a second later. Starting a new segment after a copy could only help after replay reached the copy.
+- **Fix:** for a verified CPU upload call site, the recording owns the source bytes, along with its strides and texture description. The queued command uses them to fill the Metal staging arena before running the ordered blit. The build ID and return address identify the CPU upload routine because NVN also supports buffer-to-texture copies whose source is written by the GPU.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md#rendering).
+
 ## NVN entry points
 
 ### Sampler builder queries leave renderer state unread

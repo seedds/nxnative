@@ -85,5 +85,17 @@ int main(void) { @autoreleasepool {
     @try { gp_end(upload); } @catch (NSException *x) { CHECK(0, "another queue's encoder got the open pass's timestamp"); }
     CHECK(upload.stamps == 0 && g_gp_cur == k, "another queue's encoder does not close the open pass");
     gp_end(pass); CHECK(pass.stamps == 2 && pass.last == 2 * (NSUInteger)k + 1 && g_gp_cur < 0, "the pass's own end writes its end stamp");
+    // Watchdog (gp_stalled): a profile whose completion never fires is dropped after max(4 periods, 120) frames, and profiling goes on; its late completion,
+    // if it ever comes, resolves nothing and leaves the newer profile's heap alone (2 of 12 runs on cut9s lost every profile after frame 810, T-126)
+    g_gp_every = 5; g_gp_state = 0; int res0 = heap.resolutions, inv0 = heap.invalidations;
+    atomic_store(&g_cur_frame, 20); gp_begin(nil, 'C', nil); gp_end(nil); g_fence = 200;
+    atomic_store(&g_cur_frame, 21); gp_begin(nil, 'C', nil); CHECK(g_gp_state == 2 && atomic_load(&g_gp_busy), "frame 20's profile is handed to its report");
+    atomic_store(&g_cur_frame, 140); gp_begin(nil, 'C', nil); CHECK(g_gp_state == 2 && atomic_load(&g_gp_busy), "within the limit the profile still waits for its report");
+    atomic_store(&g_cur_frame, 141); gp_begin(nil, 'C', nil); CHECK(!atomic_load(&g_gp_busy) && g_gp_state == 0, "past the limit the watchdog drops it");
+    atomic_store(&g_cur_frame, 145); gp_begin(nil, 'C', nil); gp_end(nil); CHECK(g_gp_state == 1 && g_gp_frame == 145 && heap.invalidations == inv0 + 2, "profiling goes on at the next selected frame");
+    [event complete]; CHECK(heap.resolutions == res0 && g_gp_state == 1 && !atomic_load(&g_gp_busy), "the dropped profile's late report resolves nothing and frees nothing");
+    g_fence = 1450; atomic_store(&g_cur_frame, 146); gp_begin(nil, 'C', nil); CHECK(atomic_load(&g_gp_busy), "the new profile is handed to its own report");
+    [event complete]; CHECK(heap.resolutions == res0 + 1 && !atomic_load(&g_gp_busy), "the new profile reports and releases the heap");
+    CHECK(!gp_stalled(140, 20, 5) && gp_stalled(141, 20, 5) && !gp_stalled(220, 100, 30) && gp_stalled(221, 100, 30), "the limit is max(4 periods, 120 frames)");
     printf("t_gpuprof: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

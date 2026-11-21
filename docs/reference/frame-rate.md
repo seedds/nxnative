@@ -68,6 +68,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** pre-refresh Mac BOTW 1.9.0 outdoor and TOTK 1.4.3 opening-cave logs put screenshot completion beside 125–135 ms frames, with shorter submit/GPU spans and no new pipelines. Subsequent runs used post-window screenshots; a TOTK launcher smoke report recovered `game_speed: 1.0` with the corrected parser. Those runs used shader chain `fda42ce035db`, not this branch's `b3ca4b7c621f`; no fresh runtime check on this branch is claimed. The six existing benchmark behavior tests are retained, not newly executed here.
 - **Found on:** [BOTW](../../dm/games/01007EF00011E000/README.md#gpu-work) and [TOTK](../../dm/games/0100F2C0115B6000/README.md#frame-rate) on Mac routes.
 
+### Periodic GPU profiles stopped after a lost report
+
+- **Symptom:** a run with `DM_NVN_GPUPROF=every:<n>` prints `[gpuprof]` lines for its first few hundred frames, then none for the rest of the run. `abpair.sh` / `abstat.py` then fail the run with "main pass -" (gpuprof frames 0), which voids an A/B block.
+- **Cause:** a periodic profile is handed to its report (the `g_ev` listener of `gp_periodic_finish`, or a commit feedback handler) with `g_gp_busy` set, and only that report clears it. When neither hook fires, no later frame is profiled. Why neither fired is **open**: it was seen only on an E2 v2 build with `DM_NVN_MTLQ2=1`, in 2 of 12 Ocarina of Time A/B runs, both after frame 810.
+- **Fix (a workaround):** `gp_begin` drops a profile that has had no report for max(4 periods, 120 frames) and prints `[RED] GPUPROF: the profile of frame N got no report …`, and profiling goes on. `g_gp_busy` holds the pending profile's generation, so a report that arrives after the drop resolves nothing and cannot release a newer profile's heap. The `[RED]` line counts the occurrences, so the cause can be chased from them.
+- **Check:** `t_gpuprof` (a profile whose completion never fires is dropped at the limit, its late completion is ignored, and the next profile reports).
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) (cut9s A/Bs, 2026-11-20 and 21).
+
 ### A thermally serious iPhone holds 30 fps
 
 - **Symptom:** on an iPhone, a game with the frame step at 60 fps drops a frame in most windows after a few minutes, and its GPU time per frame roughly doubles to triples (17-26 ms for the same scenes).

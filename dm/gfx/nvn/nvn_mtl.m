@@ -1837,7 +1837,13 @@ enum { GP_MAX = 4096 };   // the largest timestamp heap Metal makes
 typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; } gp_lab;   // seg: the command buffer (segment) of the submission it is in
 static id<MTL4CounterHeap> g_gp_heap; static gp_lab g_gp_lab[GP_MAX / 2]; static int g_gp_n, g_gp_state, g_gp_cur = -1; static long g_gp_f0 = -2, g_gp_f1, g_gp_every; static uint64_t g_gp_frame;
 static const void *g_gp_e;   // the encoder g_gp_cur belongs to: m4_end also ends the upload / diagnostics / present encoders, which may end while a profiled pass is open (#531)
-static _Atomic int g_gp_busy;   // a periodic profile's report has not been printed yet: the heap is still being read
+static _Atomic int g_gp_busy;   // a profile's report has not been printed yet: the heap is still being read. It holds that profile's generation (g_gp_gen), not 1, so that
+                                // a report the watchdog gave up on (gp_watch) cannot release a later profile's heap
+static _Atomic int g_gp_gen;    // the generation of the last profile handed to its report (gp_handoff)
+// Watchdog (a workaround; the cause is open): a periodic profile whose report never ran kept g_gp_busy set and stopped profiling for the rest of the run. On cut9s
+// (E2 v2, DM_NVN_MTLQ2) 2 of 12 OoT A/B runs lost every profile after frame 810: neither the g_ev listener of gp_periodic_finish nor the commit feedback handler fired
+// (T-126 bfab2 / bfab3). After max(4 periods, 120 frames) without its report the profile is dropped with a [RED] line, and profiling goes on.
+static inline int gp_stalled(uint64_t now, uint64_t handed, long every) { uint64_t lim = every > 0 && every * 4 > 120 ? (uint64_t)every * 4 : 120; return now > handed + lim; }
 static uint64_t g_bw_load, g_bw_store, g_gp_bw_l0, g_gp_bw_s0;   // the bandwidth ledger (defined with the pass statistics below) and its values at the last render pass end
 static uint64_t g_stat_pass, g_stat_draw; static _Atomic uint64_t g_cur_frame; static uint32_t g_seg; static uint32_t g_gp_copies, g_gp_disp, g_gp_ubd;   // copies / dispatches encoded (for the compute encoders' labels)
 static int gp_active(void) {
@@ -1850,14 +1856,15 @@ static int gp_active(void) {
     if (g_gp_every > 0) return f > 0 && f % g_gp_every == 0;
     return f >= g_gp_f0 && f <= g_gp_f1;
 }
-static void gp_report(int n, gp_lab *lab, uint64_t frame);
+static void gp_report(int n, gp_lab *lab, uint64_t frame, int gen);
+static int gp_handoff(void) { int gen = atomic_fetch_add(&g_gp_gen, 1) + 1; if (!gen) gen = atomic_fetch_add(&g_gp_gen, 1) + 1; atomic_store(&g_gp_busy, gen); return gen; }   // never 0 (0 = none)
 static void gp_periodic_finish(void) {   // on the submit thread, before the next frame's first encoder can touch the heap
     if (!g_gp_every || g_gp_state != 1 || g_gp_frame == atomic_load(&g_cur_frame)) return;
     int n = g_gp_n; gp_lab *lab = malloc(sizeof *lab * (n ? n : 1)); memcpy(lab, g_gp_lab, sizeof *lab * n); uint64_t frame = g_gp_frame;
-    g_gp_state = 2; atomic_store(&g_gp_busy, 1);
+    g_gp_state = 2; int gen = gp_handoff();
     static MTLSharedEventListener *listener; if (!listener) listener = [MTLSharedEventListener new];
     // g_fence covers all submissions of the sampled frame. No GPU wait or extra command buffer is needed, including for every:1.
-    [g_ev notifyListener:listener atValue:g_fence block:^(id<MTLSharedEvent> event, uint64_t value) { (void)event; (void)value; gp_report(n, lab, frame); }];
+    [g_ev notifyListener:listener atValue:g_fence block:^(id<MTLSharedEvent> event, uint64_t value) { (void)event; (void)value; gp_report(n, lab, frame, gen); }];
 }
 static id<MTL4CounterHeap> g_ts_heap; static int g_ts_pend = -1;   // ts_on; pend: the boundary the next encoder writes (ts_stamp)
 static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right after an encoder of the main command buffer is made
@@ -1865,7 +1872,11 @@ static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right 
         if (kind == 'R') [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageVertex intoHeap:g_ts_heap atIndex:slot];
         else [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:g_ts_heap atIndex:slot]; }
     gp_periodic_finish();
-    if (g_gp_every > 0 && g_gp_state == 2 && !atomic_load(&g_gp_busy)) g_gp_state = 0;   // the previous periodic profile has been reported
+    if (g_gp_every > 0 && g_gp_state == 2) { int b = atomic_load(&g_gp_busy); uint64_t now = atomic_load(&g_cur_frame);
+        if (b && gp_stalled(now, g_gp_frame, g_gp_every) && atomic_compare_exchange_strong(&g_gp_busy, &b, 0)) {   // gp_watch: its report never ran
+            static uint64_t nw; if (++nw <= 8 || !(nw & (nw - 1))) MLOG("[RED] GPUPROF: the profile of frame %llu got no report in %llu frames (its completion hook did not fire; cause open): dropped, profiling goes on (%llu so far)",
+                (unsigned long long)g_gp_frame, (unsigned long long)(now - g_gp_frame), (unsigned long long)nw); }
+        if (!atomic_load(&g_gp_busy)) g_gp_state = 0; }   // the previous periodic profile has been reported (or dropped)
     if (!gp_active() || g_gp_state == 2) return;
     if (!g_gp_heap) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = GP_MAX; NSError *er = nil;
         g_gp_heap = [g_dev newCounterHeapWithDescriptor:hd error:&er]; if (!g_gp_heap) { MLOG("[RED] GPUPROF: no counter heap: %s", er.description.UTF8String); g_gp_f0 = -1; return; } }
@@ -1890,8 +1901,9 @@ static void gp_end(id e) {   // right before that encoder ends
     if (g_gp_lab[k].kind == 'R') [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageFragment intoHeap:g_gp_heap atIndex:2 * k + 1];
     else [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:g_gp_heap atIndex:2 * k + 1];
 }
-static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's last command buffer has completed
-    NSData *r = [g_gp_heap resolveCounterRange:NSMakeRange(0, 2 * n)]; const uint64_t *t = r.bytes; if (!t) { free(lab); atomic_store(&g_gp_busy, 0); return; }
+static void gp_report(int n, gp_lab *lab, uint64_t frame, int gen) {   // the frame's last command buffer has completed
+    if (atomic_load(&g_gp_busy) != gen) { free(lab); return; }   // the watchdog dropped this profile (gp_stalled): the heap may hold a later one's stamps
+    NSData *r = [g_gp_heap resolveCounterRange:NSMakeRange(0, 2 * n)]; const uint64_t *t = r.bytes; if (!t) { free(lab); atomic_compare_exchange_strong(&g_gp_busy, &gen, 0); return; }
     double tick_ns = 1e9 / (double)[g_dev queryTimestampFrequency], tot[2] = {0}, span = 0; uint64_t t0 = 0, t1 = 0, ld = 0, st = 0; int np = 0;
     for (int i = 0; i < n; i++) { uint64_t a = t[2 * i], b = t[2 * i + 1]; if (!a || !b || b < a) continue;
         double us = (b - a) * tick_ns / 1e3; const gp_lab *l = &lab[i]; tot[l->kind != 'R'] += us;
@@ -1901,7 +1913,7 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
         else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w); }
     span = (t1 - t0) * tick_ns / 1e3;
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
-    free(lab); atomic_store(&g_gp_busy, 0);
+    free(lab); atomic_compare_exchange_strong(&g_gp_busy, &gen, 0);
 }
 static void tf_pass_end(void); static id<MTL4RenderCommandEncoder> g_tf_enc;   // the open transform feedback capture pass (nvn_feedback.inc): ended before any other encoder begins
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { if (g_tf_enc) tf_pass_end(); g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
@@ -2879,8 +2891,8 @@ uint64_t mtl_sub_commit(void) {
         defer_drain(); defer_idle_commit();
     }];
     void arena_commit(uint64_t fence); arena_commit(fence);
-    if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+    if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; int gg = gp_handoff();
+        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf, gg); }]; }
     cb_commit(o, 1);   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
     // With the encode thread the records go to it and the replay goes on with the next submission: what comes after it on the queue is a record too (the next submission's commits,

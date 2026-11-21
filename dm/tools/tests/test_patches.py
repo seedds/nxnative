@@ -202,6 +202,16 @@ class Registry(unittest.TestCase):
         words = {m.node_area: ({'08fca752', '09fca752', 'e8230b32', 'e9230b32'}, {'087ca052', '097ca052'}),
                  m.alignment: ({'0808a052', 'e8030a32', '0b40a052', 'eb030732', '0a00a852', 'ea030232'}, {'0804a052', '0b04a052', '0a04a052'})}
         for rule in m.MATCH_CUTS['sdk']:
+            if rule['name'] == m.old_vamm:
+                node, alignment = rule['functions']
+                self.assertEqual([(old, new) for _, old, new, _ in node['cuts']],
+                                 [('e9030232', '0980a052'), ('ea030232', '0a80a052')])
+                self.assertEqual([(old, new) for _, old, new, _ in alignment['cuts']], [('ea030232', '0a40a052')])
+                for fn in rule['functions']:
+                    for delta, old, new, why in fn['cuts']:
+                        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)
+                        self.assertLess(delta + len(bytes.fromhex(old)), fn['size'])
+                continue
             old_words, new_words = words[rule['name']]
             for delta, old, new, why in rule['cuts']:
                 self.assertIn(old, old_words, why); self.assertIn(new, new_words, why)
@@ -220,7 +230,7 @@ class Registry(unittest.TestCase):
         sdk = {bid for g in game.all_games() for bid, m in builds_of(g).items() if m == 'sdk'}
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
         self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}) or getattr(m, 'STUBS', {}))
-        for bid in m.CUTS: self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
+        for bid in getattr(m, 'CUTS', {}): self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
 
 
 class ExternalRegistry(unittest.TestCase):

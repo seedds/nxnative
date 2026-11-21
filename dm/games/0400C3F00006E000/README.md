@@ -130,6 +130,8 @@ The 1.8.0 dump contained descriptor-shaped payload outside the BAHS binary recor
 
 Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both main `79f28b06` and the updated parser on chain `03a3ac831bfb` used the corrected split. All 11,601 shader manifests matched, all 9,591 pipeline interfaces passed, and both revisions completed the 200-second Grand Prix route past its 6,000-frame target.
 
+The iOS shoulder-button position editor was tested on an iPhone Duo running iOS 27.2.1 (Xcode 27.2 build, frontend based on `2925d7af`). The player moved L/R and ZL/ZR and confirmed working input during 1.8.0 gameplay. Other physical devices and tabletop layouts have not been checked. See [In-game menu](../../../docs/settings.md#in-game-menu).
+
 ## Open
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).

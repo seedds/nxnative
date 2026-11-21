@@ -105,6 +105,7 @@ void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 
 int front_ios_boot_ok(void) { return 1; }
+bool front_ios_hud_enabled_from_saved_choice(void) { return false; }   // the harness does not enable the Metal HUD at launch
 void front_ios_boot(void) {}
 bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
 

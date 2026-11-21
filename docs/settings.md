@@ -256,6 +256,8 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
 
 On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
 
+**Move shoulder buttons** lets you drag L, R, ZL and ZR within the control area. Open the gear again and choose **Done moving shoulder buttons** to resume input. Moving controls does not send button presses to the game. Positions are saved separately for portrait, landscape and tabletop layouts; **Reset shoulder positions** restores the current layout. The editor is unavailable in Tap mode or while a physical controller hides the controls. Other buttons keep their standard positions.
+
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
 ## TV

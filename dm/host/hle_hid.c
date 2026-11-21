@@ -18,6 +18,7 @@
 #include <time.h>
 #include <math.h>
 #include "motion_fusion.h"
+#include "controls.h"
 
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
@@ -62,8 +63,26 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
 }
+// The player's controls (controls.h): DM_CONTROLS, files separated by ':' read in order (the Mac launcher: the global one, then the game's), else <DM_ROOT>/controls.txt.
+// Loaded once, at the first input; a change takes effect at the next start
+static controls g_controls;
+static pthread_once_t g_controls_once = PTHREAD_ONCE_INIT;
+static void controls_bad(const char *path, int line, const char *text) { LOG("[RED] controls: %s line %d not understood: %s", path, line, text); }
+static void controls_load(void) {
+    ctl_defaults(&g_controls);
+    char list[4096] = ""; const char *e = getenv("DM_CONTROLS"), *root = getenv("DM_ROOT");
+    if (e && *e) snprintf(list, sizeof list, "%s", e); else if (root && *root) snprintf(list, sizeof list, "%s/controls.txt", root);
+    for (char *save = NULL, *f = strtok_r(list, ":", &save); f; f = strtok_r(NULL, ":", &save)) {
+        int r = ctl_load(&g_controls, f, controls_bad);
+        if (r >= 0) LOG("controls: read %s%s", f, r ? " (with lines not understood)" : "");
+    }
+    if (g_controls.pad_mapped || g_controls.swap_sticks) LOG("controls: controller buttons mapped%s", g_controls.swap_sticks ? ", sticks swapped" : "");
+}
+const controls *dm_controls(void) { pthread_once(&g_controls_once, controls_load); return &g_controls; }
 void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     if (p < 0 || p >= DM_PLAYERS) return;
+    const controls *ct = dm_controls(); buttons = ctl_pad_map(ct, buttons);
+    if (ct->swap_sticks) { int32_t t = lx; lx = rx; rx = t; t = ly; ly = ry; ry = t; }
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();
 }
@@ -451,6 +470,7 @@ void dm_joy_attach(int p, uint32_t sides) {
 }
 void dm_joy_set(int p, int side, uint64_t buttons, int32_t sx, int32_t sy) {
     if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return;
+    buttons = ctl_pad_map(dm_controls(), buttons);
     uint64_t old = atomic_exchange(&g_joy_btn[p][side], buttons); atomic_fetch_or(&g_joy_latch[p][side], buttons & ~old);
     atomic_store(&g_joy_axes[p][side], pack(sx, sy, 0, 0));
 }

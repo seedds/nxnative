@@ -8440,20 +8440,39 @@ static unsigned vs_streams(const nvn_refl *rf) {   // the streams the vertex sha
     for (int v = 0; rf && v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 32 && a < S.nattr && S.attr[a].fmt && S.attr[a].stream < 16) m |= 1u << S.attr[a].stream; }
     return m;
 }
-// A draw can bind from an offset in a buffer with the full buffer size, as Snowdrop does for the character preview. The declared tail can extend
+static void ix_minmax(const void *p, int isz, int32_t count, uint32_t *mn, uint32_t *mx);
+// A failed full-stream lookup can recover a prefix for a direct indexed draw when the CPU can see the same indices the GPU will read.
+static int vbuf_index_last(const p_draw_idx *di, uint64_t *last) {
+    if (!di || di->ind || di->mdi_cnt || di->count <= 0 || !di->ibuf || (unsigned)di->itype > 2) return 0;
+    int isz = 1 << di->itype;
+    uint64_t addr = di->ibuf, bytes = (uint64_t)di->count * isz, end = addr + bytes;
+    if (end < addr || (addr & (isz - 1)) || nvn_sparse_gen()) return 0;
+    void *mb; uint64_t mo;
+    if (!mtl_addr(addr, bytes, &mb, &mo) || !nvn_host_readable(addr, bytes)) return 0;
+    if (pend_hits(addr, bytes) || g_sbw_over || sbw_hits(addr, end) || hw_sub_hits(addr, end) || gw_live(addr, end)) return 0;
+    const uint8_t *src = [(__bridge id<MTLBuffer>)mb contents];
+    if (!src) return 0;
+    uint32_t mn, mx;
+    ix_minmax(src + mo, isz, di->count, &mn, &mx);   // Including restart indices can only make this proof more conservative.
+    int64_t hi = (int64_t)mx + di->base_vertex;
+    if ((int64_t)mn + di->base_vertex < 0 || hi > UINT32_MAX) return 0;
+    *last = (uint64_t)hi;
+    return 1;
+}
+// A draw can bind from an offset in a buffer with the full buffer size, as Snowdrop does for its UI. The declared tail can extend
 // beyond its pool while every vertex this draw fetches is mapped. Only narrow a failed lookup when the draw and all its formats give a known end.
 static uint64_t vbuf_draw_bytes(int st, const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {
-    uint64_t last, bytes = 0;
-    if (!rf || !vstream_last(st, dw, di, &last)) return 0;
-    for (int v = 0; v < rf->nv; v++) {
+    uint64_t last, attr_end = 0;
+    for (int v = 0; rf && v < rf->nv; v++) {
         int a = rf->v[v].nvn;
         if (a >= 32 || a >= S.nattr || !S.attr[a].fmt || S.attr[a].stream != st) continue;
         int width = vattr_bytes(S.attr[a].fmt);
         if (!width) return 0;
-        uint64_t end = last * S.stream[st].stride + S.attr[a].offset + (uint64_t)width;
-        if (end > bytes) bytes = end;
+        uint64_t end = S.attr[a].offset + (uint64_t)width;
+        if (end > attr_end) attr_end = end;
     }
-    return bytes;
+    if (!attr_end || (!vstream_last(st, dw, di, &last) && (S.stream[st].divisor || !vbuf_index_last(di, &last)))) return 0;
+    return last * S.stream[st].stride + attr_end;
 }
 // Returns the first stream the vertex shader reads (rf) whose non-zero address is in no memory pool, or -1. Such a slot would keep the buffer an earlier draw bound
 // there, so the caller skips the draw, as for an index buffer in no pool; a stream with address 0 reads the zero buffer through the vertex descriptor (ZERO_ATTR)
@@ -8478,6 +8497,8 @@ static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf, const
                 if (bytes && bytes < size && mtl_gpu_addr(addr, bytes, &mb, &mo, &gpu)) {
                     g_vbuf_prefix_mask |= 1u << s;
                     g_vbuf_prefix_bytes[s] = bytes;
+                    PD("v %llu stream %d at %#llx: mapped %llu of %llu declared bytes for this draw", g_stat_pass, s,
+                       (unsigned long long)addr, (unsigned long long)bytes, (unsigned long long)size);
                     enc_r_vbuf(en, VB_SLOT(s), gpu);   // this lookup only proved the current draw's range
                     continue;
                 }
@@ -16310,7 +16331,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (cur_pull) { pull_bind(en, vertex, dw, di); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
         int bad = bind_vbufs(en, vertex, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di);
-        if (bad >= 0) { RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address); return; }
+        if (bad >= 0) {
+            RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address);
+            PD("Z %llu draw skipped: stream %d range %#llx+%llu has no mapped vertex binding", g_stat_pass, bad,
+               (unsigned long long)S.vbuf[bad].address, (unsigned long long)S.vbuf[bad].size);
+            return;
+        }
         if (pr->sh[0]) vconv_bind(en, pr->sh[0], S.rast_discard, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di);   // integer inputs fed float-type formats or 8 / 16-bit integers of the other sign (see vconv_ncomp, vconv_int); a lean geometry draw: the vertices its indices name
     }
     g_kd_force = kd_draw(pr, dw, di);

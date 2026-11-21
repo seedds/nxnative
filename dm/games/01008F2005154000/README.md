@@ -18,7 +18,7 @@ Update 1.05 (v327680) over the base game, SDK 3.5.1, Ubisoft's Snowdrop engine o
 
 - The game sets NVN near depth to zero and uses the full pad layout. It requests 30 fps. The port keeps that timing.
 - **Resolved: missing character preview.** The preview's vertex streams declared a range beyond their pool, and the host skipped the draws even though their fetches fit. The rebuilt renderer drew the character in the same menu. [A vertex stream bound past its memory pool](../../../docs/reference/rendering.md#a-vertex-stream-bound-past-its-memory-pool).
-- **Open: startup draw warning.** A skipped vertex stream still appears before the title. Both the compact and original 12 GB reservations log it. The affected draw and its address source remain open. [A vertex stream in no memory pool](../../../docs/reference/rendering.md#a-vertex-stream-in-no-memory-pool).
+- **Resolved on Mac: black loading screen and flickering title.** The same oversized binding affected the indexed UI draws and caused the startup draw warning. Captures show the game submitting the UI draws even on black frames. The renderer now checks the mapped vertex range using the CPU-readable indices. The loading indicator and title render again. [A vertex stream bound past its memory pool](../../../docs/reference/rendering.md#a-vertex-stream-bound-past-its-memory-pool).
 
 ## Mac testing
 

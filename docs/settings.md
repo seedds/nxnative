@@ -60,6 +60,10 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
 - **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
 
+### HDR
+
+On by default. Switch games draw a standard (SDR) picture. On a screen with HDR turned on (an HDR monitor in its HDR mode, a MacBook Pro's or Pro Display XDR's screen, or an iPhone's or iPad's HDR screen), the app lifts the picture's bright parts above normal white into the screen's HDR range: the sky, light, fire and magic glow, while the rest stays as the game drew it. The screen's own HDR brightness sets how far, at most 2.5 times normal white (`DM_HDR_PEAK` in `env.txt` changes the limit). On a screen without HDR nothing changes. Off keeps the standard picture everywhere. An iPhone's or iPad's Low Power Mode keeps the standard picture.
+
 ### Game's upscaler
 
 Shown only for games that upscale their own picture with a network of their own before the app sees it: agl's NDSR network, in Donkey Kong Bananza and Splatoon Raiders. **Game's own**, the default, keeps the game's upscaler. **MetalFX** replaces it with Apple's MetalFX spatial scaler: the same input and output sizes, at a fraction of the GPU time, but Apple's scaler's picture rather than the game's.

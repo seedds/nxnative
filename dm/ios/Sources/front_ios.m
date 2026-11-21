@@ -387,10 +387,33 @@ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape 
 // maximumFramesPerSecond says. Before the game view has a window: the app's own scene (UIScreen.mainScreen is deprecated in iOS 26). 0 until read
 static _Atomic int g_screen_hz;
 int front_screen_max_fps(void) { return atomic_load_explicit(&g_screen_hz, memory_order_relaxed); }
+// Auto-HDR, as on the Mac (front_mac.m hdr_apply; the present lifts the game's SDR highlights, nvn_mtl.m present_hdr_peak, present.metal): on a screen whose HDR range goes above
+// SDR white (potentialEDRHeadroom: an iPhone's or iPad's HDR display, an HDR TV over AirPlay or a cable) the layer takes half floats in extended linear sRGB. Low Power Mode keeps
+// the 8-bit SDR layer (HDR brightness costs battery), as does DM_HDR=0. The headroom follows the brightness (currentEDRHeadroom, read each second while HDR). Not yet tried on
+// a device: built on the Mac's path, where the Dell in HDR mode showed it at 60 fps
+static _Atomic double g_hdr_head;
+double front_hdr_headroom(void) { return g_hdr_head; }
+static void hdr_apply(UIScreen *scr) {   // main thread
+    CAMetalLayer *l = g_layer; if (!l || !scr) return;
+    static int want = -1; if (want < 0) { const char *e = getenv("DM_HDR"); want = !(e && !strcmp(e, "0")); }
+    double pot = scr.potentialEDRHeadroom, cur = scr.currentEDRHeadroom;
+    int on = want && pot > 1.05 && !dm_low_power_now(), was = l.pixelFormat == MTLPixelFormatRGBA16Float;
+    if (on != was) {
+        l.wantsExtendedDynamicRangeContent = on;
+        CGColorSpaceRef cs = on ? CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB) : NULL;
+        l.colorspace = cs; if (cs) CGColorSpaceRelease(cs);
+        l.pixelFormat = on ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+        LOG("front end: %s (HDR headroom up to %.2f, now %.2f%s)", on ? "HDR layer, the game's picture lifted into the screen's HDR range" : "SDR layer", pot, cur,
+            !want ? "; DM_HDR=0" : dm_low_power_now() && pot > 1.05 ? "; Low Power Mode" : "");
+        static NSTimer *t; if (on && !t) t = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *x) { (void)x; screen_refresh(); }];   // brightness moves the headroom
+    }
+    g_hdr_head = on ? cur : 0;
+}
 static void screen_refresh(void) {
     UIWindowScene *ws = (g_root.game ?: g_root.view).window.windowScene;
     if (!ws) for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
         if ([s isKindOfClass:UIWindowScene.class] && [s.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) { ws = (UIWindowScene *)s; break; }
+    if (ws) hdr_apply(ws.screen);
     int hz = ws ? (int)ws.screen.maximumFramesPerSecond : 0, lpm = dm_low_power_now();
     if (hz <= 0) return;   // no screen yet: keep what was read
     if (lpm && hz > 60) hz = 60;

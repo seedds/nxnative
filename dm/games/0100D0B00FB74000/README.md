@@ -2,7 +2,7 @@
 
 ## Status
 
-**Bring-up only.** Program 0 displays the offline terms page on the Mac, and A advances after the window-close result fix. Program switching and gameplay have not been validated. The profile lists both game programs so the build packs the complete collection, rather than just the 30.4 MB launcher.
+**Playable on the Mac, confirmed by the user.** Program 0 displays the offline terms page, A advances, and the in-game mode switch works after open users are handed over. A repeatable gameplay route, longer sessions and iOS have not been validated. The profile lists both game programs so the build packs the complete collection, rather than just the 30.4 MB launcher.
 
 ## Version and programs
 
@@ -20,7 +20,7 @@ The full splits produced 33,034 shaders for program 1 and 39,939 for program 2, 
 
 ## Remaining validation
 
-- The launcher's handoff to both programs, their heap requirements, and gameplay.
+- Repeated switching in both directions, save/load and longer gameplay sessions.
 - iOS, which has not been tested.
 
 The launcher memory partition comes from its provisional heap check. The child profiles allow the same 3.25 GiB heap, but their actual requirements remain unvalidated. [Multi-program applications](../../../docs/reference/services.md#multi-program-applications-oeexecuteprogram)
@@ -30,3 +30,5 @@ The launcher memory partition comes from its provisional heap check. The child p
 - **Resolved in extraction.** The shader split returned zero shaders despite decoding the packages. [Unreal shared control and code arrays](../../../docs/reference/shaders.md#unreal-shared-control-and-code-arrays). Rendering and gameplay remain untested.
 
 - **Resolved on the Mac.** A closed the terms applet but the launcher reopened it. The page calls `window.close()`, whose result must be 4. [Offline applet pages close their browser window](../../../docs/reference/services.md#offline-applet-pages-close-their-browser-window). The user confirmed acceptance after the host update.
+
+- **Resolved on the Mac.** Selecting the in-game mode switch did nothing because no open users were handed over from the previous program. [Open users handed over between programs](../../../docs/reference/services.md#open-users-handed-over-between-programs). The user confirmed switching with the handoff fix.

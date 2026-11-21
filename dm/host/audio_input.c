@@ -39,6 +39,38 @@ typedef struct {
     uint32_t pre_peak, post_peak;
 } input_level_window;
 
+// DM_MIC_DUMP=<file>: what the capture hands the streams, before any gain, as 16-bit mono samples at 48 kHz without a header (as DM_AUDIO_DUMP
+// has the output); DM_MIC_FILE plays such a file back. Opened at the first start of a run, written by the producer callback alone.
+enum { INPUT_DUMP_BLOCK = 1024 };
+static FILE *input_dump;
+static int input_dump_tried;
+static int16_t input_dump_block[INPUT_DUMP_BLOCK];
+static uint32_t input_dump_fill;
+static _Atomic uint64_t input_dump_frames;
+
+static void input_dump_begin(void) {   // input_lock held, before the platform capture starts
+    if (!input_dump_tried) {
+        input_dump_tried = 1;
+        const char *path = getenv("DM_MIC_DUMP");
+        if (path && *path && !(input_dump = fopen(path, "wb"))) fprintf(stderr, "[dm] audio input: DM_MIC_DUMP %s did not open\n", path);
+    }
+    if (input_dump) fprintf(stderr, "[dm] audio input: DM_MIC_DUMP: this capture starts at %.2f s of the file\n",
+                            (double)atomic_load_explicit(&input_dump_frames, memory_order_relaxed) / DM_AUDIO_INPUT_RATE);
+}
+
+static void input_dump_flush(void) {
+    if (!input_dump_fill) return;
+    fwrite(input_dump_block, sizeof(int16_t), input_dump_fill, input_dump);
+    fflush(input_dump);
+    atomic_fetch_add_explicit(&input_dump_frames, input_dump_fill, memory_order_relaxed);
+    input_dump_fill = 0;
+}
+
+static void input_dump_sample(float value) {
+    input_dump_block[input_dump_fill++] = value <= -1.0f ? INT16_MIN : value >= 1.0f ? INT16_MAX : (int16_t)(value * 32768.0f);
+    if (input_dump_fill == INPUT_DUMP_BLOCK) input_dump_flush();
+}
+
 static uint32_t float_bits(float f) { uint32_t u; memcpy(&u, &f, sizeof u); return u; }
 static float bits_float(uint32_t u) { float f; memcpy(&f, &u, sizeof f); return f; }
 
@@ -141,6 +173,7 @@ static void input_close_capture_locked(void) {
 
 static int input_start_capture_locked(void) {
     input_close_capture_locked();
+    input_dump_begin();
     if (dm_audio_input_platform_prepare() || dm_audio_input_platform_start()) {
         dm_audio_input_platform_close();
         return -1;
@@ -300,6 +333,7 @@ void dm_audio_input_set_gain(dm_audio_input_stream *s, float gain) {
 
 static void input_push_sample(float value, dm_audio_input_stream *const *streams, input_level_window *levels) {
     if (!(value == value)) value = 0.0f;
+    if (input_dump) input_dump_sample(value);
     for (int i = 0; i < INPUT_MAX; i++) {
         dm_audio_input_stream *s = streams[i];
         if (!s || atomic_load_explicit(&s->state, memory_order_relaxed) != INPUT_STARTED) continue;
@@ -356,5 +390,6 @@ void dm_audio_input_process(const float *const *channels, int channel_count, uin
         atomic_max_u32(&s->pre_peak, levels[i].pre_peak);
         atomic_max_u32(&s->post_peak, levels[i].post_peak);
     }
+    if (input_dump) input_dump_flush();
     atomic_fetch_sub_explicit(&input_writers, 1, memory_order_seq_cst);
 }

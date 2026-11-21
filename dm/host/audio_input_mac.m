@@ -1,4 +1,5 @@
 #include "audio_input.h"
+#include "audio_input_file.h"
 #include "hle.h"
 #include <AVFAudio/AVFAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -81,14 +82,16 @@ static AudioDeviceID selected_input_device(int *uses_default, int *fell_back) {
 }
 
 int dm_audio_input_platform_device_available(void) {
+    if (dm_mic_file_selected()) return 1;   // DM_MIC_FILE: a recording stands in for the microphone, with no device and no permission
     if (AVAudioApplication.sharedInstance.recordPermission != AVAudioApplicationRecordPermissionGranted) return 0;
     int uses_default, fell_back;
     return selected_input_device(&uses_default, &fell_back) != kAudioObjectUnknown;
 }
 
-int dm_audio_input_platform_failed(void) { return atomic_load_explicit(&g_input.failed, memory_order_acquire); }
+int dm_audio_input_platform_failed(void) { return !dm_mic_file_selected() && atomic_load_explicit(&g_input.failed, memory_order_acquire); }
 
 int dm_audio_input_platform_route_changed(void) {
+    if (dm_mic_file_selected()) return 0;   // a recording has no route to change
     int uses_default, fell_back;
     pthread_mutex_lock(&g_input_lock);
     int changed = !g_input.unit || dm_audio_input_platform_failed() || g_input.device != selected_input_device(&uses_default, &fell_back);
@@ -226,6 +229,7 @@ static int input_prepare_locked(void) {
 }
 
 int dm_audio_input_platform_prepare(void) {
+    if (dm_mic_file_selected()) return dm_mic_file_prepare();
     input_listen();
     pthread_mutex_lock(&g_input_lock);
     int ok = input_prepare_locked();
@@ -234,6 +238,7 @@ int dm_audio_input_platform_prepare(void) {
 }
 
 int dm_audio_input_platform_start(void) {
+    if (dm_mic_file_selected()) return dm_mic_file_start();
     pthread_mutex_lock(&g_input_lock);
     int ok = g_input.unit && !atomic_load_explicit(&g_input.failed, memory_order_acquire);
     if (ok && !atomic_load_explicit(&g_input.running, memory_order_relaxed)) {
@@ -251,12 +256,14 @@ int dm_audio_input_platform_start(void) {
 }
 
 void dm_audio_input_platform_close(void) {
+    if (dm_mic_file_selected()) { dm_mic_file_close(); return; }
     pthread_mutex_lock(&g_input_lock);
     input_cleanup_locked();
     pthread_mutex_unlock(&g_input_lock);
 }
 
 void dm_audio_input_platform_info(char name[0x100], char uid[0x100], double *sample_rate, int *channels) {
+    if (dm_mic_file_selected()) { dm_mic_file_info(name, uid, sample_rate, channels); return; }
     pthread_mutex_lock(&g_input_lock);
     if (name) strlcpy(name, g_input.name[0] ? g_input.name : "unknown", 0x100);
     if (uid) strlcpy(uid, g_input.uid[0] ? g_input.uid : "unknown", 0x100);

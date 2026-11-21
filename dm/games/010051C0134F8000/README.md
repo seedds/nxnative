@@ -4,9 +4,15 @@ Update 1.70 (`v1048576`), Unreal Engine 4.24, Nintendo SDK 9.3.1, NVN 53.313 and
 
 ## Mac verification
 
-On Apple M6 with macOS 27.2.1 and Xcode 27.2, a fresh save reached the language selector, opening movie and version 1.70 title screen. The player continued through New Game into the opening Piccolo fight. Its arena, characters, effects and battle HUD rendered, with a median frame time of about 33.4 ms. The windowed test used the Metal HUD and the profile's iPhone-sized alias region. Device play, later chapters and DLC gameplay remain open.
+On Apple M6 with macOS 27.2.1 and Xcode 27.2, a fresh save reached the language selector, opening movie and version 1.70 title screen. The player continued through New Game into the opening Piccolo fight. Its arena, characters, effects and battle HUD rendered, with a median frame time of about 33.4 ms. The windowed test used the Metal HUD and the profile's iPhone-sized alias region. iPhone gameplay for 1.70, later chapters and DLC gameplay remain open.
 
 Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac-app` for a Finder app, or `--platform mac` for the host and run command. From a fresh save, choose a language, review the first-run agreement, and select New Game. On the Mac keyboard J is A, Return is Plus, WASD moves, and Shift plus arrow keys move the right stick.
+
+## iPhone verification of the base executable
+
+@dag294-alt independently identified the slot-17 allocator layout and tested their patch on an iPhone 18 Pro with iOS 27.2.1, Cartouche 0.13.1 and Increased Memory Limit enabled. The unpatched game crashed during allocator startup. With the host allocator active, the game ran for about 11.5 minutes through the opening tutorial. At frame 20,400, median frame time over the preceding 300 frames was 33.46 ms and the memory footprint was 2,262 MiB. The log ended with a graceful exit. [PR #3104](https://github.com/seedds/nxnative/pull/3104) · [iPhone log](https://gist.github.com/dag294-alt/7484f97dfe798ec679661c635ab4ac0f#file-kakarot-iphone-after-txt)
+
+The PR reports package `v983040`. The Mac and iPhone logs identify `main` by the prefix `98217279`, which matches the 1.00 base NSP's executable (`98217279aaf870fadab6445062e2f36d`). The iPhone result applies to that executable. [Contributor logs](https://gist.github.com/dag294-alt/7484f97dfe798ec679661c635ab4ac0f)
 
 ## Memory
 

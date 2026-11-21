@@ -17,6 +17,7 @@
 #include "front_role.h"
 #include "dm_input.h"
 #include "front.h"
+#include "front_kbm_mac.h"
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
@@ -147,7 +148,8 @@ static void cursor_hide_for_input(void) {
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    uint64_t b = g_btn; kbm_input(&b, &lx, &ly, &rx, &ry);   // keyboard and mouse controls (front_kbm_mac.m)
+    dm_input_set(b, lx, ly, rx, ry);
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -174,6 +176,7 @@ static void on_key(NSEvent *e, int down) {
         return;
     }
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    if (kbm_key(c, down)) return;   // the keyboard and mouse layout (front_kbm_mac.m)
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
     // could be turned only with a controller (Donkey Kong Bananza)
     int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
@@ -352,6 +355,7 @@ static void input_release(void) {
     hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
     [NSCursor setHiddenUntilMouseMoves:NO];
     display_awake(0);
+    kbm_release();
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0); dm_jc1_active(0);
@@ -1682,6 +1686,7 @@ void front_run(void (*guest)(void)) {
                 if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();
         pads_start();
+        kbm_start(win, &g_btn, &g_input_on, push);   // keyboard and mouse controls, on the build whose patch turns the camera by the mouse (DM_KBM=1)
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed

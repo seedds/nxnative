@@ -50,6 +50,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | kept: 1.0.1 (2019) is the last update; a function match would serve no other build of this game | checked: nso_fnmap of its 112 sites into those four mains (2026-11-09) | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | kept: 44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears | checked: nso_fnmap of its 44 sites into those 13 mains (2026-11-09) | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur) |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
+| `build` → `game` | Tears of the Kingdom's mouse camera (DM_KBM=1), whose stubs kbm_patches.py places at fixed addresses (front_kbm_mac.m) | runtime | kept: an opt-in Mac control scheme brought up on 1.4.3 alone; other builds run without it until its stubs are matched by fingerprint | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own camera functions; function fingerprints (MATCH_CUTS) could find them on other updates |
 
 ## Summary
 
@@ -84,7 +85,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 3 | 0 | `game` ×5 |
-| [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
+| [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 26 | 0 | 1 | `game`, `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 1 | 1 | 0 | `game` ×2 |
 
@@ -622,7 +623,33 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), `0100F2C0115B6000`, [patches.py](../../dm/games/0100F2C0115B6000/patches.py).
 
 - **`game`**, frame rate, at goal, checked: 1.4.3 main: one function of each fingerprint; the rule rewrites it byte-identical to its former build entry (2026-11-09): 60 fps frame step and render scale. The game's own timing object, found by its six functions' fingerprints on any build that keeps them; no engine sibling shares the code (BotW, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread, Origami King: no exact match, 2026-11-09)
+- **`build` → `game`**, runtime, kept: an opt-in Mac control scheme brought up on 1.4.3 alone; other builds run without it until its stubs are matched by fingerprint, judgement: Tears of the Kingdom's mouse camera (DM_KBM=1), whose stubs kbm_patches.py places at fixed addresses (front_kbm_mac.m). The game's own camera functions; function fingerprints (MATCH_CUTS) could find them on other updates
 
+- **1.4.3 `main`** `277178b7…` ([patches.py:177](../../dm/games/0100F2C0115B6000/patches.py#L177))
+  <details><summary>17 frame-step sites</summary>
+
+  - frame step `+0xd5cc0`: view render size x the host render scale (1.0 = original)
+  - frame step `+0xd5d80`: dynamic resolution only at render scale 1.0
+  - frame step `+0x18e468`: mouse camera: host mouse counts added to the camera yaw / pitch
+  - frame step `+0x1fbc80`: D-pad menu fade starts at full rate under fractional steps (FPSLocker)
+  - frame step `+0x2daa54`: game step reads the float fps (original integer fps and scvtf when off)
+  - frame step `+0x2daa6c`: scvtf moved into the stub at the load
+  - frame step `+0x2db18c`: frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)
+  - frame step `+0x3e562c`: game step reads the float fps (original integer fps and scvtf when off)
+  - frame step `+0x3e5638`: scvtf moved into the stub at the load
+  - frame step `+0xbe14a8`: swapchain argument 1 when on (FPSLocker)
+  - frame step `+0x1d595d0`: mouse camera: Ultrahand turns the held object by the mouse
+  - frame step `+0x1d59670`: mouse camera: Ultrahand raises the held object by the mouse
+  - frame step `+0x23be9b4`: mouse camera: host mouse counts added to the camera yaw / pitch
+  - frame step `+0x23d2dd0`: mouse camera: host mouse counts added to the camera yaw / pitch
+  - frame step `+0x23d756c`: mouse camera: host mouse counts added to the camera yaw / pitch
+  - frame step `+0x23d8e74`: mouse camera: UltraHand marks itself before the LockOn calc
+  - frame step `+0x23de46c`: mouse camera: Ascend aiming marks itself as an ability
+
+  </details>
+
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - host [front_kbm_mac.m:30](../../dm/host/front_kbm_mac.m#L30): build check
 - **function-matched frame step** (`main` of builds without FRAME_STEP): 60 fps frame step and render scale: a function of 0x298 bytes, `+0x18` in it; game step reader 1, a function of 0x358 bytes, `+0x34`, `+0x4c` in it; game step reader 2, a function of 0x81c bytes, `+0x4c`, `+0x58` in it; menu fade, a function of 0x3bc bytes, `+0x130` in it; swapchain argument, a function of 0x8bc bytes, `+0x1a4` in it; view render size, a function of 0x1f8 bytes, `+0x9c`, `+0x15c` in it
 
 ### Xenoblade Chronicles 3

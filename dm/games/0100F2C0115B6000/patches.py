@@ -163,3 +163,15 @@ BINDING = [
             'Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread, Origami King: no exact match, 2026-11-09)',
      'checked': '1.4.3 main: one function of each fingerprint; the rule rewrites it byte-identical to its former build entry (2026-11-09)'},
 ]
+
+# Keyboard and mouse controls on the Mac (DM_KBM=1; kbm_patches.py, in a file of its own): the mouse camera's stubs patch fixed addresses found on 1.4.3, so that build
+# takes its frame step from this entry, the same stub at the six functions' 1.4.3 addresses (where MATCH_FRAME_STEP finds them), with the mouse camera beside it; every
+# other build keeps the matched frame step alone
+def kbm_frame_step(ctx):
+    import importlib.util, os
+    spec = importlib.util.spec_from_file_location('kbm_patches_0100F2C0115B6000', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kbm_patches.py'))
+    assert spec and spec.loader, 'kbm_patches.py beside patches.py'
+    kbm = importlib.util.module_from_spec(spec); spec.loader.exec_module(kbm)
+    stub(ctx, 0x2db174, 0x2daa20, 0x3e55e0, 0x1fbb50, 0xbe1304, 0xd5c24)
+    kbm.mouse_camera(ctx)
+FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': kbm_frame_step}   # 1.4.3 main

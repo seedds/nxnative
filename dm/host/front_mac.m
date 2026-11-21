@@ -1584,6 +1584,44 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 }
 @end
 
+// Performance › Upscaling and Performance › Game's upscaler: the settings window's two MetalFX choices at once (nvn_mtl.m dm_present_upscale_set from the next present, dm_upscaler_set from
+// the next frame), on a GPU with MetalFX's spatial scaler; Game's upscaler in a game whose shader map names upscaler shaders. Disabled otherwise. The choice holds until the game quits.
+// Item tags: 1 the first value (off / game), 2 metalfx
+@interface DmUpscaleMenu : NSObject <NSMenuDelegate>
+@property(nonatomic) BOOL game;   // NO: the present's upscaling (DM_PRESENT_UPSCALE), YES: the game's upscaler (DM_UPSCALER)
+@end
+@implementation DmUpscaleMenu
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    int now = self.game ? dm_upscaler_live() : dm_present_upscale_live();
+    for (NSMenuItem *it in menu.itemArray) {
+        if (it.tag) { it.enabled = now >= 0; it.state = now >= 0 && it.tag == now + 1 ? NSControlStateValueOn : NSControlStateValueOff; }
+        else if (it.representedObject) it.title = now >= 0 ? @"Applies until the game quits" : self.game ? @"Not available: no upscaler of its own, or no MetalFX on this Mac" : @"Not available: no MetalFX on this Mac";
+    }
+}
+- (void)pick:(NSMenuItem *)it {
+    const char *v = it.tag == 2 ? "metalfx" : self.game ? "game" : "off";
+    if (self.game ? dm_upscaler_set(v) : dm_present_upscale_set(v)) LOG("front end: %s %s (Performance menu)", self.game ? "game's upscaler" : "upscaling", v);
+}
+@end
+static void front_upscale_menu(NSMenu *pm, DmUpscaleMenu *d, NSString *title, NSString *first) {
+    NSMenu *m = [[NSMenu alloc] initWithTitle:title];
+    m.delegate = d; m.autoenablesItems = NO;
+    NSString *names[2] = {first, @"MetalFX"};   // the settings window's labels (dm/games/settings.tsv)
+    for (int i = 0; i < 2; i++) { NSMenuItem *it = [m addItemWithTitle:names[i] action:@selector(pick:) keyEquivalent:@""]; it.target = d; it.tag = i + 1; }
+    [m addItem:NSMenuItem.separatorItem];
+    NSMenuItem *note = [m addItemWithTitle:@"" action:nil keyEquivalent:@""]; note.enabled = NO; note.representedObject = @"note";
+    [d menuNeedsUpdate:m];
+    [[pm addItemWithTitle:title action:nil keyEquivalent:@""] setSubmenu:m];
+}
+// Performance: the settings window's upscaling choices, changed while the game runs
+static NSMenu *front_perf_menu(void) {
+    NSMenu *pm = [[NSMenu alloc] initWithTitle:@"Performance"];
+    static DmUpscaleMenu *ud, *gd; ud = [DmUpscaleMenu new]; gd = [DmUpscaleMenu new]; gd.game = YES;
+    front_upscale_menu(pm, ud, @"Upscaling", @"Standard");
+    front_upscale_menu(pm, gd, @"Game's upscaler", @"Game's own");
+    return pm;
+}
+
 void front_run(void (*guest)(void)) {
     // Keep the latency-critical activity token alive for the host process, including windowless play.
     static id<NSObject> game_activity;
@@ -1649,6 +1687,7 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        [[bar addItemWithTitle:@"Performance" action:nil keyEquivalent:@""] setSubmenu:front_perf_menu()];
         NSApp.mainMenu = bar;
         static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;   // also for fullscreen entered later (⌃⌘F, the green button): no menu bar over the game
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window

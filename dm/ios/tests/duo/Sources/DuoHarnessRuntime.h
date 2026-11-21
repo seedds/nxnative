@@ -33,6 +33,9 @@ typedef struct {
 
 DuoHarnessInput duo_harness_input(void);
 int duo_harness_rumble(void);   // the in-game menu's rumble switch (dm_haptics_set_enabled)
+void duo_harness_upscale(int present, int game);   // the synthetic MetalFX choices: -1 = not offered, else 1 MetalFX / 0 bilinear (present) or the game's own (game)
+int duo_harness_present_upscale(void);   // the present's upscaling in force (dm_present_upscale_set)
+int duo_harness_game_upscaler(void);   // the game's upscaler in force (dm_upscaler_set)
 void dm_set_opmode(int mode);
 int dm_opmode(void);
 DuoHarnessState duo_harness_state(void);

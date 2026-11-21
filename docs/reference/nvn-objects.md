@@ -424,7 +424,7 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree` (or `…GetControlMemorySize`) once, after the game gives a command buffer control memory.
 - **Cause:** `AddControlMemory` was a no-op, and the size and free getters reached the unimplemented stub, which returns 0, so a game that checks the free space sees none left.
 - **Fix:** `cmd_t` records the last `AddControlMemory` block; `GetControlMemorySize` returns its size, `GetControlMemoryUsed` the bytes of control entries the host wrote into it ([A recording's end and links are in control memory](#a-recordings-end-and-links-are-in-control-memory); 0 until then, when the host used none), and `GetControlMemoryFree` the rest. `t_nvn` checks the values before any block, after one, after a recording and after a smaller block replaces it.
-- **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table). With the getters implemented it reached the title, menu, a save and character customization on the Mac; with them returning 0 it also progressed, but submitted commands at a different rate.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) 1.05. With the getters implemented it reached the title, menu, a save and character customization on the Mac. With them returning 0 it also progressed and submitted commands at a different rate. [PR #662](https://github.com/seedds/nxnative/pull/662).
 
 ### Queue builder size getters
 
@@ -728,6 +728,13 @@ Games read this count as a position in their own command memory and size their h
   - reading the resolved host texture instead uploads it on the reading thread after the CPU write, and `up_owner_check` stops the test.
   Copying the rows at the pixel pitch fails 5 of 6 rows. Axiom Verge's opening logs `linear texture ser=28 8x8 format 0x25 flags 0x10: offset 0x3f8000 / row pitch 32 not aligned to 64 bytes` and `CPU-written texture ser=28 …`, the same on the Mac with the switch and on both iOS devices without it. On the Mac its picture matches a run without the switch.
 - **Found on:** [Hades II](../../dm/games/0100A00019DE0000/README.md) v0 on an iPhone 15 Pro Max (GitHub issue #1956): the title screen's movie background grey and flickering, green and magenta blocks behind the options menu; 736x480 `IMAGE | LINEAR` R8 planes in a `CPU_UNCACHED` pool, rows of 736 bytes (the Mac asks for 16). Checked by `t_linear_readback`; not yet on the iPhone. Axiom Verge 1.0.3 (`0100052004384000`, SDK 4.4.0, MonoGame; its profile is a separate change) on an iPhone 16 Pro Max, iOS 26.0: the opening's sky and mountains are magenta. Its 8×8 RGBA8 linear textures sit in a `CPU_UNCACHED` pool. An iPad Pro with an M4 asks for 64 bytes on iPadOS 26.0 as well, while macOS 27.0 on an M4 Pro asks for 16. With the fix, both iOS devices log the four textures as uploaded, and the iPhone's opening is right.
+
+### A linear texture past Metal's 2D limit
+
+- **Symptom:** `-[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]` aborts on a Metal descriptor assertion before the host can log a red line.
+- **Cause:** a linear texture may become a view on its memory pool's buffer. This path bypassed `tex_desc`'s dimension check.
+- **Fix:** `linear_fit` and `tex_desc` share the 2D size check (16,384 on older supported GPUs, 32,768 from Apple10). An oversized linear texture falls through to the descriptor check and its red line. `t_linear_readback` checks that a buffer view at the device limit succeeds and that one pixel past either dimension is refused.
+- **Found on:** Nintendo Switch Sports 1.5.0 has a 1024×32768 R8 linear glyph cache ([PR #2908](https://github.com/seedds/nxnative/pull/2908)). An M4 Pro on macOS 27.2.1 reproduced the Metal assertion with a buffer view 16,385 rows high.
 
 ### Textures written with `nvnTextureWriteTexels`
 

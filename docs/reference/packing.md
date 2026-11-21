@@ -355,7 +355,7 @@
 - **Symptom:** a `--romfs separate` app whose image was copied into its Documents folder by hand (Finder, the Files app, a LiveContainer guest) logs `boot: game files not found (Documents/romfs.img, Documents/romfs or <App>/romfs)`, and a build with `romfs.id` shows "There is no game file image on this device.", though the complete image is there. Renaming it to `romfs.img` makes the game start.
 - **Cause:** the NSP script writes the image as `extract/<version>/RomFS.img`, and `push_romfs.sh` copies it to `Documents/romfs.img`. A hand copy keeps the source's name. The Mac's file system ignores letter case, so the mismatch never shows there, but iOS's does not, and `main.m` looked up only the exact `romfs.img`.
 - **Fix:** `main.m` (`romfs_document_images`) lists Documents for `romfs.img` in any letter case, `romfs.img` itself first, and takes the first that is complete and passes the `romfs.id` check; a rejected or incomplete one falls through to the next spelling, then to the folders. The identity report, the backup exclusion and the log lines use the names found. Folder names (`Documents/romfs`) are still matched exactly.
-- **Found on:** South Park: The Fractured But Whole 1.05 (`01008F2005154000`, no profile here) on an iPhone 15 Pro Max, [issue #582](https://github.com/seedds/nxnative/issues/582). The Foundation startup test runs the locator on a case-sensitive APFS disk image.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) 1.05 on an iPhone 15 Pro Max. The Foundation startup test runs the locator on a case-sensitive APFS disk image. [Issue #582](https://github.com/seedds/nxnative/issues/582).
 
 ### Building creates a full RomFS tree before packing its image
 

@@ -110,31 +110,99 @@ def layer_out(src):
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i)
     return i >= 0 and j >= 0 and '[[render_target_array_index]]' in src[i:j]
 
-def vs_layer_entry(full):
+def vs_layer_entry(full, source=None):
     """Layer entry points for a vertex shader that writes integer bits taken from the instance index into an output component (Unreal Engine 4.18's WriteToSliceMainVS: the slice = instance −
     base instance + its first slice, DRAGON QUEST XI S 7ceb7898171a9ae9). main0_l and main0_lz are main0 and main0_z writing that component as the layer (render_target_array_index), without
     the point size (see vs_layer); the host draws with them when the program's geometry shader is a slice writer reading that component (gs_slice). → (source with the two entry points added,
     {'loc', 'comp'}), or (source, None) when no output qualifies"""
-    i = full.find('struct main0_out\n{\n'); j = full.find('\n};', i)
-    if i < 0 or j < 0 or 'gl_InstanceIndex' not in full or '[[render_target_array_index]]' in full[i:j]: return full, None
-    locs = {m.group(1): int(m.group(2)) for m in re.finditer(r'\n    float4 (\w+) \[\[user\(locn(\d+)\)\]\];', full[i:j])}
-    m = next((m for m in re.finditer(r'\n    out\.(\w+)\.([xyzw]) = as_type<float>\(', full) if m.group(1) in locs), None)
+    source = full if source is None else source   # a folded GS ignores an earlier VS viewport mask
+    i = source.find('struct main0_out\n{\n'); j = source.find('\n};', i)
+    if i < 0 or j < 0 or 'gl_InstanceIndex' not in source or '[[render_target_array_index]]' in source[i:j]: return full, None
+    locs = {m.group(1): int(m.group(2)) for m in re.finditer(r'\n    float4 (\w+) \[\[user\(locn(\d+)\)\]\];', source[i:j])}
+    m = next((m for m in re.finditer(r'\n    out\.(\w+)\.([xyzw]) = as_type<float>\(', source) if m.group(1) in locs), None)
     if not m: return full, None
     name, comp = m.group(1), m.group(2)
-    st = re.sub(r'\n    float gl_PointSize \[\[point_size\]\];', '', full[i:j + 3]).replace('struct main0_out', 'struct main0l_out', 1)
+    st = re.sub(r'\n    float gl_PointSize \[\[point_size\]\];', '', source[i:j + 3]).replace('struct main0_out', 'struct main0l_out', 1)
     st = st[:-3] + '\n    uint gl_Layer [[render_target_array_index]];\n};'
     add = '\n' + st + '\n'
     for ep, new in (('main0', 'main0_l'), ('main0_z', 'main0_lz')):
-        a = re.search(rf'\bvertex\s+main0_out\s+{ep}\s*\(', full)
+        a = re.search(rf'\bvertex\s+main0_out\s+{ep}\s*\(', source)
         if not a: return full, None
-        b, depth = full.find('{', a.end()), 0
-        for e in range(b, len(full)):
-            depth += full[e] == '{'; depth -= full[e] == '}'
+        b, depth = source.find('{', a.end()), 0
+        for e in range(b, len(source)):
+            depth += source[e] == '{'; depth -= source[e] == '}'
             if not depth: break
-        fn = full[a.start():e + 1].replace('main0_out', 'main0l_out').replace(f' {ep}(', f' {new}(', 1)
+        fn = source[a.start():e + 1].replace('main0_out', 'main0l_out').replace(f' {ep}(', f' {new}(', 1)
         fn = drop_point_size(fn)
         add += '\n' + fn.replace('return out;', f'out.gl_Layer = as_type<uint>(out.{name}.{comp});\n    return out;') + '\n'
     return full + add, {'loc': locs[name], 'comp': comp}
+
+def _viewport_uniform(src, params, value):
+    """Prove a small generated-MSL subset draw-uniform, including fixed UBO words."""
+    value = value.strip()
+    while m := re.fullmatch(r'(?:as_type<(?:int|uint)>|int|uint)\((.*)\)', value):
+        value = m[1].strip()
+    if re.fullmatch(r'-?(?:0[xX][0-9a-fA-F]+|[0-9]+)[uU]?', value): return True
+    constant = {m[2]: m[1] for m in re.finditer(r'\bconstant\s+(\w+)\s*&\s*(\w+)\s*\[\[buffer\(\d+\)\]\]', params)}
+    if constant.get(value) in ('int', 'uint'): return True
+    # The descriptor itself and its buffer pointer must both be constant, and
+    # every offset must be literal. A similarly named device pointer is not proof.
+    load = re.fullmatch(r'\(\*(\w+)\.(\w+)\)\.(\w+)\[(0[xX][0-9a-fA-F]+|[0-9]+)[uU]?\]\.([xyzw])', value)
+    if not load or load[1] not in constant: return False
+    descriptor = re.search(r'\bstruct\s+' + re.escape(constant[load[1]]) + r'\s*\{([^{}]*)\};', src)
+    if not descriptor: return False
+    pointer = re.search(r'\bconstant\s+(\w+)\s*\*\s*' + re.escape(load[2]) + r'\s*\[\[id\(\d+\)\]\];', descriptor[1])
+    if not pointer: return False
+    payload = re.search(r'\bstruct\s+' + re.escape(pointer[1]) + r'\s*\{([^{}]*)\};', src)
+    array = re.search(r'\b(?:float|int|uint)4\s+' + re.escape(load[3]) + r'\[(\d+)\];', payload[1]) if payload else None
+    index = int(load[4], 16 if load[4].lower().startswith('0x') else 10)
+    return bool(array and index < int(array[1]))
+
+
+def vs_viewport_mask(src):
+    """Return raster and unculled sources for an ordinary vertex ViewportMaskNV.
+
+    Metal has no mask output. The final VTG stage's bit zero selects the host's
+    viewport; earlier stages' masks are ignored (NV_viewport_array2, 11.4).
+    Capture, feedback and a later folded geometry stage use the unculled body.
+    X clipping is equivalent only for primitive-uniform masks. Accept one
+    unconditional write of a proven draw-uniform value, never an arbitrary
+    per-vertex mask; do not let the cull reach the next stage's capture.
+    """
+    builtin, local = 'gl_BuiltIn_5253', 'dm_vertex_viewport_mask'
+    if builtin not in src: return src, src
+    # Ignore annotations from earlier MSL rewrites without moving source offsets.
+    code = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
+                  lambda m: re.sub(r'[^\n]', ' ', m[0]), src, flags=re.S)
+    if builtin not in code: return src, src
+    if local in code: raise ValueError('vertex viewport mask: local name already used')
+    output = re.search(r'struct main0_out\s*\{(.*?)\};', code, re.S)
+    position = re.search(r'\bfloat4 (\w+) \[\[position(?:, invariant)?\]\];', output[1]) if output else None
+    entry = re.search(r'\bvertex\s+main0_out\s+main0\s*\(([^{}]*)\)\s*\{', code)
+    if not position or not entry: raise ValueError('vertex viewport mask: missing position or entry')
+    begin, depth, end = entry.end(), 1, entry.end()
+    while depth and end < len(code):
+        depth += (code[end] == '{') - (code[end] == '}'); end += 1
+    if depth: raise ValueError('vertex viewport mask: unterminated entry')
+    body = src[begin:end - 1]
+    body_code = code[begin:end - 1]
+    store = re.search(r'\b' + builtin + r'\s*\[\s*0u?\s*\]\s*=\s*([^;\n]+);', body_code)
+    if code.count(builtin) != 1 or not store:
+        raise ValueError('vertex viewport mask: requires one draw-uniform element-zero store')
+    prefix = body_code[:store.start()]
+    if (prefix.count('{') != prefix.count('}') or not re.search(r'(?:^|[;}])\s*$', prefix)
+            or re.search(r'\breturn\b', prefix) or not _viewport_uniform(code, entry[1], store[1])):
+        raise ValueError('vertex viewport mask: requires an unconditional draw-uniform store before every return')
+    returns = list(re.finditer(r'\breturn out;', body_code))
+    if not returns: raise ValueError('vertex viewport mask: missing return')
+    cull = f'{{ if (({local} & 1u) == 0u) out.{position[1]} = float4(2.0, 0.0, 0.0, 1.0); return out; }}'
+    raster = body
+    for ret in reversed(returns):
+        raster = raster[:ret.start()] + cull + raster[ret.end():]
+    before = src[:begin] + f'\n    int {local} = 1;' + body[:store.start()] + f'{local} = {store[1]};'
+    after = src[end - 1:]
+    return before + raster[store.end():] + after, before + body[store.end():] + after
+
 
 def vs_depth(src):
     """Two entry points for the depth convention: the translator's vertex shader leaves z unchanged (NVN's near=0 convention); the main function is copied here - main0 gets the GL convention's (near=-w) z' = z/2 + w/2 before every return out

@@ -201,7 +201,8 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
             for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[(NSUInteger)i])->blocks) b((id<MTL4CommitFeedback>)part); }
     }];
     pthread_mutex_lock(&g_res_commit_mu);
-    [g_q4 commit:buffers count:(NSUInteger)nb options:o]; rx_mark();
+    uint64_t elapsed = q4_commit_elapsed(buffers, (NSUInteger)nb, o);
+    rx_mark();
     pthread_mutex_unlock(&g_res_commit_mu);
     if (cur) g_rx_cb = nil;
     g_rx_cbs++; g_rx_merged += (uint64_t)n; g_rx_last_nb = nb;
@@ -210,6 +211,7 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
         else { _Atomic uint64_t *np = g_rx_post[i].p; pthread_mutex_lock(&g_note_mu); if (g_rx_post[i].v > atomic_load(np)) atomic_store(np, g_rx_post[i].v); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); }
     }
     g_rx_npost = 0;
+    q4_commit_slow(elapsed, "encode thread (main command buffers)");
     if (g_rx_cbs % 20000 == 0) MLOG("held submissions: %llu commits of main command buffers so far, %llu submissions committed with a later one (DM_NVN_SUB_MERGE)", (unsigned long long)g_rx_cbs, (unsigned long long)g_rx_merged);
 }
 static void rx_flush(void) { if (g_rx_npend) rx_commit(0, nil, 0); }   // the held command buffers go to the queue now
@@ -229,12 +231,13 @@ static void rec_exec(const rec_t *r) {
             break; }
         rx_commit(1, fb, a[2]);
         break; }
-    case RO_COMMIT_REAL: {   // an upload batch, a snapshot copy: a whole command buffer, after everything recorded before it
+    case RO_COMMIT_REAL: {   // a whole command buffer, after everything recorded before it; a[2] is the commit site
         rx_flush();
         id<MTL4CommandBuffer> buffers[] = {rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
         pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
-        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+        uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
         rx_mark(); pthread_mutex_unlock(&g_res_commit_mu);
+        q4_commit_slow(elapsed, (const char *)(uintptr_t)a[2]);
         break; }
     case RO_SIGNAL:
         if (after && g_rx_npend && g_rx_npost < (int)(sizeof g_rx_post / sizeof *g_rx_post)) { g_rx_post_ev[g_rx_npost] = rec_id(a[0]); g_rx_post[g_rx_npost].v = a[1]; g_rx_post[g_rx_npost++].p = NULL; g_rx_after = 1; break; }   // its command buffer is not committed yet
@@ -502,13 +505,17 @@ static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: the submissio
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(fb); r->a[2] = ubc_head(); r->a[5] = (uint64_t)end; return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb}; MTL4CommitOptions *o = commit_opts(fb);
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    q4_commit_slow(q4_commit_elapsed(buffers, 1, o), "rec_commit (main command buffer)");
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
-    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
+    if (rec_on() && g_rb_started) {
+        rec_t *r = rec_put(RO_COMMIT_REAL, 2);
+        r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); r->a[2] = (uintptr_t)"encode thread (upload batch)";
+        return;
+    }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    q4_commit_slow(q4_commit_elapsed(buffers, 1, o), "rec_commit_upload (upload batch)");
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
 // committed after it and after the command buffers committed before it

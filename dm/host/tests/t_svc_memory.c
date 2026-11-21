@@ -11,6 +11,7 @@
 
 static int memory_mprotect(void *addr, size_t size, int prot);
 static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset);
+static int memory_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg);
 static _Noreturn void memory_abort(void);
 static int memory_getpagesize(void) {
 #ifdef TEST_PAGE_16K
@@ -23,12 +24,26 @@ static int memory_getpagesize(void) {
 #define getpagesize memory_getpagesize
 #define mprotect memory_mprotect
 #define mmap memory_mmap
+#define pthread_create memory_pthread_create
 #define abort memory_abort
 #include "../hle_svc.c"
 #undef abort
+#undef pthread_create
 #undef mprotect
 #undef mmap
 #undef getpagesize
+
+static int file_worker_starts;
+static int memory_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg) {
+    if (entry == guest_file_thread) {
+        // Check the state at creation so the result does not depend on when the watcher first runs.
+        assert(g_gf_n > 0);
+        assert(g_heap && g_stack && g_alias && g_alias_cap);
+        assert(g_alias_bits && g_alias_exposed && g_alias_rel && g_alias_aged);
+        ++file_worker_starts;
+    }
+    return pthread_create(thread, attr, entry, arg);
+}
 
 static module_t test_modules[2];
 module_t *g_mod = test_modules;
@@ -640,6 +655,7 @@ static void guest_helper(void) {
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
 // The block: 256 MB in front, the heap region, the stack region, the alias region up to its end. The heap and stack sizes are the profile's, whatever the alias region's size
 static void layout_order(void) {
+    assert(file_worker_starts == (g_gf_n > 0));
     assert(info(I_HeapAddr) == (uint64_t)(uintptr_t)g_as + 0x10000000);
     assert(info(I_HeapSize) == DM_GAME_MEM_RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000);
     assert(info(I_StackAddr) == info(I_HeapAddr) + info(I_HeapSize) && info(I_StackSize) == DM_GAME_MEM_STACK);

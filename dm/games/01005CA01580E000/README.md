@@ -12,6 +12,7 @@ The base game (1.0.0, `v0`) is also playable: on 2026-11-12 a self-contained Mac
 |---|---|---|
 | `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | the NPDM declares no system resource; the game sets a heap in the existing 4 GB layout |
 | `mem_used 0x4c00000` | `game.tsv` | the rewritten modules require 76 MB, exceeding the default 64 MB deducted from the pool |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0, so the offline archive and Mac prebuild use the near-zero vertex entries ([iPhone evidence](#found-on-this-game)) |
 | `pad_layout full` | `game.tsv` | movement and camera use both sticks |
 
 ## Rendering
@@ -45,6 +46,7 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 
 ## Found on this game
 
+- **Resolved.** On NX18's iPhone 18 Pro Max, the game selected near = 0 and the host rejected the bundled archive stamped near = −w. The device's own cache covered that run. The corrected 63 MB archive held 3,342 bases, and the same phone found 16 of 16 probed bases at startup. Fresh-install startup time is unknown. [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree) · [NX18 iPhone results](https://github.com/kencalx/NX18/commit/4b1a2621ab735ff18882a62c510e2a8b702599c2)
 - [Linear render-target storage without the LINEAR flag](../../../docs/reference/nvn-objects.md#linear-render-target-storage-without-the-linear-flag): sizing, row pitch and deswizzle eligibility must all recognize `LINEAR_RENDER_TARGET` independently.
 - [Needle shader containers in main and GFD archives](../../../docs/reference/shaders.md#needle-shader-containers-in-main-and-gfd-archives): descriptor-based extraction of NVN control/code sections.
 

@@ -934,10 +934,13 @@ void load_modules(const char *dir, const char **names, int n) {
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
 
-// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
+// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT. The order is reverse of the load list:
+// modules later in the list are the ones the earlier ones depend on, so the sdk module's DT_INIT, which constructs the
+// libc++ globals (std::cout and friends), runs before main's static initializers, which already write to them. Forward
+// order crashed Little Busters! Converted Edition at its first log line (std::ostream::write on an unconstructed cout).
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
-    for (int i = 0; i < g_nmod; i++) {
+    for (int i = g_nmod - 1; i >= 0; i--) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);

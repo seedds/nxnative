@@ -290,7 +290,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     _pad = p; _live = YES; _handshaken = YES;
     s2_rumble_timer();
     if (fresh) {
-        if (!g_front.attach || !g_front.attach(p)) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
+        if (!g_front.attach || !g_front.attach(p, 0)) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
     } else if (g_front.read) g_front.read(p);
     s2_sync_sides(p);
     _player = s2_player(p);
@@ -388,9 +388,11 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     s2_dev *d = s2_dev_of(old, _pid), *nd = s2_dev_of(p, _pid); *nd = *d; memset(d, 0, sizeof *d);
     s2_joy_release(was, side); s2_sync_sides(old); if (g_front.read) g_front.read(old);
     p->next = g_pads; g_pads = p; _pad = p;
-    if (!g_front.attach || !g_front.attach(p)) {   // no free player: back into the pair
+    if (!g_front.attach || !g_front.attach(p, 1)) {   // no free player: back into the pair
         LOG("[sw2] %s: no free player to play alone, it stays in the pair", s2_kind(_pid));
-        s2_pad_unlink(p); *d = *nd; _pad = old; free(p); s2_sync_sides(old); return;
+        s2_pad_unlink(p); *d = *nd; _pad = old; free(p); s2_sync_sides(old);
+        if (g_front.read) g_front.read(old);
+        return;
     }
     s2_sync_sides(p); _player = s2_player(p);
     if (g_front.read) g_front.read(p);

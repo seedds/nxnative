@@ -64,9 +64,11 @@ jobs:
           xcodebuild -version
       - name: Compile database (dry runs of the Makefiles)
         run: python3 dm/tools/lint_c.py compdb
-      - name: Base branch's baseline (pull requests)
+      - name: Pull request base revision's baseline
         if: github.event_name == 'pull_request'
-        run: git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
       - name: clang-tidy against the baseline
         run: |
           mkdir -p logs

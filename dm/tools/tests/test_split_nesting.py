@@ -2,6 +2,9 @@
 one layout archive that expands 9 times, was left out), while members that overlap and Yaz0 members that expand without end are still stopped early. No game files needed."""
 import struct
 import sys
+import tempfile
+import shutil
+import subprocess
 import time
 import unittest
 from pathlib import Path
@@ -73,6 +76,89 @@ class Nesting(unittest.TestCase):
         with mock.patch.object(ss, 'yaz0', wraps=ss.yaz0) as dec, self.assertRaisesRegex(SystemExit, 'Yaz0 archive members expand to more than 16 times the file'):
             ss.scan_blob(d, '/bomb.sarc', [])
         self.assertEqual(dec.call_count, 0)
+
+
+class NestedZstd(unittest.TestCase):
+    def pack(self, payload, *, unknown=False):
+        zstd = ss.zstd_mod()
+        options = {zstd.CompressionParameter.content_size_flag: 0} if unknown else None
+        return zstd.compress(payload, options=options)
+
+    def scan(self, data):
+        out = []
+        ss.scan_blob(data, '/models.pack', out)
+        return out
+
+    def test_nested_frames_reach_shader_reader_through_file_prefilter(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh())])
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                packed = self.pack(inner, unknown=unknown)
+                outer = fz.sarc([(b'model.zs', packed), (b'padding', b'\1' * len(inner))])
+                self.assertFalse(b'BNSH' + bytes(4) in outer)
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / 'models.pack'; path.write_bytes(outer)
+                    _, shaders, _, unreadable = ss.scan_file((str(path), 'models.pack'))
+                self.assertFalse(unreadable)
+                self.assertEqual({s[1] for s in shaders.values()}, {'vs', 'ps'})
+                self.assertTrue(all('/models.pack/model.zs/shader.bnsh' in s[0] for s in shaders.values()))
+
+    def test_decoded_container_traversal_is_not_another_expansion(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh()), (b'padding', bytes(32768))])
+        for _ in range(3): inner = fz.sarc([(b'inner.sarc', inner)])
+        for pack in (self.pack, yaz0):
+            with self.subTest(pack=pack.__name__):
+                outer = fz.sarc([(b'layout', pack(inner)), (b'padding', b'\1' * (len(inner) // 10))])
+                self.assertEqual({s[1] for s in self.scan(outer)}, {'vs', 'ps'})
+
+    def test_expansion_budget_applies_with_and_without_declared_size(self):
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                outer = fz.sarc([(b'bomb.zs', self.pack(bytes(1 << 20), unknown=unknown))])
+                with self.assertRaisesRegex(SystemExit, 'zstd archive members expand'):
+                    self.scan(outer)
+
+    def test_incomplete_or_multiple_frames_are_not_silently_skipped(self):
+        packed = self.pack(b'payload')
+        for bad in (packed[:-1], packed + b'junk', packed + packed):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(SystemExit, 'incomplete or trailing data'):
+                    self.scan(fz.sarc([(b'bad.zs', bad)]))
+
+    def test_missing_dictionary_is_reported(self):
+        packed = self.pack(b'payload')
+        # Add a one-byte dictionary ID to a single-segment synthetic frame.
+        self.assertTrue(packed[4] & 32)
+        packed = packed[:4] + bytes([packed[4] | 1, 7]) + packed[5:]
+        with mock.patch.object(ss, 'ZDICTS', {}):
+            with self.assertRaisesRegex(SystemExit, 'needs zstd dictionary 7'):
+                self.scan(fz.sarc([(b'model.zs', packed)]))
+
+    @unittest.skipUnless(shutil.which('zstd'), 'requires the existing zstd CLI to train a synthetic dictionary')
+    def test_named_dictionary_decodes_nested_shaders(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh())])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); samples = []
+            for i in range(32):
+                sample = root / f'sample{i}'
+                sample.write_bytes(inner + (f'synthetic sample {i} '.encode() * 64))
+                samples.append(str(sample))
+            dictionary = root / 'dictionary'
+            subprocess.run(['zstd', '--train', '--maxdict=1024', '--dictID=7', '-o', str(dictionary), *samples], check=True, capture_output=True)
+            data = dictionary.read_bytes(); zstd = ss.zstd_mod()
+            packed = zstd.compress(inner, zstd_dict=zstd.ZstdDict(data))
+        self.assertEqual(ss.zs_dict_id(packed), 7)
+        with mock.patch.object(ss, 'ZDICTS', {7: data}), mock.patch.object(ss, '_ZD', {}):
+            outer = fz.sarc([(b'model.zs', packed), (b'padding', b'\1' * len(inner))])
+            self.assertEqual({s[1] for s in self.scan(outer)}, {'vs', 'ps'})
+
+    def test_overlapping_compressed_members_still_stop(self):
+        data = bytes(0x4000)
+        for _ in range(6): data = fanout(self.pack(data), pad=0x4000)
+        with mock.patch.object(ss, 'scan_blob', wraps=ss.scan_blob) as calls:
+            with self.assertRaisesRegex(SystemExit, 'more than 16 times the file'):
+                self.scan(data)
+            self.assertLess(calls.call_count, 200)
 
 
 class MemberNames(unittest.TestCase):

@@ -202,6 +202,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Slay the Spire](010026300BA4A000/README.md) | `010026300BA4A000` | 1.0 (base) | 7.3.2 | libGDX on MonoGame.Switch (BRUTE) | OpenGL |
 | [Sonic Frontiers Definitive Edition](0400921025B32000/README.md) | `0400921025B32000` | v65536 (Switch 2) | 21.4.1 (Ounce) | Hedgehog Engine 2, CRIWARE | NVN2 |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
+| [South Park: The Stick of Truth](010095300B6A4000/README.md) | `010095300B6A4000` | 1.01 | 4.5.0 | Obsidian's Onyx engine, Bink | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN |
 | [SteamWorld Dig](01009320084A4000/README.md) | `01009320084A4000` | 1.12.0 | 3.4.0 | Image & Form's own engine (SteamWorld) | NVN |

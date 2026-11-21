@@ -216,12 +216,12 @@ private struct MicrophoneDevicePicker: View {
         Section {
             if let uid = getenv("DM_MIC_DEVICE") {
                 let value = String(cString: uid)
-                LabeledContent("Microphone input", value: devices.first { $0.uid == value }?.name ?? "System Default")
+                LabeledContent(L("Microphone input"), value: devices.first { $0.uid == value }?.name ?? L("System Default"))
             } else {
-                Picker("Microphone input", selection: $savedDevice) {
-                    Text("System Default").tag("default")
+                Picker(L("Microphone input"), selection: $savedDevice) {
+                    Text(L("System Default")).tag("default")
                     if savedDevice != "default", !devices.contains(where: { $0.uid == savedDevice }) {
-                        Text("Selected device unavailable").tag(savedDevice)
+                        Text(L("Selected device unavailable")).tag(savedDevice)
                     }
                     ForEach(devices) { Text($0.name).tag($0.uid) }
                 }

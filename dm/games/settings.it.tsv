@@ -58,6 +58,9 @@ DM_RUMBLE_MIN.label	Soglia vibrazione
 DM_PAD_PRESS_TO_JOIN.label	Premi un tasto per unirti
 DM_SW2.label	Controller Switch 2
 DM_SW2.note	Usa Joy-Con 2 e Pro Controller 2 via Bluetooth: durante il gioco tieni premuto Sync su uno per abbinarlo. macOS chiede una volta l'accesso al Bluetooth.
+DM_MIC.label	Microfono
+DM_MIC.note	Permette al gioco di sentire il tuo microfono. macOS chiede l'accesso quando avvii il gioco con questa opzione attiva.
+DM_MIC_GAIN.label	Guadagno del microfono
 DM_PRESENT_SNAP.label	Buffer dei fotogrammi
 DM_PRESENT_SNAP.note	Fino a un fotogramma di latenza in più.
 DM_PSO_MTL4.label	Pipeline Metal 4
@@ -91,3 +94,6 @@ ui:Waiting for iCloud to deliver this game's save.	In attesa che iCloud consegni
 ui:Play Without It	Gioca senza
 ui:Play This Mac's Save	Usa il salvataggio di questo Mac
 ui:Try Again	Riprova
+ui:Microphone input	Ingresso microfono
+ui:System Default	Predefinito di sistema
+ui:Selected device unavailable	Dispositivo selezionato non disponibile

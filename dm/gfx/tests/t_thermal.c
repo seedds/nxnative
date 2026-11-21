@@ -14,6 +14,9 @@ static _Atomic uint64_t test_now;
 static _Atomic int test_thermal = -1, thermal_reads;
 uint64_t now_ns(void) { return atomic_load(&test_now); }
 int dm_thermal_now(void) { atomic_fetch_add(&thermal_reads, 1); return atomic_load(&test_thermal); }
+static _Atomic int test_low_power, low_power_reads;
+int dm_low_power_now(void) { atomic_fetch_add(&low_power_reads, 1); return atomic_load(&test_low_power); }   // front_ios.m: NSProcessInfo lowPowerModeEnabled
+static void low_power(int on) { atomic_store(&test_low_power, on); }
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -47,10 +50,13 @@ static void *reader(void *unused) {
 int main(void) {
     target(60);
     const char *enabled = getenv("DM_THERMAL_CAP");
+    const char *lp_env = getenv("DM_LOW_POWER_CAP"); int lp_enabled = !(lp_env && !strcmp(lp_env, "0"));
     if (enabled && !strcmp(enabled, "0")) {
         at(10, 3); CHECK("disabled: a critical device keeps the configured cap", nvn_game_fps() == 60);
+        low_power(1); at(11, 0); CHECK("disabled: Low Power Mode keeps the configured cap", nvn_game_fps() == 60);
         movie(30); CHECK("disabled: the movie cap still applies", nvn_game_fps() == 30);
         CHECK("disabled: thermal state is never read", atomic_load(&thermal_reads) == 0);
+        CHECK("disabled: Low Power Mode is never read", atomic_load(&low_power_reads) == 0);
     } else {
         dm_fps_state = NULL; at(1, 2);
         CHECK("no frame step: thermal state is not read", nvn_game_fps() == 60 && !atomic_load(&thermal_reads));
@@ -102,6 +108,35 @@ int main(void) {
         atomic_store(&start, 1);
         for (unsigned i = 0; i < 4; i++) pthread_join(threads[i], NULL);
         CHECK("concurrent acquire/present readers retain the hot cap", nvn_game_fps() == 30);
+
+        // Low Power Mode: the same cap and calm timer, only where heat applies (DM_LOW_POWER_CAP=0 keeps 60 in it)
+        at(250, 0); (void)nvn_game_fps();
+        at(280, 0); CHECK("the hot cap from the readers recovers", nvn_game_fps() == 60);
+        dm_fps_state = NULL; low_power(1); at(300, 0); int lpr = atomic_load(&low_power_reads);
+        CHECK("no frame step: Low Power Mode is not read", nvn_game_fps() == 60 && atomic_load(&low_power_reads) == lpr);
+        dm_fps_state = fps_state; target(0);
+        CHECK("inactive frame step: Low Power Mode is not read", nvn_game_fps() == 60 && atomic_load(&low_power_reads) == lpr);
+        target(60);
+        if (lp_enabled) {
+            at(301, 0); CHECK("Low Power Mode holds 30 fps", nvn_game_fps() == 30);
+            CHECK("Low Power Mode is read with the thermal sample", atomic_load(&low_power_reads) == lpr + 1);
+            low_power(0); at(301, 0); CHECK("a second call uses the cached Low Power Mode sample", nvn_game_fps() == 30 && atomic_load(&low_power_reads) == lpr + 1);
+            at(302, 0); CHECK("Low Power Mode off starts the calm interval", nvn_game_fps() == 30);
+            at(331, 0); CHECK("29 s after Low Power Mode went off the cap holds", nvn_game_fps() == 30);
+            at(332, 0); CHECK("30 s after Low Power Mode went off 60 fps returns", nvn_game_fps() == 60);
+            low_power(1); at(333, 2); CHECK("heat and Low Power Mode hold 30 fps", nvn_game_fps() == 30);
+            low_power(0); at(334, 2); CHECK("Low Power Mode off while still hot keeps the cap", nvn_game_fps() == 30);
+            at(335, 1); (void)nvn_game_fps();
+            low_power(1); at(350, 1); CHECK("Low Power Mode during the heat calm keeps 30 fps", nvn_game_fps() == 30);
+            low_power(0); at(351, 1); (void)nvn_game_fps();
+            at(380, 1); CHECK("Low Power Mode restarted the calm interval", nvn_game_fps() == 30);
+            at(381, 1); CHECK("the restarted calm interval ends after 30 s", nvn_game_fps() == 60);
+        } else {
+            at(301, 0); CHECK("DM_LOW_POWER_CAP=0: Low Power Mode keeps 60 fps", nvn_game_fps() == 60);
+            CHECK("DM_LOW_POWER_CAP=0: Low Power Mode is never read", atomic_load(&low_power_reads) == 0);
+            at(302, 2); CHECK("DM_LOW_POWER_CAP=0: heat still holds 30 fps", nvn_game_fps() == 30);
+        }
+        low_power(0);
     }
     printf("== %d checks, %d failed ==\n", checks, failed);
     return failed != 0;

@@ -34,6 +34,7 @@ static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where p
 static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
+#include "controls_card_mac.h"
 #include "ctrl_prompt.h"
 #include "user_select_mac.h"
 #include <signal.h>
@@ -1003,6 +1004,21 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 }
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
+// The controls card (controls_card_mac.h), Window → Show Controls (⌘/): its views exist only while it is shown, so a hidden card costs the game nothing
+static NSView *g_cc_card;
+@interface DmControlsCardTarget : NSObject @end
+@implementation DmControlsCardTarget
+- (void)toggleControls:(NSMenuItem *)it {
+    (void)it;
+    if (g_cc_card) { hq_fade(g_cc_card, 0); g_cc_card = nil; LOG("front end: controls card hidden"); return; }   // the fade's end removes and releases its views
+    NSView *cv = g_win.contentView; if (!cv) return;
+    g_cc_card = cc_card_view(cv.bounds, dm_controls());
+    [cv addSubview:g_cc_card]; hq_fade(g_cc_card, 1);
+    LOG("front end: controls card shown");
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)it { it.title = g_cc_card ? @"Hide Controls" : @"Show Controls"; return YES; }
+@end
+static DmControlsCardTarget *g_cc_target;   // NSMenuItem keeps its target unretained
 
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
@@ -1700,6 +1716,9 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        g_cc_target = [DmControlsCardTarget new];
+        [wm addItemWithTitle:@"Show Controls" action:@selector(toggleControls:) keyEquivalent:@"/"].target = g_cc_target;
+        if (getenv("DM_CONTROLS_CARD") && atoi(getenv("DM_CONTROLS_CARD"))) dispatch_async(dispatch_get_main_queue(), ^{ [g_cc_target toggleControls:nil]; });   // shown from the start
         NSApp.mainMenu = bar;
         static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;   // also for fullscreen entered later (⌃⌘F, the green button): no menu bar over the game
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window

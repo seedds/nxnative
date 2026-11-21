@@ -2733,6 +2733,18 @@ static void fstep_tick(const win_t *o, int c) {
         slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE));
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
+    // While the display link is silent and for FSTEP_LINK_QUIET frames after any of its events (a stall's start or end, a rescue's start or end, a pacing mode change:
+    // mtl_link_events), the frames' start-to-start time holds waits for the screen, not the game's work, and so does their CPU cost: the acquire's wait for a present the
+    // silent link never takes is not in the pacing wait. A frame whose GPU time fits its hold is on time there; one whose GPU time does not is still judged as before.
+    // Ocarina of Time on an M6 (2 performance cores), as the link went silent or came back (the window covered; DM_TEST_LINK_STALL=95,3 on the field-run route): three frames of
+    // GPU 0.66-0.99 vsyncs (CPU cost 0.96-6.31 with the wait) and the hold stepped 1 → 2 → 3 (20 fps) within 8 frames, for 1-2 s
+    {
+        enum { FSTEP_LINK_QUIET = 30 };
+        static uint64_t ev_seen; static int quiet; uint64_t ev = mtl_link_events();
+        if (ev != ev_seen) { ev_seen = ev; quiet = FSTEP_LINK_QUIET; }
+        int disturbed = quiet > 0 || mtl_link_stalled(); if (quiet > 0) quiet--;
+        if (disturbed && !g_fs.screen && gpu <= (g_fs.k ? g_fs.k : kmin) + FSTEP_LATE) g_fs.screen = 1;
+    }
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();

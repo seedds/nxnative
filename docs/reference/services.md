@@ -1265,6 +1265,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### Play report upload status
+
+- **Symptom:** a won Chambara match ends in `nn::diag` abort Result `0xe15`, after `[RED] sf: the game connects to service prepo:u itself`.
+- **Cause:** the SDK's `nn::prepo::GetTransmissionStatus` opens `prepo:u` through `sm`. The host has no play report service process, and `sm` returns ResultNotRegistered.
+- **Fix:** `hle_offline.c` answers success with status 0 (idle). The offline host discards reports, so the upload queue is always empty.
+- **Found on:** Nintendo Switch Sports 1.5.0 (SDK 13.3.4), with a won match replayed after the fix in [PR #2908](https://github.com/seedds/nxnative/pull/2908).
+
 ### SDK 21 socket initialization and overloads
 
 - **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).

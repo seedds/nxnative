@@ -19,6 +19,7 @@ HLE_FORCE("_ZN2nn5prepo10InitializeEv", "telemetry init: the original connects t
 HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "telemetry session ID: no service connection, nothing added, reports success", Result, h_prepo_AddSess, void *rep, const char *key) { (void)rep; (void)key; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "telemetry internet connection status: no service connection, nothing added, reports success", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "telemetry immediate upload; nothing is sent, reports success", Result, h_prepo_Tx, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn5prepo21GetTransmissionStatusEPNS0_18TransmissionStatusE", "telemetry upload status: idle (nothing is queued)", Result, h_prepo_TxStatus, uint32_t *st) { if (st) *st = 0; return RES_OK; }
 
 // ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
 HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless (cut): initialization fails", Result, h_ldn_Init, void) { return RES_FAIL; }

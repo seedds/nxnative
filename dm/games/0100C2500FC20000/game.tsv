@@ -1,0 +1,39 @@
+# Game profile of Splatoon 3 (Switch, base game v0 + update 12.0.0 = v2818048), SDK 20.5.32. Nintendo EPD (sead / agl / gsys), Pia / NPLN, NVN
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100C2500FC20000
+program_id	0100C2500FC20000
+
+# ---- App ----
+name	Splatoon 3
+ipa	Splatoon3.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v2818048	12.0.0	main=6cbb16698653e1af3c3a7602164819bb	sdk=6a0a2600867712cd6f6c4dec53ae0d9c
+package	v2818048
+shader_versions	v2818048
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	Model/Fld_PlayerMake.bfres.zs
+zip_store	.bwav:.xtx:.zs:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Pack/=pack /UI/=ui /Model/=model /Sound/=sound /Layout/=layout /Bake/=bake /Phive/=phive /Locker/=locker /Gyml/=gyml /AnimationEvent/=animationevent /Banc/=banc /Component/=component /RSDB/=rsdb /CameraAnimation/=cameraanimation /Fest/=fest /Catalog/=catalog /Mals/=mals /Lib/=lib /NavTable/=navtable /Event/=event /Effect/=effect /UniqueSequenceSPL/=uniquesequencesp /System/=system /Env/=env
+shader_note	Splatoon 3 shaders (provisional profile)
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x7600000

@@ -2,6 +2,9 @@
 // A0 B1 X2 Y3 StickL4 StickR5 L6 R7 ZL8 ZR9 Plus10 Minus11 Left12 Up13 Right14 Down15; sticks ±32767.
 #pragma once
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 // Button bits (= nn::hid::NpadButton bit order; the DM_KEYS key-name table in hle_hid.c is generated from here). Frontends always compose buttons from these names.
 enum {
     DM_BTN_A = 1u << 0, DM_BTN_B = 1u << 1, DM_BTN_X = 1u << 2, DM_BTN_Y = 1u << 3,
@@ -68,3 +71,72 @@ void dm_input_sampled_right(int32_t *rx,int32_t *ry);
 
 // Controller state injection point: called after GetNpadState has filled in the original state and before the pseudo-key override. The Mac host touch point script (touch_mac.c, Mac only, kept out of the iOS app by the _mac convention) registers at startup; iOS does not carry that file and it stays empty
 extern void (*dm_pad_hook)(uint64_t now, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+
+// Controller layout (DM_PAD_LAYOUT) and per-button remap (DM_PAD_MAP), shared across GameController (pad_apple.h) and raw HID gamepads (pad_hid.h).
+enum { DM_PAD_LAYOUT_SWITCH = 0, DM_PAD_LAYOUT_XBOX = 1, DM_PAD_LAYOUT_PLAYSTATION = 2 };
+#define DM_PAD_BTN_COUNT 16
+#define DM_PAD_MAP_NONE 0xffu
+
+static inline int dm_pad_face_layout(void) {
+    const char *l = getenv("DM_PAD_LAYOUT");
+    if (!l || !*l) return DM_PAD_LAYOUT_SWITCH;
+    if (!strcasecmp(l, "xbox")) return DM_PAD_LAYOUT_XBOX;
+    if (!strcasecmp(l, "playstation")) return DM_PAD_LAYOUT_PLAYSTATION;
+    return DM_PAD_LAYOUT_SWITCH;
+}
+static inline int dm_pad_labels_mode(void) { return dm_pad_face_layout() != DM_PAD_LAYOUT_SWITCH; }
+
+// Switch button names in NpadButton bit order (bits 0..15): shared by DM_PAD_MAP and DM_HID_MAP.
+static inline const char *dm_pad_btn_name(int b) {
+    static const char *const names[DM_PAD_BTN_COUNT] = {
+        "A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+    return (unsigned)b < DM_PAD_BTN_COUNT ? names[b] : NULL;
+}
+
+static inline void dm_pad_trim(const char **s, size_t *len) {
+    while (*len && (**s == ' ' || **s == '\t')) { (*s)++; (*len)--; }
+    while (*len && ((*s)[*len - 1] == ' ' || (*s)[*len - 1] == '\t')) (*len)--;
+}
+
+static inline int dm_pad_btn_index(const char *s, size_t len) {
+    dm_pad_trim(&s, &len);
+    if (!len) return -1;
+    for (int b = 0; b < DM_PAD_BTN_COUNT; b++) {
+        const char *nm = dm_pad_btn_name(b);
+        if (strlen(nm) == len && !strncasecmp(s, nm, len)) return b;
+    }
+    return -1;
+}
+
+// DM_PAD_MAP: comma-separated DST=SRC entries (or DST= to unbind). Invalid tokens are skipped without disturbing the identity default.
+static inline void dm_pad_map_init(uint8_t map[DM_PAD_BTN_COUNT], const char *spec) {
+    for (int b = 0; b < DM_PAD_BTN_COUNT; b++) map[b] = (uint8_t)b;
+    for (const char *s = spec, *end; s && *s; s = end ? end + 1 : "") {
+        end = strchr(s, ',');
+        const char *eq = strchr(s, '=');
+        if (!eq || (end && eq > end)) continue;
+        int dst = dm_pad_btn_index(s, (size_t)(eq - s));
+        if (dst < 0) continue;
+        const char *rhs = eq + 1;
+        size_t rlen = end ? (size_t)(end - rhs) : strlen(rhs);
+        dm_pad_trim(&rhs, &rlen);
+        if (!rlen) { map[dst] = DM_PAD_MAP_NONE; continue; }
+        int src = dm_pad_btn_index(rhs, rlen);
+        if (src >= 0) map[dst] = (uint8_t)src;
+    }
+}
+
+static inline uint64_t dm_pad_map_apply(const uint8_t map[DM_PAD_BTN_COUNT], uint64_t m) {
+    uint64_t out = m & ~((1ull << DM_PAD_BTN_COUNT) - 1);
+    for (int b = 0; b < DM_PAD_BTN_COUNT; b++) if (map[b] < DM_PAD_BTN_COUNT && (m >> map[b] & 1)) out |= 1ull << b;
+    return out;
+}
+
+static inline uint64_t dm_pad_remap_spec(uint64_t m, const char *spec) {
+    if (!m || !spec || !*spec) return m;
+    uint8_t map[DM_PAD_BTN_COUNT];
+    dm_pad_map_init(map, spec);
+    return dm_pad_map_apply(map, m);
+}
+
+static inline uint64_t dm_pad_remap(uint64_t m) { return dm_pad_remap_spec(m, getenv("DM_PAD_MAP")); }

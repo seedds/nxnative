@@ -604,7 +604,7 @@ static uint64_t pad_live_buttons(GCControllerLiveInput *input) {
     K(GCInputLeftShoulder, B_L); K(GCInputRightShoulder, B_R); K(GCInputLeftTrigger, B_ZL); K(GCInputRightTrigger, B_ZR);
     K(GCInputButtonMenu, B_PLUS); K(GCInputButtonOptions, B_MINUS); K(GCInputLeftThumbstickButton, B_LS);
     #undef K
-    return m;
+    return dm_pad_remap(m);
 }
 static void read_pad(GCController *c) {
     GCExtendedGamepad *g = c.extendedGamepad;
@@ -615,15 +615,7 @@ static void read_pad(GCController *c) {
         pad_report(c, pad_live_buttons(input), stick.xAxis.value, stick.yAxis.value, 0, 0);
         return;
     }
-    _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
-    uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
-    #define K(btn, bit) if (btn.isPressed) m |= 1ull << bit
-    K(g.leftShoulder, B_L); K(g.rightShoulder, B_R); K(g.leftTrigger, B_ZL); K(g.rightTrigger, B_ZR);
-    K(g.buttonMenu, B_PLUS); if (g.buttonOptions) K(g.buttonOptions, B_MINUS);
-    if (g.leftThumbstickButton) K(g.leftThumbstickButton, B_LS); if (g.rightThumbstickButton) K(g.rightThumbstickButton, B_RS);
-    K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
-    #undef K
-    pad_report(c, m, g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value);
+    pad_report(c, dm_pad_buttons(g), g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value);
 }
 // Returns YES on first registration, so a controller waiting to join is logged once.
 static BOOL pad_listen(GCController *c) {

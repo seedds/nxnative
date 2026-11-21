@@ -65,7 +65,8 @@ def build(out_dir, src=SOURCE, letters=LETTERS):
         print('%s: type %d, %d characters, %d glyphs, %d bytes' % (fn, t, chars, glyphs, os.path.getsize(os.path.join(out_dir, fn))))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import make_ext_font
-    make_ext_font.build(os.path.join(out_dir, EXT), letters)
+    for layout, fn in (('switch', EXT), ('xbox', 'nintendo_ext_xbox.ttf'), ('playstation', 'nintendo_ext_playstation.ttf')):
+        make_ext_font.build(os.path.join(out_dir, fn), letters, layout)
 
 if __name__ == '__main__':
     if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: make_shared_fonts.py out_dir [source.ttf]')

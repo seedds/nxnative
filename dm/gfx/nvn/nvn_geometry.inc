@@ -139,7 +139,7 @@ static void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTL4RenderPassDescriptor *rd = [MTL4RenderPassDescriptor new]; rd.renderTargetWidth = rd.renderTargetHeight = rd.defaultRasterSampleCount = 1;
     id<MTL4RenderCommandEncoder> en = enc_r_begin(rd); enc_r_pso(en, ps);
-    { int bad = bind_vbufs(en, &vs->rf); if (bad >= 0) { RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address); enc_r_end(en); return; } }
+    { int bad = bind_vbufs(en, &vs->rf, &range, NULL); if (bad >= 0) { RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address); enc_r_end(en); return; } }
     vconv_bind(en, vs, 1, &range, NULL); args_dirty_all(); encode_args(en, vs, 0, 1); enc_r_vbuf(en, 13, gpu);
     enc_r_draw_instanced(en, MTLPrimitiveTypePoint, lo, span, 1, (uint32_t)info[3]); enc_r_end(en);
     mdi_wait();
@@ -549,7 +549,8 @@ static int geo_mesh_keeps(uint32_t op) {
 }
 // Whether the draw's result is the same in any order among the draws of a run (see above); the first refusal of each kind is logged
 static int geo_mesh_run_fits(NvProg *pr) {
-    static const char *const why[] = {"its fragment shader writes memory", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest"};
+    static const char *const why[] = {"its fragment shader writes memory", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest",
+                                      "it writes depth with a depth bounds test, which reads the depth the run's other draws write"};
     static uint8_t logged;
     NvShader *fs = pr->sh[1]; int r = -1;
     uint32_t attached = 0; for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) attached |= 1u << i;
@@ -558,6 +559,8 @@ static int geo_mesh_run_fits(NvProg *pr) {
     else if (draw_color_writes(pr) & attached) r = 1;
     else if (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])) r = 2;
     else if (g_pass.hd && S.ds.dw && !(S.ds.dt && (S.ds.df == 1 || S.ds.df == 2 || S.ds.df == 4 || S.ds.df == 5 || S.ds.df == 7))) r = 3;   // NVN NEVER, LESS, LEQUAL, GREATER, GEQUAL
+    else if (g_pass.hd && S.ds.dw && S.dbnd.on) { float b_[2]; if (dbnd_resolve(1, S.dbnd.lo, S.dbnd.hi, b_) == DBND_TEST && dbnd_on() && dbnd_hw()) r = 4; }   // the test reads
+    // the depth stored when the fragment runs, which depends on the order the run's draws rasterize in (bounds (0.5, 1) over a cleared 1: a draw at 0.2 passes before one at 0.3, fails after)
     if (r < 0) return 1;
     if (!(logged >> r & 1)) { logged |= 1 << r; MLOG("geometry mesh run: a draw of vertex %s draws alone: %s", pr->sh[0] ? pr->sh[0]->key : "-", why[r]); }
     return 0;
@@ -1175,7 +1178,7 @@ static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     memset(g_vbuf_need, 0, sizeof g_vbuf_need);   // a later draw's bounds do not apply here (geo_prepare)
     enc_r_pso(re, j->capture);
     {   // the capture shares its encoder with the job's other stages, which read what it writes: it is not skipped alone, and the stream's slot keeps an earlier buffer
-        int bad = bind_vbufs(re, &j->vs->rf);
+        int bad = bind_vbufs(re, &j->vs->rf, NULL, NULL);
         if (bad >= 0) RED_ONCE(160, "vertex stream %d's buffer %#llx is in no memory pool; a geometry capture reads the buffer bound before", bad, (unsigned long long)S.vbuf[bad].address);
     }
     vconv_bind(re, j->vs, 1, &j->vertex_range, NULL);

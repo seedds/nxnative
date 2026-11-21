@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fuzz the in-memory shader container readers of dm/gfx/tools/shader_split.py, dispatched as scan_file does for a loose file: scan_blob (BNSH, BAHS, MSHD, SARC and Yaz0
 around them, and the others it recognizes by magic), then glslc_shaders when nothing was found, sdf_shaders for 'SDF\\0' (RE Engine) and arh_entries for 'arh1' (Monolith's
-index), and uniq_keys / var_pairs over what they return.
+index), nxsd_shaders for 'NXSD', and uniq_keys / var_pairs over what they return.
 Seeds: one synthetic shader pair (a 0x880-byte control section and a small code area per stage, vertex and pixel), wrapped as a BNSH, a BAHS with its binary and program arrays,
-an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, and an ARH1 index with one path.
+an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, an ARH1 index with one path, and an NXSD with separate control and code regions.
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
@@ -118,15 +118,27 @@ def rgxd():
     return bytes(d)
 
 
+def nxsd():
+    """NXSD v0x100: two descriptors followed by the controls and code areas they reference."""
+    ctl_start = 0x40 + 2 * 0x18; code_start = ctl_start + len(VS[0]) + len(PS[0])
+    d = bytearray(0x40); d[:4] = b'NXSD'
+    struct.pack_into('<7I', d, 4, 0x100, code_start + len(VS[1]) + len(PS[1]), code_start, 0, 2, 2 * 0x880, len(VS[1]) + len(PS[1]))
+    struct.pack_into('<3Q', d, 0x28, 0x40, ctl_start, code_start)
+    d += struct.pack('<6I', 0, 0, 0, 0, 0, 0) + struct.pack('<6I', 0x880, 0, len(VS[1]), 0, 0, 0)
+    return bytes(d) + VS[0] + PS[0] + VS[1] + PS[1]
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd()}
 
 
 def check(data):
     try:
         if data[:4] == b'SDF\0': found = ss.sdf_shaders(data, '/fuzz.sdf')
+        elif data[:4] == b'NXSD':
+            found = ss.nxsd_shaders(data, '/fuzz.nxsd'); ss.separable_pairs(ss.uniq_keys(found))
         elif data[:4] == b'arh1': ss.arh_entries(data); return
         else:
             found = []; ss.scan_blob(data, '/fuzz', found)

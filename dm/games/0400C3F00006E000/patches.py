@@ -147,6 +147,26 @@ def screen_shape(ctx):
     fov_stub(0x25aabd4, '0041201e', 0xbd40b262, 0x1e204100, 0x1e204008)   # setFovy_: ratio at [x19,#0xb0], half in s8
     fov_stub(0xd2e624, '0041201e', 0xbd40b262, 0x1e204100, 0x1e204008)    # constructor: aspect stored at +0xb0 before, half in s8
     fov_stub(0xd2fcbc, '2041201e', 0x1e204102, 0x1e204120, 0x1e204009)    # set(): ratio still in s8, half in s9
+    # Cameras whose aspect becomes the screen's ratio after their fovy was set (the race camera: its aspect comes from the viewport ratio stores, 16:9's m00 0.8829 became
+    # 1.0988 with m11 kept at 1.5697, so the sides were cut and the view stretched): where the projection matrix is built (the five inlined copies and doUpdateMatrix,
+    # ldp tan, aspect at +0xac), an aspect of the screen's ratio whose fovy is not one of the widened ones has its tan x k for the matrix. Assembled with clang; x16 / x17 and
+    # s16 / s17 free and no flags read after each site (checked). Counts matrices at state +0x120 ("built") and the widened ones at +0x124
+    LATE = {
+        'x0': (0x2D558801, 0xD503201F, 0xB9412211, 0x11000631, 0xB9012211, 0xBD405A10, 0x1E202208, 0x54000280, 0x1E303851, 0x1E20C231, 0xBD406210, 0x1E302220, 0x540001EA, 0xBD40A010, 0x91040210, 0x52800811, 0xBC404611, 0x1E302220, 0x54000120, 0x71000631, 0x54FFFF81, 0xD503201F, 0xBD405E10, 0x1E300821, 0xB9412611, 0x11000631, 0xB9012611, 0xD503201F),
+        'x1': (0x2D558821, 0xD503201F, 0xB9412211, 0x11000631, 0xB9012211, 0xBD405A10, 0x1E202208, 0x54000280, 0x1E303851, 0x1E20C231, 0xBD406210, 0x1E302220, 0x540001EA, 0xBD40A030, 0x91040210, 0x52800811, 0xBC404611, 0x1E302220, 0x54000120, 0x71000631, 0x54FFFF81, 0xD503201F, 0xBD405E10, 0x1E300821, 0xB9412611, 0x11000631, 0xB9012611, 0xD503201F),
+        'x21': (0x2D558AA1, 0xD503201F, 0xB9412211, 0x11000631, 0xB9012211, 0xBD405A10, 0x1E202208, 0x54000280, 0x1E303851, 0x1E20C231, 0xBD406210, 0x1E302220, 0x540001EA, 0xBD40A2B0, 0x91040210, 0x52800811, 0xBC404611, 0x1E302220, 0x54000120, 0x71000631, 0x54FFFF81, 0xD503201F, 0xBD405E10, 0x1E300821, 0xB9412611, 0x11000631, 0xB9012611, 0xD503201F),
+        'x19': (0x2D558E62, 0xD503201F, 0xB9412211, 0x11000631, 0xB9012211, 0xBD405A10, 0x1E202208, 0x54000280, 0x1E303871, 0x1E20C231, 0xBD406210, 0x1E302220, 0x540001EA, 0xBD40A270, 0x91040210, 0x52800811, 0xBC404611, 0x1E302220, 0x54000120, 0x71000631, 0x54FFFF81, 0xD503201F, 0xBD405E10, 0x1E300842, 0xB9412611, 0x11000631, 0xB9012611, 0xD503201F),
+    }
+    for site, b in ((0x75b34, 'x0'), (0x2e6508, 'x1'), (0x5b5560, 'x21'), (0x5b57e8, 'x21'), (0xb3e81c, 'x19'), (0x25aac34, 'x0')):
+        words = LATE[b]
+        fs_site(site, struct.pack('<I', words[0]).hex())
+        start = here()
+        for i, w in enumerate(words):
+            if i in (1, 21): emit(ADRP(16, here(), FS_STATE_OFF))
+            elif i == len(words) - 1: emit(B(here(), site + 4))
+            else: emit(w)
+        fs_put(site, [B(site, start)], 'screen shape: a projection of the screen\'s ratio whose fovy was not widened draws with tan x k (16:9\'s sides, more above and below)')
+
     # The 2D layer: the UI renderer's stored ortho copied into each draw's uniform block (main+0x17ed900, Tears of the Kingdom's leaf byte for byte) and the text
     # composites' flipped ortho before the quad's matrix (main+0x1822e50): a 16:9 one (|m11| / m00 = 16/9) has row 1 divided by k, a 16:9 band in the middle
     UI_BAND = (0x5e040404, 0x5e0c0425, 0x1e2418a6, 0x1e20c0c6, 0x1e2600d1, 0x5289c730, 0x72a7fc50, 0x4b100231, 0x53127e31, 0x35000171, 'adrp',

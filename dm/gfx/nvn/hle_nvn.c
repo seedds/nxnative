@@ -1520,6 +1520,8 @@ static int slots_bound(const char *what, int st, int first, int n, int slots) {
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
     if (slots_fit(0, first, n, 16) != n) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
+    if (getenv("DM_VP_TRACE") && n > 0 && v[1] < 0) { static int seen; if (seen++ < 8) { module_t *m = module_of(__builtin_return_address(0));   // which game code sets a negative-y viewport
+        LOG("[nvn] viewport %.0f,%.0f %.0fx%.0f from %s+%#llx", v[0], v[1], v[2], v[3], m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); } }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8 | (uint32_t)(((dev_t_ *)CB(c)->dev)->origin + 1) << 16, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);

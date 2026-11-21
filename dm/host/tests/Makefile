@@ -97,6 +97,12 @@ sync-wait: $(B)/t_sync_wait
 	$(B)/t_sync_wait
 .PHONY: sync-wait
 run: $(B)/t_symbols
+run: $(B)/t_gates
+$(B)/t_gates: t_gates.c ../hle.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_gates.c
+.PHONY: gates
+gates: $(B)/t_gates
+	$(B)/t_gates
 run: $(B)/t_server_environment
 $(B)/t_server_environment: t_server_environment.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c

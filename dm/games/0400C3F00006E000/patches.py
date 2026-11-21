@@ -106,6 +106,21 @@ def screen_shape(ctx):
         elif w == 'back': emit(B(here(), site + 4))
         else: emit(w)
     fs_put(site, [B(site, start)], 'screen shape: a 16:9 render size takes the screen\'s shape')
+    # The scene's frame buffer (main+0x474440, its sizes set from a physical size x1 (floats) and a virtual one x2 (ints), copied to the object's +0x20..): the race scene's
+    # target stays 2560x1440 (1920x1080 handheld) while its viewport comes in the taller layout (1280x896), so the viewport became 0,-352 2560x1792 on the 1440 target (found by
+    # DM_VP_TRACE, the viewport code main+0x78bec, and DM_PROBE_WATCH on the frame buffer): the scene was cut at the top and drawn 1.24 times too tall. A virtual 1280x720 over a
+    # 16:9 physical size takes the layout height (state +0x4c), stored in the caller's size too, so the viewport fills the 16:9 target, which the picture's composite stretches to
+    # the screen's shape. Assembled with clang; a leaf: x9 / x10 / x16 / x17 and s16 / s17 free, flags set again before they are read
+    FBV = ('adrp', 0xB9404E10, 0x340001D0, 0xF9400051, 0xD280A009, 0xF2C05A09, 0xEB09023F, 0x54000121, 0x2D404430, 0x1E390209, 0x1E39022A, 0x531C6D4A, 0x0B090D29,
+           0x6B0A013F, 0x54000041, 0xB9000450, 0xF943D008, 'back')
+    site = 0x474440
+    fs_site(site, struct.pack('<I', 0xF943D008).hex())   # ldr x8,[x0,#0x7a0]
+    start = here()
+    for w in FBV:
+        if w == 'adrp': emit(ADRP(16, here(), FS_STATE_OFF))
+        elif w == 'back': emit(B(here(), site + 4))
+        else: emit(w)
+    fs_put(site, [B(site, start)], 'screen shape: a 16:9 frame buffer\'s 1280x720 virtual size takes the layout height, so the taller layout\'s viewports fill it')
     # The cameras' aspect: every store of a projection's aspect (+0xb0, with its changed flag +8) near 16:9, and the aspect argument of sead::PerspectiveProjection's set()
     # and constructor, take the screen's ratio (Ocarina of Time's wide_view method, as Tears of the Kingdom's): (bits - bits(16/9 - 0.0098)) >> 18 == 0. Counted per site
     def cnt(off): return (0xb9400211 | (off // 4) << 10, 0x11000631, 0xb9000211 | (off // 4) << 10)

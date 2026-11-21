@@ -1490,6 +1490,7 @@ NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NV
     const NVNtexture *dt, const NVNtextureView *dv) {
     if (n < 0 || n > 8) { LOG("[RED] SetRenderTargets count %d", n); n = n < 0 ? 0 : 8; }
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
+    if (n > 0 && ct && ct[0]) { extern __thread int dm_vp_rt[2]; dm_vp_rt[0] = (int)CTX(ct[0])->d.width; dm_vp_rt[1] = (int)CTX(ct[0])->d.height; }   // DM_VP_TRACE: the target's size
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
     for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]);
@@ -1518,10 +1519,12 @@ static int slots_bound(const char *what, int st, int first, int n, int slots) {
     if (k != n) { static _Atomic int red; if (red++ < 16) LOG("[RED] %s stage %d first=%d n=%d: the host keeps %d slots a stage (%d resource stages), %d bound", what, st, first, n, slots, NVN_RESOURCE_STAGES, k); }
     return k;
 }
+__thread int dm_vp_rt[2];
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
     if (slots_fit(0, first, n, 16) != n) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
-    if (getenv("DM_VP_TRACE") && n > 0 && v[1] < 0) { static int seen; if (seen++ < 8) { module_t *m = module_of(__builtin_return_address(0));   // which game code sets a negative-y viewport
-        LOG("[nvn] viewport %.0f,%.0f %.0fx%.0f from %s+%#llx", v[0], v[1], v[2], v[3], m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); } }
+    if (getenv("DM_VP_TRACE") && n > 0 && v[1] != 0) { static int seen; if (seen++ < 40) { module_t *m = NULL; void *ra = NULL;   // which game code sets a negative-y viewport: the first game return address up the frame chain
+        for (void **fp = __builtin_frame_address(0); fp && !m && (uint64_t)fp > 0x1000; fp = (void **)fp[0]) { ra = fp[1]; m = module_of(ra); }
+        LOG("[nvn] viewport %.0f,%.0f %.0fx%.0f on a %dx%d target from %s+%#llx", v[0], v[1], v[2], v[3], dm_vp_rt[0], dm_vp_rt[1], m ? m->name : "?", m ? (unsigned long long)((uint64_t)ra - (uint64_t)m->base) : 0ULL); } }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8 | (uint32_t)(((dev_t_ *)CB(c)->dev)->origin + 1) << 16, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);

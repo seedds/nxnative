@@ -2555,6 +2555,16 @@ static void high_cap_tick(void) {
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
+// The display link for a Switch 2 display at 120 Hz (vi120): the 120 Hz link while it lasts, the 60 Hz one after, as high_cap_tick does for 120 fps. DM_PRESENT_LINK keeps its own
+static int vi120(void);
+static void vi_link_tick(void) {
+    static int link_env = -1, was;
+    if (link_env < 0) link_env = getenv("DM_PRESENT_LINK") != NULL;
+    int want = vi120() ? 2 : 1;
+    if (link_env || want == was || (!was && want == 1)) { if (!link_env) was = want; return; }
+    LOG("[nvn] display at %d Hz: the %d Hz display link (present interval %d)", want == 2 ? 120 : 60, want == 2 ? 120 : 60, atomic_load(&g_game_itv));
+    mtl_link_mode_set(want); was = want;
+}
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
     uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
@@ -2575,6 +2585,17 @@ static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides 
 // only limit), so there the cap is applied as the present interval alone: Red Dead
 // Redemption asks for interval 2 once and steps by time, and its 60 needs no limiter.
 static int g_present_cap = -1;
+static int fps_present_cap(void);
+// The display's refresh rate as the game sees it (hle_vi.c): 60, or 120 on a Switch 2 display whose game has said it can run at 120 Hz (vi::SetDisplay120HzRefreshRateCapability)
+// on a screen that shows 120 Hz. At 120 Hz the game's present interval counts refreshes of 1/120 s: interval 1 is 120 fps, 2 is 60. That holds in game mode (the game's own
+// present interval) when no host cap decides the pacing (fps_target, the frame step, fps_high's own 120); display mode presents one frame per tick of its own rate and keeps it.
+// It is read at every present, so a game whose performance option turns the capability on and off while it runs is followed at once
+#ifndef DM_VI_REFRESH_HZ_OWN
+__attribute__((weak)) int vi_refresh_hz(void) { return 60; }   // hle_vi.c; graphics unit tests have none
+#else
+int vi_refresh_hz(void);   // a test's own (t_link_ticks)
+#endif
+static int vi120(void) { return g_hz > 0 && !g_display_mode && !fps_high() && !fps_present_cap() && vi_refresh_hz() == 120; }
 static int display_mode(void) {   // present_cfg's choice, also before its first call (the cap can be asked for before the window's first interval)
     if (g_hz >= 0) return g_display_mode;
     const char *m = getenv("DM_PRESENT_INTERVAL"); return m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
@@ -2601,8 +2622,12 @@ int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   //
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
-int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
+// A Switch 2 display at 120 Hz (vi120: the game's 120 Hz capability on a screen that shows 120 Hz, paced by the game's interval) has its vsync event at 120 as well; under a host
+// cap (Ocarina of Time's frame step with DM_DISPLAY_120=2) presentation stays at the cap and so does the event
+int nvn_vsync_hz(void) { return (fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120) || vi120() ? 120 : 60; }
+int nvn_game_fps(void) {
+    if (vi120()) return atomic_load(&g_game_itv) <= 1 ? 120 : 60;   // interval 1 at 120 Hz is 120 fps, 2 is 60: never the 30 Hz link
+    int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -2635,6 +2660,7 @@ static int window_interval(const win_t *o) { present_cfg(o); return g_display_mo
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {
     static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
+    if (vi120()) { int t = (o->interval > 0 ? o->interval : 1) * mtl_link_rate() / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }   // refreshes of 1/120 s, on a link at 120 or 60 Hz
     if (fps_high()) { int t = present_itv(o) * mtl_link_rate() / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }   // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz
     int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
     if (hz != hz_was || rate != rate_was) { remainder = 0; hz_was = hz; rate_was = rate; }
@@ -2655,7 +2681,7 @@ static uint64_t present_period(const win_t *o) {
         if (want < 2 || want % 2) atomic_store(&g_itv2_since, 0);   // an odd interval needs the 60 Hz link: 3 vsyncs on a 30 Hz link were 2 ticks, 15 fps for 20
         else if (was < 2 || was % 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
-    int itv = present_itv(o), hz = g_hz;
+    int itv = present_itv(o), hz = vi120() ? 120 : g_hz;
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
 // The period the acquire thread declares to the scheduler (rt_declare), which the frame threads follow: the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
@@ -2792,7 +2818,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_ue_cvar_tick();
-    if (fps_high()) high_cap_tick();
+    if (fps_high()) high_cap_tick(); else vi_link_tick();
     int movie = dm_movie_hz();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)(movie != 0), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();

@@ -2,6 +2,8 @@
 // Host: returns host static objects; when hooking up Metal, the native window corresponds to the front end's CAMetalLayer (front_metal_layer()).
 #include "../host/hle.h"
 #include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
 
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
@@ -151,6 +153,53 @@ HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR:
     (void)disp; if (on) *on = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {
     (void)disp; (void)on; return RES_OK; }
+
+// ---------- Switch 2 SDKs: the display's refresh rate, 60 or 120 Hz ----------
+// A Switch 2 game that can run at 120 fps says so with SetDisplay120HzRefreshRateCapability(display, true) (the SDK's, sdk+0x5e1270 in 22.2.8, is
+// vi2::SetDisplayRefreshRateCapability(display, 120, on)); the display then runs at 120 Hz where it can, and the game reads the rate back with QueryDisplayCurrentRefreshRate
+// (RefreshRate: the rate in Hz, a 32-bit value the SDK accepts only as 60 or 120, DefaultDisplay::QueryRefreshRate sdk+0x5de520; the bool beside it set reads as no fixed rate, and the
+// one-argument overload then answers 0). At 120 Hz a present interval counts refreshes of 1/120 s and the vsync event comes 120 times a second (hle_nvn.c vi_refresh_hz). A game with
+// a performance option calls the capability as the player changes it, so the rate follows the game while it runs; one without an option calls it once at start.
+// The SDK's versions check the display against its own default display object, which the host never made: Result 0x272, and Ocarina of Time's engine (sead / agl: main+0x346c600,
+// main+0x3b4ea90, its frame-rate setter main+0x4dc0f0) then takes 60 Hz. The display here is at 120 Hz while the game has the capability on, the screen shows 120 Hz or more
+// (front_screen_max_fps: a 120 Hz Mac screen or ProMotion, 60 in Low Power Mode) and the player has not turned it off (DM_DISPLAY_120=0). Found by reading the SDK, not yet on a game
+// that runs at 120 (Ocarina of Time passes its graphics settings' byte +0xad, main+0x346bf5c)
+__attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
+static atomic_int g_vi_cap120;   // the game's 120 Hz capability (0 off, 1 on)
+static int vi_120_env(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_DISPLAY_120"); v = e ? atoi(e) : 1; } return v; }   // 0 off, 1 the player's default, 2 forced (diagnostics)
+static int vi_allow120(void) { return vi_120_env() != 0; }
+static int vi_cap120(void) { return atomic_load(&g_vi_cap120) || vi_120_env() == 2; }   // DM_DISPLAY_120=2: as if the game had the capability on, to try the 120 Hz pacing on any game
+int vi_refresh_hz(void) {   // the display's rate as the game sees it: hle_nvn.c paces present intervals and the vsync event by it
+    int hz = vi_cap120() && vi_allow120() && front_screen_max_fps() >= 120 ? 120 : 60;
+    static atomic_int was; int w = atomic_exchange(&was, hz);
+    if (w && w != hz) LOG("vi: display refresh rate %d → %d Hz (%s)", w, hz, hz == 120 ? "the game's 120 Hz capability, a screen at 120 Hz" : !vi_cap120() ? "the game turned its 120 Hz capability off" : !vi_allow120() ? "DM_DISPLAY_120=0" : "the screen shows less than 120 Hz");
+    return hz;
+}
+HLE_FORCE("_ZN2nn2vi36SetDisplay120HzRefreshRateCapabilityEPNS0_7DisplayEb", "display 120 Hz capability (Switch 2): the display runs at 120 Hz while it is on, where the screen shows it",
+          Result, h_vi_Cap120, void *disp, unsigned on) {
+    (void)disp; on &= 1;
+    static atomic_int calls; int was = atomic_exchange(&g_vi_cap120, (int)on);
+    if (was != (int)on || !atomic_fetch_add(&calls, 1))
+        LOG("vi::SetDisplay120HzRefreshRateCapability %d: the game %s; the display runs at %d Hz (screen %d Hz%s)", on, on ? "can run at 120 Hz" : "keeps to 60 Hz",
+            vi_refresh_hz(), front_screen_max_fps(), vi_120_env() == 2 ? ", DM_DISPLAY_120=2 forces 120" : vi_allow120() ? "" : ", DM_DISPLAY_120=0");
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPKNS0_7DisplayE", "display refresh rate (Switch 2): 60, or 120 while the game's 120 Hz capability holds",
+          Result, h_vi_Rate, uint32_t *rate, const void *disp) {
+    (void)disp; if (rate) *rate = (uint32_t)vi_refresh_hz(); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPbPKNS0_7DisplayE", "display refresh rate (Switch 2): 60, or 120 while the game's 120 Hz capability holds; a fixed rate",
+          Result, h_vi_RateFixed, uint32_t *rate, uint8_t *variable, const void *disp) {
+    (void)disp; if (rate) *rate = (uint32_t)vi_refresh_hz(); if (variable) *variable = 0; return RES_OK; }
+// AvailableRefreshRate is 0x38 bytes, the rate in Hz first (the SDK copies 14 words and accepts only 60 or 120 there, DefaultDisplay::QueryAvailableRefreshRates sdk+0x5deb40); what
+// the other 13 words hold is not known: zero. The count written is the display's whole list, as the SDK's (it caches at most 2), whatever the buffer holds
+HLE_FORCE("_ZN2nn2vi33QueryDisplayAvailableRefreshRatesEPiPNS0_20AvailableRefreshRateEiPNS0_7DisplayE", "display refresh rates (Switch 2): 60, and 120 where the screen shows it",
+          Result, h_vi_Rates, int *count, uint8_t *out, int n, void *disp) {
+    (void)disp; uint32_t rates[2] = {60, 120}; int total = vi_allow120() && front_screen_max_fps() >= 120 ? 2 : 1;
+    for (int i = 0; out && i < n && i < total; i++) { memset(out + (size_t)i * 0x38, 0, 0x38); memcpy(out + (size_t)i * 0x38, &rates[i], 4); }
+    if (count) *count = total;
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayAvailableRefreshRates: %s", total == 2 ? "60 and 120 Hz" : "60 Hz (the screen shows less than 120 Hz, or DM_DISPLAY_120=0)");
+    return RES_OK;
+}
 // The largest display buffer (vi2 through the SDK, sdk+0x5e10c0, which the host does not serve: Result 0x272 and the output left as the game set it). BufferMaxResolution is
 // 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's own table, main+0x1abc2c0 / +0x1abc050). Fire Emblem Fortune's Weave sets 0 first, so the failed call
 // told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window.

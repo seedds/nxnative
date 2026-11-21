@@ -301,6 +301,9 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 ## Found on this game
 
 - [Autoreleased temporaries collect during background pipeline builds](../../../docs/reference/memory.md#autoreleased-temporaries-collect-during-background-pipeline-builds). The audit finding is resolved in the host.
+- [A Switch 2 display at 120 Hz](../../../docs/reference/frame-rate.md#a-switch-2-display-at-120-hz): its engine reads the refresh rate and sets the 120 Hz capability from its graphics settings; this build passes 0, so it stays at 60 Hz (2026-11-20).
+- [The 60 Hz link on a fixed 120 Hz screen in fullscreen](../../../docs/reference/frame-rate.md#the-60-hz-link-on-a-fixed-120-hz-screen-in-fullscreen): 1,224 late frames in 52 s on a ROG XG27AQNGV at a fixed 120 Hz, 59.7-60.0 fps on the 120 Hz link.
+- [A rescue in the display link's first frames left the game waiting for good](../../../docs/reference/frame-rate.md#a-rescue-in-the-display-links-first-frames-left-the-game-waiting-for-good): a black screen at start on the ROG XG27AQNGV at variable refresh, twice.
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.
 - [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
 

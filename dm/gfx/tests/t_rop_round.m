@@ -40,7 +40,7 @@ static void merged_case(NSString *source, prog_t *program, int on) {
         "{\n    main0_out out = {};\n    out.m_0 = float4(as_type<float>(0x3e858586u));\n    dm_blend0(out, dm_blend);\n    dm_merged_out r = {};\n    r.m_1 = out.m_0;\n    return r;\n}\n"];
     NSError *error = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:merged options:nil error:&error];
     CHECK(lib != nil); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
-    id<MTLFunction> fn = fn4_note([lib newFunctionWithName:@"main_m"], lib, @"main_m", nil);
+    id<MTLFunction> fn = fn_spec(lib, @"main_m", [MTLFunctionConstantValues new], nil);   // as shader_load: a function with constants (dm_blend_off) is specialized
     CHECK(fn != nil); if (!fn) return;
     static tex_t unused = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98310}, target = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98311};
     unused.d = (nvn_texdesc){.width = 8, .height = 1, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA16F};
@@ -90,7 +90,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     NvProg *pr = [NvProg new];
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vrop_b");
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "prop_b");
+    ps->fn = fn_spec(lib, @"main0", [MTLFunctionConstantValues new], nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "prop_b");   // as shader_load: a function with constants (dm_blend_off) is specialized
     CHECK(ps->fn != nil);
     static prog_t program; program.serial = 98300; serial_put(program.serial, pr);
     merged_case(source, &program, on);

@@ -67,6 +67,34 @@ int main(void) {
     uint64_t sw = nvn_dirty_sparse_writes(); nvn_dirty_protect_sparse((const void *)sp, pg);
     EXPECT("sparse protection of a write-pending page moves the sparse write count", 1, nvn_dirty_sparse_writes() - sw);
 
+    // Hot pages: a page whose write faults keep coming back soon after it is protected again stops being protected; its readers compare at each look; once its bytes stay
+    // unchanged for HOT_QUIET frames it is protected again
+    {
+        volatile uint8_t *hp = page + 5 * pg;
+        uint64_t f0h = atomic_load(&g_faults);
+        for (int k = 0; k < HOT_RUN; k++) { nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)hp, pg); hp[64] = (uint8_t)k; }   // a write two frames after each protection
+        EXPECT("a page written again two frames after each protection faults each time", HOT_RUN, atomic_load(&g_faults) - f0h);
+        nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_protect((const void *)hp, pg);
+        EXPECT("after HOT_RUN such faults the page is hot: protection leaves it writable", 1, kernel_writable((const void *)hp));
+        EXPECT("one hot page", 1, g_nhot);
+        uint64_t f1h = atomic_load(&g_faults), sth = nvn_dirty_now(); int still = 1;
+        for (int k = 0; k < 200; k++) { hp[65] = (uint8_t)k; nvn_dirty_frame(); nvn_dirty_protect((const void *)hp, pg); still &= kernel_writable((const void *)hp); }
+        EXPECT("written every frame for 200 frames, it stays writable", 1, still);
+        EXPECT("and those writes take no fault", 0, atomic_load(&g_faults) - f1h);
+        EXPECT("a reader's stamp sees it as written", 1, nvn_dirty_since((const void *)hp, 16, sth));
+        for (int k = 0; k < HOT_QUIET + 1; k++) nvn_dirty_frame();   // its bytes unchanged
+        EXPECT("quiet for HOT_QUIET frames, it is no longer hot", 0, g_nhot);
+        uint64_t old = nvn_dirty_now() - 1; nvn_dirty_protect((const void *)hp, pg);
+        EXPECT("so the next protection makes it read-only again", 0, kernel_writable((const void *)hp));
+        EXPECT("a stamp from while it was hot sees it as written once more", 1, nvn_dirty_since((const void *)hp, 16, old));
+        uint64_t st3 = nvn_dirty_now(); nvn_dirty_protect((const void *)hp, pg);
+        EXPECT("a stamp taken after that sees it clean", 0, nvn_dirty_since((const void *)hp, 16, st3));
+        nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_frame(); nvn_dirty_frame();
+        uint64_t f2h = atomic_load(&g_faults); hp[66] = 1;
+        EXPECT("a write after it went back to protection faults again", 1, atomic_load(&g_faults) - f2h);
+        EXPECT("and is seen", 1, nvn_dirty_since((const void *)hp, 16, st3));
+    }
+
     // DM_NVN_DIRTY_PENDING=0: protected again at once, as before
     g_pend_on = 0;
     volatile uint8_t *off = page + 4 * pg;

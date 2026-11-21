@@ -34,7 +34,7 @@ enum { BLK_SHIFT = 10, BLK = 1 << BLK_SHIFT, NBLK = 256, MAX_RANGE = BLK * NBLK 
 // without a fault. A stamp older than born therefore counts as written (nvn_dirty_since_cached, nvn_dirty_since_except).
 // pins: the lock-free readers (the fault hook, the host pre-write hook, the dirty checks, describe) pin a slot before they read its fields past base and end, and add_range rewrites a
 // retired slot for the next pool only once none holds it (pin). base and end are read before the pin, to pass over slots that cannot hold the address, so they are atomic
-typedef struct { _Atomic uintptr_t base, end; uintptr_t mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; _Atomic(_Atomic uint8_t *) sparse; size_t cap; _Atomic int live, pins; _Atomic uint64_t born; _Atomic uint32_t *pend; } range_t;   // pend: per page, write-pending since frame pend - 1 (0: not)   // sparse: per page, protected for a placement sparse tile (nvn_dirty_protect_sparse)
+typedef struct { _Atomic uintptr_t base, end; uintptr_t mem; _Atomic uint8_t *state; _Atomic uint64_t *gen; _Atomic(_Atomic uint8_t *) sparse; size_t cap; _Atomic int live, pins; _Atomic uint64_t born; _Atomic uint32_t *pend; _Atomic uint8_t *streak, *hotf; } range_t;   // pend: per page, write-pending since frame pend - 1 (0: not); streak, hotf: hot pages (below)   // pend: per page, write-pending since frame pend - 1 (0: not)   // sparse: per page, protected for a placement sparse tile (nvn_dirty_protect_sparse)
 static inline uintptr_t rb(range_t *r) { return atomic_load_explicit(&r->base, memory_order_relaxed); }
 static inline uintptr_t re(range_t *r) { return atomic_load_explicit(&r->end, memory_order_relaxed); }
 static _Atomic(range_t *) g_blk[NBLK];
@@ -198,7 +198,36 @@ static _Atomic uint64_t g_pends, g_pend_skips;
 // ticks at each call, so every look reads the pages again
 static _Atomic int64_t g_hot_pages;
 static void hot_set(range_t *r, uintptr_t p) { if (atomic_exchange(&r->gen[p], GEN_HOT) != GEN_HOT) atomic_fetch_add(&g_hot_pages, 1); }
-void nvn_dirty_frame(void) { atomic_fetch_add_explicit(&g_dframe, 1, memory_order_relaxed); }
+// Hot pages: compared, not protected (T-141). Write-pending alone still protected a page the game writes all the time once a frame had passed, and it faulted again at
+// the next write: Ocarina of Time's worker threads take an OS lock that shares its 16 KB host page with texture data, ~370 write faults a second (repro4 c-NFgf, guest files
+// on), and the textures on that page never changed (0 re-uploads; every look found their bytes as uploaded, pkg_edges_clean). So a page whose write faults keep coming back
+// soon after it is protected again (HOT_RUN faults in a row, each within HOT_GAP frames of the one before: counted in frames, as write-pending is) becomes hot: it stays
+// writable with its generation always newer than any stamp, so every reader checks it at each look and re-reads only what really changed (the edge check compares a texture's
+// bytes on the shared page). nvn_dirty_frame hashes each hot page once a frame; after HOT_QUIET frames with its bytes unchanged it goes back to protection (pending gives it a
+// fresh generation at the next protection). At most HOT_MAX pages are hot; past that a page is write-pending as before. DM_NVN_DIRTY_HOT=0: write-pending only
+enum { HOT_RUN = 4, HOT_GAP = 30, HOT_QUIET = 120, HOT_MAX = 256 };
+static int g_hot_on = 1;
+typedef struct { range_t *r; uintptr_t p; uint64_t h; uint32_t quiet; } hot_ent;
+static hot_ent g_hot[HOT_MAX]; static int g_nhot;   // g_slot_mu
+static _Atomic uint64_t g_hot_made, g_hot_cooled, g_hot_full;
+static uint64_t page_hash(const void *page);
+static void hot_drop(int k) { g_hot[k] = g_hot[--g_nhot]; }
+void nvn_dirty_frame(void) {
+    uint32_t f = atomic_fetch_add_explicit(&g_dframe, 1, memory_order_relaxed) + 1;
+    if (!g_hot_on || !g_nhot || pthread_mutex_trylock(&g_slot_mu)) return;   // the next frame looks when the protecting side holds the table now
+    for (int k = 0; k < g_nhot; ) {
+        hot_ent *e = &g_hot[k];
+        uint64_t h = page_hash((const void *)(rb(e->r) + (e->p << g_shift)));
+        if (h != e->h) { e->h = h; e->quiet = 0; k++; continue; }
+        if (++e->quiet < HOT_QUIET) { k++; continue; }
+        atomic_store(&e->r->hotf[e->p], 0); atomic_store(&e->r->streak[e->p], 0); atomic_store(&e->r->pend[e->p], 0);   // quiet: protected again at its next protection
+        atomic_fetch_add(&g_hot_cooled, 1); hot_drop(k);
+    }
+    pthread_mutex_unlock(&g_slot_mu);
+    static uint64_t said; uint64_t m = atomic_load(&g_hot_made);
+    if (f % 600 == 0 && m != said) { said = m; LOG("[nvn-dirty] hot pages (compared, not protected): %d now, %llu made hot, %llu back to protection, %llu refused (table full); write-pending protections skipped %llu",
+        g_nhot, (unsigned long long)m, (unsigned long long)atomic_load(&g_hot_cooled), (unsigned long long)atomic_load(&g_hot_full), (unsigned long long)atomic_load(&g_pend_skips)); }
+}
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
     // Publish completion after the generation: a checker may have cached "clean" using the incremented clock before the generation store. Both fault and host-write paths
@@ -216,15 +245,22 @@ static void sparse_note(range_t *r, uintptr_t p) { _Atomic uint8_t *sp = atomic_
 // A fault took the page for a write (signal context: atomics only): write-pending from this frame
 static void pend_note(range_t *r, uintptr_t p) {
     if (!g_pend_on || !r->pend) return;
-    atomic_store_explicit(&r->pend[p], atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1, memory_order_relaxed); atomic_fetch_add_explicit(&g_pends, 1, memory_order_relaxed);
+    uint32_t now = atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1, prev = atomic_load_explicit(&r->pend[p], memory_order_relaxed);
+    if (r->streak) { unsigned n = prev && now - prev <= HOT_GAP ? atomic_load_explicit(&r->streak[p], memory_order_relaxed) + 1u : 1u; atomic_store_explicit(&r->streak[p], (uint8_t)(n < 255 ? n : 255), memory_order_relaxed); }
+    atomic_store_explicit(&r->pend[p], now, memory_order_relaxed); atomic_fetch_add_explicit(&g_pends, 1, memory_order_relaxed);
 }
 // Whether protection must leave page p writable now: written by a fault in this frame or the one before (no whole frame since). A page whose frame has passed is cleared here,
 // and its always-written generation becomes a fresh one. g_slot_mu held (the protecting side)
 static int pending(range_t *r, uintptr_t p) {
     if (!r->pend) return 0;
-    uint32_t f = atomic_load(&r->pend[p]); if (!f) return 0;
-    if (atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1 - f < 2) return 1;
-    atomic_store(&r->pend[p], 0);
+    if (r->hotf && atomic_load(&r->hotf[p])) return 1;   // hot: compared, not protected (nvn_dirty_frame lets it go once quiet)
+    uint32_t f = atomic_load(&r->pend[p]);
+    if (f && atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1 - f < 2) return 1;
+    if (f && g_hot_on && r->streak && atomic_load(&r->streak[p]) >= HOT_RUN) {   // its faults keep coming back: hot instead of protected again
+        if (g_nhot < HOT_MAX) { g_hot[g_nhot++] = (hot_ent){r, p, page_hash((const void *)(rb(r) + (p << g_shift))), 0}; atomic_store(&r->hotf[p], 1); atomic_fetch_add(&g_hot_made, 1); return 1; }
+        atomic_fetch_add(&g_hot_full, 1);
+    }
+    if (f) atomic_store(&r->pend[p], 0);
     // Written at will while pending: every stamp from before now counts it as written. The generation is the clock as it stands, not a tick past it: the protecting caller took
     // its stamp just before this protection and reads after it, so it must see the page clean (a tick here re-read every quiet page once more); every earlier stamp is lower
     if (atomic_load(&r->gen[p]) == GEN_HOT) { atomic_store(&r->gen[p], atomic_load(&g_now)); atomic_fetch_sub(&g_hot_pages, 1); }
@@ -315,6 +351,7 @@ static void prep_write(void *addr, size_t len) {
 // hook table while it grew (PR #2225). With no pool registered the hooks scan an empty table, so a game that never makes one pays nothing for them
 __attribute__((constructor)) static void dirty_init(void) {
     { const char *c = getenv("DM_NVN_DIRTY_PENDING"); if (c && *c) g_pend_on = atoi(c) != 0; }
+    { const char *c = getenv("DM_NVN_DIRTY_HOT"); if (c && *c) g_hot_on = atoi(c) != 0; }
     g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb);
     dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write);
 }
@@ -347,15 +384,15 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     _Atomic uint64_t *gen = r->gen;
     if (r->cap < np) {
         free((void *)state); free((void *)gen); free((void *)atomic_load(&r->sparse));   // no reader holds them: none is pinned, and a reader pins before it reads the pointers
-        free((void *)r->pend);
+        free((void *)r->pend); free((void *)r->streak); free((void *)r->hotf);
         state = calloc(np, 1); gen = calloc(np, sizeof *gen);
-        r->pend = calloc(np, sizeof *r->pend);
-        if (!state || !gen || !r->pend) die("dirty-page table allocation failed (%zu pages)", np);
+        r->pend = calloc(np, sizeof *r->pend); r->streak = calloc(np, 1); r->hotf = calloc(np, 1);
+        if (!state || !gen || !r->pend || !r->streak || !r->hotf) die("dirty-page table allocation failed (%zu pages)", np);
         atomic_store(&r->sparse, NULL);   // sized for the old cap
         r->cap = np;
     } else {
         memset((void *)state, 0, np); memset((void *)gen, 0, np * sizeof *gen);
-        memset((void *)r->pend, 0, np * sizeof *r->pend);
+        memset((void *)r->pend, 0, np * sizeof *r->pend); memset((void *)r->streak, 0, np); memset((void *)r->hotf, 0, np);
         _Atomic uint8_t *sp = atomic_load(&r->sparse); if (sp) memset((void *)sp, 0, np);
     }
     atomic_store_explicit(&r->base, base, memory_order_relaxed); atomic_store_explicit(&r->end, end, memory_order_relaxed); r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
@@ -376,7 +413,8 @@ void nvn_dirty_remove_range(const void *mem) {
         atomic_store(&r->live, 0);   // seq_cst: against pin (the reuse in add_range reads the pin count)
         atomic_fetch_sub(&g_live, 1);
         { int64_t hot = 0; for (uintptr_t p = 0, np = (re(r) - rb(r)) >> g_shift; p < np; p++) hot += atomic_load(&r->gen[p]) == GEN_HOT;   // its write-pending pages go with it (a dead range is never protected
-          if (hot) atomic_fetch_sub(&g_hot_pages, hot); }                                                                               // again, and add_range clears its arrays on reuse)
+          if (hot) atomic_fetch_sub(&g_hot_pages, hot);
+          for (int k = 0; k < g_nhot; ) if (g_hot[k].r == r) hot_drop(k); else k++; }   // its hot pages too (g_slot_mu held)                                                                               // again, and add_range clears its arrays on reuse)
         atomic_fetch_add(&g_range_epoch, 1);
     }
     pthread_mutex_unlock(&g_slot_mu);
@@ -578,7 +616,7 @@ void nvn_dirty_describe(const void *addr, const void *span, char *out, size_t n)
         uintptr_t p = (a - rb(r)) >> g_shift; uint8_t s = atomic_load(&r->state[p]);
         uint32_t pf = r->pend ? atomic_load(&r->pend[p]) : 0;
         int w = snprintf(out + o, n - o, "%sslot %d pool %#lx%s %s gen %llu born %llu%s", found++ ? "; " : "", i, (unsigned long)r->mem, (const void *)r == span ? " (kept)" : "",
-                         s < 4 ? st[s] : "?", (unsigned long long)atomic_load(&r->gen[p]), (unsigned long long)atomic_load(&r->born), pf ? ", write-pending" : "");
+                         s < 4 ? st[s] : "?", (unsigned long long)atomic_load(&r->gen[p]), (unsigned long long)atomic_load(&r->born), r->hotf && atomic_load(&r->hotf[p]) ? ", hot (compared, not protected)" : pf ? ", write-pending" : "");
         unpin(r);
         if (w > 0) o += (size_t)w;
     }
@@ -596,6 +634,7 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     for (int i = 0; i < n; i++) active += live_at(i) != 0;
     *live = active; *used_slots = n; *adds_total = atomic_load(&g_adds_total);
 }
+void nvn_dirty_hot_stats(int *now, uint64_t *made, uint64_t *cooled) { *now = g_nhot; *made = atomic_load(&g_hot_made); *cooled = atomic_load(&g_hot_cooled); }
 void nvn_dirty_pend_stats(uint64_t *pends, uint64_t *skips) { *pends = atomic_load(&g_pends); *skips = atomic_load(&g_pend_skips); }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_faults); *preps = atomic_load(&g_preps); }
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {

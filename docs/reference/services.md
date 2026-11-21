@@ -1725,6 +1725,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** Drag x Drive (040041601D83A000, v196608, SDK 20; no profile in the repository yet): 43 s in, as player 1's Joy-Con 2 pair joined (`main+0x2c80c4`). [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536) asks the question at boot: the SDK's own aborted on its error (`Result 0x58cca` at `sdk+0x6ca40c`).
 - **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`).
 
+### GameShare HID feature query opens the service
+
+- **Symptom:** `[RED] sf: the game connects to service stpl:u itself, which the host does not serve`, followed by `Result 0xe15` in a guest input loop, despite the streamplay initialization takeovers.
+- **Cause:** `nn::streamplay::GetSupportedHidFeatureSet()` was missing from the host. Unlike the hooked initialization functions, this public getter still ran in the SDK and lazily opened the service through `detail::GetUserService()` and `detail::CreateUserServiceByHipc()`. It returns a 32-bit configured feature mask; the game tests its bits before reading guest inputs. This is neither a different Initialize overload nor an internal call bypassing its hook.
+- **Fix:** take over the getter by symbol and retain the mask in the existing setter (`hle_misc.c`), as for the guest style and hold configuration. The default mask is zero. No IPC commands, aborts or executable addresses are changed.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md), base v0, main build ID `898024ffa42c059518eb38196f1ee0f635ecdf89`, SDK build ID `41d4de4a3b78214ad20c896960df0e5ea0ed595f`. On these builds only, the observed path is `main+0xad98620` (PLT call) → `sdk+0x770db0` (getter) → `sdk+0x77a280` (lazy service) → `sdk+0x777770` (connect / abort). These are diagnostic offsets, not patch addresses.
+- **Check:** `t_pctl` resolves both real takeover registrations and checks default, replacement, clearing and high-bit masks without a guest service. The host builds. Benjyp verified startup and played from an existing save through to Andros once on an M4 Max, macOS 27.2.1 (2026-11-21). The automated attempt in restricted Codex stopped earlier at `FATAL no Metal device`; other titles remain unchecked.
+
 ### GameShare guest displays
 
 - **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.

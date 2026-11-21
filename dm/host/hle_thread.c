@@ -20,6 +20,7 @@
 #include <pthread/qos.h>
 #include <dlfcn.h>
 #include <stdatomic.h>
+#include "thr_census.h"
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -636,6 +637,9 @@ uint32_t svc_thread_main_init(void) {
     return t->handle;
 }
 
+// The guest main thread's waits (thr_census.h): written only by that thread (svc_thread), read by the main thread waits line (dm_main_wait_line), which may run on another thread and then
+// reads counters a wait is adding to (whole 64-bit words; a window may count one wait late)
+static thr_waits g_main_waits; static thr_addr g_main_addr[THR_ADDR_N];
 static uint64_t g_main_yield_n, g_main_yield_ns;   // Written only by the guest main thread; the diagnostic line reads it on the same thread
 void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = g_main_yield_n; *ns = g_main_yield_ns; }
 uint32_t dm_guest_work_qos(unsigned *count) {
@@ -1082,6 +1086,49 @@ void dm_guest_sleep_ns(int64_t ns) {
     sleep_precise(now_ns() + (uint64_t)ns);
     if (me) me->sleeping = 0;
 }
+// The main thread waits line (hle_nvn.c power_line, every 300 frames): per frame of the window, the time and count of each kind of wait the guest main thread made, the longest
+// first, against the mean frame (frame_ms), and the two addresses its address waits took longest on. A frame that is slow with the main thread idle shows here what it waited for
+void dm_main_wait_line(char *out, size_t n, double frames, double frame_ms) {
+    static thr_waits was; thr_waits now = g_main_waits;
+    size_t o = thr_waits_line(out, n, &now, &was, frames, frame_ms); was = now;
+    const thr_addr *a1, *a2; thr_addr_top2(g_main_addr, &a1, &a2);
+    if (frames < 1) frames = 1;
+    if (a1 && o < n) o += (size_t)snprintf(out + o, n - o, "; longest address waits %#llx %.1f ms (%.0f)", (unsigned long long)a1->addr, a1->ns / 1e6 / frames, a1->n / frames);
+    if (a2 && o < n) snprintf(out + o, n - o, ", %#llx %.1f ms (%.0f)", (unsigned long long)a2->addr, a2->ns / 1e6 / frames, a2->n / frames);
+    thr_addr_reset(g_main_addr);
+}
+// The host threads line (hle_nvn.c power_line, every 300 frames): every thread of the process that is not a guest thread, with its CPU per second over the window (secs) and the
+// kernel's part, the five busiest by name (an unnamed one by its tid, whether a GCD worker runs it, and its priority). The power line's CPU less the threads line's guest CPU
+// is this line's total; a host thread that spins, or a system thread busy for us, shows here. The first call only takes the baseline
+void dm_host_thread_cpu(char *out, size_t n, double secs) {
+    static thr_sample *was; static int nwas;
+    enum { GMAX = 1024 }; static uint64_t gid[GMAX]; int ng = 0;
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t && ng < GMAX; t = t->all) {
+        if (!t->mport || t->exited) continue;
+        thread_identifier_info_data_t ii; mach_msg_type_number_t c = THREAD_IDENTIFIER_INFO_COUNT;
+        if (thread_info(t->mport, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &c) == KERN_SUCCESS) gid[ng++] = ii.thread_id;
+    }
+    pthread_mutex_unlock(&G);
+    thread_act_array_t th = NULL; mach_msg_type_number_t nth = 0;
+    if (task_threads(mach_task_self(), &th, &nth) != KERN_SUCCESS) { if (n) snprintf(out, n, "-"); return; }
+    thr_sample *cur = calloc(nth ? nth : 1, sizeof *cur); int nc = 0;
+    for (mach_msg_type_number_t i = 0; i < nth; i++) {
+        thread_identifier_info_data_t ii; mach_msg_type_number_t c = THREAD_IDENTIFIER_INFO_COUNT; thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+        if (cur && thread_info(th[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &c) == KERN_SUCCESS) {
+            int guest = 0; for (int j = 0; j < ng && !guest; j++) guest = gid[j] == ii.thread_id;
+            if (!guest && thread_info(th[i], THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS) {
+                thr_sample *s = &cur[nc++]; s->tid = ii.thread_id; s->cpu_us = (xi.pth_user_time + xi.pth_system_time) / 1000; s->sys_us = xi.pth_system_time / 1000;
+                s->gcd = ii.dispatch_qaddr != 0; s->pri = xi.pth_curpri; snprintf(s->name, sizeof s->name, "%s", xi.pth_name);
+            }
+        }
+        mach_port_deallocate(mach_task_self(), th[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)th, nth * sizeof *th);
+    if (was && cur) { thr_rank top[5]; double all = 0; int k = thr_census(was, nwas, cur, nc, secs, top, 5, &all); thr_census_line(out, n, top, k, all, nc); }
+    else if (n) snprintf(out, n, "-");
+    free(was); was = cur; nwas = cur ? nc : 0;
+}
 // A host hook's bounded wait on a host condition variable (m held), a sleep to a garbage collector's pause like dm_guest_sleep_ns; the caller checks its condition and the clock
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) {
     thr_t *me = pthread_getspecific(g_keythr); if (me) me->sleeping = 1;
@@ -1090,14 +1137,16 @@ void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) {
     if (me) me->sleeping = 0;
 }
 int svc_thread(int num, uint64_t *regs) {
-    int r = svc_thread_impl(num, regs);
     thr_t *me = pthread_getspecific(g_keythr);
+    int wk = me && me->handle == 0x1001 ? thr_wait_kind(num, regs[0]) : -1; uint64_t waddr = regs[0], w0 = wk >= 0 ? now_ns() : 0;   // regs[0] is the result once the SVC returns
+    int r = svc_thread_impl(num, regs);
+    if (wk >= 0) { uint64_t d = now_ns() - w0; g_main_waits.n[wk]++; g_main_waits.ns[wk] += d; if (wk == TW_ADDRESS) thr_addr_add(g_main_addr, waddr, d); }
     // The default path hands off only after a wake. The optional broader mode
     // also checks peers that were already runnable, without serializing every
     // game's SVCs behind unrelated busy workers by default.
     if (me && (g_core_preempt || me->yield_pending)) {
         uint64_t t0 = now_ns(); int w = dm_yield_to_core_peers(g_core_preempt);
-        if (w) { g_preempt_n++; g_preempt_ns += now_ns() - t0; }
+        if (w) { uint64_t d = now_ns() - t0; g_preempt_n++; g_preempt_ns += d; if (me->handle == 0x1001) { g_main_waits.n[TW_HANDOFF]++; g_main_waits.ns[TW_HANDOFF] += d; } }
     }
     if (me) { me->yield_pending = 0; me->hand_epoch++; }   // the handoff is complete: threads this one made runnable no longer hold it
     return r;

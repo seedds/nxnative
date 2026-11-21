@@ -44,7 +44,12 @@ int main(void) {
     char g[] = "/tmp/t_controls_gXXXXXX", p[] = "/tmp/t_controls_pXXXXXX";
     int fg = mkstemp(g), fp = mkstemp(p);
     FILE *fgf = fg >= 0 ? fdopen(fg, "w") : NULL, *fpf = fp >= 0 ? fdopen(fp, "w") : NULL;
-    if (!fgf || !fpf) { fprintf(stderr, "t_controls: cannot write the temporary controls files\n"); return 1; }
+    if (!fgf || !fpf) {
+        if (fgf) fclose(fgf);
+        if (fpf) fclose(fpf);
+        fprintf(stderr, "t_controls: cannot write the temporary controls files\n");
+        return 1;
+    }
     fputs("pad A=B\nkey 38=X\nmouse=right\nbogus line\n", fgf); fclose(fgf);
     fputs("key 38=Y\r\nmouse_speed=3\n", fpf); fclose(fpf);
     ctl_defaults(&c); nbad = 0;

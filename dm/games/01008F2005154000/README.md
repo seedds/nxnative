@@ -16,7 +16,7 @@ Update 1.05 (v327680) over the base game, SDK 3.5.1, Ubisoft's Snowdrop engine o
 
 ## Rendering
 
-- The game sets NVN near depth to zero and uses the full pad layout. It requests 30 fps. The port keeps that timing.
+- The game sets NVN near depth to zero and uses the full pad layout.
 - **Resolved: missing character preview.** The preview's vertex streams declared a range beyond their pool, and the host skipped the draws even though their fetches fit. The rebuilt renderer drew the character in the same menu. [A vertex stream bound past its memory pool](../../../docs/reference/rendering.md#a-vertex-stream-bound-past-its-memory-pool).
 - **Resolved on Mac: black loading screen and flickering title.** The same oversized binding affected the indexed UI draws and caused the startup draw warning. Captures show the game submitting the UI draws even on black frames. The renderer now checks the mapped vertex range using the CPU-readable indices. The loading indicator and title render again. [A vertex stream bound past its memory pool](../../../docs/reference/rendering.md#a-vertex-stream-bound-past-its-memory-pool).
 
@@ -25,6 +25,12 @@ Update 1.05 (v327680) over the base game, SDK 3.5.1, Ubisoft's Snowdrop engine o
 On 2026-11-21 the Apple M6 Mac mini (macOS 27.2.1) passed the title and opening cutscenes in a window with Metal HUD, audio output and the iPhone-sized alias region. The title held about 30 fps, all six DLC licences mounted and the game wrote `profile.sys` to the test save folder. The rebuilt renderer reached character creation and showed the preview. The earlier Mac run also reached the first interactive scene. [PR #843](https://github.com/seedds/nxnative/pull/843).
 
 Press A on the title to reach Play and New Game. Hold B to skip the opening cinematic. In the character creator, choose Next, a difficulty and Create.
+
+## Frame rate
+
+Snowdrop requests NVN present interval 2 (30 fps at 60 Hz). The profile uses the host's existing display pacing to default to 60 fps. The launcher's **Frame rate** setting can restore 30 fps. [Present interval in display mode](../../../docs/reference/frame-rate.md#a-present-interval-that-is-the-games-only-limit-in-display-mode).
+
+On the Apple M6 Mac mini, 1.05 reached about 60 fps through most of the opening, with a brief dip before returning to 60 fps. The original timing held about 30 fps. The visible Mac playtest reported no timing problems. The updated Mac bundle was checked at startup with both frame-rate settings. iOS has not been tested at 60 fps.
 
 ## iOS build
 

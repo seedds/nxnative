@@ -236,6 +236,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Write faults that never stop on a page the game writes all the time](../../../docs/reference/nvn-objects.md#write-faults-that-never-stop-on-a-page-the-game-writes-all-the-time) (resolved, issue #3097). The worker threads' OS lock shares a 16 KB host page with texture data; under memory pressure in Castle Town six threads looped on one store and the frames stopped. Measured on the Mac (cap 60, FG and DR off, 30,000 frames, guest files on): Castle Town write faults 869,657 → 569, fault-loop lines 545 → 0, worst frame 2,357 → 468 ms in the frames both arms played alike (≥45 ms 8.9 → 8.8 a minute); Kokiri write faults 264,698 → 731, ≥45 ms 2.8 → 3.0 a minute. 9–17 pages turned hot a run; 4–5 were still hot at the end.
+
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.
 - [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
 

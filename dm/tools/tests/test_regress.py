@@ -835,6 +835,22 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
             self.assertEqual(finish.call_args.args[0]['games']['game']['status'], 'NEW-FAIL')
 
 
+class TreeModules(unittest.TestCase):
+    def test_each_tree_imports_its_own(self):   # a baseline and a candidate tool, each importing a helper by name: each gets its own tree's (2026-11-21: one dmsh_abi for both)
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            mods = []
+            for name, val in (('base', 1), ('cand', 2)):
+                t = Path(d) / name; t.mkdir()
+                (t / 'rg_helper_x.py').write_text(f'V = {val}\n')
+                (t / 'tool.py').write_text('import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\nimport rg_helper_x\nV = rg_helper_x.V\n')
+                path0 = list(sys.path)
+                mods.append(regress.load_tree_module(f'tool_{name}', t / 'tool.py'))
+                self.assertEqual(sys.path, path0)
+            self.assertEqual([m.V for m in mods], [1, 2])
+            self.assertNotIn('rg_helper_x', sys.modules)
+
+
 class Validated(unittest.TestCase):
     """--record: dm/games/<id>/validated.tsv, the chain a game was last green on"""
     def run_record(self, td, status, record=True, dirty=False, mode='quick', smoke=True, chain='aaaa11112222', runs=None, command='check', derived=False):

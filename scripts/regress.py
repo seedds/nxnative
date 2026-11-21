@@ -71,7 +71,7 @@
 #   baseline (a deleted bindless access, extra entry points: shader_regressions.losses), the interface check, a crash, a hang, the frame not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
-import argparse, collections, concurrent.futures as cf, contextlib, ctypes, datetime, fcntl, hashlib, importlib.util, json, math, os, re, shutil, signal, struct, subprocess, sys, time, traceback
+import argparse, collections, concurrent.futures as cf, contextlib, ctypes, datetime, fcntl, hashlib, importlib.util, json, math, os, re, shutil, signal, struct, subprocess, sys, sysconfig, time, traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -82,6 +82,28 @@ def load_module(name, path):   # a module from a file (another script, or a tool
     if spec is None or spec.loader is None: raise ImportError(f'cannot load {path}')
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     return mod
+
+
+def _outside_python(m):   # a loaded module that is not Python's own (stdlib, site-packages): one a script or a revision's tool imported by name from its sys.path
+    f = getattr(m, '__file__', None)
+    if not f: return False
+    roots = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, *(sysconfig.get_paths().get(k) for k in ('stdlib', 'platstdlib', 'purelib', 'platlib'))) if p}
+    f = os.path.realpath(f)
+    return not any(f == r or f.startswith(r + os.sep) for r in roots)
+
+
+def load_tree_module(name, path):
+    """A tool of a revision's tree, with its own imports: the modules it imports by name (dmsh_abi, dmsh_side, shader_lib, ...) come from its tree, never from another
+    revision's tool loaded earlier in this process or from this checkout's. Those already loaded are hidden while it runs and put back after; the ones it loads stay
+    bound inside it (its globals) and leave sys.modules, and sys.path is restored. A baseline and a candidate's pso_offline.py once shared one dmsh_abi, so a
+    candidate's new constant was looked up in the baseline's header (regress check, 2026-11-21)"""
+    hidden = {k: m for k, m in list(sys.modules.items()) if _outside_python(m)}
+    before, path0 = set(sys.modules), list(sys.path)
+    for k in hidden: del sys.modules[k]
+    try: return load_module(name, path)
+    finally:
+        for k in set(sys.modules) - before: del sys.modules[k]
+        sys.modules.update(hidden); sys.path[:] = path0
 
 
 bench = load_module('bench', REPO / 'scripts/bench.py')
@@ -671,7 +693,7 @@ def interface_check(tree, g, out):
     pairs = [prof / 'shader_pairs.tsv', prof / 'pso_pairs.tsv' if (prof / 'pso_pairs.tsv').is_file() else g.build / 'shader/pso_pairs.tsv']
     po = tree.path / 'dm/gfx/tools/pso_offline.py'
     if not po.is_file(): return {'checked': 0, 'note': 'no pso_offline.py in this revision', 'bad': []}
-    mod = load_module('pso_offline_' + tree.id.replace('-', '_'), po)
+    mod = load_tree_module('pso_offline_' + tree.id.replace('-', '_'), po)
     todo = mod.read_pairs(mod.pair_text([p for p in pairs if p.is_file()]))
     zero = depth_zero(g, tree)
     keys = {k for pr in todo for k in pr}

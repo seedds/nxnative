@@ -58,6 +58,7 @@ The development build is `01008CF01BAAC000_build/` beside the NSPs, with runs an
 
 ## Found on this game
 
+- **Registered 1.1.0 builds stopped at the shader table check.** On an M4 Pro, first-copy selection changed 36 `main` rows, with all 9,858 shader payloads identical by key. Keeping the verified registered occurrences makes the same extraction pass the strict check. [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - **A cached vibration-device answer prevented rumble after a late controller connection:** [A vibration device before its controller connects](../../../docs/reference/services.md#a-vibration-device-before-its-controller-connects).
 - **An iPhone build's launcher toggles built no pipeline bases** (issue #1684): the build left out the pulling libraries, as the profile leaves `pso_mtl4` off; it keeps them now. [Pulling vertex inputs](../../../docs/reference/rendering.md#pulling-vertex-inputs). Not yet run on a device with the fix.
 - **Mac app pair tables:** [Shader-pair tables in a Mac app](../../../docs/reference/shaders.md#shader-pair-tables-in-a-mac-app).

@@ -58,7 +58,7 @@
 #   (SecredUber's 16600 stage shaders have only 3079 distinct control sections, with 6367 cases of same control, different code), so hashing the control alone picks the wrong library.
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
-#   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
+#   map rows have the same columns as D2R's shader_map.tsv (column 5 names the source chosen for the key); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
@@ -4256,12 +4256,32 @@ def nxcx_shaders(f, label):
     with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         return sead_prim_shaders(d, label) or glslc_shaders(d, label, need=False, offsets=offsets)
 
-def uniq_keys(found):
-    uniq = {}
-    for where, st, ctl, code in found:
+def uniq_keys(found, registered_map: str = ''):
+    """Keep the first checked copy, or an equivalent occurrence from the registered map.
+
+    Source labels order package records. A registered label can be kept only
+    if that exact key, stage and source occur in this scan. Check every copy
+    against the first before selecting one for the package.
+    """
+    uniq, alternatives = {}, {}
+    for shader in found:
+        where, st, ctl, code = shader
         key = skey(ctl, code)
-        if key in uniq and not same_shader(uniq[key][2:4], (ctl, code)): red(f'key {key} is the same but the control section or code area differs ({where})')
-        uniq.setdefault(key, (where, st, ctl, code))
+        first = uniq.setdefault(key, shader)
+        if first is shader: continue
+        if not same_shader(first[2:4], (ctl, code)): red(f'key {key} is the same but the control section or code area differs ({where})')
+        if registered_map and st == first[1] and where != first[0]:
+            alternatives.setdefault((key, STAGE_NAME[st]), {}).setdefault(where, shader)
+    if alternatives:
+        try:
+            with open(registered_map, encoding='utf-8') as table:
+                for line in table:
+                    fields = line.rstrip('\n').split('\t', 4)
+                    if len(fields) != 5: continue
+                    _, _, stage, key, source = fields
+                    by_source = alternatives.get((key, stage))
+                    if by_source is not None and source in by_source: uniq[key] = by_source[source]
+        except FileNotFoundError: pass   # the packer checks that registered tables exist
     return uniq
 
 def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueError) on a damaged file
@@ -4329,6 +4349,7 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
+    registered_map = os.environ.get('DM_SPLIT_REGISTERED_MAP', '')
     files, results, common = [], [], None
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
@@ -4360,7 +4381,7 @@ def main():
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
         if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
-        results.append(('main', uniq_keys(found), var_pairs(found), {}))
+        results.append(('main', uniq_keys(found, registered_map), var_pairs(found), {}))
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
@@ -4427,7 +4448,7 @@ def main():
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)),
                                             ('Telltale effect packs', any('#TTFX@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
-        f.write('# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
+        f.write('# column 5 names the chosen source of each key, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')
     # Hand-written facts the machine code cannot give (the profile's shader_facts_manual.tsv, same row format) are merged over the generated ones, so the table stays reproducible

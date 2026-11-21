@@ -68,7 +68,10 @@ void plat_sema_destroy(plat_sema *s);
 
 // ---------- Deferred work and termination (Apple: libdispatch) ----------
 void plat_after_ms(unsigned ms, void (*fn)(void));       // call fn once on another thread after ms milliseconds
-void plat_on_terminate(void (*fn)(const char *why));     // call fn on an ordinary thread when the process is asked to end (SIGTERM; Windows: console close / Ctrl+C / log-off / shutdown)
+void plat_on_terminate(void (*fn)(const char *why));     // call fn on an ordinary thread when the process is asked to end (SIGTERM; Windows: console close / Ctrl+C / log-off / shutdown,
+                                                         // and the stop request: the event PLAT_STOP_EVENT<process ID>, which a process that shares no console with this one sets)
+#define PLAT_STOP_EVENT "Local\\nxnative-stop-"          // Windows: the stop request's event name before the process ID in decimal (nxlauncher's Stop, launcher_model.h stop_event_name)
+#define PLAT_STOP_EVENT_W L"Local\\nxnative-stop-"
 
 // ---------- Virtual memory ----------
 // Protections: the POSIX PROT_* values. Windows commits reserved pages when a range is made accessible and keeps their contents when it is made inaccessible, like mprotect

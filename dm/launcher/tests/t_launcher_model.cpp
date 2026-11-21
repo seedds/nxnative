@@ -6,11 +6,16 @@
 // and nxaot taken from the launcher's folder when the launch file's are gone; NXHOST over both; the problem when none is there), the launcher's own settings,
 // DM_LAUNCHER and "Show this window at launch", a child process with its environment, working folder, log and exit status (this program, which acts as nxhost-run and as
 // the packer with NXL_FAKE_HOST=1), and a pack the host refuses: nxhost-run's status 8 explained, and a pack whose PLT bindings name a symbol the host takes over
-// (its --takeovers list; the stand-in prints NXL_FAKE_TAKEOVERS) named before the start, in the Problem column and Play's error, with the repack.
+// (its --takeovers list; the stand-in prints NXL_FAKE_TAKEOVERS) named before the start, in the Problem column and Play's error, with the repack. Add game: the file kinds, the
+// packer and its Python (a bundle's, NXPACKER and PYTHON, a development tree's), where prod.keys is looked for (by path only), the packer's command, its JSON events read, its
+// end in plain words, the packer's stand-in run (fake_games.h packer: a pack made, the keys missing, a traceback), the NSP folder remembered outside the games folder. The saves:
+// the folder DM_SAVE names as the game gets it, dated backups, Restore (refused while running, the current saves backed up first, a device save the backup lacks removed), and
+// the dialogs' stand-in.
 #include "launcher_model.h"
 #include "fake_games.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #if defined(_WIN32)
 #include <fcntl.h>
@@ -805,7 +810,226 @@ static void refused_packs(const fake::Folder &f, const fs::path &root) {
     CHECK(find_games(fake::str(f.games))[0].problem.empty(), "the bindings file gone: no problem");
 }
 
+// ---- Add game ----
+static std::vector<std::string> lines_with(const PackView &v, const std::string &part) {
+    std::vector<std::string> out;
+    for (const auto &l : v.lines) if (l.find(part) != std::string::npos) out.push_back(l);
+    return out;
+}
+
+static void add_game(const fake::Folder &f, const fs::path &root) {
+    CHECK(is_game_file("/a/Game [0100AAAA00000000][v0].nsp") && is_game_file("C.XCI") && is_game_file("d.nsz") && is_game_file("e.xcz") && !is_game_file("prod.keys") &&
+          !is_game_file("nsp"), "the packer's file kinds, any case");
+    CHECK_EQ(nsp_folder_of(fake::str(root / "nsps" / "Game" / "game.xci")), fake::str(root / "nsps" / "Game"), "the NSP folder is the file's folder");
+    // The tools: a bundle (VERSION's python row, its packer), NXPACKER and PYTHON, a development tree, none
+    const fs::path bundle = root / "addbundle", py = bundle / "python" / "bin" / (std::string("python3") + kExeSuffix);
+    fake::write(bundle / "VERSION", "nxnative test\npython 3.14.10 python/bin/python3" + std::string(kExeSuffix) + "\n");
+    fake::write(bundle / "scripts" / "build_ipa_from_nsp.py", "# the bundle's packer\n");
+    fake::write(py, "python");
+    MapEnv none;
+    PackTools t = find_pack_tools(fake::str(bundle), none);
+    CHECK(t.problem.empty() && t.from == "the bundle" && t.packer == fake::str(bundle / "scripts" / "build_ipa_from_nsp.py") && t.python == fake::str(py), "a bundle: its packer and Python: " + t.problem);
+    CHECK(value(t.set, "PYTHONHOME") == "" && value(t.set, "PYTHONPATH") == "" && value(t.set, "PYTHONNOUSERSITE") == "1" && value(t.set, "PYTHONUNBUFFERED") == "1" &&
+          value(t.set, "PYTHONUTF8") == "1", "as pack.sh runs it: PYTHONHOME and PYTHONPATH unset, no user site, unbuffered, UTF-8");
+    MapEnv own; own.vars = {{"PYTHON", fake::str(root / "otherpython")}};
+    fake::write(root / "otherpython", "python");
+    t = find_pack_tools(fake::str(bundle), own);
+    CHECK(t.python == fake::str(root / "otherpython") && value(t.set, "PYTHONHOME") == "<unset>", "PYTHON names another Python, as pack.sh takes it, with the PC's own environment");
+    fs::remove(py);
+    CHECK(find_pack_tools(fake::str(bundle), none).problem.find("the bundle's Python") != std::string::npos, "the bundle's Python gone: the problem");
+    MapEnv nxp; nxp.vars = {{"NXPACKER", fake::str(root / "scripts" / "build_ipa_from_nsp.py")}, {"PYTHON", self_path()}};
+    t = find_pack_tools(fake::str(root / "nowhere"), nxp);
+    CHECK(t.problem.empty() && t.from == "NXPACKER" && t.packer == fake::str(root / "scripts" / "build_ipa_from_nsp.py") && t.python == self_path(), "NXPACKER and PYTHON: " + t.problem);
+    const fs::path dev = root / "dev", bin = root / "devbin";
+    fake::write(dev / "scripts" / "build_ipa_from_nsp.py", "# the checkout's packer\n");
+    fake::write(dev / "dm" / "launcher" / "main.cpp", "//\n");
+    fs::create_directories(dev / "build" / "linux");
+#if defined(_WIN32)
+    const std::string pyname = "python.exe";
+#else
+    const std::string pyname = "python3";
+#endif
+    fake::write(bin / pyname, "python");
+    MapEnv path; path.vars = {{"PATH", fake::str(root / "empty") + (std::string(kPlatform) == "windows" ? ";" : ":") + fake::str(bin)}};
+    CHECK_EQ(which(pyname, path), fake::str(bin / pyname), "which: the program on PATH");
+    CHECK(which("no-such-program", path).empty() && which(fake::str(bin / pyname), MapEnv()) == fake::str(bin / pyname), "which: none; a path as it is");
+    t = find_pack_tools(fake::str(dev / "build" / "linux"), path);
+    CHECK(t.problem.empty() && t.from == "the development tree" && t.packer == fake::str(dev / "scripts" / "build_ipa_from_nsp.py") && t.python == fake::str(bin / pyname),
+          "a development tree: the checkout's packer, Python from PATH: " + t.problem);
+    CHECK(find_pack_tools(fake::str(dev / "build" / "linux"), none).problem.find("no Python") != std::string::npos, "no Python on PATH: the problem");
+    t = find_pack_tools(fake::str(root / "nowhere"), none);   // the test's folder may itself be in a checkout (CTest's TMPDIR is the build folder's tmp/): then that checkout's
+    CHECK(t.problem.find("no packer") != std::string::npos || (t.from == "the development tree" && t.packer.rfind(fake::str(root), 0) != 0),
+          "neither a bundle nor a checkout: the problem (or the checkout the test folder is in): " + t.problem + t.packer);
+    // The keys, by path only: launcher.txt's, a packed game's keys row, the bundle's keys/, ~/.switch
+    auto games = find_games(fake::str(f.games));
+    Config c; MapEnv home;
+#if defined(_WIN32)
+    home.vars = {{"USERPROFILE", fake::str(root / "home")}};
+#else
+    home.vars = {{"HOME", fake::str(root / "home")}};
+#endif
+    KeysFound k = find_keys(c, games, fake::str(bundle), home);
+    CHECK(k.path.empty() && k.looked.size() == 3 && k.looked[0] == fake::str(root / "keys" / "prod.keys") && k.looked[1] == fake::str(bundle / "keys" / "prod.keys") &&
+          k.looked[2] == fake::str(root / "home" / ".switch" / "prod.keys"), "no keys anywhere: the places looked, in order (Alpha's keys row, the bundle, ~/.switch)");
+    fake::write(root / "home" / ".switch" / "prod.keys", "stand-in, not keys\n");
+    CHECK_EQ(find_keys(c, games, fake::str(bundle), home).path, fake::str(root / "home" / ".switch" / "prod.keys"), "~/.switch/prod.keys");
+    fake::write(bundle / "keys" / "prod.keys", "stand-in, not keys\n");
+    CHECK_EQ(find_keys(c, games, fake::str(bundle), home).path, fake::str(bundle / "keys" / "prod.keys"), "the bundle's keys/ before ~/.switch");
+    fake::write(root / "keys" / "prod.keys", "stand-in, not keys\n");
+    CHECK_EQ(find_keys(c, games, fake::str(bundle), home).path, fake::str(root / "keys" / "prod.keys"), "a packed game's keys row before the bundle's");
+    c.set("keys", fake::str(root / "chosen.keys"));
+    CHECK(find_keys(c, games, fake::str(bundle), home).looked[0] == fake::str(root / "chosen.keys"), "launcher.txt's keys first, looked at even when gone");
+    fake::write(root / "chosen.keys", "stand-in, not keys\n");
+    CHECK_EQ(find_keys(c, games, fake::str(bundle), home).path, fake::str(root / "chosen.keys"), "launcher.txt's keys (Choose prod.keys...)");
+    // The command
+    const fs::path nsp = root / "elsewhere" / "Phi NSPs", file = nsp / "Phi Game [0100FFFF00000000][v0].nsp";
+    fake::write(file, "not a game\n");
+    PackTools stub; stub.python = self_path(); stub.packer = fake::str(root / "scripts" / "build_ipa_from_nsp.py"); stub.set = {{"NXL_FAKE_PACKER", "1"}, {"PYTHONUNBUFFERED", "1"}};
+    Command cmd = add_command(fake::str(file), fake::str(root / "chosen.keys"), stub);
+    CHECK(cmd.error.empty() && cmd.argv == (std::vector<std::string>{self_path(), stub.packer, fake::str(nsp), "--platform", kPlatform, "--progress", "json", "-k", fake::str(root / "chosen.keys")}),
+          "add_command: <python> <packer> <NSP folder> --platform --progress json -k <keys>: " + cmd.error);
+    CHECK(cmd.cwd == fake::str(nsp) && cmd.log == fake::str(nsp / "nxlauncher-pack.txt") && cmd.tree, "in the NSP folder, its output in nxlauncher-pack.txt, as a tree (Cancel)");
+    CHECK(add_command(fake::str(file), "", stub).error.find("prod.keys") != std::string::npos, "no keys: no command");
+    CHECK(add_command(fake::str(nsp / "gone.nsp"), "k", stub).error.find("not there") != std::string::npos, "a file that is gone: no command");
+    PackTools broken; broken.problem = "no packer here";
+    CHECK_EQ(add_command(fake::str(file), "k", broken).error, std::string("no packer here"), "the tools' problem");
+    // The packer's events
+    PackView v = read_pack_log(
+        "fake packer: argv x\n"
+        "{\"ev\": \"stage\", \"k\": 1, \"n\": 4, \"name\": \"Extracting\", \"step\": \"base\", \"t\": 1}\r\n"
+        "{\"ev\": \"progress\", \"k\": 1, \"name\": \"Extracting\", \"step\": \"base\", \"done\": 2040109465, \"total\": 5368709120, \"unit\": \"B\", \"est\": true, \"note\": \"RomFS\", \"frac\": 0.38, \"eta\": 90.5}\n"
+        "{\"ev\": \"say\", \"msg\": \"[10:00:00] a message\\nover two lines\"}\n"
+        "not json {\n");
+    CHECK(v.k == 1 && v.n == 4 && v.stage == "Extracting" && v.step == "base" && v.in_stage && v.events == 3, "a stage, its step");
+    CHECK(v.count == "1.9/~5.0 GB" && v.note == "RomFS" && std::fabs(v.frac - 0.38) < 1e-9 && std::fabs(v.eta - 90.5) < 1e-9, "its count as the packer shows it: " + v.count);
+    CHECK(v.lines.size() == 5 && v.lines[0] == "fake packer: argv x" && v.lines[1] == "[1/4] Extracting \xC2\xB7 base" && v.lines[2] == "[10:00:00] a message" &&
+          v.lines[4] == "not json {", "the log pane's lines: plain lines, the stage, a message's lines");
+    v = read_pack_log("{\"ev\": \"stage\", \"k\": 2, \"n\": 4, \"name\": \"Shaders\", \"step\": \"\"}\n{\"ev\": \"progress\", \"done\": 1203, \"total\": 19592, \"unit\": \"shaders\", \"frac\": null, \"eta\": null}\n");
+    CHECK(v.count == "1,203/19,592 shaders" && v.frac < 0 && v.eta < 0, "a count of things, no fraction or ETA: " + v.count);
+    v = read_pack_log("{\"ev\": \"stage\", \"k\": 2, \"n\": 4, \"name\": \"Shaders\"}\n{\"ev\": \"stage_end\", \"k\": 2, \"name\": \"Shaders\", \"ok\": false, \"summary\": \"3 failed\", \"elapsed\": 3725}\n"
+                      "{\"ev\": \"say\", \"msg\": \"[RED] no such file: /k/prod.keys\"}\n");
+    CHECK(!v.in_stage && lines_with(v, "[2/4] Shaders: failed in 1:02:05 (3 failed)").size() == 1 && v.red == "no such file: /k/prod.keys", "a stage's end, a red message");
+    // Its end in plain words
+    CHECK(pack_failure(v, 0, "/n", "/k/prod.keys").empty(), "status 0: no failure");
+    CHECK(pack_failure(v, 1, "/n", "/k/prod.keys").find("found no prod.keys at /k/prod.keys") != std::string::npos, "the keys file not there: " + pack_failure(v, 1, "/n", "/k/prod.keys"));
+    CHECK(pack_failure(PackView(), 130, "/n", "k").find("cancelled") != std::string::npos && pack_failure(PackView(), 130, "/n", "k").find("/n") != std::string::npos, "Cancel (status 130)");
+    v.red = "more than one game in the folder, keep one game per folder: 0100AAAA00000000, 0100BBBB00000000";
+    CHECK(pack_failure(v, 1, "/n", "k").find("more than one game (0100AAAA00000000, 0100BBBB00000000)") != std::string::npos, "two games in one folder: " + pack_failure(v, 1, "/n", "k"));
+    v.red = "no base game NSP found in /n (title ID 0100AAAA00000000)";
+    CHECK(pack_failure(v, 1, "/n", "k").find("not the base game") != std::string::npos, "an update without its base game");
+    v.red = "less than 7 GB free on the volume of /n/0100AAAA00000000_build";
+    CHECK(pack_failure(v, 1, "/n", "k").rfind("Not enough free disk space: the packer needs at least 7 GB free on the drive of /n/0100AAAA00000000_build before", 0) == 0,
+          "the packer's disk check: " + pack_failure(v, 1, "/n", "k"));
+    v.red = "something else";
+    CHECK_EQ(pack_failure(v, 1, "/n", "k"), std::string("The packer stopped (status 1): something else"), "another message: as the packer says it");
+    v.red.clear();
+    CHECK(pack_failure(v, 1, "/n", "k").find("no message") != std::string::npos && pack_failure(v, 1, "/n", "k").find("nxlauncher-pack.txt") != std::string::npos, "no message: where its output is");
+    // The stand-in packer, run: its events, the game it packs, the folder remembered
+    const int64_t since = unix_now();
+    Child ch; std::string err;
+    CHECK(spawn(cmd, &ch, &err), "the packer started: " + err);
+    CHECK_EQ(wait(&ch), 0, "and ended with status 0");
+    v = read_pack_log(fake::read(nsp / "nxlauncher-pack.txt"));
+    CHECK(v.k == 3 && v.n == 3 && !v.in_stage && lines_with(v, "Shaders: done in 1:02:05").size() == 1 && lines_with(v, "recompiler: the stand-in").size() == 1,
+          "its stages and messages read from its output");
+    CHECK(lines_with(v, "fake packer: argv " + stub.packer + "|" + fake::str(nsp) + "|--platform|" + kPlatform + "|--progress|json|-k|" + fake::str(root / "chosen.keys")).size() == 1,
+          "the packer got the NSP folder and the keys' path");
+    CHECK(pack_failure(v, 0, fake::str(nsp), "k").empty() && packed_build(fake::str(nsp), since) == fake::str(nsp / "0100FFFF00000000_build"), "the pack it made: " + packed_build(fake::str(nsp), since));
+    CHECK(packed_build(fake::str(nsp), since + 3600).empty(), "a launch file older than the start is not this pack's");
+    Config cf;
+    CHECK(remember_folder(cf, fake::str(f.games), fake::str(nsp)) && nsp_folders(cf) == std::vector<std::string>{fake::str(nsp)}, "an NSP folder outside the games folder is remembered");
+    CHECK(!remember_folder(cf, fake::str(f.games), fake::str(nsp)), "once");
+    CHECK(!remember_folder(cf, fake::str(f.games), fake::str(f.games / "Beta NSPs")) && !remember_folder(cf, fake::str(f.games), fake::str(f.games)), "a folder the games folder reaches is not");
+    auto all = find_all_games(fake::str(f.games), cf);
+    CHECK(all.size() == 4 && all[3].launch.title == "Phi Game" && all[3].problem.empty(), "find_all_games: the games folder's three and the added one, by title");
+    cf.add("nsp_folder", fake::str(root / "unplugged drive"));
+    CHECK(find_all_games(fake::str(f.games), cf).size() == 4, "a remembered folder that is not there now: skipped");
+    cf.path = fake::str(root / "cfg2" / "launcher.txt"); cf.set("games", "/g"); cf.save();
+    Config back; back.path = cf.path;
+    CHECK(back.load() && back.all("nsp_folder") == (std::vector<std::string>{fake::str(nsp), fake::str(root / "unplugged drive")}) && back.get("games") == "/g", "launcher.txt keeps a line per folder");
+    back.remove("nsp_folder", fake::str(nsp));
+    CHECK(back.all("nsp_folder").size() == 1, "and one can be removed");
+    // The packer stopped on missing keys, and a crash
+    cmd.set.push_back({"NXL_FAKE_PACK", "keys"});
+    CHECK(spawn(cmd, &ch, &err) && wait(&ch) == 1, "the keys stand-in ends with status 1");
+    v = read_pack_log(fake::read(nsp / "nxlauncher-pack.txt"));
+    CHECK(pack_failure(v, 1, fake::str(nsp), fake::str(root / "chosen.keys")).find("found no prod.keys") != std::string::npos, "the missing keys in plain words");
+    CHECK(fs::exists(nsp / "nxlauncher-pack.prev.txt"), "the previous pack's output kept");
+    cmd.set.back().value = "crash";
+    CHECK(spawn(cmd, &ch, &err) && wait(&ch) == 1, "the crash stand-in ends with status 1");
+    v = read_pack_log(fake::read(nsp / "nxlauncher-pack.txt"));
+    CHECK(lines_with(v, "ValueError: the stand-in's crash").size() == 1 && pack_failure(v, 1, fake::str(nsp), "k").find("no message") != std::string::npos, "a traceback: kept as lines");
+}
+
+// ---- The saves ----
+static void saves(const fake::Folder &f, const fs::path &root) {
+    auto g = find_games(fake::str(f.games));
+    const Game &a = g[0];
+    MapEnv none;
+    Saves s = save_place(a, none);
+    CHECK(s.folder == fake::str(f.a_run / "save") && s.backups == fake::str(f.a_run / "save") + "-backups" && s.present.empty() && s.problem.find("no save yet") != std::string::npos,
+          "the launch file's DM_SAVE row; no save yet: " + s.problem);
+    fake::write(f.a_run / "env.txt", std::string(fake::kChoices) + "DM_SAVE=" + fake::str(root / "mysave") + "/\n");
+    CHECK_EQ(save_place(a, none).folder, fake::str(root / "mysave"), "the player's env.txt over the row, its trailing / dropped as the host does");
+    MapEnv saved_off; saved_off.vars = {{"DM_SAVED_CHOICES", "0"}};
+    CHECK_EQ(save_place(a, saved_off).folder, fake::str(f.a_run / "save"), "DM_SAVED_CHOICES=0: env.txt not read");
+    MapEnv set; set.vars = {{"DM_SAVE", fake::str(root / "envsave")}};
+    CHECK_EQ(save_place(a, set).folder, fake::str(root / "envsave"), "the environment over both");
+    fake::write(f.a_run / "env.txt", fake::kChoices);
+    Game bare = a; bare.launch.env.clear();
+    CHECK(save_place(bare, none).problem.find("no save folder") != std::string::npos, "a launch file without the row: the problem");
+    // Back up
+    fake::write(f.a_run / "save" / "game_data.sav", "first");
+    fake::write(f.a_run / "save" / "sub" / "option.sav", "options");
+    fake::write(f.a_run / "save.work" / "game_data.sav", "the mounted save's working copy");
+    s = save_place(a, none);
+    CHECK(s.problem.empty() && s.present == std::vector<std::string>{fake::str(f.a_run / "save")}, "a save: its folder");
+    const int64_t t0 = 1800000000;   // 2027-01-15 in UTC
+    Backup b1, b2; std::string err;
+    CHECK(backup_saves(s, t0, &b1, &err), "backed up: " + err);
+    CHECK(b1.files == 2 && b1.bytes == 12 && b1.folders == std::vector<std::string>{"save"} && fake::read(fs::u8path(b1.path) / "save" / "sub" / "option.sav") == "options" &&
+          !fs::exists(fs::u8path(b1.path) / "save.work"), "a copy of the committed folder, not its working copy: " + b1.path);
+    CHECK(b1.name.size() == 19 && b1.name[4] == '-' && b1.name[10] == '_' && b1.name.find(':') == std::string::npos, "a dated name a folder can have: " + b1.name);
+    CHECK(backup_saves(s, t0, &b2, &err) && b2.name == b1.name + "-2", "a second backup in the same second: " + b2.name);
+    fs::create_directories(fs::u8path(s.backups) / "2099-01-01_00-00-00.partial" / "save");
+    auto list = list_backups(s);
+    CHECK(list.size() == 2 && list[0].name == b2.name && list[1].name == b1.name, "the backups, newest first, without one being made");
+    // Restore
+    fake::write(f.a_run / "save" / "game_data.sav", "second");
+    fake::write(f.a_run / "save_device" / "island.sav", "device");
+    s = save_place(a, none);
+    CHECK(s.present.size() == 2, "the device save beside it");
+    const std::string prompt = restore_prompt(s, b1);
+    CHECK(prompt.find(b1.name) != std::string::npos && prompt.find("replaces the current save folder " + s.folder + ".") != std::string::npos &&
+          prompt.find(s.folder + "_device, which the backup does not have, is removed") != std::string::npos && prompt.find("backed up first") != std::string::npos,
+          "the confirmation names what is replaced and what is removed: " + prompt);
+    Backup safety;
+    CHECK(!restore_saves(s, b1, true, t0 + 10, &safety, &err) && err.find("running") != std::string::npos && fake::read(f.a_run / "save" / "game_data.sav") == "second",
+          "not while the game runs: " + err);
+    CHECK(restore_saves(s, b1, false, t0 + 10, &safety, &err), "restored: " + err);
+    CHECK(fake::read(f.a_run / "save" / "game_data.sav") == "first" && fake::read(f.a_run / "save" / "sub" / "option.sav") == "options" && !fs::exists(f.a_run / "save_device"),
+          "the save as it was in the backup");
+    CHECK(!safety.name.empty() && fake::read(fs::u8path(safety.path) / "save" / "game_data.sav") == "second" && fake::read(fs::u8path(safety.path) / "save_device" / "island.sav") == "device",
+          "the replaced saves backed up first: " + safety.path);
+    CHECK(!fs::exists(f.a_run / "save.restoring") && !fs::exists(f.a_run / "save.replaced"), "nothing left beside the save");
+    s = save_place(a, none);
+    CHECK(restore_saves(s, safety, false, t0 + 20, nullptr, &err) && fake::read(f.a_run / "save_device" / "island.sav") == "device", "undone from that backup: " + err);
+    Backup gone = b1; gone.path = fake::str(root / "no backup");
+    CHECK(!restore_saves(save_place(a, none), gone, false, t0 + 30, nullptr, &err) && err.find("gone") != std::string::npos, "a backup that is gone: " + err);
+    fs::remove_all(f.a_run / "save"); fs::remove_all(f.a_run / "save_device"); fs::remove_all(f.a_run / "save.work"); fs::remove_all(fs::u8path(s.backups));
+    // The dialogs' stand-in
+    AnswerDialogs d; d.answers = {"/a/game.xci"};
+    std::string got = "unset";
+    d.open_file("Add a game", game_file_filters(), "/a", [&](const std::string &p) { got = p; });
+    CHECK(got == "/a/game.xci" && d.asked == std::vector<std::string>{"file Add a game"}, "a dialog answered in advance");
+    d.open_folder("Choose the games folder", "/a", [&](const std::string &p) { got = p; });
+    CHECK(got.empty(), "no answer left: cancelled");
+    CHECK(d.show_folder("/s", nullptr) && d.shown == std::vector<std::string>{"/s"}, "the file manager recorded");
+    CHECK(game_file_filters()[0].pattern == "nsp;xci;nsz;xcz", "the dialog's filter: the packer's kinds");
+}
+
 int main(int argc, char **argv) {
+    if (std::getenv("NXL_FAKE_PACKER")) return fake::packer(argc, argv);
     if (std::getenv("NXL_FAKE_HOST")) return fake_host(argc, argv);
     fs::path root = fake::tmp_root("t_launcher_model");
     fake::Folder f = fake::make(root, self_path());
@@ -823,6 +1047,8 @@ int main(int argc, char **argv) {
     start(f);
     child(root);
     refused_packs(f, root);
+    add_game(f, root);
+    saves(f, root);
     std::printf("t_launcher_model: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

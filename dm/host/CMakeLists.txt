@@ -109,8 +109,9 @@ endif()
 # stops the configure step. Offline: -DFETCHCONTENT_SOURCE_DIR_SDL3=<a copy of that release> builds from the copy instead (not downloaded; its commit is checked when it is a git checkout).
 # A static library with only what the host uses: video (with the dummy driver the tests run on, X11 and Wayland, Windows), the software renderer for the progress screen, Vulkan
 # surfaces, events, joystick and gamepad (HIDAPI for the PlayStation, Switch and Xbox controllers' gyro and rumble), haptic, sensor (the gyro of PC handhelds whose controller has
-# none of its own) and audio (PipeWire, PulseAudio, ALSA, WASAPI, the dummy driver). The Linux libraries are loaded at run time with dlopen (SDL_DEPS_SHARED), so a PC without
-# one of them still starts: that driver is skipped
+# none of its own), audio (PipeWire, PulseAudio, ALSA, WASAPI, the dummy driver) and the file dialogs of the launcher's Add game and Browse... (dm/launcher: the Windows dialogs;
+# on Linux the XDG desktop portal over D-Bus, else zenity; nxhost-run calls none of it). The Linux libraries are loaded at run time with dlopen (SDL_DEPS_SHARED), so a PC
+# without one of them still starts: that driver is skipped
 set(SDL3_TAG release-3.4.14)
 set(SDL3_COMMIT 147a8ee32dbf9ac02f3794964490687b6bbda1bc)
 if(WIN32)
@@ -118,12 +119,12 @@ if(WIN32)
 endif()
 include(FetchContent)
 FetchContent_Declare(SDL3 GIT_REPOSITORY https://github.com/libsdl-org/SDL.git GIT_TAG ${SDL3_TAG} GIT_SHALLOW TRUE)
-foreach(opt SDL_SHARED SDL_TEST_LIBRARY SDL_TESTS SDL_EXAMPLES SDL_INSTALL SDL_UNINSTALL SDL_GPU SDL_CAMERA SDL_POWER SDL_DIALOG SDL_TRAY
+foreach(opt SDL_SHARED SDL_TEST_LIBRARY SDL_TESTS SDL_EXAMPLES SDL_INSTALL SDL_UNINSTALL SDL_GPU SDL_CAMERA SDL_POWER SDL_TRAY
             SDL_OPENGL SDL_OPENGLES SDL_RENDER_VULKAN SDL_RENDER_D3D SDL_RENDER_D3D11 SDL_RENDER_D3D12 SDL_KMSDRM SDL_OFFSCREEN SDL_DISKAUDIO
             SDL_JACK SDL_SNDIO SDL_OSS SDL_FRIBIDI SDL_LIBTHAI SDL_LIBURING SDL_HIDAPI_LIBUSB)
     set(${opt} OFF)
 endforeach()
-foreach(opt SDL_STATIC SDL_VIDEO SDL_RENDER SDL_VULKAN SDL_AUDIO SDL_JOYSTICK SDL_HAPTIC SDL_HIDAPI SDL_SENSOR SDL_DUMMYVIDEO SDL_DUMMYAUDIO SDL_VIRTUAL_JOYSTICK)
+foreach(opt SDL_STATIC SDL_VIDEO SDL_RENDER SDL_VULKAN SDL_AUDIO SDL_JOYSTICK SDL_HAPTIC SDL_HIDAPI SDL_SENSOR SDL_DUMMYVIDEO SDL_DUMMYAUDIO SDL_VIRTUAL_JOYSTICK SDL_DIALOG)
     set(${opt} ON)
 endforeach()
 FetchContent_MakeAvailable(SDL3)
@@ -864,12 +865,14 @@ host_test(t_guest_map SOURCES t_guest_map.c INCLUDES ${TESTS}/memory_profile)
 # ---- The launcher: nxlauncher (dm/launcher; docs/settings.md, "On Windows and Linux") ----
 # Dear ImGui (dm/third_party/imgui) over SDL3's 2D renderer, so it opens on a PC without Vulkan: the games packed on this PC, each game's settings, its pack mode, Play. This file
 # builds Linux and Windows only, never Apple (the Apple apps keep dm/mac/Launcher.swift and dm/ios/Sources/Launcher.swift). Its tests: t_launcher_model (the model over a games
-# folder the test writes) and t_launcher_window (the program, found beside the test: one frame on SDL's dummy video driver, the starts without the window, --command, --list)
+# folder the test writes: Add game's packer against a stand-in, the saves' backups and restore), t_launcher_window (the program, found beside the test: one frame on SDL's dummy
+# video driver, the starts without the window, --command, --list, and the window driven by --answer and --press: Add game with a stand-in packer, Stop, the saves) and
+# t_launcher_stop (Stop of a stand-in host that installs the host's own plat_on_terminate: SIGTERM on Linux, the named event on Windows; then Force stop of one that ignores it)
 option(NXHOST_LAUNCHER "build the launcher nxlauncher (dm/launcher: Dear ImGui over SDL3's renderer)" ON)
 if(NXHOST_LAUNCHER)
     enable_language(CXX)
     add_subdirectory(${REPO}/dm/launcher ${CMAKE_BINARY_DIR}/launcher)
-    foreach(t IN ITEMS t_launcher_model t_launcher_window)
+    foreach(t IN ITEMS t_launcher_model t_launcher_window t_launcher_stop)
         host_test(${t} SOURCES ../../launcher/tests/${t}.cpp TMPDIR)
         target_link_libraries(${t} PRIVATE nxlauncher_model)
         set_target_properties(${t} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

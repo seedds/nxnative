@@ -9,12 +9,21 @@
 // file <id>_build/game-profile-<platform>.tsv (path game_profile), which make writes (the stand-in host does not read it)
 #pragma once
 #include "launcher_model.h"
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX   // std::min and std::max stay functions in the tests
+#endif
+#include <windows.h>
+#endif
 
 namespace fake {
 namespace fs = std::filesystem;
@@ -119,6 +128,68 @@ inline Folder make(const fs::path &root, const std::string &host) {
     write(f.games / "notes/readme.txt", "not a pack\n");   // a folder without packs is skipped
     write(f.games / ("0100DDDD00000000_build/launch-" + std::string(p == "linux" ? "windows" : "linux") + ".tsv"), "# nxnative launch 1\n");   // another system's pack only
     return f;
+}
+
+// ---- The packer's stand-in (Add game) ----
+// The test program acts as the Python that runs the packer when NXL_FAKE_PACKER=1 is in its environment: <program> <packer> <NSP folder> --platform <p> --progress json -k <keys>,
+// as launcher_model.cpp add_command composes it. It prints its arguments (a plain line), then the packer's JSON events (build_ipa_from_nsp.py Progress._json), and ends as
+// NXL_FAKE_PACK says:
+//   ok (or unset)  three stages with counts, a message, then <NSP folder>/0100FFFF00000000_build with a launch file of the platform (Phi Game, host: this program), its game
+//                  profile's file and a complete balanced pack; status 0
+//   keys           "[RED] no such file: <keys>", as the packer's BuildError for a keys path with no file; status 1
+//   slow           the first stage, then a line every 100 ms for up to a minute (Cancel and Force stop end it)
+//   crash          a traceback on its standard error; status 1
+// It never opens the keys file (whose path it is given): the tests' keys are a stand-in too
+inline std::string json_text(const std::string &s) {   // a JSON string's contents
+    std::string out;
+    for (char ch : s) { if (ch == '"' || ch == '\\') out += '\\'; out += ch; }
+    return out;
+}
+
+inline int packer(int argc, char **argv) {
+    std::string args, nsp, keys;
+    for (int i = 1; i < argc; i++) {
+        args += std::string(i > 1 ? "|" : "") + argv[i];
+        if (i == 2) nsp = argv[i];
+        if (!std::strcmp(argv[i], "-k") && i + 1 < argc) keys = argv[i + 1];
+    }
+    const char *how_env = std::getenv("NXL_FAKE_PACK");
+    const std::string how = how_env ? how_env : "ok";
+    auto ev = [](const std::string &json) { std::printf("%s\n", json.c_str()); std::fflush(stdout); };
+    std::printf("fake packer: argv %s\n", args.c_str());
+    if (how == "keys") {
+        ev("{\"ev\": \"say\", \"msg\": \"[RED] no such file: " + json_text(keys) + "\", \"t\": 1.0}");
+        return 1;
+    }
+    if (how == "crash") {
+        ev("{\"ev\": \"stage\", \"k\": 1, \"n\": 3, \"name\": \"Extracting\", \"step\": \"\", \"t\": 1.0}");
+        std::fprintf(stderr, "Traceback (most recent call last):\n  File \"build_ipa_from_nsp.py\", line 1\nValueError: the stand-in's crash\n");
+        return 1;
+    }
+    ev("{\"ev\": \"stage\", \"k\": 1, \"n\": 3, \"name\": \"Extracting\", \"step\": \"base game\", \"t\": 1.0}");
+    ev("{\"ev\": \"progress\", \"k\": 1, \"name\": \"Extracting\", \"step\": \"base game\", \"done\": 1073741824, \"total\": 2147483648, \"unit\": \"B\", \"est\": false, \"note\": \"\", "
+       "\"frac\": 0.5, \"eta\": 65.0, \"elapsed\": 3.0, \"t\": 2.0}");
+    if (how == "slow") {
+#if defined(_WIN32)
+        SetConsoleCtrlHandler([](DWORD ev) -> BOOL { if (ev != CTRL_C_EVENT) return FALSE; std::fflush(stdout); ExitProcess(130); }, TRUE);   // Python's KeyboardInterrupt ends the packer with 130
+#endif
+        for (int i = 0; i < 600; i++) { std::printf("fake packer: still extracting %d\n", i); std::fflush(stdout); std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
+        return 3;
+    }
+    ev("{\"ev\": \"stage_end\", \"k\": 1, \"name\": \"Extracting\", \"ok\": true, \"summary\": \"2.0 GB\", \"elapsed\": 75.0, \"t\": 3.0}");
+    ev("{\"ev\": \"stage\", \"k\": 2, \"n\": 3, \"name\": \"Shaders\", \"step\": \"\", \"t\": 4.0}");
+    ev("{\"ev\": \"progress\", \"k\": 2, \"name\": \"Shaders\", \"step\": \"translating\", \"done\": 1203, \"total\": 19592, \"unit\": \"shaders\", \"est\": true, \"note\": \"\", "
+       "\"frac\": 0.061, \"eta\": null, \"elapsed\": 1.0, \"t\": 5.0}");
+    ev("{\"ev\": \"say\", \"msg\": \"[12:00:00] recompiler: the stand-in\", \"t\": 6.0}");
+    ev("{\"ev\": \"stage_end\", \"k\": 2, \"name\": \"Shaders\", \"ok\": true, \"summary\": \"\", \"elapsed\": 3725.0, \"t\": 7.0}");
+    ev("{\"ev\": \"stage\", \"k\": 3, \"n\": 3, \"name\": \"Packs\", \"step\": \"\", \"t\": 8.0}");
+    const fs::path dir = fs::u8path(nsp), build = dir / "0100FFFF00000000_build";
+    packs(build / "aot_v0", false);
+    profile(build, "0100FFFF00000000");
+    write(build / ("launch-" + std::string(nxl::kPlatform) + ".tsv"),
+          launch("Phi Game", "0100FFFF00000000", build, dir / "0100FFFF00000000-work/run", nxl::self_path(), false, {{"balanced", build / "aot_v0"}}));
+    ev("{\"ev\": \"stage_end\", \"k\": 3, \"name\": \"Packs\", \"ok\": true, \"summary\": \"1 pack\", \"elapsed\": 1.0, \"t\": 9.0}");
+    return 0;
 }
 
 }   // namespace fake

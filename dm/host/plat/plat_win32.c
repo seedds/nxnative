@@ -166,7 +166,21 @@ static BOOL WINAPI term_handler(DWORD ev) {
     if (g_term_fn) g_term_fn(why);
     return TRUE;
 }
-void plat_on_terminate(void (*fn)(const char *why)) { g_term_fn = fn; SetConsoleCtrlHandler(term_handler, TRUE); }
+// The stop request (plat.h PLAT_STOP_EVENT): a console event reaches only the processes of the sender's console, which a GUI program (nxlauncher) does not share with the
+// child it started with CREATE_NO_WINDOW, so the host also waits on an event named after its process ID; the launcher's Stop sets it (dm/launcher launcher_model.cpp request_stop)
+static DWORD WINAPI stop_main(LPVOID ev) {
+    if (WaitForSingleObject((HANDLE)ev, INFINITE) == WAIT_OBJECT_0 && g_term_fn) g_term_fn("stop request");
+    return 0;
+}
+void plat_on_terminate(void (*fn)(const char *why)) {
+    static int done; if (done++) return;
+    g_term_fn = fn; SetConsoleCtrlHandler(term_handler, TRUE);
+    wchar_t name[64]; swprintf(name, 64, PLAT_STOP_EVENT_W L"%lu", (unsigned long)GetCurrentProcessId());
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, name);   // manual reset: one request is enough, and a second Stop finds it set
+    if (!ev) return;
+    HANDLE t = CreateThread(NULL, 64 * 1024, stop_main, ev, 0, NULL);
+    if (t) CloseHandle(t); else CloseHandle(ev);
+}
 
 // ---------- Virtual memory ----------
 size_t plat_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return si.dwPageSize; }

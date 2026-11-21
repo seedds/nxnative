@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -439,6 +440,13 @@ static bool is_build_dir(const fs::directory_entry &e) {
     return e.is_directory(ec) && n.size() > 6 && n.compare(n.size() - 6, 6, "_build") == 0;
 }
 
+static void sort_games(std::vector<Game> *games) {   // by title, then folder
+    std::sort(games->begin(), games->end(), [](const Game &a, const Game &b) {
+        std::string x = lower(a.launch.title), y = lower(b.launch.title);
+        return x != y ? x < y : a.dir < b.dir;
+    });
+}
+
 std::vector<Game> find_games(const std::string &dir, const std::string &platform, const std::string &bundle, const Env &env) {
     std::vector<Game> out; std::error_code ec;
     for (const auto &e : fs::directory_iterator(P(dir), ec)) {
@@ -447,10 +455,7 @@ std::vector<Game> find_games(const std::string &dir, const std::string &platform
         std::error_code ec2;
         for (const auto &f : fs::directory_iterator(e.path(), ec2)) if (is_build_dir(f)) add_game(f.path(), platform, bundle, env, &out);
     }
-    std::sort(out.begin(), out.end(), [](const Game &a, const Game &b) {
-        std::string x = lower(a.launch.title), y = lower(b.launch.title);
-        return x != y ? x < y : a.dir < b.dir;
-    });
+    sort_games(&out);
     return out;
 }
 
@@ -475,14 +480,28 @@ void Config::set(const std::string &key, const std::string &value) {
     for (auto &e : kv) if (e.key == key) { e.value = value; return; }
     kv.push_back({key, value});
 }
+static bool list_key(const std::string &k) { return k == "nsp_folder"; }   // a key with a line per value
+std::vector<std::string> Config::all(const std::string &key) const {
+    std::vector<std::string> out;
+    for (const auto &e : kv) if (e.key == key) out.push_back(e.value);
+    return out;
+}
+void Config::add(const std::string &key, const std::string &value) {
+    for (const auto &e : kv) if (e.key == key && e.value == value) return;
+    kv.push_back({key, value});
+}
+void Config::remove(const std::string &key, const std::string &value) {
+    kv.erase(std::remove_if(kv.begin(), kv.end(), [&](const KV &e) { return e.key == key && e.value == value; }), kv.end());
+}
 bool Config::load() {
     kv.clear(); std::string text, k, v;
     if (!read_file(path, &text)) return false;
-    for (const auto &line : lines_of(text)) if (parse_kv_line(line, &k, &v)) set(k, v);
+    for (const auto &line : lines_of(text)) if (parse_kv_line(line, &k, &v)) { if (list_key(k)) add(k, v); else set(k, v); }
     return true;
 }
 bool Config::save() const {
-    std::string text = "# nxlauncher's own settings (dm/launcher): the games folder, the window's switches, each game's pack mode and last start (played.<title ID>, seconds since 1970)\n";
+    std::string text = "# nxlauncher's own settings (dm/launcher): the games folder, the window's switches, each game's pack mode and last start (played.<title ID>, seconds since 1970),\n"
+                       "# the NSP folders of games added outside the games folder (nsp_folder, a line each), the prod.keys file Add game passes to the packer (its path only)\n";
     for (const auto &e : kv) text += e.key + "=" + e.value + "\n";
     return write_file(path, text, nullptr);
 }
@@ -750,12 +769,22 @@ bool spawn(const Command &cmd, Child *child, std::string *err) {
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE); si.hStdOutput = log; si.hStdError = log;
     PROCESS_INFORMATION pi = {};
     std::wstring app = W(cmd.argv[0]), cwd = W(cmd.cwd);
-    BOOL ok = CreateProcessW(app.c_str(), &line[0], nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, &block[0], cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    // A tree starts suspended and runs once it is in its job, so no process it starts escapes the job (force_stop ends the job). Its own hidden console, as every child's
+    // (CREATE_NO_WINDOW): interrupt sends CTRL_C_EVENT there
+    const DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (cmd.tree ? CREATE_SUSPENDED : 0);
+    BOOL ok = CreateProcessW(app.c_str(), &line[0], nullptr, nullptr, TRUE, flags, &block[0], cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
     DWORD e = GetLastError();
     CloseHandle(log);
     if (!ok) { char msg[64]; std::snprintf(msg, sizeof msg, "Windows error %lu", (unsigned long)e); *err = "cannot start " + cmd.argv[0] + ": " + msg; return false; }
+    child->job = nullptr;
+    if (cmd.tree) {
+        HANDLE job = CreateJobObjectW(nullptr, nullptr);
+        if (job && AssignProcessToJobObject(job, pi.hProcess)) child->job = job;
+        else if (job) CloseHandle(job);   // no job (a job the launcher's own does not allow nested in, before Windows 8): force_stop ends the process alone
+        ResumeThread(pi.hThread);
+    }
     CloseHandle(pi.hThread);
-    child->pid = pi.dwProcessId; child->handle = pi.hProcess; child->running = true; child->status = -1;
+    child->pid = pi.dwProcessId; child->handle = pi.hProcess; child->tree = cmd.tree; child->running = true; child->status = -1;
     return true;
 }
 
@@ -764,6 +793,7 @@ bool poll(Child *child) {
     if (WaitForSingleObject((HANDLE)child->handle, 0) != WAIT_OBJECT_0) return false;
     DWORD code = 0; GetExitCodeProcess((HANDLE)child->handle, &code);
     CloseHandle((HANDLE)child->handle); child->handle = nullptr;
+    if (child->job) { CloseHandle((HANDLE)child->job); child->job = nullptr; }   // the job ends with its last process
     child->status = (int)code; child->running = false;
     return true;
 }
@@ -772,6 +802,56 @@ int wait(Child *child) {
     if (child->running) WaitForSingleObject((HANDLE)child->handle, INFINITE);
     poll(child);
     return child->status;
+}
+
+bool wait_for(Child *child, int ms) {
+    if (child->running) WaitForSingleObject((HANDLE)child->handle, ms < 0 ? 0 : (DWORD)ms);
+    return poll(child);
+}
+
+bool request_stop(Child *child, std::string *err) {
+    if (!child->running) return true;
+    HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, W(stop_event_name(child->pid)).c_str());
+    if (!ev) {
+        if (err) *err = "the game takes no stop request yet (no event " + stop_event_name(child->pid) + ": a host older than Stop, or one still starting)";
+        return false;
+    }
+    BOOL ok = SetEvent(ev);
+    CloseHandle(ev);
+    if (!ok && err) *err = "cannot signal " + stop_event_name(child->pid);
+    return ok != 0;
+}
+
+bool force_stop(Child *child, std::string *err) {
+    if (!child->running) return true;
+    BOOL ok = child->job ? TerminateJobObject((HANDLE)child->job, 1) : TerminateProcess((HANDLE)child->handle, 1);
+    if (!ok && err) { char msg[64]; std::snprintf(msg, sizeof msg, "Windows error %lu", (unsigned long)GetLastError()); *err = std::string("cannot end the process: ") + msg; }
+    return ok != 0;
+}
+
+// The launcher's own answer to the Ctrl+C it sends (interrupt): taken, so the default handler does not end the launcher. A handler, not SetConsoleCtrlHandler(NULL, TRUE),
+// whose "ignore Ctrl+C" every process started later would inherit (the next packer could not be cancelled)
+static BOOL WINAPI swallow_ctrl_c(DWORD ev) { return ev == CTRL_C_EVENT; }
+
+bool interrupt(Child *child, std::string *err) {
+    if (!child->running) return true;
+    // A process attaches to one console at a time: the launcher leaves its own (a GUI program has none; --repack in a terminal has its caller's) for the child's, takes
+    // the event itself, sends it to every process of that console (the packer and the tools it started), and goes back
+    static bool handler = SetConsoleCtrlHandler(swallow_ctrl_c, TRUE) != 0; (void)handler;
+    const bool had = GetConsoleWindow() != nullptr;
+    FreeConsole();
+    if (!AttachConsole((DWORD)child->pid)) {
+        char msg[64]; std::snprintf(msg, sizeof msg, "Windows error %lu", (unsigned long)GetLastError());
+        if (err) *err = std::string("cannot reach the packer's console: ") + msg;
+        if (had) AttachConsole(ATTACH_PARENT_PROCESS);
+        return false;
+    }
+    BOOL ok = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+    Sleep(50);   // the event reaches each process of the console on a thread of its own, the launcher's too: its handler answers it while still attached
+    FreeConsole();
+    if (had) AttachConsole(ATTACH_PARENT_PROCESS);
+    if (!ok && err) *err = "cannot send Ctrl+C to the packer's console";
+    return ok != 0;
 }
 #else
 bool spawn(const Command &cmd, Child *child, std::string *err) {
@@ -799,12 +879,14 @@ bool spawn(const Command &cmd, Child *child, std::string *err) {
     if (pid < 0) { close(log); close(pipefd[0]); close(pipefd[1]); *err = std::string("fork: ") + std::strerror(errno); return false; }
     if (pid == 0) {
         int e = 0;
+        if (cmd.tree) setpgid(0, 0);   // a process group of its own: interrupt and force_stop reach the tools it starts (the parent sets it too, whichever runs first)
         if (!cmd.cwd.empty() && chdir(cmd.cwd.c_str())) e = errno;
         if (!e && (dup2(log, 1) < 0 || dup2(log, 2) < 0)) e = errno;
         if (!e) { execve(argv[0], argv.data(), envp.data()); e = errno; }
         ssize_t w = write(pipefd[1], &e, sizeof e); (void)w;
         _exit(127);
     }
+    if (cmd.tree) setpgid(pid, pid);   // EACCES once the child has run execve: it set the group itself then
     close(log); close(pipefd[1]);
     int e = 0; ssize_t n;
     while ((n = read(pipefd[0], &e, sizeof e)) < 0 && errno == EINTR) {}
@@ -814,7 +896,7 @@ bool spawn(const Command &cmd, Child *child, std::string *err) {
         *err = "cannot start " + cmd.argv[0] + " in " + cmd.cwd + ": " + std::strerror(e);
         return false;
     }
-    child->pid = pid; child->running = true; child->status = -1;
+    child->pid = pid; child->tree = cmd.tree; child->running = true; child->status = -1;
     return true;
 }
 
@@ -840,7 +922,46 @@ int wait(Child *child) {
     else reap(child, st);
     return child->status;
 }
+
+bool wait_for(Child *child, int ms) {
+    for (int waited = 0; !poll(child); waited += 10) {
+        if (waited >= ms) return false;
+        usleep(10000);
+    }
+    return true;
+}
+
+static bool send_signal(Child *child, int sig, const char *what, std::string *err) {
+    if (!child->running) return true;
+    pid_t to = child->tree ? -(pid_t)child->pid : (pid_t)child->pid;
+    if (kill(to, sig) == 0) return true;
+    if (errno == ESRCH) return true;   // it has just ended: poll reaps it
+    if (err) *err = std::string("cannot send ") + what + ": " + std::strerror(errno);
+    return false;
+}
+bool request_stop(Child *child, std::string *err) { return send_signal(child, SIGTERM, "SIGTERM", err); }
+bool force_stop(Child *child, std::string *err) { return send_signal(child, SIGKILL, "SIGKILL", err); }
+bool interrupt(Child *child, std::string *err) { return send_signal(child, SIGINT, "SIGINT", err); }
 #endif
+
+std::string stop_event_name(int64_t pid) { return "Local\\nxnative-stop-" + std::to_string(pid); }
+
+std::string ended_how(int status, bool stopped, bool forced, double seconds, const std::vector<std::string> &tail) {
+    bool received = false, done = false;
+    for (const auto &l : tail) {
+        if (l.find("graceful exit done") != std::string::npos) done = true;
+        else if (l.find("received ") != std::string::npos && l.find(": graceful exit") != std::string::npos) received = true;
+    }
+    char head[96]; std::snprintf(head, sizeof head, " (status %d, %.1f s after Stop)", status, seconds);
+    if (forced) return std::string("Force stop ended it") + head + ": this session's profile was not written; the saves the game committed are kept";
+    if (!stopped) return "";
+    if (done) return std::string("It stopped gracefully") + head + ": the host wrote this session's files and ended; the saves the game committed are kept";
+    if (received) return std::string("Stop reached the host, which ended before its graceful exit was done") + head + ": its log's last lines say why";
+#if !defined(_WIN32)
+    if (status == 128 + SIGTERM) return std::string("Stop ended it before the host had its exit handler") + head + ": SIGTERM's default action, nothing of the session written";
+#endif
+    return std::string("It ended after Stop") + head + ", without the host's graceful-exit lines in its log";
+}
 
 std::vector<std::string> tail_lines(const std::string &path, size_t n) {
     std::ifstream f(P(path), std::ios::binary);
@@ -1209,5 +1330,387 @@ std::string vulkan_loader_problem(const char *lib) {
 #endif
     return "no Vulkan loader (" + std::string(kVulkanLoaderHint) + "): a game would start and stop at once; install your GPU's Vulkan driver and the loader";
 }
+
+// ---- Add game ----
+static bool is_dir(const std::string &path) { std::error_code ec; return !path.empty() && fs::is_directory(P(path), ec); }
+static bool same_path(const std::string &a, const std::string &b) { std::error_code ec; return fs::equivalent(P(a), P(b), ec) && !ec; }
+
+bool is_game_file(const std::string &path) {
+    const std::string ext = lower(S(P(path).extension()));
+    for (const char *e : kGameFileExts) if (ext == e) return true;
+    return false;
+}
+
+std::string nsp_folder_of(const std::string &file) { return S(P(file).parent_path()); }
+
+std::string which(const std::string &program, const Env &env) {
+    if (program.empty()) return "";
+    if (P(program).has_parent_path()) return is_file(program) ? program : "";
+#if defined(_WIN32)
+    const char sep = ';';
+    const std::vector<std::string> names = P(program).has_extension() ? std::vector<std::string>{program} : std::vector<std::string>{program + ".exe", program};
+#else
+    const char sep = ':';
+    const std::vector<std::string> names = {program};
+#endif
+    std::string path;
+    if (!env.get("PATH", &path)) return "";
+    size_t a = 0;
+    while (a <= path.size()) {
+        size_t b = path.find(sep, a);
+        if (b == std::string::npos) b = path.size();
+        const std::string dir = path.substr(a, b - a);
+        for (const auto &n : names) if (!dir.empty() && is_file(S(P(dir) / P(n)))) return S(P(dir) / P(n));
+        a = b + 1;
+    }
+    return "";
+}
+
+PackTools find_pack_tools(const std::string &bundle, const Env &env) {
+    PackTools t;
+    std::string v, py;
+    const bool own_python = env.get("PYTHON", &py);   // pack.sh / pack.cmd take PYTHON over the bundle's own
+    if (env.get("NXPACKER", &v)) { t.packer = v; t.from = "NXPACKER"; }
+    else if (!bundle.empty() && is_file(S(P(bundle) / "VERSION")) && is_file(S(P(bundle) / "scripts" / "build_ipa_from_nsp.py"))) {
+        t.packer = S(P(bundle) / "scripts" / "build_ipa_from_nsp.py"); t.from = "the bundle";
+        const std::string rel = bundle_python(bundle);
+        if (!own_python && !rel.empty()) {   // as pack.sh runs it: the bundle's Python with its own modules only
+            t.python = S(P(bundle) / P(rel).make_preferred());
+            t.set = {{"PYTHONHOME", ""}, {"PYTHONPATH", ""}, {"PYTHONNOUSERSITE", "1"}};
+            if (!is_file(t.python)) { t.problem = "the bundle's Python " + t.python + " is missing: unpack the bundle again"; return t; }
+        }
+    } else {   // a development tree: the checkout above the launcher's build folder
+        fs::path d = P(bundle.empty() ? std::string(".") : bundle);
+        std::error_code ec;
+        for (int i = 0; i < 6 && !d.empty(); i++) {
+            if (fs::is_regular_file(d / "scripts" / "build_ipa_from_nsp.py", ec) && fs::is_directory(d / "dm" / "launcher", ec)) {
+                t.packer = S(d / "scripts" / "build_ipa_from_nsp.py"); t.from = "the development tree"; break;
+            }
+            if (d == d.parent_path()) break;
+            d = d.parent_path();
+        }
+    }
+    if (t.packer.empty()) { t.problem = "no packer: " + bundle + " is neither a bundle (VERSION, scripts/build_ipa_from_nsp.py) nor in a checkout; set NXPACKER to build_ipa_from_nsp.py"; return t; }
+    if (!is_file(t.packer)) { t.problem = "the packer " + t.packer + " is missing"; return t; }
+    if (t.python.empty()) {
+        if (own_python) t.python = is_file(py) ? py : which(py, env);
+#if defined(_WIN32)
+        else if (!(t.python = which("python", env)).empty()) {}
+        else if (!(t.python = which("py", env)).empty()) t.python_args = {"-3"};
+#else
+        else t.python = which("python3", env);
+#endif
+        if (t.python.empty()) { t.problem = own_python ? "PYTHON names " + py + ", which is not there" : "no Python 3.12 or later on PATH: the packer needs one (or set PYTHON)"; return t; }
+    }
+    t.set.push_back({"PYTHONUNBUFFERED", "1"});   // its lines reach the log as they are said
+    t.set.push_back({"PYTHONUTF8", "1"});         // its output is a file: UTF-8 on Windows too (repack_command)
+    return t;
+}
+
+KeysFound find_keys(const Config &c, const std::vector<Game> &games, const std::string &bundle, const Env &env) {
+    KeysFound k;
+    auto look = [&](const std::string &p) {   // by its path only: the file is never opened here
+        if (p.empty()) return false;
+        if (std::find(k.looked.begin(), k.looked.end(), p) == k.looked.end()) k.looked.push_back(p);
+        if (is_file(p)) { k.path = p; return true; }
+        return false;
+    };
+    if (look(c.get("keys"))) return k;
+    for (const auto &g : games) if (look(g.launch.keys)) return k;
+    if (!bundle.empty() && look(S(P(bundle) / "keys" / "prod.keys"))) return k;
+    std::string home;
+#if defined(_WIN32)
+    if (env.get("USERPROFILE", &home) && look(S(P(home) / ".switch" / "prod.keys"))) return k;
+#else
+    if (env.get("HOME", &home) && look(S(P(home) / ".switch" / "prod.keys"))) return k;
+#endif
+    return k;
+}
+
+Command add_command(const std::string &file, const std::string &keys, const PackTools &tools) {
+    Command c;
+    if (!tools.problem.empty()) { c.error = tools.problem; return c; }
+    if (!is_file(file)) { c.error = "the game file " + file + " is not there"; return c; }
+    if (keys.empty()) { c.error = "no prod.keys: the packer needs it (Choose prod.keys...)"; return c; }
+    const std::string dir = nsp_folder_of(file);
+    c.argv.push_back(tools.python);
+    c.argv.insert(c.argv.end(), tools.python_args.begin(), tools.python_args.end());
+    for (const std::string &a : {tools.packer, dir, std::string("--platform"), std::string(kPlatform), std::string("--progress"), std::string("json"), std::string("-k"), keys}) c.argv.push_back(a);
+    c.cwd = dir; c.log = S(P(dir) / "nxlauncher-pack.txt"); c.set = tools.set; c.tree = true;
+    return c;
+}
+
+static double num(const cJSON *o, const char *k, double def = -1) { const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, k); return cJSON_IsNumber(v) ? v->valuedouble : def; }
+
+static std::string grouped(double v) {   // 19592 -> "19,592"
+    std::string s = std::to_string((long long)std::llround(v)), out;
+    for (size_t i = 0; i < s.size(); i++) { if (i && (s.size() - i) % 3 == 0 && s[i - 1] != '-') out += ','; out += s[i]; }
+    return out;
+}
+
+static std::string clock_text(double s) {   // m:ss, or h:mm:ss (the packer's hms)
+    long t = (long)s, h = t / 3600, m = t / 60 % 60;
+    char buf[32];
+    if (h) std::snprintf(buf, sizeof buf, "%ld:%02ld:%02ld", h, m, t % 60); else std::snprintf(buf, sizeof buf, "%ld:%02ld", m, t % 60);
+    return buf;
+}
+
+PackView read_pack_log(const std::string &text) {
+    PackView v;
+    for (auto line : lines_of(text)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        cJSON *o = !line.empty() && line[0] == '{' ? cJSON_Parse(line.c_str()) : nullptr;
+        const std::string ev = o ? jstr(o, "ev") : "";
+        if (ev.empty()) {   // not an event: a line of its own (a traceback, a tool's output)
+            if (o) cJSON_Delete(o);
+            if (line.rfind("[RED] ", 0) == 0) v.red = line.substr(6);
+            v.lines.push_back(line);
+            continue;
+        }
+        v.events++;
+        if (ev == "stage") {
+            v.k = (int)num(o, "k", 0); v.n = (int)num(o, "n", 0); v.stage = jstr(o, "name"); v.step = jstr(o, "step");
+            v.count.clear(); v.note.clear(); v.frac = v.eta = -1; v.in_stage = true;
+            v.lines.push_back("[" + std::to_string(v.k) + "/" + std::to_string(v.n) + "] " + v.stage + (v.step.empty() ? "" : " \xC2\xB7 " + v.step));
+        } else if (ev == "step") {
+            v.step = jstr(o, "step"); v.count.clear(); v.note.clear(); v.frac = v.eta = -1;
+        } else if (ev == "progress") {
+            v.step = jstr(o, "step"); v.note = jstr(o, "note"); v.frac = num(o, "frac"); v.eta = num(o, "eta");
+            const double done = num(o, "done"), total = num(o, "total");
+            const std::string unit = jstr(o, "unit");
+            const cJSON *est = cJSON_GetObjectItemCaseSensitive(o, "est");
+            const std::string about = cJSON_IsTrue(est) ? "~" : "";
+            v.count.clear();
+            if (done >= 0 && unit == "B") {
+                const double d = (total > 0 ? total : done) >= 1073741824.0 ? 1073741824.0 : (total > 0 ? total : done) >= 1048576.0 ? 1048576.0 : 1024.0;
+                const char *u = d == 1073741824.0 ? "GB" : d == 1048576.0 ? "MB" : "KB";
+                char buf[64];
+                if (total > 0) std::snprintf(buf, sizeof buf, "%.1f/%s%.1f %s", done / d, about.c_str(), total / d, u); else std::snprintf(buf, sizeof buf, "%.1f %s", done / d, u);
+                v.count = buf;
+            } else if (done >= 0) {
+                v.count = grouped(done) + (total > 0 ? "/" + about + grouped(total) : "") + (unit.empty() ? "" : " " + unit);
+            }
+        } else if (ev == "stage_end") {
+            const cJSON *ok = cJSON_GetObjectItemCaseSensitive(o, "ok");
+            const std::string summary = jstr(o, "summary");
+            v.lines.push_back("[" + std::to_string((int)num(o, "k", v.k)) + "/" + std::to_string(v.n) + "] " + jstr(o, "name") + ": " + (cJSON_IsFalse(ok) ? "failed" : "done") +
+                              " in " + clock_text(num(o, "elapsed", 0)) + (summary.empty() ? "" : " (" + summary + ")"));
+            v.in_stage = false; v.frac = v.eta = -1; v.count.clear(); v.note.clear(); v.step.clear();
+        } else if (ev == "say") {
+            const std::string msg = jstr(o, "msg");
+            if (msg.rfind("[RED] ", 0) == 0) v.red = msg.substr(6);
+            for (const auto &l : lines_of(msg)) v.lines.push_back(l);
+        }
+        cJSON_Delete(o);
+    }
+    return v;
+}
+
+std::string pack_failure(const PackView &v, int status, const std::string &nsp_folder, const std::string &keys) {
+    if (status == 0) return "";
+    if (status == 130 || status == 128 + 2)   // KeyboardInterrupt, or SIGINT's default action
+        return "Packing was cancelled. What the packer had finished stays in " + nsp_folder + ", and adding the game again goes on from there.";
+    const std::string red = v.red;
+    if (!keys.empty() && red == "no such file: " + keys)
+        return "The packer found no prod.keys at " + keys + ". Choose the file with Choose prod.keys...: the packer reads keys only from the file it is given.";
+    if (red.find("more than one game in the folder") != std::string::npos) {
+        std::string ids = red.substr(red.rfind(':') + 1);
+        while (!ids.empty() && ids[0] == ' ') ids.erase(0, 1);
+        return "The folder " + nsp_folder + " holds the files of more than one game (" + ids + "), and the packer packs one game per folder. Move each game's files into a "
+               "folder of its own, then add the game from there.";
+    }
+    if (red.rfind("no NSP with a readable title ID", 0) == 0)
+        return "No file in " + nsp_folder + " says which game it is (the packer: " + red + ").";
+    if (red.rfind("less than ", 0) == 0 && red.find(" GB free on the volume of ") != std::string::npos) {   // the packer's check before it extracts
+        const size_t of = red.find(" GB free on the volume of ");
+        return "Not enough free disk space: the packer needs at least " + red.substr(10, of - 10) + " GB free on the drive of " + red.substr(of + 26) +
+               " before it extracts the game. Free some space there, or move the game's files to a folder on another drive and add the game from there.";
+    }
+    if (red.rfind("no base game NSP found", 0) == 0)
+        return "The folder " + nsp_folder + " holds an update or DLC but not the base game: put the base game's file beside them.";
+    char buf[32]; std::snprintf(buf, sizeof buf, "%d", status);
+    if (red.empty()) return std::string("The packer stopped with status ") + buf + " and no message: its whole output is in " + S(P(nsp_folder) / "nxlauncher-pack.txt") + ".";
+    return std::string("The packer stopped (status ") + buf + "): " + red;
+}
+
+static int64_t unix_time(const fs::file_time_type &t) {   // a file's time in seconds since 1970 (C++17 has no clock_cast)
+    const auto sys = std::chrono::system_clock::now() + std::chrono::duration_cast<std::chrono::system_clock::duration>(t - fs::file_time_type::clock::now());
+    return (int64_t)std::chrono::system_clock::to_time_t(sys);
+}
+
+std::string packed_build(const std::string &nsp_folder, int64_t since, const std::string &platform) {
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(P(nsp_folder), ec)) {
+        if (!is_build_dir(e)) continue;
+        const fs::path launch = e.path() / P("launch-" + platform + ".tsv");
+        std::error_code ec2;
+        if (fs::is_regular_file(launch, ec2) && unix_time(fs::last_write_time(launch, ec2)) >= since - 1) return S(e.path());
+    }
+    return "";
+}
+
+std::vector<std::string> nsp_folders(const Config &c) { return c.all("nsp_folder"); }
+
+bool remember_folder(Config &c, const std::string &games_dir, const std::string &nsp_folder) {
+    if (same_path(nsp_folder, games_dir) || same_path(S(P(nsp_folder).parent_path()), games_dir)) return false;   // find_games of the games folder reaches it
+    for (const auto &f : nsp_folders(c)) if (f == nsp_folder || same_path(f, nsp_folder)) return false;
+    c.add("nsp_folder", nsp_folder);
+    return true;
+}
+
+std::vector<Game> find_all_games(const std::string &dir, const Config &c, const std::string &platform, const std::string &bundle, const Env &env) {
+    std::vector<Game> out = find_games(dir, platform, bundle, env);
+    for (const auto &f : nsp_folders(c)) {
+        if (!is_dir(f)) continue;   // a folder moved or on a drive not there now: kept in launcher.txt, listed again once it is back
+        for (auto &g : find_games(f, platform, bundle, env)) {
+            bool have = false;
+            for (const auto &h : out) if (same_path(h.dir, g.dir)) { have = true; break; }
+            if (!have) out.push_back(std::move(g));
+        }
+    }
+    sort_games(&out);
+    return out;
+}
+
+// ---- The saves ----
+Saves save_place(const Game &g, const Env &env) {
+    Saves s; std::string v;
+    if (env.get("DM_SAVE", &v)) s.folder = v;
+    if (s.folder.empty() && !(env.get("DM_SAVED_CHOICES", &v) && v == "0"))
+        for (const auto &e : read_env_file(g.launch.choices)) if (name_key(e.key) == name_key("DM_SAVE") && !e.value.empty()) { s.folder = e.value; break; }
+    if (s.folder.empty()) for (const auto &e : g.launch.env) if (name_key(e.key) == name_key("DM_SAVE") && !e.value.empty()) { s.folder = e.value; break; }
+    if (s.folder.empty()) { s.problem = "the launch file names no save folder (no DM_SAVE row): pack the game again"; return s; }
+    while (s.folder.size() > 1 && (s.folder.back() == '/' || s.folder.back() == '\\')) s.folder.pop_back();   // as the host takes it (h_fs_MountSave)
+    s.backups = s.folder + "-backups";
+    for (const std::string &d : {s.folder, s.folder + "_device"}) if (is_dir(d)) s.present.push_back(d);
+    if (s.present.empty()) s.problem = "no save yet: the game makes " + s.folder + " when it first saves";
+    return s;
+}
+
+static void tree_count(const fs::path &dir, uint64_t *files, uint64_t *bytes) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        std::error_code ec2;
+        if (it->is_regular_file(ec2)) { (*files)++; *bytes += (uint64_t)it->file_size(ec2); }
+    }
+}
+
+static Backup backup_at(const fs::path &dir) {
+    Backup b; b.name = S(dir.filename()); b.path = S(dir);
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(dir, ec)) {
+        std::error_code ec2;
+        if (!e.is_directory(ec2)) continue;
+        b.folders.push_back(S(e.path().filename()));
+        tree_count(e.path(), &b.files, &b.bytes);
+    }
+    std::sort(b.folders.begin(), b.folders.end());
+    return b;
+}
+
+std::vector<Backup> list_backups(const Saves &s) {
+    std::vector<Backup> out;
+    std::error_code ec;
+    if (s.backups.empty()) return out;
+    for (const auto &e : fs::directory_iterator(P(s.backups), ec)) {
+        std::error_code ec2;
+        const std::string n = S(e.path().filename());
+        if (!e.is_directory(ec2) || n.size() < 8 || n.compare(n.size() - 8, 8, ".partial") == 0) continue;   // a backup being made, or one a crash cut short
+        out.push_back(backup_at(e.path()));
+    }
+    std::sort(out.begin(), out.end(), [](const Backup &a, const Backup &b) { return a.name > b.name; });   // the dated names sort by time
+    return out;
+}
+
+static std::string stamp(int64_t t) {   // a folder's name on every system: no ':'
+    std::time_t tt = (std::time_t)t; std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+    char buf[32]; std::strftime(buf, sizeof buf, "%Y-%m-%d_%H-%M-%S", &tm);
+    return buf;
+}
+
+bool backup_saves(const Saves &s, int64_t now, Backup *out, std::string *err) {
+    if (s.present.empty()) { *err = s.problem.empty() ? "no save to back up" : s.problem; return false; }
+    std::error_code ec;
+    std::string name = stamp(now);
+    for (int i = 2; fs::exists(P(s.backups) / P(name), ec) || fs::exists(P(s.backups) / P(name + ".partial"), ec); i++) name = stamp(now) + "-" + std::to_string(i);
+    const fs::path dst = P(s.backups) / P(name), tmp = P(s.backups) / P(name + ".partial");   // made under another name, renamed when whole: a listed backup is complete
+    fs::create_directories(tmp, ec);
+    if (ec) { *err = "cannot make " + S(tmp) + ": " + ec.message(); return false; }
+    for (const auto &d : s.present) {
+        fs::copy(P(d), tmp / P(d).filename(), fs::copy_options::recursive, ec);
+        if (ec) { *err = "cannot copy " + d + ": " + ec.message(); fs::remove_all(tmp, ec); return false; }
+    }
+    fs::rename(tmp, dst, ec);
+    if (ec) { *err = "cannot name the backup " + S(dst) + ": " + ec.message(); fs::remove_all(tmp, ec); return false; }
+    if (out) *out = backup_at(dst);
+    return true;
+}
+
+static std::string size_text(uint64_t bytes) {
+    char buf[32];
+    if (bytes >= 1048576) std::snprintf(buf, sizeof buf, "%.1f MB", bytes / 1048576.0);
+    else if (bytes >= 1024) std::snprintf(buf, sizeof buf, "%.1f KB", bytes / 1024.0);
+    else std::snprintf(buf, sizeof buf, "%llu bytes", (unsigned long long)bytes);
+    return buf;
+}
+
+std::string restore_prompt(const Saves &s, const Backup &b) {
+    std::string replaced, removed;
+    for (const std::string &d : {s.folder, s.folder + "_device"}) {
+        const bool in_backup = std::find(b.folders.begin(), b.folders.end(), S(P(d).filename())) != b.folders.end();
+        if (!is_dir(d)) continue;
+        (in_backup ? replaced : removed) += (in_backup ? replaced : removed).empty() ? d : " and " + d;
+    }
+    std::string t = "Put back the saves of " + b.name + " (" + std::to_string(b.files) + " file" + (b.files == 1 ? "" : "s") + ", " + size_text(b.bytes) + ")?";
+    if (!replaced.empty()) t += " This replaces the current save folder " + replaced + ".";
+    if (!removed.empty()) t += " " + removed + ", which the backup does not have, is removed.";
+    if (replaced.empty() && removed.empty()) t += " There is no current save to replace.";
+    else t += " The current saves are backed up first, so this can be undone.";
+    return t;
+}
+
+bool restore_saves(const Saves &s, const Backup &b, bool running, int64_t now, Backup *safety, std::string *err) {
+    if (running) { *err = "the game is running: stop it first (it may be writing its save)"; return false; }
+    if (s.folder.empty()) { *err = s.problem; return false; }
+    if (!is_dir(b.path)) { *err = "the backup " + b.path + " is gone"; return false; }
+    if (!s.present.empty() && !backup_saves(s, now, safety, err)) { *err = "the current saves could not be backed up first, so nothing was replaced: " + *err; return false; }
+    std::error_code ec;
+    for (const std::string &d : {s.folder, s.folder + "_device"}) {
+        const fs::path src = P(b.path) / P(d).filename(), tmp = P(d + ".restoring"), old = P(d + ".replaced");
+        const bool have = fs::is_directory(src, ec);
+        fs::remove_all(tmp, ec); fs::remove_all(old, ec);
+        if (have) {   // the backup's copy beside the folder first, then the swap: an error leaves the current folder as it was
+            fs::copy(src, tmp, fs::copy_options::recursive, ec);
+            if (ec) { *err = "cannot copy " + S(src) + ": " + ec.message() + (safety && !safety->path.empty() ? " (the current saves are in " + safety->path + ")" : ""); fs::remove_all(tmp, ec); return false; }
+        }
+        if (fs::exists(P(d), ec)) {
+            fs::rename(P(d), old, ec);
+            if (ec) { *err = "cannot move " + d + " aside: " + ec.message(); fs::remove_all(tmp, ec); return false; }
+        }
+        if (have) {
+            fs::rename(tmp, P(d), ec);
+            if (ec) { *err = "cannot put " + d + " in place: " + ec.message() + (safety && !safety->path.empty() ? " (the saves it replaced are in " + safety->path + ")" : ""); return false; }
+        }
+        fs::remove_all(old, ec);
+    }
+    return true;
+}
+
+// ---- The dialogs' stand-in ----
+static std::string next_answer(std::vector<std::string> &a) {
+    if (a.empty()) return "";
+    std::string s = a.front(); a.erase(a.begin());
+    return s;
+}
+void AnswerDialogs::open_file(const std::string &title, const std::vector<Filter> &, const std::string &, Done done) { asked.push_back("file " + title); done(next_answer(answers)); }
+void AnswerDialogs::open_folder(const std::string &title, const std::string &, Done done) { asked.push_back("folder " + title); done(next_answer(answers)); }
+bool AnswerDialogs::show_folder(const std::string &folder, std::string *) { shown.push_back(folder); return true; }
+
+std::vector<Dialogs::Filter> game_file_filters() { return {{"Switch games (NSP, XCI, NSZ, XCZ)", "nsp;xci;nsz;xcz"}, {"All files", "*"}}; }
 
 }   // namespace nxl

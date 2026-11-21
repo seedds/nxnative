@@ -44,7 +44,7 @@ Play the supported Switch games on Windows 10 or later and on Linux (checked thr
 | Rejected GPU option | yuzu-style asynchronous shaders | They draw wrong or missing objects for some frames: a quality loss |
 | Pack-time balance | ThinLTO, per-function cache keyed by hash, PGO profiles recorded once per game build and shipped, "balanced" (default) and "max" pack modes | Owner rejected long waits |
 | CPU baseline | x86-64-v3 (AVX2, FMA3: Haswell / Zen 1 and later) with a possible v2 fallback | Open, see below |
-| Launcher (replaces `Launcher.swift`) | **Decided and built**: Dear ImGui v1.91.9b over SDL3's renderer, `dm/launcher/` (`nxlauncher`; the model with no UI tested by `t_launcher_model`, one frame under SDL's dummy driver by `t_launcher_window`), the packer writing `launch-<platform>.tsv` and `launcher-<platform>.json` that `run.sh` / `run.cmd` and the launcher share | Phase 6 |
+| Launcher (replaces `Launcher.swift`) | **Decided and built**: Dear ImGui v1.91.9b over SDL3's renderer, `dm/launcher/` (`nxlauncher`; the model with no UI tested by `t_launcher_model`, the window under SDL's dummy driver by `t_launcher_window`, Stop by `t_launcher_stop`; since 2026-11-21 also **Add game...** through the system's file dialog and the bundle's packer, **Browse...**, **Stop** (Windows: the host's event `Local\nxnative-stop-<pid>`) and the saves' backups and restore), the packer writing `launch-<platform>.tsv` and `launcher-<platform>.json` that `run.sh` / `run.cmd` and the launcher share | Phase 6 |
 
 ## Phases
 

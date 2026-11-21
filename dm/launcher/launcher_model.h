@@ -12,10 +12,15 @@
 // choices into that env.txt before it starts the game: a setting's line only while its value differs from the pack's default (the env row's value, else the list's default), the other
 // lines kept. Its output goes to the log row's file (log.txt beside the save; the previous run's kept as log.prev.txt, as the Mac keeps <title ID>.prev.log).
 //
-// The launcher's own settings (the games folder, "Show this window at launch", the Advanced settings disclosure, the pack mode and last start of each game, the last game played) are
-// KEY=VALUE lines in launcher.txt of the OS's config folder: $XDG_CONFIG_HOME/nxnative/ (else ~/.config/nxnative/) on Linux, %APPDATA%\nxnative\ on Windows.
+// The launcher's own settings (the games folder, "Show this window at launch", the Advanced settings disclosure, the pack mode and last start of each game, the last game played,
+// the NSP folders of games added outside the games folder, the prod.keys chosen for Add game, the window's size) are KEY=VALUE lines in launcher.txt of the OS's config folder:
+// $XDG_CONFIG_HOME/nxnative/ (else ~/.config/nxnative/) on Linux, %APPDATA%\nxnative\ on Windows.
+//
+// What a player does besides Play (the sections below): Add game (the packer on a file the system's dialog chose, in the background, its progress read from its JSON events),
+// Stop (the host's graceful exit, then Force stop after a bound), and the saves (a dated copy of the save folder the launch file names, the copies listed, one put back).
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -169,9 +174,12 @@ const Game *find_game(const std::vector<Game> &games, const std::string &id, std
 // ---- The launcher's own settings (launcher.txt) ----
 struct Config {
     std::string path;
-    std::vector<KV> kv;   // in file order
+    std::vector<KV> kv;   // in file order; a list key (nsp_folder) has a line per value
     std::string get(const std::string &key, const std::string &def = "") const;
     void set(const std::string &key, const std::string &value);
+    std::vector<std::string> all(const std::string &key) const;      // every value of a list key, in file order
+    void add(const std::string &key, const std::string &value);      // a value of a list key, once
+    void remove(const std::string &key, const std::string &value);
     bool load();          // a missing file is an empty config
     bool save() const;
 };
@@ -206,9 +214,12 @@ bool save_choices(const Game &g, const SettingsState &st, std::string *err);
 struct Command {
     std::vector<std::string> argv;
     std::vector<std::string> notes;   // what the launcher logs: a program taken from the bundle instead of the launch file's (find_host, find_nxaot, find_packer)
-    std::vector<KV> set;   // the variables the launcher sets, in the order it sets them
+    std::vector<KV> set;   // the variables the launcher sets, in the order it sets them; an empty value unsets the variable (Env)
     std::string cwd, log, mode;
     std::string error;     // why it cannot start ('' when it can)
+    // A tree of processes the launcher may have to interrupt as a whole (the packer and the tools it starts: interrupt, force_stop): Linux, a process group of its own;
+    // Windows, a job object (the process starts suspended, joins the job, then runs)
+    bool tree = false;
 };
 std::string chosen_mode(const Game &g, const Config &c);   // the player's pack mode when it has complete packs, else the first that has
 // record: "Record a profile while playing" (record_profile): DM_AOT_PROFILE set to the game's profile folder after everything else, so the environment, env.txt or an env row
@@ -220,13 +231,39 @@ Command compose(const Game &g, const std::string &mode, const Env &env, bool rec
 struct Child {
     int64_t pid = 0;
     void *handle = nullptr;   // Windows: the process handle
+    void *job = nullptr;      // Windows: the job object of a Command's tree
+    bool tree = false;        // Linux: the process leads a process group of its own (Command::tree)
     bool running = false;
     int status = -1;          // its exit status once it ended (128 + the signal for a signal, as dm/mac/launcher.c reports it)
 };
 bool spawn(const Command &cmd, Child *child, std::string *err);   // its output to cmd.log (the previous run's kept as log.prev.txt); the folders made first
 bool poll(Child *child);    // true once it has ended (child->status)
 int wait(Child *child);
+bool wait_for(Child *child, int ms);   // true once it has ended within ms milliseconds
 std::vector<std::string> tail_lines(const std::string &path, size_t n);
+
+// ---- Stop: the host's graceful exit, then Force stop ----
+// nxhost-run ends gracefully when asked (dm/host/hle_lifecycle.c dm_host_shutdown, installed by dm_term_install through plat_on_terminate): it writes the session's files
+// (the sample profile, the JIT misses, the known targets), stops audio and graphics in order and exits with status 0, after the log lines "received <why>: graceful exit" and
+// "graceful exit done (<s> s)". What it commits to the save folder is already there: the game's own save commits are atomic (hle_fs.c), so an exit loses only what the game had
+// not saved. The way in:
+//   Linux    SIGTERM to the process (plat_linux.c: a handler that wakes a thread). Its default action, before the host installed the handler, ends it with status 143
+//   Windows  the named event stop_event_name(pid), which plat_win32.c's plat_on_terminate creates and a thread of the host waits on. The host's console control handler (Ctrl+C,
+//            console close) needs a console the caller shares, which a GUI program's child started with CREATE_NO_WINDOW does not: GenerateConsoleCtrlEvent reaches only the
+//            processes of the caller's own console. No event yet (a host older than it, or one that has not reached main): request_stop fails, and the window asks again on
+//            every frame until the bound
+// When the game has not ended kStopBoundMs after the request (the host's own bounds are 20 s for the session's files and 1.5 s for the suspend after them, so a host that took
+// the request ends before it), the window offers Force stop: SIGKILL on Linux, TerminateProcess on Windows, which ends it without its files. ended_how says how it ended.
+inline constexpr int kStopBoundMs = 25000;
+std::string stop_event_name(int64_t pid);           // "Local\nxnative-stop-<pid>" (Windows; plat.h names it too)
+bool request_stop(Child *child, std::string *err);   // the graceful exit's way in (above); false with *err when it cannot be asked (yet)
+bool force_stop(Child *child, std::string *err);     // SIGKILL (to the group of a tree); TerminateProcess (TerminateJobObject for a tree)
+// Cancel of a tree (the packer): what Ctrl+C in its terminal does. Linux: SIGINT to its process group; Windows: CTRL_C_EVENT on its console (the launcher attaches to the
+// child's console for the call: a GUI program has none of its own), which the packer takes as KeyboardInterrupt ("[RED] interrupted", status 130) and passes to the tools it started
+bool interrupt(Child *child, std::string *err);
+// How a game ended, for the log pane: status, whether Stop asked it (stopped) and Force stop ended it (forced), the seconds since the request, and its log's last lines
+// (the host's graceful-exit lines: a graceful exit says it ended gracefully, a Stop before the host's handler says so too)
+std::string ended_how(int status, bool stopped, bool forced, double seconds, const std::vector<std::string> &log_tail);
 
 // ---- Whether the window shows ----
 struct Start { bool window = true; std::string game, why; };
@@ -289,5 +326,94 @@ ProfileState profile_state(const Game &g, const std::string &mode, const std::st
 // folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes; PYTHONUTF8=1: the packer writes that file as UTF-8 on Windows too); error when the launch file names no package, packer or python
 // (a pack made before those rows: pack the game once more by hand, which writes them). The Python, the packer and nxaot as find_python, find_packer and find_nxaot find them in bundle
 Command repack_command(const Game &g, const std::string &mode, const std::string &bundle = bundle_dir());
+
+// ---- Add game: the packer on a file the player chose ----
+// The packer (scripts/build_ipa_from_nsp.py, what pack.sh / pack.cmd run) packs a folder holding one game's files: the base game's NSP, XCI, NSZ or XCZ (its scan_nsps), with or
+// without updates and DLC. The chosen file's folder is that NSP folder; the packer writes <title ID>_build/ and <title ID>-work/ beside the file (about 20 minutes and several GB
+// for a first pack of a small game, under a minute for a repack), and stops with "more than one game in the folder" when the folder holds another game's base file.
+// The packer looks for prod.keys only where -k says: find_keys looks for it, by path only (never reading it), in this order: launcher.txt's keys (Choose prod.keys...), the keys
+// row of a game packed before (the file it used), <bundle>/keys/prod.keys, ~/.switch/prod.keys (%USERPROFILE%\.switch\prod.keys on Windows, where Switch tools keep it).
+// The tools (find_pack_tools): NXPACKER (a packer script) and PYTHON (a Python program) in the environment, as NXHOST names another host and pack.sh takes PYTHON; else a bundle's
+// scripts/build_ipa_from_nsp.py with its own Python (VERSION's python row, run as pack.sh runs it: PYTHONHOME and PYTHONPATH unset, PYTHONNOUSERSITE=1; "python no": python3 on
+// PATH, python.exe or py.exe on Windows); else, in a development tree (a folder above the launcher with scripts/build_ipa_from_nsp.py and dm/launcher), its packer with python3
+// (python on Windows) from PATH. The packer finds the bundle's nxaot and host beside itself, so add_command passes no --nxaot.
+// add_command: <python> <packer> <NSP folder> --platform <this system> --progress json -k <keys>, in the NSP folder, as a tree (Cancel: interrupt), PYTHONUNBUFFERED=1 and
+// PYTHONUTF8=1, its output in <NSP folder>/nxlauncher-pack.txt (the previous one kept as nxlauncher-pack.prev.txt).
+inline constexpr const char *kGameFileExts[] = {".nsp", ".xci", ".nsz", ".xcz"};
+bool is_game_file(const std::string &path);           // one of kGameFileExts, any case
+std::string nsp_folder_of(const std::string &file);   // the file's folder
+struct PackTools {
+    std::string python, packer, from;          // from: "NXPACKER", "the bundle", "the development tree"
+    std::vector<std::string> python_args;      // py.exe's -3
+    std::vector<KV> set;                       // the variables the packer gets (an empty value unsets one)
+    std::string problem;                       // why nothing can pack ('' when it can)
+};
+PackTools find_pack_tools(const std::string &bundle, const Env &env);
+std::string which(const std::string &program, const Env &env);   // a program on PATH ('' when none; Windows tries .exe)
+struct KeysFound { std::string path; std::vector<std::string> looked; };   // path '' when no file is at any place looked
+KeysFound find_keys(const Config &c, const std::vector<Game> &games, const std::string &bundle, const Env &env);
+Command add_command(const std::string &file, const std::string &keys, const PackTools &tools);
+// The packer's progress (--progress json: one JSON object per line, Progress._json): stage {k, n, name, step}, step {step}, progress {done, total, unit, note, frac, eta},
+// stage_end {ok, summary}, say {msg}; other lines (a traceback on stderr) are kept as they are
+struct PackView {
+    int k = 0, n = 0;                 // the stage, of how many
+    std::string stage, step, count, note;   // count: "1.9/5.0 GB", "1,203/19,592 shaders"
+    double frac = -1, eta = -1;       // -1: unknown
+    bool in_stage = false;            // a stage started and has not ended
+    std::vector<std::string> lines;   // what the log pane shows: the stages' ends, the messages, the other lines
+    std::string red;                  // the last [RED] message (without the prefix)
+    int events = 0;
+};
+PackView read_pack_log(const std::string &text);
+// The packer's end in plain words: '' for status 0; Cancel (130: "Packing was cancelled..."); else its last [RED] message, explained where it is a known one (missing keys,
+// more than one game, no game file, an unreadable title)
+std::string pack_failure(const PackView &v, int status, const std::string &nsp_folder, const std::string &keys);
+// The game a pack made: the <id>_build in the NSP folder with a launch file of this platform written at or after since (unix seconds); '' when none
+std::string packed_build(const std::string &nsp_folder, int64_t since, const std::string &platform = kPlatform);
+// The NSP folders remembered outside the games folder (launcher.txt nsp_folder lines): remember_folder adds one unless find_games of the games folder reaches it already (the
+// games folder itself, or a folder directly in it); find_all_games lists the games folder's games and those of every remembered folder that is there, each build once
+std::vector<std::string> nsp_folders(const Config &c);
+bool remember_folder(Config &c, const std::string &games_dir, const std::string &nsp_folder);   // true when it was added
+std::vector<Game> find_all_games(const std::string &dir, const Config &c, const std::string &platform = kPlatform, const std::string &bundle = bundle_dir(), const Env &env = ProcessEnv());
+
+// ---- The saves ----
+// The host keeps the game's save in the folder DM_SAVE names (dm/host/hle_fs.c h_fs_MountSave, which stops the game without it): the committed save, with <folder>.work (the
+// working copy of a mounted save) and <folder>.new (a commit in progress) beside it, both discarded at the next mount; a game that also mounts device save data while main mounts
+// account save data has a second folder, <folder>_device. DM_SAVE as the game gets it (save_place): the environment, else the player's env.txt (unless DM_SAVED_CHOICES=0),
+// else the launch file's env row (<NSP folder>/<id>-work/run/save). A backup is a dated folder <folder>-backups/<YYYY-MM-DD_HH-MM-SS>/ holding a copy of each committed folder
+// under its own name (save/, save_device/). Restore puts a backup's folders in place of the current ones (a current folder the backup has not is removed: the save as it
+// was), after backing the current saves up; never while the game runs (refused), and the window asks first (restore_prompt names what is replaced)
+struct Saves {
+    std::string folder;                 // DM_SAVE
+    std::string backups;                // <folder>-backups
+    std::vector<std::string> present;   // the committed folders that exist (folder, folder_device)
+    std::string problem;                // why there is nothing to back up or restore ('' when there is)
+};
+Saves save_place(const Game &g, const Env &env);
+struct Backup { std::string name, path; uint64_t files = 0, bytes = 0; std::vector<std::string> folders; };   // folders: the names inside (save, save_device)
+std::vector<Backup> list_backups(const Saves &s);   // newest first
+bool backup_saves(const Saves &s, int64_t now, Backup *out, std::string *err);
+std::string restore_prompt(const Saves &s, const Backup &b);
+bool restore_saves(const Saves &s, const Backup &b, bool running, int64_t now, Backup *safety, std::string *err);   // safety: the backup of the saves it replaced
+
+// ---- The system's dialogs and file manager: SDL3's in the window (main.cpp), answers given in advance in the tests and scripts (--answer) ----
+// A dialog of the system cannot be driven without a desktop, so the window asks through this seam: a Dialogs answers on a callback, which SDL may call on another thread
+// (the window keeps the answer for its next frame); '' is a cancelled dialog
+struct Dialogs {
+    using Done = std::function<void(const std::string &path)>;
+    struct Filter { std::string name, pattern; };   // SDL_DialogFileFilter: "Switch games", "nsp;xci;nsz;xcz"
+    virtual ~Dialogs() = default;
+    virtual void open_file(const std::string &title, const std::vector<Filter> &filters, const std::string &start, Done done) = 0;
+    virtual void open_folder(const std::string &title, const std::string &start, Done done) = 0;
+    virtual bool show_folder(const std::string &folder, std::string *err) = 0;   // in the system's file manager
+};
+// The stand-in: each dialog takes the next of the answers, in order ('' when none is left); show_folder records the folder
+struct AnswerDialogs : Dialogs {
+    std::vector<std::string> answers, shown, asked;   // asked: "file <title>", "folder <title>"
+    void open_file(const std::string &title, const std::vector<Filter> &filters, const std::string &start, Done done) override;
+    void open_folder(const std::string &title, const std::string &start, Done done) override;
+    bool show_folder(const std::string &folder, std::string *err) override;
+};
+std::vector<Dialogs::Filter> game_file_filters();   // the packer's file kinds, then every file
 
 }   // namespace nxl

@@ -17,7 +17,8 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #define mtl_exec_rest test_exec_rest
 #define mtl_exec test_exec
 #define mtl_set_frame test_set_frame
-#define mtl_drain test_drain
+#define mtl_suspend_drain test_drain
+#define mtl_arch_save test_arch_save
 #include "../nvn/hle_nvn.c"
 #undef pthread_mutex_lock
 #undef mtl_prepare
@@ -28,7 +29,8 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #undef mtl_exec_rest
 #undef mtl_exec
 #undef mtl_set_frame
-#undef mtl_drain
+#undef mtl_suspend_drain
+#undef mtl_arch_save
 
 module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
@@ -39,6 +41,8 @@ uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // t
 static dispatch_semaphore_t preparing, second_waiting, finish_prepare, prepared, suspended, returned, committed;
 static __thread int second_submit;
 static _Atomic int prepares, commits, drains;
+static _Atomic int hold_suspend;
+static dispatch_semaphore_t drain_started, drain_release, archive_started, archive_release;
 static int inflight_in_prepare, host_work_in_prepare, inflight_at_serial_wait, host_work_at_serial_wait;
 static int observed_mutex_lock(pthread_mutex_t *mutex) {
     if (mutex == &g_sub_mu && second_submit) {   // reached only when the lock is contended (dm_host_mutex_lock tries first)
@@ -65,7 +69,18 @@ void test_queue_origin(int on) { (void)on; }
 void test_exec_rest(const uint64_t *handles, int count) { (void)handles; (void)count; }
 void test_exec(const uint8_t *commands) { (void)commands; }
 void test_set_frame(uint64_t frame) { (void)frame; }
-void test_drain(void) { atomic_fetch_add(&drains, 1); }
+void test_drain(void) {
+    atomic_fetch_add(&drains, 1);
+    if (!atomic_load(&hold_suspend)) return;
+    dispatch_semaphore_signal(drain_started);
+    dispatch_semaphore_wait(drain_release, DISPATCH_TIME_FOREVER);
+}
+void test_arch_save(int wait_ms, int ending) {
+    (void)wait_ms; (void)ending;
+    if (!atomic_load(&hold_suspend)) return;
+    dispatch_semaphore_signal(archive_started);
+    dispatch_semaphore_wait(archive_release, DISPATCH_TIME_FOREVER);
+}
 
 static NVNqueue queues[2];
 static const op_hdr work[] __attribute__((aligned(8))) = {{OP_BEGIN, 8}};
@@ -142,6 +157,46 @@ int main(void) {
     h_nvnQueueFinish(&queues[0]);
     CHECK("exactly the three intended command prefixes committed", atomic_load(&commits) == 3);
     CHECK("resume leaves the graphics gate balanced", g_inflight_api == 0);
+
+    drain_started = dispatch_semaphore_create(0); drain_release = dispatch_semaphore_create(0);
+    archive_started = dispatch_semaphore_create(0); archive_release = dispatch_semaphore_create(0);
+    atomic_store(&hold_suspend, 1);
+    pthread_create(&background, NULL, suspend_graphics, NULL);
+    if (!reached(drain_started, "suspend reaches the held drain")) return 1;
+    if (!reached(archive_started, "archive handoff starts independently of the held drain")) return 1;
+    if (!reached(suspended, "suspend returns with the drain and archive handoff both held")) return 1;
+    pthread_join(background, NULL);
+    int held_drains = atomic_load(&drains);
+    dm_gfx_suspend(0);
+    h_nvnQueueSubmitCommands(&queues[0], 1, &parked_handle);
+    CHECK("foreground request keeps work queued while the earlier drain is held",
+          dispatch_semaphore_wait(committed, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
+    pthread_create(&background, NULL, suspend_graphics, NULL);
+    if (!reached(suspended, "a newer suspend returns while the same drain is held")) return 1;
+    pthread_join(background, NULL);
+    CHECK("overlapping transitions share one drain", atomic_load(&drains) == held_drains);
+    dispatch_semaphore_signal(drain_release);
+    CHECK("the earlier foreground request cannot let work through the newer suspend",
+          dispatch_semaphore_wait(committed, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
+    dm_gfx_suspend(0);
+    if (!reached(committed, "the latest foreground request resumes queued work")) return 1;
+    dispatch_semaphore_signal(archive_release);
+    atomic_store(&hold_suspend, 0);
+    h_nvnQueueFinish(&queues[0]);
+
+    atomic_store(&hold_suspend, 1);
+    pthread_create(&background, NULL, suspend_graphics, NULL);
+    if (!reached(drain_started, "another suspend reaches its drain")) return 1;
+    dm_gfx_suspend(0);
+    if (!reached(suspended, "foreground request releases the obsolete suspend call")) return 1;
+    pthread_join(background, NULL);
+    h_nvnQueueSubmitCommands(&queues[0], 1, &parked_handle);
+    CHECK("work stays queued until the drain really completes",
+          dispatch_semaphore_wait(committed, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0);
+    dispatch_semaphore_signal(drain_release);
+    if (!reached(committed, "the drain worker resumes work for the pending foreground request")) return 1;
+    dispatch_semaphore_signal(archive_release);
+    h_nvnQueueFinish(&queues[0]);
     h_nvnQueueFinalize(&queues[0]); h_nvnQueueFinalize(&queues[1]);
     printf("graphics suspend: %d checks, %d failed\n", checks, failures);
     return failures != 0;

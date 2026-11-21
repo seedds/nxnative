@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """One copy of a raw global memory lookup's search (dmsh_rewrite.py raw_noinline): the translator's dmsh_raw_find (GlobalToStorage GetRawFindFunction), as spirv-cross writes it, is
-marked noinline; the access helpers that check the last entry and call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with
-xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the translator's own lookups on the GPU in both forms."""
+marked noinline outside mesh stages; final mesh code keeps it inline, including composed code whose inputs were already rewritten. The access helpers that check the last entry and
+call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the
+translator's own lookups on the GPU in both forms."""
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +13,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
-from dmsh_rewrite import raw_noinline   # noqa: E402
+from dmsh_rewrite import mesh_subgroup_noinline, raw_noinline   # noqa: E402
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -72,6 +73,18 @@ def attribute(src, name):
 
 
 class RawNoinline(unittest.TestCase):
+    def test_mesh_keeps_the_search_inline(self):
+        for source in (SRC, raw_noinline(SRC)):
+            with self.subTest(already_noinline=source != SRC):
+                out = raw_noinline(source, stage='ms')
+                self.assertEqual(out, SRC)
+                self.assertEqual(raw_noinline(out, stage='ms'), out)
+
+    def test_other_stages_keep_one_search(self):
+        for stage in ('ts', 'vs', 'ps', 'cs', 'rt'):
+            with self.subTest(stage=stage):
+                self.assertEqual(raw_noinline(SRC, stage=stage), raw_noinline(SRC))
+
     def test_marks(self):
         out = raw_noinline(SRC)
         self.assertEqual(attribute(out, 'dmsh_raw_find'), NOINLINE)
@@ -84,6 +97,21 @@ class RawNoinline(unittest.TestCase):
         plain = HEAD + OTHER + helper('_71', '_70') + MAIN
         self.assertEqual(raw_noinline(plain), plain)
         self.assertEqual(raw_noinline(raw_noinline(SRC)), raw_noinline(SRC))
+
+    def test_mesh_subgroup_noinline(self):
+        one_line = '\nstatic inline __attribute__((always_inline)) float dm_zsnap(float z) { return z; }\n'
+        body = '\nstatic inline __attribute__((always_inline)) void dm_stage_body(uint gl_SubgroupInvocationID) {}\n'
+        subgroup = SRC.replace('int _71(thread const int&', 'int _71(thread uint& gl_SubgroupInvocationID, thread const int&')
+        src = raw_noinline(subgroup, stage='ms') + one_line + body
+        out = mesh_subgroup_noinline(src)
+        self.assertEqual(attribute(out, 'dmsh_raw_find'), INLINE)
+        self.assertEqual(attribute(out, '_71'), NOINLINE)
+        for name in ('_63', '_64', '_70'):
+            self.assertEqual(attribute(out, name), INLINE, name)
+        self.assertIn(one_line, out)
+        self.assertIn(body, out)
+        self.assertEqual(mesh_subgroup_noinline(out), out)
+        self.assertEqual(out.replace(NOINLINE, INLINE), src)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):

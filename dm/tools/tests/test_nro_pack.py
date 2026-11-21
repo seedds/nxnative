@@ -51,10 +51,10 @@ class NroPack(unittest.TestCase):
 
     def test_parser_changes_recollect(self):
         self.build()
-        for i, f in enumerate(('dm/gfx/tools/smash_arc.py', 'dm/tools/nso_syms.py'), 2):
-            (self.repo / f).write_text('v2'); self.build()
-            self.assertEqual(self.collections, i)
-        self.assertEqual(self.rewrites, 1)   # identical collected bytes do not need another rewrite
+        (self.repo / 'dm/gfx/tools/smash_arc.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (2, 1))   # identical collected bytes can reuse the rewrite
+        (self.repo / 'dm/tools/nso_syms.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (3, 2))   # the rewriter also reads symbols directly
 
     def test_removed_registration_drops_stale_manifest(self):
         self.build(); (self.rom / 'game.nrr').unlink(); self.build()

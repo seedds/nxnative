@@ -249,6 +249,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     Operand x = sourcesList[^1];
                     sourcesList[^1] = context.BitwiseAnd(x, Const(0x3FFF));
                     sourcesList.Add(context.ShiftRightU32(x, Const(14)));
+                    flags |= TextureFlags.RowWrap;
                     context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(imm);
                 }
                 else
@@ -518,6 +519,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                                 Operand x = sourcesList[^1];
                                 sourcesList[^1] = context.BitwiseAnd(x, Const(0x3FFF));
                                 sourcesList.Add(context.ShiftRightU32(x, Const(14)));
+                                flags |= TextureFlags.RowWrap;
                                 context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(tldsOp.TidB);
 
                                 type &= ~SamplerType.Mask;

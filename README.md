@@ -19,12 +19,14 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Kirby Air Riders](dm/games/040077201BE50000/README.md)
 - [Mario Kart World](dm/games/0400C3F00006E000/README.md)
 - [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
+- [Nintendo Switch 2 Welcome Tour](dm/games/040057C02159A000/README.md) — Area A tested; exhibits need further testing
 - [Nintendo Switch Sports Resort](dm/games/04008E001F098000/README.md)
 - [Orbitals](dm/games/040032B023CA4000/README.md) — two players: a controller for player 2
 - [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
 - [PRAGMATA](dm/games/0400C76024710000/README.md)
 - [Splatoon Raiders](dm/games/0400380020056000/README.md)
 - [Star Fox](dm/games/0400E88025B1A000/README.md)
+- [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](dm/games/040015100B514001/README.md)
 - [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)
 - [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md)
 
@@ -103,7 +105,7 @@ A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
 ```
 
-[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size).
+[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size). The script also reads [NUPs with shifted metadata numbers](docs/reference/packing.md#a-nup-icon-is-written-as-control-data).
 
 A Nintendo Switch 2 Edition of a Switch 1 game can hold both of its programs in one NUP: the Switch 1 program with the game data, and the Switch 2 program, which reads that data from the Switch 1 program and its Switch 2 files from the upgrade add-on. The script packs the Switch 2 program, with the Switch 1 program's game files beside its own and the add-on as DLC; `--program 0` packs the Switch 1 program instead.
 

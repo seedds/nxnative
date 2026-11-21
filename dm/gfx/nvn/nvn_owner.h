@@ -11,7 +11,8 @@
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost; and the live serials of each memory pool
 //               (the pool recorded at initialization), whose entries the pool's Finalize ends (own_pool_finalize_locked)
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
-//   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
+//   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under g_prog_pin_lk; release and unpin also hold
+//               the submission lock, which serial_del needs). A streamed producer can pin without the submission lock.
 //   sharing     alias_key (pool, offset, description) → the texture that holds those bytes (own_alias_*): NVN textures over the same storage with the same description are one
 //               texture. Kept resident by the table; an entry goes when its pool is finalized (own_pool_finalize_locked), a new texture takes its bytes over (own_alias_publish)
 //               or another texture drew over them and it has not been used since (own_alias_dead_locked). The first and the last take the serial entries that name the
@@ -109,7 +110,7 @@ own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use
 uint32_t own_pool_finalize_locked(const void *pool, CFSetRef also);
 void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_key *k, id o));   // the entries that start at off in the pool (its cell of the index)
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
-typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken, pool_entries; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total, serial entries that went with their pools
+typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken, pool_entries, looks; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total, serial entries that went with their pools, entries takeovers looked at
 own_alias_stats own_alias_stats_locked(void);
 // The entries only the sharing table keeps: no live or finalized serial, view or pin holds their texture (entry_holds, tex_object_pinned). Bytes count each texture once
 // (allocatedSize, several keys can name one); writable_bytes is the part made to be drawn into or written by shaders, whose content the pool may not have; oldest_idle is the
@@ -133,7 +134,7 @@ int own_tex_live_locked(uint64_t serial);
 int own_tex_live(uint64_t serial);
 int own_tex_end_locked(tex_t *t);   // a finalize: -1 when t is a copy and the object the texture was initialized in still holds it (nothing ends), else whether it was live (it is not now)
 
-// Program pins (the caller holds the submission lock); mtl_prog_release and mtl_prog_unpin (nvn_obj.h) are the other two
+// Program pins (takes its own lock); mtl_prog_release and mtl_prog_unpin (nvn_obj.h) also require the submission lock
 void own_prog_pin(uint64_t serial);
 
 // The change generation. g_ser_gen is read directly (an atomic load on the hot paths); only the owner's functions change it

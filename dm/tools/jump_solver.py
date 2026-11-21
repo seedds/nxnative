@@ -227,7 +227,8 @@ def _refine(st, v, reg, key, interval=None, low=False):
                 if a is None: return True
                 lo2, hi2 = max(a.lo, interval[0]), min(a.hi, interval[1])
                 if lo2 > hi2 or not a.bits & _pattern(lo2, hi2): return False
-                own = ('r', root, chain, 64)
+                # A guard on a wrapping W-register expression may need a new root. Loop widening must still preserve the zeroed upper half.
+                own = ('r', root, chain, 32 if _top(chain, root[-1]) <= M32 else 64)
                 st.regs = [('s', own, ()) if r == v else r for r in st.regs]
                 st.cons[own] = _mk(lo2, hi2, a.bits, 0, M32)
                 if st.flags and st.flags[1] == v: st.flags = st.flags[:1] + (('s', own, ()),) + st.flags[2:]

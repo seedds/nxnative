@@ -10,14 +10,14 @@ from dmsh_chain import LOCK, XLATE_DIR, SPIRV_CROSS, xlate_source_sha
 
 def sha16(p): return hashlib.sha256(open(p, 'rb').read()).hexdigest()[:16]
 
-def tools_now():
+def tools_now(check_metal=True):
     """Actual tool fingerprints: the translator (a native executable that holds the Ryujinx shader library), spirv-cross, metal compiler (macOS / iOS)"""
     xl = os.path.join(XLATE_DIR, 'dmsh_xlate')
     t: dict = {'dmsh_xlate': sha16(xl) if os.path.isfile(xl) else 'missing'}
     t['xlate_source'] = xlate_embedded()
     sc = shutil.which(SPIRV_CROSS)
     t['spirv-cross'] = sha16(sc) if sc else 'missing'
-    for sdk in ('macosx', 'iphoneos'):
+    for sdk in ('macosx', 'iphoneos') if check_metal else ():
         t['metal_' + sdk] = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True).stdout.splitlines()[0:1] or ['missing']
         t['metal_' + sdk] = t['metal_' + sdk][0]
     return t
@@ -33,9 +33,10 @@ def xlate_embedded():
 
 def no_run_message(embedded): return f'the translator {embedded}: {os.path.join(XLATE_DIR, "dmsh_xlate")} is the committed native executable (dm/tools/native_tools.sh builds it); check out the repository again if it is missing or damaged'
 
-def check_tools():
+def check_tools(check_metal=True):
     want = dict(l.rstrip('\n').split('\t', 1) for l in open(LOCK) if '\t' in l and not l.startswith('#'))
-    now = tools_now(); ran = not now['xlate_source'].startswith(NO_RUN)
+    now = tools_now() if check_metal else tools_now(False)
+    ran = not now['xlate_source'].startswith(NO_RUN)
     bad = [f'{k}: lock {want.get(k)} / actual {v}' for k, v in now.items() if want.get(k) != v and (ran or k != 'xlate_source')]
     if not ran: bad.append(no_run_message(now['xlate_source']))
     elif now['xlate_source'] != xlate_source_sha(): bad.append(f'the translator was not built from the in-repo source: embedded source {now["xlate_source"]} / in repo {xlate_source_sha()} (rebuild it: dm/tools/native_tools.sh dmsh_xlate)')

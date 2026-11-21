@@ -403,6 +403,20 @@ class DeriveProfile(Base):
         g = check(AssertionError('a value set by hand is checked, not worked out again'))
         self.assertEqual(g.get('stdalloc_cap'), '0xa0000000')
 
+    def test_the_heap_checks_stdalloc_cap_survives_the_region_check(self):   # issue #2830: the heap check limits StandardAllocator's region, not the pool the game reads as its memory
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x118000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0xCD500000\nsys_resource\t0x3000000\n')
+        self.derive(); patched = self.tmp / 'work/patched_v65536'; key = patched.with_name(patched.name + '.key')
+        key.parent.mkdir(parents=True); key.write_text('a' * 64 + '\n')
+        g = self.check_boot('heap', '>>> nnMain\n[dm] [mem] alias region mapped up to +4.26 GB (alias region 4.38 GB)\n')
+        self.assertEqual((g.get('stdalloc_cap'), g.get('app_pool')), ('0x40000000', '0xCD500000'))
+        self.assertFalse(nsp.checked_cap(g))   # the region check checks it as a value set by hand rather than working it out again (and taking it out)
+        logs = self.tmp / 'logs'
+        def boot(*args): (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text('0x4000000\t0x40000000\tmain+0x10\t0\t-\t-\t0\n'); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), \
+             mock.patch.object(nsp.pg, 'stdalloc_cap_needed', side_effect=AssertionError('a value the heap check set is checked, not worked out again')):
+            g = nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        self.assertEqual(g.get('stdalloc_cap'), '0x40000000')
+
     def test_provisional_run_invalidates_derivation(self):
         self.derive()
         key = nsp.derived_key(self.pdir)
@@ -488,7 +502,7 @@ class DlcOnlyShaders(Base):
             with self.subTest(name=name):
                 tables.joinpath('shader_map.tsv').write_text(shader_map)
                 tables.joinpath('shader_facts.tsv').write_text(facts)
-                self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
+                self.assertEqual(nsp.optional_shader_change(g, tables), want)
 
     def test_a_shader_the_dlc_shares_with_the_game(self):   # issue #2439: the split gives a shared shader the game's row (merge_keys), so both directions are DLC-only changes
         tables = self.tmp / 'new-tables'; tables.mkdir()
@@ -503,7 +517,30 @@ class DlcOnlyShaders(Base):
             with self.subTest(name=name):
                 self.src.joinpath('shader_map.tsv').write_text(profile); self.src.joinpath('shader_facts.tsv').write_text(facts)
                 tables.joinpath('shader_map.tsv').write_text(split); tables.joinpath('shader_facts.tsv').write_text(facts)
-                self.assertEqual(nsp.dlc_only_shader_change(game.Game(self.src), tables), want)
+                self.assertEqual(nsp.optional_shader_change(game.Game(self.src), tables), want)
+
+    def test_play_pair_can_change_with_the_same_shader_map(self):
+        tables = self.tmp / 'new-tables'; tables.mkdir()
+        base = 'vs_other.bin\t0\tvertex\tbase\t/base.shader\nps_other.bin\t0\tpixel\tknown\t/known.shader\n'
+        captured = 'vs_other.bin\t1\tvertex\tplayed\t/glslc_play/capture.glslc#GLSLC@0x0\n'
+        for d in (self.src, tables):
+            (d / 'shader_map.tsv').write_text(base + captured)
+            (d / 'shader_facts.tsv').write_text('')
+        (self.src / 'shader_pairs.tsv').write_text('')
+        (tables / 'shader_pairs.tsv').write_text('played\tknown\n')
+        g = game.Game(self.src)
+        self.assertTrue(nsp.optional_shader_change(g, tables))
+        (tables / 'shader_pairs.tsv').write_text('base\tknown\n')
+        self.assertFalse(nsp.optional_shader_change(g, tables))
+        (tables / 'shader_map.tsv').write_text(base)
+        self.assertTrue(nsp.optional_shader_change(g, tables))
+
+    def test_partial_build_includes_new_gameplay_captures(self):
+        known, captured = 'a' * 16, 'b' * 16
+        (self.src / 'shader_map.tsv').write_text(f'vs_other.bin\t0\tvertex\t{known}\t/base.shader\n'
+                                                f'ps_other.bin\t0\tpixel\t{captured}\t/glslc_play/capture.glslc#GLSLC@0x0\n')
+        (self.src / 'shader_seen.tsv').write_text(f'{known}\n')
+        self.assertEqual(nsp.seen_keys(game.Game(self.src), self.tmp / 'shader', []), [known, captured])
 
 
 class ComputeReaderAdditions(Base):
@@ -583,8 +620,8 @@ class SplitShaders(Base):
 
     def table(self, n): return self.tables[n] if hasattr(self, 'tables') else f'# split header\n{n}\t{self.rows}\n'
 
-    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, env=None):
-        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, env or {}, self.logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, env=None, glslc_play=()):
+        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, env or {}, self.logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute, glslc_play)
 
     def compute_addition(self):
         self.tables = {'shader_map.tsv': 'vs_data.bin\t0\tvertex\tbase\t/original\ncs_data.bin\t0\tcompute\tadded\t/assets#Compute#run.0\n',
@@ -691,6 +728,17 @@ class SplitShaders(Base):
         asset.write_bytes(b'updated DLC shader')
         self.go(g, dlc_roms=[dlc]); self.assertEqual(self.splits, 3)
         self.go(g); self.assertEqual(self.splits, 4)   # removing the DLC removes its shaders from the union
+
+    def test_gameplay_capture_content_invalidates_the_split(self):
+        g = self.own(); self.go(g)
+        folder = self.tmp / 'separate gameplay captures'; folder.mkdir()
+        capture = folder / ('a' * 16 + '.glslc'); capture.write_bytes(b'first output')
+        self.go(g, glslc_play=[folder]); self.assertEqual(self.splits, 2)
+        self.assertEqual(self.last_cmd[-2], '')   # no DLC paths before the game-independent capture manifest
+        self.go(g, glslc_play=[folder]); self.assertEqual(self.splits, 2)
+        capture.write_bytes(b'other output')
+        self.go(g, glslc_play=[folder]); self.assertEqual(self.splits, 3)
+        self.go(g); self.assertEqual(self.splits, 4)
 
     def own(self):   # a derived profile with the empty tables, as main makes it
         self.derive(); g = game.Game(self.pdir); nsp.provisional_prep(sys.executable, self.repo, {}, self.logs, g); return g

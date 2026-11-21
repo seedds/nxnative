@@ -4,6 +4,7 @@
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
 # publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
+# The build script can use a numeric display version label from the selected package after checking control data and the profile.
 # A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
 # leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
 # and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
@@ -11,7 +12,7 @@
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
-#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
+#   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content); an update without an icon has its base game's
 #   extract/v<version>/romfs_programs/<index>.img   for an application of several programs (a Switch 2 Edition of a Switch 1 game), the RomFS of each program not packed, which the
 #                                       packed one mounts by program index (nn::fs::MountRom(name, index, ...), hle_fs.c); --program picks the program, default the highest index
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − the NACP's AddOnContentBaseId, else − base title ID − 0x1000), the host's DM_AOC_DIR
@@ -20,7 +21,7 @@
 # or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # Usage: pack_nup.py <game.nup> [--version N] [--program N] [--work-dir DIR]   (exit 1 on error)
-import argparse, hashlib, mmap, os, shutil, struct, sys
+import argparse, hashlib, mmap, os, re, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
@@ -43,7 +44,9 @@ NO_DIR = 0xFFFFFFFF
 BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
-T_NACP, T_ICON, T_LICONS = 2, 3, 10
+T_NACP, T_ICON, T_DISPLAY, T_BUILD_ID, T_LICONS = 2, 3, 4, 7, 10   # SPEC §5's numbers
+NACP_SIZE = 0x4000   # every NACP's size: a record of another size is something else
+SHIFTED = 'its meta block uses type numbers one too low (upstream nup PR #20). Reading each record one type up'
 ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
@@ -54,16 +57,65 @@ class Package:
         self.title_id, self.root, self.exefs, self.romfs, self.version, self.kind, self.flags, r1, r2, self.meta_off, self.meta_size = rec
         if self.kind >= len(KINDS): raise Error(f'{nup.path}: package {index} of unknown kind {self.kind}')
         if r1 or r2 or self.flags & ~STANDALONE: raise Error(f'{nup.path}: package {index} has reserved fields or flags set')
+        self._meta_reported = False
         self.name = f'{nup.path.name} ({KINDS[self.kind]}' + (f' {self.version}' if self.kind == UPDATE else f' {self.title_id:016X}' if self.kind == ADDON else '') + ')'   # what pick_nsps prints
 
-    def meta(self):   # {TLV type: payload}
-        out, b = {}, self.nup.mm[self.meta_off:self.meta_off + self.meta_size] if self.meta_size else b''
+    def meta(self, *, say=None):
+        """First payload per TLV type, in SPEC §5 numbering, with wrong-size NACP records omitted."""
+        recs = {}
+        b = self.nup.mm[self.meta_off:self.meta_off + self.meta_size] if self.meta_size else b''
         p = 0
         while p + TLV.size <= len(b):
             t, _, n = TLV.unpack_from(b, p); p += TLV.size
             if p + n > len(b): raise Error(f'{self.nup.path}: package {self.index}: meta record {t:#x} runs past its block')
-            out.setdefault(t, bytes(b[p:p + n])); p += n
-        return out
+            recs.setdefault(t, b[p:p + n]); p += n
+        shifted, marked = shifted_meta(recs)
+        if shifted:
+            recs = {t + 1: v for t, v in recs.items()}
+        bad_size = None
+        if (control := recs.get(T_NACP)) is not None and len(control) != NACP_SIZE:
+            bad_size = len(control)
+            del recs[T_NACP]
+        if say is not None and not self._meta_reported:
+            if shifted:
+                say(f'{self.name}: {SHIFTED}')
+            elif marked:
+                say(f'{self.name}: its meta block has a shift marker, but its NACP or icon uses SPEC §5 numbering. The block is read as it is')
+            if bad_size is not None:
+                say(f'{self.name}: its NACP record is {bad_size:,} bytes, not {NACP_SIZE:,} (0x4000): it is not a NACP, left out')
+            self._meta_reported = True
+        return recs
+
+
+def image(v): return v is not None and (v[:2] == b'\xff\xd8' or v[:4] == b'\x89PNG')   # a JPEG's start of image, or PNG's signature
+
+
+def nacp_like(v):
+    if v is None or len(v) != NACP_SIZE or image(v):
+        return False
+    if not v.startswith(b'META'):
+        return True
+    # An uncompressed NACP title can start with META too. Check the NPDM's ACI0.
+    try:
+        program_id(v, 'NUP metadata')
+    except (Error, struct.error):
+        return True
+    return False
+
+
+def shifted_meta(recs):
+    """Detect metadata written by nup PR #20, which started the TLV enum at 0 instead of 1.
+
+    Prefer NACP and image evidence. Fall back to the markers from upstream PR #32:
+    type 0 or a type 7 whose length differs from the 32-byte SPEC build ID.
+    Return whether to shift, and whether the content overruled a shift marker.
+    """
+    build_id = recs.get(T_BUILD_ID)
+    rule = 0 in recs or (build_id is not None and len(build_id) != 32)
+    for test, at in ((nacp_like, T_NACP), (image, T_ICON)):
+        low, spec = test(recs.get(at - 1)), test(recs.get(at))
+        if low != spec: return low, rule and not low
+    return rule, False
 
 
 class Nup:
@@ -207,12 +259,12 @@ def is_nup(path):
     except OSError: return False
 
 
-NACP_AOC_BASE, NACP_SAVE_OWNER = 0x3070, 0x3078   # ApplicationControlProperty: AddOnContentBaseId, SaveDataOwnerId (the application's ID)
+NACP_AOC_BASE = 0x3070   # ApplicationControlProperty: AddOnContentBaseId, then SaveDataOwnerId (the application's ID)
 
 
 def nacp_ids(k):   # (application ID, add-on content base ID) from the package's NACP; None for each it does not give
-    b = k.meta().get(T_NACP, b'')
-    if len(b) < NACP_SAVE_OWNER + 8: return None, None
+    b = k.meta().get(T_NACP)
+    if b is None: return None, None
     aoc, owner = struct.unpack_from('<QQ', b, NACP_AOC_BASE)
     return owner or None, aoc or None
 
@@ -386,16 +438,31 @@ def pick(tags, code):   # the record for a language code: the exact tag, then it
     return tags.get(code) or tags.get(code.split('-')[0])
 
 
+def display_label(k):
+    """The selected package's numeric display label, bounded to the console's 15 version bytes."""
+    raw = k.meta().get(T_DISPLAY, b'')
+    if raw == f'v{k.version}'.encode('ascii'): return ''   # a package version tag, e.g. v131072
+    label = raw.removeprefix(b'v')
+    return label.decode('ascii') if len(label) <= 15 and re.fullmatch(rb'[0-9]+(?:\.[0-9]+){0,2}', label) else ''
+
+
 def app_package(n):   # the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
     return next((k for k in n.packages if k.kind == BASE), n.packages[0])
 
 
-def control(k, out, fallback=None):   # the package's control data beside its ExeFS; what it lacks comes from fallback
-    meta = fallback.meta() if fallback is not None else {}
-    meta.update(k.meta())
-    nacp_bytes = meta.get(T_NACP)
+def icon_of(meta):   # a package's icon among its records: the icon, else the American English one of its localized icons, else the first of them
     icons = localized(meta.get(T_LICONS, b''))
-    icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
+    return meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
+
+
+def control(k, out, fallback=None, base=None, *, say=print):
+    """The package's control data beside its ExeFS; what it lacks comes from fallback. An update without an icon takes its base game's (base): the NSP script reads the base game's
+    control data in the folder the base is extracted to alone, and a build that packs only the update makes none (The Legend of Zelda: Ocarina of Time v131072: the app had no icon).
+    The NACP stays the package's own: its display version and languages are that version's"""
+    meta = fallback.meta(say=say) if fallback is not None and fallback is not k else {}
+    meta.update(k.meta(say=say))
+    nacp_bytes = meta.get(T_NACP)
+    icon = icon_of(meta) or (icon_of(base.meta(say=say)) if base is not None and base is not k else None)
     for name, data in (('control.nacp', nacp_bytes), ('icon.jpg', icon)):
         if data: (out / name).write_bytes(data)
         else: (out / name).unlink(missing_ok=True)
@@ -410,9 +477,9 @@ def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the
 PROGRAMS = 'romfs_programs'   # beside a version's RomFS.img: <index>.img, the RomFS of each other program of the application (the host's MountRom by program index, hle_fs.c)
 
 
-def pack_version(n, k, base, app, out, say=print, step=lambda s: None):
+def pack_version(n, k, base, app, out, say=print, step=lambda s: None, *, note=None):
     """One version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data, and out/romfs_programs/<index>.img for each other program of the
-    application (sibling_romfs); returns how pack() got this program's image"""
+    application (sibling_romfs); returns how pack() got this program's image. note receives metadata diagnostics and defaults to say."""
     if k.exefs == NO_DIR or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm')
     if (pid := program_id(n.read(n.child(k.exefs, b'main.npdm')), f'{k.name} exefs/main.npdm')) != app: raise Error(f'{k.name}: program ID {pid:016X}, the base is {app:016X}')
     d = romfs_of(k, base)
@@ -428,7 +495,7 @@ def pack_version(n, k, base, app, out, say=print, step=lambda s: None):
     for name, sd in others.items():
         say(f'program {name.removesuffix(".img")} of the application ({n.siblings[int(name.removesuffix(".img"))][0]:016X}): its RomFS → {PROGRAMS}/{name}')
         pack(n, sd, progs / name, say, step)
-    control(k, out, app_package(n) if base is None else None)
+    control(k, out, app_package(n) if base is None else None, base, say=say if note is None else note)
     return how
 
 

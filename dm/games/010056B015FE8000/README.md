@@ -29,6 +29,8 @@ Update 1.0.3 (v131072) over the base cartridge dump. PlatinumGames' engine, SDK 
 
 ## Status on the Mac
 
+- Shared host demand-time recording validation (#2018, 2026-11-17, M4 Pro, macOS 27.2.1, baseline `b04c42b0`, chain `5ea15f2c8240`): both full 220-second opening-flight runs reached the route target, with all 1,225 shaders unchanged and no new red diagnostic, crash or hang. The first baseline was covered by another window and the harness repeated it; the clean baseline and candidate both ran at 59.9 fps. The raw screenshot gate flagged the moving 180 s scene (dHash 17 bits, RGB 7.94); inspection shows different ship positions, effects and subtitle timing. Frame 10,800 then passed three fresh replays per revision within the capture's existing 2,094-pixel tolerance (baseline at most 1,295 differing pixels, candidate 963). The raw screenshot warning is retained in `regress.py`'s report, not treated as a rendering regression. Reports are under the NSP area's `_agent/pr2018/reports/integration` and `fixed-frame`; the preparation-cost measurement is [below](#preparation-cost-of-a-recorded-backlog).
+- Shared host [archive admission](../../../docs/reference/memory.md#pipeline-archives-exhaust-a-restricted-task-map) validation (#2444, 2026-11-17, M4 Pro, macOS 27.2.1, baseline `6c079578`, chain `9eecb8412308`): both full 220-second opening-flight runs reached the target with all 1,225 shaders unchanged and no new red diagnostic, crash or hang. The automated timed screenshot gate flagged the 100 s image (dHash 18 bits, RGB 6.85); inspection shows different subtitle timing and small ship/UI position changes. Frame 10,800 passed three fresh replays per revision within the existing 2,094-pixel tolerance: baseline at most 829 differing pixels, candidate 1,221. Both runs were on a busy Mac; the baseline/candidate peak footprints of 2,418/2,332 MiB do not establish a memory improvement. The candidate admitted its 74 MiB device archive set and retained Metal 4. Reports remain in the NSP work area's regression harness, `issue-2444-archive-admission` and `issue-2444-nier-replay`.
 - Shared host [render-pass continuity](../../../docs/reference/rendering.md#empty-target-bindings-between-draws-broke-continuation) validation (#2806, 2026-11-17, M4 Pro, macOS 27.2.1, baseline `ba9ce212`, chain `9eecb8412308`): both full 220-second opening-flight runs reached the route target, with all 1,225 shaders unchanged, no new red diagnostic, crash or hang. The timed ocean screenshot comparison flagged a difference (RGB 7.26); an unchanged-baseline control varied more (RGB 9.38). Frame 10,800 then passed three fresh replays per revision within the existing 2,094-pixel tolerance, derived from eight unchanged-baseline replays with at most 1,047 differing pixels. The candidate differed in at most 1,260 pixels, the comparison baseline in 885. The route now names that frame for repeatable capture/replay checks; captures and reports stay in the NSP work folder's `regress/` directory.
 - In those runs' 140–200 s window, GPU p50 was 8.363 / 8.761 ms in the two baseline controls and 6.837 ms in the candidate. Attachment traffic and pass counts were essentially unchanged, with no deferred-unbind event logged in this route, so these observations do not establish a speedup from the fix.
 - The title, menus, keyboard naming, a new Easy game with auto-chips, save creation and save loading pass. The opening formation cinematic and ocean combat render ships, clouds, lighting, exhaust, shots and HUD correctly. Left/right movement and firing respond to input (`snap01_control_*`, `fps60_opt_*`).
@@ -37,6 +39,20 @@ Update 1.0.3 (v131072) over the base cartridge dump. PlatinumGames' engine, SDK 
 - **Resolved: serial geometry prefix scan.** A GPU profile of frame 4,600 in the 720p `fps60_seg` records 79 geometry sequences: 7.246 ms in their serial scans out of a 16.19 ms GPU span, with 521 encoders. The general parallel scan and combined compute encoder preserve ordered primitive compaction; native checks cover 129,032 groups and the translated geometry stages. The final 1080p route's frame 4,600 uses 284 encoders, 4.19 ms compute/copy and an 11.17 ms GPU span. The mode and camera timing differ, so these totals are supporting encoder evidence rather than an isolated same-frame speedup.
 - Initial upstream build validation (before the integration below): both standard NSP build workflows pass. The unsigned `NieRAutomata.ipa` is 11,712,290,740 bytes (about 10.9 GiB), with all 1,225 Mac/iOS shader libraries on chain `20fe3d62b9f6` and 331 recorded prewarm entries. Its four cuts and all three embedded main sections match the tested rewrite; all 3,551 archive entries pass CRC verification. The normal Mac executable is `010056B015FE8000_build/tools/dmhost`.
 - Work folder: `/Volumes/T7/nsp/NieR Automata The End of YoRHa Edition/010056B015FE8000-work`. `run/boot.py <name> <seconds> [KEY=VALUE ...]` runs the adjacent `010056B015FE8000_build/tools/dmhost` with bounded duration, control file `run/<name>.ctl`, logs and save data beside it.
+
+## Preparation cost of a recorded backlog
+
+**Controlled measurement, 2026-11-17:** the general host's [demand-time pipeline recording](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built), integrated from PR #2018 onto `b04c42b0`, on an M4 Pro (48 GB), macOS 27.2.1, Xcode 27.2, chain `5ea15f2c8240`. This measures the preparation cost of retaining unfinished work. It is not a naturally observed 400-pipeline backlog in this game, or an iPhone timing result: two bounded 125-second diagnostic collections, without render-pipeline prewarm and then with shader-only preparation and primed pulling bases, produced no hybrid demands on this Mac.
+
+The two preparation lists differ by the first 400 `R` rows of this profile's recorded seed list; all shader, compute and other render rows are identical. After the warmer's normalization those rows add 390 distinct render pipelines. Each measurement uses a fresh process, 14 preparation workers, no bundled archive, and its own copy of the same pulling-only device archive, so ordinary layout bases must be built. The system Metal cache is warm: both lists are primed once, then measured three times each in A/B, B/A, A/B order. The harness marked every timed run idle.
+
+| Preparation | Completed-only control | With the 400-row backlog |
+|---|---:|---:|
+| Median time (range) | 0.95 s (0.94–0.97) | 1.68 s (1.62–1.69) |
+| Render pipelines prepared | 248 | 638 |
+| Bases compiled / reused | 237 / 11 | 507 / 131 |
+
+The extra rows add **0.73 s** to median preparation and compile **270** more bases. This is work moved before gameplay, not compilation removed; the size of the increase depends on the demanded states, base sharing, archives, Metal cache and device. The manifests, per-run logs, measurement driver and `report.json` remain in `010056B015FE8000-work/regress/pr2018-backlog400/` beside the NSPs.
 
 ## 60 fps
 
@@ -81,8 +97,47 @@ The objects in `data000.cpk/shader.dat` decode as follows:
 - **M6 Mac, full 220-second opening-flight comparison against `3e77816c`:** baseline/candidate frame rate 59.1/59.5 fps, frame p99 17.58/18.26 ms, peak footprint 2,746/2,022 MB. These are this route's measurements; the M1 performance figures from PR #416 remain author-reported. Both runs reach the route target without crashes, hangs or new red diagnostics; 902 pipeline bases prebuild without failures. At frame 12,000, the candidate's preceding 300 frames contain 11,334 mesh draws and no draws waiting for a mesh pipeline.
 - **Screenshot review:** the raw harness flags the moving formation at 180 seconds (17 dHash bits, RGB difference 8.52). An earlier repeat of unchanged `df694e3` produced a larger RGB difference (16 bits, RGB 9.90). The reviewed images retain all three ships at different positions, with animated effects. This is classified as flight-motion variance; the raw warning is retained. The 100-second flight image does not trigger the comparison threshold.
 
+## Arena allocation policy (PR #2862)
+
+**Resolved; verified on the Mac.** The general host change shares unused arena block tails between submissions and retires completed, idle blocks. Shader argument caches borrow their arena buffers so old shaders cannot keep retired scratch allocated. See [Per-frame arena blocks made for every submission in flight](../../../docs/reference/memory.md#per-frame-arena-blocks-made-for-every-submission-in-flight).
+
+**Upstream evidence, not local measurements:** kencalx's NX18 [63c4e8d64](https://github.com/kencalx/NX18/commit/63c4e8d64df8fa6af3490e30c3e53022a0b3eb6d), Mac model unspecified, reports 26–28 blocks after frame-wide allocator sharing versus eight beforehand, with roughly 100–150 MB extra graphics memory. Idle retirement alone still held 30 blocks after 160 seconds. Sharing and retirement together made two blocks; two 300-second runs reported graphics memory 790–793 MB versus 856 MB at 122 seconds and footprint 2,296–2,299 MB versus 2,388 MB at 296 seconds. Median frame time was 16.67 ms and p95 below 17.1 ms on both sides.
+
+**Current-main validation (2026-11-17):** Apple M4 Pro, macOS 27.2.1, Xcode 27.2, game 1.0.3; full 220-second opening-flight route from the same fixed save, two runs per revision against `b04c42b0`. The first retained baseline still had a window-visibility warning after its automatic retry (59.4 fps, 2,418 MB peak); the primary memory comparison uses the unobscured second baseline and both unobscured candidate runs. A separate run that overlapped another game's measurement was interrupted and excluded.
+
+| Metric | Unobscured main baseline | Integrated candidate, two runs |
+|---|---|---|
+| Arena blocks at the final logged checkpoint | 24 (96 MB) | 2 (8 MB), both runs |
+| GPU allocated at frame 12,300 | 2,401 MB | 2,313 MB in run 1 (88 MB less); run 2's last memory line is frame 10,800, 2,311 MB |
+| Resident GPU resource bytes at frame 12,000 | 1,861 MB | 1,771 / 1,772 MB (90 / 89 MB less) |
+| Peak physical footprint | 2,316 MB | 2,228 / 2,225 MB (88 / 91 MB less) |
+| Frame rate / median frame time | 59.9 fps / 16.67 ms | 59.9 fps / 16.67 ms, both runs |
+| Frame-time p99 | 17.28 ms | 17.27 / 17.24 ms |
+
+No idle arena releases were needed in either candidate run: sharing prevented the block peak; the GPU fixture separately verifies idle release. The full regression exits 0 with `CHANGED` solely for flight motion at 180 seconds (RGB difference 8.34, below the 10.67 baseline-repeat variation). Screenshot review shows the same ships, water and effects at different positions. All runs reach the route target, all 1,225 shaders build unchanged, all 902 pipeline bases prebuild, and no crash, hang or new red kind appears. Conditional rendering remains the existing red warning.
+
+The allocator fixture passes 25/25/22/20 checks with encoding off/on, trimming off and sharing off, including pending and latest-writer fences, current-block residency, large-block counters and actual buffer release while its shader cache survives. An isolated mutation restoring the strong shader reference fails the release assertion; the working tree is unchanged by that check. Existing `t_args_gen` retains the address-rollover regressions and passes all 42 checks. No iPhone run. Isaac was skipped at the user's request.
+
+## Windowless Mac audio
+
+kenCalx diagnosed the problem in NX18 and Oliver Ames ported the change to nxnative. In NieR, Wwise keeps four blocks of 1,024 frames in its AudioOut queue. NX18's System Trace recorded runnable waits of up to 30–40 ms with the unspecified role and up to 1.6 ms with a foreground-role wrapper. Underruns occurred in four of five controls, and all three wrapper runs had zero. NX18 also reported a separate 300-second run with the foreground role that had zero underruns, compared with five in the preceding run. [NX18 change](https://github.com/kencalx/NX18/commit/7c3d6eb7135b27fefd0682d0e0d5adc52e550e9a) · [PR #2876](https://github.com/seedds/nxnative/pull/2876).
+
+The nxnative comparison used main at `a739027a` with PR #2876 and a variant that changed only the Mach role. On an M4 Pro with macOS 27.2.1 and Xcode 27.2, NieR 1.0.3 ran the opening-flight inputs from [smoke.tsv](smoke.tsv) for 300 seconds. Each run started from a fresh copy of the same save and pipeline archive and used real Core Audio with output muted.
+
+| Role | Sampled interactive priority | Underruns / zero-filled audio per 58,000 reported callbacks |
+|---|---:|---:|
+| Unspecified | 31 | 53 / 223.3 ms |
+| Default application | 46 | 0 / 0 ms |
+| Foreground application | 47 | 0 / 0 ms in both runs |
+
+The default-role run and its paired foreground run measured frame p95 of 17.11 and 16.94 ms over the 140–200 s flight window. One 840.5 ms frame in the foreground run occurred with audio callbacks continuing. The local runs sampled light load from the daemons named in the NX18 trace. The runnable wait measurements above come from NX18.
+
 ## Found on this game
 
+- **Resolved:** [SIGTERM during the first Metal initialization](../../../docs/reference/rendering.md#sigterm-during-the-first-metal-initialization). On an M4 Pro with macOS 27.2.1 and Xcode 27.2, early SIGTERM trapped in 16 of 24 windowless NieR 1.0.3 launches on `efd1bddd`, the parent of PR #2876. The fix exited cleanly in all 24 matched trials. A 100-second opening-flight run reached frame 5,977 and then shut down cleanly on SIGTERM.
+- [Underruns in a run without a window](../../../docs/reference/audio.md#underruns-in-a-run-without-a-window): [Mac audio comparison](#windowless-mac-audio).
+- [A pipeline a hybrid draw stood in for listed only once built](../../../docs/reference/shaders.md#a-pipeline-a-hybrid-draw-stood-in-for-listed-only-once-built): controlled [preparation-cost measurement](#preparation-cost-of-a-recorded-backlog); the unfinished gameplay backlog was not reproduced on this Mac.
+- [Per-frame arena blocks made for every submission in flight](../../../docs/reference/memory.md#per-frame-arena-blocks-made-for-every-submission-in-flight).
 - **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - [Size-delimited PlatinumGames shader objects](../../../docs/reference/shaders.md#size-delimited-platinumgames-shader-objects).
 - [Mapped-range flushes taken as uploads](../../../docs/reference/nvn-objects.md#mapped-range-flushes-taken-as-uploads-tex_flush_upload).

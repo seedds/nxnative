@@ -7,6 +7,8 @@
 #include "nvn.h"
 #include "nvn_tex.h"
 #include "dmsh_abi.h"   // the shader library ABI shared with the shader build (DMSH_SEPTEX_SLOT0)
+#include "nvn_accel.h"
+#include "nvn_raytrace.h"
 
 #define MAGIC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 #define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " exceeds the reserved size of " #H)
@@ -60,7 +62,7 @@ typedef struct { uint32_t magic, zero; samp_par p; } samp_t;                    
 _Static_assert(__builtin_offsetof(samp_t, p) == 8 && sizeof(samp_par) == 40, "sampler state from byte 8, with no padding");
 
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
-typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
+typedef struct prog_t { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 1: physical, 2: acquire, 3: owned logical receipt */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
@@ -145,7 +147,7 @@ enum {
     OPC_DRAW_IDX,          // prim, index type << 8 | count, base vertex, ibuf (u64)     → OP_DRAW_IDX, one instance
     OPC_DRAW_IDX_INST,     // prim, index type << 8 | count, base vertex, base instance, instances, ibuf
     OPC_DRAW_IDX_IND,      // prim, index type << 8 | ibuf, ind (u64)                    → OP_DRAW_IDX, indirect
-    OPC_VIEWPORTS,         // first, n << 8 | n × {x, y, w, h} (f32)                     → OP_VIEWPORTS
+    OPC_VIEWPORTS,         // first | n << 8 | (origin + 1) << 16; n × {x, y, w, h} (f32) → OP_VIEWPORTS
     OPC_STENCIL,           // face, which << 2, value << 4 (20 bits) | none              → OP_STENCIL
     OPC_HANDLES,           // op, stage << 6, first << 9, n << 17 | n × handle (u32)     → op (OP_BIND_TEX / _SAMP / _IMG), handles already moved to the bound pools
     OPC_BUFS,              // op, stage << 6, first << 9, n << 17 | n × {addr (u64), size (u32)} → n records of op (OP_BIND_UBO_SMALL / OP_BIND_SSBO)
@@ -171,9 +173,18 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_PATCH_SIZE, OP_LINE_WIDTH, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_PATCH_SIZE, OP_LINE_WIDTH,
+    OP_AS_BUILD, OP_AS_COPY, OP_BIND_AS, OP_RT_DISPATCH, OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
+typedef struct {
+    uint64_t raygen;
+    nvn_rt_table miss, hit, callable; // CPU descriptions snapshotted at recording.
+    uint32_t width, height, depth, _pad;
+} p_rt_dispatch;
+_Static_assert(sizeof(p_rt_dispatch) == 96 && offsetof(p_rt_dispatch, miss) == 8 &&
+               offsetof(p_rt_dispatch, hit) == 32 && offsetof(p_rt_dispatch, callable) == 56 &&
+               offsetof(p_rt_dispatch, width) == 80, "RT dispatch record layout");
 typedef struct {
     uint64_t ind, cnt, ibuf;
     int64_t stride;
@@ -184,7 +195,13 @@ typedef struct { int32_t index, mask; float rgba[4]; } p_clear_color;
 typedef struct { uint64_t h; NVNdrawTextureRegion d, s; } p_draw_tex;   // nvnCommandBufferDrawTexture: texture handle, destination (pixels) and source (texels) regions
 typedef struct { int32_t mode, pad; uint64_t addr; } p_render_cond;   // mode 0 / 1: SetRenderEnableConditional (render if the 64-bit counters at addr and addr + 16 are equal / not equal), 2 / 3: SetRenderEnable(true / false)
 typedef struct { float depth; int32_t depth_mask, stencil, stencil_mask; } p_clear_ds;
-typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x, y, w, h, near, far (near and far are overridden by DEPTH_RANGE)
+// Keep the old six-float viewport stride and record size: depth range is a separate
+// command, so the first viewport's unused near slot carries the recording origin.
+// Zero keeps legacy captures' device-origin behavior; otherwise 1 + NVNwindowOriginMode.
+typedef struct {
+    int32_t first, n;
+    union { float v[16][6]; struct { float xywh[4]; int32_t origin; }; };
+} p_viewports;
 typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { uint32_t on, index; } p_prim_restart;
@@ -233,6 +250,9 @@ static inline const p_bind_handles *bind_rec(uint32_t op, const void *a, p_bind_
 // Texture slots of a stage: 0-127 nvnCommandBufferBindTexture's (combined handles), 128-255 the separate texture binds. The driver keeps the two in tables of their own (c2 DMSH_C2_TEX + 8 r and
 // DMSH_C2_SEPTEX + 8 r, dmsh_abi.h), which the shaders' reflection names as these slots, so a game may bind both kinds in the same frame (Monster Hunter Rise: BindTexture slot 0 beside separate slots 0-4)
 #define NVN_SEPTEX_SLOT0 DMSH_SEPTEX_SLOT0
+// Resource bindings have their own ray-tracing table. Raster/compute programs
+// still have six shader slots; NVN2 task/mesh resources share hull/domain.
+enum { NVN_RESOURCE_STAGES = 7, NVN_RT_RESOURCE_STAGE = 6 };
 typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil;  // which: 0 value mask 1 write mask 2 reference value
 typedef struct { float factor, units, clamp; } p_poly_offset;
 enum { DM_PRIM_MESH_TASKS = 0x40 };   // p_draw.prim of nvnCommandBufferDrawMeshTasks (first task or mesh workgroup, count): no NVN primitive has this value
@@ -247,6 +267,7 @@ static inline const p_draw_idx *draw_idx_rec(const void *a, uint32_t size, p_dra
 typedef struct { int32_t x, y, z; uint64_t caller, ind; } p_dispatch;   // caller: return address of the game call site (to locate the dispatcher); ind != 0: DispatchComputeIndirect, the group counts are read by the GPU from that address
 typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
+#define DM_COPY_SNAPSHOT 0x20000000   // buffer-to-texture transfer with CPU bytes inline after the copy strides
 // A host-only bit in flags: DM_COPY_RESOLVE = this is a Downsample (multisample resolve), recorded as a texture copy so everything else treats it as one (reads the source, writes the destination)
 #define DM_COPY_RESOLVE 0x40000000
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address
@@ -347,14 +368,19 @@ int nvn_tex_level_range(const tex_t *t, unsigned level, unsigned layer, uint64_t
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for, from the host's copy of its control section. The keys belong to
 // the program's serial, so a copy of the NVNprogram the game made after SetShaders finds them. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
+int nvn_shader_key(const NVNshaderData *shader, uint8_t key[8]);   // standard content key, synchronous readable input (also used for RT module snapshots)
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 void mtl_prog_unpin(prog_t *p); // submit lock held: release a queued descriptor or saved binding
+int mtl_sub_stream_on(void);
+void mtl_prog_snapshot_pin(prog_t *copy, const prog_t *source); // retain the serial without resolving the program on the submit thread
 void mtl_prog_snapshot(prog_t *copy, const prog_t *source); // submit lock held: retain compiled shaders behind owned metadata
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
+typedef void (*nvn_buffer_range_fn)(uint64_t addr, uint64_t size);
+void nvn_buffer_write_ranges(uint64_t addr, uint64_t size, nvn_buffer_range_fn note);   // Snapshot physical destinations while a copy captures its storage
 // Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
 void nvn_serial_floor(uint64_t s);

@@ -1,0 +1,42 @@
+# Super Mario Bros. Wonder – Nintendo Switch 2 Edition (Switch 2 program 040015100B514001).
+# Nintendo EPD's engine (sead / agl), NVN2. The program mounts program 0's RomFS (010015100B514000) and the upgrade add-on itself; scripts/pack_nup.py packs it with that RomFS beside it.
+
+# ---- Identity ----
+title_id	040015100B514001
+program_id	040015100B514001
+
+# ---- App ----
+name	Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park
+ipa	SuperMarioBrosWonderNintendoSwitch2EditionMeetup.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v0	1.2.1	main=ec47e6f8846d2a7b6892e2682845c725	subsdk0=3fddebac0ad5c3f9e018dcadca9e55ed	sdk=31945f745022d0232d2562252641b3d3
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# code modules rewritten and loaded (load order; rtld is replaced by the host)
+modules	main subsdk0 sdk
+romfs_marker	System/RegionLangMask.txt
+zip_store	.bwav:.zs:.metallib
+
+# ---- Memory ----
+mem_alias	0x118000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Lib/=lib /Layout/=layout /Effect/=effect
+shader_note	Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park shaders
+
+# ---- Heap check on the Mac ----
+# the game asked for a 4.94 GB heap
+mem_reserve	0x278000000
+
+# heap check: 2026-11-14, the heap request did not fit, then heap 4.94 GB; set mem_reserve
+
+# address regions: 2026-11-14, no address regions (rewrite 4e7c0bdf9c75)

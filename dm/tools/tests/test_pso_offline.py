@@ -130,6 +130,34 @@ class Plan(unittest.TestCase):
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
+    def test_vertex_entry_is_the_name_the_reflection_gives_the_library(self):   # nvn_mtl.m side_entry, as shader_load and pre_desc take it
+        own = {'entry': 'main0', 'entry_z': 'main0_z'}
+        self.assertEqual([po.vertex_entry(own, z) for z in (False, True)], ['main0', 'main0_z'])   # no pulling library: the shader's own, in <key>_b
+        named = dict(own, pull={'entry': 'main0_p', 'entry_z': 'main0_zp', 'slot': 16, 'inputs': [0]})
+        self.assertEqual([po.vertex_entry(named, z) for z in (False, True)], ['main0_p', 'main0_zp'])
+        for pull in ({}, {'entry': 'main0'}, {'entry': '', 'entry_z': None}, {'entry_z': 7}):   # names none for the depth mode: the shader's own (today's libraries repeat it)
+            self.assertEqual(po.vertex_entry(dict(own, pull=pull), True), 'main0_z', pull)
+        self.assertEqual(po.vertex_entry(dict(own, pull={'entry_z': 'main0_zp'}), False), 'main0')
+        self.assertEqual(po.vertex_entry(dict(own, pull=True), False), 'main0')   # not a pulling library's record
+        self.assertEqual(po.vertex_entry({'entry': 'main0', 'pull': {'entry': 'main0_p', 'entry_z': 'main0_zp'}}, True), 'main0_p')   # no near = 0 entry of its own: `entry`, as the host
+        self.assertIsNone(po.vertex_entry({}, False))
+
+    def test_a_pulling_library_with_names_of_its_own(self):   # one compile unit holding a shader's entry points and its pulling ones cannot name both main0
+        vz = [('main0', False), ('main0_z', False)]
+        refl = {'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0}]}
+        self.shader('unit', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': [('main0_p', False), ('main0_zp', ('dm_border_off',))]})
+        self.shader('own', dict(refl, pull={'entry': 'main0', 'entry_z': 'main0_z'}), {'_b': vz, '_bp': vz})   # as dmsh_pull.variant names them today
+        self.shader('stale', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': vz})   # names an entry point its library does not hold: no base
+        self.shader('fs', {}, {'_b': [('main0', False)]})
+        pairs = [('unit', 'fs'), ('own', 'fs'), ('stale', 'fs')]
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
+        self.assertEqual(bases, [('unit_bp', 'main0_p', 'fs_b', 'main0'), ('own_bp', 'main0', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, True)
+        self.assertEqual(bases, [('unit_bp', 'main0_zp', 'fs_b', 'main0'), ('own_bp', 'main0_z', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        self.assertEqual(po.cut_entries(self.d, bases), {('unit_bp', 'main0_zp')})   # specialized, and not its library's first function: from a library of its own, under that name
+
     def test_border_constant_is_specialized_as_the_host_does(self):   # pre_fn: dm_border_off true, every other constant at its default; a pair with another constant stays on the device
         vz = [('main0', False), ('main0_z', False)]
         self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': [('main0', ('dm_border_off',))]})
@@ -256,10 +284,10 @@ class Compute(unittest.TestCase):
         self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], c, 5, 0)], [('c00001', 0, 3)])
 
 
-class Build(unittest.TestCase):
-    """main: one archive per architecture, made again only when its key changes; the stamp, rest_pairs.tsv and archive.tsv beside them"""
+class BuildCase(unittest.TestCase):
+    """A profile, its libraries and a fake metal-tt for main (Build, Prewarm)"""
     def setUp(self):
-        self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t)
+        self.t = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.t)
         self.lib = self.t / f'b-{CHAIN}'; self.lib.mkdir()
         for k, j, funcs in (('v', {'pull': {}, 'entry_z': 'main0_z'}, [('main0', False), ('main0_z', False)]), ('f', {}, [('main0', False)]), ('c', {}, [('main0', True)])):
             (self.lib / f'{k}_b.json').write_text(json.dumps(dict({'chain': CHAIN, 'entry': 'main0'}, **j)))
@@ -284,6 +312,9 @@ class Build(unittest.TestCase):
         with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
             return po.main(args)
 
+
+class Build(BuildCase):
+    """main: one archive per architecture, made again only when its key changes; the stamp, rest_pairs.tsv and archive.tsv beside them"""
     def test_large_script_memory_and_compatible_archive_key(self):
         # Share the two synthetic library files but give every base a distinct entry pair.
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(512)]
@@ -388,12 +419,12 @@ class Build(unittest.TestCase):
 
     def test_an_architectures_prewarm_pipelines_stay(self):
         # the NSP script links them into the output folder after a run (mac_prebake) and takes them away: a run that removed them gave the files the app packs new change times
-        self.main('--gpu', 'g18p,g17p')
+        self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p,g17p')
         for gpu in ('applegpu_g18p', 'applegpu_g17p'): (self.out / f'{gpu}-prewarm-00.mtl4a').write_bytes(b'bases'); (self.out / f'{gpu}-prewarm-00.keys').write_bytes(b'index')
         (self.out / 'prewarm.tsv').write_text('stamp\n')
-        self.main('--gpu', 'g18p,g17p')
+        self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p,g17p')
         self.assertEqual(sorted(p.name for p in self.out.glob('*-prewarm-*.mtl4a')), ['applegpu_g17p-prewarm-00.mtl4a', 'applegpu_g18p-prewarm-00.mtl4a'])
-        self.main('--gpu', 'g18p')   # an architecture no longer asked for goes with its prewarm pipelines
+        self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p')   # an architecture no longer asked for goes with its prewarm pipelines
         self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g18p-prewarm-00.mtl4a', 'applegpu_g18p.mtl4a'])
 
     def test_chain_move_reuses_binary_and_refreshes_metadata_for_both_platforms(self):
@@ -490,7 +521,9 @@ class Build(unittest.TestCase):
         profiles = ('01008CF01BAAC000', '010089C01E9CA000', '010056B015FE8000', '01007BB017812000',
                     '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000',
                     '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000',
-                    '01006A800016E000')   # Super Smash Bros. Ultimate: a player's start log (its note)
+                    '01006A800016E000',  # Super Smash Bros. Ultimate: a player's start log (its note)
+                    '0400E88025B1A000',  # Star Fox: a Mac app's start log (its note)
+                    '01005CA01580E000')  # Persona 5 Royal: an iPhone app's start log (its note)
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')
@@ -758,18 +791,223 @@ class Build(unittest.TestCase):
         self.assertFalse({'translate-0001', 'a.airp'} & left)
 
 
+class Prewarm(BuildCase):
+    """--prewarm-host: the host's prebuild tool makes the prewarm lists' R and M rows here (a fake host below, writing what the bundle form writes), from the profile's tables without the
+    pair lists; metal-tt compiles each period's script for each --gpu as <arch>-prewarm-<NN>.mtl4a beside the period's index; both cached; a failure leaves the archive as it is"""
+    MAC = 'applegpu_g16g'
+
+    def setUp(self):
+        super().setUp()
+        (self.prof / 'shader_map.tsv').write_text('# map\n')
+        (self.prof / 'c1_full.tsv').write_text('c1\n')
+        (self.prof / 'pso_manifest.tsv').write_text('# list\nS\tv\t0\nR\tr1\nC\tc_b\nM\t-\tm1\nR\tr1\nR\tr2\n')
+        self.host = self.t / 'dmhost'; self.host.write_bytes(b'host 1')
+        self.vbp = hashlib.sha256((self.lib / 'v_bp.metallib').read_bytes()).hexdigest().upper()
+        self.host_runs, self.tt, self.periods, self.host_exit, self.tt_fail = [], [], 2, 0, ()
+
+    def fake_run(self, cmd, **kw):
+        cmd = [str(c) for c in cmd]
+        if cmd == ['sysctl', '-n', 'kern.osversion']: return subprocess.CompletedProcess(cmd, 0, '25A1\n', '')
+        if cmd == [str(self.host)]:   # the bundle form: per period an archive for this Mac, its index and its script; the stamp
+            env = kw['env']; self.host_runs.append(env); made = Path(env['DM_PSO_PREBUILD_OUT']); made.mkdir(parents=True, exist_ok=True)
+            for k in range(self.periods if not self.host_exit else 0):
+                (made / f'{self.MAC}-prewarm-{k:02d}.mtl4a').write_bytes(b'mac'); (made / f'{self.MAC}-prewarm-{k:02d}.keys').write_bytes(b'DMPSOIX2' + bytes([k]))
+                rp = [{'vertex_function_descriptor': f'fnd:F{k}{i}', 'label': f'p{k}{i}'} for i in range(3)]
+                (made / f'prewarm-{k:02d}.mtl4-json').write_text(json.dumps({'libraries': [{'label': self.vbp, 'path': '_Path_not_available_for_lib_from_data_with_UUID_' + self.vbp}],
+                    'function_descriptors': {'library_function_descriptors': [{'label': f'F{k}{i}', 'name': 'main0', 'library': self.vbp} for i in range(3)]},
+                    'pipeline_descriptors': {'render_pipeline_descriptors': rp, 'mesh_render_pipeline_descriptors': [{'mesh_function_descriptor': f'fnd:F{k}0', 'label': f'm{k}'}]}}))
+            if not self.host_exit: (made / 'prewarm.tsv').write_text('chain\tX\n')
+            print('[dm] [nvn-mtl] pipeline prebuild: the prewarm lists\' 3 lines in 1.0 s: 2 render pipelines', file=kw['stdout'])
+            return subprocess.CompletedProcess(cmd, self.host_exit)
+        if 'metal-tt' in cmd and '-ios-version-min' in cmd and 'pipelines.mtl4-json' in cmd[8]:
+            d = json.loads(Path(cmd[8]).read_text()); labels = [x['label'] for k in po.PIPELINE_KINDS for x in d['pipeline_descriptors'].get(k, [])]
+            self.tt.append((cmd[5], labels)); self.assertTrue(Path(d['libraries'][0]['path']).is_file())   # the library found by its bytes
+            if set(labels) & set(self.tt_fail): return subprocess.CompletedProcess(cmd, 1)
+        if 'metal-pack' in cmd: self.tt.append(('pack', len(cmd) - 8)); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'packed'); return subprocess.CompletedProcess(cmd, 0)
+        return super().fake_run(cmd, **kw)
+
+    def main(self, *extra):
+        return super().main('--os-min', '27.0', *extra)
+
+    def test_rows(self):
+        self.assertEqual(po.prewarm_rows([self.prof / 'pso_manifest.tsv', self.t / 'none.tsv']), 'R\tr1\nM\t-\tm1\nR\tr2\n')
+
+    def test_cached_publication_preserves_ipa_reuse_metadata(self):
+        for copy_only in (False, True):
+            with self.subTest(copy_only=copy_only), contextlib.ExitStack() as stack:
+                if copy_only: stack.enter_context(mock.patch.object(po.os, 'link', side_effect=OSError('no hard links')))
+                self.main('--prewarm-host', str(self.host))
+                def state():
+                    return {p.name: (p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns, p.stat().st_ino) for p in self.out.iterdir()}
+                before = state()
+                self.main('--prewarm-host', str(self.host))
+                self.assertEqual(state(), before)
+            shutil.rmtree(self.out)
+
+    def test_prewarm_only_bundle_keeps_cached_files_without_pair_archives(self):
+        (self.prof / 'shader_pairs.tsv').write_text('# no pulling bases\n')
+        self.main('--no-compute', '--prewarm-host', str(self.host))
+        archive = self.out / 'applegpu_g18p-prewarm-00.mtl4a'; before = archive.stat()
+        self.main('--no-compute', '--prewarm-host', str(self.host))
+        self.assertEqual((archive.stat().st_ino, archive.stat().st_ctime_ns), (before.st_ino, before.st_ctime_ns))
+
+    def test_files_beside_the_archive_and_reuse(self):
+        with mock.patch.dict(os.environ, DM_SAVE='/x/save', DM_PSO_PREBUILD_THREADS='3'):
+            self.assertEqual(self.main('--gpu', 'g18p,g17p', '--prewarm-host', str(self.host)), 0)
+        env = self.host_runs[0]
+        self.assertEqual((env['DM_PSO_PREBUILD'], env['DM_PSO_BUNDLE'], env['DM_PSO_PREBUILD_DEPTH'], env['DM_MSL_DIR']), ('tool', 'off', 'zero', str(self.t)))
+        self.assertEqual(Path(env['DM_PSO_MANIFEST']).read_text(), 'R\tr1\nM\t-\tm1\nR\tr2\n')   # the M rows' mesh pipelines too
+        self.assertEqual(sorted(p.name for p in Path(env['DM_NVN_SHMAP']).parent.iterdir()), ['c1_full.tsv', 'shader_map.tsv'])   # no pair list: those are the archive's
+        self.assertFalse(any(k in env for k in ('DM_SAVE', 'DM_PSO_USER')))
+        self.assertEqual(env.get('DM_PSO_PREBUILD_THREADS'), '3')   # passed on: fewer workers on a small Mac
+        names = sorted(p.name for p in self.out.iterdir())
+        for arch in ('applegpu_g17p', 'applegpu_g18p'):
+            for k in range(2):
+                self.assertIn(f'{arch}-prewarm-{k:02d}.mtl4a', names)
+                self.assertEqual((self.out / f'{arch}-prewarm-{k:02d}.keys').read_bytes(), b'DMPSOIX2' + bytes([k]))   # this Mac's index of the same period
+        self.assertEqual((self.out / 'applegpu_g18p-prewarm-01.mtl4a').read_bytes(), b'archive applegpu_g18p')
+        self.assertIn('applegpu_g18p.mtl4a', names); self.assertIn('prewarm.tsv', names)
+        self.assertEqual(sorted(a for a, _ in self.tt), ['applegpu_g17p'] * 2 + ['applegpu_g18p'] * 2)
+        self.assertEqual(self.tt[0][1], ['p00', 'p01', 'p02', 'm0'])
+        self.assertIn('prewarm\t4 files', (self.out / 'archive.tsv').read_text())
+        self.host_runs.clear(); self.tt.clear()
+        self.main('--gpu', 'g18p,g17p', '--prewarm-host', str(self.host))
+        self.assertEqual((self.host_runs, self.tt), ([], []))   # inputs unchanged: nothing runs
+        self.main('--gpu', 'g18p', '--prewarm-host', str(self.host))
+        self.assertEqual((self.host_runs, self.tt), ([], []))
+        self.assertFalse(list(self.out.glob('applegpu_g17p*')))   # a GPU no longer asked for
+        (self.prof / 'pso_manifest.tsv').write_text('R\tr3\n')
+        self.main('--gpu', 'g18p', '--prewarm-host', str(self.host))
+        self.assertEqual((len(self.host_runs), len(self.tt)), (1, 0))   # new rows: the host runs again; its scripts are the same bytes here, so metal-tt has nothing new
+        self.main('--gpu', 'g18p')
+        self.assertFalse(list(self.out.glob('*-prewarm-*')) + list(self.out.glob('prewarm.tsv')))   # without a host: none, not stale ones
+        self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
+
+    def test_groups_and_a_pipeline_metal_tt_cannot_compile(self):
+        self.periods, self.tt_fail = 1, ('p01',)
+        self.assertEqual(self.main('--batch-size', '2', '--prewarm-host', str(self.host)), 0)
+        compiled = [x for x in self.tt if x[0] != 'pack']
+        self.assertEqual(compiled[0], ('applegpu_g18p', ['p00', 'p01']))
+        self.assertIn(('applegpu_g18p', ['p00']), compiled); self.assertIn(('applegpu_g18p', ['p02', 'm0']), compiled)
+        self.assertEqual(self.tt[-1], ('pack', 2))
+        self.assertEqual((self.out / 'applegpu_g18p-prewarm-00.mtl4a').read_bytes(), b'packed')
+        self.assertIn('1 pipelines left out', (self.out / 'archive.tsv').read_text())
+        self.assertFalse((self.out / 'applegpu_g18p-prewarm-00.keys').exists())   # a complete index must not claim the omitted pipeline, shadowing its device capture
+        self.tt.clear()
+        self.main('--batch-size', '2', '--prewarm-host', str(self.host))
+        self.assertEqual(self.tt, [])
+        self.assertFalse((self.out / 'applegpu_g18p-prewarm-00.keys').exists())   # the cached partial archive has the same contract
+
+    def test_library_changes_invalidate_host_cache_without_a_new_stamp(self):
+        args = (self.host, 'R\tr1\n', [self.prof / 'shader_map.tsv'], self.lib, False, 'OS')
+        key = po.prewarm_host_key(*args)
+        lib = self.lib / 'v_bp.metallib'; st = lib.stat()
+        lib.write_bytes(metallib([('main0', False), ('changed', False)]))
+        os.utime(lib, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertNotEqual(po.prewarm_host_key(*args), key)
+
+    def test_relative_host_and_child_paths(self):
+        with contextlib.chdir(self.t):
+            self.assertEqual(self.main('--msl', self.lib.name, '--out', 'out', '--work', 'work', '--prewarm-host', 'dmhost'), 0)
+        env = self.host_runs[0]
+        for name in ('DM_PSO_ARCHIVE', 'DM_PSO_PREBUILD_OUT', 'DM_PSO_MANIFEST', 'DM_MSL_DIR', 'DM_NVN_SHMAP'):
+            self.assertTrue(Path(env[name]).is_absolute(), name)
+
+    def test_host_launch_error_keeps_pair_archive(self):
+        runner = self.fake_run
+        def fail(cmd, **kw):
+            if list(map(str, cmd)) == [str(self.host)]: raise OSError('host cannot execute')
+            return runner(cmd, **kw)
+        with mock.patch.object(self, 'fake_run', fail):
+            self.assertEqual(self.main('--prewarm-host', str(self.host)), 0)
+        self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
+        self.assertFalse(list(self.out.glob('*-prewarm-*')))
+        self.assertIn('prewarm\tnone (failed)', (self.out / 'archive.tsv').read_text())
+
+    def test_pair_fast_path_still_builds_refreshes_repairs_and_removes_prewarm(self):
+        po.shader_lib.pack(str(self.lib))
+        self.main()   # populate the pair archive's image fast path without a prewarm host
+        with mock.patch.object(po, 'plan', side_effect=AssertionError('pair archive must stay on its fast path')):
+            self.main('--prewarm-host', str(self.host))
+            self.assertEqual(len(self.host_runs), 1)
+            self.host_runs.clear(); self.tt.clear()
+            (self.prof / 'pso_manifest.tsv').write_text('C\tc_b\nR\tr3\nM\t-\tm2\n')
+            self.main('--prewarm-host', str(self.host))
+            self.assertEqual(len(self.host_runs), 1)
+            archive = self.out / 'applegpu_g18p-prewarm-00.mtl4a'; archive.unlink()
+            self.main('--prewarm-host', str(self.host))
+            self.assertTrue(archive.is_file())
+            self.assertEqual(self.tt, [])   # repaired from the prewarm cache
+            self.main()
+            self.assertFalse(list(self.out.glob('*-prewarm-*')) + list(self.out.glob('prewarm.tsv')))
+
+    def test_mac_pair_step_preserves_separately_baked_prewarm(self):
+        self.main('--platform', 'macos')
+        archive = self.out / 'applegpu_g18p-prewarm-00.mtl4a'; archive.write_bytes(b'mac prewarm')
+        keys = archive.with_suffix('.keys'); keys.write_bytes(b'index')
+        (self.out / 'prewarm.tsv').write_text('mac stamp\n')
+        self.main('--platform', 'macos')
+        self.assertEqual(archive.read_bytes(), b'mac prewarm')
+        self.assertEqual(keys.read_bytes(), b'index')
+
+    def test_a_failed_host_leaves_the_archive(self):
+        self.out.mkdir(); (self.out / 'applegpu_g18p-prewarm-07.mtl4a').write_bytes(b'old')
+        self.host_exit = 1
+        out = io.StringIO()
+        with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+            r = po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--prewarm-host', str(self.host)])
+        self.assertEqual(r, 0)
+        self.assertIn('[RED] pso_offline: prewarm: the host\'s prebuild tool made 0 files', out.getvalue())
+        self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g18p.mtl4a'])
+        self.assertIn('prewarm\tnone (failed)', (self.out / 'archive.tsv').read_text())
+        self.host_exit = 0; self.host_runs.clear()
+        self.main('--prewarm-host', str(self.host))
+        self.assertEqual(len(self.host_runs), 1)   # nothing kept from the failed run
+        self.assertTrue((self.out / 'applegpu_g18p-prewarm-01.mtl4a').is_file())
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs Xcode and Metal')
+    def test_metal_tt_takes_a_mesh_pipeline(self):   # the M rows: a native mesh pipeline descriptor, as the host's script writes it, compiles for an iPhone's GPU
+        src = ('#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nusing M = metal::mesh<V, void, 3, 1, topology::triangle>;\n'
+               '[[mesh]] void m0(M out, uint t [[thread_index_in_threadgroup]]) { if (t == 0) { out.set_primitive_count(1); for (uint i = 0; i < 3; i++) { V v; '
+               'v.p = float4(float(i), 0, 0, 1); out.set_vertex(i, v); out.set_index(i, i); } } }\nfragment float4 f0() { return float4(1); }\n')
+        (self.t / 'm.metal').write_text(src)
+        r = subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', str(self.t / 'm.metal'), '-o', str(self.t / 'm.air')], capture_output=True, text=True)
+        if r.returncode: self.skipTest('no Metal compiler: ' + r.stderr[-200:])
+        subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metallib', str(self.t / 'm.air'), '-o', str(self.t / 'm.metallib')], check=True, capture_output=True)
+        if subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal-tt', '-version'], capture_output=True).returncode: self.skipTest('no metal-tt')
+        h = hashlib.sha256((self.t / 'm.metallib').read_bytes()).hexdigest().upper()
+        cfg = {'libraries': [{'label': h, 'path': str(self.t / 'm.metallib')}],
+               'function_descriptors': {'library_function_descriptors': [{'label': 'M', 'name': 'm0', 'library': h}, {'label': 'F', 'name': 'f0', 'library': h}]},
+               'pipeline_descriptors': {'mesh_render_pipeline_descriptors': [{'mesh_function_descriptor': 'fnd:M', 'fragment_function_descriptor': 'fnd:F',
+                                                                              'max_total_threads_per_mesh_threadgroup': 32, 'color_attachments': [{'pixel_format': 'RGBA8Unorm'}]}]}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(po.compile_script(cfg, self.t / 'm.mtl4a', self.t / 'mw', 'applegpu_g18p', 'ios', '27.0', 1000), [])
+        self.assertGreater((self.t / 'm.mtl4a').stat().st_size, 0)
+
+    def test_a_missing_host_is_a_warning(self):
+        out = io.StringIO()
+        with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+            self.assertEqual(po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0',
+                                      '--prewarm-host', str(self.t / 'nothing')]), 0)
+        self.assertIn('[RED] pso_offline: prewarm: no host at', out.getvalue())
+
+
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
 
-    def step(self, python):
+    def step(self, python, host_game=None, make_exit=0, **extra):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
         i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
         j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'bin').mkdir(); stub = Path(d) / 'bin/python3'; stub.write_text('#!/bin/sh\n' + python); stub.chmod(0o755)
             (Path(d) / 'shader_pairs.tsv').write_text('v\tf\n')
-            env = dict(os.environ, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn')
-            script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\necho went on\n'
+            if host_game:
+                host = Path(d) / f'dm/host/gen/{host_game}/dmhost'; host.parent.mkdir(parents=True); host.write_text('#!/bin/sh\nexit 0\n'); host.chmod(0o755)
+                make = Path(d) / 'bin/make'; make.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$W/make.args"\nexit ' + str(make_exit) + '\n'); make.chmod(0o755)
+            env = dict({k: v for k, v in os.environ.items() if k != 'DM_PSO_HOST'}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            if host_game: env['DM'] = str(Path(d) / 'dm')
+            script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\n[ ! -f "$W/make.args" ] || cat "$W/make.args"\necho went on\n'
             return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
 
     def test_failed_archive_is_a_warning(self):
@@ -777,9 +1015,25 @@ class IpaFallback(unittest.TestCase):
         self.assertIn('[RED] pipeline archive: pso_offline.py failed', out); self.assertIn('PSO=[]', out); self.assertNotIn('folder', out); self.assertIn('went on', out)
         self.assertNotIn('FAIL', out)
 
+    def test_prewarm_host(self):   # DM_PSO_HOST names the Mac host the prewarm files are made with; none, or no host of this game in the tree: none, with a line saying how
+        out = self.step('echo "ARGS $*"; exit 0\n', DM_PSO_HOST='/x/dmhost')
+        self.assertIn('--prewarm-host /x/dmhost', out); self.assertNotIn('no Mac host', out)
+        for setting in ('none', None):
+            out = self.step('echo "ARGS $*"; exit 0\n', DM_PSO_HOST=setting) if setting else self.step('echo "ARGS $*"; exit 0\n')
+            self.assertNotIn('--prewarm-host', out); self.assertIn('prewarm pipelines: no Mac host of this game', out); self.assertNotIn('FAIL', out)
+
     def test_made_archive_goes_into_the_app(self):
         out = self.step('mkdir -p "$W/build/ios/pso/bundle"; exit 0\n')
         self.assertNotIn('[RED]', out); self.assertIn('/build/ios/pso/bundle]', out); self.assertIn('folder', out)
+
+    def test_current_per_game_host_is_discovered_without_the_old_stamp(self):
+        out = self.step('echo "ARGS $*"; exit 0\n', host_game='G')
+        self.assertIn('/dm/host/gen/G/dmhost', out); self.assertIn('GAME=G gen/G/dmhost', out)
+        self.assertNotIn('no Mac host', out)
+        out = self.step('echo "ARGS $*"; exit 0\n', host_game='other')
+        self.assertNotIn('--prewarm-host', out); self.assertIn('no Mac host', out)
+        out = self.step('mkdir -p "$W/build/ios/pso/bundle"; exit 0\n', host_game='G', make_exit=1)
+        self.assertIn('prewarm pipelines: make', out); self.assertNotIn('--prewarm-host', out); self.assertIn('folder', out)
 
 
 class Default(unittest.TestCase):

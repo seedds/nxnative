@@ -164,7 +164,7 @@ static int g_geo_split_depth;   // > 0 while geo_split draws its runs: they skip
 static int geo_sync_cpu(int *drained) {
     if (*drained) return 1;
     mdi_wait();
-    if (g_mdi_ev.signaledValue < g_mdi_v) return 0;
+    if (g_read_ev.signaledValue < g_read_v) return 0;
     memset(g_vconv, 0, sizeof g_vconv); *drained = 1;
     return 1;
 }
@@ -293,14 +293,14 @@ static int geo_color_omit(void) {
 static int geo_color_omit_(void) {
     // Removing an inactive color must not change raster bounds, sample count or
     // layer selection. Keep the general case on the original attachment path.
-    id<MTLTexture> d = tex_mtl(R.rt.depth);
+    id<MTLTexture> d = tex_mtl_replay(R.rt.depth);
     if (!d || d.textureType != MTLTextureType2D || !mtl_fmt_depth(d.pixelFormat) || d.pixelFormat == MTLPixelFormatStencil8) return 0;
     NSUInteger dl = R.rt.has_dview && R.rt.dview.set_levels ? R.rt.dview.base_level : 0;
     NSUInteger w = mip_extent(d.width, dl), h = mip_extent(d.height, dl);
     int n = 0;
     for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) {
         if (R.clear_c[i] || ((S.chmask.mask >> (4 * i)) & 15)) return 0;
-        id<MTLTexture> c = tex_mtl(R.rt.color[i]);
+        id<MTLTexture> c = tex_mtl_replay(R.rt.color[i]);
         NSUInteger l = R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0;
         if (!c || c.textureType != MTLTextureType2D || c.sampleCount != d.sampleCount || mip_extent(c.width, l) != w || mip_extent(c.height, l) != h) return 0;
         n++;
@@ -348,21 +348,24 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
 // program's own vertex and fragment stages draw the kept primitives. Instanced or multi-invocation draws, vertex shaders with
 // storage writes (they would run twice) and transform feedback keep the full kernel and its reader. So does a passthrough shader that writes the layer (its reader has it, the
 // vertex shader does not): Mario Tennis Fever's atmosphere table (d9c3a99828b4f39f, one 8x8 plane of a 64-plane 3D texture per draw) and its shadow map went to layer 0, and the
-// other planes stayed zero: a blue wash over the whole scene. DM_NVN_GEO_LEAN=0 turns it off.
+// other planes stayed zero: a blue wash over the whole scene. A VS viewport mask also requires the full path: only the final
+// VTG stage controls the mask, so rerunning the VS raster entry would incorrectly clip a primitive the GS kept. DM_NVN_GEO_LEAN=0 turns it off.
 static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int instances) {
     static int lean_on = -1; if (lean_on < 0) { const char *e = getenv("DM_NVN_GEO_LEAN"); lean_on = !(e && !strcmp(e, "0")); }
     NvShader *vs = pr->sh[0], *base = pr->sh[2];
-    if (!lean_on || instances > 1 || (gs && gs->geo_invocations != 1) || base->geo_invocations != 1 || !vs || vs->discard_fn || S.tf_on || !pr->sh[1] || !(topology == 0 || topology == 1 || topology == 3)) return NULL;
-    if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([[[NSString stringWithUTF8String:base->key] substringToIndex:16] stringByAppendingString:@"_bgv"], 0); }
+    if (!lean_on || instances > 1 || (gs && gs->geo_invocations != 1) || base->geo_invocations != 1 || !vs || vs->discard_fn || vs->viewport_mask || S.tf_on || !pr->sh[1] || !(topology == 0 || topology == 1 || topology == 3)) return NULL;
+    if (!(base->geo_bg_tried & 0x80)) {
+        base->geo_bg_tried |= 0x80;
+        base->geo_bgv_v = shader_get([NSString stringWithFormat:@"%.16s_bgv", base->key], 0);
+    }
     if (base->geo_bgv_v && base->geo_bgv_v->layer_out) return NULL;
     if (!(base->geo_lean_tried >> topology & 1)) {
         base->geo_lean_tried |= 1 << topology;
-        NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
-        base->geo_lean_v[topology] = shader_get([key stringByAppendingFormat:@"_bl%d", topology], 2);
+        base->geo_lean_v[topology] = shader_get([NSString stringWithFormat:@"%.16s_bl%d", base->key, topology], 2);
     }
     NvShader *lean = base->geo_lean_v[topology];
     if (!lean || !lean->geo_slot || lean->geo_vertices != (uint32_t)nvn_geo_width(topology) || lean->geo_invocations != 1) return NULL;
-    if (!lean->geo_pso && !lean->geo_pso_failed) { NSError *e = nil; lean->geo_pso = [g_dev newComputePipelineStateWithFunction:fn_dev(lean->fn) error:&e];
+    if (!lean->geo_pso && !lean->geo_pso_failed) { NSError *e = nil; lean->geo_pso = dev_cps(fn_dev(lean->fn), &e);
         if (!lean->geo_pso || lean->geo_pso.maxTotalThreadsPerThreadgroup < 32) { lean->geo_pso = nil; lean->geo_pso_failed = 1; MLOG("[RED] lean geometry compute %s: %s; the full kernel draws", lean->key, e ? e.localizedDescription.UTF8String : "no 32-thread group"); } }
     if (!lean->geo_pso) return NULL;
     if (!g_geo_lean_k[2]) {
@@ -373,7 +376,7 @@ static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int insta
         const char *names[] = {"geo_lean_cull", "geo_lean_index", "geo_lean_tri"};
         for (int i = 0; i < 3 && lib; i++) {
             id<MTLFunction> fn = [lib newFunctionWithName:@(names[i])];
-            g_geo_lean_k[i] = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&error] : nil;
+            g_geo_lean_k[i] = fn ? dev_cps(fn, &error) : nil;
         }
         if (!g_geo_lean_k[0] || !g_geo_lean_k[1] || !g_geo_lean_k[2]) {
             failed = 1; g_geo_lean_k[0] = g_geo_lean_k[1] = g_geo_lean_k[2] = nil;
@@ -477,7 +480,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
         const char *vk = vs->key, *fk = fs ? fs->key : "-", *gk = g_geo_mesh.lean->key; pso_key kk = k;
         dispatch_async(pp_bg_queue(), ^{
             NSError *e = nil; uint64_t t0 = bp_now();
-            id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
+            id<MTLRenderPipelineState> p = dev_mps(m, &e);
             MLOG("%sgeometry mesh pipeline: vertex %s fragment %s kernel %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", vk, fk, gk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
             os_unfair_lock_lock(&g_pso_mesh_lock); hm_put_id(&g_pso_mesh, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mesh_lock);
         });
@@ -613,7 +616,7 @@ static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thre
 // Noted for Metal 4 (fn4_note) so that such a pipeline goes through the compiler and the archive like the others
 static id<MTLFunction> mtk_nop_fragment(void) {
     static id<MTLFunction> fn; static dispatch_once_t once;
-    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = [g_dev newLibraryWithSource:@"fragment void dm_mesh_nop() {}" options:nil error:&e];
+    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = dev_lib(@"fragment void dm_mesh_nop() {}", &e);
         fn = fn4_note([l newFunctionWithName:@"dm_mesh_nop"], l, @"dm_mesh_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not compile: %s", e.localizedDescription.UTF8String); });
     return fn;
 }
@@ -658,7 +661,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
-    id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:error];
+    id<MTLRenderPipelineState> ps = dev_mps(m, error);
     if (ps) { if (m4) { g_mtk_built++; arch_harvest(m4, 0); } else g_mtk_dev++; }
     return ps;
 }
@@ -922,10 +925,13 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     if (cp_on()) { if (drained) g_cp_geo_waited++; else g_cp_geo_safe++; }
     // The kernel for this topology and the reader, looked up by name once per geometry shader: building the names on every draw took about 40 % of geo_prep's time
     // in Donkey Kong Bananza (an NSString format, a substring and two dictionary lookups a draw, at hundreds of geometry draws a frame)
-    if (!(base->geo_bg_tried >> topology & 1) || !(base->geo_bg_tried & 0x80)) {
-        NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
-        if (!(base->geo_bg_tried >> topology & 1)) { base->geo_bg_tried |= 1 << topology; base->geo_bg_v[topology] = shader_get([key stringByAppendingFormat:@"_bg%d", topology], 2); }
-        if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([key stringByAppendingString:@"_bgv"], 0); }
+    if (!(base->geo_bg_tried >> topology & 1)) {
+        base->geo_bg_tried |= 1 << topology;
+        base->geo_bg_v[topology] = shader_get([NSString stringWithFormat:@"%.16s_bg%d", base->key, topology], 2);
+    }
+    if (!(base->geo_bg_tried & 0x80)) {
+        base->geo_bg_tried |= 0x80;
+        base->geo_bgv_v = shader_get([NSString stringWithFormat:@"%.16s_bgv", base->key], 0);
     }
     NvShader *gs = base->geo_bg_v[topology], *reader = base->geo_bgv_v;
     if (!gs || !reader) return 0;
@@ -934,7 +940,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     if (lean) gs = lean;
     uint32_t record = lean ? gs->geo_words : GEO_CAPTURE_WORDS;
     id<MTLRenderPipelineState> capture = geo_capture_pso(vs); if (!capture) return 0;
-    if (!gs->geo_pso) { NSError *e = nil; gs->geo_pso = [g_dev newComputePipelineStateWithFunction:fn_dev(gs->fn) error:&e];   // fn_dev: a kernel that samples has the border corrections' constant (kept)
+    if (!gs->geo_pso) { NSError *e = nil; gs->geo_pso = dev_cps(fn_dev(gs->fn), &e);   // fn_dev: a kernel that samples has the border corrections' constant (kept)
         if (!gs->geo_pso) { MLOG("[RED] geometry compute %s: %s", gs->key, e.localizedDescription.UTF8String); return 0; } }
     if (gs->geo_pso.maxTotalThreadsPerThreadgroup < 32) { MLOG("[RED] geometry kernel cannot run a 32-thread group"); return 0; }
 
@@ -1069,7 +1075,7 @@ static id<MTLComputePipelineState> __strong *geo_pack_psos(void) {
     static id<MTLComputePipelineState> pack[5];
     if (!pack[4]) { NSError *e = nil; id<MTLLibrary> lib = host_lib("geo_pack", &e);
         const char *fn[5] = {"geo_pack_count", "geo_pack_scan", "geo_pack_write", "geo_pack_small", "geo_pack_scan_legacy"};
-        for (int i = 0; i < 5 && lib; i++) if (!(pack[i] = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@(fn[i])] error:&e])) break;
+        for (int i = 0; i < 5 && lib; i++) if (!(pack[i] = dev_cps([lib newFunctionWithName:@(fn[i])], &e))) break;
         if (!pack[4]) { for (int i = 0; i < 5; i++) pack[i] = nil; MLOG("[RED] geometry index compaction: %s", e.localizedDescription.UTF8String); return NULL; } }
     return pack;
 }
@@ -1082,14 +1088,17 @@ static id<MTLComputePipelineState> __strong *geo_pack_psos(void) {
 static uint64_t geo_gpu_kernels(NvProg *pr, NvShader *__strong *gs_out, NvShader *__strong *reader_out) {
     NvShader *base = pr->sh[2]; int topology = nvn_geo_topology(4);
     if (!base || !base->geo_vertices || topology < 0) return 0;
-    if (!(base->geo_bg_tried >> topology & 1) || !(base->geo_bg_tried & 0x80)) {
-        NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
-        if (!(base->geo_bg_tried >> topology & 1)) { base->geo_bg_tried |= 1 << topology; base->geo_bg_v[topology] = shader_get([key stringByAppendingFormat:@"_bg%d", topology], 2); }
-        if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([key stringByAppendingString:@"_bgv"], 0); }
+    if (!(base->geo_bg_tried >> topology & 1)) {
+        base->geo_bg_tried |= 1 << topology;
+        base->geo_bg_v[topology] = shader_get([NSString stringWithFormat:@"%.16s_bg%d", base->key, topology], 2);
+    }
+    if (!(base->geo_bg_tried & 0x80)) {
+        base->geo_bg_tried |= 0x80;
+        base->geo_bgv_v = shader_get([NSString stringWithFormat:@"%.16s_bgv", base->key], 0);
     }
     NvShader *gs = base->geo_bg_v[topology], *reader = base->geo_bgv_v;
     if (!gs || !reader) return 0;
-    if (!gs->geo_pso) { NSError *e = nil; gs->geo_pso = [g_dev newComputePipelineStateWithFunction:fn_dev(gs->fn) error:&e];
+    if (!gs->geo_pso) { NSError *e = nil; gs->geo_pso = dev_cps(fn_dev(gs->fn), &e);
         if (!gs->geo_pso) { MLOG("[RED] geometry compute %s: %s", gs->key, e.localizedDescription.UTF8String); return 0; } }
     if (gs->geo_pso.maxTotalThreadsPerThreadgroup < 32) return 0;
     *gs_out = gs; *reader_out = reader;

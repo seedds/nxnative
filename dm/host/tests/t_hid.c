@@ -3,13 +3,24 @@
 #include <time.h>
 #include <unistd.h>
 #include <sched.h>
+#include <pthread.h>
 static int hid_clock_gettime(clockid_t clock, struct timespec *ts);
 static int hid_usleep(useconds_t usec);
+static int hid_mutex_lock(pthread_mutex_t *m);
 #define clock_gettime hid_clock_gettime
 #define usleep hid_usleep
+#define pthread_mutex_lock hid_mutex_lock
 #include "../hle_hid.c"
 #undef clock_gettime
 #undef usleep
+#undef pthread_mutex_lock
+// Another thread's turn just before the chosen mutex is taken: run once, before the lock
+static pthread_mutex_t *turn_mutex;
+static void (*lock_turn)(void);
+static int hid_mutex_lock(pthread_mutex_t *m) {
+    if (m == turn_mutex && lock_turn) { void (*f)(void) = lock_turn; lock_turn = NULL; f(); }
+    return pthread_mutex_lock(m);
+}
 #include "../pad_slots.h"
 void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
 void front_web_shot(const char *path) { (void)path; }
@@ -348,9 +359,13 @@ static void t_vibration(void) {
     g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
     CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY), "no sink: no vibration devices");
     dm_haptics_init(vibration_sink, 1);
-    CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
-          "startup handles do not wait for a routed haptics output");
-    CHECK(!h_hid_VibMounted(&h[0]), "no routed output: device not mounted");
+    CHECK(h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
+          "rumble on with no controller routed: permitted, handles exist");
+    CHECK(h_hid_VibMounted(&h[0]) && h_hid_VibMounted(&h[1]),
+          "both channels are mounted before a haptics output is routed");
+    CHECK(h_hid_VibMountedOunce(&h[0]) && h_hid_VibMountedOunce(&h[1]), "Switch 2 channels are mounted before routing too");
+    h_hid_VibInfo(info, &h[0]); CHECK(info[0] == 1 && info[1] == 1, "left motor answers before routing");
+    h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2, "right motor answers before routing");
     h_hid_SendVib(&h[0], &v);
     CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "a value before routing is not retained");
     dm_haptics_route(0, 1); dm_haptics_route(1, 1);
@@ -388,11 +403,52 @@ static void t_vibration(void) {
     { int m; CHECK(!vib_targets(3, &m), "old docked handle is not valid in handheld mode"); }
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
-    CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
+    CHECK(h_hid_VibPermit(), "disconnecting controllers does not change the system's vibration setting");
     dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
+    h_hid_VibInfo(info, &h[1]);
+    CHECK(h_hid_VibMounted(&h[1]) && h_hid_VibMountedOunce(&h[1]) && info[0] == 1 && info[1] == 2, "rumble off does not remove a channel or its actuator info");
+    h_hid_SendVib(&h[0], &v);
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "rumble off still drops values for a routed channel");
     dm_haptics_set_enabled(1);
     CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
+}
+
+static void t_joycon_vibration_lifetime(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1}, 2); dm_pad_players(1);
+    h_hid_SetStyles(STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
+    dm_joy_attach(0, 3); h_hid_JoyDual(&(uint32_t){0}); dm_haptics_route(0, 1);
+    uint32_t dual[2] = {0}, left = 0, right = 0;
+    dm_vibration values[] = {{0.2f, 160, 0, 320}, {0.7f, 160, 0, 320}};
+    CHECK(h_hid_VibHandles(dual, 2, &(uint32_t){0}, STYLE_JOYDUAL) == 2, "rumbling pair: one handle per physical motor");
+    h_hid_SendVibs(dual, values, 2);
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_VibHandles(&left, 1, &(uint32_t){0}, STYLE_JOYLEFT) == 1 &&
+          h_hid_VibHandles(&right, 1, &(uint32_t){1}, STYLE_JOYRIGHT) == 1, "split while rumbling: a handle on each npad");
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0.2f && dm_haptics_actual(0, 1).amplitude_low == 0.7f,
+          "assignment changes keep the physical motors' persistent state");
+    h_hid_SendVib(&left, &(dm_vibration){0.4f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.4f && vibration[0].motor[1].amplitude_low == 0.7f,
+          "left npad updates motor 0 without changing the right npad's motor");
+    h_hid_SendVib(&right, &(dm_vibration){0.6f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.4f && vibration[0].motor[1].amplitude_low == 0.6f,
+          "right npad updates motor 1 on the same physical pair");
+    h_hid_JoyDual(&(uint32_t){0});
+    vibration_calls = 0;
+    h_hid_SendVib(&left, &values[0]); h_hid_SendVib(&right, &values[1]);
+    CHECK(!vibration_calls && !h_hid_VibMounted(&left) && !h_hid_VibMounted(&right), "rejoin invalidates both single-npad handles");
+    h_hid_SendVibs(dual, values, 2);
+    CHECK(vibration_calls == 1 && vibration[0].motor[0].amplitude_low == 0.2f && vibration[0].motor[1].amplitude_low == 0.7f,
+          "rejoined pair accepts its original dual handles, still one per motor");
+    h_hid_JoySingleT(&(uint32_t){0}, 1);   // the right half stays on No1 this time
+    CHECK(h_hid_VibHandles(&right, 1, &(uint32_t){0}, STYLE_JOYRIGHT) == 1 &&
+          h_hid_VibHandles(&left, 1, &(uint32_t){1}, STYLE_JOYLEFT) == 1, "split keeping the right half: the npads swap");
+    h_hid_SendVib(&left, &(dm_vibration){0.3f, 160, 0, 320});
+    h_hid_SendVib(&right, &(dm_vibration){0.8f, 160, 0, 320});
+    CHECK(vibration[0].motor[0].amplitude_low == 0.3f && vibration[0].motor[1].amplitude_low == 0.8f,
+          "swapping logical npads does not swap the physical motors");
+    h_hid_JoyDual(&(uint32_t){0}); dm_joy_attach(0, 0); dm_haptics_route(0, 0);
+    h_hid_SetStyles(0xffffffffu);
 }
 
 static void *vibration_sender(void *arg) {
@@ -400,6 +456,18 @@ static void *vibration_sender(void *arg) {
     const uint32_t handles[] = {3, 0};
     const dm_vibration values[] = {{0.25, 160, 0, 320}, {0.8, 160, 0, 320}};
     for (int i = 0; i < 1000; i++) h_hid_SendVibs(handles, values, 2);
+    return NULL;
+}
+static void *vibration_query(void *arg) {
+    (void)arg;
+    uint32_t h = 3, info[2];
+    for (int i = 0; i < 1000; i++) {
+        dm_haptics_set_enabled(i & 1);
+        h_hid_VibPermit();
+        h_hid_VibInfo(info, &h);
+        h_hid_VibMounted(&h);
+        h_hid_VibMountedOunce(&h);
+    }
     return NULL;
 }
 static void t_rumble_log(void) {
@@ -430,11 +498,11 @@ static void t_rumble_log(void) {
               "diagnostic totals reset once per second and retain the interval peak");
     }
     close(saved); fclose(capture);
-    // Game threads may send independently; ThreadSanitizer also covers the logger's shared totals.
-    pthread_t threads[4]; int started = 0;
-    for (int i = 0; i < 4; i++) {
-        int rc = pthread_create(&threads[started], NULL, vibration_sender, NULL);
-        CHECK(!rc, "start concurrent vibration sender"); if (!rc) started++;
+    // Game threads may send and query independently while the rumble setting changes; TSan checks all diagnostic state.
+    pthread_t threads[8]; int started = 0;
+    for (int i = 0; i < 8; i++) {
+        int rc = pthread_create(&threads[started], NULL, i < 4 ? vibration_sender : vibration_query, NULL);
+        CHECK(!rc, "start concurrent vibration sender or query"); if (!rc) started++;
     }
     for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
     unsetenv("DM_RUMBLE_LOG");
@@ -467,6 +535,10 @@ static void t_script(void) {
     CHECK(buttons_of(1, STYLE_FULLKEY) == 0, "player 2 does not receive or consume scripted presses");
     NpadState s; fill(&s, NPAD_HANDHELD, STYLE_HANDHELD);
     CHECK(s.buttons == DM_BTN_A && s.lx == 100 && s.ly == -200 && s.rx == 300 && s.ry == -400, "scripted buttons and all four axes reach player 1 in handheld mode");
+    script_set(0, DM_STICK_MAX, DM_STICK_MAX, -DM_STICK_MAX, 20000);   // a Mac controller's diagonal: each axis at full tilt on its own
+    fill(&s, NPAD_HANDHELD, STYLE_HANDHELD);
+    CHECK(hypot(s.lx, s.ly) <= DM_STICK_MAX + 1 && hypot(s.rx, s.ry) <= DM_STICK_MAX + 1, "a diagonal past full tilt is held inside the stick's circle");
+    CHECK(s.lx == s.ly && s.lx > 23000 && s.rx < 0 && s.ry > 0 && abs(s.rx * 20000 + s.ry * DM_STICK_MAX) < DM_STICK_MAX, "the held diagonal keeps its direction and reaches the circle");
     script_set(0, 0, 0, 0, 0); buttons_of(NPAD_HANDHELD, STYLE_HANDHELD);
     g_mode = 1; dm_pad_players(1);
     g_nsteps = 0; g_steps = NULL;
@@ -1591,7 +1663,7 @@ static void t_icon_decoration(void) {
 // A game that supports no full-key style (Nintendo Switch Sports Resort's lobby: Handheld | JoyDual, 0x6): a controller that is not a Joy-Con pair (the keyboard, a Pro-like pad)
 // is shown on No1..No8 as a dual Joy-Con pair, the supported style that has its buttons and both sticks, so GetNpadStyleSet only answers supported styles; the states, six-axis
 // sensors and IMU samples, vibration handles and the controller applet's answer follow, and a style change signals the npad's style event. The Handheld npad and a game that
-// supports full-key (or no style with a whole controller's buttons): unchanged
+// supports full-key: unchanged
 static void t_unsupported_style(void) {
     static uint8_t ev0[0x40];
     g_mode = 1; ids((uint32_t[]){0, 1, 2, 3, NPAD_HANDHELD}, 5); dm_pad_players(1);
@@ -1639,9 +1711,83 @@ static void t_unsupported_style(void) {
     g_mode = 0; CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "Handheld only, handheld mode: the Handheld npad"); g_mode = 1;
     h_hid_SetStyles(STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "JoyDual | JoyLeft | JoyRight: JoyDual");
-    h_hid_SetStyles(STYLE_JOYLEFT | STYLE_JOYRIGHT);
-    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "JoyLeft | JoyRight only: no style with a whole controller's buttons supported, full-key as before");
     h_hid_SetStyles(0xffffffffu); pthread_mutex_lock(&g_style_lock); g_style_ev[0] = NULL; pthread_mutex_unlock(&g_style_lock);
+}
+
+// A whole controller on No1 for a game that takes a single Joy-Con (Let's Go, Eevee!: 0x5a).
+static void t_single_joy_fallback(void) {
+    const uint32_t id = 0, styles = 0x5a;
+    g_mode = 1; ids((uint32_t[]){id, NPAD_HANDHELD}, 2); dm_pad_players(3);
+    h_hid_SetStyles(STYLE_FULLKEY);
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    uint32_t full[2] = {0}, h[2] = {0};
+    CHECK(h_hid_VibHandles(full, 2, &id, STYLE_FULLKEY) == 2, "start with the whole pad's two motors");
+    const dm_vibration buzz = {0.5f, 160, 0.5f, 320};
+    h_hid_SendVib(&full[0], &buzz);
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0.5f && dm_haptics_actual(1, 0).amplitude_low == 0.5f, "the left motor vibrates on both merged pads");
+
+    h_hid_SetStyles(styles);
+    CHECK(h_hid_GetStyle(&id) == STYLE_JOYRIGHT, "0x5a: pick JoyRight on No1");
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0 && dm_haptics_actual(1, 0).amplitude_low == 0, "changing the style retires the left motor on both pads");
+    h_hid_SendVib(&full[0], &buzz);
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0 && dm_haptics_actual(1, 0).amplitude_low == 0, "the old left handle cannot restart the motor");
+    CHECK(h_hid_VibHandles(h, 2, &id, styles) == 1 && h[0] == 7, "one right vibration handle, even with a mixed style mask");
+    h_hid_SendVib(&h[0], &buzz);
+    CHECK(dm_haptics_actual(0, 1).amplitude_low == 0.5f && dm_haptics_actual(1, 1).amplitude_low == 0.5f, "the right handle reaches each pad's right motor");
+    { int m; CHECK(vib_targets(full[1], &m) == 3 && m == 1, "the old full-key handle can still reach the exposed motor"); }
+    CHECK(h_hid_SixHandles(h, 2, &id, styles) == 1 && h[0] == 0x10007 && six_connected(h[0]), "one connected right sensor with the mixed style mask");
+
+    dm_input_set(DM_BTN_A | DM_BTN_MINUS | DM_BTN_ZL, -20000, 5000, 0, 0);
+    NpadState st = npad_of(id, STYLE_JOYRIGHT);
+    CHECK((st.buttons & 0xffffff) == (DM_BTN_A | DM_BTN_PLUS | DM_BTN_ZR | 1u << 20) &&
+          !st.lx && !st.ly && st.rx == -20000 && st.ry == 5000 && st.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN),
+          "JoyRight state has the folded buttons, stick and direction on the right");
+    CHECK(!npad_of(id, STYLE_FULLKEY).attributes, "no FullKey state while JoyRight is shown");
+    g_mode = 0; dm_hid_opmode_changed();
+    CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "Handheld still has its own style");
+    CHECK(dm_haptics_actual(0, 1).amplitude_low == 0 && dm_haptics_actual(1, 1).amplitude_low == 0, "moving off the single Joy-Con state retires its rumble");
+
+    g_mode = 1; dm_hid_opmode_changed();
+    h_hid_SetStyles(STYLE_HANDHELD | STYLE_JOYLEFT);
+    dm_input_set(DM_BTN_A | DM_BTN_R, 0, 0, DM_STICK_MAX, -DM_STICK_MAX);
+    st = npad_of(id, STYLE_JOYLEFT);
+    CHECK(h_hid_GetStyle(&id) == STYLE_JOYLEFT && (st.buttons & 0xffff) == (DM_BTN_RIGHT | DM_BTN_L) &&
+          st.lx > 0 && st.ly == -st.lx && hypot(st.lx, st.ly) <= DM_STICK_MAX + 0.5 && !st.rx && !st.ry && st.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN),
+          "JoyLeft folds a diagonal into the left stick and keeps the circular range");
+    CHECK(h_hid_SixHandles(h, 2, &id, STYLE_HANDHELD | STYLE_JOYLEFT) == 1 && h[0] == 6 && six_connected(h[0]), "one connected left sensor with the mixed style mask");
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYLEFT) == 1 && h[0] == 6, "one left vibration handle");
+    dm_input_set(0, 0, 0, 0, 0); npad_of(id, STYLE_JOYLEFT);
+    dm_haptics_init(NULL, 0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+static void show_right_joycon(void) { h_hid_SetStyles(STYLE_JOYRIGHT); }
+static void t_style_read_snapshot(void) {
+    h_hid_SetStyles(STYLE_FULLKEY);
+    dm_input_set(DM_BTN_A, -12000, 0, 0, 0);
+    // The style changes while fill() advances the keyboard script, after validating the caller's FullKey request.
+    g_sync_next = g_nsteps; g_sync_held = 0; atomic_store(&g_sync_on, 1);
+    turn_mutex = &g_sync_mu; lock_turn = show_right_joycon;
+    NpadState st = npad_of(0, STYLE_FULLKEY);
+    CHECK(!lock_turn && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYRIGHT, "the style changed during the state read");
+    CHECK(st.lx == -12000 && !st.rx && st.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN | ATTR_RIGHT_CONN), "one read still uses its original FullKey style");
+    dm_input_set(0, 0, 0, 0, 0); h_hid_SetStyles(0xffffffffu);
+}
+
+// A controller that arrives while the game binds its npad's style event: the front end's report (dm_pad_players → styles_sync) runs on its own thread, here just before the bind
+// takes g_style_lock. The report finds no event bound and signals nothing, so the bind must read the style under the lock and signal it; a style read before the lock was
+// the one before the controller came, and the game heard nothing of player 3 until some later change
+static void third_player_comes(void) { dm_pad_players(0x7); }
+static void t_bind_gap(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, 2, 3}, 4); h_hid_SetStyles(STYLE_FULLKEY); dm_pad_players(0x1);
+    static uint8_t ev2[0x40]; g_signals = 0; g_signalled = NULL;
+    turn_mutex = &g_style_lock; lock_turn = third_player_comes;
+    h_hid_BindStyleEv(&(uint32_t){2}, ev2, 0);
+    CHECK(!lock_turn, "the report ran inside the bind");
+    CHECK(h_hid_GetStyle(&(uint32_t){2}) == STYLE_FULLKEY, "player 3 is on No3");
+    CHECK(g_signalled == ev2, "a controller that came during the bind: No3's style event signalled by the bind (after the report's signal of No2's)");
+    g_signals = 0; dm_hid_opmode_changed();
+    CHECK(g_signals == 0, "the bind told No3's style: a report with no change signals nothing");
+    dm_pad_players(0x1); g_signals = 0; g_signalled = NULL;
 }
 
 int main(void) {
@@ -1658,7 +1804,10 @@ int main(void) {
     t_vibration();
     t_opmode();
     t_joycons();
+    t_joycon_vibration_lifetime();
     t_unsupported_style();
+    t_single_joy_fallback();
+    t_style_read_snapshot();
     t_jcms();
     t_rumble_log();
     t_motion_threads();
@@ -1706,6 +1855,7 @@ int main(void) {
         CHECK(pad_slot_take_lowest(&f, &o[DM_PLAYERS], "pad") == -1, "press: none left when every player is held");
         CHECK(pad_slot_take_lowest(&f, NULL, "pad") == -1, "press: no owner, no slot");
     }
+    t_bind_gap();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

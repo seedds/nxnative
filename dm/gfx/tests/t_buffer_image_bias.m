@@ -27,6 +27,11 @@ static const char *kSource =
     "kernel void a(array<texture_buffer<uint>, 2> tex [[texture(0)]], constant uint4 *table [[buffer(0)]], device uint *out [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
     "    uint e = i / 16, x = i % 16, n = 3u + e, b = table[n >> 2][n & 3], m = x + b;\n"
     "    out[i] = tex[e].read(m < b ? x : m).x;\n"
+    "}\n"
+    "kernel void f(texture_buffer<float, access::read_write> img [[texture(0)]], constant uint4 *table [[buffer(0)]], device uint *out [[buffer(1)]]) {\n"
+    "    uint b = table[0].x;\n"
+    "    out[0] = as_type<uint>(img.read(b).x);\n"
+    "    img.write(float4(1.0), b + 1);\n"
     "}\n";
 static tex_t buffer_texture(uint8_t *mem, uint64_t off, uint64_t serial, uint32_t flags) {
     tex_t t = {.magic = MAGIC('T','E','X',0), .serial = serial, .mem = mem + off, .off = (int64_t)off};
@@ -54,6 +59,11 @@ int main(void) { @autoreleasepool {
     CHECK(real && t && t.textureType == MTLTextureTypeTextureBuffer && t.bufferOffset == OFF - 8 && t.width == W + 2, "the image's view starts at the 16-byte boundary below it, 2 elements wider");
     uint32_t bias = tbuf_lead(701, t);
     CHECK(bias == 2, "8 bytes below the boundary: the shader moves R32 coordinates by 2");
+    nvn_rbind fb = b; fb.dpf = NVN_DPF_FLOAT;
+    uint64_t frid = 0; int freal = 0;
+    id<MTLTexture> ft = img_binding(701, &fb, &frid, &freal);
+    int float_view = freal && ft.pixelFormat == MTLPixelFormatR32Float && tbuf_lead(701, ft) == bias;
+    CHECK(float_view, "an R32Uint buffer image bound as float gets a view with the same alignment bias");
     uint64_t arid = 0; int areal = 0;
     id<MTLTexture> at = img_binding(702, &b, &arid, &areal);
     CHECK(areal && at.bufferOffset == ALIGNED && at.width == W && tbuf_lead(702, at) == 0, "an image at an aligned offset is viewed as it is, its coordinates unmoved");
@@ -123,6 +133,19 @@ int main(void) { @autoreleasepool {
         const uint32_t *o = out.contents; int ok = ka && cmd.status == MTLCommandBufferStatusCompleted;
         for (int i = 0; i < W; i++) ok &= o[i] == 500u + (uint32_t)i && o[W + i] == 700u + (uint32_t)i;
         CHECK(ok, "an array of buffer textures reads each element's own elements, each by its own entry");
+    }
+    if (float_view) {
+        id<MTLComputePipelineState> kf = kernel_named(lib, @"f");
+        if (!kf) return 1;
+        memcpy(tb.contents, table, sizeof table);
+        id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+        cmd = [q commandBuffer]; enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:kf]; [enc setTexture:ft atIndex:0]; [enc setBuffer:tb offset:0 atIndex:0]; [enc setBuffer:out offset:0 atIndex:1];
+        [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        const uint32_t *words = (const uint32_t *)(mem + OFF);
+        CHECK(cmd.status == MTLCommandBufferStatusCompleted && *(const uint32_t *)out.contents == 500u && words[1] == 0x3f800000u,
+              "float image reads and writes alias the integer image's original bits");
     }
     mtl_pool_del(mem);
     printf("t_buffer_image_bias: %d checks, %d failed\n", checks, failed);

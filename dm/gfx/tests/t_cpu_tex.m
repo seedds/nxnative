@@ -369,6 +369,26 @@ static void flushed_buffer_upload(int flush_kind) {
     CHECK(!nvn_flushed(mem + buffer_off + flush_off, 1), "pool finalization retires buffer flush ranges");
     defer_drain(); munmap(mem,len);
 }
+// Retired classifications stay until their pool is finalized, and a pool that lives on collects them: a Finalize of another pool takes out its own entries without walking the tables
+// (they were walked, all three, under g_cpu_tex_mu: Ocarina of Time loads from the pause menu grew from 80 to 640 ms over 200 loads)
+static void pool_index(void) {
+    enum { M = 200000, DROPS = 1000 };
+    static uint8_t mem[3]; pool_t pools[3] = {{.mem=&mem[0]}, {.mem=&mem[1]}, {.mem=&mem[2]}};
+    uint64_t first = 0, dropped = 0;
+    for (int i = 0; i < M; i++) { tex_t a = {.serial=nvn_new_serial(), .pool=&pools[0], .mem=&mem[0]}; if (!i) first = a.serial; mtl_tex_cpu_written(&a); }
+    tex_t b = {.serial=nvn_new_serial(), .pool=&pools[1], .mem=&mem[1]}; mtl_tex_cpu_written(&b);
+    CHECK(g_cpu_tex_retired.n == M + 1 && tex_cpu_written(first) && tex_cpu_written(b.serial), "one pool collects retired classifications");
+    uint64_t t0 = bp_now();
+    for (int i = 0; i < DROPS; i++) { tex_t c = {.serial=nvn_new_serial(), .pool=&pools[2], .mem=&mem[2]}; dropped = c.serial; mtl_tex_cpu_written(&c); mtl_alias_drop_pool(&pools[2]); }
+    double ms = (bp_now() - t0) / 1e6;
+    printf("%d Finalizes of a small pool beside %d entries of another: %.1f ms\n", DROPS, M, ms);
+    CHECK(!tex_cpu_written(dropped) && g_cpu_tex_retired.n == M + 1, "a Finalize takes out its own pool's entries and no other pool's");
+    CHECK(ms < 40, "the Finalizes do not walk the other pool's entries");
+    mtl_alias_drop_pool(&pools[0]);
+    CHECK(!tex_cpu_written(first) && tex_cpu_written(b.serial) && g_cpu_tex_retired.n == 1, "the pool's Finalize takes out its entries, the other pool's stay");
+    mtl_alias_drop_pool(&pools[1]);
+    CHECK(!tex_cpu_written(b.serial) && !g_cpu_tex_retired.n && !g_cpu_pix.n, "no entry and no index entry is left");
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -402,7 +422,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     CHECK(!own_tex_live(own.serial), "finalizing the object itself ends it");
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
-    retired_classification(); descriptor_replacement();
+    retired_classification(); pool_index(); descriptor_replacement();
     if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

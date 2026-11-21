@@ -84,6 +84,14 @@ To enroll a cut for any game's own module:
   - FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition: the 1.0.1 cheatslips file, anchored on the cartridge's `main`, compiles to exactly the hand-verified +0x43680 on 1.0.3 (12 of 12 cheats, 4 of 4 references each). The 1.0.3 file (5 ASM cheats with a code cave, 7 stat cheats, Mog's fatigue) compiles back to identical writes on 1.0.3 and to all 18 entries on the cartridge's build (code sites: 4 exact, 3 by body digest, 2 by window).
   - [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md#cheats): a 1.10 Ryujinx list compiles back to identical writes and to 1.00, where every site lies 0x330 lower and the hook site was found by its body digest.
 
+### ExeFS patches of mods
+
+- **Symptom:** a mod made of IPS or pchtxt files (`exefs/<build ID>.ips`, `exefs/*.pchtxt`) does nothing: only RomFS folders were read.
+- **Cause:** Atmosphère and the yuzu family patch the NSO before it is loaded; this host loads the rewriter's modules, whose text it maps executable and never writable, so there was no place to apply them.
+- **Fix:** `dm/host/hle_exefs.c` applies them after the modules are loaded and relocated, before the game's first instruction, through a writable alias of the module (`mach_vm_remap`, as the cheat engine's code writes). Offsets count from the NSO header (IPS; pchtxt after its `offset_shift`). A file is checked whole before any byte is written, and refused whole, with a `[RED]` line, when it would touch a word the rewriter changed or moved (`<module>.changed.tsv`), reach past the image, or change a byte a mod earlier in `DM_EXEFS_PATCHES` already patched differently (two mods that put code in the same padding). A mod whose `exefs/` also holds a module or `main.npdm` is refused whole: its patches branch into that module, which this host does not load. Not on the iPhone (the app's code pages are signed). The folders are `DM_EXEFS_PATCHES=<dir>[:<dir>…]`, first mod first, set by a front end or `env.txt`.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_exefs`: IPS, IPS32 and pchtxt parsing (runs, offset shifts, endianness, `@enabled`/`@disabled` groups, build ID names).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game): Fast Travel's 17,183 pchtxt records and Bunny Hood Speed Boost's IPS32 file touch no word the rewriter changed; Fast Travel and L3 Sprint Toggle put code in the same padding between functions.
+
 ## Thread registers
 
 ### System register accesses through x18

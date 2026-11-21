@@ -62,8 +62,31 @@ static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh
 static int32_t g_match_pick; static int g_match_pick_vrr;   // main thread: the IO mode ID this host last switched to (valid while g_match_orig != NULL) and whether it is variable-refresh
+// Auto-HDR: on a screen whose HDR is on (EDR headroom above 1: an HDR monitor in HDR mode, an XDR display) the layer takes half floats in extended linear sRGB and the
+// present lifts the game's SDR highlights above SDR white (nvn_mtl.m present_hdr_peak, present.metal). Elsewhere the layer stays 8-bit sRGB, the bytes as they are.
+// DM_HDR=0 keeps SDR everywhere. The headroom follows the screen's
+// brightness (read each second while the layer is HDR); 0 while the layer is SDR
+static _Atomic double g_hdr_head;
+double front_hdr_headroom(void) { return g_hdr_head; }
+static void hdr_apply(NSScreen *scr) {   // main thread
+    if (!g_layer) return;
+    static int want = -1;
+    if (want < 0) { const char *e = getenv("DM_HDR"); want = !(e && !strcmp(e, "0")); }
+    double pot = scr ? scr.maximumPotentialExtendedDynamicRangeColorComponentValue : 1, cur = scr ? scr.maximumExtendedDynamicRangeColorComponentValue : 1;
+    int on = want && pot > 1.05, was = g_layer.pixelFormat == MTLPixelFormatRGBA16Float;
+    if (on != was) {
+        g_layer.wantsExtendedDynamicRangeContent = on;
+        CGColorSpaceRef cs = on ? CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB) : NULL;
+        g_layer.colorspace = cs; if (cs) CGColorSpaceRelease(cs);
+        g_layer.pixelFormat = on ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+        LOG("front end: %s (screen %s: HDR headroom up to %.2f, now %.2f%s)", on ? "HDR layer, the game's picture lifted into the screen's HDR range" : "SDR layer",
+            scr.localizedName.UTF8String ?: "?", pot, cur, !want ? "; DM_HDR=0" : "");
+    }
+    g_hdr_head = on ? cur : 0;
+}
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
     if (!screen) return;
+    hdr_apply(screen);
     g_screen_fps = (int)screen.maximumFramesPerSecond;
     g_screen_id = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
     g_screen_variable_refresh = screen.minimumRefreshInterval > 0 && screen.maximumRefreshInterval > screen.minimumRefreshInterval;
@@ -1825,6 +1848,8 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
+        hdr_apply(win.screen);
+        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { (void)t; hdr_apply(g_win.screen); }];   // brightness moves the headroom
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);

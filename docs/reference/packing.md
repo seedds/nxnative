@@ -488,6 +488,14 @@
 
 ## Add-on content
 
+### Separate DLC for a NUP
+
+- **Symptom:** a build from a NUP with no embedded DLC omits add-ons the player has as separate RomFS images. The host logs `aoc: reporting 0 add-on contents {} (no DM_AOC_DIR)`.
+- **Cause:** the packing script selected DLC solely from the container. A separately extracted image never reached the shader scan or the app packer.
+- **Fix:** `--aoc-dir <folder>` selects a directory of numbered RomFS images for a NUP with no embedded DLC. The script validates the images and stages the complete set separately from the package extraction cache. Each rebuild uses the current selection, including after a front end clears its build folder. An empty folder selects no DLC. A NUP that already lists DLC rejects the option. A prepared Xcode project compares these images by checksum on incremental builds because a replacement can have the same size and whole-second modification time.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), v655360, whose marker add-on unlocks data in the update. [PR #2905](https://github.com/seedds/nxnative/pull/2905) reports the result on a MacBook Air.
+- **Check:** `test_nsp_nup.py` checks that the selected images reach the build, stale package images stay out, and rebuilds handle replacement, removal and cleanup. `test_xcode_workflow.py` checks that the staged app also replaces images with matching sizes and times and removes retired images.
+
 ### DLC in Documents is ignored or removed DLC remains installed
 
 - **Symptom:** a game's DLC works only when packed inside its IPA, although its base RomFS can be deployed separately. After pushing a smaller DLC set, removed indices can remain reported as owned and mounted.

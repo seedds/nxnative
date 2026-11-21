@@ -14,6 +14,8 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 
 `scripts/build_ipa_from_nsp.py <NSP folder>` builds one game: an IPA by default, a Mac app with `--platform mac-app`, at the path `-o` names. Its options are in [The packing script in detail](development.md#the-packing-script-in-detail) and `--help`.
 
+For a NUP without embedded DLC, pass `--aoc-dir <folder>` on each build to include the player's numbered DLC images. Keep this input folder outside the build directory so cleanup can remove staged copies safely. [Separate DLC for a NUP](reference/packing.md#separate-dlc-for-a-nup)
+
 With `--progress json` it asks nothing and writes one JSON object per line on stdout. Every object has `ev` (the event) and `t` (Unix time, seconds):
 
 | `ev` | Fields | When |

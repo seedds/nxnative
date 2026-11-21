@@ -1,0 +1,171 @@
+/**
+ * Copyright (c) 2019 Paul-Louis Ageneau
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#include <chrono>
+#include <iostream>
+#include <thread>
+
+#include "test.hpp"
+#include <rtc/rtc.hpp>
+
+using namespace std;
+using namespace chrono_literals;
+
+using chrono::duration_cast;
+using chrono::milliseconds;
+using chrono::seconds;
+using chrono::steady_clock;
+
+TestResult test_connectivity();
+TestResult test_connectivity_fail_on_wrong_fingerprint();
+TestResult test_dtls_startup_after_remote_description();
+TestResult test_pem();
+TestResult test_negotiated();
+TestResult test_reliability();
+TestResult test_simulcast_sdp_generation();
+TestResult test_simulcast_sdp_parsing();
+TestResult test_turn_connectivity();
+TestResult test_track();
+TestResult test_video_layers_allocation();
+TestResult test_fir_sdp();
+TestResult test_fir_offer_yes_answer_yes();
+TestResult test_rtx_attribute();
+TestResult test_rtx_description_addrtx();
+TestResult test_rtx_description_addrtx_no_audio();
+TestResult test_rtx_dropped_packet();
+TestResult test_rtx_multi_codec();
+TestResult test_rtcp_app_single_packet();
+TestResult test_rtcp_app_compound_packet();
+TestResult test_rtcp_app_empty_data();
+TestResult test_rtcp_app_send();
+TestResult test_rtcp_app_multiple_in_compound();
+TestResult test_rtcp_app_integration();
+TestResult test_capi_connectivity();
+TestResult test_capi_track();
+TestResult test_websocket();
+TestResult test_websocketserver();
+TestResult test_capi_websocketserver();
+size_t benchmark(chrono::milliseconds duration);
+
+void test_benchmark() {
+	size_t goodput = benchmark(10s);
+
+	if (goodput == 0)
+		throw runtime_error("No data received");
+
+	const size_t threshold = 1000; // 1 MB/s;
+	if (goodput < threshold)
+		throw runtime_error("Goodput is too low");
+}
+
+TestResult test_cleanup() {
+	try {
+		// Every created object must have been destroyed, otherwise the wait will block
+		if (rtc::Cleanup().wait_for(10s) == future_status::timeout)
+			return TestResult(false, "timeout");
+		return TestResult(true);
+	} catch (const exception &e) {
+		return TestResult(false, e.what());
+	}
+}
+
+TestResult test_capi_cleanup() {
+	try {
+		rtcCleanup();
+		return TestResult(true);
+	} catch (const exception &e) {
+		return TestResult(false, e.what());
+	}
+}
+
+static const vector<Test> tests = {
+    // C++ API tests
+    Test("DTLS startup after remote description", test_dtls_startup_after_remote_description),
+    Test("WebRTC connectivity", test_connectivity),
+    Test("WebRTC broken fingerprint", test_connectivity_fail_on_wrong_fingerprint),
+    Test("pem", test_pem),
+    // TODO: Temporarily disabled as the Open Relay TURN server is unreliable
+    // Test("WebRTC TURN connectivity", test_turn_connectivity),
+    Test("WebRTC negotiated DataChannel", test_negotiated),
+    Test("WebRTC reliability mode", test_reliability),
+    Test("WebRTC simulcast SDP generation", test_simulcast_sdp_generation),
+    Test("WebRTC simulcast SDP parsing", test_simulcast_sdp_parsing),
+#if RTC_ENABLE_MEDIA
+    Test("WebRTC track", test_track),
+	Test("WebRTC video layers allocation", test_video_layers_allocation),
+    Test("RTX Description::addRtx", test_rtx_description_addrtx),
+    Test("RTX Description::addRtx audio=false", test_rtx_description_addrtx_no_audio),
+    Test("RTX negotiation fallback", test_rtx_attribute),
+    Test("RTX dropped packet recovery", test_rtx_dropped_packet),
+    Test("RTX multi-codec PT mapping", test_rtx_multi_codec),
+    Test("FIR SDP parsing", test_fir_sdp),
+    Test("FIR offer answer handling", test_fir_offer_yes_answer_yes),
+    Test("RTCP APP single packet", test_rtcp_app_single_packet),
+    Test("RTCP APP compound packet", test_rtcp_app_compound_packet),
+    Test("RTCP APP empty data", test_rtcp_app_empty_data),
+    Test("RTCP APP send", test_rtcp_app_send),
+    Test("RTCP APP multiple in compound", test_rtcp_app_multiple_in_compound),
+    Test("RTCP APP integration", test_rtcp_app_integration),
+#endif
+#if RTC_ENABLE_WEBSOCKET
+    // TODO: Temporarily disabled as the echo service is unreliable
+    // Test("WebSocket", test_websocket),
+    Test("WebSocketServer", test_websocketserver),
+#endif
+    Test("Cleanup", test_cleanup),
+    // C API tests
+    Test("WebRTC C API connectivity", test_capi_connectivity),
+#if RTC_ENABLE_MEDIA
+    Test("WebRTC C API track", test_capi_track),
+#endif
+#if RTC_ENABLE_WEBSOCKET
+    Test("WebSocketServer C API", test_capi_websocketserver),
+#endif
+    Test("C API cleanup", test_capi_cleanup),
+};
+
+int main(int argc, char **argv) {
+	rtc::SetThreadPoolSize(4);
+
+	int success_tests = 0;
+	int failed_tests = 0;
+	steady_clock::time_point startTime, endTime;
+
+	startTime = steady_clock::now();
+
+	for (auto test : tests) {
+		auto res = test.run();
+		if (res.success) {
+			success_tests++;
+		} else {
+			failed_tests++;
+		}
+	}
+
+	endTime = steady_clock::now();
+
+	auto durationMs = duration_cast<milliseconds>(endTime - startTime);
+	auto durationS = duration_cast<seconds>(endTime - startTime);
+	cout << "Finished " << success_tests + failed_tests << " tests in " << durationS.count()
+	     << "s (" << durationMs.count() << " ms). Succeeded: " << success_tests
+	     << ". Failed: " << failed_tests << "." << endl;
+
+	/*
+	    // Benchmark
+	    try {
+	        cout << endl << "*** Running WebRTC benchmark..." << endl;
+	        test_benchmark();
+	        cout << "*** Finished WebRTC benchmark" << endl;
+	    } catch (const exception &e) {
+	        cerr << "WebRTC benchmark failed: " << e.what() << endl;
+	        std::this_thread::sleep_for(2s);
+	        return -1;
+	    }
+	*/
+	return 0;
+}

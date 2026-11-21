@@ -82,20 +82,20 @@ static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
 #ifndef CROP_LEGACY_HEADER
 static void check_external_png(const char *path) {
     NSURL *url = [NSURL fileURLWithPath:@(path)];
-    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+    CGImageSourceRef source = url ? CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL) : NULL;
     CGImageRef image = source ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
     int green = 0;
     if (image) {
         uint8_t pixels[4 * 4 * 4];
         CGColorSpaceRef color = CGColorSpaceCreateDeviceRGB();
-        CGContextRef ctx = CGBitmapContextCreate(pixels, 4, 4, 8, 16, color, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+        CGContextRef ctx = color ? CGBitmapContextCreate(pixels, 4, 4, 8, 16, color, (CGBitmapInfo)kCGImageAlphaNoneSkipLast) : NULL;
         if (ctx) {
             CGContextDrawImage(ctx, CGRectMake(0, 0, 4, 4), image);
             for (int i = 0; i < 16; i++)
                 green += pixels[4*i] == 0 && pixels[4*i+1] == 255 && pixels[4*i+2] == 0;
             CGContextRelease(ctx);
         }
-        CGColorSpaceRelease(color);
+        if (color) CGColorSpaceRelease(color);
         CGImageRelease(image);
     }
     if (source) CFRelease(source);

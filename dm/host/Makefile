@@ -75,7 +75,28 @@ FORCE:
 # lists the headers its source read (-MMD; -MP: a removed header is no error), so an edit rebuilds the objects that include it and the link; the Makefile (CFLAGS, these lines)
 # rebuilds them all. The generated headers come first (order-only: the dependency files name them for the sources that read them). The NSP script builds gen/<id>/dmhost and takes it
 HOST_CFLAGS = $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc
+HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework MetalPerformanceShaders -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+
+# WebRTC Streamer support
+RTC_LIB = ../third_party/libdatachannel/build/libdatachannel-static.a
+SRTP_LIB = ../third_party/libdatachannel/build/deps/libsrtp/libsrtp2.a
+USRSCTP_LIB = ../third_party/libdatachannel/build/deps/usrsctp/usrsctplib/libusrsctp.a
+JUICE_LIB = ../third_party/libdatachannel/build/deps/libjuice/libjuice-static.a
+
+ifeq ($(wildcard $(RTC_LIB)),$(RTC_LIB))
+WEBRTC_AVAILABLE = 1
+endif
+
+ifeq ($(WEBRTC_AVAILABLE),1)
+HOST_CFLAGS += -DDM_HAS_WEBRTC=1 -DCPPHTTPLIB_OPENSSL_SUPPORT -I../third_party/libdatachannel/include -I../third_party/libdatachannel/deps/json/include -I../third_party/httplib -I/opt/homebrew/opt/opus/include -I/opt/homebrew/opt/openssl@3/include
+HOST_LIBS += $(RTC_LIB) $(SRTP_LIB) $(USRSCTP_LIB) $(JUICE_LIB) -L/opt/homebrew/opt/opus/lib -lopus -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto
+WEBRTC_SRC = webrtc/webrtc_streamer.cpp webrtc/vtb_encoder.mm webrtc/opus_encoder_helper.c
+SRC += $(WEBRTC_SRC)
+endif
 HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework AVFAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+ifeq ($(WEBRTC_AVAILABLE),1)
+HOST_FRAMEWORKS += -framework MetalPerformanceShaders
+endif
 HOST_SRC = $(SRC) $(GFX)
 ifneq ($(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))),)
 $(error host sources outside dm/host and dm/gfx need an object rule: $(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))))
@@ -83,6 +104,12 @@ endif
 OBJ_DIR = gen/$(GAME)/obj
 HOST_OBJ = $(foreach s,$(HOST_SRC),$(if $(filter ../gfx/%,$(s)),$(OBJ_DIR)/gfx/$(s:../gfx/%=%).o,$(OBJ_DIR)/host/$(s).o))   # the line's order: the link lays code out in it
 HOST_BIN = gen/$(GAME)/dmhost
+$(OBJ_DIR)/host/%.cpp.o: %.cpp Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+	@mkdir -p $(dir $@)
+	clang++ $(HOST_CFLAGS) -std=c++17 -MMD -MP -c $< -o $@
+$(OBJ_DIR)/host/%.mm.o: %.mm Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
+	@mkdir -p $(dir $@)
+	clang++ $(HOST_CFLAGS) -std=c++17 -MMD -MP -c $< -o $@
 $(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
@@ -90,7 +117,7 @@ $(OBJ_DIR)/gfx/%.o: ../gfx/% Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
 $(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk
-	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS)
+	clang++ $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS) $(HOST_LIBS)
 	dsymutil $@
 ifneq ($(strip $(GAME)),)
 -include $(HOST_OBJ:.o=.d)

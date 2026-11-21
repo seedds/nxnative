@@ -1,0 +1,134 @@
+name: CMake CI
+
+on:
+  push:
+    branches: [ 2_x_dev ]
+  pull_request:
+    branches: [ 2_x_dev ]
+  schedule:
+    - cron: '20 4 * * 1'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        crypto: [internal, openssl, openssl3, nss, mbedtls, mbedtls4]
+        exclude:
+          - os: windows-latest
+            crypto: openssl
+          - os: windows-latest
+            crypto: openssl3
+          - os: windows-latest
+            crypto: nss
+          - os: windows-latest
+            crypto: mbedtls
+          - os: windows-latest
+            crypto: mbedtls4
+          - os: ubuntu-latest
+            crypto: openssl3
+        include:
+          - crypto: internal
+            cmake-crypto-enable: ""
+          - crypto: openssl
+            cmake-crypto-enable: "-DENABLE_OPENSSL=ON"
+          - crypto: openssl3
+            cmake-crypto-enable: "-DENABLE_OPENSSL=ON"
+          - crypto: nss
+            cmake-crypto-enable: "-DENABLE_NSS=ON"
+          - crypto: mbedtls
+            cmake-crypto-enable: "-DENABLE_MBEDTLS=ON"
+          - crypto: mbedtls4
+            cmake-crypto-enable: "-DENABLE_MBEDTLS=ON"
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      CTEST_OUTPUT_ON_FAILURE: 1
+
+    steps:
+    - name: Setup Ubuntu NSS
+      if: matrix.os == 'ubuntu-latest' && matrix.crypto == 'nss'
+      run: |
+        sudo apt-get update
+        sudo apt-get install libnss3-dev
+
+    - name: Setup Ubuntu MbedTLS
+      if:  matrix.os == 'ubuntu-latest' && matrix.crypto == 'mbedtls'
+      run: sudo apt-get install libmbedtls-dev
+
+    - name: Setup Ubuntu MbedTLS 4
+      if:  matrix.os == 'ubuntu-latest' && matrix.crypto == 'mbedtls4'
+      run: |
+        python3 -m pip install --break-system-packages --upgrade jsonschema jinja2
+        git clone https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls4-src
+        cd /tmp/mbedtls4-src
+        git checkout mbedtls-4.1.0
+        git submodule update --init --recursive
+        # PIC is required to link the static libtfpsacrypto into libsrtp2's
+        # shared library; without it the final shared link fails with
+        # "relocation R_X86_64_PC32 ... can not be used when making a shared
+        # object; recompile with -fPIC".
+        cmake -S . -B build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        cmake --build build -j
+        sudo cmake --install build
+
+    - name: Setup macOS OpenSSL
+      if: matrix.os == 'macos-latest' && matrix.crypto == 'openssl'
+      run: echo "cmake-crypto-dir=-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@1.1)" >> $GITHUB_ENV
+
+    - name: Setup macOS OpenSSL3
+      if: matrix.os == 'macos-latest' && matrix.crypto == 'openssl3'
+      run: |
+        brew install openssl@3
+        echo "cmake-crypto-dir=-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+
+    - name: Setup macOS NSS
+      if:  matrix.os == 'macos-latest' && matrix.crypto == 'nss'
+      run: brew install nss
+
+    - name: Setup macOS MbedTLS
+      if:  matrix.os == 'macos-latest' && matrix.crypto == 'mbedtls'
+      run: |
+        brew install mbedtls@3
+        echo "CMAKE_PREFIX_PATH=$(brew --prefix mbedtls@3)" >> $GITHUB_ENV
+
+    - name: Setup macOS MbedTLS 4
+      if:  matrix.os == 'macos-latest' && matrix.crypto == 'mbedtls4'
+      run: |
+        # Install under /tmp/ (outside $GITHUB_WORKSPACE) so the install
+        # survives the actions/checkout@v2 step that runs later in this job
+        # and clears the workspace.
+        python3 -m pip install --break-system-packages --upgrade jsonschema jinja2
+        git clone https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls4-src
+        cd /tmp/mbedtls4-src
+        git checkout mbedtls-4.1.0
+        git submodule update --init --recursive
+        cmake -S . -B build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+              -DCMAKE_INSTALL_PREFIX=/tmp/mbedtls4-prefix
+        cmake --build build -j
+        cmake --install build
+        echo "CMAKE_PREFIX_PATH=/tmp/mbedtls4-prefix" >> $GITHUB_ENV
+
+    - uses: actions/checkout@v2
+
+    - name: Create Build Environment
+      run: cmake -E make_directory ${{github.workspace}}/build
+
+    - name: Configure CMake
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: cmake $GITHUB_WORKSPACE -DLIBSRTP_TEST_APPS=ON  ${{ matrix.cmake-crypto-enable}} ${{env.cmake-crypto-dir}}
+
+    - name: Build
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: cmake --build .
+
+    - name: Test
+      working-directory: ${{github.workspace}}/build
+      shell: bash
+      run: ctest

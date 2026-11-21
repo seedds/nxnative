@@ -1,0 +1,17 @@
+name: Code Formatting Check
+
+on:
+  push:
+    branches: [ 2_x_dev ]
+  pull_request:
+    branches: [ 2_x_dev ]
+
+jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Clang Format
+        run: sudo apt install clang-format-14
+      - name: Run clang format
+        run: ./format.sh -d

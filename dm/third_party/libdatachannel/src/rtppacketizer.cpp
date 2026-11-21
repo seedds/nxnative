@@ -1,0 +1,259 @@
+/**
+ * Copyright (c) 2020 Filip Klembara (in2core)
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#if RTC_ENABLE_MEDIA
+
+#include "rtppacketizer.hpp"
+#include "video_layers_allocation.hpp"
+
+#include <cmath>
+#include <cstring>
+
+namespace rtc {
+
+RtpPacketizer::RtpPacketizer(shared_ptr<RtpPacketizationConfig> rtpConfig) : rtpConfig(rtpConfig) {}
+
+RtpPacketizer::~RtpPacketizer() {}
+
+std::vector<binary> RtpPacketizer::fragment(binary data) {
+	// Default implementation
+	return {std::move(data)};
+}
+
+message_ptr RtpPacketizer::packetize(const binary &payload, bool mark, shared_ptr<FrameInfo> frameInfo) {
+	size_t rtpExtHeaderSize = 0;
+	bool twoByteHeader = false;
+
+	const bool setVideoRotation =
+	    (rtpConfig->videoOrientationId != 0) && mark && (rtpConfig->videoOrientation != 0);
+
+	const bool setAbsCaptureTime =
+	    rtpConfig->absCaptureTimeId > 0 && frameInfo && frameInfo->absCaptureTimeNtp.has_value();
+
+	std::optional<DependencyDescriptorWriter> ddWriter;
+	if (rtpConfig->dependencyDescriptorContext.has_value()) {
+		ddWriter.emplace(*rtpConfig->dependencyDescriptorContext);
+	}
+
+	// Decide if we are going to emit the Google Video Layers Allocation extension
+	binary videoLayersAllocationBuf;
+	if (rtpConfig->videoLayersAllocationId > 0 &&
+		rtpConfig->videoLayersAllocationStreams &&
+		shouldEmitVideoLayersAllocation(frameInfo)) {
+		// Yes, generate it now so we can calculate total size
+		videoLayersAllocationBuf = rtpConfig->videoLayersAllocationStreams->
+				generate(rtpConfig->videoLayersAllocationStreamIndex);
+	}
+
+	// Determine if a two-byte header is necessary
+	// Check for dependency descriptor extension
+	if (ddWriter.has_value()) {
+		auto sizeBytes = ddWriter->getSize();
+		if (sizeBytes > 16 || rtpConfig->dependencyDescriptorId > 14) {
+			twoByteHeader = true;
+		}
+	}
+	// Check for other extensions
+	if ((setVideoRotation && rtpConfig->videoOrientationId > 14) ||
+	    (rtpConfig->mid.has_value() && rtpConfig->midId > 14) ||
+	    (rtpConfig->rid.has_value() && rtpConfig->ridId > 14) ||
+	    (videoLayersAllocationBuf.size() > 14 || rtpConfig->videoLayersAllocationId > 14) ||
+	    rtpConfig->playoutDelayId > 14 ||
+	    (setAbsCaptureTime && rtpConfig->absCaptureTimeId > 14)) {
+		twoByteHeader = true;
+	}
+	size_t headerSize = twoByteHeader ? 2 : 1;
+
+	if (setVideoRotation)
+		rtpExtHeaderSize += headerSize + 1;
+
+	const bool setPlayoutDelay = rtpConfig->playoutDelayId > 0;
+	const bool setColorSpace = rtpConfig->colorSpaceId > 0;
+
+	if (setPlayoutDelay)
+		rtpExtHeaderSize += headerSize + 3;
+
+	if (setColorSpace)
+		rtpExtHeaderSize += headerSize + 4;
+
+	if (setAbsCaptureTime)
+		rtpExtHeaderSize += headerSize + 8;
+
+	if (rtpConfig->mid.has_value())
+		rtpExtHeaderSize += headerSize + rtpConfig->mid->length();
+
+	if (rtpConfig->rid.has_value())
+		rtpExtHeaderSize += headerSize + rtpConfig->rid->length();
+
+	if (!videoLayersAllocationBuf.empty())
+		rtpExtHeaderSize += headerSize + videoLayersAllocationBuf.size();
+
+	if (ddWriter.has_value())
+		rtpExtHeaderSize += headerSize + ddWriter->getSize();
+
+	if (rtpExtHeaderSize != 0)
+		rtpExtHeaderSize += 4;
+
+	// Align the size to the multiple of 4 bytes
+	// according to RFC 3550, sec. 5.3.1.
+	rtpExtHeaderSize = (rtpExtHeaderSize + 3) & ~3;
+
+	auto message = make_message(RtpHeaderSize + rtpExtHeaderSize + payload.size());
+	auto *rtp = (RtpHeader *)message->data();
+	rtp->setPayloadType(rtpConfig->payloadType);
+	rtp->setSeqNumber(rtpConfig->sequenceNumber++); // increase sequence number
+	rtp->setTimestamp(rtpConfig->timestamp);
+	rtp->setSsrc(rtpConfig->ssrc);
+
+	if (mark) {
+		rtp->setMarker(true);
+	}
+
+	if (rtpExtHeaderSize) {
+		rtp->setExtension(true);
+
+		auto extHeader = rtp->getExtensionHeader();
+		extHeader->setProfileSpecificId(twoByteHeader ? 0x1000 : 0xbede);
+
+		auto headerLength = static_cast<uint16_t>(rtpExtHeaderSize / 4) - 1;
+
+		extHeader->setHeaderLength(headerLength);
+		extHeader->clearBody();
+
+		size_t offset = 0;
+		if (setVideoRotation) {
+			offset += extHeader->writeCurrentVideoOrientation(
+			    twoByteHeader, offset, rtpConfig->videoOrientationId, rtpConfig->videoOrientation);
+		}
+
+		if (rtpConfig->mid.has_value()) {
+			offset +=
+			    extHeader->writeHeader(twoByteHeader, offset, rtpConfig->midId,
+			                           reinterpret_cast<const std::byte *>(rtpConfig->mid->c_str()),
+			                           rtpConfig->mid->length());
+		}
+
+		if (rtpConfig->rid.has_value()) {
+			offset +=
+			    extHeader->writeHeader(twoByteHeader, offset, rtpConfig->ridId,
+			                           reinterpret_cast<const std::byte *>(rtpConfig->rid->c_str()),
+			                           rtpConfig->rid->length());
+		}
+
+		if (ddWriter.has_value()) {
+			auto sizeBytes = ddWriter->getSize();
+			std::vector<std::byte> buf(sizeBytes);
+			ddWriter->writeTo(buf.data(), sizeBytes);
+			offset += extHeader->writeHeader(
+			    twoByteHeader, offset, rtpConfig->dependencyDescriptorId, buf.data(), sizeBytes);
+		}
+
+		if (!videoLayersAllocationBuf.empty()) {
+			offset += extHeader->writeHeader(
+				twoByteHeader, offset, rtpConfig->videoLayersAllocationId,
+				videoLayersAllocationBuf.data(),
+				videoLayersAllocationBuf.size());
+		}
+
+		if (setPlayoutDelay) {
+			uint16_t min = rtpConfig->playoutDelayMin & 0xFFF;
+			uint16_t max = rtpConfig->playoutDelayMax & 0xFFF;
+
+			// 12 bits for min + 12 bits for max
+			byte data[] = {byte((min >> 4) & 0xFF), byte(((min & 0xF) << 4) | ((max >> 8) & 0xF)),
+			               byte(max & 0xFF)};
+
+			offset += extHeader->writeHeader(
+			    twoByteHeader, offset, rtpConfig->playoutDelayId, data, 3);
+		}
+
+		if (setColorSpace) {
+			uint8_t range_chr = (rtpConfig->colorRange << 4) + (rtpConfig->colorChromaSitingHorz << 2) + rtpConfig->colorChromaSitingVert;
+
+			byte data[] = {byte(rtpConfig->colorPrimaries), byte(rtpConfig->colorTransfer),
+			               byte(rtpConfig->colorMatrix), byte(range_chr)};
+
+			offset += extHeader->writeHeader(
+			    twoByteHeader, offset, rtpConfig->colorSpaceId, data, 4);
+		}
+
+		if (setAbsCaptureTime) {
+			// 8-byte (shortened) form: 64-bit NTP timestamp, network order.
+			// https://webrtc.googlesource.com/src/+/refs/heads/main/docs/native-code/rtp-hdrext/abs-capture-time
+			uint64_t ntp = frameInfo ? frameInfo->absCaptureTimeNtp.value_or(0) : 0;
+			byte data[8] = {
+			    byte((ntp >> 56) & 0xFF), byte((ntp >> 48) & 0xFF),
+			    byte((ntp >> 40) & 0xFF), byte((ntp >> 32) & 0xFF),
+			    byte((ntp >> 24) & 0xFF), byte((ntp >> 16) & 0xFF),
+			    byte((ntp >> 8) & 0xFF),  byte(ntp & 0xFF)};
+
+			offset += extHeader->writeHeader(
+			    twoByteHeader, offset, rtpConfig->absCaptureTimeId, data, 8);
+		}
+	}
+
+	rtp->preparePacket();
+
+	std::memcpy(message->data() + RtpHeaderSize + rtpExtHeaderSize, payload.data(), payload.size());
+
+	return message;
+}
+
+void RtpPacketizer::media([[maybe_unused]] const Description::Media &desc) {}
+
+void RtpPacketizer::outgoing(message_vector &messages,
+                             [[maybe_unused]] const message_callback &send) {
+	message_vector result;
+	for (const auto &message : messages) {
+		if (const auto &frameInfo = message->frameInfo) {
+			if (frameInfo->payloadType && frameInfo->payloadType != rtpConfig->payloadType)
+				continue;
+
+			if (frameInfo->timestampSeconds)
+				rtpConfig->timestamp =
+				    rtpConfig->startTimestamp +
+				    rtpConfig->secondsToTimestamp(
+				        std::chrono::duration<double>(*frameInfo->timestampSeconds).count());
+			else
+				rtpConfig->timestamp = frameInfo->timestamp;
+		}
+
+		auto payloads = fragment(std::move(*message));
+		for (size_t i = 0; i < payloads.size(); i++) {
+			if (rtpConfig->dependencyDescriptorContext.has_value()) {
+				auto &ctx = *rtpConfig->dependencyDescriptorContext;
+				ctx.descriptor.startOfFrame = i == 0;
+				ctx.descriptor.endOfFrame = i == payloads.size() - 1;
+			}
+			bool mark = i == payloads.size() - 1;
+			result.push_back(packetize(payloads[i], mark, message->frameInfo));
+		}
+	}
+
+	messages.swap(result);
+}
+
+bool RtpPacketizer::shouldEmitVideoLayersAllocation(shared_ptr<FrameInfo> frameInfo) {
+	// We emit the Google VLA extension for the first 100 packets
+	if (videoLayersAllocationInitialPacketCount < 100) {
+		++ videoLayersAllocationInitialPacketCount;
+		return true;
+	}
+
+	// And also on every packet of every key frame
+	if (frameInfo && frameInfo->isKeyFrame) {
+		return true;
+	}
+
+	return false;
+}
+
+
+} // namespace rtc
+
+#endif /* RTC_ENABLE_MEDIA */

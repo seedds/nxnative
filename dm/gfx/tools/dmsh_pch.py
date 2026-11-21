@@ -33,13 +33,15 @@ def make(metal):
     h, pch, src = os.path.join(d, 'prefix.h'), os.path.join(d, 'prefix.pch'), os.path.join(d, 'probe.metal')
     with open(h, 'w') as f: f.write(HEADER)
     with open(src, 'w') as f: f.write(PROBE)
-    r = subprocess.run([*(a for a in metal if a != '-c'), '-x', 'metal-header', h, '-o', pch], capture_output=True, text=True)
-    if r.returncode: return None, f'it does not build: {r.stderr.strip()[:200]}'
+    r = subprocess.run([*(a for a in metal if a != '-c'), '-x', 'metal-header', h, '-o', pch], capture_output=True)
+    err = r.stderr.decode('utf-8', errors='replace') if isinstance(r.stderr, bytes) else str(r.stderr or '')
+    if r.returncode: return None, f'it does not build: {err.strip()[:200]}'
     outs = []
     for extra, name in (((), 'plain.air'), (('-include-pch', pch), 'header.air')):
         out = os.path.join(d, name)
-        r = subprocess.run([*metal, *extra, src, '-o', out], capture_output=True, text=True)
-        if r.returncode: return None, f'a test shader does not compile: {r.stderr.strip()[:200]}'
+        r = subprocess.run([*metal, *extra, src, '-o', out], capture_output=True)
+        err = r.stderr.decode('utf-8', errors='replace') if isinstance(r.stderr, bytes) else str(r.stderr or '')
+        if r.returncode: return None, f'a test shader does not compile: {err.strip()[:200]}'
         with open(out, 'rb') as f: outs.append(f.read())
     if outs[0] != outs[1]: return None, 'a test shader compiled with it differs'
     return pch, None
@@ -67,7 +69,12 @@ def compile(metal, msl, air):
     if pch:
         r = _run([*metal, '-include-pch', pch], msl, air, capture_output=True)
         if not r.returncode:
-            sys.stderr.buffer.write(r.stderr); sys.stderr.flush()
+            err = r.stderr.decode('utf-8', errors='replace') if isinstance(r.stderr, bytes) else str(r.stderr or '')
+            if err: sys.stderr.write(err); sys.stderr.flush()
             return
-    try: _run(metal, msl, air, check=True)
-    except subprocess.CalledProcessError: print(f'{msl}: does not compile (the messages above say <stdin>)', file=sys.stderr, flush=True); raise
+    try: _run(metal, msl, air, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else str(e.stderr or '')
+        if err: sys.stderr.write(err); sys.stderr.flush()
+        print(f'{msl}: does not compile (the messages above say <stdin>)', file=sys.stderr, flush=True)
+        raise

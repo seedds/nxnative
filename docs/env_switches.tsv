@@ -464,6 +464,10 @@ DM_WAKE_UNLOCKED	switch	`0` signals a woken guest thread while the waker still h
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path
 DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that long (default 15 with `DM_WATCH`), logs a red line, dumps the threads and exits
+DM_WEBRTC	switch	`1` starts the local WebRTC stream server and remote controller web interface
+DM_WEBRTC_PORT	switch	`=<port>` port for the WebRTC HTTP signaling and web server (default 8888)
+DM_WEBRTC_RES	switch	`=<res>` stream video resolution for WebRTC (`480p` or `720p`, default 480p)
+DM_WEBRTC_WEB	path	`path`: directory path containing web assets for the WebRTC remote controller
 DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
 DM_WINDOWLESS_ROLE	switch	`0` keeps the existing task role for a windowless Mac run. By default the host requests the [default application task role](reference/audio.md#underruns-in-a-run-without-a-window) to enable interactive QoS

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>libdatachannel media SFU example</title>
+</head>
+<body>
+
+<div style="display:inline-block; width:40%;">
+    <h1>SENDER</h1>
+    <p id="send-help">Please enter the offer provided to you by the application: </p>
+    <textarea style="width:100%;" id="send-text" cols="40" rows="25"></textarea>
+    <button id="send-button">Submit</button>
+</div>
+<div style="display:inline-block; width:40%;">
+    <h1>RECEIVER</h1>
+    <p id="recv-help">Please enter the offer provided to you by the application: </p>
+    <textarea id="recv-text" style="width:100%;" cols="40" rows="25"></textarea>
+    <button id="recv-button">Submit</button>
+</div>
+
+<div id="videos">
+</div>
+
+<script>
+    document.getElementById('send-button').addEventListener('click',  async () => {
+        const pc = new RTCPeerConnection({
+            // Recommended for libdatachannel
+            bundlePolicy: 'max-bundle',
+        });
+
+        pc.onicegatheringstatechange = (state) => {
+            if (pc.iceGatheringState === 'complete') {
+                // We only want to provide an answer once all of our candidates have been added to the SDP.
+                const answer = pc.localDescription;
+                document.getElementById('send-text').value = JSON.stringify({
+                    type: answer.type,
+                    sdp: answer.sdp
+                });
+                document.getElementById('send-help').value = 'Please paste the answer in the application.';
+                alert('Please paste the answer in the application.');
+            }
+        }
+
+        const offer = JSON.parse(document.getElementById('send-text').value);
+        await pc.setRemoteDescription(offer);
+
+        const media = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: 1280,
+                height: 720
+            }
+        });
+        media.getTracks().forEach(track => pc.addTrack(track, media));
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+    });
+
+    document.getElementById('recv-button').addEventListener('click',  async () => {
+        const pc = new RTCPeerConnection({
+            // Recommended for libdatachannel
+            bundlePolicy: 'max-bundle',
+        });
+
+        pc.onicegatheringstatechange = (state) => {
+            if (pc.iceGatheringState === 'complete') {
+                // We only want to provide an answer once all of our candidates have been added to the SDP.
+                const answer = pc.localDescription;
+                document.getElementById('recv-text').value = JSON.stringify({
+                    type: answer.type,
+                    sdp: answer.sdp
+                });
+                document.getElementById('recv-help').value = 'Please paste the answer in the application.';
+                alert('Please paste the answer in the application.');
+            }
+        }
+
+        let trackCount = 0;
+        pc.ontrack = (evt) => {
+            const id = trackCount++;
+            document.getElementById('videos').innerHTML += `<video width="100%" height="100%" id="video-${id}"></video>`;
+
+            const video = document.getElementById(`video-${id}`);
+			video.srcObject = evt.streams[0];
+            video.play();
+        };
+
+        const offer = JSON.parse(document.getElementById('recv-text').value);
+        await pc.setRemoteDescription(offer);
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+    });
+</script>
+
+</body>
+</html>

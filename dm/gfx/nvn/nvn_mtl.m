@@ -19311,6 +19311,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!kind) { cb_end(cb, drs); [g_q4 signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
     cb_end(cb, drs);
+    id<MTLTexture> stream_tex = (dr && dr.texture) ? dr.texture : nil;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
@@ -19318,6 +19319,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
         if (retire) ext_retire(retire);
+#if DM_HAS_WEBRTC
+        if (!f.error && stream_tex) {
+            extern int webrtc_streamer_wants_video(void);
+            extern void webrtc_streamer_send_metal_texture(void *mtl_texture, void *mtl_dev, void *mtl_cmd_queue, uint64_t pts_ns);
+            if (webrtc_streamer_wants_video()) {
+                webrtc_streamer_send_metal_texture((__bridge void *)stream_tex, (__bridge void *)g_dev, (__bridge void *)g_q, now_ns());
+            }
+        }
+#endif
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);

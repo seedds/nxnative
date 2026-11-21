@@ -10995,6 +10995,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
                 (unsigned long)d.depthAttachmentPixelFormat, (unsigned long)d.stencilAttachmentPixelFormat, compile]}];
         return nil;
     }
+    int known_only = compile == 2; if (known_only) compile = 0;   // 2: the base only if it is made already (g_pbase): no archive search, no compile (pso_get_'s first try)
     pso4_init();
     int rast = d.rasterizationEnabled;
     // A face-split draw's pipeline (fsp_plan): built whole, so that the compiler drops the work of the colour outputs the pipeline has no attachment for (a specialization of a base keeps
@@ -11020,6 +11021,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     for (;;) {
         os_unfair_lock_lock(&g_pbase_lock);
         base = hm_get_id(&g_pbase, &bk); job = nil; owner = 0; known = 0;
+        if (!base && known_only) { os_unfair_lock_unlock(&g_pbase_lock); return nil; }
         if (!base) {
             known = hm_get_id(&g_pbase_miss, &bk) != nil;
             if (known && !compile) { os_unfair_lock_unlock(&g_pbase_lock); return nil; }
@@ -11255,6 +11257,19 @@ static int pso_pend_try(const pso_key *k, id<MTLRenderPipelineState> *out) {
 // built with preserved invariance, from bit-identical inputs (t_pull.m, t_pull_inv.m). Only a pulling base already made or in the archive is used (the prebuild makes them); otherwise
 // the draw waits as before and the pulling base is built in the background for the pair's next miss. Not for merged passes, readable-tile or diagnostic fragments, layer-writing or
 // transform feedback vertex shaders. DM_PSO_HYBRID=0 turns it off
+// DM_PSO_LOOKUP_BG=1 (off by default): a draw takes a base only if it is made (g_pbase); the search of the others, and the compile of those the archives lack, are the background's
+// (pso_pend_demand, hy_base_kick). By default a draw looks in the pipeline archives itself, on the replay thread, for the base of its pipeline and of its stand-in; a search that finds nothing
+// waits for Metal's compiler scheduler behind the background's own compiles (17-150 ms) while the replay thread holds g_sub_mu, and the game's next submit waits for that lock. With it on, a draw
+// that has neither pipeline yet is skipped (pso_get returns nil, as it does for a slice-merged pass's pipeline not built yet) and asked again at its next use, for at most PSO_SKIP_NS; then it
+// builds as before. A skipped draw that is not repeated (one into a target that is drawn once) stays missing until its target is drawn again: why it is not the default
+static int lookup_bg(void) {
+    static int v = -1;
+    if (v < 0) { const char *ev = getenv("DM_PSO_LOOKUP_BG"); v = ev && !strcmp(ev, "1"); if (v) MLOG("DM_PSO_LOOKUP_BG=1: a draw's first look for its pipeline's base and its stand-in's takes only a base that is made; the rest is looked up in the background and the draw skipped for up to 250 ms"); }
+    return v;
+}
+#define PSO_SKIP_NS 250000000ull
+static nvn_hmap g_pso_skip = {.klen = sizeof(pso_key)};   // pso_key -> NSNumber: when a draw of the key was first skipped for want of a pipeline (replay thread); 0 once it gave up
+static _Atomic uint64_t g_hy_skipped, g_hy_skip_giveup;   // draws skipped for want of a pipeline; keys that waited past PSO_SKIP_NS and were built here after all
 static int hybrid_on(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_PSO_HYBRID"); pso4_init(); v = g_comp4 && !(e && !strcmp(e, "0")); if (!v) MLOG("hybrid pipelines off: a draw whose pipeline is not built yet waits for it"); }
@@ -11282,7 +11297,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     if (h) return h;
     MTLRenderPipelineDescriptor *d = vs->has_pull ? pso_desc_pull(k, vs, fs) : nil;
     if (!d) return nil;
-    NSError *e = nil; int off = !k->border; id<MTLRenderPipelineState> ps = pso_build_ex(d, off, &e, 0);
+    NSError *e = nil; int off = !k->border; id<MTLRenderPipelineState> ps = pso_build_ex(d, off, &e, lookup_bg() ? 2 : 0);
     if (!ps) { hy_base_kick(d, off); g_hy_none++; return nil; }
     g_hy_made++; hm_put_id(&g_pso_hy, k, ps);
     return ps;
@@ -11328,6 +11343,9 @@ void mtl_pso_line(char *o, size_t n) {
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
+    static uint64_t psk, pgu; uint64_t sk = atomic_load(&g_hy_skipped), gu = atomic_load(&g_hy_skip_giveup);
+    if (sk > psk || gu > pgu) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws skipped until their pipeline was built in the background %llu (%llu keys built here after %d ms)", (unsigned long long)(sk - psk), (unsigned long long)(gu - pgu), (int)(PSO_SKIP_NS / 1000000));
+    psk = sk; pgu = gu;
     static uint64_t pca, pcr, pcb, pcl, pcn; uint64_t ca = g_cps_arch, cr = g_cps_run, cb = g_cps_built, cl = g_cps_look_ns, cn = g_cps_build_ns;   // compute pipelines (cps_new)
     if (ca > pca || cr > pcr || cb > pcb)
         snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building)",
@@ -11700,7 +11718,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         int st = pso_pend_try(&k, &ps);
         if (st == 2) took = 1;   // built in the background (nil: it failed, and is built again below for its message)
         else {
-            if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), !k.border, &e, 0);   // its base made or archived: no compile
+            // With DM_PSO_LOOKUP_BG its base made: no archive search and no compile on this thread (lookup_bg). With no base made it takes its stand-in below, or is skipped until the background has one
+            if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), !k.border, &e, lookup_bg() ? 2 : 0);
             if (!ps) {
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
@@ -11710,6 +11729,16 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (pso_predict_due(st == 0)) { uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
+                }
+                if (lookup_bg() && why == 4) {   // the shader pulls, so a stand-in is coming from the background lookup (hybrid_get kicked it); until it is there the draw is skipped
+                    uint64_t now = bp_now(); NSNumber *since = hm_get_id(&g_pso_skip, &k);
+                    if (!since) { since = @(now); hm_put_id(&g_pso_skip, &k, since); }
+                    if (now - since.unsignedLongLongValue < PSO_SKIP_NS) {
+                        if (st == 0) pso_pend_demand(&k, vs, fs);
+                        atomic_fetch_add(&g_hy_skipped, 1); g_hy_ns += bp_now() - bt;
+                        return nil;
+                    }
+                    if (since.unsignedLongLongValue) { atomic_fetch_add(&g_hy_skip_giveup, 1); hm_put_id(&g_pso_skip, &k, @0); }
                 }
             }
         }

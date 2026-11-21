@@ -1,6 +1,7 @@
 // A compile 0 call of pso_build_ex (nvn_mtl.m) for a base another thread holds: it waits for that thread's archive lookup, which takes milliseconds, and takes the base
 // it found; it never waits for that thread's compile. Before, it returned nil at once, so a draw that came while a background worker looked up its pulling base found no
 // stand-in and compiled its own base on the submit thread instead (Ocarina of Time on an iPhone 17, first visits: one draw waited 0.3-1.8 s).
+// The known-only mode (compile 2: a draw's first look, which takes a base only if it is made and never searches or waits) is checked last.
 // The other thread is played here by hand: a job planted in g_pbase_pending, finished from a dispatch_after block. Real Metal 4 compiles of synthetic shaders, no archive.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -87,6 +88,26 @@ int main(void) { @autoreleasepool {
         os_unfair_lock_lock(&g_pbase_lock); int miss = hm_get_id(&g_pbase_miss, &bk) != nil, pend = hm_get_id(&g_pbase_pending, &bk) != nil; os_unfair_lock_unlock(&g_pbase_lock);
         CHECK(miss && !pend, "the base is marked missing and its job is gone");
         CHECK(pso_build_ex(d, !k.border, &e, 1) != nil, "a compiling call then builds it");
+    }
+    // 4. Compile 2 takes a base only if it is made: with none it returns nil at once, searches nothing, marks nothing missing and leaves no job; a base made is specialized as for compile 0
+    {   NvProg *p = program(.9f); pso_key k; pbase_key bk; MTLRenderPipelineDescriptor *d = desc(p, &k, &bk);
+        NSError *e = nil; uint64_t asks = g_arch_asks, built = g_pb_built, t0 = bp_now();
+        CHECK(pso_build_ex(d, !k.border, &e, 2) == nil, "a compile 2 call for a base not made returns nil");
+        CHECK((bp_now() - t0) / 1e6 < 50, "it returns at once");
+        os_unfair_lock_lock(&g_pbase_lock); int miss = hm_get_id(&g_pbase_miss, &bk) != nil, pend = hm_get_id(&g_pbase_pending, &bk) != nil; os_unfair_lock_unlock(&g_pbase_lock);
+        CHECK(!miss && !pend, "it marked the base neither missing nor under way");
+        CHECK(g_arch_asks == asks && g_pb_built == built, "it searched no archive and compiled nothing");
+        CHECK(pso_build_ex(d, !k.border, &e, 1) != nil, "a compiling call builds the base");
+        CHECK(pso_build_ex(d, !k.border, &e, 2) != nil, "a compile 2 call then takes it");
+    }
+    // 5. Compile 2 does not wait for another thread's lookup of the base either (compile 0 does, case 1)
+    {   NvProg *p = program(1.1f); pso_key k; pbase_key bk; MTLRenderPipelineDescriptor *d = desc(p, &k, &bk);
+        PbaseBuild *job = plant(&bk);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), other, ^{ dispatch_group_leave(job->looked); finish(job, &bk, nil); });
+        NSError *e = nil; uint64_t t0 = bp_now();
+        CHECK(pso_build_ex(d, !k.border, &e, 2) == nil, "a compile 2 call for a base another thread is looking up returns nil");
+        CHECK((bp_now() - t0) / 1e6 < 250, "it does not wait for that lookup");
+        dispatch_sync(other, ^{});
     }
     printf("lookup waits: %d checks, %d failed\n", checks, failed);
     return failed != 0;

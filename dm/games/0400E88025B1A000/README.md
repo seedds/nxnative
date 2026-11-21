@@ -42,6 +42,22 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 
 The shipped Switch 2 configuration sets `render.resolution_scale_console=0.5` and selects NDSR (`render.main_upscaler_console=3`). At a 1920x1080 window and graphics scale tier 0, the game renders its 3D scene at 960x540 and upscales it to 1080p. [Issue #2895](https://github.com/seedds/nxnative/issues/2895#finding-2-why-the-3d-is-960x540-the-games-own-settings)
 
+### Render scale
+
+The launcher's **Render scale** (`DM_RENDER_SCALE`, 0.5 to 2.0) multiplies the scale the game sizes its 3D views by: the mode's override (`render.resolution_scale_console`, 0.5 as shipped, or `render.resolution_scale_handheld`) when it is nonzero, else `render.resolution_scale`. A stub in the render function does it ([`patches.py`](patches.py)); 1.0 keeps the game's own scale. The game caps the result at the window's size, so 2.0 takes the console override's 0.5 to the full window. There is no `render_base`: the window follows the display ([Opt-in 4K on the Mac](#opt-in-4k-on-the-mac)), so a fixed size in pixels would be wrong on a larger screen.
+
+Measured on an M5 Max (32-core GPU, macOS 27.2, 2026-11-21) in the Corneria and space flights, a 1920x1080 window on a host before 78bd42b9, from `DM_CTL` pass dumps of the main scene pass (three colour targets):
+
+| Mode | Render scale | Main scene pass | Frame rate | GPU p50 / p95 |
+|---|---|---|---|---|
+| Docked | 1.0 | 960x540 | 60 | about 5 / 7 ms |
+| Docked | 1.5 | 1440x810 | 58–60 | 4.6–6.1 / 6.7–7.0 ms |
+| Docked | 2.0 | 1920x1080 | 58–60 | 5.5 / 7–8 ms |
+| Handheld | 1.0 | 1600x900 | 58 | — |
+| Handheld | 2.0 | 1920x1080 (the cap) | 57–60 | 3.7–5.8 / 6.7–7.9 ms |
+
+The 2.0 rows were taken while the stub replaced the override instead of multiplying it (2.0 capped to the window, the same size as 0.5 × 2.0), and the docked one also with a `render.resolution_scale_console` overlay. The 1.5 row and the handheld 1.0 row are the stub as it is. Not measured: a window larger than 1920x1080 (78bd42b9), the iPhone, and later levels.
+
 ### Opt-in 4K on the Mac
 
 Create a folder outside the repository with this `veclipse_build.cvar` file in its root. The game reads it after its platform settings. A scale of 1.0 uses the full rendering resolution, and preset 3 requests 3840x2160 for presentation.

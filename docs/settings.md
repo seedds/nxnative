@@ -37,6 +37,8 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
 
+Star Fox goes up to 200 %: the game draws its 3D at half its window docked (960x540 for a 1920x1080 window) and doubles it with its own upscaler, and at 200 % it draws the 3D at the window's size. The game stops at the window's size, so handheld, where it already draws 1600x900, reaches it at about 120 %. Sharper 3D docked, at more GPU time. [Its note](../dm/games/0400E88025B1A000/README.md#render-scale)
+
 ### Console mode
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
@@ -269,7 +271,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Setting | Variable | Values |
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (games with `fps_max 120`) |
-| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
+| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`, Star Fox: to `2.0`) |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |

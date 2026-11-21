@@ -1,0 +1,34 @@
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 8933cf26..5bbbff62 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -1357,6 +1357,18 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait
+ static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
+ uint64_t dm_nvn_frame_count(void) { return g_frame; }
+ extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
++// Years 1-4 (libharry1.nro, nro1, build 2ac11df4c46d710f4ee2dfe6668e7da7) is the one module in this collection with no frame limit of its own: it never waits for the
++// screen, so the swapchain's own release of a texture is what paces it on the device (a frame cannot be drawn until a texture comes back, once per display period).
++// Present snapshots (DM_PRESENT_SNAP) copy each present into a host ring and free the guest's texture at once ("the game's texture is free at once"), so that release
++// disappears and the module runs 2 to 4 guest frames per displayed one -- measured 149.5 guest frames/s against 52.4 presents/s with the 4-deep ring (141.6/s over a whole
++// run), and 59.1 with the ring's pacing path off. Years 5-7 (nro0) limits its own frame rate and is unaffected. While nro1 is loaded the acquire keeps the console's pacing: a texture is
++// not handed out before its display slot (o->avail, set at present to display time + one period), on top of the ring's capacity wait.
++static int years14_loaded(void) {
++    for (int i = 0; i < g_nmod; i++)
++        if (g_mod[i].nro && atomic_load(&g_mod[i].loaded) && !strcmp(g_mod[i].name, "nro1") &&
++            !strcmp(g_mod[i].build_id, "2ac11df4c46d710f4ee2dfe6668e7da7")) return 1;
++    return 0;
++}
+ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+     win_t *o = (win_t *)w;
+     *idx = o->ntex ? o->next++ % o->ntex : 0;
+@@ -1367,7 +1379,9 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
+         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
+         rt_comp_tick(rtp);
+         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
+-        if (snap && mtl_link_active()) { if (wait && mtl_link_stalled()) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m): the acquire's wait for a free ring slot below paces it.
++        int y14 = snap && years14_loaded();
++        if (y14) { static int once; if (!once++) LOG("[nvn] present snapshots: nro1 (Years 1-4) has no frame limit of its own, so the acquire keeps the console's swapchain pacing (a texture is not handed out before its display slot); Years 5-7 keeps the ring unchanged"); }
++        if (snap && mtl_link_active()) { if (wait && (mtl_link_stalled() || y14)) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m): the acquire's wait for a free ring slot below paces it; with nro1 loaded the texture's display slot paces it as on the device
+             // While the display link is silent (the window in the background or covered) frames are dropped as fast as they come and
+             // nothing frees a slot later, so the texture's slot time paces the game as without snapshots: unpaced, Breath of the Wild ran 3 to 4.5 times real time there
+         else if (mtl_link_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives

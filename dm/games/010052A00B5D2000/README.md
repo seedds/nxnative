@@ -2,15 +2,15 @@
 
 Update 1.0.2 (`v131072`), SDK 5.4.0, NVN. TT Games' own renderer — the Windows D3D11 DLLs ported to `nn::ro` modules: `main` is 750 instructions that mount the RomFS, `libHarryLauncher.nro` starts and loads `libharry1.nro` (Years 1-4) or `libharry2.nro` (Years 5-7) as a module. Modules `main`, `sdk` and the three NROs `lhp_switch_dll_launcher.nrr` registers; the host maps the rewritten NROs at start.
 
-**This branch is the recipe for `Lego HP NX GLYPHFIX.app`.** It differs from the user's original app in exactly three files (two replaced, `env.txt` added), and one of them is the whole fix:
+**This branch is the recipe for `Lego HP NX GLYPHFIX.app`.** It is the user's original app plus three replaced/added files (host, `nro0`, `env.txt`), and this revision adds the fold of 372 captured shaders (the profile's `shdump/`, `shader_map.tsv` and the compiled library) and a host gate for Years 1-4's present pacing:
 
 | file | what it is | sha256 |
 |---|---|---|
-| `Contents/MacOS/dmhost` | the pinned host (built from `lego-hp57-artifact`; not rebuilt here — [`host/README.md`](host/README.md)) | `99100d734bea3c12a3d2e68c62699e3e190e4d4b2d8ba815d1cc924f1798d723` |
+| `Contents/MacOS/dmhost` | the pinned host (series + `host-gate.patch`; not rebuilt here — [`host/README.md`](host/README.md)) | `52e08030da37f3fcffbb2c116acf4e5dff7e7075af21b5b919a807163d948bd7` |
 | `Contents/Resources/dm/nro0.patched.bin` | `libharry2.nro` rewritten with this profile's two stubs — `publish_record` and **`blit_guard`** | `6729d1b3c0857fbb93ed6d94ceb4f4a5105f4fc112f376dcab18527d7c1a2496`, 18,762,448 B |
-| `Contents/Resources/dm/env.txt` | [`env.txt`](env.txt): `DM_PRESENT_SNAP=4`, `DM_PRESENT_UPSCALE=off`, `DM_FULLSCREEN=1` | `001874a5220c2d565759ab0fdd1abe2987e86810768b6542a138ba53e78a1db2` |
+| `Contents/Resources/dm/env.txt` | [`env.txt`](env.txt): only `DM_PRESENT_SNAP=4`; Fullscreen and Upscaling are left to the settings window | `f9ea3a16fe0dd9b908d2000293debdf892eea7978089bd96559b83e5019c33c8` |
 
-Everything else — `romfs.img`, `main.patched.bin`, the other NROs, the shader packages, `launcher.json`, the icon — is the source bundle's, byte for byte. Nothing is codesigned or re-signed: an unsigned host inside a bundle whose signature no longer covers it is what runs.
+Everything else — `romfs.img`, `main.patched.bin`, the other NROs, the shader packages, `launcher.json`, the icon — is the source bundle's, byte for byte, except `shader_map.tsv` and the compiled `msl/` library: this revision folds the 372 shaders captured from play into them (the profile's `shdump/` and `shader_map.tsv` are the inputs; a full `build_ipa_from_nsp.py --platform mac-app` rebuilds the library). Nothing is codesigned or re-signed: an unsigned host inside a bundle whose signature no longer covers it is what runs.
 
 [`patches.py`](patches.py) holds the two guest patches and [`PATCHES.md`](PATCHES.md) their sites, bytes and rebuild. This note is the artifact, the diagnosis, the mechanism, the numbers and what is left. The mechanism is written up at length in the host repository: `nxnative/docs/guestpatch-glyph-batch.md` (branch `lego-hp57-artifact`), with the measurements in `orch/guestpatch/REPORT.md` and the emission archaeology in `orch/dither`, `orch/emit`, `orch/state`.
 
@@ -105,8 +105,8 @@ Reproducibility of the recipe itself (no host launch, hashes only):
 ```
 patches.py + patch_nso.py + stock nro0   ->  6729d1b3…  == GLYPHFIX's nro0.patched.bin, byte for byte
 git am host series on a662f29            ->  32 commits, tree 6147769164def6b1c311f99d343a7cc50d27908a
-make -C dm/host GAME=010052A00B5D2000    ->  builds (ac540e0c…; the pinned 99100d73… is an artifact pin)
-make_lego_hp_app.sh on the original app  ->  dmhost 99100d73…, module 6729d1b3…, env.txt 001874a5…
+make -C dm/host GAME=010052A00B5D2000    ->  builds (series + host-gate.patch: 52e08030…; the pin is an artifact)
+make_lego_hp_app.sh on the original app  ->  dmhost 52e08030…, module 6729d1b3…, env.txt f9ea3a16…
                                              the other 6,499 files sha256-identical; romfs.img same size and mtime (clonefile)
 ```
 
@@ -131,14 +131,14 @@ The improvement the user called "really really improved" is the **presentation**
 * **`ui_republish` stays 0.** It is inert at this configuration (its flagged population is identical to OFF: OFF 1.70 / 1.60, ON 1.66 / 1.66) and harmful with 2 submissions in flight: it writes one 5 MB pool block three times a frame with no ordering against the GPU, and put the wall back at 8.90 per 100 in one of two ON runs.
 * **MetalFX is off.** Its 0.00 was a measurement, not an absence: the spatial scaler anti-aliases the glyph edges, so the *residual* lattice reads `nbrh ~39.5` with white under the 0.06 companion line, it hid the residual from the detector, and it costs GPU time every frame.
 
-These values are in [`game.tsv`](game.tsv) and again in [`env.txt`](env.txt). The pinned host was built while `game.tsv` still said `metalfx`; the environment pins in `env.txt` take precedence (`fx_mode()` in `nvn_mtl.m`), so GLYPHFIX presents bilinearly. A host rebuilt from this branch's `game.tsv` compiles `off` directly and is not byte-identical (see [`host/README.md`](host/README.md)).
+These values are in [`game.tsv`](game.tsv) and the snapshot depth again in [`env.txt`](env.txt). Fullscreen and upscaling are deliberately **not** pinned in `env.txt` any more: the settings window owns them. The pinned host is built from this branch's `game.tsv` plus [`host-gate.patch`](host-gate.patch) (the Years 1-4 pacing gate) and is not byte-identical to a rebuild (see [`host/README.md`](host/README.md)).
 
 ## Shaders
 
 * **372 keys** the split reads from the three NROs (252 pixel, 120 vertex: 186 GLSLC outputs in each of `libharry1.nro` and `libharry2.nro`, none in the 741 KB launcher). Verified: `shader_split.py` on `RomFS.img` + `ExeFS/main` alone reproduces those rows and their labels exactly.
-* **1,024 more** from a run-time dump. The engine assembles those programs in RAM, so their bytes exist only in a run. [`shdump/`](shdump/) holds the 1,677 pairs one playthrough with `DM_NVN_SHDUMP` wrote — 1,391 distinct keys, 286 of them captured twice, 367 already in the split's map. `dmsh_shdump.py` recomputes each pair's `sha256(control[0:nctl] + code)[:16]`, **rejects** a pair whose hash is not the key in its file name, and appends the row plus its package record.
-* The map is **1,396 keys** in two packages: `ps_nro.bin` 1,028 records, `vs_nro.bin` 368. `/shdump/=nro` files the dumped rows into the same two.
-* **The app's map labelled those 1,024 rows `/.nro/libHarryLauncher.nro#RAW@<n>`, and `<n>` was not an offset in any file** — it was the package record index, printed as hex by a one-off script that appended the dump by hand. This branch writes the dump's provenance instead (`/shdump/<key>.ctl#SHDUMP@0x0`). Keys, stages and package files are identical; the record order — and so the `index` column — is not. The same 1,396 programs compile either way, but a rebuild's `.bin` packages are not byte-identical to the app's.
+* **1,396 more** from a run-time dump. The engine assembles those programs in RAM, so their bytes exist only in a run. [`shdump/`](shdump/) holds the 2,112 pairs one playthrough with `DM_NVN_SHDUMP` wrote — 1,763 distinct keys, 63 of them captured twice, 1,677 already in the split's map. `dmsh_shdump.py` recomputes each pair's `sha256(control[0:nctl] + code)[:16]`, **rejects** a pair whose hash is not the key in its file name, and appends the row plus its package record.
+* The map is **1,769 keys** in two packages: `ps_nro.bin` 1,362 records, `vs_nro.bin` 406. `/shdump/=nro` files the dumped rows into the same two.
+* **The app's map labelled those 1,396 rows `/.nro/libHarryLauncher.nro#RAW@<n>`, and `<n>` was not an offset in any file** — it was the package record index, printed as hex by a one-off script that appended the dump by hand. This branch writes the dump's provenance instead (`/shdump/<key>.ctl#SHDUMP@0x0`). Keys, stages and package files are identical; the record order — and so the `index` column — is not. The same 1,769 programs compile either way, but a rebuild's `.bin` packages are not byte-identical to the app's.
 * Two containers no reader decodes: the launcher's own zlib package (`launcher_dll/launcher.pkdswitch`, 158 members) holds 13 more keys, and 489 of the 865 programs the game draws sit in the four `.DATNX` block archives (12.9 GB, LZHAM in zlib framing).
 
 ## Open

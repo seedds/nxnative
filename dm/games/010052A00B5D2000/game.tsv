@@ -51,7 +51,7 @@ sys_resource	0x0
 
 # ---- Shader split ----
 shader_groups	/.nro/=nro /shdump/=nro /harry1_dll/=harry1dll /harry2_dll/=harry2dll /launcher_dll/=launcherdll /.nrr/=nrr
-shader_note	LEGO® Harry Potter™ Collection shaders (372 keys the split reads from the three NROs, 1,024 from the run-time dump in this profile's shdump/)
+shader_note	LEGO® Harry Potter™ Collection shaders (373 keys the split reads from the three NROs, 1,396 from the run-time dump in this profile's shdump/)
 
 # ---- Present path (Years 5-7: the configuration the user called "really really improved", MetalFX removed) ----
 # 1920x1080 -> 5120x2880 drawable in a fullscreen window, bilinear present, and a 4-deep ring of present

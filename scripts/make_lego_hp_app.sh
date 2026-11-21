@@ -7,7 +7,7 @@
 # The app is its source bundle with exactly three files changed:
 #
 #   Contents/MacOS/dmhost                   the host built from the pinned source (see dm/games/<id>/host/README.md);
-#                                           sha256 99100d734bea3c12a3d2e68c62699e3e190e4d4b2d8ba815d1cc924f1798d723
+#                                           sha256 52e08030da37f3fcffbb2c116acf4e5dff7e7075af21b5b919a807163d948bd7
 #   Contents/Resources/dm/nro0.patched.bin   libharry2.nro (Years 5-7) rewritten with this profile's two stubs — the
 #                                           pass-table publish and the blit guard; sha256 6729d1b3…, 18,762,448 bytes
 #                                           (./scripts/build_lego_hp.sh module builds it)
@@ -27,7 +27,7 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 ID=010052A00B5D2000
-HOST_SHA=99100d734bea3c12a3d2e68c62699e3e190e4d4b2d8ba815d1cc924f1798d723     # the host the fix was measured with
+HOST_SHA=52e08030da37f3fcffbb2c116acf4e5dff7e7075af21b5b919a807163d948bd7     # the host this revision was measured with (series + host-gate.patch)
 MODULE_SHA=6729d1b3c0857fbb93ed6d94ceb4f4a5105f4fc112f376dcab18527d7c1a2496   # nro0.patched.bin (Years 5-7, both stubs)
 MODULE_BYTES=18762448
 PREV_SHA=56f3bf4fdbb712f3c4f7d1c32d921efd38ec6abde304616ab29df82150ce9820     # the same module before the blit guard

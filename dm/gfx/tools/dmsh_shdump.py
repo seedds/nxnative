@@ -52,9 +52,9 @@ def records(d):
         out.append(0x38 + ncode + nctl); o += out[-1]
     return out
 
-def rec_of(ctl, code):
+def rec_of(key, ctl, code):
     """The record shader_split.py writes for one key: the two lengths, the code area, the control section (and the two things that would make dmsh_build.py split it wrongly)"""
-    rec = bytearray(REC + bytes(0x30)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(code)); rec += code + ctl
+    rec = bytearray(REC + bytes.fromhex(key) + bytes(0x28)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(code)); rec += code + ctl
     if rec.find(split.CTL_MAGIC) != 0x38 + len(code): return None, 'the control magic appears in the code area'
     if rec.count(REC) != 1: return None, 'the record separator appears inside the record'
     return bytes(rec), None
@@ -100,7 +100,7 @@ def main():
         if key in taken: twice += 1; continue   # the dump holds one key twice (SetShaders-<key> and <key>): one row and one record, from the copy the key was made of
         st = split.glslc_stage(ctl, code)
         if not st: rejected.append(f'{nm}: the code area names no stage ({code[:4].hex()})'); continue
-        rec, why = rec_of(ctl, code)
+        rec, why = rec_of(key, ctl, code)
         if why: rejected.append(f'{nm}: {why}'); continue
         src = f'/shdump/{key}.ctl#SHDUMP@0x0'
         add.append((f'{st}_{split.group(src)}.bin', src, key, st, ctl, rec)); stages[st] = stages.get(st, 0) + 1

@@ -31,6 +31,8 @@ LOG = [
     f'{P}frame 1200: render 0.91 ms, compute / copy 0.00 ms over 4 encoders (4 render passes, attachments load 5.5 MB store 49.0 MB), first start to last end 0.91 ms',
     # an older host's line without the ledger and formats still parses
     f'{P}F1800    0    50.0 us render pass 30 800x450 colors 1 depth 0 loads 0 draws 2 start +0.0 seg 0',
+    # DM_NVN_GPUPROF_SPLIT's tail (the shaders of the group's first draw) is left out
+    rp(2400, 0, 320.0, 40, 1520, 988, 6, 1, 4, 0.0, 0, 35000, 70, 260) + ' fs aafe364101139e6e vs 095cd6ad97fd779a',
     '[dm] [nvn-mtl] [ab] phase 0 base: 90 frames, GPU p50 9.00 / p90 10.00 / mean 9.10 ms, frame p50 16.60 / p90 17.00 / mean 16.70 ms; per frame: attachments load 300 MB store 400 MB, passes 150.0',
     '[dm] [nvn-mtl] [ab] phase 1 BARRIER: 90 frames, GPU p50 8.00 / p90 9.00 / mean 8.10 ms, frame p50 16.60 / p90 16.90 / mean 16.65 ms; per frame: attachments load 300 MB store 400 MB, passes 150.0',
     '[dm] [nvn-mtl] [ab] phase 2 base: 90 frames, GPU p50 7.00 / p90 8.00 / mean 7.10 ms, frame p50 16.70 / p90 17.10 / mean 16.80 ms; per frame: attachments load 300 MB store 400 MB, passes 150.0',
@@ -44,7 +46,7 @@ class GpuProf(unittest.TestCase):
         self.frames, self.flines = gpuprof.parse(LOG)
 
     def test_parse(self):
-        self.assertEqual(list(self.frames), [600, 1200, 1800])
+        self.assertEqual(list(self.frames), [600, 1200, 1800, 2400])
         self.assertEqual(len(self.frames[600]), 5); self.assertEqual(len(self.frames[1200]), 4)
         g = self.frames[600][0]
         self.assertEqual((g.kind, g.w, g.h, g.colors, g.depth, g.draws, g.store_kb, g.cfmt, g.dfmt), ('R', 1600, 900, 4, 1, 300, 28125, 70, 260))
@@ -52,6 +54,8 @@ class GpuProf(unittest.TestCase):
         self.assertEqual((c.kind, c.pass_, c.copies, c.ubd, c.dispatches, c.seg), ('C', 13, 3, 2, 1, 1))
         old = self.frames[1800][0]
         self.assertEqual((old.load_kb, old.store_kb, old.cfmt), (0, 0, 0))
+        split = self.frames[2400][0]
+        self.assertEqual((split.w, split.h, split.colors, split.draws, split.store_kb, split.cfmt, split.dfmt), (1520, 988, 6, 4, 35000, 70, 260))
         self.assertEqual(self.flines[600], {'render_ms': 0.71, 'compute_ms': 0.03, 'encoders': 5, 'span_ms': 0.76})
         self.assertEqual(self.flines[1200]['span_ms'], 0.91)
 

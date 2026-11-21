@@ -162,6 +162,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** not run on an iPhone here: neither a listed file nor an offline start. The PR author's runs (its own 25 s wait): a planted `.save.dmsync.icloud` in a scratch folder timed out with nothing written, and a real iCloud fetch logged `downloaded in N s`.
 - **Found on:** Cadence of Hyrule on an iPhone (iPhone19,4), after a save from a Mac mini M2 Pro, macOS 26.6 ([PR #2180](https://github.com/seedds/nxnative/pull/2180)).
 
+### Replacing a cloud-save folder left its scope open on iOS
+
+- **Symptom:** switching the launcher's cloud-save folder or turning cloud saves off left the previous folder's sandbox grant open until the app exited.
+- **Cause:** `dm_cloud_saves_path` discarded the URL without stopping access and could replace it with a different URL for the same path. Clearing the bookmark left the grant held. The stale-bookmark refresh balances its own grant.
+- **Fix:** `CloudSaves.m` retains the exact URL that successfully started access and stops access when the selection is replaced, cleared, or no longer resolves. The launcher disables folder changes during the prelaunch save check so it can finish using the selected folder.
+- **Found on:** code review of the shared iOS launcher. The grant lifecycle was checked with synthetic URLs and bookmarks.
+
 ### A failed pull deleted this device's save
 
 - **Symptom:** `[RED] save sync: bringing the cloud's save in failed (errno=…): playing on with this device's`, and the game starts with the cloud's save; this device's is in neither its save folder nor `<save>-backups`.

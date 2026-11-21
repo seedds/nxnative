@@ -1,0 +1,395 @@
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 828e5b03..4c8d0097 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -1,5 +1,6 @@
+ // Metal execution layer of the NVN null device, see nvn_mtl.h.
+ #import <Metal/Metal.h>
++#include <malloc/malloc.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <QuartzCore/CAMetalDisplayLink.h>
+ #import <MetalFX/MetalFX.h>
+@@ -335,6 +336,13 @@ static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memor
+ @end
+ static char g_rh_owner_key;
+ static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
++// What each heap is for, to tell the memory breakdown apart (res_top): a heap is tagged where it is made; the table holds no heap alive
++static NSMapTable *g_heap_what; static os_unfair_lock g_heap_what_lk = OS_UNFAIR_LOCK_INIT;
++static id<MTLHeap> heap_tag(id<MTLHeap> h, NSString *what) {
++    if (h) { os_unfair_lock_lock(&g_heap_what_lk); if (!g_heap_what) g_heap_what = [NSMapTable weakToStrongObjectsMapTable]; [g_heap_what setObject:what forKey:h]; os_unfair_lock_unlock(&g_heap_what_lk); }
++    return h;
++}
++static NSString *heap_what(id h) { os_unfair_lock_lock(&g_heap_what_lk); NSString *w = [g_heap_what objectForKey:h]; os_unfair_lock_unlock(&g_heap_what_lk); return w ?: @"other"; }
+ static int rh_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_RT_RECYCLE", 1); return m; }
+ // A heap for a texture of this descriptor: the smallest waiting one it fits, up to an eighth larger, or a new one of its exact size. nil when the descriptor cannot be placed
+ static id<MTLHeap> rh_take(MTLTextureDescriptor *d, int *reused) {
+@@ -354,7 +362,8 @@ static id<MTLHeap> rh_take(MTLTextureDescriptor *d, int *reused) {
+     if (got) { *reused = 1; return CFBridgingRelease(got); }
+     MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = need.size;
+     hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
+-    *reused = 0; return [g_dev newHeapWithDescriptor:hd];
++    if (need.size >= (48u << 20)) { static int logged; if (logged++ < 24) MLOG("big render-target heap made: %llu MB for a %lux%lux%lu texture, Metal format %lu, %lu levels, %lu samples (type %lu)", (unsigned long long)(need.size >> 20), (unsigned long)d.width, (unsigned long)d.height, (unsigned long)MAX(d.depth, d.arrayLength), (unsigned long)d.pixelFormat, (unsigned long)d.mipmapLevelCount, (unsigned long)d.sampleCount, (unsigned long)d.textureType); }
++    *reused = 0; return heap_tag([g_dev newHeapWithDescriptor:hd], @"render targets and other recycled textures");
+ }
+ // A shared render target in a GPU-only pool (tex_mtl_), in recycled memory: written by the GPU alone, so its bytes never come from the CPU's view of the pool
+ static id<MTLTexture> rh_texture(const tex_t *t, MTLTextureDescriptor *d) {
+@@ -423,21 +432,28 @@ static void res_commit(void) {
+ }
+ // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
+ // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
++static int g_res_top_show = 24;   // how many of the largest objects res_top lists (the periodic breakdown lists a few)
++static uint32_t pso_count(void);
+ static void res_top(const char *why) { @autoreleasepool {
+     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
++    NSMutableDictionary<NSString *, NSNumber *> *hb = [NSMutableDictionary dictionary], *hn = [NSMutableDictionary dictionary];   // heaps by use: bytes, count
+     pthread_mutex_lock(&g_res_mu);
+     for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize; total += z; n++;
+         int k = [(id)o conformsToProtocol:@protocol(MTLTexture)] ? 0 : [(id)o conformsToProtocol:@protocol(MTLHeap)] ? 1 : ((id<MTLBuffer>)o).storageMode == MTLStorageModeShared ? 2 : 3;
+         kind[k] += z; count[k]++;
++        if (k == 1) { NSString *w = heap_what(o); hb[w] = @(hb[w].unsignedLongLongValue + z); hn[w] = @(hn[w].unsignedLongLongValue + 1); }
+         for (int q = 0; q < N; q++) if (!top[q] || z > top[q].allocatedSize) { for (int j = N - 1; j > q; j--) top[j] = top[j - 1]; top[q] = o; break; } }
+     pthread_mutex_unlock(&g_res_mu);
+     MLOG("%s: the residency set holds %llu objects, %llu MB (Metal's recommended working set %llu MB, GPU allocated %llu MB): textures %llu, %llu MB; heaps %llu, %llu MB; shared buffers %llu, %llu MB; private buffers %llu, %llu MB; the largest:", why,
+          (unsigned long long)n, (unsigned long long)(total >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20),
+          (unsigned long long)count[0], (unsigned long long)(kind[0] >> 20), (unsigned long long)count[1], (unsigned long long)(kind[1] >> 20), (unsigned long long)count[2], (unsigned long long)(kind[2] >> 20), (unsigned long long)count[3], (unsigned long long)(kind[3] >> 20));
+-    for (int k = 0; k < N && top[k]; k++) { id o = top[k];
++    for (int k = 0; k < N && k < g_res_top_show && top[k]; k++) { id o = top[k];
+         if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; MLOG("  texture %lux%lux%lu format %lu levels %lu%s: %llu MB", (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength), (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, t.isSparse ? " (sparse)" : "", (unsigned long long)(t.allocatedSize >> 20)); }
+         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
+         else { id<MTLBuffer> b = o; int sh = b.storageMode == MTLStorageModeShared; MLOG("  buffer %p+%#lx (%s): %llu MB", sh ? b.contents : NULL, (unsigned long)b.length, sh ? "shared" : "private", (unsigned long long)(b.allocatedSize >> 20)); } }
++    for (NSString *w in [hb.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *x, NSString *y) { return [hb[y] compare:hb[x]]; }])
++        MLOG("  heaps for %s: %llu, %llu MB", w.UTF8String, hn[w].unsignedLongLongValue, hb[w].unsignedLongLongValue >> 20);
++    { uint64_t al = g_dev.currentAllocatedSize; MLOG("  allocated to the process but not in the residency set: %lld MB (render pipelines held %u: their compiled code and state, the display buffers, the driver's own)", (long long)((al >> 20) - (total >> 20)), pso_count()); }
+ } }
+ void mem_census(const char *why);
+ void dm_gfx_restop(void) { res_top("DM_CTL restop"); mem_census("DM_CTL restop"); }
+@@ -2802,6 +2818,10 @@ static int tex_atomic_alias(id<MTLTexture> base) {
+         || pf == MTLPixelFormatRG16Unorm || pf == MTLPixelFormatRG16Snorm || pf == MTLPixelFormatRG16Uint || pf == MTLPixelFormatRG16Sint || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float;
+     return bytes32 && (base.textureType == MTLTextureType2D || base.textureType == MTLTextureType2DArray) && base.sampleCount == 1 && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
+ }
++// DM_SHADOW_DIV=N (2 to 4, default 1 = off): the game's 12288x12288 depth texture, 288 MB, is made N times smaller on each side (12288 / N must stay whole). The game draws into it with viewports and scissors in its own 12288 pixels:
++// state_op divides those by N while that texture is the depth target. The shaders sample it by 0..1 coordinates, so they read the smaller map; shadow edges get coarser. Experimental
++static unsigned shadow_div(void) { static unsigned v; if (!v) { const char *e = getenv("DM_SHADOW_DIV"); int n = e && *e ? atoi(e) : 1; if (n < 1 || n > 48) { MLOG("[RED] DM_SHADOW_DIV=%s: must be 1 to 48; 1 used", e ? e : ""); n = 1; } v = (unsigned)n; if (n > 1) MLOG("shadow map 12288x12288 made %ux smaller on each side (DM_SHADOW_DIV)", v); } return v; }
++static int is_shadow_map(const tex_t *t) { return t->d.width == 12288 && t->d.height == 12288 && t->d.target == NVN_TEXTURE_TARGET_2D && fmt_depth(t->d.format); }
+ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
+     uint32_t pf = 0; uint8_t swz[4];
+     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
+@@ -2811,6 +2831,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
+     d.pixelFormat = (MTLPixelFormat)pf;
+     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
+     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
++    if (shadow_div() > 1 && is_shadow_map(t)) { d.width = (d.width + shadow_div() - 1) / shadow_div(); d.height = (d.height + shadow_div() - 1) / shadow_div(); }   // DM_SHADOW_DIV: the 12288x12288 depth texture (a 288 MB shadow map) is made smaller; state_op scales the viewports and scissors aimed at it
+     switch (t->d.target) {
+         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
+         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)
+@@ -2956,7 +2977,10 @@ static void up_wait_zero(_Atomic int *v, int site) {
+     if (ws_on()) ws_put(site, w0, 1);
+ }
+ static unsigned g_up_seq;
+-#define UP_BLOCK_SIZE (32u * 1024u * 1024u)
++// DM_UP_BLOCK_MB (4 to 32, default 32): the size of a texture-upload staging block. Each of the 3 upload slots keeps a block and an overflow block, so 32 MB means up to 192 MB of GPU memory held for staging;
++// 8 MB holds 48 MB. An upload bigger than a block gets a temporary block of its own, so this costs a little speed, not correctness
++static size_t up_block_size(void) { static size_t v; if (!v) { const char *e = getenv("DM_UP_BLOCK_MB"); int mb = e && *e ? atoi(e) : 32; if (mb < 4 || mb > 32) { if (e && *e) MLOG("[RED] DM_UP_BLOCK_MB=%s: must be 4 to 32; 32 used", e); mb = 32; } v = (size_t)mb << 20; if (mb != 32) MLOG("upload staging blocks of %d MB (DM_UP_BLOCK_MB)", mb); } return v; }
++#define UP_BLOCK_SIZE up_block_size()
+ // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
+ // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
+ // Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
+@@ -3383,6 +3407,7 @@ static int sp_slot(uint32_t *out) {   // caller holds g_sp_mu
+         MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+         hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.size = (NSUInteger)SP_HEAP_TILES * SP_TILE; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
+         id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
++        heap_tag(h, @"sparse texture tiles (256 MB each)");
+         if (!h) { RED_ONCE(144, "cannot make a 256 MB placement heap for sparse tiles (%llu tiles mapped)", (unsigned long long)g_sp_live); return 0; }
+         if (!g_sp_heaps) g_sp_heaps = [NSMutableArray array];
+         uint32_t base = (uint32_t)g_sp_heaps.count * SP_HEAP_TILES; [g_sp_heaps addObject:h]; res_add(h);
+@@ -4248,7 +4273,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
+         if (!family) return nil;
+         MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = capacity;
+         hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
+-        id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd]; if (!heap) return nil;
++        id<MTLHeap> heap = heap_tag([g_dev newHeapWithDescriptor:hd], @"pool textures (placed by the game)"); if (!heap) return nil;
+         owner = [NvImageHeap new]; owner->heap = heap; atomic_fetch_add(&g_image_heap_n, 1);
+     }
+     id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:0]; if (!mt) return nil;
+@@ -4454,7 +4479,46 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
+ // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
+ // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
+ // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
++// DM_TRIM_MEM=1: every report (300 frames) the host gives the memory its allocator holds free back to the system (malloc_zone_pressure_relief) and drops the idle upload staging blocks; the game's own memory pools are not touched (the game owns their contents)
++static void mem_trim(unsigned long long frame) {
++    static int on = -1; if (on < 0) { const char *e = getenv("DM_TRIM_MEM"); on = e && atoi(e) > 0; if (on) MLOG("host memory trim on (DM_TRIM_MEM)"); }
++    if (!on) return;
++    size_t freed = malloc_zone_pressure_relief(NULL, 0);
++    static int n; if (n++ < 40) MLOG("memory trim at frame %llu: %zu MB given back to the system", frame, freed >> 20);
++}
++// DM_ALIAS_SWEEP=N: every report (300 frames) the shared textures that nothing resolves to (no live serial, finalized serial or pin holds them) and that no lookup found in the last N submissions are released,
++// the same eviction a storage takeover does (a later lookup rebuilds the texture from the pool's bytes). What a cutscene left behind (its textures stay cached until another texture takes their storage over) goes back. 0 / unset = off; 600 is a sound start
++static void alias_sweep(unsigned long long frame) {
++    static int idle = -1; if (idle < 0) { const char *e = getenv("DM_ALIAS_SWEEP"); idle = e && atoi(e) > 0 ? atoi(e) : 0; if (idle) MLOG("idle shared texture sweep on: %d submissions (DM_ALIAS_SWEEP)", idle); }
++    if (!idle) return;
++    pthread_mutex_lock(&g_smu);
++    uint32_t n = 0, cap = 0; alias_key *ks = NULL;
++    for (uint32_t i = 0; i < g_alias.cap; i++) {
++        if (!g_alias.vals[i]) continue;
++        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
++        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
++        if ((seen && g_fence + 1 - seen < (uint64_t)idle) || entry_holds(g_alias.vals[i]) || tex_object_pinned((__bridge id)g_alias.vals[i])) continue;
++        if (n == cap) { cap = cap ? cap * 2 : 64; alias_key *nk = realloc(ks, cap * sizeof *ks); if (!nk) break; ks = nk; }
++        ks[n++] = k;
++    }
++    unsigned long long freed = 0;
++    for (uint32_t j = 0; j < n; j++) {
++        void *old = nvn_hm_del(&g_alias, &ks[j]);
++        if (!old) continue;
++        nvn_hm_del(&g_alias_seen, &ks[j]);
++        id o = CFBridgingRelease(old);
++        if ([o respondsToSelector:@selector(allocatedSize)]) freed += ((id<MTLTexture>)o).allocatedSize;
++        if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
++        defer_obj_release(o);
++    }
++    if (n) { ser_note(0); g_alias_taken += n; }
++    pthread_mutex_unlock(&g_smu);
++    free(ks);
++    static int logs; if (n && logs++ < 60) MLOG("idle shared texture sweep at frame %llu: %u released, about %llu MB", frame, n, freed >> 20);
++}
+ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
++    mem_trim(frame);
++    alias_sweep(frame);
+     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
+     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
+     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
+@@ -4480,6 +4544,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
+ #endif
+     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
+          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
++    { static unsigned n; static int every = -1;   // DM_MEM_BREAKDOWN=N: the residency set by kind, with its 16 largest objects, on every Nth of these reports (default 4; 0 = never): what the memory is made of, without waiting for a GPU out-of-memory error
++      if (every < 0) { const char *e = getenv("DM_MEM_BREAKDOWN"); every = e && *e ? atoi(e) : 4; }
++      if (every > 0 && ++n % (unsigned)every == 0) { int was = g_res_top_show; g_res_top_show = 16; res_top("memory breakdown"); g_res_top_show = was; } }
+     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
+       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
+       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
+@@ -5600,6 +5667,21 @@ static void shmap_read_once(void) { static dispatch_once_t once; dispatch_once(&
+ // That, then the prewarm (warm_start) once: the submit thread and the tools only. The flag is set before warm_start runs, so a call from inside it (pso_prebuild) returns at
+ // once; inside the dispatch_once that call re-entered it and libdispatch aborted (Tears of the Kingdom and Pokémon Scarlet at boot, chain d0e99bd4b2fe)
+ static void shmap_load(void) { shmap_read_once(); static int warmed; if (!warmed) { warmed = 1; warm_start(); } }
++// Shaders whose draws are left out (DM_SKIP_GRASS=1; DM_SKIP_SHADER_MATCH=<text>,<text>,...): the keys of the shader map's rows whose source file name contains one of the texts
++// (case-insensitive). DM_SKIP_GRASS stands for the foliage shaders (the game's Foliage package, FoliageShader.sharcb, and the grass effect Obj_Plant_Grass); it can take other foliage
++// with it (bushes), and a key the map first met in a foliage file that another shader shares goes too. A program with any stage in the set is not drawn (draw_skipped)
++static NSMutableSet *g_skip_keys; static int g_skip_draws;
++static void skip_init(NSMutableArray<NSString *> **pats) {
++    *pats = [NSMutableArray array];
++    const char *g = getenv("DM_SKIP_GRASS"); if (g && !strcmp(g, "1")) { [*pats addObject:@"/Foliage"]; [*pats addObject:@"Obj_Plant_Grass"]; }
++    else if (g && !strcmp(g, "2")) [*pats addObject:@"Obj_Plant_Grass"];   // the grass effect alone: the Foliage package (tree leaves among it) is drawn
++    else if (g && strcmp(g, "0") && *g) MLOG("[RED] DM_SKIP_GRASS=%s: must be 0, 1 or 2; grass drawn", g);
++    const char *w = getenv("DM_SKIP_WATER"); if (w && !strcmp(w, "1")) [*pats addObject:@"Water"];   // the shaders whose source name has Water in it (effects: waterfalls, fountains, water-temple parts); the lake and river surface may be a variant of the Model shader, which this cannot tell apart
++    const char *fx = getenv("DM_SKIP_EFFECTS"); if (fx && !strcmp(fx, "1")) [*pats addObject:@"/Effect/"];   // every particle and effect shader (a test for how much they cost)
++    const char *m = getenv("DM_SKIP_SHADER_MATCH");
++    if (m && *m) for (NSString *t in [@(m) componentsSeparatedByString:@","]) if (t.length) [*pats addObject:t];
++    if ((*pats).count) g_skip_keys = [NSMutableSet set];
++}
+ static void shmap_read(void) {
+     if (g_shmap) return;
+     const char *e = getenv("DM_NVN_SHMAP");
+@@ -5607,11 +5689,14 @@ static void shmap_read(void) {
+     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+     if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
+     g_shmap = [NSMutableDictionary dictionary];
++    NSMutableArray<NSString *> *skip_pats = nil; skip_init(&skip_pats);
+     for (NSString *ln in [txt componentsSeparatedByString:@"\n"]) {
+         if (!ln.length || [ln hasPrefix:@"#"] || [ln hasPrefix:@"package"]) continue;
+         NSArray *c = [ln componentsSeparatedByString:@"\t"];
+         if (c.count > 3) g_shmap[c[3]] = c[2];
++        if (skip_pats.count && c.count > 4) for (NSString *t in skip_pats) if ([c[4] rangeOfString:t options:NSCaseInsensitiveSearch].location != NSNotFound) { [g_skip_keys addObject:c[3]]; break; }
+     }
++    if (skip_pats.count) { g_skip_draws = 1; MLOG("skip shaders: %lu keys match %s (draws of programs using them are not encoded: DM_SKIP_GRASS, DM_SKIP_SHADER_MATCH)", (unsigned long)g_skip_keys.count, [skip_pats componentsJoinedByString:@","].UTF8String); }
+     g_shmap_path = path;
+     const char *m = getenv("DM_MSL_DIR");
+     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
+@@ -5688,7 +5773,7 @@ typedef struct { int8_t fx[32]; uint8_t fbmask, lmap[8]; } bf_key;
+ #include "nvn_pso_skey.h"
+ #include "nvn_geometry.h"
+ #include "nvn_feedback.h"
+-@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
++@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img, skip; } @end   // skip: a stage's shader is in the skip set (DM_SKIP_GRASS / DM_SKIP_SHADER_MATCH), the program's draws are not encoded; c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
+ @implementation NvProg @end
+ // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
+ @interface WarmItem : NSObject { @public int kind, record; NSString *key, *vs_key, *fs_key, *ts_key; NvShader *shader, *vs, *fs, *ts; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // record: a prefetched library, written to the prewarm lists when claimed (shader_get's lines)
+@@ -6116,6 +6201,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
+         uint8_t md[8]; if (!prog_key(p, i, md)) MDIE("program stage %u has no shader key", i);
+         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
+         NSString *stage = g_shmap[k];
++        if (g_skip_keys && [g_skip_keys containsObject:k]) o->skip = 1;
+         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
+             NvShader *b = builtin_get(k.UTF8String);
+             if (b) { o->sh[5] = b; continue; }
+@@ -6527,6 +6613,7 @@ static int treg_swizzle(const treg_t *r, MTLPixelFormat base_pf, int in_place, u
+     }
+     return need_sw;
+ }
++static int tex_off_wants(const tex_t *t); static int stand_make(int id_);   // DM_TEXTURES_OFF (defined with the pool stand-ins)
+ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
+     if (g_tpool_n && tid >= g_tpool_n) { if (!g_stat_tex_oob++) MLOG("texture ID %d outside the pool (capacity %d) treated as an empty slot: reads 0", tid, g_tpool_n); return nil; }
+     if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) { RED_ONCE(10, "texture ID %d not registered", tid); return nil; }
+@@ -6547,6 +6634,11 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
+         if (cur && (cur == v || v.parentTexture == cur)) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, cur); return v; }
+         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
+     }
++    // DM_TEXTURES_OFF: a texture bound directly (not through the pool tables) is not made either: it reads its stand-in (a few KB of coarse levels), made here if it has none
++    if (!rp->view && !rp->gone && !pkg_shared(&rp->t) && !tex_get(rp->t.serial) && tex_off_wants(&rp->t)) {
++        if (!rp->stand && !rp->stand_no) stand_make(tid);
++        if (rp->stand) return (__bridge id<MTLTexture>)rp->stand;
++    }
+     treg_t r = *rp;
+     id<MTLTexture> base = treg_tex(rp);
+     if (!base) { if (rp->gone) { static uint64_t n; if (n++ < 4) MLOG("texture ID %d read after its memory pool was finalized ser=%llu %ux%u format %#x: treated as an empty slot (%llu so far)", tid, (unsigned long long)rp->t.serial, rp->t.d.width, rp->t.d.height, rp->t.d.format, (unsigned long long)n); } return nil; }
+@@ -7663,6 +7755,7 @@ static MTLBlendOperation bop(int e) { switch (e) { case 2: return MTLBlendOperat
+ static const uint8_t *g_pso_lmap; static id<MTLFunction> g_pso_fsfn; static pso_fz_desc g_pso_fz, g_fz_desc;
+ static os_unfair_lock g_fz_fn_lock = OS_UNFAIR_LOCK_INIT;   // bf_fn: a shader's bflib and bffn (the submit thread and the warm-up both ask)
+ static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
++static uint32_t pso_count(void) { return g_pso.n; }
+ static nvn_hmap g_pso_fail = {.klen = sizeof(pso_key)};   // pipelines that failed to build: remembered and never retried (previously every draw recompiled it, over 10,000 times in one iPhone session)
+ static const char g_tf_mark, g_amp_mark, g_discard_mark;
+ static char g_geo_mark;
+@@ -9771,10 +9864,37 @@ static int pool_ds_read(const tex_t *t) {
+ // budget has filled, pool_snap.over). Made where the walk leaves the ID out, at most STAND_FRAME a frame, as an area load registers thousands at once (Ocarina of Time's Hyrule
+ // Field: 5,152, 82 ms in one frame without the limit); the rest wait in g_stand_todo and go into the tables in place (pool_stand_scan), as a newly read ID's texture does. In play
+ // the game registers about 7 a frame, 6 us each on an M4 Pro, and about 6,000 are held at a time, in 16 MB of heaps. DM_NVN_POOL_STANDIN=0: the dummy, as before
+-enum { STAND_LEVEL = 1024, STAND_PICK = 4096, STAND_LAYERS = 8, STAND_HEAP = 4u << 20, STAND_HEAPS = 32, STAND_FRAME = 512 };
++enum { STAND_LEVEL = 1024, STAND_PICK = 4096, STAND_LAYERS = 8, STAND_HEAP = 4u << 20, STAND_HEAPS = 512, STAND_FRAME = 512, STAND_BUF = 512u << 10 };
++// DM_STAND_KB (1 to 512, default 1): how big a level of a stand-in may be, in KB. At 1 a stand-in is a few texels (the blocky look); at 64 it keeps the largest mip level under 64 KB, which is a 256x256 ASTC 4x4 or a
++// 512x512 ASTC 8x8: a texture that was megabytes becomes under a hundred KB and keeps its detail. A texture already no bigger than twice that is kept as it is
++static size_t stand_level(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB"); int kb = e && *e ? atoi(e) : 1; if (kb < 1 || kb > 512) { MLOG("[RED] DM_STAND_KB=%s: must be 1 to 512; 1 used", e ? e : ""); kb = 1; } v = (size_t)kb << 10; if (kb > 1) MLOG("texture stand-ins keep levels up to %d KB (DM_STAND_KB)", kb); } return v; }
++// Dynamic detail: DM_STAND_KB_SMALL (1-512, default: the same as DM_STAND_KB) is the cap for textures that hold less than DM_STAND_BIG_KB (default 512) in storage; DM_STAND_KB is the cap of the bigger ones
++static size_t stand_level_small(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB_SMALL"); int kb = e && *e ? atoi(e) : 0; if (kb < 1 || kb > 512) { if (e && *e) MLOG("[RED] DM_STAND_KB_SMALL=%s: must be 1 to 512; DM_STAND_KB used", e); v = stand_level(); } else { v = (size_t)kb << 10; MLOG("small textures keep levels up to %d KB (DM_STAND_KB_SMALL)", kb); } } return v; }
++static size_t stand_big_bytes(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_BIG_KB"); int kb = e && *e ? atoi(e) : 512; if (kb < 1) kb = 512; v = (size_t)kb << 10; } return v; }
++// Three sizes: the big ones (DM_STAND_BIG_KB, default 512, and up in storage) keep up to DM_STAND_KB; the medium ones (DM_STAND_MID_KB, default 128, up to the big ones) up to DM_STAND_KB_MID (default: DM_STAND_KB_SMALL); the rest up to DM_STAND_KB_SMALL
++static size_t stand_level_mid(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_KB_MID"); int kb = e && *e ? atoi(e) : 0; if (kb < 1 || kb > 512) { if (e && *e) MLOG("[RED] DM_STAND_KB_MID=%s: must be 1 to 512; the small textures' value used", e); v = stand_level_small(); } else { v = (size_t)kb << 10; MLOG("medium textures keep levels up to %d KB (DM_STAND_KB_MID)", kb); } } return v; }
++static size_t stand_mid_bytes(void) { static size_t v; if (!v) { const char *e = getenv("DM_STAND_MID_KB"); int kb = e && *e ? atoi(e) : 128; if (kb < 1) kb = 128; v = (size_t)kb << 10; } return v; }
++static size_t stand_cap_of(const tex_t *t) { uint64_t z = pool_tex_size(t); size_t c = z >= stand_big_bytes() ? stand_level() : z >= stand_mid_bytes() ? stand_level_mid() : stand_level_small(); return MIN(c, stand_level()); }
++static size_t stand_pick(void) { return MAX((size_t)STAND_PICK, stand_level()); }
++// DM_TEXTURES_KEEP=WxH,WxH,...: textures of these sizes are never replaced by DM_TEXTURES_OFF (the map's, say); DM_TEXTURES_LOG=1 lists every texture replaced, with its size and the frame, to find them
++static int tex_kept(const tex_t *t) {
++    static int n = -1; static unsigned ui; static uint32_t kw[32], kh[32];
++    if (n < 0) { n = 0; const char *e = getenv("DM_TEXTURES_KEEP"); for (const char *q = e; q && *q && n < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { unsigned w, h; if (sscanf(q, "%ux%u", &w, &h) == 2) { kw[n] = w; kh[n++] = h; } else if (!strncmp(q, "ui", 2)) { int kb = atoi(q + 2); ui = kb > 0 ? (unsigned)kb : 1024; } }
++        if (n || ui) MLOG("textures kept as they are (DM_TEXTURES_KEEP): %d sizes%s", n, ui ? ", and UI-like textures (one level, a side that is not a power of two, %u KB or less in storage)" : "", ui); }
++    if (ui && t->d.levels <= 1 && ((t->d.width & (t->d.width - 1)) || (t->d.height & (t->d.height - 1))) && pool_tex_size(t) <= ((uint64_t)ui << 10)) return 1;
++    for (int i = 0; i < n; i++) if (t->d.width == kw[i] && t->d.height == kh[i]) return 1;
++    return 0;
++}
++static int tex_log_on(void) { static int v = -1; if (v < 0) v = getenv("DM_TEXTURES_LOG") != NULL; return v; }
+ static __strong id<MTLHeap> g_stand_heap[STAND_HEAPS]; static int g_nstand_heap, g_stand_heap_at;
+ static uint32_t g_stand_todo[POOL_SEEN_WORDS]; static unsigned g_stand_todo_n, g_stand_frame_n; static uint64_t g_stand_frame = ~0ull;
+ static uint64_t g_stand_made, g_stand_picked, g_stand_full, g_stand_ns, g_first_stand, g_first_dummy, g_first_dummy_big, g_first_stale;   // first reads of a texture not made: those that found a stand-in, the dummy (and of 256 KB or more), a stand-in whose levels the game has written since
++// DM_TEXTURES_OFF=all|big: a diagnostic that makes no block-compressed texture (the game's art: BC1-BC7, the formats of its world and character textures; data textures such as the
++// terrain's R32F and RGBA8 maps are other formats and stay): its pool table entry holds the stand-in (a few KB of its own coarse levels) or the dummy, whatever the budget and
++// whether a shader read it. all: every one; big: those of 512 KB or more, which leaves the UI and small props. To see whether the game runs without them (GPU memory, not looks)
++static int tex_off_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_TEXTURES_OFF"); v = !e || !*e || !strcmp(e, "0") ? 0 : !strcmp(e, "all") ? 1 : !strcmp(e, "big") ? 2 : -1;
++    if (v < 0) { MLOG("[RED] DM_TEXTURES_OFF=%s: must be all, big or 0; textures made", e); v = 0; } else if (v) MLOG("textures off: %s block-compressed textures are not made (DM_TEXTURES_OFF)", v == 1 ? "every" : "the big"); } return v; }
++static int tex_off_wants(const tex_t *t) { int m = tex_off_mode(); if (!m) return 0; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); if (!bpb || (bw < 2 && bh < 2) || tex_kept(t)) return 0; if (stand_cap_of(t) > 1024 && pool_tex_size(t) <= 2 * stand_cap_of(t)) return 0; return m == 1 || pool_tex_size(t) >= (512u << 10); }
+ static int stand_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_POOL_STANDIN"); v = !(e && !strcmp(e, "0")); } return v; }
+ static id<MTLTexture> stand_alloc(MTLTextureDescriptor *d) {
+     for (int k = 0; k < g_nstand_heap; k++) {   // the heap that last had room first
+@@ -9783,7 +9903,7 @@ static id<MTLTexture> stand_alloc(MTLTextureDescriptor *d) {
+     }
+     if (g_nstand_heap == STAND_HEAPS) { g_stand_full++; return nil; }
+     MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypeAutomatic; hd.size = STAND_HEAP; hd.storageMode = MTLStorageModeShared;
+-    id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
++    id<MTLHeap> h = heap_tag([g_dev newHeapWithDescriptor:hd], @"texture stand-ins");
+     if (!h) { g_stand_full++; return nil; }
+     res_add(h); res_commit();   // before any table names a texture in it
+     g_stand_heap_at = g_nstand_heap; g_stand_heap[g_nstand_heap++] = h;
+@@ -9799,11 +9919,11 @@ static int stand_shape_of(const tex_t *t, stand_shape *s) {
+     if (!bpb || levels > fit) return 0;
+     memset(s, 0, sizeof *s);
+     unsigned l = 0; uint32_t bx = 0, by = 0;
+-    for (; l < levels; l++) { bx = (MAX(W >> l, 1u) + bw - 1) / bw; by = (MAX(H >> l, 1u) + bh - 1) / bh; if ((size_t)bx * by * bpb <= STAND_LEVEL) break; }
++    for (; l < levels; l++) { bx = (MAX(W >> l, 1u) + bw - 1) / bw; by = (MAX(H >> l, 1u) + bh - 1) / bh; if ((size_t)bx * by * bpb <= stand_cap_of(t)) break; }
+     if (l < levels) { s->l0 = l; s->n = levels - l; s->w = MAX(W >> l, 1u); s->h = MAX(H >> l, 1u); return 1; }
+     if (bpb > 16 || (bpb & (bpb - 1))) return 0;   // (a block in one 16-byte piece of the storage, nvn_deswizzle_pick)
+-    uint32_t step = (uint32_t)sqrt((double)bx * by * bpb / STAND_PICK); if (step < 2) step = 2;
+-    while ((size_t)MAX(bx / step, 1u) * MAX(by / step, 1u) * bpb > STAND_PICK) step++;
++    uint32_t step = (uint32_t)sqrt((double)bx * by * bpb / stand_pick()); if (step < 2) step = 2;
++    while ((size_t)MAX(bx / step, 1u) * MAX(by / step, 1u) * bpb > stand_pick()) step++;
+     s->l0 = levels - 1; s->n = 1; s->step = step; s->nx = MAX(bx / step, 1u); s->ny = MAX(by / step, 1u); s->w = s->nx * bw; s->h = s->ny * bh;
+     return 1;
+ }
+@@ -9816,11 +9936,12 @@ static int stand_layers(const treg_t *r, unsigned *s0, unsigned *ns, MTLTextureT
+     *ns = r->has_v && r->v.set_layers && r->v.nlayers ? r->v.nlayers : depth - *s0;
+     MTLTextureType base = arr ? MTLTextureType2DArray : MTLTextureType2D; *tt = r->has_v && r->v.set_target ? ttype(r->v.target, base) : base;
+     if (*tt == MTLTextureType2D) *ns = 1; else if (*tt != MTLTextureType2DArray) return 0;
+-    return *s0 + *ns <= depth && *ns <= STAND_LAYERS;
++    // with DM_TEXTURES_OFF a layered texture (the 90-layer 1365x1365 arrays are 73 MB each) gets a stand-in too, of up to 128 layers: each layer's is under a kilobyte
++    return *s0 + *ns <= depth && *ns <= (tex_off_mode() ? 128u : (unsigned)STAND_LAYERS);
+ }
+ // The stand-in's bytes, read from the texture's storage: into the stand-in, and their hash when asked for (pool_first_read). 0 when the storage cannot be read so
+ static int stand_fill(const tex_t *t, const stand_shape *s, unsigned s0, unsigned ns, id<MTLTexture> into, uint64_t *sum) {
+-    static uint8_t buf[STAND_PICK]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); uint64_t h = 1469598103934665603ull;
++    static uint8_t buf[STAND_BUF]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh); uint64_t h = 1469598103934665603ull;
+     for (unsigned y = 0; y < ns; y++) for (unsigned k = 0; k < s->n; k++) {
+         uint32_t w = s->step ? s->w : MAX(s->w >> k, 1u), hh = s->step ? s->h : MAX(s->h >> k, 1u); size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (hh + bh - 1) / bh;
+         if (pitch * rows > sizeof buf) return 0;
+@@ -9856,6 +9977,7 @@ static int stand_make_(int id_) {
+     if (!mt || !stand_fill(t, &sh, s0, ns, mt, pool_first_log() ? &r->stand_sum : NULL)) return 0;
+     r->stand = (void *)CFBridgingRetain(mt); r->stand_rid = mt.gpuResourceID._impl; r->stand_tt1 = (uint8_t)tt + 1;
+     g_stand_made++; g_stand_live++; g_stand_picked += sh.step != 0;
++    if (tex_log_on()) { static unsigned nl; if (nl++ < 4000) MLOG("TEXLOG frame %llu: %ux%ux%u format %#x levels %u, %llu KB in storage -> stand-in %ux%u from level %u", (unsigned long long)atomic_load(&g_cur_frame), t->d.width, t->d.height, t->d.depth, t->d.format, t->d.levels, (unsigned long long)(pool_tex_size(t) >> 10), sh.w, sh.h, sh.l0); }
+     return 1;
+ }
+ // What a table of type dtt holds for an ID the walk leaves out: its stand-in's resource ID, or 0 (the dummy). Caller holds g_rmu
+@@ -9960,6 +10082,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
+     if (r->gone) { ++*gone; return 0; }
+     if (!r->view && !tex_storage_live(&r->t)) { ++*gone; *dead = 1; return 0; }
+     if (!r->view && pool_unwritten_target(&r->t)) return 0;   // dummy until a pass writes it (its new texture is noted: ser_note)
++    if (!r->view && !pkg_shared(&r->t) && !tex_get(r->t.serial) && tex_off_wants(&r->t)) return pool_stand(id_, dtt);   // DM_TEXTURES_OFF: not made, read or not; nothing is left for a later walk
+     if (!r->view && pool_tex_size(&r->t) > limit && !pkg_shared(&r->t) && !tex_get(r->t.serial) && !(pool_seen(id_) && g_walk_req < POOL_REQ_BYTES)) { ++*left; *left_req += pool_seen(id_); return pool_stand(id_, dtt); }   // a texture a shader read is made whatever the budget, so it reads its stand-in or the dummy for a few frames at most
+     if (r->tt1 && r->tt1 - 1 != dtt) return 0;   // an ID of another texture type, seen before (the table holds only its own type): nothing to look up or charge (the idea is from PR 1428)
+     if (!r->view && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
+@@ -11050,9 +11173,13 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
+ }
+ 
+ int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descriptor pool's IDs start in the host table
++// The depth target is the shrunk shadow map (and nothing is drawn in colour): viewports and scissors given in the game's 12288 pixels are divided by shadow_div()
++static int shadow_target(void) { if (shadow_div() < 2 || !R.rt.depth || !is_shadow_map(R.rt.depth)) return 0; for (int i = 0; i < 8; i++) if (R.rt.color[i]) return 0; return 1; }
+ static int state_op(uint32_t op, const void *a) {
+     switch (op) {
+-        case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
++        case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1;
++            if (shadow_target()) { int dv = (int)shadow_div(); R.sc.x /= dv; R.sc.y /= dv; R.sc.w = (R.sc.w + dv - 1) / dv; R.sc.h = (R.sc.h + dv - 1) / dv; }
++            break;
+         // The pool bound when the draw runs, as on the GPU (a command buffer that binds none keeps the queue's): handles a shader reads from a uniform buffer are resolved only here,
+         // so they take this base. Dark Souls Remastered keeps 12 sampler pools with different samplers under the same IDs and its map materials read their handles from uniform
+         // memory; resolved in the first pool, the walls' tiling textures took a clamp-to-edge sampler and smeared sideways
+@@ -11102,7 +11229,9 @@ static int state_op(uint32_t op, const void *a) {
+             break;
+         }
+         case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
+-        case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
++        case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1;
++            if (shadow_target()) for (int i = 0; i < b->n; i++) for (int k = 0; k < 4; k++) S.vp[b->first + i][k] /= (float)shadow_div();
++            break; }
+         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
+         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
+         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
+@@ -13351,6 +13480,7 @@ static void draw_multi(const p_multi_draw *m) {
+     g_mdxc.next = NULL;
+ }
+ static void draw_(const p_draw *dw, const p_draw_idx *di);
++static int draw_skipped(void) { if (!g_skip_draws || !S.prog) return 0; __unsafe_unretained NvProg *p = prog_get(S.prog); return p && p->skip; }   // the bound program has a stage in the skip set (DM_SKIP_GRASS)
+ // Diagnostic switch for measuring an upper bound DM_NVN_SKIP_FS=<fragment key>[,<fragment key>...] (none by default): drops all draws of these fragment shaders (the picture will be wrong;
+ // only used in real-device ABA to measure "how much GPU time this class of draws is worth in total"), and the same-process alternating measurement's phase (DM_NVN_UB). Task / mesh
+ // draws (mesh_tasks_draw) take it too: before, they went past it, so a bisection by fragment key never dropped a mesh draw
+@@ -14871,11 +15001,11 @@ void mtl_exec(const uint8_t *p) {
+             case OP_MULTI_DRAW:
+                 // A lookahead from outside the range stops at its boundary, including scans for inline writes to the arguments.
+                 g_mdx_epoch++; g_mdx_stop = NULL;
+-                if (!g_rc_skip) draw_multi(a);
++                if (!g_rc_skip && !draw_skipped()) draw_multi(a);
+                 g_mdx_epoch++;
+                 break;
+-            case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
+-            case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
++            case OP_DRAW: { if (g_rc_skip || draw_skipped()) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
++            case OP_DRAW_IDX: { if (g_rc_skip || draw_skipped()) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
+             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
+             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
+                 if (passdump()) { NvProg *pr = S.prog ? prog_get(S.prog) : nil;

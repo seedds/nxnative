@@ -261,6 +261,25 @@ static void t_opmode(void) {
     g_signals = 0; dm_pad_players(1); dm_hid_opmode_changed(); CHECK(g_signals == 0, "nothing changed since the bind: no signal");
 }
 
+// DM_NPAD_HANDHELD=1: docked, player 1 is the Handheld npad as in handheld mode (Pokémon: Let's Go, Eevee!: Handheld | JoyLeft | JoyRight | Palma, ids No1, No2, Handheld), with its
+// two sensors; without it player 1 is on No1. Players 2..8 stay on No n either way
+static void t_npad_handheld(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(1); h_hid_SetStyles(0x5a);
+    atomic_store(&g_npad_handheld, 0); dm_hid_opmode_changed();
+    CHECK(dm_player_npad(0) == 0 && h_hid_GetStyle(&(uint32_t){0}) != 0 && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == 0, "off: docked player 1 is on No1, Handheld empty");
+    atomic_store(&g_npad_handheld, 1); dm_hid_opmode_changed();
+    CHECK(dm_player_npad(0) == NPAD_HANDHELD && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD && h_hid_GetStyle(&(uint32_t){0}) == 0, "on: docked player 1 is on Handheld, No1 empty");
+    dm_pad_set_player(0, DM_BTN_A, 0, 0, 0, 0);
+    CHECK(buttons_of(NPAD_HANDHELD, STYLE_HANDHELD) == DM_BTN_A, "on: player 1's A reaches the Handheld npad");
+    dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    uint32_t h[2]; SixAxisState s;
+    CHECK(h_hid_SixHandles(h, 2, &(uint32_t){NPAD_HANDHELD}, 0x5a) == 2 && h[0] == 0x2004, "on: two handheld sensors");
+    h_hid_SixState(&s, &h[0]); CHECK(s.attributes == 1, "on: the handheld sensor is connected");
+    dm_pad_players(0x3); CHECK(dm_player_npad(1) == 1 && h_hid_GetStyle(&(uint32_t){1}) != 0, "on: player 2 stays on No2");
+    dm_pad_players(1); atomic_store(&g_npad_handheld, 0); h_hid_SetStyles(0xffffffffu); dm_hid_opmode_changed();
+    CHECK(dm_player_npad(0) == 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "off again: player 1 back on No1");
+}
+
 // Joy-Cons as devices of their own (dm_joy_attach / dm_joy_set): nothing changes until a front end reports a Joy-Con half; then the pair is a JoyDual npad, splits into JoyLeft and
 // JoyRight when the game asks for single assignment (or the controller applet needs another player), keeps the rail buttons, and has vibration handles per Joy-Con. Handheld: unchanged.
 static void t_joycons(void) {
@@ -1745,6 +1764,7 @@ int main(void) {
     t_script();
     t_vibration();
     t_opmode();
+    t_npad_handheld();
     t_joycons();
     t_joycon_vibration_lifetime();
     t_unsupported_style();

@@ -296,7 +296,16 @@ static void ctl_start(void) {
     pthread_t th; if (!pthread_create(&th, NULL, ctl_main, strdup(e))) { pthread_detach(th); LOG("DM_CTL: reading key presses and screenshot requests from %s", e); }
 }
 
-static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
+// Player 1 as the console with its Joy-Cons on the rails (the Handheld npad): in handheld mode, and docked too with DM_NPAD_HANDHELD=1, so a game keeps its TV resolution but takes
+// the controls it gives a handheld console. Pokémon: Let's Go, Eevee! throws with A and aims with the sensor on a Handheld npad; docked on single Joy-Cons it throws only on a
+// flick. Let's Go Recomp (MIT, raulzrrs/letsgo-recomp, runtime/hle/input.c) shows its game the Handheld npad while docked the same way
+static _Atomic int g_npad_handheld = -1;   // DM_NPAD_HANDHELD, read once (-1: not yet)
+static int handheld_npad(void) {
+    int v = atomic_load(&g_npad_handheld);
+    if (v < 0) { const char *e = getenv("DM_NPAD_HANDHELD"); v = e && *e == '1'; int exp = -1; if (atomic_compare_exchange_strong(&g_npad_handheld, &exp, v) && v) LOG("hid: player 1 is the Handheld npad in console mode too (DM_NPAD_HANDHELD=1)"); }
+    return v || dm_opmode() == 0;
+}
+static uint32_t connected_id(void) { return handheld_npad() ? NPAD_HANDHELD : NPAD_NO1; }
 uint32_t hle_hid_connected_npad(void) { return connected_id(); }   // nfp's NFC device sits on player 1's controller (hle_sdk16.c)
 // Player n is on No n in handheld mode too, where No1 stays empty: games take Handheld and No1 both for player 1, so a second controller on No1 would act as player 1 again
 uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
@@ -337,7 +346,7 @@ static _Atomic uint32_t g_single_keep[DM_PLAYERS];   // 1: the left Joy-Con stay
 static _Atomic uint32_t g_styles_supported = 0xffffffffu;   // SetSupportedNpadStyleSet; read by the input threads too (npad_resolve, pad_style)
 // The styles the game supports for pad p's Joy-Cons: a Joy-Con 2 style counts as its plain one
 static uint32_t joy_supported(int p) { uint32_t s = atomic_load(&g_styles_supported); if (p >= 0 && p < DM_PLAYERS && atomic_load(&g_joy_two[p])) s |= (s >> 10 & (STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT)); return s; }
-static int joy_active(int p) { return p >= 0 && p < DM_PLAYERS && atomic_load(&g_joy_sides[p]) && !(p == 0 && dm_opmode() == 0); }
+static int joy_active(int p) { return p >= 0 && p < DM_PLAYERS && atomic_load(&g_joy_sides[p]) && !(p == 0 && handheld_npad()); }
 static int joy_split(int p) { return atomic_load(&g_joy_sides[p]) == 3 && (atomic_load(&g_single_mask) >> p & 1) && (joy_supported(p) & (STYLE_JOYLEFT | STYLE_JOYRIGHT)) == (STYLE_JOYLEFT | STYLE_JOYRIGHT); }
 // The npad the other Joy-Con of pad p takes when the pair is split: the lowest supported npad No2..No8 that has no player of its own and is not another split's; -1 for none
 static int split_target(int p) {
@@ -1145,7 +1154,11 @@ static int six_at(SixAxisState *s, int64_t samp, const live_hist *src, int shake
 }
 static int six_states(SixAxisState *out, int n, uint32_t h) {
     if (n <= 0) return 0;
-    if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); return 0; }
+    if (!six_connected(h)) {
+        static _Atomic uint32_t told;   // once per handle value (the last one told), so a game polling a stale handle logs one line
+        if (atomic_exchange(&told, h) != h) LOG("[RED] hid six-axis handle %#x read as not connected: npad %u is shown in styles %#x", h, h >> 8 & 0xff, style_of(h >> 8 & 0xff));
+        memset(out, 0, sizeof *out * (size_t)n); return 0;
+    }
     static _Thread_local live_hist src;   // 10 KB: off the guest thread's stack
     int64_t samp = answer_tick(&g_hwm_states, h, (int64_t)(guest_ns() / SIX_PERIOD_NS)), first = samp - n + 1;
     int shakes; six_source(h, first > 0 ? (uint64_t)first * SIX_PERIOD_NS : 0, &src, &shakes, &g_hwm_states);
@@ -1160,8 +1173,7 @@ HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS
     if (!idx || n <= 0) return 0;
     int k = style & (STYLE_HANDHELD | STYLE_JOYDUAL | STYLE_JOYDUAL2) ? 2 : 1; if (k > n) k = n;
     uint32_t dev0 = idx == SIX_IDX_JOYRIGHT;   // a right Joy-Con's sensor is device 1, as the SDK's (0x10007)
-    for (int i = 0; i < k; i++) h[i] = idx | (*id & 0xff) << 8 | ((uint32_t)i + dev0) << 16;
-    return k;
+    for (int i = 0; i < k; i++) h[i] = idx | (*id & 0xff) << 8 | ((uint32_t)i + dev0) << 16;    return k;
 }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
 // Merged mouse pointer (Nmouse, Switch 2 SDKs; Pokemon Pokopia, main+0x11251dc). The SDK opens the hid service itself in InitializeNmouse, which the host does not serve (abort 0xe15). No device

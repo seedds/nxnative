@@ -14,6 +14,21 @@ sys.path.insert(0, str(REPO / 'dm/games'))
 import settings
 
 
+class MacSettingSymbolTests(unittest.TestCase):
+    def test_every_mac_setting_has_its_symbol(self):
+        """The Mac window draws a symbol before each setting's row (Symbols.rows in dm/mac/Launcher.swift), a gear for a row it has none for: every row of
+        settings.tsv a Mac app can show has one, and the table names no variable the list lacks"""
+        import re
+        swift = (REPO / 'dm/mac/Launcher.swift').read_text()
+        table = swift[swift.index('enum Symbols {'):]
+        symbols = dict(re.findall(r'"(DM_[A-Z0-9_]+)": "([a-z0-9.]+)"', table[:table.index('\n}\n')]))
+        rows = [line.split('\t') for line in (REPO / 'dm/games/settings.tsv').read_text().splitlines() if line and not line.startswith('#')]
+        mac = {r[0] for r in rows if 'platform:ios' not in r[4]}   # the condition column: a row only the iPhone offers has no row in the Mac window
+        self.assertGreater(len(mac), 10)
+        self.assertEqual(sorted(mac - set(symbols)), [], 'a setting the Mac window shows has no symbol in Symbols.rows')
+        self.assertEqual(sorted(set(symbols) - mac), [], 'Symbols.rows names a variable no Mac row of settings.tsv sets')
+
+
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs the macOS Swift toolchain')
 class LauncherStorageTests(unittest.TestCase):
     def test_only_changed_choices_are_stored(self):
@@ -30,7 +45,7 @@ class LauncherStorageTests(unittest.TestCase):
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-I', str(REPO / 'dm/host'), '-c', '-o', str(sync), str(REPO / 'dm/host/save_sync.c')], capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
-                            '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/LauncherRow.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
+                            '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
                             str(REPO / 'dm/mac/Launcher.swift'), str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync)],
                             capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)

@@ -1853,10 +1853,8 @@ _Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the p
 // graphics gate: inside it, going to the background meanwhile (dm_gfx_suspend, on the main thread) waited for it, minutes on a first start. It stays host work for the guest scheduler. The lock
 // comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
 #include "nvn_queue.inc"
-void nvn_shadow_sync(void);   // sparse pool copies (vshadow_map)
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     ((queue_t *)q)->submits++;
-    nvn_shadow_sync();
     nvn_queue_submit((queue_t *)q,n,(const uint64_t *)h);
 }
 
@@ -2910,7 +2908,7 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 enum { VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
 typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live, shadow; uint64_t wst; } vpte;   // shadow: the page is a copy in the reservation (vshadow below), which textures read; wst: the dirty-tracker stamp of its last change   // live: the page has been mapped and may still be under a zero-copy buffer the GPU uses (see vunmap_defer)
 struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun, taken; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog;
-                struct vshadow { uint64_t voff, size; const uint8_t *src; uint64_t stamp; } *sh; int nsh, csh; };   // sh: mappings kept as a copy of their physical pages (vshadow_map)   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
+                struct vshadow { uint64_t voff, size; const uint8_t *src; uint64_t stamp; uint8_t *snap; } *sh; int nsh, csh; int whole; };   // whole: the reservation is one copy buffer (vshadow_map)   // sh: mappings kept as a copy of their physical pages (vshadow_map)   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
 enum { VLOG_N = 4096 };
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
@@ -2954,6 +2952,7 @@ static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
+    for (int k = 0; k < v->nsh; k++) free(v->sh[k].snap);
     free(v->pt); free(v->log); free(v->run); free(v->sh); free(v); o->vp = NULL;
 }
 static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
@@ -3086,8 +3085,9 @@ static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // forget
         if (b <= lo || a >= hi) { i++; continue; }
         v->sh[i] = v->sh[--v->nsh];
         struct vshadow piece[2]; int np = 0;
-        if (a < lo) piece[np++] = (struct vshadow){a, lo - a, e.src, e.stamp};
-        if (b > hi) piece[np++] = (struct vshadow){hi, b - hi, e.src + (hi - a), e.stamp};
+        if (a < lo) { uint8_t *sn = malloc(lo - a); if (!sn) die("sparse pool copy snapshot allocation failed"); memcpy(sn, e.snap, lo - a); piece[np++] = (struct vshadow){a, lo - a, e.src, e.stamp, sn}; }
+        if (b > hi) { uint8_t *sn = malloc(b - hi); if (!sn) die("sparse pool copy snapshot allocation failed"); memcpy(sn, e.snap + (hi - a), b - hi); piece[np++] = (struct vshadow){hi, b - hi, e.src + (hi - a), e.stamp, sn}; }
+        free(e.snap);
         for (int k = 0; k < np; k++) {
             if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
             v->sh[v->nsh++] = piece[k];
@@ -3100,14 +3100,27 @@ static int vshadow_map(struct vpool *v, const map_req *r, const uint8_t *src) { 
     uint64_t pg = (uint64_t)getpagesize(); uint8_t *to = v->base + r->voff;
     if (off || (uint64_t)r->voff + r->size > v->len || (((uintptr_t)to | r->size) & (pg - 1))) return 0;
     { void mtl_pool_alias_drop(uint64_t, uint64_t); mtl_pool_alias_drop((uint64_t)(uintptr_t)to, (uint64_t)(uintptr_t)to + r->size); }
-    if (mmap(to, r->size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("[RED] virtual pool %p: cannot make %#llx+%#llx a copy (errno %d)", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, errno); return 0; }
+    // The first copy in a pool with nothing mapped yet makes the whole reservation plain memory under one buffer, made once: every copy after it is written in place, and every
+    // GPU access to the pool (a compute shader's image writes through a buffer texture, the indirect draw reading what it wrote) goes through that one buffer. Per mapped run, a
+    // run's buffer was made again at each mapping beside it, so one pass wrote through an older buffer and the next read through a newer one over the same memory: Metal orders work
+    // per resource, and the draw read before the write (the intro's GPU-built UI fell apart about one run in two)
+    if (!v->whole) {
+        if (v->nrun) {   // already mapped runs: one copy at a time, as its own run
+            if (mmap(to, r->size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("[RED] virtual pool %p: cannot make %#llx+%#llx a copy (errno %d)", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, errno); return 0; }
+        } else {
+            if (mmap(v->base, v->len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("[RED] virtual pool %p: cannot make its reservation a copy (errno %d)", (const void *)v->pool, errno); return 0; }
+            v->whole = 1; vrun_set(v, 0, v->len, 1);
+        }
+    }
     uint64_t stamp = nvn_dirty_now(); nvn_dirty_protect(src, r->size);
     memcpy(to, src, r->size);
+    uint8_t *snap = malloc(r->size); if (!snap) die("sparse pool copy snapshot allocation failed");
+    memcpy(snap, to, r->size);   // the physical bytes as copied: the next sync takes over only what the CPU changed since (nvn_shadow_sync)
     if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
-    v->sh[v->nsh++] = (struct vshadow){(uint64_t)r->voff, r->size, src, stamp};
+    v->sh[v->nsh++] = (struct vshadow){(uint64_t)r->voff, r->size, src, stamp, snap};
     for (uint64_t o = 0; o < r->size; o += 0x1000) { vpte *e = (vpte *)vpt_get(v, (uint64_t)r->voff + o); if (e) e->shadow = 1; }
     vshadow_written(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
-    vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
+    if (!v->whole) vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
     uint64_t tot = atomic_fetch_add(&g_sh_bytes, r->size) + r->size;
     if ((tot >> 26) != ((tot - r->size) >> 26) || tot == r->size)
         LOG("[nvn] virtual pool %p: a request whose physical pages are not host-page aligned (map %#llx+%#llx from %p) is a copy in the reservation, joined with the runs beside it (%llu MB copied so far, %d runs)",
@@ -3125,26 +3138,70 @@ int nvn_shadow_hit(uint64_t a, uint64_t n) {
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
 static _Atomic uint64_t g_sh_wb;
+// Write-backs found g_vp_mu busy: queued, put back at the next sync (under their own lock, which is never held while g_vp_mu is taken)
+enum { WBQ_N = 4096 };
+static struct { uint64_t a, n; } g_wbq[WBQ_N]; static int g_nwbq, g_wbq_over; static pthread_mutex_t g_wbq_mu = PTHREAD_MUTEX_INITIALIZER;
+static void wb_locked(uint64_t a, uint64_t n);
 void nvn_shadow_writeback(uint64_t a, uint64_t n) {
     if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !n) return;
-    // at completion, under the post lock: a thread holding g_vp_mu may be waiting for this completion (MapVirtual's GPU waits), so a busy lock skips the write-back
-    if (pthread_mutex_trylock(&g_vp_mu)) { static _Atomic uint64_t nb; if (!atomic_fetch_add(&nb, 1)) LOG("[nvn] sparse pool copies: a GPU write not put back (the sparse pools were busy; later cases are not logged)"); return; }
+    // at completion, under the post lock: a thread holding g_vp_mu may be waiting for this completion (MapVirtual's GPU waits), so a busy lock queues the write-back
+    if (pthread_mutex_trylock(&g_vp_mu)) {
+        pthread_mutex_lock(&g_wbq_mu);
+        if (g_nwbq < WBQ_N) { g_wbq[g_nwbq].a = a; g_wbq[g_nwbq++].n = n; } else g_wbq_over = 1;
+        pthread_mutex_unlock(&g_wbq_mu);
+        return; }
+    wb_locked(a, n);
+    pthread_mutex_unlock(&g_vp_mu);
+}
+static void wb_locked(uint64_t a, uint64_t n) {   // caller holds g_vp_mu
     for (int i = 0; i < g_nvp; i++) { const struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
         if (!v->nsh || a + n <= b || a >= b + v->size) continue;
         uint64_t lo = a > b ? a - b : 0, hi = a + n - b < v->size ? a + n - b : v->size;
         for (uint64_t o = lo & ~0xFFFull; o < hi; o += 0x1000) { const vpte *e = vpt_get(v, o); if (!e || !e->shadow || !e->phys) continue;
             uint64_t s0 = o > lo ? o : lo, s1 = o + 0x1000 < hi ? o + 0x1000 : hi;
-            if (memcmp((uint8_t *)e->phys + (s0 & 0xFFF), v->base + s0, s1 - s0)) { memcpy((uint8_t *)e->phys + (s0 & 0xFFF), v->base + s0, s1 - s0); atomic_fetch_add(&g_sh_wb, s1 - s0); } }
+            if (memcmp((uint8_t *)e->phys + (s0 & 0xFFF), v->base + s0, s1 - s0)) { memcpy((uint8_t *)e->phys + (s0 & 0xFFF), v->base + s0, s1 - s0); atomic_fetch_add(&g_sh_wb, s1 - s0);
+                for (int k = 0; k < v->nsh; k++) { const struct vshadow *x = &v->sh[k]; if (s0 >= x->voff && s1 <= x->voff + x->size) { memcpy(x->snap + (s0 - x->voff), v->base + s0, s1 - s0); break; } } } }
     }
-    pthread_mutex_unlock(&g_vp_mu);
     static _Atomic uint64_t nl; uint64_t k = atomic_fetch_add(&nl, 1) + 1; if (k == 1 || !(k & (k - 1))) LOG("[nvn] sparse pool copies: %llu GPU writes put back into the physical pages (%llu KB changed in all)", (unsigned long long)k, (unsigned long long)(atomic_load(&g_sh_wb) >> 10));
 }
-// Before a submission: the physical pages the CPU wrote since their copy was taken are copied again (per host page of the physical side)
+// As a submission's replay begins (nvn_mtl.m mtl_sub_begin, when the GPU would read them on hardware): the physical pages the CPU wrote since their copy was taken are copied again
+// (per host page of the physical side). Done at the game's submit call instead, the intro broke one run in two: the game writes into them between its submit and the replay
 void nvn_shadow_sync(void) {
     static uint64_t seen; uint64_t now = nvn_dirty_now();
-    if (now == seen || !atomic_load_explicit(&g_sh_bytes, memory_order_relaxed)) return;
+    if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed)) return;
     uint64_t pg = (uint64_t)getpagesize(), copied = 0;
     pthread_mutex_lock(&g_vp_mu);
+    {   // write-backs queued while the pools were busy, before the CPU's changes are taken over
+        pthread_mutex_lock(&g_wbq_mu); int nq = g_nwbq, over = g_wbq_over; static struct { uint64_t a, n; } q[WBQ_N]; memcpy(q, g_wbq, (size_t)nq * sizeof *q); g_nwbq = 0; g_wbq_over = 0; pthread_mutex_unlock(&g_wbq_mu);
+        for (int i = 0; i < nq; i++) wb_locked(q[i].a, q[i].n);
+        static int nl; if (over && nl++ < 4) LOG("[RED] sparse pool copies: the write-back queue overflowed, some GPU writes were not put back into the physical pages");
+    }
+    static int full = -1; if (full < 0) { const char *e = getenv("DM_NVN_SHADOW_FULL"); full = e ? atoi(e) : 0; }   // diagnostic: 1 = every byte compared at each submission, the dirty tracker not trusted; 2 = also what the GPU changed in the copies put back (below)
+    if (full) {
+        if (full >= 2) {   // what the GPU changed in the copies goes back to the physical pages, after the GPU is idle (slow)
+            pthread_mutex_unlock(&g_vp_mu); mtl_finish(); pthread_mutex_lock(&g_vp_mu); uint64_t back = 0;
+            for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
+                for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k]; const uint8_t *sh = v->base + e->voff;
+                    for (uint64_t c = 0; c < e->size; c += 4096) {
+                        if (!memcmp(e->snap + c, sh + c, 4096)) continue;
+                        for (uint64_t d = c; d < c + 4096; d += 64) { if (!memcmp(e->snap + d, sh + d, 64)) continue;
+                            memcpy((uint8_t *)e->src + d, sh + d, 64); memcpy(e->snap + d, sh + d, 64); back += 64; } }
+                } }
+            if (back) { static uint64_t nb; if (!(nb++ & 255)) LOG("[nvn] sparse pool copies (GPU write-back diagnostic): %llu KB put back at this submission", (unsigned long long)(back >> 10)); }
+        }
+        for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
+            for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k]; uint64_t clo = ~0ull, chi = 0;
+                for (uint64_t c = 0; c < e->size; c += 4096) {
+                    if (!memcmp(e->snap + c, e->src + c, 4096)) continue;
+                    for (uint64_t d = c; d < c + 4096; d += 64) { if (!memcmp(e->snap + d, e->src + d, 64)) continue;
+                        memcpy(e->snap + d, e->src + d, 64); memcpy(v->base + e->voff + d, e->snap + d, 64); copied += 64; if (d < clo) clo = d; chi = d + 64; } }
+                if (chi) vshadow_written(v, e->voff + clo, e->voff + chi);
+            } }
+        seen = now; pthread_mutex_unlock(&g_vp_mu);
+        if (copied) { static uint64_t nf; if (!(nf++ & 255)) LOG("[nvn] sparse pool copies (full compare): %llu KB copied at this submission", (unsigned long long)(copied >> 10)); }
+        return;
+    }
+    if (now == seen) { pthread_mutex_unlock(&g_vp_mu); return; }
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
         for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
             if (!nvn_dirty_since(e->src, e->size, e->stamp)) continue;
@@ -3152,14 +3209,19 @@ void nvn_shadow_sync(void) {
             for (uintptr_t a = (uintptr_t)e->src & ~(pg - 1); a < (uintptr_t)e->src + e->size; a += pg) {
                 uintptr_t lo = a > (uintptr_t)e->src ? a : (uintptr_t)e->src, hi = a + pg < (uintptr_t)e->src + e->size ? a + pg : (uintptr_t)e->src + e->size;
                 if (!nvn_dirty_since((const void *)lo, hi - lo, old)) continue;
-                if (!memcmp(v->base + e->voff + (lo - (uintptr_t)e->src), (const void *)lo, hi - lo)) continue;   // the same bytes (a GPU write put back, nvn_shadow_writeback)
-                memcpy(v->base + e->voff + (lo - (uintptr_t)e->src), (const void *)lo, hi - lo); copied += hi - lo;
-                vshadow_written(v, e->voff + (lo - (uintptr_t)e->src), e->voff + (hi - (uintptr_t)e->src));
+                // only the bytes the CPU changed since the last look (against the snapshot): a host page holds up to four 4 KB pages of the copy, and what the GPU wrote into the
+                // others meanwhile must stay (copying the whole host page over it broke the intro one run in two)
+                uint64_t o0 = lo - (uintptr_t)e->src, o1 = hi - (uintptr_t)e->src, clo = ~0ull, chi = 0;
+                for (uint64_t c = o0; c < o1; c += 64) { uint64_t ce = c + 64 < o1 ? c + 64 : o1;
+                    if (!memcmp(e->snap + c, e->src + c, ce - c)) continue;
+                    memcpy(e->snap + c, e->src + c, ce - c); memcpy(v->base + e->voff + c, e->snap + c, ce - c); copied += ce - c;
+                    if (c < clo) clo = c; chi = ce; }
+                if (chi) vshadow_written(v, e->voff + clo, e->voff + chi);
             }
         }
     }
-    pthread_mutex_unlock(&g_vp_mu);
     seen = now;
+    pthread_mutex_unlock(&g_vp_mu);
     if (copied) { uint64_t n = atomic_fetch_add(&g_sh_sync, 1) + 1; if (n == 1 || !(n & (n - 1))) LOG("[nvn] sparse pool copies: %llu syncs copied CPU writes over (last %llu KB)", (unsigned long long)n, (unsigned long long)(copied >> 10)); }
 }
 static int vpool_overwrites(const struct vpool *v, const map_req *r) {   // does a mapping request put new pages over pages mapped before? Caller holds g_vp_mu
@@ -3176,6 +3238,11 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     vpt_set(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL);
     if (v->nsh) vshadow_cut(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
     vm_address_t to = (vm_address_t)(v->base + r->voff);
+    if (v->whole) {   // one copy buffer over the reservation (vshadow_map): a mapping is a copy, an unmap leaves the memory (the page table says unmapped)
+        if (!ph) return 1;
+        if (vshadow_map(v, r, ph->mem + r->poff)) { uint64_t end = (uint64_t)r->voff + r->size; if (end > v->top) v->top = end; return 1; }
+        LOG("[RED] virtual pool %p: a mapping (%#llx+%#llx) in a copied reservation could not be copied", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size); return 0;
+    }
     // Not aliased (see above): only textures read through the page table see it; the GPU cannot address it directly
     if ((uint64_t)r->voff + r->size > v->len || ((uintptr_t)to | r->size | (uint64_t)r->voff) & (pg - 1) || (ph && (((uintptr_t)ph->mem + (uintptr_t)r->poff) & (pg - 1)))) {
         if (ph && vshadow_map(v, r, ph->mem + r->poff)) {

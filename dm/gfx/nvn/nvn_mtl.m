@@ -1728,6 +1728,7 @@ static int g_split_resume;   // the pass was split at this draw: it opens again 
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
     treg_sparse_notes();   // the mappings made before this submission
+    { void nvn_shadow_sync(void); nvn_shadow_sync(); }   // the CPU's writes behind sparse pool copies (hle_nvn.c), before any texture of this submission is looked at
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
     defer_drain();

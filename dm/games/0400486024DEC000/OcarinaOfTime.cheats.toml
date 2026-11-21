@@ -1,0 +1,49 @@
+# Version-independent cheats for nxnative (scripts/cheat_anchor.py, format 1).
+# Compile it for a build with
+#   cheat_anchor.py compile <this file> --nso <that build's ExeFS/main> -o <cheats folder>
+# God mode by UserDerezzed (https://github.com/UserDerezzed). Its on entry writes the game's code at fixed addresses
+# and indexes its stores by register 0, so the pair compiles only for build E0F3CCFAF50065AE (update v131072). It
+# patches code (a cave in the text's zero padding and one hook), so it runs on the Mac only: the iPhone's code pages
+# are the app's signed pages (docs/reference/cheats.md).
+
+format = 1
+title = "0400486024DEC000"
+authored = "E0F3CCFAF50065AE"
+
+[[cheats]]
+name = "God mode: Link takes no damage (by UserDerezzed)"
+label = true
+
+[[cheats]]
+name = "God mode (player, all external damage) - on"
+note = "By UserDerezzed. The game's damage apply (main+0x488750: life loss, death, hit flags and impulse) branches to a code cave at main+0x3C46F00 (the zero padding after the text). The cave returns at once when the receiver's damage handler is the player's (vtable main+0x4B606D0), so Link loses no hearts and does not die from what goes through it; every other actor runs the apply as before. Not established: whether every damage source (pits, drowning, lava, falls, scripted damage) goes through it. Mac only (code writes)"
+code = """
+04000000 03C46F00 F9401010
+04000000 03C46F04 B40000F0
+04000000 03C46F08 F9400210
+04000000 03C46F0C D00078D1
+04000000 03C46F10 911B4231
+04000000 03C46F14 EB11021F
+04000000 03C46F18 54000041
+04000000 03C46F1C D65F03C0
+04000000 03C46F20 D503237F
+04000000 03C46F24 1721060C
+04000000 00488750 14DEF9EC
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "God mode (player, all external damage) - off"
+note = "By UserDerezzed. Puts the damage apply's first word (pacibsp) back; the cave stays, unused"
+patch = [
+  { at = "s_488750", new = "D503237F" },
+]
+builds = ["E0F3CCFAF50065AE"]
+
+[anchors.cave]
+pad = 0x100
+authored = "0x3C46F00"
+
+[anchors.s_488750]
+code = { old = "D503237F", size = 0x1644, at = 0x0, fp = "f1efe4ceb9fa18887209a2366541141491c01238b485c05375ef260392a3bfaa", body = "5b68788eafd8822254e4abd8220b20fea5d5237972d21b5fbeedfbb63c5fbbfd", window = "AA0003E8 AA1303E0 14000000 00000000 D503237F D10603FF A9127BFD A9136FFC A91467FA", wat = 4, wkey = 5, wunique = true }
+authored = "0x488750"

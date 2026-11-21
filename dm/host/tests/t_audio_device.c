@@ -4,6 +4,10 @@
 #include <assert.h>
 #include <stddef.h>
 #include <time.h>
+#include <pthread.h>
+
+static int mock_once(pthread_once_t *, void (*)(void));
+#define pthread_once mock_once
 
 static AudioComponent mock_find(AudioComponent, const AudioComponentDescription *);
 static OSStatus mock_new(AudioComponent, AudioComponentInstance *);
@@ -44,6 +48,15 @@ static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAdd
 #define AudioObjectAddPropertyListener mock_route_add
 #define AudioObjectRemovePropertyListener mock_route_remove
 #include "../hle_audio.c"
+#undef pthread_once
+// The device is mocked, so drive its watchdog ticks too. Real scheduler delays must not
+// reset the no-callback deadline while this fixture waits for a timeout it assumes is fixed.
+static int mock_once(pthread_once_t *once, void (*init)(void)) {
+    if (init == au_watchdog_start) return 0;
+    return pthread_once(once, init); // route listeners and other initialization retain real once semantics
+}
+static unsigned other_init_calls;
+static void other_init(void) { other_init_calls++; }
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 
 static struct {
@@ -183,6 +196,40 @@ static void *guest_close(void *out) { h_au_Close(out); dispatch_semaphore_signal
 static int signaled(dispatch_semaphore_t s, int seconds) {
     return dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, seconds * (int64_t)NSEC_PER_SEC)) == 0;
 }
+static void wait_phase(aout *a, int phase) {
+    uint64_t until = now_ns() + NSEC_PER_SEC;
+    for (;;) {
+        pthread_mutex_lock(&g_aos_lock);
+        int ready = a->start_phase == phase;
+        pthread_mutex_unlock(&g_aos_lock);
+        if (ready) return;
+        assert(now_ns() < until);
+        usleep(1000);
+    }
+}
+static void watchdog_tick(uint64_t t, uint64_t gap) {
+    pthread_mutex_lock(&g_aos_lock);
+    // Zero selects the real clock for callback handoff, read under the same lock as the startup stamp.
+    au_watchdog_tick(t ? t : now_ns(), gap);
+    pthread_mutex_unlock(&g_aos_lock);
+}
+static void retry_at_deadline(aout *a) {
+    wait_phase(a, AU_IDLE);
+    pthread_mutex_lock(&g_aos_lock);
+    uint64_t t = a->retry_at;
+    assert(a->stalled && t);
+    pthread_mutex_unlock(&g_aos_lock);
+    watchdog_tick(t - 1, 50000000);
+    pthread_mutex_lock(&g_aos_lock);
+    assert(a->start_phase == AU_IDLE);
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(!signaled(start_entered, 0));
+    watchdog_tick(t, 1);
+    pthread_mutex_lock(&g_aos_lock);
+    assert(a->start_phase == AU_STARTING);
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(signaled(start_entered, 2));
+}
 static void blocked_start(void *out) {
     start_entered = dispatch_semaphore_create(0);
     start_allowed = dispatch_semaphore_create(0);
@@ -218,28 +265,64 @@ static void blocked_start(void *out) {
     dispatch_semaphore_signal(start_allowed);
     pthread_join(guest, NULL);
     until = now_ns() + NSEC_PER_SEC;
-    do { au_render(a, NULL, NULL, 0, 1, &bl); if (samples[0]) break; usleep(1000); } while (now_ns() < until);
+    do {
+        au_render(a, NULL, NULL, 0, 1, &bl);
+        watchdog_tick(0, 50000000);
+        if (samples[0]) break;
+        usleep(1000);
+    } while (now_ns() < until);
     assert(samples[0] == 1234 && samples[1] == 1234);
 
+    // Finish the long handoff buffer through the callback. The resumed silent sink gets
+    // a separate 10 ms buffer: its real-time pacing must not depend on virtual watchdog time.
+    static int16_t drained[RATE * 2];
+    AudioBufferList drain = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof drained, drained}}};
+    au_render(a, NULL, NULL, 0, RATE, &drain);
+    assert(h_au_Released(out) == &next);
+    // Keep the same descriptor layout as b; any SDK linkage fields remain zero.
+    __typeof__(b) resumed = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm};
+    assert(h_au_Append(out, &resumed));
     dm_audio_suspend(1);
     assert(signaled(device_stopped, 1));
     dm_audio_suspend(0);
     assert(signaled(start_entered, 2));
     // A successful start with no callbacks keeps releasing buffers and is retried.
     dispatch_semaphore_signal(start_allowed);
-    assert(signaled(device_stopped, 3));
+    wait_phase(a, AU_WAIT_CALLBACK);
+    pthread_mutex_lock(&g_aos_lock);
+    uint64_t t = a->wd_t;
+    pthread_mutex_unlock(&g_aos_lock);
+    // Late wakes deliberately restart the deadline; three seconds of them must not stop the device.
+    for (int i = 0; i < 12; i++) {
+        t += 250000000;
+        watchdog_tick(t, 250000000);
+        assert(!signaled(device_stopped, 0));
+    }
+    // Only a full second of timely ticks without a callback stops it, exactly at the boundary.
+    for (int i = 0; i < 19; i++) {
+        t += 50000000;
+        watchdog_tick(t, 50000000);
+        assert(!signaled(device_stopped, 0));
+    }
+    t += 49999999; watchdog_tick(t, 49999999);
+    assert(!signaled(device_stopped, 0));
+    watchdog_tick(t + 1, 1);
+    assert(signaled(device_stopped, 0));
     until = now_ns() + NSEC_PER_SEC;
     while (!(released = h_au_Released(out)) && now_ns() < until) usleep(1000);
-    assert(released == &next);
-    assert(signaled(start_entered, 3));
+    assert(released == &resumed);
+    retry_at_deadline(a);
     start_result = kAudioUnitErr_FailedInitialization;
     dispatch_semaphore_signal(start_allowed);
-    assert(signaled(start_entered, 4));
+    retry_at_deadline(a);
     // Reset while the retry blocks. The old unit stays alive until Start returns, then its replacement starts.
     start_result = noErr;
     dm_audio_reset(); assert(unit.disposals == 0);
     dispatch_semaphore_signal(start_allowed);
-    assert(signaled(device_stopped, 1) && signaled(start_entered, 2));
+    assert(signaled(device_stopped, 1));
+    wait_phase(a, AU_IDLE);
+    watchdog_tick(0, 50000000);
+    assert(signaled(start_entered, 2));
     assert(unit.disposals == 1);
     // Close returns while the driver still blocks Start: it unregisters the output and leaves the unit to the start's worker,
     // which stops and disposes it when Start returns.
@@ -407,6 +490,10 @@ static void test_sink_route(void) {
     assert(!object.key);
 }
 int main(void) {
+    static pthread_once_t other_once = PTHREAD_ONCE_INIT;
+    assert(!mock_once(&other_once, other_init));
+    assert(!mock_once(&other_once, other_init));
+    assert(other_init_calls == 1);
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
     test_route_without_output();
     test_same_channel_route();

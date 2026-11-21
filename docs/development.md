@@ -428,6 +428,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 
 `--platform` takes `ios` (the default: the IPA, or the Xcode project with `--prepare-xcode`), `mac` ([A Mac-only build for development](#a-mac-only-build-for-development)) and `mac-app` ([A Mac app](#a-mac-app)). With either Mac platform, `--seen-shaders` builds only the shaders a game's playtests used ([Building selected Mac shaders](#building-selected-mac-shaders)).
 
+For a NUP without embedded add-on content, pass `--aoc-dir <folder>` to include separate DLC RomFS images. Keep the folder outside the build cache and name each image `<index>.img`, with the index the game uses (1 to 2000). Each run of the script takes the images currently in the selected folder. Remove an image or omit the option to build without that DLC. For an existing Xcode project, run the script again with `--prepare-xcode` after changing the selection. See [Separate DLC for a NUP](reference/packing.md#separate-dlc-for-a-nup).
+
 In Spyder, open the script, fill in the settings at the top (`NSP_DIR`, `PROD_KEYS`, and optionally `PACKAGE`, `OUT_IPA`, `APP_NAME`, `BUNDLE_ID`, `ICON`, `FALLBACK_ICON`, `LANGUAGE`, `KEEP_EXTRACTED`, `SHOW_FPS`, `MOTION`, `PSO_GPUS`, `PLATFORM`, `PROGRAM_INDEX`, `SEEN_SHADERS`; for a game without a profile `HEAP_CHECK`, `HEAP_CHECK_SECS`, `PROVISIONAL`), and press F5. Empty paths are asked for at run time.
 
 What the script does:

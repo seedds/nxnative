@@ -1,12 +1,12 @@
 # The Legend of Zelda: Ocarina of Time (`0400486024DEC000`)
 
-A Switch 2 game: update 1.1.1 (v131072), SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the rewriter's patches are a frame-step stub and one cut ([`patches.py`](patches.py)). Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
+A Switch 2 game: update 1.1.1 (v131072), SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the rewriter's patches are a frame-step stub and one cut ([`patches.py`](patches.py)). Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video.
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
-| `mem_reserve 0x320000000`, `mem_alias 0x100000000`, `mem_stack 0x10000000`, `app_pool 0x240000000` | [`game.tsv`](game.tsv) | the game asks `SetHeapSize` for 0x18ce00000; the rest as Donkey Kong Bananza, the Switch 2's 9 GB |
+| `mem_reserve 0x420000000`, `mem_alias 0x200000000`, `mem_stack 0x10000000`, `app_pool 0x240000000` | [`game.tsv`](game.tsv) | the game asks `SetHeapSize` for 0x18ce00000 and needs the larger alias region at the Chamber of Sages transition ([Memory](#memory)) |
 | `mem_map_limit on` | [`game.tsv`](game.tsv) | a map past the application pool fails with ResultLimitReached, as on Horizon. The SDK's allocator keeps freed pages mapped until a map fails, then gives them back ([PR 1444](https://github.com/seedds/nxnative/pull/1444) reports a black screen leaving the Deku Tree without it; not reached here) |
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
 | Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)) |
@@ -106,6 +106,7 @@ From the same Kakariko save, walk into Hyrule Field and continue towards Castle 
 
 ## Memory
 
+- **Resolved.** With a 4 GiB alias region the first Master Sword sequence stays solid white after Ganondorf walks into the light. On an M4 Pro (macOS 27.2.1, host `d2fd78b4`), the SDK's `VammManager::AllocateAddressRegion` hit its no-fit branch at `sdk+0x16bc9c` and returned `0x1803` for a 50.03 MiB request with 2 MiB alignment from `main+0x7ed630`. At 8 GiB the same save and inputs placed the request at alias +0x10aa00000 and reached the Chamber of Sages. The reporter also confirmed the transition in a roughly 27-minute iPhone 18 Pro session (iOS 27.2.1). Startup with the 16.5 GiB reservation on earlier iPhones and later stages of the game remain open. [Issue #3103](https://github.com/seedds/nxnative/issues/3103)
 - Current: on the walk, run from an external drive with a 3.5 GB pipeline archive: resident 10.9-11.4 GB, wired about 9.4 GB, on a 16 GB Mac. `vmmap` and `footprint`: 6.4 GB of guest memory and 3.8 GB of Metal textures and targets, 1 GB of IOAccelerator memory. [Reading the archive into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory) used to add 3.5 GB (footprint 15.0, peak 16.7). `mem_map_limit on`: a map past the application pool fails as on Horizon, and the SDK's allocator then gives back the pages it keeps. Other apps' memory adds to the swap: other games running beside it can push the Mac over.
 - This game took the Mac down before the fixes (kernel panic in `IOGPUGroupMemory` at 14.7 GB wired): [raw pool table](../../../docs/reference/memory.md#memory-pools-nothing-gave-an-address-to-stay-out-of-the-raw-pool-table), [textures made only when read](../../../docs/reference/memory.md#shaders-report-which-textures-they-read-through-a-pool), [out-of-memory exit](../../../docs/reference/memory.md#repeated-gpu-out-of-memory-failures-end-the-game).
 - Why so much: the game's own memory is about the console's 9 GB application pool, and on the Mac its textures also exist as Metal textures, as Metal cannot sample the guest's block-linear storage.

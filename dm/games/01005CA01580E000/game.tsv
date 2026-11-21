@@ -35,6 +35,12 @@ sys_resource	0x0
 shader_groups	/CPK/=cpk /app_config/=appconfig
 shader_note	Persona 5 Royal shaders
 
+# ---- Shaders ----
+# 24,826 pipelines: the prefetch maps every library of every program a scene creates, and the
+# iOS process fills its open mapping limit in about ten minutes (NX2Apple #665). Load each at
+# its first draw instead; the Mac keeps the prefetch (the setting's Mac default is on).
+nvn_prefetch	off
+
 # ---- After the rewrite ----
 # The rewritten modules require 76 MB, more than the default 64 MB deducted from the pool.
 mem_used	0x4c00000

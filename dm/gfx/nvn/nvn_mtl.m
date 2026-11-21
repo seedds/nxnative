@@ -2076,7 +2076,9 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 }
 
 static void post(post_op o);
-enum { POST_BUFFER_COPY = 4 };
+enum { POST_BUFFER_COPY = 4, POST_SHADOW_WB = 5 };   // POST_SHADOW_WB: a GPU write into a sparse pool copy, put back into its physical pages at completion (hle_nvn.c nvn_shadow_writeback)
+int nvn_shadow_hit(uint64_t a, uint64_t n); void nvn_shadow_writeback(uint64_t a, uint64_t n);
+static void post_shadow_wb(uint64_t a, uint64_t n) { if (n && nvn_shadow_hit(a, n)) post((post_op){.kind = POST_SHADOW_WB, .addr = a, .copy_end = a + n}); }
 static void post_buffer_copy(uint64_t dst, uint64_t n) {
     if (!n) return;
     // Pool compaction copies successive pieces down or up. Publish each contiguous destination once.
@@ -2774,14 +2776,15 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     uint64_t off = sub_place(r, c0, c1);
     for (int i = 0; i < n; i++) {
         if (ops[i].kind == 1) continue;   // A terminal release publishes after every earlier GPU write has landed.
-        else if (ops[i].kind == POST_BUFFER_COPY) nvn_dirty_gpu_written(ops[i].addr, ops[i].copy_end - ops[i].addr);
+        else if (ops[i].kind == POST_BUFFER_COPY) { nvn_dirty_gpu_written(ops[i].addr, ops[i].copy_end - ops[i].addr); nvn_shadow_writeback(ops[i].addr, ops[i].copy_end - ops[i].addr); }
+        else if (ops[i].kind == POST_SHADOW_WB) nvn_shadow_writeback(ops[i].addr, ops[i].copy_end - ops[i].addr);
         else if (ops[i].kind == 3) {   // Samples passed: the running total, in submission order
             if (ops[i].mode == VIS_ZERO) { g_vis_acc = 0; continue; }
             vis_list *l = ops[i].vis;
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
+            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); nvn_shadow_writeback(ops[i].addr, sizeof rec); }
         }
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
+        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); nvn_shadow_writeback(ops[i].addr, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     // Forwarded counter values expire once their CPU-visible reports have landed.
     // This precedes event publication so a released CPU writer is never hidden by stale knowledge.
@@ -2854,7 +2857,7 @@ uint64_t mtl_sub_commit(void) {
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
     // CPU-visible effects after completion: copy the op table into the callback
     int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
-    if (ws_on()) for (int i = 0; i < n; i++) { if (g_post[i].kind == POST_BUFFER_COPY) continue; int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
+    if (ws_on()) for (int i = 0; i < n; i++) { if (g_post[i].kind == POST_BUFFER_COPY || g_post[i].kind == POST_SHADOW_WB) continue; int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
     DmCommitFB *o = [DmCommitFB new];
@@ -4876,8 +4879,10 @@ static int tex_cpu_written(uint64_t serial) {
 static int tex_from_storage(const tex_t *t) {
     if (!t->mem) return 0;
     if (t->has_layout || tex_cpu_written(t->serial)) return 1;
-    if (!t->pool || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET |
-        NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))) return 0;
+    // IMAGE only matters for an uncompressed texture, as in tex_storage_ok: shaders cannot write a block-compressed one. Immortals Fenyx Rising gives its streamed BC1 / BC7 textures
+    // IMAGE (flags 0x4) in its 2 GB sparse pool: they stayed GPU textures of zeros, and the hero's skin was black with stray blocks
+    if (!t->pool || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE)) ||
+        ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))) return 0;
     if (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)
         return nvn_sparse_pool(t->pool);
     // SPARSE selects the layout even in non-virtual memory. Bloodstained writes these compressed textures through a CPU-visible pool after creating them.
@@ -13661,7 +13666,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         } else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) {   // B: storage buffers / compute-stage uniforms are device pointers; the address is taken by NVN slot
             const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL;
             void *mb; uint64_t mo, gpu;
-            if (u && u->addr && (mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu) || sbuf_clipped(u->addr, u->size, nvn_stage == 5 && !b->rw, &mb, &mo, &gpu))) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
+            if (u && u->addr && (mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu) || sbuf_clipped(u->addr, u->size, nvn_stage == 5 && !b->rw, &mb, &mo, &gpu))) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) { uint64_t wl = sbw_len(u->size, mb, mo); sbw_note(u->addr, wl, SBW_GPU); if (wl <= (16u << 20)) post_shadow_wb(u->addr, wl); } }   // cb_extent.tsv: slots the shader never writes
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufp reg%d %s addr=%#llx size=%llu %s", g_stat_pass, nvn_stage, reg, u && u->addr ? "real" : "dummy", u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle

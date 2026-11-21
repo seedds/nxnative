@@ -68,6 +68,9 @@ static NSString *const SHIM = @R"JS(
     }, 'footer.')
   };
   window.nx = stub(nx, '');
+  // The applet page is not a script-opened window: WebKit ignores its native close().
+  // Window closure is exit reason 4; nx.endApplet keeps the exit-button reason 0.
+  window.close = function () { post({k: 'end', r: 4}); };
 
   // Sounds follow the host's audio: muted, every connection to the speakers goes through a gain of 0 (the sounds still play and end, for pages that wait for them)
   if (cfg.muted && window.AudioNode) {

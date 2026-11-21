@@ -2,7 +2,7 @@
 
 ## Status
 
-**Bring-up only.** Program 0 reaches the offline terms page on the Mac. Acceptance, program switching and gameplay have not been validated. The profile lists both game programs so the build packs the complete collection, rather than just the 30.4 MB launcher.
+**Bring-up only.** Program 0 displays the offline terms page on the Mac, and A advances after the window-close result fix. Program switching and gameplay have not been validated. The profile lists both game programs so the build packs the complete collection, rather than just the 30.4 MB launcher.
 
 ## Version and programs
 
@@ -20,7 +20,6 @@ The full splits produced 33,034 shaders for program 1 and 39,939 for program 2, 
 
 ## Remaining validation
 
-- Controller input and completion of `legalterms.htdocs/termsofservice-CHN.html`.
 - The launcher's handoff to both programs, their heap requirements, and gameplay.
 - iOS, which has not been tested.
 
@@ -29,3 +28,5 @@ The launcher memory partition comes from its provisional heap check. The child p
 ## Found on this game
 
 - **Resolved in extraction.** The shader split returned zero shaders despite decoding the packages. [Unreal shared control and code arrays](../../../docs/reference/shaders.md#unreal-shared-control-and-code-arrays). Rendering and gameplay remain untested.
+
+- **Resolved on the Mac.** A closed the terms applet but the launcher reopened it. The page calls `window.close()`, whose result must be 4. [Offline applet pages close their browser window](../../../docs/reference/services.md#offline-applet-pages-close-their-browser-window). The user confirmed acceptance after the host update.

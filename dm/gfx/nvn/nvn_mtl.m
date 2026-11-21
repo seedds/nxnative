@@ -2004,12 +2004,13 @@ static void blit_note(void);   // Per-pass dump: a copy / buffer update ended th
 enum { BW_MAX = 64 };
 static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX], g_br_lo[BW_MAX], g_br_hi[BW_MAX]; static int g_bw_n, g_br_n, g_blit_ops; static uint64_t g_blit_barriers;
 enum { DW_MAX = 256 };
-static uint64_t g_dw_lo[DW_MAX], g_dw_hi[DW_MAX], g_dr_lo[DW_MAX], g_dr_hi[DW_MAX]; static int g_dw_n, g_dr_n, g_dsp_game_bar;   // what dispatches ordered by the game's barriers wrote and read since the last barrier (dispatch_enc_cs), apart from the copies' sets: copies are ordered after them, dispatches only when the game asked (g_dsp_game_bar). Emptied by every barrier and by a new copy encoder; empty with DM_NVN_DISPATCH_BARRIER=full
+static uint64_t g_dw_lo[DW_MAX], g_dw_hi[DW_MAX], g_dr_lo[DW_MAX], g_dr_hi[DW_MAX]; static int g_dw_n, g_dr_n, g_dsp_game_bar;
+enum { DI_MAX = 64 }; static uint64_t g_di_lo[DI_MAX], g_di_hi[DI_MAX]; static int g_di_n;   // the storage of the images dispatches bound since the last barrier (dispatch_enc_cs, cs_images)   // what dispatches ordered by the game's barriers wrote and read since the last barrier (dispatch_enc_cs), apart from the copies' sets: copies are ordered after them, dispatches only when the game asked (g_dsp_game_bar). Emptied by every barrier and by a new copy encoder; empty with DM_NVN_DISPATCH_BARRIER=full
 static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended an open draw pass (the residency set line; a pass ended this way stores and the next one reloads its attachments)
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
 static int g_blit_ct;   // the open copy encoder has the compute argument table set (dispatches share it, dispatch_enc)
-static id<MTL4ComputeCommandEncoder> blit_open(void) { if (g_tf_enc) tf_pass_end(); if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = g_dw_n = g_dr_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
+static id<MTL4ComputeCommandEncoder> blit_open(void) { if (g_tf_enc) tf_pass_end(); if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = g_dw_n = g_dr_n = g_di_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
 static void ubd_flush(void); static int g_nubd;   // the inline updates deferred (see mtl_sub_update)
 static int g_ubd_landing;
 static id<MTL4ComputeCommandEncoder> blit_raw(void) {
@@ -2023,7 +2024,7 @@ static void ubd_land_compute(void) { if (g_nubd && !g_ubd_landing) { ubd_land();
 static void blit_barrier(void) {
     // Only the stages a compute encoder has: MTLStageAll here fails Metal validation (macOS 27: "must be a valid combination of MTLStages for the current encoder type")
     [g_blit barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:blit_vis()];
-    g_bw_n = g_br_n = g_dw_n = g_dr_n = 0; g_blit_ops = 0; g_blit_barriers++;
+    g_bw_n = g_br_n = g_dw_n = g_dr_n = g_di_n = 0; g_blit_ops = 0; g_blit_barriers++;
 }
 uint64_t mtl_blit_barriers(void) { return g_blit_barriers; }
 static int bw_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_bw_n; i++) if (lo < g_bw_hi[i] && g_bw_lo[i] < hi) return 1; return 0; }
@@ -16511,17 +16512,39 @@ static int dbar_unknown_game(void) {
     if (mode < 0) mode = sw_mode("DM_NVN_DISPATCH_RANGELESS", 1);
     return sw_on(mode);
 }
-static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free, g_dbar_ufree;
-void mtl_dispatch_barrier_stats(uint64_t *game, uint64_t *copy, uint64_t *unknown, uint64_t *none) {   // the periodic [nvn] line (hle_nvn.c)
-    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *none = g_dbar_free + g_dbar_ufree; }
+static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free, g_dbar_ufree, g_dbar_img;
+void mtl_dispatch_barrier_stats(uint64_t *game, uint64_t *copy, uint64_t *unknown, uint64_t *img, uint64_t *none) {   // the periodic [nvn] line (hle_nvn.c)
+    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *img = g_dbar_img; *none = g_dbar_free + g_dbar_ufree; }
+// The storage of the images a dispatch binds (image slots and image handles in uniform slots), whole textures. NVN runs a dispatch after the one before it on the same images
+// although the game put no barrier between them: Immortals Fenyx Rising writes its terrain tiles' indirect records through a buffer image (31f233eeb98fea35, instance count 0) and
+// culls them right after with image atomics on the same image (dbb4e479742fca22). Unordered on Metal, the records' writes landed after the culling's counts: no terrain was drawn
+static int cs_images(NvShader *sh, uint64_t *lo, uint64_t *hi, int max) {
+    int n = 0;
+    for (int i = 0; i < sh->rf.nb; i++) {
+        const nvn_rbind *b = &sh->rf.b[i];
+        int tid = b->kind == NVN_RB_IMG ? (b->reg < 32 ? (int)(bound_img(5, b->reg) & 0xfffff) : 0) : b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(5, b->reg, b->off)) : -1;
+        if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok || !g_treg[tid].t.mem) continue;
+        if (n == max) return -1;
+        lo[n] = (uint64_t)(uintptr_t)g_treg[tid].t.mem; hi[n] = lo[n] + (g_treg[tid].t.L.size ? g_treg[tid].t.L.size : 1); n++;
+    }
+    return n;
+}
+static int di_hit(const uint64_t *lo, const uint64_t *hi, int n) {   // an image of this dispatch overlaps one bound since the last barrier (or too many to tell)
+    if (n < 0 || g_di_n + n > DI_MAX) return 1;
+    for (int i = 0; i < n; i++) for (int k = 0; k < g_di_n; k++) if (lo[i] < g_di_hi[k] && g_di_lo[k] < hi[i]) return 1;
+    return 0;
+}
+static void di_add(const uint64_t *lo, const uint64_t *hi, int n) { for (int i = 0; i < n && g_di_n < DI_MAX; i++) { g_di_lo[g_di_n] = lo[i]; g_di_hi[g_di_n++] = hi[i]; } }
 static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind) {
     if (!dbar_game()) { g_dsp_game_bar = 0; return dispatch_enc(); }
     geo_access a = cs_access_of(cs, ind);
+    uint64_t ilo[16], ihi[16]; int ni = cs_images(cs, ilo, ihi, 16);
     if (a.unknown && !dbar_unknown_game()) { g_dbar_unknown++; g_dsp_game_bar = 0; return dispatch_enc(); }
     if (a.unknown) {
         id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
-        if (g_blit_ops && (g_dsp_game_bar || g_bw_n || g_br_n)) { g_dbar_unknown++; blit_barrier(); } else g_dbar_ufree++;   // after the game's barrier or a copy: as before
-        g_dsp_game_bar = 0;
+        int ih = di_hit(ilo, ihi, ni);
+        if (g_blit_ops && (g_dsp_game_bar || g_bw_n || g_br_n || ih)) { if (g_dsp_game_bar || g_bw_n || g_br_n) g_dbar_unknown++; else g_dbar_img++; blit_barrier(); } else g_dbar_ufree++;   // after the game's barrier, a copy, or a dispatch on the same images
+        g_dsp_game_bar = 0; di_add(ilo, ihi, ni);
         g_dw_lo[0] = 0; g_dw_hi[0] = ~0ull; g_dw_n = 1; g_dr_lo[0] = 0; g_dr_hi[0] = ~0ull; g_dr_n = 1;   // read and written everything, for the copies after it (blit_buf, blit)
         g_blit_ops++;
         if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
@@ -16531,8 +16554,9 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind)
     id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
     int copy = g_dr_n + a.n > DW_MAX || g_dw_n + a.n > DW_MAX;
     for (int i = 0; i < a.n && !copy; i++) copy = bw_hit(a.r[i].lo, a.r[i].hi) || (a.r[i].write && br_hit(a.r[i].lo, a.r[i].hi));
-    if (g_blit_ops && (g_dsp_game_bar || copy)) { if (g_dsp_game_bar) g_dbar_game++; else g_dbar_copy++; blit_barrier(); } else g_dbar_free++;
-    g_dsp_game_bar = 0;
+    int ih = di_hit(ilo, ihi, ni);
+    if (g_blit_ops && (g_dsp_game_bar || copy || ih)) { if (g_dsp_game_bar) g_dbar_game++; else if (copy) g_dbar_copy++; else g_dbar_img++; blit_barrier(); } else g_dbar_free++;
+    g_dsp_game_bar = 0; di_add(ilo, ihi, ni);
     for (int i = 0; i < a.n; i++) {   // a range already in its set is not added again: the systems share their tables
         uint64_t *lo = a.r[i].write ? g_dw_lo : g_dr_lo, *hi = a.r[i].write ? g_dw_hi : g_dr_hi; int *n = a.r[i].write ? &g_dw_n : &g_dr_n, have = 0;
         for (int k = 0; k < *n && !have; k++) have = lo[k] == a.r[i].lo && hi[k] == a.r[i].hi;

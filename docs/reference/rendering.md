@@ -1747,6 +1747,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 - **Note:** 04's Metroid Dread section (at `6a06877`) still described the old behaviour ("every copy or update ends the host's render pass"); the deferral came later (development.md's Power section), and it is now the default (`ubd_on` in `nvn_mtl.m`, off with `DM_NVN_UB_DEFER=0`).
 
+### Deferred inline updates reach geometry-stage mesh bindings
+
+- **Symptom:** an inline buffer update is applied after a geometry shader running as a mesh draw, so the shader sees old data or its storage writes are overwritten at the end of the render pass.
+- **Cause:** `geo_mesh_draw` passes a synthetic vertex/fragment-only program to the normal draw path. Its deferred-update conflict check cannot see the lean geometry kernel's stage-2 buffer bindings, even though the mesh function reads those bindings too.
+- **Fix:** before the synthetic draw, check the selected lean kernel's bindings with the same dependency rule used for other shader stages. Land conflicting updates before encoding the mesh draw. Nonconflicting updates and uniform reads that can use a complete or partial shadow retain their existing deferral behavior. The compute fallback already lands updates before its geometry dispatch.
+- **Found on:** the stage-2 uniform conflict reported in [Wolfenstein: Youngblood, issue #1314](https://github.com/seedds/nxnative/issues/1314). Reproduced independently with synthetic geometry-stage storage counters; the game's patch, profile and remaining visual problems are not validated here.
+
 ### Partial-cover uniform shadows keep passes open
 
 - **Symptom:** hundreds of render passes a frame and heavy attachment traffic when a game updates a small part of a large uniform block before each draw group.

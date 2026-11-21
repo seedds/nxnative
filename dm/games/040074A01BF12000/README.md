@@ -109,6 +109,7 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [A display link tried again after a rescue stays silent](../../../docs/reference/frame-rate.md#a-display-link-tried-again-after-a-rescue-stays-silent): a 135 ms frame at each try of a link that stayed silent in fullscreen.
 - [Runtime per-texel gathers wrap wide offsets on Metal](../../../docs/reference/shaders.md#runtime-per-texel-gathers-wrap-wide-offsets-on-metal): agl compute shaders `4933fe058307fe7f` and `841c54a878c402f9` compute offsets in 0…19. Its other three per-texel gather shaders use constant offsets.
 - [Mesh geometry reports unused compute scratch as zero GPU addresses](../../../docs/reference/rendering.md#mesh-geometry-reports-unused-compute-scratch-as-zero-gpu-addresses): the host diagnostic is corrected, with real mesh and compute address checks preserved; no FPS improvement is attributed to this correction. Mac qualification (2026-11-17, M4 Max, 48 GB): v458752 plus DLC, all 23,638 shaders rebuilt on chain `5ea15f2c8240`, host based on `23427a7b`. The installed app loaded the mining tunnel ("Meet up with others"), rendered camera turns through frame 7,800 and exited normally, with no `[RED]` lines. No graphics settings were reduced. The stationary windows ending at frames 3,600/3,900/4,200 held 60 fps, GPU p50 6.74-6.75 ms. This short route does not qualify sustained destruction or every layer; the reported slowdown was not reproduced consistently.
 

@@ -11,7 +11,7 @@ Base game 1.00 (v0), SDK 11.4.3: the Japanese / Korean / Chinese cartridge and e
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares no system resource (the NSP script writes it from the NPDM) |
 | `depth_mode zero` | `game.tsv` | the game sets the near = 0 depth mode, so the pipeline bases made before it runs (the NSP script's Mac prebuild, and a [pipeline archive made offline](../../../docs/development.md#the-pipeline-archive-made-offline) for the iPhone when one is built with `DM_PSO_GPUS`) take its vertex shaders' `main0_z` entries (the host itself follows the mode the game sets) |
 
-No `patches.py`, no `sdk_patches.py` cut for its `sdk` build (`2d369d99…`), no `pad_layout` (the iPhone pad starts in the 2D layout). The rest of the profile is the NSP script's provisional one.
+One cut in [`patches.py`](patches.py) (below), no `sdk_patches.py` cut for its `sdk` build (`2d369d99…`), no `pad_layout` (the iPhone pad starts in the 2D layout). The rest of the profile is the NSP script's provisional one.
 
 ## Files and shaders
 
@@ -20,7 +20,9 @@ No `patches.py`, no `sdk_patches.py` cut for its `sdk` build (`2d369d99…`), no
 
 ## Found on this game
 
-Nothing: no host change was needed.
+No host change was needed. One cut of the game's own code:
+
+- **A crash at the first frame when the start is slow** (`SIGSEGV` at `main+0x309128`, about 9 s after the start, before the logo). At the end of a frame the main thread waits for the render thread only as long as the frame's time lasts (`main+0x30c194`), then goes on without it: a skipped frame. The render thread's first submission waits on the host for the pipeline archive and the prepare step. From an internal disk that is 0.1 s. From a library folder on a USB 2.0 disk (20 to 40 MB/s, a 131 MB archive) it was 7 s and more, the main thread meanwhile ran on (reading the next screens' files from the same disk, which made the wait longer), and the render thread's first draws bound a texture entry of index −1. What the main thread did to that texture meanwhile was not traced. Measured on a Mac with an M2 and 8 GB: 13 of 13 starts with a wait of 7 s or more crashed, none of 8 below 6.5 s. [`patches.py`](patches.py) cuts the three branches that end the wait, so the main thread waits until the render thread is done: 9 of 9 starts ran, with waits of 2 to 3.5 s (no start with the cut had a wait of 7 s, since the main thread no longer reads from the disk meanwhile). A frame the render thread cannot finish in time now makes the game slower instead of being skipped.
 
 ## Open
 

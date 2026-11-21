@@ -15,14 +15,16 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(TOOLS.parents[1] / 'tools'))
 import dmsh_chain
 import dmsh_pull
 import pso_offline
+import shader_cache
 
 
 def builder():
     # Use production functions without the CLI's translator/profile initialization.
-    names = {'load_pairs', 'partner_inputs', 'vs_pad', 'shader_key', 'pair_keyed'}
+    names = {'load_pairs', 'partner_inputs', 'vs_pad', 'shader_key', 'pair_keyed', 'output', 'label_dir'}
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
     import dmsh_entry
     ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib, vs_depth=dmsh_entry.vs_depth)
@@ -75,9 +77,10 @@ class Pairing(unittest.TestCase):
         self.extra = self.package.parent / 'pso_pairs.tsv'
         self.extra.write_text('# BAHS\nv\tf1\nv\tf6\nv\tf1\n\n')
         self.ns = builder()
-        # output(): a finished shader's file as dmsh_build.py reads it back (from the compile cache there; from the folder here)
+        self.store = shader_cache.Store(self.root / 'cas.db')
+        self.addCleanup(self.store.close)
         self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package),
-                       output=lambda target, name: (self.root / name).read_bytes() if (self.root / name).is_file() else None)
+                       STORE=self.store, STAGE='stage/test', want=set())
         for key, loc in [('f0', 0), ('f1', 1), ('f6', 6)]:
             src = pixel(loc)
             if not loc: src = src.replace('    float4 missing [[user(locn0)]];\n', '').replace('in.v0 + in.missing', 'in.v0')
@@ -92,6 +95,12 @@ class Pairing(unittest.TestCase):
             self.assertIn(f'out.dm_pad{loc} = float4(0.0, 0.0, 0.0, 1.0);', src)
         self.assertEqual(src.count('float4 v0 [[user(locn0)]];'), 1)
         self.assertEqual(self.ns['vs_pad']('v', src), (src, []))
+
+    def test_padding_reads_staged_pixel_outputs(self):
+        for path in self.root.glob('*_b.metal'):
+            self.store.put(f'stage/test/mac/{path.name}', path.read_bytes())
+            path.unlink()
+        self.test_split_fallback_union_and_defaults()
 
     def test_profile_table_wins_and_optional_table(self):
         self.g.table('pso_pairs.tsv').write_text('v\tf6\n')

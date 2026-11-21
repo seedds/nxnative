@@ -33,7 +33,7 @@ enum { S2_SUB_MEMORY_READ = 0x04, S2_SUB_LEDS_SET = 0x07, S2_SUB_FEATURE_SET = 0
 // 0x12 are int16 position counters that wrap (x right, y toward the player), 0x14 and 0x16 jump from about 1,600 and 150 on a surface to about 4,600 and 3,200 when lifted
 #define S2_FEATURE_MOUSE 0x10
 #define S2_MOUSE_SURFACE_MAX 1000   // 0x16 below this: on a surface
-enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_STICK1 = 0x00013080u, S2_ADDR_STICK2 = 0x000130C0u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC062u };
+enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_STICK1 = 0x00013080u, S2_ADDR_STICK2 = 0x000130C0u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC082u };
 // Each stick's factory block (S2_ADDR_STICK1 / 2): its stick parameters (S2_STICK_PARAMS bytes), then its calibration (9 bytes: 0x130A8, 0x130E8)
 enum { S2_STICK_PARAMS = 0x28, S2_STICK_BLOCK = S2_STICK_PARAMS + 9 };
 
@@ -50,7 +50,9 @@ static inline uint16_t s2_u16(const uint8_t *p) { return (uint16_t)(p[0] | (uint
 static inline uint32_t s2_u32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static inline int16_t s2_s16(const uint8_t *p) { return (int16_t)s2_u16(p); }
 
-typedef struct { uint32_t clock_ms, buttons; uint16_t lx, ly, rx, ry; int16_t raw[6]; uint16_t battery_mv; int16_t mouse_x, mouse_y; uint16_t mouse_q, mouse_s; } s2_report;   // clock_ms: the controller's own clock; raw: accel xyz, gyro xyz in counts; mouse_*: S2_FEATURE_MOUSE
+// clock_ms: the controller's own clock; raw: accel xyz, gyro xyz in counts; mouse_*: S2_FEATURE_MOUSE; charge: the charge status at 0x21 (ndeadly's hid_reports.md; 0 on battery,
+// as command 0x0B 0x04 gives it)
+typedef struct { uint32_t clock_ms, buttons; uint16_t lx, ly, rx, ry; int16_t raw[6]; uint16_t battery_mv, charge; int16_t mouse_x, mouse_y; uint16_t mouse_q, mouse_s; } s2_report;
 
 // A 63-byte input notification (the same characteristic also carries longer audio packets; the length tells them apart)
 static inline int s2_report_parse(const uint8_t *d, size_t n, s2_report *r) {
@@ -59,7 +61,7 @@ static inline int s2_report_parse(const uint8_t *d, size_t n, s2_report *r) {
     r->clock_ms = s2_u32(d); r->buttons = s2_u32(d + 4);
     uint32_t a = (uint32_t)d[10] | (uint32_t)d[11] << 8 | (uint32_t)d[12] << 16, b = (uint32_t)d[13] | (uint32_t)d[14] << 8 | (uint32_t)d[15] << 16;
     r->lx = (uint16_t)(a & 0xFFF); r->ly = (uint16_t)(a >> 12); r->rx = (uint16_t)(b & 0xFFF); r->ry = (uint16_t)(b >> 12);
-    r->battery_mv = s2_u16(d + 0x1F);
+    r->battery_mv = s2_u16(d + 0x1F); r->charge = s2_u16(d + 0x21);
     for (int i = 0; i < 6; i++) r->raw[i] = s2_s16(d + 0x30 + 2 * i);
     r->mouse_x = s2_s16(d + 0x10); r->mouse_y = s2_s16(d + 0x12); r->mouse_q = s2_u16(d + 0x14); r->mouse_s = s2_u16(d + 0x16);
     return 1;
@@ -77,12 +79,17 @@ static inline size_t s2_command(uint8_t *out, size_t cap, uint8_t cmd, uint8_t s
     if (n) memcpy(out + 8, payload, n);
     return 8 + n;
 }
-// Memory read payload: length, 0x7E, 0, 0, address (little endian). The reply is the 8-byte frame header, the same 8 bytes echoed (length, 0x7E, 0, 0, address), then the data.
+// Memory read payload: length, 0x7E, 0, 0, address (little endian). The reply is the 8-byte frame header, then 8 bytes starting with the length and ending with the address, then the data
 static inline void s2_memory_payload(uint8_t out[8], uint8_t len, uint32_t addr) {
     out[0] = len; out[1] = 0x7E; out[2] = out[3] = 0;
     out[4] = (uint8_t)addr; out[5] = (uint8_t)(addr >> 8); out[6] = (uint8_t)(addr >> 16); out[7] = (uint8_t)(addr >> 24);
 }
 #define S2_REPLY_DATA 16   // offset of the data in a memory-read reply
+// Whether a memory-read reply answers the read of len bytes at addr: its length and address (bytes 8 and 12-15). A reply that comes after its command timed out would otherwise be
+// taken for the next one's. Bytes 9-11 are not compared: a Pro Controller 2 does not echo the request's 0x7E there (comparing all 8 refused every read on hardware)
+static inline int s2_memory_reply_for(const uint8_t *d, size_t n, uint8_t len, uint32_t addr) {
+    return d && n >= S2_REPLY_DATA + len && d[8] == len && s2_u32(d + 12) == addr;
+}
 // A command reply is for command cmd when it starts with it and byte 1 is 1 (done) or 2 (status)
 static inline int s2_reply_is(const uint8_t *d, size_t n, uint8_t cmd) { return d && n >= 8 && d[0] == cmd && (d[1] == 1 || d[1] == 2); }
 
@@ -124,8 +131,12 @@ static inline int s2_info_parse(const uint8_t *d, size_t n, uint16_t *vid, uint1
 }
 
 // Stick calibration (0x0B bytes): centre, maximum and minimum travel, each a packed 12-bit pair
-typedef struct { float cx, cy, maxx, maxy, minx, miny; int valid; float dead; } s2_cal;   // dead: the stick's own dead zone in raw counts (s2_params_dead), 0 when unknown
-static inline void s2_cal_default(s2_cal *c) { c->cx = c->cy = 2048; c->maxx = c->maxy = c->minx = c->miny = 1200; c->valid = 0; c->dead = 0; }
+// dead: the stick's own dead zone in raw counts (s2_params_dead), 0 when unknown. dead_set: a dead zone chosen for the stick on this host, a share of its travel
+// (S2_DEAD_SET_MIN..S2_DEAD_SET_MAX), 0 for none. The controller refuses writes below 0x1F5000, its stick parameters included, so a dead zone of the user's own cannot live in
+// it: the host keeps it per controller serial and stick (pad_switch2_apple.m, dm_switch2_set_dead_zone). Both belong to the stick, not to its calibration: whatever builds a
+// calibration from another carries them
+typedef struct { float cx, cy, maxx, maxy, minx, miny; int valid; float dead, dead_set; } s2_cal;
+static inline void s2_cal_default(s2_cal *c) { c->cx = c->cy = 2048; c->maxx = c->maxy = c->minx = c->miny = 1200; c->valid = 0; c->dead = 0; c->dead_set = 0; }
 static inline int s2_cal_blank(const uint8_t *d, size_t n) { return !d || n < 3 || (d[0] == 0xFF && d[1] == 0xFF && d[2] == 0xFF); }
 static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     if (!d || !c || n < 9 || s2_cal_blank(d, n)) return 0;
@@ -134,6 +145,7 @@ static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     c->maxx = (float)(q & 0xFFF); c->maxy = (float)(q >> 12);   // travel above and below the centre, not absolute positions
     c->minx = (float)(r & 0xFFF); c->miny = (float)(r >> 12);
     c->valid = c->maxx > 100 && c->maxy > 100 && c->minx > 100 && c->miny > 100;
+    c->dead = c->dead_set = 0;   // the 9 bytes hold no dead zone: the caller gives the stick's (s2_cal_from_flash, readCal), and none is left from whatever c held
     return c->valid;
 }
 // Stick parameters (S2_STICK_PARAMS bytes before each stick's calibration, 0x13080 and 0x130C0): a format byte, then 13 packed 12-bit pairs, x and y. They are the same on
@@ -159,7 +171,7 @@ static inline float s2_params_dead(const uint8_t *d, size_t n) {
 // S2_ADDR_USER_STICK1 / 2, blank unless the stick was calibrated on a console; either may be NULL): the user's centre and travel when set, else the factory's, and the dead zone
 // from the parameters either way. Returns 2 for the user's calibration, 1 for the factory's, 0 for none (c keeps the typical travel, s2_cal_default, and any dead zone read).
 static inline int s2_cal_from_flash(const uint8_t *block, size_t n, const uint8_t *user, size_t un, s2_cal *c) {
-    s2_cal_default(c); s2_cal t;
+    s2_cal_default(c); s2_cal t; s2_cal_default(&t);   // t whole: s2_cal_parse fills the calibration only, and *c takes all of it
     if (block && n >= S2_STICK_PARAMS) c->dead = s2_params_dead(block, n);
     float dead = c->dead;
     if (user && s2_cal_parse(user, un, &t)) { *c = t; c->dead = dead; return 2; }
@@ -171,25 +183,263 @@ static inline int s2_cal_from_flash(const uint8_t *block, size_t n, const uint8_
 #define S2_DEAD_SHARE 0.10f
 #define S2_DEAD_MIN 0.03f
 #define S2_DEAD_MAX 0.25f
+// The range a dead zone set on this host may take (the Controller panel's slider)
+#define S2_DEAD_SET_MIN 0.01f
+#define S2_DEAD_SET_MAX 0.30f
+// A dead zone to set, held to that range; 0 (or less, or not a number) clears it
+static inline float s2_dead_set_clamp(float share) { return !(share > 0) ? 0 : share < S2_DEAD_SET_MIN ? S2_DEAD_SET_MIN : share > S2_DEAD_SET_MAX ? S2_DEAD_SET_MAX : share; }
 // The stick's own dead zone as a share of its mean travel, 0 when it has none to trust
 static inline float s2_cal_dead_own(const s2_cal *c) {
     float travel = (c->maxx + c->minx + c->maxy + c->miny) / 4, share = travel > 0 ? c->dead / travel : 0;
     return share >= S2_DEAD_MIN && share <= S2_DEAD_MAX ? share : 0;
 }
-static inline float s2_cal_dead_share(const s2_cal *c) { float own = s2_cal_dead_own(c); return own > 0 ? own : S2_DEAD_SHARE; }
+// The dead zone applied: the one set on this host, else the stick's own, else the default
+static inline float s2_cal_dead_share(const s2_cal *c) {
+    float set = s2_dead_set_clamp(c->dead_set); if (set > 0) return set;
+    float own = s2_cal_dead_own(c); return own > 0 ? own : S2_DEAD_SHARE;
+}
 // A stick in -1..1 (x right, y up): each axis over its travel on that side of the centre, then a round dead zone (the stick's own, s2_cal_dead_share), and past it the deflection
 // scaled back to start at 0, as pad_hid_stick does. A stick that comes to rest a little off its centre reads 0, and the output grows from 0 at the dead zone's edge instead of
 // jumping to it, and a small movement keeps both axes (a dead zone per axis would zero the smaller one). Each axis is clamped after the scale.
 // Before (2026-11), each axis had its own dead zone of 40 raw counts with no scale: a Pro Controller 2's right stick comes to rest 0 to 60 counts off its centre, so it read 0 or
 // a constant 3 to 5 % after a release, and Breath of the Wild, which decides at the start of an aim whether the right stick is in use, left motion aiming off about half the time.
 static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, float *x, float *y) {
-    s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); if (c) d.dead = c->dead; c = &d; }
+    s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); if (c) { d.dead = c->dead; d.dead_set = c->dead_set; } c = &d; }
     float sx = (float)rawx - c->cx, sy = (float)rawy - c->cy;
     float tx = sx >= 0 ? c->maxx : c->minx, ty = sy >= 0 ? c->maxy : c->miny;
     float nx = tx > 0 ? sx / tx : 0, ny = ty > 0 ? sy / ty : 0, r = sqrtf(nx * nx + ny * ny), dead = s2_cal_dead_share(c);
     if (r <= dead) { *x = *y = 0; return; }
     float k = (r - dead) / (1 - dead) / r; nx *= k; ny *= k;
     *x = fminf(fmaxf(nx, -1.f), 1.f); *y = fminf(fmaxf(ny, -1.f), 1.f);
+}
+
+// The calibration a stick is read with from its two blocks: the user's when it parses, else the factory's, else the defaults (valid 0); *fac is the factory block, or a copy of *cal
+// when that one did not read, so a travel is always judged against something. Returns cal->valid
+static inline int s2_cal_pick(const s2_cal *user, int has_user, const s2_cal *factory, int has_factory, s2_cal *cal, s2_cal *fac) {
+    if (has_user && user) *cal = *user; else if (has_factory && factory) *cal = *factory; else s2_cal_default(cal);
+    if (has_factory && factory) *fac = *factory; else *fac = *cal;
+    return cal->valid;
+}
+
+// ---- Writing a user stick calibration (DM_SW2_CALIBRATE: switch2_ops_apple.m) ----
+// The user calibration of a stick slot is 11 bytes, the first slot's at 0x1FC040 and the second's at 0x1FC080: the marker B2 A1 (Switch 1's user-calibration marker), then the
+// 9 bytes s2_cal_parse reads, which is why the reads start at 0x1FC042 and 0x1FC082 (SDL's SDL_hidapi_switch2.c and Linux's hid-nintendo.c read both there and check the marker
+// the same way; no console-calibrated controller has been seen to confirm the second: a Pro Controller 2 never calibrated on a console holds 0xFF at both). Its
+// sector 0x1FC000..0x1FCFFF holds only user calibration (ndeadly/switch2_controller_research memory_layout.md: motion at 0x1FC000, the sticks after it), all 0xFF until a
+// calibration is written. Command 0x02: subcommand 0x05 writes (length, 0x7E, 0, 0, address, data; addresses below 0x1F5000 are refused), 0x03 erases the 0x1000-byte sector
+// holding an address to 0xFF (0, 0, 0, 0, address). Whether a write over bytes that are not 0xFF needs the erase first is documented nowhere, so the host writes straight only
+// into a blank block and otherwise erases the sector and writes it back whole (only once the sector reads blank: an answered erase is not proof of one), then reads
+// everything back.
+enum { S2_SUB_MEMORY_ERASE = 0x03, S2_SUB_MEMORY_WRITE = 0x05 };
+#define S2_ADDR_USER_CAL_SECTOR 0x001FC000u
+#define S2_SECTOR_SIZE 0x1000u
+#define S2_USER_STICK1_OFF 0x40u   // the first stick slot's block in the sector (marker at 0x1FC040, calibration at S2_ADDR_USER_STICK1)
+#define S2_USER_STICK2_OFF 0x80u   // the second's (marker at 0x1FC080, calibration at S2_ADDR_USER_STICK2)
+static inline uint32_t s2_user_slot_off(int slot) { return slot ? S2_USER_STICK2_OFF : S2_USER_STICK1_OFF; }
+#define S2_USER_CAL_LEN 11
+static inline int s2_all_ff(const uint8_t *d, size_t n) { for (size_t i = 0; i < n; i++) if (d[i] != 0xFF) return 0; return 1; }
+// A calibration as the 9 bytes s2_cal_parse reads: centre, travel above, travel below, each pair packed x | y << 12, little endian
+static inline void s2_cal_pack(const s2_cal *c, uint8_t out[9]) {
+    float v[6] = {c->cx, c->cy, c->maxx, c->maxy, c->minx, c->miny};
+    for (int i = 0; i < 3; i++) {
+        uint32_t x = (uint32_t)fminf(fmaxf(roundf(v[2 * i]), 0.f), 4095.f), y = (uint32_t)fminf(fmaxf(roundf(v[2 * i + 1]), 0.f), 4095.f), p = x | y << 12;
+        out[3 * i] = (uint8_t)p; out[3 * i + 1] = (uint8_t)(p >> 8); out[3 * i + 2] = (uint8_t)(p >> 16);
+    }
+}
+static inline void s2_user_cal_block(const s2_cal *c, uint8_t out[S2_USER_CAL_LEN]) { out[0] = 0xB2; out[1] = 0xA1; s2_cal_pack(c, out + 2); }
+static inline int s2_user_cal_marked(const uint8_t *d) { return d[0] == 0xB2 && d[1] == 0xA1; }
+// The calibration with its centre moved to (cx, cy) and the same end stops: travel is measured from the centre, so what the centre gains one side loses the other.
+// 0 when c is not a calibration read from the controller (the defaults are no travel of this stick's) or the new travel would not be one (s2_cal_parse's rule)
+static inline int s2_cal_recentre(const s2_cal *c, float cx, float cy, s2_cal *out) {
+    if (!c || !c->valid) return 0;
+    cx = roundf(cx); cy = roundf(cy);
+    float dx = cx - c->cx, dy = cy - c->cy;
+    out->cx = cx; out->cy = cy; out->dead = c->dead; out->dead_set = c->dead_set;   // the dead zone is the stick's (s2_params_dead, or set here), not its calibration's
+    out->maxx = c->maxx - dx; out->minx = c->minx + dx; out->maxy = c->maxy - dy; out->miny = c->miny + dy;
+    out->valid = out->maxx > 100 && out->maxy > 100 && out->minx > 100 && out->miny > 100;
+    return out->valid;
+}
+// Where a released stick rests: S2_STICK_REST_MS of reports in which neither axis moved more than S2_STICK_REST_SPREAD counts (a touch starts it over), averaged.
+// Returns 1 with the rest in out
+#define S2_STICK_REST_MS 2000u
+#define S2_STICK_REST_SPREAD 24
+#define S2_STICK_REST_MAX 300.f    // a rest farther than this from the calibrated centre (a quarter of the travel) is a held stick, not drift: nothing is written
+typedef struct { int n; uint32_t t0; uint16_t lo[2], hi[2]; uint64_t sum[2]; } s2_stick_rest;
+// The same for hold_ms of reports (S2_STICK_REST_MS is the 2 s of the DM_SW2_CALIBRATE write)
+static inline int s2_stick_rest_update_for(s2_stick_rest *r, uint16_t x, uint16_t y, uint32_t ms, uint32_t hold_ms, float out[2]) {
+    uint16_t v[2] = {x, y};
+    if (r->n) for (int i = 0; i < 2; i++) {
+        uint16_t lo = v[i] < r->lo[i] ? v[i] : r->lo[i], hi = v[i] > r->hi[i] ? v[i] : r->hi[i];
+        if (hi - lo > S2_STICK_REST_SPREAD) { r->n = 0; break; }
+        r->lo[i] = lo; r->hi[i] = hi;
+    }
+    if (!r->n) { r->t0 = ms; for (int i = 0; i < 2; i++) { r->lo[i] = r->hi[i] = v[i]; r->sum[i] = 0; } }
+    r->n++; r->sum[0] += x; r->sum[1] += y;
+    if (ms - r->t0 < hold_ms || r->n < 10) return 0;
+    out[0] = (float)r->sum[0] / (float)r->n; out[1] = (float)r->sum[1] / (float)r->n;
+    return 1;
+}
+static inline int s2_stick_rest_update(s2_stick_rest *r, uint16_t x, uint16_t y, uint32_t ms, float out[2]) {
+    return s2_stick_rest_update_for(r, x, y, ms, S2_STICK_REST_MS, out);
+}
+static inline int s2_stick_rest_near(const s2_cal *c, float x, float y) { return fabsf(x - c->cx) <= S2_STICK_REST_MAX && fabsf(y - c->cy) <= S2_STICK_REST_MAX; }
+// A release for the stick tester: the stick goes more than S2_RELEASE_AWAY counts from c's centre on either axis, then rests closer than that for S2_RELEASE_HOLD_MS (milliseconds of the controller's clock).
+// Returns 1 once per release with the averaged rest in out, then waits for the next push; while the stick is away its rest window starts over
+#define S2_RELEASE_AWAY 300
+#define S2_RELEASE_HOLD_MS 300u
+typedef struct { int away; s2_stick_rest rest; } s2_release;
+static inline int s2_release_update(s2_release *r, const s2_cal *c, uint16_t x, uint16_t y, uint32_t ms, float out[2]) {
+    if (fabsf((float)x - c->cx) > S2_RELEASE_AWAY || fabsf((float)y - c->cy) > S2_RELEASE_AWAY) { r->away = 1; r->rest.n = 0; return 0; }
+    if (!r->away) { r->rest.n = 0; return 0; }
+    if (!s2_stick_rest_update_for(&r->rest, x, y, ms, S2_RELEASE_HOLD_MS, out)) return 0;
+    r->away = 0; r->rest.n = 0;
+    return 1;
+}
+// The edge of a stick for a new calibration: the furthest offset from c's centre in each direction, in counts (up: right and up, down: left and down; zero-initialised to start)
+#define S2_REACH_MIN_FRAC 0.7f     // a reach under this share of the limits' travel (the factory calibration's) in that direction is a stick not rotated all the way
+#define S2_REACH_MAX_FRAC 1.25f    // over this share of the limits' travel in any direction is not this stick's edge
+#define S2_REACH_TRIM 0.97f        // the new travel is this share of the reach, so the edge reads full tilt
+#define S2_REACH_SHORT_RIGHT 1
+#define S2_REACH_SHORT_LEFT 2
+#define S2_REACH_SHORT_UP 4
+#define S2_REACH_SHORT_DOWN 8
+#define S2_REACH_TOO_FAR 16
+typedef struct { float up[2], down[2]; } s2_reach;
+static inline void s2_reach_update(s2_reach *r, const s2_cal *c, uint16_t x, uint16_t y) {
+    float dx = (float)x - c->cx, dy = (float)y - c->cy;
+    if (dx > r->up[0]) r->up[0] = dx;
+    if (-dx > r->down[0]) r->down[0] = -dx;
+    if (dy > r->up[1]) r->up[1] = dy;
+    if (-dy > r->down[1]) r->down[1] = -dy;
+}
+// The S2_REACH_SHORT_ bits of the directions whose reach is under S2_REACH_MIN_FRAC of limits' travel that way (0: every way far enough)
+static inline int s2_reach_short(const s2_reach *r, const s2_cal *limits) {
+    int f = 0;
+    if (r->up[0] < S2_REACH_MIN_FRAC * limits->maxx) f |= S2_REACH_SHORT_RIGHT;
+    if (r->down[0] < S2_REACH_MIN_FRAC * limits->minx) f |= S2_REACH_SHORT_LEFT;
+    if (r->up[1] < S2_REACH_MIN_FRAC * limits->maxy) f |= S2_REACH_SHORT_UP;
+    if (r->down[1] < S2_REACH_MIN_FRAC * limits->miny) f |= S2_REACH_SHORT_DOWN;
+    return f;
+}
+// The calibration with c's centre (the one the reach was measured from) and the reach, trimmed, as travel; out is written only when this returns 0. Otherwise the S2_REACH_
+// bits of what is wrong, judged against limits' travel: the factory calibration's, since a stored user calibration may be the short travel being replaced (all four SHORT
+// bits when the result would not be a calibration by s2_cal_parse's rule)
+static inline int s2_reach_travel(const s2_reach *r, const s2_cal *c, const s2_cal *limits, s2_cal *out) {
+    int f = s2_reach_short(r, limits);
+    if (r->up[0] > S2_REACH_MAX_FRAC * limits->maxx || r->down[0] > S2_REACH_MAX_FRAC * limits->minx ||
+        r->up[1] > S2_REACH_MAX_FRAC * limits->maxy || r->down[1] > S2_REACH_MAX_FRAC * limits->miny) f |= S2_REACH_TOO_FAR;
+    if (f) return f;
+    s2_cal t; t.cx = c->cx; t.cy = c->cy; t.dead = c->dead; t.dead_set = c->dead_set;
+    t.maxx = r->up[0] * S2_REACH_TRIM; t.minx = r->down[0] * S2_REACH_TRIM; t.maxy = r->up[1] * S2_REACH_TRIM; t.miny = r->down[1] * S2_REACH_TRIM;
+    t.valid = t.maxx > 100 && t.maxy > 100 && t.minx > 100 && t.miny > 100;
+    if (!t.valid) return S2_REACH_SHORT_RIGHT | S2_REACH_SHORT_LEFT | S2_REACH_SHORT_UP | S2_REACH_SHORT_DOWN;
+    *out = t;
+    return 0;
+}
+// An offset from the centre as a share of the travel that way (d >= 0: up, else down; a travel under 1 count counts as 1)
+static inline float s2_share(float d, float up, float down) { return d / fmaxf(d >= 0 ? up : down, 1.f); }
+// The edges step's turns around the stick's edge: the angle swept while the stick is at least S2_TURN_SHARE of its travel out (x, y: s2_share each way, y up), signed so a
+// still stick's jitter and a turn back cancel out; a stick pulled in starts the angle over. Returns the most turns reached so far, at most S2_TURNS_WANTED
+#define S2_TURN_SHARE 0.6f
+#define S2_TURNS_WANTED 2.f
+typedef struct { int have; float last, winding, turns; } s2_turns;
+static inline float s2_turns_update(s2_turns *t, float x, float y) {
+    const float pi = 3.14159265f;
+    if (hypotf(x, y) < S2_TURN_SHARE) { t->have = 0; return t->turns; }
+    float a = atan2f(y, x);
+    if (t->have) {
+        float d = a - t->last;
+        if (d > pi) d -= 2 * pi; else if (d < -pi) d += 2 * pi;
+        t->winding += d;
+        float n = fminf(S2_TURNS_WANTED, fabsf(t->winding) / (2 * pi));
+        if (n > t->turns) t->turns = n;
+    }
+    t->last = a; t->have = 1;
+    return t->turns;
+}
+// Payloads of the write (returns its length, 0 when the data does not fit a command) and of the erase (1, or 0 when refused). Neither is built for an address below
+// S2_WRITE_FLOOR: the controller refuses those, and the host never sends one
+#define S2_WRITE_FLOOR 0x001F5000u
+static inline size_t s2_memory_write_payload(uint8_t *out, size_t cap, uint32_t addr, const uint8_t *data, size_t n) {
+    if (!out || !data || n == 0 || n > 0x80 || cap < 8 + n || 8 + n > 0xFF || addr < S2_WRITE_FLOOR) return 0;
+    s2_memory_payload(out, (uint8_t)n, addr); memcpy(out + 8, data, n);
+    return 8 + n;
+}
+static inline int s2_memory_erase_payload(uint8_t out[8], uint32_t addr) {
+    if (!out || addr < S2_WRITE_FLOOR) return 0;
+    out[0] = out[1] = out[2] = out[3] = 0;
+    out[4] = (uint8_t)addr; out[5] = (uint8_t)(addr >> 8); out[6] = (uint8_t)(addr >> 16); out[7] = (uint8_t)(addr >> 24);
+    return 1;
+}
+
+// ---- What else a controller tells and does (the Controller menu and panel; ndeadly/switch2_controller_research commands.md and memory_layout.md, each checked on a Pro Controller 2) ----
+// Commands: the firmware version (0x10 0x01, no payload); the player lights flashing (0x09 0x08: 1 on, 0 off, 8 bytes); a vibration sample (0x0A 0x02: its id, 4 bytes; 2 is
+// the console's "search for controllers" tone, 1 a low buzz of about a second); power off (0x06 0x02, 12 zero bytes: the console sends it over USB when it sleeps docked; over
+// Bluetooth the controller answers, disconnects and goes dark, and a button press wakes it)
+enum { S2_CMD_POWER = 0x06, S2_CMD_VIBRATION = 0x0A, S2_CMD_FIRMWARE = 0x10 };
+enum { S2_SUB_POWER_OFF = 0x02, S2_SUB_LEDS_FLASH = 0x08, S2_SUB_VIB_SAMPLE = 0x02, S2_SUB_FIRMWARE_VERSION = 0x01 };
+enum { S2_SAMPLE_BUZZ = 1, S2_SAMPLE_SEARCH = 2 };
+#define S2_POWER_OFF_LEN 12
+#define S2_LEDS_FLASH_LEN 8
+#define S2_VIB_SAMPLE_LEN 4
+#define S2_CMD_REPLY_DATA 8   // a command reply's data after its 8-byte header (a memory read's starts at S2_REPLY_DATA)
+// The firmware version reply's data: the controller's version, its type (0 Joy-Con L, 1 Joy-Con R, 2 Pro Controller, 3 GameCube), the Bluetooth patch, and on a Pro Controller with
+// updated firmware the audio jack's DSP firmware (FF FF FF without it). A Pro Controller 2 answered 02 01 04 02 0c 00 00 00 00 02 03 00: 2.1.4, Bluetooth 12.0.0, DSP 0.2.3
+typedef struct { uint8_t fw[3], type, bt[3], dsp[3]; int has_dsp; } s2_firmware;
+static inline int s2_firmware_parse(const uint8_t *d, size_t n, s2_firmware *f) {
+    if (f) memset(f, 0, sizeof *f);
+    if (!d || !f || n < 7) return 0;
+    memcpy(f->fw, d, 3); f->type = d[3]; memcpy(f->bt, d + 4, 3);
+    if (n >= 11 && !(d[8] == 0xFF && d[9] == 0xFF && d[10] == 0xFF)) { memcpy(f->dsp, d + 8, 3); f->has_dsp = 1; }
+    return 1;
+}
+// "2.1.4" and, with the DSP firmware, " (DSP 0.2.3)"
+static inline void s2_firmware_text(const s2_firmware *f, char *out, size_t cap) {
+    if (f->has_dsp) snprintf(out, cap, "%u.%u.%u (DSP %u.%u.%u)", f->fw[0], f->fw[1], f->fw[2], f->dsp[0], f->dsp[1], f->dsp[2]);
+    else snprintf(out, cap, "%u.%u.%u", f->fw[0], f->fw[1], f->fw[2]);
+}
+// The colours in the identity block (S2_ADDR_INFO): body at 0x19, buttons 0x1C, highlight 0x1F, grip 0x22, each red, green, blue. 0 when the block is short or blank there
+enum { S2_COLOUR_BODY, S2_COLOUR_BUTTONS, S2_COLOUR_HIGHLIGHT, S2_COLOUR_GRIP };
+static inline int s2_info_colours(const uint8_t *d, size_t n, uint8_t out[4][3]) {
+    if (!d || n < 0x25) return 0;
+    for (int i = 0; i < 4; i++) memcpy(out[i], d + 0x19 + 3 * i, 3);
+    return !(out[0][0] == 0xFF && out[0][1] == 0xFF && out[0][2] == 0xFF);
+}
+// The pairing table (S2_ADDR_PAIRINGS): a count, then from 8 an entry of 0x28 bytes per host, its address first (as s2_pair_host_payload sends it, little endian) and its link
+// key at 0x12. Only the count and whether host is among the addresses are taken: the keys are secrets and nothing here keeps them. -1 for a blank or unreadable table
+#define S2_ADDR_PAIRINGS 0x001FA000u
+#define S2_PAIRINGS_READ (8 + 0x28 * 4)   // enough for four hosts
+static inline int s2_pairings(const uint8_t *d, size_t n, const uint8_t host[6], int *has_host) {
+    if (has_host) *has_host = 0;
+    if (!d || n < 1 || d[0] == 0xFF) return -1;
+    int count = d[0];
+    for (int i = 0; i < count && host && has_host; i++) {
+        size_t at = 8 + (size_t)0x28 * (size_t)i;
+        if (at + 6 > n) break;
+        if (!memcmp(d + at, host, 6)) *has_host = 1;
+    }
+    return count;
+}
+// The battery level, about: 0x1FB04A holds ten descending 16-bit values (a Pro Controller 2: 3737, 3540, 3404, 3285, 3216, 3174, 3069, 3063, 2986, 2730), in the range of the
+// battery voltage the input report gives (3450 mV on one), read as the controller's thresholds for 100, 90 .. 10 %. That reading is inferred from their shape, not documented,
+// so the level is shown as "about". The table is per model (memory_layout.md: the same on every controller of a type). 0 for a table that is not of that shape
+#define S2_ADDR_BATTERY_TABLE 0x001FB04Au
+#define S2_BATTERY_STEPS 10
+static inline int s2_battery_table(const uint8_t *d, size_t n, uint16_t t[S2_BATTERY_STEPS]) {
+    if (!d || n < 2 * S2_BATTERY_STEPS) return 0;
+    for (int i = 0; i < S2_BATTERY_STEPS; i++) {
+        t[i] = s2_u16(d + 2 * i);
+        if (t[i] < 2000 || t[i] > 4500 || (i && t[i] >= t[i - 1])) return 0;
+    }
+    return 1;
+}
+// The level for mv between the thresholds, 0..100; -1 without a table or a reading
+static inline int s2_battery_level(const uint16_t t[S2_BATTERY_STEPS], int have_table, unsigned mv) {
+    if (!have_table || !mv) return -1;
+    if (mv >= t[0]) return 100;
+    for (int i = 0; i + 1 < S2_BATTERY_STEPS; i++)
+        if (mv >= t[i + 1]) return 100 - 10 * i - (int)lroundf(10.f * (float)(t[i] - mv) / (float)(t[i] - t[i + 1]));
+    return 0;   // below the last threshold (10 %)
 }
 
 // Player LED patterns of the console for players 1..8

@@ -535,7 +535,8 @@ static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // holding G, t is stopped
 
 // DM_HITCH_DUMP=<ms>[:<s>] (diagnostic): when no frame has been presented for <ms>, from <s> seconds after the start on, log every guest thread once per stall: priority, core and
 // mask, what it waits on, its last SVC and call site, and where it is (pc, lr and the frame-pointer chain: up to 8 guest frames, the host frames above them; x0-x2 and x19-x25
-// when it runs guest code), read with the thread suspended for a moment. At most 24 stalls per run. It found Breath of the Wild's job queue poll (patch_nso.py "Spin waits")
+// when it runs guest code), read with the thread suspended for a moment, and after the host threads that carry a frame (the acquire, queue replay and encode threads: state and
+// host frames, one `host '<name>'` line each). At most 24 stalls per run. It found Breath of the Wild's job queue poll (patch_nso.py "Spin waits")
 _Atomic uint64_t dm_present_ns;   // nvn_mtl.m present_enqueue (every graphics API): when the last present was made (host monotonic ns)
 typedef struct {   // what one dump line needs, copied under G so that a thread that exits meanwhile is not read
     uint32_t handle, svc; int prio, core, rs, sleeping, host_work, wkind;
@@ -588,6 +589,34 @@ static void hitch_log(const hitch_t *h) {
         kinds[h->wkind], (unsigned long long)h->waddr, (unsigned long long)h->wkey, h->sleeping ? " sleeping" : "", h->host_work ? " host-work" : "", h->rs, h->svc, m ? m->name : "?",
         (unsigned long long)(m ? h->lr - (uint64_t)m->base : h->lr), w);
 }
+// The host threads that carry a frame (the real-time registry of hle_nvn.c: the acquire, queue replay and encode threads) are taken first in a stall and logged beside the guest
+// threads: state and the frame-pointer chain, every frame named by dladdr. Between the suspend and the resume only mach calls and memory reads run, as in hitch_grab
+extern int nvn_rt_threads(mach_port_t *port, uint64_t *tid, const char **name, int max);
+typedef struct { char name[32]; int rs, np; uint64_t pc[56]; } hitch_host_t;
+static int hitch_host_grab(hitch_host_t *hh, int max) {
+    mach_port_t ports[8]; uint64_t tids[8]; const char *names[8]; int n = nvn_rt_threads(ports, tids, names, max < 8 ? max : 8), k = 0;
+    for (int i = 0; i < n; i++) {
+        hitch_host_t *h = &hh[k]; memset(h, 0, sizeof *h); snprintf(h->name, sizeof h->name, "%s", names[i]); h->rs = -1;
+        thread_basic_info_data_t bi; mach_msg_type_number_t c = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(ports[i], THREAD_BASIC_INFO, (thread_info_t)&bi, &c) == KERN_SUCCESS) h->rs = bi.run_state;
+        thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT;   // the port of a thread that has ended may name another thread now
+        if (thread_info(ports[i], THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) != KERN_SUCCESS || ii.thread_id != tids[i]) continue;
+        if (thread_suspend(ports[i]) != KERN_SUCCESS) continue;
+        arm_thread_state64_t st; c = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(ports[i], ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS) {
+            uint64_t fp = __darwin_arm_thread_state64_get_fp(st);
+            h->pc[h->np++] = __darwin_arm_thread_state64_get_pc(st); h->pc[h->np++] = __darwin_arm_thread_state64_get_lr(st);
+            while (h->np < 56) { uint64_t fr[2]; vm_size_t got = 0; if (!fp || vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &got) || got != 16) break; h->pc[h->np++] = fr[1]; fp = fr[0]; }
+        }
+        thread_resume(ports[i]); k++;
+    }
+    return k;
+}
+static void hitch_host_log(const hitch_host_t *h) {
+    char w[4000]; size_t q = 0; w[0] = 0;
+    for (int k = 0; k < h->np && q < sizeof w - 100; k++) { Dl_info di; if (dladdr((void *)h->pc[k], &di) && di.dli_sname) q += (size_t)snprintf(w + q, sizeof w - q, " %.44s", di.dli_sname); else q += (size_t)snprintf(w + q, sizeof w - q, " %#llx", (unsigned long long)h->pc[k]); }
+    LOG("  host '%s' state %d at:%s", h->name, h->rs, w);
+}
 static void *hitch_main(void *arg) {
     pthread_setname_np("dm hitch dump");
     const char *e = arg; uint64_t lim = (uint64_t)atoi(e) * 1000000ull, seen = 0, skip = 0; int n = 0;
@@ -599,7 +628,9 @@ static void *hitch_main(void *arg) {
         uint64_t p = atomic_load(&dm_present_ns), now = now_ns();
         if (!p || p == seen || now - p < lim || now - g_t0_ns < skip) continue;
         seen = p; n++;
+        static hitch_host_t hh[8]; int nh = hitch_host_grab(hh, 8);
         LOG("hitch dump %d: no present for %.1f ms", n, (now - p) / 1e6);
+        for (int k = 0; k < nh; k++) hitch_host_log(&hh[k]);
         int nt = 0;
         g_lock(); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) hitch_grab(t, &hs[nt++]); g_unlock();
         for (int k = 0; k < nt; k++) hitch_log(&hs[k]);

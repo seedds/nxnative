@@ -23,4 +23,5 @@ int dm_detclock_enabled(void) { return 0; }
 __thread uint64_t dm_clock_reads;   // guest clock reads per thread (hle_os.c in the host; thr_yield reads it)
 #endif
 __thread _Atomic int dm_host_work;   // referenced by hle_thread.c; in the host it is defined in hle_nvn.c
+int nvn_rt_threads(mach_port_t *port, uint64_t *tid, const char **name, int max) { (void)port; (void)tid; (void)name; (void)max; return 0; }   // referenced by hle_thread.c (DM_HITCH_DUMP); in the host it is hle_nvn.c's
 pthread_key_t g_key18;   // read by hle_thread.c's SVC entry and pause signal; in the host it is defined in loader.c (never created here: those paths do not run)

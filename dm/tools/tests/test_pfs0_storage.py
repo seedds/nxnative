@@ -27,6 +27,7 @@ class Pfs0Storage(unittest.TestCase):
 <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><AllowUnsafeBlocks>true</AllowUnsafeBlocks><StartupObject>Pfs0StorageTests</StartupObject></PropertyGroup>
 <ItemGroup><PackageReference Include="LibHac" Version="{escape(version)}" />
 <Compile Include="{escape(str(ROOT / 'dm/tools/nx_extract/Program.cs'))}" />
+<Compile Include="{escape(str(ROOT / 'dm/tools/nx_extract/NxTree.cs'))}" />
 <Compile Include="{escape(str(ROOT / 'dm/tools/tests/fixtures/Pfs0StorageTests.cs'))}" /></ItemGroup></Project>''')
             result = subprocess.run([DOTNET, 'run', '--project', str(tmp / 'test.csproj'), '-v:q'],
                                     capture_output=True, text=True, timeout=120, env=dict(os.environ, DOTNET_NOLOGO='1'))

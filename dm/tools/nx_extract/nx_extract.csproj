@@ -14,6 +14,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Program.cs" LogicalName="src0" />
     <EmbeddedResource Include="nx_extract.csproj" LogicalName="src1" />
+    <EmbeddedResource Include="NxTree.cs" LogicalName="src2" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="LibHac" Version="0.19.0" />

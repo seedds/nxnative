@@ -199,6 +199,7 @@ class ExtractImage(unittest.TestCase):
             project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
                                '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
                                f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
+                               f'<Compile Include="{REPO}/dm/tools/nx_extract/NxTree.cs" />'
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
             (root / 'Fixture.cs').write_text(DAMAGED_FIXTURE)
             result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(out)], capture_output=True, text=True, timeout=240)
@@ -230,6 +231,7 @@ class ExtractImage(unittest.TestCase):
             project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
                                '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
                                f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
+                               f'<Compile Include="{REPO}/dm/tools/nx_extract/NxTree.cs" />'
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
             (root / 'Fixture.cs').write_text('using System.Reflection; using LibHac.FsSystem; class Fixture { static void Main(string[] a) {'
                 'var write = typeof(P).GetMethod("WriteImage", BindingFlags.NonPublic | BindingFlags.Static);'

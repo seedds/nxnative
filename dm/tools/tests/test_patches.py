@@ -143,10 +143,21 @@ class Registry(unittest.TestCase):
                     if rule.get('others'):   # none found: the stub leaves those parts out
                         rest = []
                         ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: None, put=lambda off, words, why, rest=rest: rest.append(off),
-                                                                 state=0x9000000, render_scale=0, step_max=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set(), fps_ready=False)
+                                                                 state=0x9000000, render_scale=0, step_max=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set(), fps_ready=False, area=lambda off: None)
                         rule['stub'](ctx)
                         self.assertTrue(all(0x100000 <= off < 0x100000 + rule['size'] for off in rest), f'{p}: {rule["name"]} writes outside its function without its others')
                         if rule.get('fps_required'): self.assertFalse(ctx.fps_ready, f'{p}: incomplete correction enables a native frame target')
+
+    def test_star_fox_render_scale_uses_its_sites_area(self):
+        # main's text is longer than a branch reaches: the stub must assemble into the area that reaches its site, multiply the game's scale and take scales up to 2
+        m = MODS[REPO / 'dm/games/0400E88025B1A000/patches.py']
+        words, areas = [], []
+        ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=words.append, site=lambda off, orig: None, put=lambda off, words, why: None, state=0x9000000,
+                                                 render_scale=0, step_max=0, base=0x100000, others={}, found=None, capabilities=set(), address=lambda off: 0, area=areas.append)
+        m.MATCH_FRAME_STEP['main'][0]['stub'](ctx)
+        self.assertEqual(areas, [0x100000 + 0x25ac])
+        self.assertIn(0x1e210800, words)   # fmul s0,s0,s1: the game's scale times the host's
+        self.assertEqual(ctx.render_scale, 2)
 
     def test_mario_kart_world_declares_its_largest_step(self):
         # its stub caps the step it gives the game at 2 (mov w8,#2; csel ls), the game's own intervals, and says so (ctx.step_max), or the host holds frames 3 vsyncs while the game
@@ -154,7 +165,7 @@ class Registry(unittest.TestCase):
         m = MODS[REPO / 'dm/games/0400C3F00006E000/patches.py']
         words = []
         ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=words.append, site=lambda off, orig: None, put=lambda off, words, why: None, state=0x9000000,
-                                                 render_scale=0, step_max=0, base=0x100000, others={}, found=None, capabilities=set(), address=lambda off: 0)
+                                                 render_scale=0, step_max=0, base=0x100000, others={}, found=None, capabilities=set(), address=lambda off: 0, area=lambda off: None)
         m.MATCH_FRAME_STEP['main'][0]['stub'](ctx)
         self.assertIn(0x52800048, words)   # mov w8,#2: the cap
         self.assertEqual(ctx.step_max, 2)

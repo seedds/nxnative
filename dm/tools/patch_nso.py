@@ -1465,7 +1465,8 @@ obs += region_obs
 # +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
 # its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed), +0x40 u32 1 = the game's own dynamic resolution runs, 0 = its
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
-# A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
+# A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area (the front one; ctx.area(offset) switches to the one that
+# reaches the code at that offset, which a site past SPLIT in a split module needs: a no-op in a module with one area), ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = n marks a render-scale stub that takes scales up to n (1: it only lowers the game's size),
 # ctx.step_max = n says the stubs hand the game steps of at most n vsyncs (its own interval logic stops there; 0 = FSTEP_MAX, 3), so the host holds frames and pays back at most n,
 # ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.found what an anchored rule's find returned, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
@@ -1509,12 +1510,13 @@ if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those 
     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
                                             put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
                                             state=FS_STATE_OFF, render_scale=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
-                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off, lo_off=None: stub_address(off, 'frame step', lo_off))
+                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off, lo_off=None: stub_address(off, 'frame step', lo_off),
+                                            area=use_area)
     (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
 
 # ---- Stubs (the modules whose patch file has STUBS of their build) ----
 # A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from
-# its sites, with the frame step's ctx (here / emit / site / put / address, above) and no state page, so the host's pacing does not change (FRAME_STEP would also make the host take
+# its sites, with the frame step's ctx (here / emit / area / site / put / address, above) and no state page, so the host's pacing does not change (FRAME_STEP would also make the host take
 # the main for one with a frame step). A stub's code must hold nothing the rewriter would rewrite (x18, svc, tpidr, exclusive pairs), since it is not scanned.
 # Ori and the Will of the Wisps 1.2.1 serializes the users of Unity's shared constant-buffer table this way (its patches.py)
 STUBS = PATCHES['STUBS']
@@ -1524,7 +1526,7 @@ if BUILD_ID in STUBS or STUB_MATCH:
                               put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if STUB_MATCH else ''), 'stub'),
                               address=lambda off, lo_off=None: stub_address(off, 'stub', lo_off),
                               base=STUB_MATCH[1] if STUB_MATCH else 0, others=STUB_MATCH[2] if STUB_MATCH else {},
-                              found=STUB_MATCH[3] if STUB_MATCH else None, fps_ready=False)
+                              found=STUB_MATCH[3] if STUB_MATCH else None, fps_ready=False, area=use_area)
     (STUB_MATCH[0]['stub'] if STUB_MATCH else STUBS[BUILD_ID])(st)
     if st.fps_ready: NATIVE_FPS_BLOCKED = False
 if NATIVE_FPS_BLOCKED: print(f'[RED] {NAME}: native frame target disabled: a required timing correction did not match')

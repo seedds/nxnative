@@ -89,6 +89,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_friends`, then `dm/host/tests/build/t_friends`, resolves both overloads by their actual registered names and checks the failure result and untouched output for both local flags, including guest bool arguments with upper bits set.
 - **Found on:** [Super Nintendo Entertainment System – Nintendo Classics](../../dm/games/01008D300C50C000/README.md) (`01008D300C50C000`, 6.0.0, SDK 20.5.21, `main+0xc608`). [PR #2162](https://github.com/seedds/nxnative/pull/2162) reports the original abort and a Mac boot past it with separate mission-events and profile changes.
 
+### Friend-ID lists and network error Results on SDK 7
+
+- **Symptom:** `friends::GetFriendList` or `err::ShowNetworkServiceError` enters the SDK's service path despite the host's offline replacements.
+- **Cause:** the account-ID list overloads (with and without `Uid`) and the error overload taking `nn::Result` were not registered. The existing hooks cover `Friend` objects and an `ErrorCode` pair, which have different exported names and argument layouts.
+- **Fix:** both account-ID list overloads use the host's existing offline policy: `RES_FAIL`, zero returned entries, and no writes to the ID array. The Result-form error handler logs the Result's module and description with the usual error-applet enter/leave notification. This is an intentional offline stand-in: the host has no Nintendo friends service or network error applet; it does not claim an online operation succeeded.
+- **Found on:** Super Kirby Clash 1.0.1, SDK 7.4.0 ([issue #987](https://github.com/seedds/nxnative/issues/987), PikaMan80's supplied patch). The game's remaining rendering problems are open; no game validation is claimed for these overloads.
+
 ### SDK 6's `account::OpenPreselectedUser` returns a Result
 
 - **Symptom:** the first loading screen never ends; `DM_FS=1` shows `save:/system` "not found" and no `fs mount save`.

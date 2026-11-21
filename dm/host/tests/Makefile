@@ -89,6 +89,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_nro
 	$(B)/t_symbols
 	$(B)/t_server_environment
+	$(B)/t_offline_friend_ids
 run: $(B)/t_nro
 run: $(B)/t_sync_wait
 $(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -501,3 +502,10 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+run: $(B)/t_offline_friend_ids
+$(B)/t_offline_friend_ids: t_offline_friend_ids.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_offline_friend_ids.c
+.PHONY: offline-friend-ids
+offline-friend-ids: $(B)/t_offline_friend_ids
+	$(B)/t_offline_friend_ids

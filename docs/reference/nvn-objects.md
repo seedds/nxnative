@@ -424,7 +424,7 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree` (or `…GetControlMemorySize`) once, after the game gives a command buffer control memory.
 - **Cause:** `AddControlMemory` was a no-op, and the size and free getters reached the unimplemented stub, which returns 0, so a game that checks the free space sees none left.
 - **Fix:** `cmd_t` records the last `AddControlMemory` block; `GetControlMemorySize` returns its size, `GetControlMemoryUsed` the bytes of control entries the host wrote into it ([A recording's end and links are in control memory](#a-recordings-end-and-links-are-in-control-memory); 0 until then, when the host used none), and `GetControlMemoryFree` the rest. `t_nvn` checks the values before any block, after one, after a recording and after a smaller block replaces it.
-- **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table). With the getters implemented it reached the title, menu, a save and character customization on the Mac; with them returning 0 it also progressed, but submitted commands at a different rate.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) 1.05. With the getters implemented it reached the title, menu, a save and character customization on the Mac. With them returning 0 it also progressed and submitted commands at a different rate. [PR #662](https://github.com/seedds/nxnative/pull/662).
 
 ### Queue builder size getters
 

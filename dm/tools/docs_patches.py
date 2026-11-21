@@ -375,12 +375,13 @@ def page():
         sdk_lines.append(f'- **sdk** {short(bid)} ({link(SDK, lineno(sdk_text, repr(bid)))}): ' + (', '.join(shipped) if shipped else 'no profile registers this build: see the comment above it'))
         for off, ob, nb, why in cuts: sdk_lines.append(f'  - cut `+{off:#x}`: {why}')
     rule_lines, comment = [], ''
+    sdk_kinds = {'node': 'node area 1 GB → 62 MB', 'align': 'regions of 4 MB and more aligned to 2 MB, as SDK 20', 'vamm': sdk.old_vamm}
     block = sdk_text[sdk_text.find("MATCH_CUTS = {'sdk'"):]
     for line in block.split('\n')[1:]:
         s = line.strip()
         if s.startswith('#'): comment = (comment + ' ' if comment else '') + s.lstrip('# ')
-        elif s.startswith(('node(', 'align(')):
-            rule_lines.append(f'- {"node area 1 GB → 62 MB" if s.startswith("node(") else "regions of 4 MB and more aligned to 2 MB, as SDK 20"}: {comment}'); comment = ''
+        elif kind := sdk_kinds.get(s.partition('(')[0]):
+            rule_lines.append(f'- {kind}: {comment}'); comment = ''
         elif s.startswith(']}'): break
     n_rules = sum(len(v) for v in getattr(sdk, 'MATCH_CUTS', {}).values())
     assert len(rule_lines) == n_rules, f'sdk_patches.py MATCH_CUTS: {len(rule_lines)} commented rules of {n_rules}'

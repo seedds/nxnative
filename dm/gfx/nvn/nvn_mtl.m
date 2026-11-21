@@ -8440,25 +8440,51 @@ static unsigned vs_streams(const nvn_refl *rf) {   // the streams the vertex sha
     for (int v = 0; rf && v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 32 && a < S.nattr && S.attr[a].fmt && S.attr[a].stream < 16) m |= 1u << S.attr[a].stream; }
     return m;
 }
+// A draw can bind from an offset in a buffer with the full buffer size, as Snowdrop does for the character preview. The declared tail can extend
+// beyond its pool while every vertex this draw fetches is mapped. Only narrow a failed lookup when the draw and all its formats give a known end.
+static uint64_t vbuf_draw_bytes(int st, const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {
+    uint64_t last, bytes = 0;
+    if (!rf || !vstream_last(st, dw, di, &last)) return 0;
+    for (int v = 0; v < rf->nv; v++) {
+        int a = rf->v[v].nvn;
+        if (a >= 32 || a >= S.nattr || !S.attr[a].fmt || S.attr[a].stream != st) continue;
+        int width = vattr_bytes(S.attr[a].fmt);
+        if (!width) return 0;
+        uint64_t end = last * S.stream[st].stride + S.attr[a].offset + (uint64_t)width;
+        if (end > bytes) bytes = end;
+    }
+    return bytes;
+}
 // Returns the first stream the vertex shader reads (rf) whose non-zero address is in no memory pool, or -1. Such a slot would keep the buffer an earlier draw bound
 // there, so the caller skips the draw, as for an index buffer in no pool; a stream with address 0 reads the zero buffer through the vertex descriptor (ZERO_ATTR)
-static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
-    static struct { uint64_t addr, gpu, gen; } cache[16];
+static unsigned g_vbuf_prefix_mask;
+static uint64_t g_vbuf_prefix_bytes[16];   // the same limit applies to any CPU/GPU format conversion for this draw
+static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {
+    static struct { uint64_t addr, size, gpu, gen; } cache[16];
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
     unsigned used = vs_streams(rf); int bad = -1;
+    g_vbuf_prefix_mask = 0;
     for (int s = 0; s < 16; s++) {
         uint64_t addr = S.vbuf[s].address, gpu;
         if (!addr) continue;
         if (((addr & 3) && S.vbuf[s].size) || g_vbuf_need[s]) { uint64_t c = vbuf_unaligned(addr, S.vbuf[s].size, g_vbuf_need[s], 0); if (c) { cache[s].addr = 0; enc_r_vbuf(en, VB_SLOT(s), c); continue; } }   // not cached: the copy is per submission
-        if (g_vbuf_cache && cache[s].addr == addr && cache[s].gen == gen) { gpu = cache[s].gpu; g_vbuf_reuse++; }
+        uint64_t size = S.vbuf[s].size ? S.vbuf[s].size : 1;
+        if (g_vbuf_cache && cache[s].addr == addr && cache[s].size == size && cache[s].gen == gen) { gpu = cache[s].gpu; g_vbuf_reuse++; }
         else {
             void *mb; uint64_t mo; g_vbuf_resolve++;
-            if (!mtl_gpu_addr(addr, S.vbuf[s].size ? S.vbuf[s].size : 1, &mb, &mo, &gpu)) {
+            if (!mtl_gpu_addr(addr, size, &mb, &mo, &gpu)) {
                 cache[s].addr = 0;
+                uint64_t bytes = !(addr & 3) && (used >> s & 1) ? vbuf_draw_bytes(s, rf, dw, di) : 0;
+                if (bytes && bytes < size && mtl_gpu_addr(addr, bytes, &mb, &mo, &gpu)) {
+                    g_vbuf_prefix_mask |= 1u << s;
+                    g_vbuf_prefix_bytes[s] = bytes;
+                    enc_r_vbuf(en, VB_SLOT(s), gpu);   // this lookup only proved the current draw's range
+                    continue;
+                }
                 if (bad < 0 && used >> s & 1) bad = s;   // a stale stream no input reads is no matter
                 continue;
             }
-            cache[s].addr = addr; cache[s].gpu = gpu; cache[s].gen = gen;
+            cache[s].addr = addr; cache[s].size = size; cache[s].gpu = gpu; cache[s].gen = gen;
         }
         enc_r_vbuf(en, VB_SLOT(s), gpu);
     }
@@ -8475,13 +8501,18 @@ enum { PULL_SLOT = 16 };   // = dmsh_pull.py SLOT
 typedef struct { uint64_t base; uint32_t stride, divisor; } pull_stream;
 typedef struct { pull_stream s[16]; uint32_t attr[32]; } pull_layout;
 _Static_assert(sizeof(pull_layout) == 384, "dmsh_pull.metal dm_vlayout");
-static void pull_layout_fill(pull_layout *Lp) {
+static void pull_layout_fill(pull_layout *Lp, const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {
     pull_layout L; memset(&L, 0, sizeof L); uint32_t lo[16] = {0};
     for (int st = 0; st < 16; st++) {
         uint64_t addr = S.vbuf[st].address, gpu; void *mb; uint64_t mo;
         if (!addr) continue;
-        if (!g_vbuf_need[st] || !(gpu = vbuf_unaligned(addr, S.vbuf[st].size, g_vbuf_need[st], 0)))   // a stream the draw reads past: its copy padded with zeros (vbuf_need)
-            if (!mtl_gpu_addr(addr, S.vbuf[st].size ? S.vbuf[st].size : 1, &mb, &mo, &gpu)) continue;
+        if (!g_vbuf_need[st] || !(gpu = vbuf_unaligned(addr, S.vbuf[st].size, g_vbuf_need[st], 0))) {   // a stream the draw reads past: its copy padded with zeros (vbuf_need)
+            uint64_t size = S.vbuf[st].size ? S.vbuf[st].size : 1;
+            if (!mtl_gpu_addr(addr, size, &mb, &mo, &gpu)) {
+                uint64_t bytes = !(addr & 3) ? vbuf_draw_bytes(st, rf, dw, di) : 0;
+                if (!bytes || bytes >= size || !mtl_gpu_addr(addr, (bytes + 3) & ~3ull, &mb, &mo, &gpu)) continue;   // the pulling shader loads whole words
+            }
+        }
         L.s[st].base = gpu & ~3ull; lo[st] = (uint32_t)(gpu & 3); L.s[st].stride = S.stream[st].stride; L.s[st].divisor = S.stream[st].divisor;
     }
     for (int a = 0; a < 32 && a < S.nattr; a++) {
@@ -8495,8 +8526,8 @@ static void pull_layout_fill(pull_layout *Lp) {
     }
     *Lp = L;
 }
-static void pull_bind(id<MTL4RenderCommandEncoder> en) {
-    pull_layout L; pull_layout_fill(&L);
+static void pull_bind(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {
+    pull_layout L; pull_layout_fill(&L, rf, dw, di);
     id<MTLBuffer> ab; size_t off = arena_alloc(sizeof L, &ab);
     memcpy((uint8_t *)ab.contents + off, &L, sizeof L);
     enc_r_vbuf(en, PULL_SLOT, ab.gpuAddress + off);
@@ -9136,6 +9167,7 @@ static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, co
         if (!vconv_wanted(rf, v, NULL, on) || rf->v[v].nvn >= 32 || rf->v[v].nvn >= S.nattr) continue;   // S.attr holds 32
         int a = rf->v[v].nvn, st = S.attr[a].stream, f = S.attr[a].fmt; uint32_t off = S.attr[a].offset, stride = st < 16 ? S.stream[st].stride : 0;
         uint64_t addr = st < 16 ? S.vbuf[st].address : 0, size = st < 16 ? S.vbuf[st].size : 0, gpu = 0;
+        if (st < 16 && (g_vbuf_prefix_mask >> st & 1)) size = g_vbuf_prefix_bytes[st];
         uint64_t es = (uint64_t)vconv_size(f), v0 = 0, nv = size >= off + es ? stride == 0 ? 1 : (size - off - es) / stride + 1 : 0, whole = nv;
         if (vc && nv && stride && !S.stream[st].divisor) {   // per-vertex stream: only the vertices the draw reads
             if (rk < 0) rk = vc_draw_range(dw, di, &rlo, &rhi);
@@ -15497,7 +15529,7 @@ static int fsm_encode(id<MTL4RenderCommandEncoder> en, NvProg *pr, const p_draw 
     if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
     if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
     if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
-    if (bind_vbufs(en, &pr->sh[0]->rf) >= 0) return 0;
+    if (bind_vbufs(en, &pr->sh[0]->rf, dw, di) >= 0) return 0;
     vconv_bind(en, pr->sh[0], S.rast_discard, dw, di);
     encode_args((id<MTLCommandEncoder>)(id)en, pr->sh[0], pr->sh[0]->stage == 4 ? 4 : 0, 1);
     encode_args((id<MTLCommandEncoder>)(id)en, pr->sh[1], 1, 0);
@@ -16274,9 +16306,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
-    if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
+    const nvn_refl *vertex = pr->sh[0] ? &pr->sh[0]->rf : NULL;
+    if (cur_pull) { pull_bind(en, vertex, dw, di); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
-        int bad = bind_vbufs(en, pr->sh[0] ? &pr->sh[0]->rf : NULL);
+        int bad = bind_vbufs(en, vertex, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di);
         if (bad >= 0) { RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address); return; }
         if (pr->sh[0]) vconv_bind(en, pr->sh[0], S.rast_discard, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di);   // integer inputs fed float-type formats or 8 / 16-bit integers of the other sign (see vconv_ncomp, vconv_int); a lean geometry draw: the vertices its indices name
     }

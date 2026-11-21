@@ -389,6 +389,9 @@ DM_RT_COMP	switch	`=<ms>` fixes the computation the acquiring thread's time-cons
 DM_RT_FRAME	diagnostic	`0` keeps the time-constraint policy on the thread that acquires the window only; the queue replay and encode threads stay on their QoS (on by default; for phone A/B)
 DM_RUMBLE	player	`0` turns game rumble off (on by default); launcher setting
 DM_RUMBLE_GAIN	player	`=0..3` scales the rumble strength (default 1, `0` is silent); launcher setting
+DM_RUMBLE_HID	switch	`0` turns off the rumble an 8BitDo Ultimate 2 Wireless (2DC8:6012) gets through its HID output report 0x05, as GameController gives it no haptics (`haptics_apple.m`; on by default); Mac only
+DM_RUMBLE_HID_FLOOR	switch	`=0..255` (default 110): the lowest motor value the 8BitDo output report route sends for a level that is not silent, as rotating motors do not start at the faint levels games send
+DM_RUMBLE_HID_HOLD_MS	switch	`=0..500` (default 120): how long the 8BitDo output report route keeps a motor turning after its level ends
 DM_RUMBLE_LOG	diagnostic	`=1` logs the game's vibration handle requests and, once a second, the values it sent, how many had no routed output and the peak amplitude
 DM_RUMBLE_MIN	player	`=0..0.9`: controller rumble levels below it stay silent and the rest is stretched over the full range (default 0; the phone is unaffected); for games whose quiet HD rumble texture keeps rotating motors running (Mario Kart 8 Deluxe: 0.45); launcher setting
 DM_SAVE	path	This run's save folder (must be set); the device save is `<DM_SAVE>_device`, and `pso_user.tsv` goes in its parent folder; the Mac launcher, the iOS app and the NSP script set it

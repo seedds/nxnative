@@ -168,7 +168,7 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 // A HID device in the fake registry: its entry (one per connection), and the handles made on it
 @interface TestHid : NSObject
 @property io_service_t service;
-@property int product, opens, closes;
+@property int vendor, product, page, usage, opens, closes, reports;   // page / usage: the interface's primary usage (1 / 5 a gamepad)
 @property BOOL bluetooth, failOpen;
 @property NSData *report;
 @end
@@ -186,18 +186,26 @@ static NSUInteger listedNext;
 static int objects;   // iterators and services not released yet
 static TestHid *hid_add(int product) {
     static io_service_t next = 1000;
-    TestHid *h = [TestHid new]; h.service = next++; h.product = product; h.bluetooth = YES;
+    TestHid *h = [TestHid new]; h.service = next++; h.vendor = 0x054C; h.product = product; h.page = 1; h.usage = 5; h.bluetooth = YES;
     [registry addObject:h]; return h;
 }
 static TestHid *hid_of(int player) {
     __block IOHIDDeviceRef d; dispatch_sync(queue, ^{ d = ds4[player].dev; });
     return d ? ((__bridge TestHandle *)d).hid : nil;
 }
+static TestHid *pad8_hid(int player) {
+    __block IOHIDDeviceRef d; dispatch_sync(queue, ^{ d = pad8[player].dev; });
+    return d ? ((__bridge TestHandle *)d).hid : nil;
+}
 static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match, io_iterator_t *it) {
     (void)port;
-    assert(!listed && [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue] == 0x054C);
+    int vendor = [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue];
+    NSNumber *product = (__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDProductIDKey));
+    assert(!listed && (vendor == 0x054C ? !product : vendor == 0x2DC8 && product.intValue == 0x6012));   // Sony's by vendor, the 8BitDo by vendor and product
+    NSMutableArray<TestHid *> *found = [NSMutableArray new];
+    for (TestHid *h in registry) if (h.vendor == vendor && (!product || h.product == product.intValue)) [found addObject:h];
     CFRelease(match);
-    listed = [registry copy]; listedNext = 0; objects++; *it = SONY_ITERATOR;
+    listed = found; listedNext = 0; objects++; *it = SONY_ITERATOR;
     return KERN_SUCCESS;
 }
 static io_object_t test_iterator_next(io_iterator_t it) {
@@ -222,6 +230,8 @@ static IOHIDDeviceRef test_device_create(CFAllocatorRef a, io_service_t s) {
 static CFTypeRef test_device_property(IOHIDDeviceRef d, CFStringRef key) {
     TestHid *h = ((__bridge TestHandle *)d).hid;
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)@(h.product);
+    if (CFEqual(key, CFSTR(kIOHIDPrimaryUsagePageKey))) return (__bridge CFTypeRef)@(h.page);
+    if (CFEqual(key, CFSTR(kIOHIDPrimaryUsageKey))) return (__bridge CFTypeRef)@(h.usage);
     assert(CFEqual(key, CFSTR(kIOHIDTransportKey)));
     return (__bridge CFTypeRef)(h.bluetooth ? @"Bluetooth" : @"USB");
 }
@@ -235,7 +245,7 @@ static IOReturn test_device_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex 
     TestHid *h = ((__bridge TestHandle *)d).hid;
     assert(t == kIOHIDReportTypeOutput && id == r[0] && h.opens > h.closes);
     if (![registry containsObject:h]) return kIOReturnNoDevice;
-    h.report = [NSData dataWithBytes:r length:n];
+    h.report = [NSData dataWithBytes:r length:n]; h.reports++;
     return kIOReturnSuccess;
 }
 static void drain(void) { dispatch_sync(queue, ^{}); dispatch_sync(queue, ^{}); }
@@ -588,6 +598,55 @@ int main(void) { @autoreleasepool {
     dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
+    // An 8BitDo Ultimate 2 Wireless has no haptics in GameController: its motors take output report 0x05 on its HID device (2DC8:6012). Without
+    // that device, with haptics of its own, or under another name a controller keeps what it had
+    registry = [NSMutableArray new];
+    TestController *eb = [TestController new]; eb.haptics = [TestHaptics new]; eb.haptics.supportedLocalities = [NSSet set]; eb.vendorName = @"8BitDo Ultimate 2 Wireless";
+    dm_haptics_apple_controller(0, (id)eb); drain();
+    assert(!pad8_hid(0) && channels[0].count == 0);   // no such device: no rumble, as before
+    dm_haptics_apple_controller(0, nil); drain();
+    TestHid *keys = hid_add(0x6012); keys.vendor = 0x2DC8; keys.usage = 6;   // another interface of the same device: not the gamepad
+    TestHid *pad = hid_add(0x6012); pad.vendor = 0x2DC8;
+    TestController *named = [TestController new]; named.haptics = [TestHaptics new]; named.vendorName = @"8BitDo Pro 2";   // has haptics of its own
+    dm_haptics_apple_controller(0, (id)named); drain();
+    assert(!pad8_hid(0) && channels[0].count == 1 && pad.opens == 0);
+    TestController *other = [TestController new]; other.haptics = [TestHaptics new]; other.haptics.supportedLocalities = [NSSet set]; other.vendorName = @"Generic Gamepad";
+    dm_haptics_apple_controller(0, (id)other); drain();
+    assert(!pad8_hid(0) && channels[0].count == 0 && pad.opens == 0);
+    dm_haptics_apple_controller(0, (id)eb); drain();
+    assert(pad8_hid(0) == pad && pad.opens == 1 && keys.opens == 0 && channels[0].count == 2 && [channels[0][0] isKindOfClass:DmPad8Channel.class] && !pad.report);
+    // The game's left value on the low motor, raised from the floor: 110 + 0.2 * 145
+    send_pair(0.2, 0); drain();
+    b = pad.report.bytes;
+    assert(pad.report.length == 5 && b[0] == 0x05 && b[1] == 139 && b[2] == 0 && b[3] == 0 && b[4] == 0 && pad.reports == 1);
+    // Its right value on the high motor, and on the low one too when it is the stronger; a changed value waits 20 ms from the last report
+    send_pair(0, 1); drain();
+    assert(pad.reports == 1);
+    advance(0.03);
+    b = pad.report.bytes;
+    assert(pad.reports == 2 && b[1] == 255 && b[2] == 255);
+    // A held level is sent again every 50 ms: the controller stops a lone report after a moment
+    advance(0.2);
+    assert(pad.reports >= 5 && pad.reports <= 6 && ((const uint8_t *)pad.report.bytes)[2] == 255);
+    // The end of a level is held 120 ms, then zeros go out three times and the ticks stop
+    int before = pad.reports;
+    send_pair(0, 0); advance(0.05);
+    assert(((const uint8_t *)pad.report.bytes)[1] == 255);
+    advance(0.5);
+    b = pad.report.bytes;
+    assert(b[1] == 0 && b[2] == 0);
+    int after = pad.reports; __block BOOL ticking; __block int quiet;
+    dispatch_sync(queue, ^{ ticking = pad8[0].ticking; quiet = pad8[0].quiet; });
+    assert(!ticking && quiet == 3 && after - before >= 3 && after - before <= 5);   // at most two more of the held level, then the three zeros
+    advance(1);
+    assert(pad.reports == after);
+    // A controller that leaves while its motors turn is stopped at once, without the hold, and its ticks do nothing afterwards
+    send_pair(0.6, 0); drain();
+    assert(((const uint8_t *)pad.report.bytes)[1] > 110);
+    dm_haptics_apple_controller(0, nil); drain();
+    assert(pad.closes == 1 && !pad8_hid(0) && ((const uint8_t *)pad.report.bytes)[1] == 0 && ((const uint8_t *)pad.report.bytes)[2] == 0);
+    after = pad.reports; advance(0.5);
+    assert(pad.reports == after && objects == 0);
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, Joy-Con recovery and lifetime, the DualSense's handles, level cutoff and the DualShock 4 route passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, Joy-Con recovery and lifetime, the DualSense's handles, level cutoff, the DualShock 4 route and the 8BitDo report route passed");
 } }

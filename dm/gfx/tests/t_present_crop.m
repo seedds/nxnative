@@ -124,6 +124,7 @@ static void check_external_screenshots(void) {
     id<MTLCommandQueue> producer = [g_dev newCommandQueue];
     id<MTLCommandBuffer> cb = [producer commandBuffer];
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (!ready || !producer || !cb || !pass) return;
     pass.colorAttachments[0].texture = tex;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;

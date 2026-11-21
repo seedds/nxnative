@@ -335,6 +335,126 @@ static BOOL ds4_route(int p, GCController *controller) {
             ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
     return YES;
 }
+
+// Local addition: an 8BitDo Ultimate 2 Wireless in its own mode (2DC8:6012, firmware 1.03 and later). GameController lists it as an extended gamepad
+// with no haptics localities, so it had no rumble at all ("localities none, 0 channels"). Its motors take output report 0x05, {0x05, low motor, high
+// motor, 0, 0}, as SDL's SDL_hidapi_8bitdo.c sends it. Carried over from a route tested on this controller over Bluetooth LE on another host
+// (2026-10-21): both motors turn, the low one strong and the high one weak; a lone report gives a short kick, so a held level is sent again every
+// PAD8_KEEP_MS; a stop that gets lost leaves the motors turning, so zeros go out PAD8_QUIET times. Rotating motors do not start at the faint levels
+// games send, so a level that is not silent is raised to at least DM_RUMBLE_HID_FLOOR (0..255, default 110) and held for DM_RUMBLE_HID_HOLD_MS
+// (0..500, default 120) after it ends. The game's left motor drives the low motor and its right one the high motor, each by the Core Haptics route's
+// intensity (dm_haptics_level, so DM_RUMBLE_GAIN and DM_RUMBLE_MIN apply as elsewhere); the low motor also takes the stronger side, as the high one
+// is weak. DM_RUMBLE_HID=0 keeps the route off. Only a controller with no haptics of its own gets it: every other pad keeps its route.
+// Not run on this host yet: the report over USB or a 2.4 GHz receiver (another product ID finds no device and the pad stays without rumble).
+enum { PAD8_MIN_MS = 20, PAD8_KEEP_MS = 50, PAD8_TICK_MS = 10, PAD8_QUIET = 3 };
+typedef struct { IOHIDDeviceRef dev; uint64_t id, gen; float level[2]; uint8_t held[2], sent[2]; NSTimeInterval heldUntil[2], sentAt; int quiet; BOOL ticking; } pad8_out;   // id: its registry entry; gen: stale ticks
+static pad8_out pad8[DM_PLAYERS];
+static int pad8_floor = 110, pad8_hold_ms = 120;
+static void pad8_write(int p, uint8_t lo, uint8_t hi) {
+    pad8_out *o = &pad8[p]; const uint8_t r[5] = {0x05, lo, hi, 0, 0};
+    IOReturn e = IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, r[0], r, sizeof r);
+    if (e != kIOReturnSuccess && (++errors <= 8 || errors % 64 == 0)) fprintf(stderr, "[RED] haptics: 8BitDo output report 0x05: IOReturn 0x%x\n", e);
+    o->sent[0] = lo; o->sent[1] = hi; o->sentAt = now();   // also after a failure: the next one waits its interval like any other
+}
+static void pad8_tick(int p);
+// On the queue: one tick PAD8_TICK_MS from now, while a motor turns or zeros are still to go out
+static void pad8_schedule(int p) {
+    pad8_out *o = &pad8[p];
+    if (!o->dev || o->ticking) return;
+    o->ticking = YES; uint64_t gen = o->gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, PAD8_TICK_MS * (int64_t)NSEC_PER_MSEC), queue, ^{
+        pad8_out *q = &pad8[p];
+        if (q->gen != gen) return;   // released since: its device is closed
+        q->ticking = NO; pad8_tick(p);
+    });
+}
+static void pad8_tick(int p) {
+    pad8_out *o = &pad8[p]; uint8_t m[2]; NSTimeInterval t = now();
+    if (!o->dev) return;
+    for (int side = 0; side < 2; side++) {
+        if (o->level[side] >= 0.02f) {
+            int v = pad8_floor + (int)lrintf(o->level[side] * (255 - pad8_floor));
+            o->held[side] = (uint8_t)(v > 255 ? 255 : v); o->heldUntil[side] = t + pad8_hold_ms / 1000.0;
+        }
+        m[side] = t < o->heldUntil[side] ? o->held[side] : 0;
+    }
+    if (m[1] > m[0]) m[0] = m[1];
+    if (!m[0] && !m[1]) {
+        if (o->quiet >= PAD8_QUIET) return;   // silent: no more ticks until the next level
+        if (t - o->sentAt >= PAD8_MIN_MS / 1000.0) { pad8_write(p, 0, 0); o->quiet++; }
+    } else {
+        o->quiet = 0;
+        BOOL same = m[0] == o->sent[0] && m[1] == o->sent[1];
+        if (t - o->sentAt >= (same ? PAD8_KEEP_MS : PAD8_MIN_MS) / 1000.0) pad8_write(p, m[0], m[1]);
+    }
+    pad8_schedule(p);
+}
+static void pad8_apply(dm_haptic_state s) {
+    pad8_out *o = &pad8[s.player];
+    if (!o->dev) return;
+    for (int m = 0; m < 2; m++) o->level[m] = controller_level(dm_haptics_level(&s.motor[m], 1, gain).intensity);
+    pad8_tick(s.player);
+}
+static void pad8_release(int p) {
+    pad8_out *o = &pad8[p]; uint64_t gen = o->gen + 1;
+    if (o->dev) { if (o->sent[0] || o->sent[1]) pad8_write(p, 0, 0); IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev); }
+    *o = (pad8_out){0}; o->gen = gen;
+}
+@interface DmPad8Channel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (pad8_apply)
+@end
+@implementation DmPad8Channel
+- (void)apply:(dm_haptic_level)level { (void)level; }
+// A stop (the app in the background, the route going away, the exit) silences both motors at once, without the hold: nothing may tick afterwards
+- (void)stop {
+    pad8_out *o = &pad8[self.player];
+    if (!o->dev) return;
+    o->level[0] = o->level[1] = 0; o->heldUntil[0] = o->heldUntil[1] = 0;
+    if (o->sent[0] || o->sent[1]) { pad8_write(self.player, 0, 0); o->quiet = 1; pad8_schedule(self.player); }
+}
+@end
+// The first such device no other player drives, opened for player p; asked of the registry at each connect, as ds4_take. Of a device with several HID
+// interfaces the gamepad or joystick one is taken
+static BOOL pad8_take(int p) {
+    CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
+    if (!match) return NO;
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x2DC8);
+    CFDictionarySetValue(match, CFSTR(kIOHIDProductIDKey), (__bridge CFNumberRef)@0x6012);
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;   // takes match
+    BOOL found = NO;
+    for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+        uint64_t id = 0; BOOL taken = NO;
+        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS) continue;
+        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && pad8[q].dev && pad8[q].id == id;
+        IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
+        if (!dev) continue;
+        int page = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDPrimaryUsagePageKey)) intValue], usage = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDPrimaryUsageKey)) intValue];
+        if (page == 1 && (usage == 4 || usage == 5) && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {
+            uint64_t gen = pad8[p].gen;
+            pad8[p] = (pad8_out){.dev = dev, .id = id, .gen = gen, .quiet = PAD8_QUIET}; found = YES;
+        } else CFRelease(dev);
+    }
+    IOObjectRelease(it);
+    return found;
+}
+// Only a controller GameController gives no haptics, whose name says 8BitDo, and only while such a HID device is free
+static BOOL pad8_route(int p, GCController *controller) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("DM_RUMBLE_HID"), *fl = getenv("DM_RUMBLE_HID_FLOOR"), *ho = getenv("DM_RUMBLE_HID_HOLD_MS");
+        on = !e || atoi(e) != 0;
+        if (fl) pad8_floor = atoi(fl) < 0 ? 0 : atoi(fl) > 255 ? 255 : atoi(fl);
+        if (ho) pad8_hold_ms = atoi(ho) < 0 ? 0 : atoi(ho) > 500 ? 500 : atoi(ho);
+    }
+    if (!on || !controller.vendorName || controller.haptics.supportedLocalities.count || [controller.vendorName rangeOfString:@"8BitDo" options:NSCaseInsensitiveSearch].location == NSNotFound) return NO;
+    if (!pad8_take(p)) {
+        fprintf(stderr, "haptics: player %d controller %s has no haptics and no HID device 2dc8:6012 was found for it: no rumble (the 8BitDo output report route knows that product only)\n", p + 1, controller.vendorName.UTF8String);
+        return NO;
+    }
+    for (int m = 0; m < 2; m++) { DmPad8Channel *c = [DmPad8Channel new]; c.player = p; c.motor = m; c.target = @"8BitDo report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the 8BitDo output report 0x05 (%s, floor %d of 255, hold %d ms; DM_RUMBLE_HID=0 turns it off)\n", p + 1, controller.vendorName.UTF8String,
+            [(__bridge NSString *)IOHIDDeviceGetProperty(pad8[p].dev, CFSTR(kIOHIDTransportKey)) UTF8String] ?: "unknown transport", pad8_floor, pad8_hold_ms);
+    return YES;
+}
 #endif
 
 static void (*sinks[DM_PLAYERS])(const dm_haptic_state *);   // a player's own output instead of engines (dm_haptics_apple_set_sink)
@@ -350,6 +470,7 @@ static void apply(dm_haptic_state s) {
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
+        if ([out.firstObject isKindOfClass:DmPad8Channel.class]) { pad8_apply(s); return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route
@@ -375,8 +496,9 @@ static void configure(int p, GCController *controller) {
     channels[p] = [NSMutableArray new];
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
-    ds4_release(p);
+    ds4_release(p); pad8_release(p);
     if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
+    if (controller && pad8_route(p, controller)) { dm_haptics_route(p, 1); return; }   // an 8BitDo with no haptics of its own
 #endif
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;

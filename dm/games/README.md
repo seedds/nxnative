@@ -276,6 +276,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL | — |
 | [XCOM 2 Collection](0100D0B00FB74000/README.md) | `0100D0B00FB74000` | 1.0.3 (`v131072`) | 9.3.1 | Unreal Engine 3, Wwise | NVN | Mac |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN | — |
+| [Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition](0400FF500E34A001/README.md) | `0400FF500E34A001` | 2.0.0 (Switch 2) | 21.4.4 (Ounce) | Monolith's engine | NVN2 | — |
 | [Xenoblade Chronicles 2](0100E95004038000/README.md) | `0100E95004038000` | 2.1.0 | 3.5.0 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 2 – Nintendo Switch 2 Edition](0400E95004038001/README.md) | `0400E95004038001` | 3.0.1 (Switch 2) | 21.4.4 (Ounce) | Monolith's engine | NVN2 | — |
 | [Xenoblade Chronicles 3](010074F013262000/README.md) | `010074F013262000` | 2.2.1 | 12.3.9 | Monolith's engine | NVN | — |

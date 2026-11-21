@@ -568,3 +568,11 @@ To enroll a cut for any game's own module:
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.
+
+### NRO data sharing an executable Mac page
+
+- **Symptom:** a small run-time NRO crashes in `relocate`, writing a `R_AARCH64_RELATIVE` slot inside its first 16 KB; making relocation temporarily writable only postpones the fault until its initializer writes a global.
+- **Cause:** Horizon permits 4 KB segments. An NRO's text and writable data can occupy the same 16 KB Apple page, which the loader seals RX after mapping. Apple does not permit ordinary anonymous pages to be writable and executable together.
+- **Fix:** `nro_layout.py`, before the ordinary rewrite, moves data and bss to the next 16 KB boundary when they overlap the text's executable pages. Code and ro retain their offsets. MOD0, NRO header offsets, dynamic pointers, defined symbols, RELA/RELR and PC-relative address instructions follow the moved data. The original NRO hash and registration size remain the collection manifest's identity. Already separated NROs and all NSOs are unchanged. Exception metadata or writable unwind tables in an affected module are explicitly refused until their references can be rebased too; this case remains open.
+- **Found on:** FINAL FANTASY VIII Remastered, `01008B900DC0A000`, base 1.0.0, its `Math.nro` and `Platform.nro`. This is a provisional bring-up, without a supported game profile or gameplay claim.
+- **Check:** `test_nro_layout.py` executes a synthetic NRO under native Mac RX/RW page protections and updates a relocated global; it also checks address instructions, symbols, bss, headers and unchanged layouts. `test_nro_pack.py` checks cache invalidation when the layout helper changes. On 2026-11-22, the existing FF8 capture host loaded both rewritten modules, ran for 45 seconds and captured 34 run-time shaders without a crash. The user confirmed the game rebuild works with this fix bundled in NX2Apple; gameplay remains unverified. The standard `regress.py check --games` smoke comparison is not available for this provisional game (no registered profile or smoke route); the direct capture boot and focused NRO tests cover this narrow change instead.

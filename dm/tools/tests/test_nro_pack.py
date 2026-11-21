@@ -19,7 +19,7 @@ class NroPack(unittest.TestCase):
         self.repo = self.tmp / 'repo'; self.exe = self.tmp / 'game/ExeFS'; self.rom = self.exe.parent / 'RomFS'
         self.exe.mkdir(parents=True); self.rom.mkdir(); (self.exe / 'main').write_bytes(b'NSO0' + bytes(0x50))
         (self.rom / 'game.nrr').write_bytes(b'registered')
-        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
+        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nro_layout.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
         self.out = self.tmp / 'patched_test'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
         self.g = types.SimpleNamespace(words=lambda k: ['main'], modules_in=lambda folder: ['main'])
@@ -55,6 +55,11 @@ class NroPack(unittest.TestCase):
         self.assertEqual((self.collections, self.rewrites), (2, 1))   # identical collected bytes can reuse the rewrite
         (self.repo / 'dm/tools/nso_syms.py').write_text('v2'); self.build()
         self.assertEqual((self.collections, self.rewrites), (3, 2))   # the rewriter also reads symbols directly
+
+    def test_layout_changes_invalidate_rewrite(self):
+        self.build()
+        (self.repo / 'dm/tools/nro_layout.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (1, 2))
 
     def test_removed_registration_drops_stale_manifest(self):
         self.build(); (self.rom / 'game.nrr').unlink(); self.build()

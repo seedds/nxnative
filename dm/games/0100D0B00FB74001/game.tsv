@@ -1,0 +1,36 @@
+# XCOM 2 Collection, program 1, package v131072; control display version 1.0.3.
+# Bring-up profile: binary and file metadata verified; gameplay untested.
+
+# ---- Identity ----
+title_id	0100D0B00FB74001
+program_id	0100D0B00FB74001
+
+# ---- App ----
+program_of	0100D0B00FB74000
+name	XCOM 2 Collection: program 1
+ipa	Xcom2CollectionProgram1.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.3	main=d76a84b068f61c7000c38799759c5f36	sdk=ad3fdfbd62a5f4b082d385ffe420d440
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	XComGame/CookedNX64/CharTextures.tfc
+zip_store	.bik:.bin:.bk2:.bnk:.tfc:.upk:.xml:.xxx:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_alias	0x50000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/XComGame/=xcomgame
+shader_note	XCOM 2 Collection: program 1 shaders

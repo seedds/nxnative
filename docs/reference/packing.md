@@ -782,3 +782,10 @@
 - **Fix:** `uepak.py` tries 20-byte hashes first and switches to 8 only if the tables fail to parse with matching counts and consume the whole chunk. The version 2 archive stores each 8-byte hash with 12 zero bytes appended. Version 12 follows version 11's footer rules. For untagged Switch records, `raw_record` looks for a unique control section with matching code lengths and a `0x880`-byte control length. `shader_split.ue_shaders` takes the stage from the archive's frequency for those records.
 - **Check:** `test_uepak_iostore.py` covers both hash widths, a wrong-width parse that reaches the chunk's end, valid and legacy-position version 12 footers, and untagged records with code or control length mismatches or a copy of the control magic inside shader code. The [PR author](https://github.com/seedds/nxnative/pull/3022) built 6,878 Mac shaders for update 131072.
 - **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`).
+
+### Programs added by updates
+
+- **Symptom:** extracting a secondary program fails with `no Program NCA ... in the base NSP`, although the update contains that program. Packing only program 0 produces a launcher without the playable programs.
+- **Cause:** an update may add a program absent from the base package. Its data may be complete or may use a relocation table over another base program's data. Matching only the Program NCA title ID misses this case.
+- **Fix:** `nx_extract` accepts a non-sparse added program with complete sections directly. For a patched data section, it tries the base package's Program NCAs and reads the entire combined data through integrity verification before selecting one. A program without a compatible base still fails. Control and HtmlDocument selection retain the requested program ID. The collection profile lists its child profiles through `programs`.
+- **Found on:** [XCOM 2 Collection](../../dm/games/0100D0B00FB74000/README.md), package `v131072`, program 2. Its full patched data and extracted manifest passed integrity checks. Gameplay and handoff remain untested.

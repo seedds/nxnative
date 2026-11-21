@@ -3068,11 +3068,37 @@ def ue3_body(d, label):
         i = o
     return b''.join(out)
 
+def ue3_shared_shaders(d, label):
+    """UniShaderBuffer: byte-counted controls (with reflection between them), then a byte-counted code array in the same order."""
+    first = d.find(CTL_MAGIC)
+    if first < 4: red(f'{label}: shared shader buffer has no control sections')
+    control_size = field(d, '<I', first - 4, label)[0]
+    controls = span(d, first, control_size, label + ' shared controls')
+    code_size = field(d, '<I', first + control_size, label)[0]
+    code_start = first + control_size + 4
+    span(d, code_start, code_size, label + ' shared code')
+    out, off = [], 0
+    for m in re.finditer(re.escape(CTL_MAGIC), controls):
+        c = m.start()
+        nctl = field(controls, '<I', c + 0x20, label)[0]
+        if not 0x760 <= nctl <= 0x1000: red(f'{label}: invalid shared control length {nctl:#x}')
+        ctl = span(controls, c, nctl, label)
+        ncode = field(ctl, '<I', 0x704, label)[0]
+        if not ncode or ncode > code_size - off: red(f'{label}: shared shader code exceeds its array')
+        code = d[code_start + off:code_start + off + ncode]
+        st = glslc_stage(ctl, code)
+        why = check(label, st, ctl, code) if st else 'unknown shader stage'
+        if why: red(f'{label}: shared shader at {first + c:#x}: {why}')
+        out.append((f'{label}#UE3@{first + c:x}', st, ctl, code)); off += ncode
+    if not out or off != code_size: red(f'{label}: shared shaders do not consume their code array')
+    return out
+
 def ue3_shaders(d, label):
     """Shader records of an Unreal Engine 3 game's shader caches (Batman: Arkham Knight: GlobalShaderCache-Switch.bin, 'BMSG', 1,847 shaders; CombinedShaderCache-Switch.xxx, a package holding
     22,874 once its chunks are decoded, ue3_body; none of 68 other packages sampled holds any): u32 record length, u32 code area length, u32 control length (0x880), on the global cache one more u32,
     then the code area, right followed by its control section. Found by the control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front.
     The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
+    if d[:4] == UE3_TAG and b'UniShaderBuffer\0' in d[:0x10000]: return ue3_shared_shaders(d, label)
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start()

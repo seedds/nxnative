@@ -85,10 +85,36 @@ static class P {
             return 0;
         }
         Fit(new[] { MissingKey(ks, basePkg, a[1]), updPkg == null ? null : MissingKey(ks, updPkg, a[2]) });
-        Nca baseProg = Pick(basePkg, NcaContentType.Program, progId) ?? throw new Exception(progId == null ? "no Program NCA in the base NSP" : $"no Program NCA {progId:x16} in the base NSP");
+        Nca baseProg = Pick(basePkg, NcaContentType.Program, progId);
+        if (baseProg == null && progId != null && updPkg != null) {
+            Nca added = Pick(updPkg, NcaContentType.Program, progId);
+            if (added != null && !Sparse(added)) {
+                bool delta = System.Linq.Enumerable.Any(System.Linq.Enumerable.Range(0, 4), i => added.SectionExists(i) && added.Header.GetFsHeader(i).IsPatchSection());
+                if (!delta) {
+                    baseProg = added; basePkg = updPkg; updPkg = null;
+                    Console.WriteLine($"program {progId:x16} is self-contained in the update");
+                } else {
+                    // A new program can reuse another base program's data (XCOM 2 Collection). Do not guess from its index:
+                    // verify the complete patched data against the update's integrity tree before choosing that base.
+                    foreach (Nca candidate in basePkg) {
+                        if (candidate.Header.ContentType != NcaContentType.Program || !candidate.SectionExists(1)) continue;
+                        try {
+                            using IStorage data = candidate.OpenStorageWithPatch(added, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+                            data.GetSize(out long size).ThrowIfFailure();
+                            byte[] buf = new byte[1 << 20];
+                            for (long off = 0; off < size; off += buf.Length) data.Read(off, buf.AsSpan(0, (int)Math.Min(buf.Length, size - off))).ThrowIfFailure();
+                            baseProg = candidate;
+                            Console.WriteLine($"program {progId:x16}: verified patched data over base program {candidate.Header.TitleId:x16}");
+                            break;
+                        } catch (HorizonResultException) { }
+                    }
+                }
+            }
+        }
+        if (baseProg == null) throw new Exception(progId == null ? "no Program NCA in the base NSP" : $"no compatible base for Program NCA {progId:x16}");
         if (html) {   // an update's NCA is read alone, or over a base game's NCA when its header marks the data section a patch (a relocation table); which base NCA it patches the
                       // header does not say: the one it reads with passes the hash check
-            int k = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
+            int k = 0; ulong tid = progId ?? baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
             bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
                 int damaged = g_damaged.Count;
                 try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
@@ -114,9 +140,9 @@ static class P {
             Console.WriteLine($"{k} HtmlDocument NCAs");
             return Damaged();
         }
-        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
-        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
-        Console.WriteLine($"title {baseProg.Header.TitleId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
+        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, progId ?? baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
+        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, progId ?? baseProg.Header.TitleId);
+        Console.WriteLine($"title {(progId ?? baseProg.Header.TitleId):x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
         if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
             byte[] nacp = Nacp(ctrl);

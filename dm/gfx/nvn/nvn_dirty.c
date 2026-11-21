@@ -251,7 +251,7 @@ static void pend_note(range_t *r, uintptr_t p) {
     if (r->streak) { unsigned n = prev && now - prev <= HOT_GAP ? atomic_load_explicit(&r->streak[p], memory_order_relaxed) + 1u : 1u; atomic_store_explicit(&r->streak[p], (uint8_t)(n < 255 ? n : 255), memory_order_relaxed); }
     atomic_store_explicit(&r->pend[p], now, memory_order_relaxed); atomic_fetch_add_explicit(&g_pends, 1, memory_order_relaxed);
 }
-// Whether protection must leave page p writable now: written by a fault in this frame or the one before (no whole frame since). A page whose frame has passed is cleared here,
+// Whether protection must leave page p writable now: written by a fault in this frame or the one before (no whole frame since). A page whose frame has passed is protected,
 // and its always-written generation becomes a fresh one. g_slot_mu held (the protecting side)
 static int pending(range_t *r, uintptr_t p) {
     if (!r->pend) return 0;
@@ -259,11 +259,12 @@ static int pending(range_t *r, uintptr_t p) {
     uint32_t f = atomic_load(&r->pend[p]);
     if (f && atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1 - f < 2) return 1;
     uint32_t vt = r->veto ? atomic_load(&r->veto[p]) : 0, fr = atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1;
-    if (f && g_hot_on && r->streak && atomic_load(&r->streak[p]) >= HOT_RUN && (!vt || fr - vt > HOT_VETO)) {   // its faults keep coming back: hot instead of protected again
+    if (f && fr - f <= HOT_GAP && g_hot_on && r->streak && atomic_load(&r->streak[p]) >= HOT_RUN && (!vt || fr - vt > HOT_VETO)) {   // its faults keep coming back: hot instead of protected again
         if (g_nhot < HOT_MAX) { g_hot[g_nhot++] = (hot_ent){r, p, page_hash((const void *)(rb(r) + (p << g_shift))), 0}; atomic_store(&r->hotf[p], 1); atomic_fetch_add(&g_hot_made, 1); return 1; }
         atomic_fetch_add(&g_hot_full, 1);
     }
-    if (f) atomic_store(&r->pend[p], 0);
+    // pend keeps the frame of the last faulting write after its pending frame has passed: pend_note measures the next fault's gap from it (cleared here, the streak never
+    // grew past 1 and no page turned hot; t_dirty_hot caught it)
     // Written at will while pending: every stamp from before now counts it as written. The generation is the clock as it stands, not a tick past it: the protecting caller took
     // its stamp just before this protection and reads after it, so it must see the page clean (a tick here re-read every quiet page once more); every earlier stamp is lower
     if (atomic_load(&r->gen[p]) == GEN_HOT) { atomic_store(&r->gen[p], atomic_load(&g_now)); atomic_fetch_sub(&g_hot_pages, 1); }
@@ -617,7 +618,7 @@ void nvn_dirty_describe(const void *addr, const void *span, char *out, size_t n)
         if (!live_at(i) || a < rb(r) || a >= re(r) || !pin(r)) continue;
         if (a < rb(r) || a >= re(r)) { unpin(r); continue; }
         uintptr_t p = (a - rb(r)) >> g_shift; uint8_t s = atomic_load(&r->state[p]);
-        uint32_t pf = r->pend ? atomic_load(&r->pend[p]) : 0;
+        uint32_t pf = r->pend ? atomic_load(&r->pend[p]) : 0; pf = pf && atomic_load_explicit(&g_dframe, memory_order_relaxed) + 1 - pf < 2;
         int w = snprintf(out + o, n - o, "%sslot %d pool %#lx%s %s gen %llu born %llu%s", found++ ? "; " : "", i, (unsigned long)r->mem, (const void *)r == span ? " (kept)" : "",
                          s < 4 ? st[s] : "?", (unsigned long long)atomic_load(&r->gen[p]), (unsigned long long)atomic_load(&r->born), r->hotf && atomic_load(&r->hotf[p]) ? ", hot (compared, not protected)" : pf ? ", write-pending" : "");
         unpin(r);

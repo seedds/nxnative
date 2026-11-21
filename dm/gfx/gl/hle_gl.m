@@ -1525,6 +1525,10 @@ static void cap_set(GLenum cap, int on) {
     if (cap == GL_TEXTURE_2D) { if (S.unit < 32) F.tex2d = on ? F.tex2d | 1u << S.unit : F.tex2d & ~(1u << S.unit); return; }
     if (cap == GL_ALPHA_TEST) { F.atest = (uint8_t)on; return; }
     if ((cap == GL_LIGHTING || cap == GL_FOG) && !on) return;
+    // The fixed pipeline implements texture unit 0 and the alpha test; a light, the texture-coordinate generators, colour material and normal normalization are not
+    // implemented, so switching one of them on is reported and switching it off, which cannot change a draw, is not (as for the lighting and the fog above)
+    if (!on && ((cap >= 0x4000 && cap <= 0x4007) /* LIGHT0..7 */ || (cap >= 0x0c60 && cap <= 0x0c63) /* TEXTURE_GEN_S / T / R / Q */
+                || cap == 0x0b57 /* COLOR_MATERIAL */ || cap == 0x0ba1 /* NORMALIZE */)) return;
     if (cap == GL_FRAMEBUFFER_SRGB) { if (on && !S.srgb) RED1("GL_FRAMEBUFFER_SRGB: writes into sRGB attachments are not converted"); S.srgb = on; return; }
     if (cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
         || cap == 0x864f /* DEPTH_CLAMP: Metal clamps to the depth range already */

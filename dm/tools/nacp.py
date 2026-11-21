@@ -35,9 +35,18 @@ def name(path):
 def version(path):
     """The display version (0x10 bytes at 0x3060, e.g. 1.2.1), cut to what iOS accepts as a bundle version (up to three dot-separated integers); a missing file or no leading number returns an empty string"""
     p = Path(path)
-    if not p.is_file(): return ''
-    m = re.match(rb'\d+(\.\d+){0,2}', p.read_bytes()[0x3060:0x3070])
-    return m.group().decode() if m else ''
+    return version_data(p.read_bytes()) if p.is_file() else ''
+
+
+def version_data(data):
+    """Read a display version from NACP bytes, including a NACP held in NUP metadata."""
+    return bundle_version(data[0x3060:0x3070].decode('ascii', errors='replace'))
+
+
+def bundle_version(display):
+    """The leading numeric version in NACP or profile metadata, in the form used by the app packers."""
+    m = re.match(r'[0-9]+(?:\.[0-9]+){0,2}', display)
+    return m.group() if m else ''
 
 
 def languages(path):

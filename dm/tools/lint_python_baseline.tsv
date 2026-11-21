@@ -28,9 +28,8 @@ pyright	dm/gfx/tools/shader_split.py	reportOptionalMemberAccess	2	"write" is not
 pyright	dm/gfx/tools/shader_split.py	reportOptionalSubscript	1	Object of type "None" is not subscriptable
 pyright	dm/gfx/tools/shader_split.py	reportSelfClsParameterName	5	Instance methods should take a "self" parameter
 pyright	dm/gfx/tools/smash_arc.py	reportMissingImports	1	Import "backports" could not be resolved
-pyright	dm/gfx/tools/uepak.py	reportArgumentType	9	Argument of type "tuple[Any, Any, *tuple[Any, ...]] | Any" cannot be assigned to parameter "stop" of type "SupportsIndex" in function "__new__" Type "tuple[Any, Any, *tuple[Any, ...]] | Any" is not assignable to type "SupportsIndex" "tuple[Any, Any, *tuple[Any, ...]]" is incompatible with protocol "SupportsIndex" "__index__" is not present
+pyright	dm/gfx/tools/uepak.py	reportArgumentType	6	Argument of type "tuple[Any, Any, *tuple[Any, ...]] | Any" cannot be assigned to parameter "stop" of type "SupportsIndex" in function "__new__" Type "tuple[Any, Any, *tuple[Any, ...]] | Any" is not assignable to type "SupportsIndex" "tuple[Any, Any, *tuple[Any, ...]]" is incompatible with protocol "SupportsIndex" "__index__" is not present
 pyright	dm/gfx/tools/uepak.py	reportGeneralTypeIssues	1	Index 0 is out of range for type tuple[()]
-pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "*" not supported for types "list[None]" and "tuple[Any, Any, *tuple[Any, ...]] | Any" Operator "*" not supported for types "list[None]" and "tuple[Any, Any, *tuple[Any, ...]]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "+" not supported for types "tuple[Any, Any, *tuple[Any, ...]] | Any" and "Literal[15]" Operator "+" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "Literal[15]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "+=" not supported for types "Unknown | Any | int" and "Unknown | Any | tuple[Any, Any, *tuple[Any, ...]]" Operator "+" not supported for types "int" and "tuple[Any, Any, *tuple[Any, ...]]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "-=" not supported for types "Unknown | tuple[Any, Any, *tuple[Any, ...]] | Any" and "Unknown | tuple[Any, Any, *tuple[Any, ...]] | Any" Operator "-" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "tuple[Any, Any, *tuple[Any, ...]]"
@@ -184,7 +183,6 @@ pyright	scripts/build_ipa_from_nsp.py	reportArgumentType	1	Argument of type "str
 pyright	scripts/build_ipa_from_nsp.py	reportCallIssue	1	Argument expression after ** must be a mapping with a "str" key type
 pyright	scripts/build_ipa_from_nsp.py	reportCallIssue	1	No overloads for "__init__" match the provided arguments Argument types: (Unknown, str, str, str, str, **dict[str | ((n: Unknown) -> (Unknown | None)), str])
 pyright	scripts/build_ipa_from_nsp.py	reportOptionalOperand	1	Operator "-" not supported for "None"
-ruff	dm/gfx/tools/shader_split.py	B006	1	Do not use mutable data structures for argument defaults
 ruff	dm/gfx/tools/shader_split.py	B023	1	Function definition does not bind loop variable `c`
 ruff	dm/gfx/tools/shader_split.py	B023	1	Function definition does not bind loop variable `order`
 ruff	dm/gfx/tools/shader_split.py	B023	1	Function definition does not bind loop variable `tab`

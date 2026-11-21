@@ -233,6 +233,13 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
+    snprintf(p, sizeof p, "%s/nvn-compiler/python/bin/python3", res);
+    if (!access(p, X_OK)) {
+        setenv("DM_NVN_RUNTIME_PYTHON", p, 0);
+        snprintf(p, sizeof p, "%s/nvn-compiler/dm/gfx/tools/dmsh_live.py", res);
+        setenv("DM_NVN_RUNTIME_COMPILER", p, 0);
+        setenv("DM_NVN_RUNTIME_SOURCE", "1", 0);
+    }
     snprintf(p, sizeof p, "%s/aoc", res); if (!stat(p, &st)) setenv("DM_AOC_DIR", p, 0);
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);

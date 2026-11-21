@@ -46,7 +46,9 @@ static VkCommandBuffer begin(target *t, VkClearValue value) {
     VkCommandBuffer cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = &t->rp, .framebuffer = &t->fb,
         .renderArea = {{0, 0}, {t->fb.w, t->fb.h}}, .clearValueCount = 1, .pClearValues = &value};
-    h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE); return cb;
+    h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    // vkCmdBeginRenderPass copies the clear values into the command buffer.
+    return cb; // NOLINT(clang-analyzer-core.StackAddressEscape)
 }
 static void submit(VkCommandBuffer cb) {
     assert(h_vkEndCommandBuffer(cb) == VK_SUCCESS);
@@ -69,6 +71,7 @@ static id<MTLBuffer> pixels(VkImage im, uint32_t mip, uint32_t layer, uint32_t b
         [[cb renderCommandEncoderWithDescriptor:d] endEncoding]; tex = resolved;
     }
     id<MTLBuffer> out = [g_dev newBufferWithLength:w * h * bytes options:MTLResourceStorageModeShared];
+    assert(tex && out);
     id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
     [be copyFromTexture:tex sourceSlice:layer sourceLevel:mip sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:out destinationOffset:0 destinationBytesPerRow:w * bytes destinationBytesPerImage:w * h * bytes options:option];

@@ -2063,7 +2063,8 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
-    if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
+    if (memcmp(o->crop, v, sizeof v)) { module_t *m = module_of(__builtin_return_address(0));
+        LOG("[nvn] WindowCrop %d,%d %dx%d (from %s+%#llx)", x, y, ww, hh, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); }
     memcpy(o->crop, v, sizeof v);
 }
 NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonetta 3 reads it back every few frames; before any SetCrop it is the whole first texture, as NVN starts it
@@ -2319,6 +2320,10 @@ static void tsummary(uint64_t frame) {
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
+    { extern uint8_t *dm_fps_state; float r; if (dm_fps_state) { memcpy(&r, dm_fps_state + 0x58, 4);   // the screen shape's stubs (a profile's patches.py screen_shape): their counters
+        if (r > 0) { uint32_t c[16], w, b; memcpy(c, dm_fps_state + 0x130, sizeof c); memcpy(&w, dm_fps_state + 0x124, 4); memcpy(&b, dm_fps_state + 0x120, 4);
+            LOG("[nvn] screen shape %.4f up to frame %llu: %u set to the screen's ratio, %u built; sites %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", r, frame, w, b,
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]); } } }
     double tgt = 1000.0 / (atomic_load(&g_fs_fine) ? 30 : mtl_fps_target());   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 or at a 30 cap whose late frames the 60 Hz link shows (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > tgt;

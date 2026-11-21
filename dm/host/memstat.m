@@ -17,6 +17,7 @@
 #include <os/proc.h>
 #endif
 #include "dm.h"
+#include "sysprof.h"
 
 void svc_guest_range(uint8_t **base, size_t *size);
 enum { C_GUEST, C_CODE, C_MALLOC, C_GPU, C_STACK, C_FILE, C_OTHER, NC };
@@ -201,10 +202,11 @@ static void thrcpu_start(void) {
 #endif
     pthread_t th; pthread_create(&th, NULL, thrcpu_thread, spec); pthread_detach(th);
 }
-// DM_MEMSTAT and DM_THRCPU, started once by the host's loading (main.c host_preload), not by a constructor: on iOS a constructor runs before the app's main() sets what Documents/env.txt
+// DM_MEMSTAT, DM_THRCPU and DM_SYSPROF, started once by the host's loading (main.c host_preload), not by a constructor: on iOS a constructor runs before the app's main() sets what Documents/env.txt
 // holds, so either switch set there did nothing (GitHub issue #1184)
 void dm_diag_samplers_start(void) {
     static atomic_int once;
     if (atomic_exchange(&once, 1)) return;
     memstat_start(); thrcpu_start();
+    dm_sysprof_start();   // DM_SYSPROF (sysprof.m, Mac)
 }

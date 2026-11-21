@@ -10,8 +10,8 @@
 
 #import <Foundation/Foundation.h>
 
-/// The picked folder, or nil when there is none or it no longer resolves. `stale` (optional) is set
-/// when a bookmark exists but cannot be used under this signature.
+/// The picked folder, or nil when there is none or access could not be opened. `stale` (optional)
+/// is set when a bookmark needs a refresh or the folder could not be opened.
 NSString *dm_cloud_saves_path(BOOL *stale);
 
 /// Store a bookmark for the folder the player just picked. Returns NO when the system refuses to make one.

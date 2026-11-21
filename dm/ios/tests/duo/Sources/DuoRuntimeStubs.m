@@ -116,6 +116,7 @@ void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
 void dm_audio_route_changed(void) {}
+int dm_audio_route(void) { return 2; }
 void dm_movie_active(int active) { (void)active; }
 void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }

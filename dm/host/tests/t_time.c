@@ -1,9 +1,29 @@
 // Clock snapshot arithmetic (hle_time.c, from PR #36): CalculateSpanBetween and CalculateStandardUserSystemClockDifferenceByUser looked up by their mangled names in the real swforce
 // registrations, run on both host snapshot entries and on edited copies; the C library's local-time functions, UTC as on a Switch, against nn::time's local conversion (issue #2784)
-#include "../hle_time.c"
+#include "../hle.h"
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 #include <mach-o/getsect.h>
 
-uint64_t guest_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static uint64_t test_wall_ns, test_steady_ns, test_guest_ns;
+static uint64_t test_clock_gettime_nsec_np(clockid_t clock) {
+    if (!test_wall_ns) return clock_gettime_nsec_np(clock);
+    return clock == CLOCK_REALTIME ? test_wall_ns : test_steady_ns;
+}
+static time_t test_time(time_t *out) {
+    if (!test_wall_ns) return time(out);
+    time_t seconds = test_wall_ns / 1000000000ull;
+    if (out) *out = seconds;
+    return seconds;
+}
+#define clock_gettime_nsec_np test_clock_gettime_nsec_np
+#define time test_time
+#include "../hle_time.c"
+#undef time
+#undef clock_gettime_nsec_np
+
+uint64_t guest_ns(void) { return test_wall_ns ? test_guest_ns : clock_gettime_nsec_np(CLOCK_MONOTONIC); }
 static int checks, fails;
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
@@ -48,7 +68,46 @@ void *guest_sym(const char *name) {
 }
 static void put64(uint8_t *s, int off, int64_t v) { memcpy(s + off, &v, 8); }
 static int64_t get64(const uint8_t *s, int off) { int64_t v; memcpy(&v, s + off, 8); return v; }
+static void check_sample_phase(uint64_t phase) {
+    const int64_t offset = 1794821231;
+    pid_t pid = fork();
+    if (pid == 0) {
+        unsetenv("DM_FIXED_TIME");
+        test_steady_ns = 300000000000000ull + phase;
+        test_guest_ns = test_steady_ns;
+        test_wall_ns = test_steady_ns + offset * 1000000000ull + 400000000ull;
+        uint8_t a[0xd0], b[0xd0];
+        h_time_Snapshot(a);
+        int phase_stable = get64(a, 0) == offset;
+        test_wall_ns += 1000000000ull;
+        h_time_Snapshot(b);
+        int threshold = !memcmp(a, b, 0x20);
+        test_wall_ns += 1000000000ull;
+        h_time_Snapshot(b);
+        int forward = h_time_UserDiff(a, b) == 2000000000ll;
+        test_wall_ns -= 4000000000ull;
+        h_time_Snapshot(b);
+        int backward = h_time_UserDiff(a, b) == -2000000000ll;
+        // Simulate an elapsed interval with frozen guest ticks.
+        memcpy(a, b, sizeof a);
+        test_steady_ns += 60000000000ull;
+        test_wall_ns += 60000000000ull;
+        h_time_Snapshot(b);
+        int elapsed = !memcmp(a, b, 0x20) && get64(b, 0x90) - get64(a, 0x90) == 60;
+        _exit((!phase_stable) | ((!threshold) << 1) | ((!forward) << 2) |
+              ((!backward) << 3) | ((!elapsed) << 4));
+    }
+    int status;
+    int result = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) ? WEXITSTATUS(status) : 31;
+    CHECK(!(result & 1), "same wall-to-steady separation gives one offset across fresh processes");
+    CHECK(!(result & 2), "a one-second change keeps the existing context");
+    CHECK(!(result & 4), "a forward wall-clock adjustment beyond the threshold is reported");
+    CHECK(!(result & 8), "a backwards wall-clock adjustment beyond the threshold is reported");
+    CHECK(!(result & 16), "elapsed time with suspended guest ticks does not change the user clock");
+}
 int main(void) {
+    check_sample_phase(250000000ull);
+    check_sample_phase(750000000ull);
     Result (*snap)(uint8_t *) = hook("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_");
     Result (*adj_snap)(uint8_t *) = hook("_ZN2nn4time13ClockSnapshot31CreateWithAdjustableSystemClockEPS1_");
     unsigned (*span)(int64_t *, const uint8_t *, const uint8_t *) = hook("_ZN2nn4time20CalculateSpanBetweenEPNS_8TimeSpanERKNS0_13ClockSnapshotES5_");

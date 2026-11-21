@@ -743,6 +743,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `python3 dm/gfx/tests/test_dmsh_gather_offsets.py`. Offline, one captured dispatch of `b106afba1a18faa9`: about 40 % of the pixels differed between three runs of the old shader; the rewritten one gave the same bytes each time, equal to a version that reads the texels explicitly, and took 3.85 ms against 4.16 ms.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 28 NDSR compute shaders of its seen shaders. Every game with agl's upscaler builds it the same way. Not yet checked: whether this is the open cause of [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s isolated bright dots.
 
+### Runtime per-texel gathers wrap wide offsets on Metal
+
+- **Symptom:** a per-texel gather with a runtime offset of +8 reads as if the offset were -8. A ramp texture makes the wrong texel visible in the shader result.
+- **Cause:** the SPIR-V generator passes each tap's `Offset` through SPIRV-Cross to Metal's `gather`. Metal's offset range is -8 to +7. On an M4 Pro running macOS 27.2.1, the runtime argument uses only the low four bits. Ampere's six-bit decode preserves the offsets used by the affected compute shaders.
+- **Fix:** `dmsh_xlate` tells `TexturePass` to lower runtime per-texel offsets into normalized coordinate shifts using the base texture size. Each tap gathers at its own coordinate and returns the same corner of the footprint. The sampler still applies its addressing modes. Constant offset arrays continue through `gather_offsets`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py GatherOffsets`. On the M4 Pro, the coordinate shift matched explicit texel reads in all 1,788,750 samples per addressing mode on a 257×127 texture. The direct runtime offsets mismatched 1,325,760 samples with clamp and 1,341,888 with repeat.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) and [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) while reviewing PR #2831.
+
 ### F2IP
 
 - **Symptom:** `Ampere instruction 243 at 0x… is not implemented`, or `ISBERD mode b8 in a task or mesh shader`, in the build.
@@ -1011,6 +1019,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the translated shaders reproduce Maxwell's NaN behaviour with `isnan` selects (8,337 of 12,809 use them), and the default fast mode allows the GPU compiler to assume there is no NaN.
 - **Fix:** the iOS libraries are compiled with `-fmetal-math-mode=relaxed` (`dm/ios/tools/ios_metal.py`; the Vulkan and GL libraries in `vk_shaders.py` and `gl_shaders.py` too). Relaxed keeps fast math's reassociation but not that assumption.
 - **Found on:** listed among the mechanisms first met in [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md); the source gives the 8,337 of 12,809 count without naming the game.
+
+### Mac math mode (relaxed)
+
+- **Symptom:** the Mac draws the menus, but every 3D object is black. The colour target before tonemapping shows the full scene. The tonemap pass writes zeros.
+- **Cause:** the tonemap's dither term multiplies by `as_type<float>(0x7f800000u)`, the infinity constant from the Maxwell code, and uses an `isnan` select. Metal's default fast mode lets the compiler assume inputs and results are finite. It folded the select and the tonemap wrote zeros.
+- **Fix:** `mac_metal()` in `dm/gfx/tools/dmsh_chain.py` passes `-fmetal-math-mode=relaxed` for every Mac NVN shader, matching the [iOS compile](#ios-math-mode-relaxed).
+- **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`, update 131072). [PR #3024](https://github.com/seedds/nxnative/pull/3024) records the gameplay checks.
 
 ### Front end at -O1: Apple's control-flow lowering
 
@@ -2190,6 +2205,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** the host's network rounds each HMMA's f16 accumulator once per 8 products, as the translated helper does since [HMMA rounds its f16 accumulator once per 8 products](#hmma-rounds-its-f16-accumulator-once-per-8-products) (resolved; before that both rounded after every product, as `simdgroup_half8x8` does, and differed from the Switch in the low bits of most HMMAs). The host's network follows the helper, and `test_ndve_engine.py` fails when the two differ.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate): its title and opening movies ([issue 1375](https://github.com/seedds/nxnative/issues/1375), PR #1894).
 
+### An interrupted compute compile broke the NDVE sequence
+
+- **Symptom:** green and grey striped blocks over the opening movie after `XPC_ERROR_CONNECTION_INTERRUPTED`. The host logs `[RED] NDVE engine: a dispatch out of the network's order` and disables the engine for the rest of the run.
+- **Cause:** when Apple's `MTLCompilerService` died, NVN dispatch cached the interrupted compute compile as a permanent failure. The dispatch returned before the NDVE engine saw the layer, so the next layer looked out of order. The game's fallback then ran with the same dispatch missing.
+- **Fix:** recognized NDVE dispatches reach the engine after resource preparation and before the translated pipeline lookup. If the engine falls back, the host leaves interrupted compiles retryable on a later dispatch and caches permanent refusals.
+- **Check:** `t_dispatch_pipeline` injects the Metal error through the real dispatch path, checks that the next fallback dispatch writes its result, and checks that NDVE advances through the two reported layers without asking Metal for the first layer's fallback.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), on an M2 MacBook Air on macOS 27.0 ([issue #2920](https://github.com/seedds/nxnative/issues/2920)).
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.
@@ -2383,6 +2406,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_raw_noinline.py` covers inline mesh code, already-rewritten inputs used by composed mesh libraries, unchanged non-mesh stages, idempotence and a real Metal compile. Offline verification exports every full manifest row through the production host, retaining differing descriptors even when rows share a shader triple; the linked game note records its coverage and results.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), the later M1/M2 reports in [#2825](https://github.com/seedds/nxnative/issues/2825) and [#2911](https://github.com/seedds/nxnative/issues/2911).
 - **Remaining:** affected-device retests are recorded in the game note. [Recovery of archives poisoned before the host fix](rendering.md#an-archive-period-written-after-the-compiler-service-died) remains separate; this workaround changes no host recovery or serialization.
+
+### Inlining mesh helpers with subgroup inputs can crash the Metal compiler
+
+- **Symptom:** a native mesh pipeline fails to compile with `XPC_ERROR_CONNECTION_INTERRUPTED`. The compiler report shows SIGBUS at `llvm::MachineOperand::setReg` under the mesh backend. In-flight compiles in the same service can also fail.
+- **Cause:** SPIRV-Cross's translated helpers and the generated stage body are forced into the mesh entry points at `-O1`. Relaxing that policy cleared the failure on an M2 Pro with macOS 27.0.1. Ordinary inlining still reproduced it offline at the 26.6 minimum. Forcing only the stage body out of line cleared the isolated row, with failures elsewhere in the batch. Forcing only the helpers that take subgroup inputs out of line cleared the entire batch. The earlier raw-search failure shares a backend stack signature. The relationship between the internal defects is unknown.
+- **Fix:** `mesh_subgroup_noinline` marks SPIRV-Cross's multiline helpers with `gl_Subgroup*` parameters `noinline` in final native mesh stages. It changes only those declarations, so the generated stage body and raw search stay forced inline. This is a workaround for Apple's backend.
+- **Check:** `test_dmsh_raw_noinline.py` checks that the rewrite selects the subgroup helper and preserves the raw search, stage body and other helpers. The isolated foliage pipeline reproduces the original SIGBUS in the offline backend on `g14s` at minimum 26.6. The subgroup helper rewrite clears the isolated pipeline and all 164 rows on the five checked targets.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), from [d4kine's isolation in PR #3069](https://github.com/seedds/nxnative/pull/3069).
 
 ### 128-bit raw global loads read one word at a time
 

@@ -183,7 +183,7 @@ def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of
     def emit(w): pos[0] += 4
     at = {label: OTHER_BASE + i * OTHER_STEP for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
-                                others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0)
+                                others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0, area=lambda off: None)
     fn(ctx)
     in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + OTHER_STEP) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)

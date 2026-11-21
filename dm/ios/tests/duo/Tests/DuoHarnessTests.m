@@ -1525,4 +1525,63 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 }
 
 
+- (void)waitForMainQueue {   // lets the blocks DmGamepad.m queued on the main queue (controller changes) run
+    XCTestExpectation *ran = [self expectationWithDescription:@"main queue"];
+    dispatch_async(dispatch_get_main_queue(), ^{ dispatch_async(dispatch_get_main_queue(), ^{ [ran fulfill]; }); });
+    [self waitForExpectations:@[ran] timeout:5];
+}
+
+// Touch controls (DM_TOUCH_CONTROLS) from the in-game menu, at once: Automatic hides the touch controls while a controller is connected; On keeps them shown and pressing
+// keys with a controller connected, the controller still playing; Off hides them with no controller. The menu button stays in every mode; another value is refused
+- (void)testTouchControlsModeFromTheInGameMenu {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    [root.view layoutIfNeeded];
+    XCTAssertTrue(dm_setting_live("DM_TOUCH_CONTROLS", NULL), @"the in-game menu offers Touch controls");
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *pad = [self padForLayout:layout bounds:bounds];   // the gamepad the menu drives (dm_gamepad_view's latest)
+    [self waitForMainQueue];
+    CALayer *controls = [pad valueForKey:@"controls"];
+    UIButton *menu = [self menuButtonInPad:pad];
+    CGPoint a = [self faceAIn:layout bounds:bounds];
+    GCController *controller = [GCController controllerWithExtendedGamepad];
+    [self setHarnessControllers:@[controller] notification:GCControllerDidConnectNotification];
+    [self waitForMainQueue];
+    XCTAssertTrue(controls.hidden, @"Automatic (the default): hidden while a controller is connected");
+
+    XCTAssertTrue(dm_setting_live("DM_TOUCH_CONTROLS", "on"));
+    XCTAssertFalse(controls.hidden, @"On: shown with a controller connected, at once");
+    XCTAssertFalse(menu.hidden);
+    DuoFakeTouch *touch = [self touchAt:a time:1];
+    [self beginTouches:@[touch] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A, @"On: a touch key presses with a controller connected");
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    // The controller's player: player 1 unless an earlier controller of the same name left its slot to it (pad_slots.h: a reconnected controller gets its player back)
+    uint32_t players = duo_harness_state().connected_players;
+    XCTAssertEqual(__builtin_popcount(players), 1, @"the controller is a player");
+    int slot = players ? __builtin_ctz(players) : 0;
+    [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:1];
+    XCTAssertEqual(duo_harness_state().players[slot].buttons, DM_BTN_A, @"and the controller still plays");
+    [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:0];
+
+    XCTAssertTrue(dm_setting_live("DM_TOUCH_CONTROLS", "auto"));
+    XCTAssertTrue(controls.hidden, @"Automatic again: hidden, the controller still connected");
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+    [self waitForMainQueue];
+    XCTAssertFalse(controls.hidden, @"Automatic, no controller: shown");
+
+    XCTAssertTrue(dm_setting_live("DM_TOUCH_CONTROLS", "off"));
+    XCTAssertTrue(controls.hidden, @"Off: hidden with no controller");
+    XCTAssertFalse(menu.hidden, @"the menu button stays");
+    touch = [self touchAt:a time:2];
+    [self beginTouches:@[touch] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons & DM_BTN_A, 0, @"Off: a touch where A is drawn presses nothing");
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    dm_setting_live("DM_TOUCH_CONTROLS", "sometimes");
+    XCTAssertTrue(controls.hidden, @"a value the setting does not have is refused");
+    XCTAssertTrue(dm_setting_live("DM_TOUCH_CONTROLS", "auto"));
+    XCTAssertFalse(controls.hidden);
+}
+
 @end

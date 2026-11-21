@@ -966,7 +966,121 @@ static int test_capture_shaders(void) {
     return 0;
 }
 
+// Read stored framebuffer bytes: RGB alone is encoded, alpha is always linear.
+static int srgb_pixel(int x, const float color[4], int encode, const char *label) {
+    uint8_t pixel[4]; h_glReadPixels(x, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    for (int i = 0; i < 4; i++) {
+        float v = color[i];
+        if (encode && i < 3) v = v <= 0.0031308f ? 12.92f * v : 1.055f * powf(v, 1.f / 2.4f) - 0.055f;
+        int want = (int)lroundf(v * 255);
+        if (abs(pixel[i] - want) > 1) {
+            fprintf(stderr, "%s: pixel %d channel %d got %u, expected %d\n", label, x, i, pixel[i], want);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// GL_FRAMEBUFFER_SRGB chooses framebuffer conversion and destination blending; sampling
+// still decodes an sRGB texture. No guest shader or game data is used.
+static int test_framebuffer_srgb(void) {
+    dev_init(); h_eglCreateContext(NULL, NULL, NULL, NULL);
+    assert(import("glEnable") == (void *)h_glEnable_bs);
+    assert(import("glDisable") == (void *)h_glDisable_bs);
+    __typeof__(S) saved = S; __typeof__(F) fsaved = F;
+    h_glUseProgram(0); h_glActiveTexture(GL_TEXTURE0); h_glDisable(GL_TEXTURE_2D);
+    h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE);
+    h_glDisable(GL_ALPHA_TEST); h_glColorMask(1, 1, 1, 1);
+    h_glMatrixMode(GL_MODELVIEW); h_glLoadIdentity(); h_glMatrixMode(GL_PROJECTION); h_glLoadIdentity();
+    GLuint vao; h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao); h_glBindBuffer(GL_ARRAY_BUFFER, 0);
+    const GLfloat vertices[] = {-1, -1, 3, -1, -1, 3};
+    h_glVertexPointer(2, GL_FLOAT, 0, vertices); h_glEnableClientState(GL_VERTEX_ARRAY); h_glDisableClientState(GL_COLOR_ARRAY);
+    const float color[4] = {0.25f, 0.5f, 0.75f, 0.5f}, black[4] = {0, 0, 0, 0};
+    const float blend[4] = {0.375f, 0.375f, 0.375f, 0.5f};
+    int checks = 0;
+    for (int kind = 0; kind < 6; kind++) {
+        int srgb = kind != 1 && kind != 3, rb = kind == 2 || kind == 3;
+        GLenum fmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+        GLuint tex = 0, renderbuffer = 0, fb;
+        h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        if (rb) {
+            h_glGenRenderbuffers(1, &renderbuffer); h_glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
+            h_glRenderbufferStorage(GL_RENDERBUFFER, fmt, 2, 1);
+            h_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, renderbuffer);
+        } else {
+            GLenum target = kind == 4 ? GL_TEXTURE_2D_ARRAY : kind == 5 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+            h_glGenTextures(1, &tex); h_glBindTexture(target, tex);
+            if (kind == 4) {
+                h_glTexStorage3D(target, 2, fmt, 4, 2, 2);
+                h_glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 1, 1);
+            } else if (kind == 5) {
+                h_glTexStorage2D(target, 2, fmt, 4, 4);
+                h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + 2, tex, 1);
+            } else {
+                h_glTexStorage2D(target, 1, fmt, 2, 1);
+                h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, tex, 0);
+            }
+        }
+        // A deferred whole-image clear keeps the state at issue, even if the toggle changes before any draw.
+        for (int on = 0; on < 2; on++) {
+            cap_set(GL_FRAMEBUFFER_SRGB, on); h_glDisable(GL_SCISSOR_TEST);
+            h_glClearColor(color[0], color[1], color[2], color[3]); h_glClear(GL_COLOR_BUFFER_BIT);
+            cap_set(GL_FRAMEBUFFER_SRGB, !on);
+            if (srgb_pixel(0, color, on && srgb, "pending clear before toggle")) return 1;
+            checks++;
+        }
+        // Partial clears go through a draw; a toggle must finish its existing encoder too.
+        h_glDisable(GL_SCISSOR_TEST); h_glClearColor(0, 0, 0, 0); h_glClear(GL_COLOR_BUFFER_BIT);
+        h_glEnable(GL_SCISSOR_TEST); h_glClearColor(color[0], color[1], color[2], color[3]);
+        h_glDisable(GL_FRAMEBUFFER_SRGB); h_glScissor(0, 0, 1, 1); h_glClear(GL_COLOR_BUFFER_BIT);
+        h_glEnable(GL_FRAMEBUFFER_SRGB); h_glScissor(1, 0, 1, 1); h_glClear(GL_COLOR_BUFFER_BIT);
+        if (srgb_pixel(0, color, 0, "linear partial clear") || srgb_pixel(1, color, srgb, "encoded partial clear")) return 1;
+        checks += 2;
+        h_glDisable(GL_SCISSOR_TEST);
+        // Ordinary GL draws into the same attachment, without an intervening readback or bind.
+        h_glColor4fv(color); h_glDisable(GL_FRAMEBUFFER_SRGB); h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+        h_glEnable(GL_FRAMEBUFFER_SRGB); h_glViewport(1, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+        if (srgb_pixel(0, color, 0, "linear draw") || srgb_pixel(1, color, srgb, "encoded draw")) return 1;
+        checks += 2;
+        for (int on = 0; on < 2; on++) {
+            cap_set(GL_FRAMEBUFFER_SRGB, on); h_glClearColor(0.25f, 0.25f, 0.25f, 0.5f); h_glClear(GL_COLOR_BUFFER_BIT);
+            h_glColor4f(0.5f, 0.5f, 0.5f, 0.5f); h_glBlendFunc(0x302 /* SRC_ALPHA */, 0x303 /* ONE_MINUS_SRC_ALPHA */); h_glEnable(GL_BLEND);
+            h_glViewport(0, 0, 2, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3); h_glDisable(GL_BLEND);
+            if (srgb_pixel(0, blend, on && srgb, "destination blend")) return 1;
+            checks++;
+        }
+        // Replacing storage after creating a linear view must not keep the previous image alive as the target.
+        h_glDisable(GL_FRAMEBUFFER_SRGB); h_glClearColor(0, 0, 0, 0);
+        if (rb) h_glRenderbufferStorage(GL_RENDERBUFFER, fmt, 2, 1);
+        else if (kind < 2) h_glTexImage2D(GL_TEXTURE_2D, 0, fmt, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        h_glClear(GL_COLOR_BUFFER_BIT);
+        if (srgb_pixel(0, black, 0, "replacement storage")) return 1;
+        checks++;
+        h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
+        if (rb) h_glDeleteRenderbuffers(1, &renderbuffer); else h_glDeleteTextures(1, &tex);
+    }
+    // Texture sampling remains sRGB-decoded with framebuffer conversion disabled.
+    GLuint sample[2], sample_fb; h_glGenTextures(2, sample);
+    h_glBindTexture(GL_TEXTURE_2D, sample[0]);
+    const uint8_t encoded[4] = {137, 188, 225, 128};
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, encoded);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    h_glBindTexture(GL_TEXTURE_2D, sample[1]); h_glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 1, 1);
+    h_glGenFramebuffers(1, &sample_fb); h_glBindFramebuffer(GL_FRAMEBUFFER, sample_fb);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sample[1], 0);
+    h_glBindTexture(GL_TEXTURE_2D, sample[0]); h_glEnable(GL_TEXTURE_2D); h_glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    h_glMatrixMode(GL_TEXTURE); h_glLoadIdentity(); h_glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    h_glDisable(GL_FRAMEBUFFER_SRGB); h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (srgb_pixel(0, color, 0, "sRGB sampling to linear target")) return 1;
+    checks++;
+    h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &sample_fb); h_glDeleteTextures(2, sample);
+    h_glBindVertexArray(0); h_glDeleteVertexArrays(1, &vao); S = saved; F = fsaved;
+    printf("GL framebuffer sRGB: %d pixel checks passed\n", checks); return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--srgb")) return test_framebuffer_srgb();
     if (argc == 2 && !strcmp(argv[1], "--capture")) return test_capture_shaders();
     int stubs = 0, cpu = 0; const char *fixture = NULL;
     for (int i = 1; i < argc; i++) {
@@ -1082,6 +1196,7 @@ int main(int argc, char **argv) {
     test_compressed_arrays();
     test_doom3();
     test_packed_uploads();
+    if (!cpu && test_framebuffer_srgb()) return 1;
     if (!cpu) test_lod_bias();
     test_sampler_objects(!cpu);
     test_extension_names_and_egl();

@@ -371,7 +371,7 @@ typedef struct { void *data; size_t pitch, size; uint32_t w, h; } level_t;
 typedef struct {
     GLenum target; int made, fmt, levels, slevels; uint32_t w, h, d; uint64_t use, gen;
     level_t pend[6][MAXLV]; int defined;   // defined: bit per level whose face(s) were given
-    __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp;   // smp: the Metal sampler of its own parameters, made again when smp_dirty
+    __strong id<MTLTexture> tex, linear_rt; __strong id<MTLSamplerState> smp;   // smp: the Metal sampler of its own parameters, made again when smp_dirty
     samp_p sp; GLint maxlv, swz[4]; int smp_dirty;
     GLint ifmt;   // GL base image format, including RGB images expanded to RGBA in Metal
 } tex_t;
@@ -382,7 +382,7 @@ typedef struct { samp_p sp; } so_t;
 NAMES(so_t, g_sos, g_nsos, g_capsos)
 static so_t *so_of(GLuint n) { return n && n < g_nsos ? g_sos[n] : NULL; }
 
-typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex; uint64_t gen; } rb_t;
+typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex, linear_rt; uint64_t gen; } rb_t;
 NAMES(rb_t, g_rbs, g_nrbs, g_caprbs)
 static rb_t *rb_of(GLuint n) { return n && n < g_nrbs ? g_rbs[n] : NULL; }
 
@@ -725,7 +725,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t, GLuint samp) {
     return t->smp;
 }
 static void lv_free(level_t *l) { free(l->data); memset(l, 0, sizeof *l); }
-static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = nil; t->made = 0; t->defined = 0; t->levels = 0; t->gen++; }
+static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = t->linear_rt = nil; t->made = 0; t->defined = 0; t->levels = 0; t->gen++; }
 static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h, const void *data, size_t pitch);
 // Make the Metal texture from the levels given so far: as many levels as are given in a row from level 0 (and fit the size), or as glTexStorage said. rt: made for a framebuffer attachment
 static int tex_make(tex_t *t, int rt) {
@@ -752,7 +752,7 @@ static int tex_make(tex_t *t, int rt) {
         td.storageMode = m->kind == K_DEPTH || m->kind == K_DS || (rt && !data) ? MTLStorageModePrivate : MTLStorageModeShared;
         if (swz) td.swizzle = sw;
         if (swz && rt) RED1("texture %ux%u %s with a swizzle is a framebuffer attachment (Metal renders into no swizzled texture)", t->w, t->h, m->name);
-        t->tex = [g_dev newTextureWithDescriptor:td];
+        t->linear_rt = nil; t->tex = [g_dev newTextureWithDescriptor:td];
         if (!t->tex) { GLOG("[RED] texture %ux%u %s (%d levels) could not be made", t->w, t->h, m->name, lv); t->made = 1; return 0; }
         // The levels given so far go in through tex_write: a CPU write into a shared texture, a blit into a private one. Depth textures are always private, and a
         // glTexImage2D(GL_DEPTH_COMPONENT, ..., pixels) level was once freed here unwritten (only shared textures were filled). No command buffer has the new texture yet
@@ -847,6 +847,20 @@ static id<MTLTexture> att_tex(const att_t *a, uint64_t *gen) {
     if (a->kind == 2) { rb_t *r = rb_of(a->name); if (!r) return nil; *gen += r->gen; return r->tex; }
     return nil;
 }
+// Sampling keeps the texture's sRGB format. Framebuffer writes and destination blending use
+// that format only while GL_FRAMEBUFFER_SRGB is enabled; otherwise the same bytes are linear.
+static id<MTLTexture> color_attachment(const att_t *a, id<MTLTexture> image) {
+    if (S.srgb || image.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB) return image;
+    tex_t *t = a->kind == 1 ? tex_of(a->name) : NULL;
+    rb_t *r = a->kind == 2 ? rb_of(a->name) : NULL;
+    id<MTLTexture> view = t ? t->linear_rt : r ? r->linear_rt : nil;
+    if (!view) {
+        view = [image newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+        if (!view) die("[gl] cannot make the linear view of an sRGB colour attachment");
+        if (t) t->linear_rt = view; else if (r) r->linear_rt = view;
+    }
+    return view;
+}
 static uint64_t fb_gen(GLuint fb) { fb_t *f = fb_of(fb); if (!f) return 0; uint64_t g = f->gen; att_tex(&f->col, &g); att_tex(&f->depth, &g); att_tex(&f->stencil, &g); return g; }
 // The size of a framebuffer (its first attachment's level), 0 when it has none
 static void fb_size(GLuint fb, uint32_t *w, uint32_t *h) {
@@ -873,7 +887,7 @@ static void pass_begin(void) {
         } else {
             fb_t *f = fb_of(S.fb);
             if (f) {
-                c = att_tex(&f->col, &gen); d = att_tex(&f->depth, &gen); s = att_tex(&f->stencil, &gen);
+                c = color_attachment(&f->col, att_tex(&f->col, &gen)); d = att_tex(&f->depth, &gen); s = att_tex(&f->stencil, &gen);
                 cl = f->col.level; cs = f->col.face; dl = f->depth.level; sl = f->stencil.level;
                 gen += f->gen;
             }
@@ -1529,7 +1543,10 @@ static void cap_set(GLenum cap, int on) {
     // implemented, so switching one of them on is reported and switching it off, which cannot change a draw, is not (as for the lighting and the fog above)
     if (!on && ((cap >= 0x4000 && cap <= 0x4007) /* LIGHT0..7 */ || (cap >= 0x0c60 && cap <= 0x0c63) /* TEXTURE_GEN_S / T / R / Q */
                 || cap == 0x0b57 /* COLOR_MATERIAL */ || cap == 0x0ba1 /* NORMALIZE */)) return;
-    if (cap == GL_FRAMEBUFFER_SRGB) { if (on && !S.srgb) RED1("GL_FRAMEBUFFER_SRGB: writes into sRGB attachments are not converted"); S.srgb = on; return; }
+    if (cap == GL_FRAMEBUFFER_SRGB) {
+        if (S.srgb != on) { clears_flush(); pass_end(); S.srgb = on; }
+        return;
+    }
     if (cap == 0x809d /* MULTISAMPLE */ || cap == 0x8642 /* PROGRAM_POINT_SIZE */ || cap == 0x8d69 /* PRIMITIVE_RESTART_FIXED_INDEX */ || cap == 0x884f /* TEXTURE_CUBE_MAP_SEAMLESS */
         || cap == 0x864f /* DEPTH_CLAMP: Metal clamps to the depth range already */
         || cap == 0x92e0 /* DEBUG_OUTPUT */ || cap == 0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */) return;
@@ -1537,8 +1554,8 @@ static void cap_set(GLenum cap, int on) {
     for (int i = 0; i < n; i++) if (seen[i] == cap) return;
     if (n < 32) { seen[n++] = cap; GLOG("[RED] gl%s(%#x) not implemented", on ? "Enable" : "Disable", cap); }
 }
-GL(glEnable, void, GLenum cap) { cap_set(cap, 1); }
-GL(glDisable, void, GLenum cap) { cap_set(cap, 0); }
+GLB(glEnable, void, GLenum cap) { cap_set(cap, 1); }
+GLB(glDisable, void, GLenum cap) { cap_set(cap, 0); }
 GL(glColorMask, void, uint32_t r, uint32_t g, uint32_t b, uint32_t a) { S.cmask = (r & 0xff ? 1 : 0) | (g & 0xff ? 2 : 0) | (b & 0xff ? 4 : 0) | (a & 0xff ? 8 : 0); }
 GL(glColorMaski, void, GLuint buf, uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
     if (buf) { gl_error(GL_INVALID_VALUE); return; }   // GL_MAX_DRAW_BUFFERS is one
@@ -2442,7 +2459,7 @@ GL(glReadBuffer, void, GLenum b) { (void)b; }
 GL(glInvalidateFramebuffer, void, GLenum target, GLsizei n, const GLenum *att) { (void)target; (void)n; (void)att; }   // the contents are kept (a store action)
 GL(glDiscardFramebufferEXT, void, GLenum target, GLsizei n, const GLenum *att) { (void)target; (void)n; (void)att; }
 GL(glGenRenderbuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_rbs, &g_nrbs, &g_caprbs, sizeof(rb_t)); }
-GL(glDeleteRenderbuffers, void, GLsizei n, const GLuint *r) { for (GLsizei i = 0; i < n; i++) { rb_t *x = rb_of(r[i]); if (!x) continue; x->tex = nil; free(x); g_rbs[r[i]] = NULL; } }
+GL(glDeleteRenderbuffers, void, GLsizei n, const GLuint *r) { for (GLsizei i = 0; i < n; i++) { rb_t *x = rb_of(r[i]); if (!x) continue; x->tex = x->linear_rt = nil; free(x); g_rbs[r[i]] = NULL; } }
 GL(glBindRenderbuffer, void, GLenum target, GLuint r) {   // a name glGenRenderbuffers never gave is made at its first bind, as glBindFramebuffer's
     (void)target;
     if (r && !rb_of(r)) { if (r > 1u << 20) { RED1("glBindRenderbuffer of name %u", r); return; } name_at((void ***)&g_rbs, &g_nrbs, &g_caprbs, r, sizeof(rb_t)); }
@@ -2469,7 +2486,7 @@ GLB(glRenderbufferStorage, void, GLenum target, GLenum ifmt, GLsizei w, GLsizei 
     @autoreleasepool {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:g_fmt[f].pf width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
-        r->tex = [g_dev newTextureWithDescriptor:td]; r->fmt = f; r->w = w; r->h = h; r->gen++;
+        r->linear_rt = nil; r->tex = [g_dev newTextureWithDescriptor:td]; r->fmt = f; r->w = w; r->h = h; r->gen++;
     }
     OLOG("renderbuffer %u: %dx%d %s", S.rb, w, h, g_fmt[f].name);
 }

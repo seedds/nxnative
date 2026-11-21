@@ -204,6 +204,18 @@ class Translate(unittest.TestCase):
             self.assertIn('t:texture=0:1:sampler2D', r[1])
             self.assertTrue(any(x.startswith('u:sample=') for x in r[1]), r[1])
 
+    def test_legacy_desktop_varyings_link_after_macro_expansion(self):
+        vert = b'#version 120\nattribute vec4 p;\n#define COLOR gl_FrontColor\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_Position = p; COLOR = p; TEX(0) = p; }\n'
+        frag = b'#version 110\n#define COLOR gl_Color\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_FragData[0] = COLOR * TEX(0); }\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            for source, stage in ((vert, 'vert'), (frag, 'frag')):
+                r = gl_shaders.translate(source, stage, '1864' + stage, tmp)
+                self.assertIsInstance(r, tuple, r)
+                msl = Path(r[0]).read_text()
+                self.assertIn('[[user(dm_LegacyColor)]]', msl)
+                self.assertIn('[[user(dm_LegacyTexCoord0)]]', msl)
+                if stage == 'frag': self.assertIn('[[color(0)]]', msl)
+
 
 class MainStrings(unittest.TestCase):
     def test_a_prefix_is_not_a_shader(self):

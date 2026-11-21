@@ -46,6 +46,7 @@ int main(void) {
         MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[0]; ca.pixelFormat = MTLPixelFormatRGBA8Unorm; ca.blendingEnabled = YES;
         ca.sourceRGBBlendFactor = ca.sourceAlphaBlendFactor = MTLBlendFactorOne; ca.destinationRGBBlendFactor = ca.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
         VkPipeline pipe = zalloc(sizeof *pipe); pipe->pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err]; pipe->prim = MTLPrimitiveTypeTriangle;
+        pipe->nviewport = 1;
         pipe->cull = MTLCullModeNone; pipe->fill = MTLTriangleFillModeFill; pipe->clip = MTLDepthClipModeClip;
         if (!pipe->pso) { printf("test pipeline: %s\n", err.localizedDescription.UTF8String); abort(); }
         {

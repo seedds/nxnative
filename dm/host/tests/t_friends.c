@@ -21,6 +21,32 @@ static void *hook(const char *name) {
     CHECK(count == 1 && fn, name);
     return count == 1 ? fn : NULL;
 }
+static void check_friend_ids(void) {   // seedds's t_server_environment checks: the provider answers them offline as the cut there did
+    Result (*ids)(int *, void *, int, int, const void *) = hook("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdEiiRKNS0_12FriendFilterE") ? h_fr_GetFriendIds : NULL;
+    Result (*ids_uid)(int *, void *, const void *, int, int, const void *) = hook("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE") ? h_fr_GetFriendIdsUid : NULL;
+    const uint64_t before[] = {0x123456789abcdef0, 0xfedcba9876543210};
+    uint64_t output[2];
+    uint8_t uid[16] = {1}, filter[32] = {0};
+    if (ids) {
+        int count = 7;
+        memcpy(output, before, sizeof output);
+        CHECK(ids(&count, output, 2, 2, filter) == RES_FAIL, "friend IDs without Uid remain unavailable offline");
+        CHECK(count == 0, "unavailable ID list reports zero entries");
+        CHECK(!memcmp(output, before, sizeof output), "unavailable ID list leaves client storage untouched");
+        count = 7;
+        CHECK(ids(&count, NULL, 0, 0, filter) == RES_FAIL && count == 0, "zero-capacity ID query remains empty");
+    }
+    if (ids_uid) {
+        int count = 7;
+        memcpy(output, before, sizeof output);
+        CHECK(ids_uid(&count, output, uid, 2, 2, filter) == RES_FAIL, "friend IDs with Uid remain unavailable offline");
+        CHECK(count == 0, "unavailable per-user ID list reports zero entries");
+        CHECK(!memcmp(output, before, sizeof output), "unavailable per-user ID list leaves client storage untouched");
+        count = 7;
+        CHECK(ids_uid(&count, NULL, uid, 0, 0, filter) == RES_FAIL && count == 0, "zero-capacity per-user query remains empty");
+    }
+}
+
 int main(void) {
     uint8_t presence[0x100] = {0}, uid[16] = {1};
     CHECK(h_fr_UpInit(presence, uid) == RES_OK, "UserPresence::Initialize succeeds");
@@ -48,6 +74,7 @@ int main(void) {
             CHECK(!memcmp(key, before, sizeof key), "failed key query without Uid leaves output untouched");
         }
     }
+    check_friend_ids();
     printf("t_friends: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

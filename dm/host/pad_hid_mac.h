@@ -300,6 +300,8 @@ static void hidpad_use(hid_pad *d) {
         if (!d->proto) LOG("controller '%s' (HID, %04x:%04x): buttons in Nintendo's report 0x3F: read with its numbering", d->name, d->vid, d->pid);
     } else if (d->st.layout == PAD_HID_X360)
         LOG("controller '%s' (HID, %04x:%04x): Xbox 360 layout (Z / Rz triggers, Rx / Ry right stick)", d->name, d->vid, d->pid);
+    else if (d->st.layout == PAD_HID_TAIKO)
+        LOG("controller '%s' (HID, %04x:%04x): HORI Taiko Drum layout (1 Y, 2 B, 3 A, 4 X)", d->name, d->vid, d->pid);
     else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }

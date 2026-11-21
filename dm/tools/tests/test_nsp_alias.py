@@ -101,6 +101,17 @@ class Alias(unittest.TestCase):
         (d / 'control.nacp').unlink(); nso(d / 'ExeFS/main', UPD_BID)   # a build the profile does not register, with no control data: unknown, as before
         shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '?')
         self.assertEqual(game.Game(out).builds()['v0']['display'], '?')
+        self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main'], nup_label='1.8.0'), '1.8.0')
+        self.assertEqual(game.Game(out).builds()['v0']['display'], '1.8.0')
+        nso(d / 'ExeFS/main', BID)
+        self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main'], nup_label='1.8.0'), '1.0.0')
+
+    def test_app_version_normalizes_the_packed_build_before_using_the_label(self):
+        d = self.tmp / 'extract/v0'
+        g = mock.Mock(builds=lambda: {'v0': {'display': '1.4.0_5'}, 'v1': {'display': 'v1'}})
+        self.assertEqual(nsp.app_version_of(d, d, g, 'v0'), '1.4.0')   # a dump has only the profile
+        self.assertEqual(nsp.app_version_of(d, d, g, 'v0', '1.8.0'), '1.4.0')
+        self.assertEqual(nsp.app_version_of(d, d, g, 'v1', '1.8.0'), '1.8.0')
 
 
 if __name__ == '__main__':

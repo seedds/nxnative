@@ -22,7 +22,7 @@ __attribute__((weak)) uint32_t dm_nextendo_async_result(void *o) { (void)o; retu
 __attribute__((weak)) void dm_nextendo_async_swap(void *o, void *s) { (void)o; (void)s; }
 __attribute__((weak)) bool dm_nextendo_async_valid(void *o) { (void)o; return false; }
 __attribute__((weak)) uint32_t dm_nextendo_friends_available(uint8_t *a, const void *u) { (void)a; (void)u; return RES_FAIL; }
-__attribute__((weak)) uint32_t dm_nextendo_friends_list(int *n, void *o, const void *u, int off, int cap, const void *f, bool ids) { (void)n; (void)o; (void)u; (void)off; (void)cap; (void)f; (void)ids; return RES_FAIL; }
+__attribute__((weak)) uint32_t dm_nextendo_friends_list(int *n, void *o, const void *u, int off, int cap, const void *f, bool ids) { if (n) *n = 0; (void)o; (void)u; (void)off; (void)cap; (void)f; (void)ids; return RES_FAIL; }
 __attribute__((weak)) uint32_t dm_nextendo_friends_update(void *o, const void *u, const uint64_t *ids, int n) { (void)o; (void)u; (void)ids; (void)n; return RES_FAIL; }
 __attribute__((weak)) uint32_t dm_nextendo_friends_ensure(const void *u) { (void)u; return RES_FAIL; }
 __attribute__((weak)) uint32_t dm_nextendo_presence_commit(const void *o) { (void)o; return RES_FAIL; }

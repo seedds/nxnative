@@ -55,6 +55,9 @@ static void build_symhash(module_t *m);
 static void parse_dynamic(module_t *m) {
     uint32_t mod0 = *(uint32_t *)(m->base + 4);
     if (memcmp(m->base + mod0, "MOD0", 4)) die("%s: no MOD0", m->name);
+    int64_t bss_end = mod0 + (int64_t)*(const int32_t *)(m->base + mod0 + 12);
+    if (bss_end > 0 && (uint64_t)bss_end <= m->key_page_off)
+        m->guest_size = ((uint64_t)bss_end + 0xfff) & ~0xfffull;
     m->dyn = (const Elf64_Dyn *)(m->base + mod0 + *(int32_t *)(m->base + mod0 + 4));
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
         case DT_SYMTAB: m->symtab = (const Elf64_Sym *)(m->base + d->d_un.d_ptr); break;
@@ -111,6 +114,16 @@ static void *loaded_sym(const char *name) {   // caller holds g_modules_mu, or i
 void *guest_sym(const char *name) {
     pthread_rwlock_rdlock(&g_modules_mu); void *p = loaded_sym(name); pthread_rwlock_unlock(&g_modules_mu);
     return p;
+}
+void *guest_module_sym(uintptr_t base, const char *name) {
+    void *symbol = NULL;
+    pthread_rwlock_rdlock(&g_modules_mu);
+    for (int i = 0; i < g_nloaded; ++i) {
+        module_t *m = g_loaded[i];
+        if ((uintptr_t)m->base == base) { symbol = module_sym(m, name); break; }
+    }
+    pthread_rwlock_unlock(&g_modules_mu);
+    return symbol;
 }
 // For modules with the patch area before the base (patch_off < 0) addresses in the patch area count too, as for modules whose patch area follows the image (crash reports, the GC pause's "in guest code" test)
 module_t *module_of(const void *p) {
@@ -968,10 +981,13 @@ void load_modules(const char *dir, const char **names, int n) {
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
 
-// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
+// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT. The order is reverse of the load list:
+// modules later in the list are the ones the earlier ones depend on, so the sdk module's DT_INIT, which constructs the
+// libc++ globals (std::cout and friends), runs before main's static initializers, which already write to them. Forward
+// order crashed Little Busters! Converted Edition at its first log line (std::ostream::write on an unconstructed cout).
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
-    for (int i = 0; i < g_nmod; i++) {
+    for (int i = g_nmod - 1; i >= 0; i--) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);

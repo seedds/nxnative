@@ -179,7 +179,7 @@ int main(void) { @autoreleasepool {
             for (int a = 0; a < 4; a++) { S.attr[a].fmt = (uint32_t)fmts[a]; S.attr[a].offset = (uint32_t)offs[a]; S.attr[a].stream = 2; }
             S.attr[4].fmt = 0x2E; S.attr[4].stream = 5;   // stream 5 has no buffer
             S.attr[20] = S.attr[1];   // NVN2's attributes past 15 go into the block as the first 16 do
-            pull_layout P; pull_layout_fill(&P);
+            pull_layout P; pull_layout_fill(&P, NULL, NULL, NULL);
             EXPECT("base kept 4-byte aligned", 0, P.s[2].base & 3);
             EXPECT("attribute with no buffer reads zeros", 0, P.attr[4]);
             EXPECT("attribute 20 has attribute 1's word", P.attr[1], P.attr[20]);

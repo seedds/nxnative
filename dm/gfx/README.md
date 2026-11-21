@@ -215,4 +215,4 @@ The following paths are not implemented and report red in the log when reached (
 - indexed quad primitives (8-bit indices are widened to 16-bit at replay);
 - some forms of texture-to-texture copy and texture clear.
 
-Functions listed in `g_nops`, such as `MultiDraw*IndirectCount` and `SetDepthBounds`, are empty implementations: calling them neither reports red nor has any effect. `Downsample` / `DownsampleTextureView` are recorded as texture copies with a host flag (`DM_COPY_RESOLVE`) and replayed as a Metal multisample resolve.
+Functions listed in `g_nops`, such as `MultiDraw*IndirectCount`, are empty implementations: calling them neither reports red nor has any effect. `SetDepthBounds` is recorded and replayed on Apple10+ GPUs (`setDepthTestMinBound:maxBound:`; [rendering](../../docs/reference/rendering.md#depth-bounds)). `Downsample` / `DownsampleTextureView` are recorded as texture copies with a host flag (`DM_COPY_RESOLVE`) and replayed as a Metal multisample resolve.

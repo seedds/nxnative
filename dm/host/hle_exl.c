@@ -9,6 +9,8 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <strings.h>
 #include <libkern/OSCacheControl.h>
 #if !TARGET_OS_IPHONE
 #include <mach/mach.h>
@@ -84,7 +86,7 @@ static code_t *code_of(module_t *m) {
     for (int i = 0; i < g_ncode; i++) if (g_code[i].m == m) return &g_code[i];
     if (g_ncode == (int)(sizeof g_code / sizeof *g_code)) return NULL;
     code_t *c = &g_code[g_ncode++]; *c = (code_t){m, NULL, -1, NULL};
-    char p[1100]; snprintf(p, sizeof p, "%s/%s.changed.tsv", dm_module_dir(), m->name);
+    char p[1100]; snprintf(p, sizeof p, "%s/%s.changed.tsv", m->dir ? m->dir : dm_module_dir(), m->name);
     FILE *f = fopen(p, "r");
     if (f) {
         char line[256]; unsigned long off, len; int cap = 0; c->n = 0;
@@ -170,4 +172,41 @@ void dm_exl_sync_all(void) {
     pthread_mutex_lock(&g_view_mu);
     for (int i = 0; i < g_nview; i++) view_sync(&g_view[i]);
     pthread_mutex_unlock(&g_view_mu);
+}
+
+// ---------- Code plugins of the mods switched on ----------
+// A front end switches a mod on by putting its RomFS folder in DM_ROMFS_OVERLAY (NX2Apple: mods/<title ID>/<mod>/romfs). A mod with code has an Atmosphère exefs/ beside that folder
+// (subsdk<N>, main.npdm); the rewriter cannot run at launch, so dm/tools/prepare_mod_exefs.sh rewrites the plugins once into <mod>/exefs/nxnative/ (<name>.patched.bin and its
+// tables, as the game's modules), and they load here between main's subsdks and sdk, in the overlay's order. A mod's exefs/main replaces the game's code itself: refused.
+// Returns the module count; names gain "<folder>/<name>" entries (load_modules takes the folder from them)
+int dm_exl_mod_modules(const char **names, int n, int room) {
+    const char *ov = getenv("DM_ROMFS_OVERLAY");
+    if (!ov || !*ov || n < 1) return n;
+    char *list = strdup(ov); if (!list) return n;
+    int added = 0;
+    for (char *save = NULL, *rd = strtok_r(list, ":", &save); rd; rd = strtok_r(NULL, ":", &save)) {
+        char root[1024]; strlcpy(root, rd, sizeof root);
+        size_t l = strlen(root); while (l > 1 && root[l - 1] == '/') root[--l] = 0;
+        char *sl = strrchr(root, '/'); if (sl && !strcasecmp(sl + 1, "romfs")) *sl = 0;   // <mod>/romfs → <mod>; a mod whose files are in the folder itself stays as it is
+        char exefs[1100], prep[1200], f[1300]; snprintf(exefs, sizeof exefs, "%s/exefs", root); snprintf(prep, sizeof prep, "%s/nxnative", exefs);
+        DIR *d = opendir(exefs); if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, "main")) LOG("[RED] exl: %s/main replaces the game's code, which is not supported: left out", exefs);
+            else if (!strncmp(e->d_name, "subsdk", 6)) {
+                snprintf(f, sizeof f, "%s/%s.patched.bin", prep, e->d_name);
+                if (access(f, R_OK)) { LOG("[RED] exl: %s/%s is not prepared (dm/tools/prepare_mod_exefs.sh): the mod's code is left out", exefs, e->d_name); continue; }
+                int clash = 0; for (int k = 0; k < n; k++) { const char *b = strrchr(names[k], '/'); clash |= !strcmp(b ? b + 1 : names[k], e->d_name); }
+                if (clash) { LOG("[RED] exl: %s/%s has the name of a module already loaded: left out", exefs, e->d_name); continue; }
+                if (added == room) { LOG("[RED] exl: more than %d mod code plugins: %s/%s left out", room, exefs, e->d_name); continue; }
+                char *nm = malloc(strlen(prep) + strlen(e->d_name) + 2); if (!nm) continue;
+                sprintf(nm, "%s/%s", prep, e->d_name);
+                memmove(&names[n], &names[n - 1], sizeof *names); names[n - 1] = nm; n++; added++;   // before the last module (sdk), as the console loads subsdks
+                LOG("exl: mod code plugin %s/%s", exefs, e->d_name);
+            }
+        }
+        closedir(d);
+    }
+    free(list);
+    return n;
 }

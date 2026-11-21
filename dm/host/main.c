@@ -129,9 +129,10 @@ static void host_preload(int argc, char **argv) {
     }
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM graceful exit (hle_lifecycle.c)
     { void crash_set_dump_hook(void (*)(void)); void svc_thread_dump(void); crash_set_dump_hook(svc_thread_dump); }   // Dump guest thread state on a crash
-    const char *names[argc + DM_GAME_NMOD]; int n = 0;
+    const char *names[argc + DM_GAME_NMOD + 8]; int n = 0;
     int i = 2;
     for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];
+    int named = n;
     if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
     else if (*DM_GAME_ARGS) {   // no "--" on the command line (the iOS app, the NSP script's Mac runs): the game profile's game_args, split at spaces
         char *s = strdup(DM_GAME_ARGS);
@@ -139,6 +140,7 @@ static void host_preload(int argc, char **argv) {
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
     if (!n) n = profile_modules(argv[1], names);
+    if (!named) n = dm_exl_mod_modules(names, n, 8);   // the code plugins of the mods switched on (DM_ROMFS_OVERLAY), when the command line names no modules
     load_modules(argv[1], names, n);
     dm_exl_fake_rtld();   // with an exlaunch plugin among the modules: the rtld its module walk expects below main (hle_exl.c)
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now

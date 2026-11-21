@@ -928,18 +928,21 @@ void load_modules(const char *dir, const char **names, int n) {
     allocate_modules(n, nros);
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        // "<folder>/<name>": a module from another folder (a mod's code plugin), else one of the module folder
+        const char *sl = strrchr(names[i], '/');
+        if (sl) { char *d = strndup(names[i], (size_t)(sl - names[i])); if (!d) die("module folder"); m->dir = d; strlcpy(m->name, sl + 1, sizeof m->name); }
+        else { m->dir = g_module_dir; strlcpy(m->name, names[i], sizeof m->name); }
+        read_layout(m, m->dir);
     }
     create_keys();
     jit_layout_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, m->dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
-        LOG("%s: base %p size %#zx", names[i], m->base, m->size);
+        t = now_ns(); register_gates(m, m->dir); tg += now_ns() - t;
+        LOG("%s: base %p size %#zx%s%s", m->name, m->base, m->size, m->dir != g_module_dir ? " from " : "", m->dir != g_module_dir ? m->dir : "");
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }
     force_init();

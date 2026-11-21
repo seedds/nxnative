@@ -58,6 +58,7 @@ enum { STB_LOCAL = 0, STB_WEAK = 2, STV_DEFAULT = 0 };
 // Run-time state of one NSO module
 typedef struct {
     char name[16];
+    const char *dir;           // the folder its rewritten files are in: the module folder, or a mod's prepared exefs (hle_exl.c dm_exl_mod_modules)
     uint8_t *base;             // Start address of the image (including the patch area) in the host address space
     size_t size;
     size_t guest_size;         // Horizon module span through MOD0's page-aligned bss end, excluding rewriter pages
@@ -206,6 +207,7 @@ uint64_t dm_exl_rtld_base(void);
 uint64_t dm_exl_rtld_size(void);
 int dm_exl_view_source_ok(uint64_t src, uint64_t size);
 void dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size);
+int dm_exl_mod_modules(const char **names, int n, int room);   // adds the prepared code plugins of the mods in DM_ROMFS_OVERLAY before the last module (sdk); returns the new count
 int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size);
 void dm_exl_sync_all(void);
 void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the guest heap's base and opened length (guest addresses), 0 / 0 when none

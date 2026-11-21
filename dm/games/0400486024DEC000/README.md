@@ -237,6 +237,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [ExeFS patches of mods](../../../docs/reference/rewriter.md#exefs-patches-of-mods): Fast Travel's 17,183 pchtxt records and Bunny Hood Speed Boost's IPS32 file for this build; Fast Travel and L3 Sprint Toggle put code in the same padding between functions, so only one of them is applied.
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.
 - [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
 

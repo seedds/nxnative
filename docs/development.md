@@ -269,6 +269,7 @@ For a Mac app, it reads the name, title ID and game version from `Info.plist`, l
 supplies, nightly and by hand (never on pull requests): the RomFS image reader
 (`romfs.py`), the control data (`nacp.py`), the NSO loader, the shader
 containers of `shader_split.py` (BNSH, BAHS, MSHD, SARC / Yaz0, GLSLC, SDF,
+[NXSD](reference/shaders.md#nxsd-single-stage-shader-containers),
 ARH1 and the others `scan_blob` recognizes) and the Unreal paks and shader
 archives of `uepak.py`. Each harness, `dm/tools/fuzz/fuzz_<parser>.py`, builds
 its seeds in code and mutates them for 60 s; nothing comes from a game. A
@@ -427,6 +428,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 ```
 
 `--platform` takes `ios` (the default: the IPA, or the Xcode project with `--prepare-xcode`), `mac` ([A Mac-only build for development](#a-mac-only-build-for-development)) and `mac-app` ([A Mac app](#a-mac-app)). With either Mac platform, `--seen-shaders` builds only the shaders a game's playtests used ([Building selected Mac shaders](#building-selected-mac-shaders)).
+
+For a NUP without embedded add-on content, pass `--aoc-dir <folder>` to include separate DLC RomFS images. Keep the folder outside the build cache and name each image `<index>.img`, with the index the game uses (1 to 2000). Each run of the script takes the images currently in the selected folder. Remove an image or omit the option to build without that DLC. For an existing Xcode project, run the script again with `--prepare-xcode` after changing the selection. See [Separate DLC for a NUP](reference/packing.md#separate-dlc-for-a-nup).
 
 In Spyder, open the script, fill in the settings at the top (`NSP_DIR`, `PROD_KEYS`, and optionally `PACKAGE`, `OUT_IPA`, `APP_NAME`, `BUNDLE_ID`, `ICON`, `FALLBACK_ICON`, `LANGUAGE`, `KEEP_EXTRACTED`, `SHOW_FPS`, `MOTION`, `PSO_GPUS`, `PLATFORM`, `PROGRAM_INDEX`, `SEEN_SHADERS`; for a game without a profile `HEAP_CHECK`, `HEAP_CHECK_SECS`, `PROVISIONAL`), and press F5. Empty paths are asked for at run time.
 

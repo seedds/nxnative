@@ -89,6 +89,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_friends`, then `dm/host/tests/build/t_friends`, resolves both overloads by their actual registered names and checks the failure result and untouched output for both local flags, including guest bool arguments with upper bits set.
 - **Found on:** [Super Nintendo Entertainment System – Nintendo Classics](../../dm/games/01008D300C50C000/README.md) (`01008D300C50C000`, 6.0.0, SDK 20.5.21, `main+0xc608`). [PR #2162](https://github.com/seedds/nxnative/pull/2162) reports the original abort and a Mac boot past it with separate mission-events and profile changes.
 
+### Friend-ID lists and network error Results on SDK 7
+
+- **Symptom:** `friends::GetFriendList` or `err::ShowNetworkServiceError` enters the SDK's service path despite the host's offline replacements.
+- **Cause:** the account-ID list overloads (with and without `Uid`) and the error overload taking `nn::Result` were not registered. The existing hooks cover `Friend` objects and an `ErrorCode` pair, which have different exported names and argument layouts.
+- **Fix:** both account-ID list overloads follow the host's offline policy. They return `RES_FAIL`, set the count to zero, and leave the ID array untouched. The Result overload logs the module and description and sends the usual applet enter and leave notifications.
+- **Found on:** Super Kirby Clash 1.0.1, SDK 7.4.0, in [PikaMan80's patch for issue #987](https://github.com/seedds/nxnative/issues/987).
+
 ### SDK 6's `account::OpenPreselectedUser` returns a Result
 
 - **Symptom:** the first loading screen never ends; `DM_FS=1` shows `save:/system` "not found" and no `fs mount save`.
@@ -271,7 +278,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** a save transaction clones the committed folder into its work folder with `clonefile` and publishes a commit with `renamex_np(RENAME_SWAP)`. Both need APFS: on HFS+ and exFAT disk images both fail with `ENOTSUP` (45), and neither format advertises `VOL_CAP_INT_CLONE` or `VOL_CAP_INT_RENAME_SWAP`, so copying the files instead of cloning them would still leave no atomic commit. The host already failed safely (the committed save mounted read-only, the iOS front end told); the line did not say why. The apps' own save folders are on APFS (the Mac app's `~/Library/Application Support/nxnative/<title ID>/save`, the iOS app's `Documents/save`); only a `DM_SAVE` set by hand or a development run's work folder can be elsewhere.
 - **Fix:** `hle_fs.c` names the cause when `clonefile` returns `ENOTSUP`: set `DM_SAVE` to a folder on an APFS volume (the RomFS and shader libraries may stay on the other drive). Recursive deletes (`rm_tree`, `CleanDirectoryRecursively`) now take each entry's type from `lstat`, not `d_type` (which a filesystem may report as unknown), unlink a symlink without entering it, and refuse a symlink given as the tree itself; a commit whose leftover `.new` cannot be cleared is refused with its own red line instead of failing in the clone.
 - **Check:** `dm/host/tests/t_fs.c` section 8 makes `clonefile` fail with `ENOTSUP` (read-only mount, one front-end notice, committed save unchanged, writable again once cloning works) and deletes save folders holding a symlink to a folder outside the save (the target keeps its files).
-- **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table): a development Mac run with its save folder on a Journaled HFS+ external drive.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) 1.05 during a Mac run with its save folder on a Journaled HFS+ external drive. [PR #662](https://github.com/seedds/nxnative/pull/662).
 
 ### Save data size queries
 
@@ -1265,6 +1272,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### Play report upload status
+
+- **Symptom:** a won Chambara match ends in `nn::diag` abort Result `0xe15`, after `[RED] sf: the game connects to service prepo:u itself`.
+- **Cause:** the SDK's `nn::prepo::GetTransmissionStatus` opens `prepo:u` through `sm`. The host has no play report service process, and `sm` returns ResultNotRegistered.
+- **Fix:** `hle_offline.c` answers success with status 0 (idle). The offline host discards reports, so the upload queue is always empty.
+- **Found on:** Nintendo Switch Sports 1.5.0 (SDK 13.3.4), with a won match replayed after the fix in [PR #2908](https://github.com/seedds/nxnative/pull/2908).
+
 ### SDK 21 socket initialization and overloads
 
 - **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).
@@ -1599,6 +1613,13 @@ Most service calls can be found before they crash, before the first boot or the 
 ### `ro::ProtectRelro` runs natively
 
 - `nn::ro::ProtectRelro` (called from `main`'s DSO init), a new import of SDK 20, needs nothing: it runs natively on the host's no-op `SetMemoryPermission` / `SetMemoryAttribute`. Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### The SDK rejects a module that `svcQueryMemory` finds
+
+- **Symptom:** `Failed to get our const data section!` before `nnMain`. The SDK's `GetRequiredBufferSizeForGetAllModuleInfo` finds the game's code mapping but returns zero.
+- **Cause:** `nn::ro::GetModuleAddressRange` and `LookupModuleSymbol` by base consult the guest rtld lists. The host runs its own loader, so the SDK's automatic-load list is empty. The native range lookup rejects the game's code address, and the native symbol lookup returns `0xa16` for its own `nndetailRoGetRoDataStart` export.
+- **Fix:** answer both `nn::ro` lookups from the host's loaded modules. The module size ends at the 4 KiB-aligned MOD0 bss end, as rtld computes it. The symbol lookup takes the exact module base and searches that module. The SDK keeps its own module list and calls the game's exports for the exact read-only data range. See also [whole-process memory walks](memory.md#svcquerymemory-walks-the-whole-guest-process).
+- **Found on:** [Hitman Absolution, PR #3023](https://github.com/seedds/nxnative/pull/3023) (v131072, SDK 22.2.0). The native walk lists all four modules and both boundary exports resolve before `nnMain` on the Mac.
 
 ### Loading NROs with `ro::LoadModule`
 

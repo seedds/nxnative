@@ -1026,13 +1026,16 @@ _work = os.environ.get('WORK') or tempfile.gettempdir()
 sweep_work(_work)
 w = tempfile.mkdtemp(prefix='dmsh_', dir=_work)
 with open(os.path.join(w, 'pid'), 'w') as _f: _f.write(str(os.getpid()))
-MTL = SourceOutputs() if SOURCE_ONLY else dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
-# first take the libraries earlier chain versions left on disk: the b-*/ and b-*.img beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
-for _spec in [] if SOURCE_ONLY else [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
-    _mac, _, _ios = _spec.partition('=')
-    for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
-        if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
-            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
+if SOURCE_ONLY:
+    MTL = SourceOutputs()
+else:
+    MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+    # First take libraries earlier chain versions left on disk, beside the output and in the roots DMSH_PREFILL lists.
+    for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
+        _mac, _, _ios = _spec.partition('=')
+        for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
+            if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
+                for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
 
 # Progress for the NSP script (DMSH_PROGRESS: a small JSON file it reads, build_ipa_from_nsp.py ShaderWatch), written at most every half second
 PROGRESS = os.environ.get('DMSH_PROGRESS')
@@ -1140,7 +1143,7 @@ def finished(*_):   # one more shader finished, for the progress
 COUNTERS = (PRE_STATS, VIN_STATS, PULL_STATS, SIDE_STATS, BF_STATS, MTL.stats)
 def worker_start():
     global PROGRESS, STORE
-    assert SERVED is not None
+    assert SERVED is not None and isinstance(MTL, dmsh_mtlcache.Cache)
     STORE = MTL.store = SERVED.worker()
     PROGRESS = None   # this build writes it, as the workers' shaders finish
 def fin_worker(key, wb, job, err):

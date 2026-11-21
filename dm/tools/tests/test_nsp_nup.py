@@ -846,7 +846,109 @@ class StandaloneCLI(Base):
         self.assertFalse((work / 'extract/v0').exists())
 
 
+class ExternalDlc(Base):
+    def setUp(self):
+        super().setUp()
+        self.source = self.dir / 'player-dlc'; self.source.mkdir()
+        self.work = self.dir / 'build'
+        self.romfs = self.dir / 'dlc-romfs'; self.romfs.mkdir()
+        self.marker = self.romfs / 'marker'
+
+    def image(self, name, content):
+        self.marker.write_bytes(content)
+        img = self.source / name
+        romfs_image.pack(self.romfs, img)
+        return img
+
+    def test_rebuild_uses_only_current_selected_images(self):
+        old = self.open()
+        app, _, _, dlc = pack_nup.scan(old)
+        cached = self.work / 'aoc'
+        pack_nup.pack_dlc(old, app, dlc, cached, say=lambda _: None)   # a stamped image from a previous pack
+        (cached / '4.img').write_bytes((cached / '1.img').read_bytes())   # an earlier NSP extraction had only a directory-wide key
+        (self.work / 'aoc.key').write_text('previous extraction')
+        one = self.image('1.img', b'original')
+        two = self.image('2.IMG', b'other')
+        (self.source / '._1.img').write_bytes(b'AppleDouble')
+
+        staged = nsp.stage_external_dlc(self.work, self.source)
+        assert staged is not None
+        self.assertEqual(sorted(p.name for p in staged.iterdir()), ['1.img', '2.img'])
+        self.assertEqual((staged / '1.img').read_bytes(), one.read_bytes())
+        self.assertEqual((staged / '2.img').read_bytes(), two.read_bytes())
+        with mock.patch.object(nsp.shutil, 'copyfile', side_effect=AssertionError('copied unchanged DLC')):
+            self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+
+        before = one.stat()
+        self.image(one.name, b'replaced')
+        os.utime(one, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(one.stat().st_size, before.st_size)
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual(nsp.rfs.Path(staged / '1.img/marker').read_bytes(), b'replaced')
+        two.unlink()
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual(sorted(p.name for p in staged.iterdir()), ['1.img'])
+        self.assertEqual((staged / '1.img').read_bytes(), one.read_bytes())
+        self.assertEqual(nsp.rfs.Path(staged / '1.img/marker').read_bytes(), b'replaced')
+
+        nsp.rmtree(staged.parent)   # a front end can discard the stage after a successful build
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual(nsp.rfs.Path(staged / '1.img/marker').read_bytes(), b'replaced')
+        one.unlink()
+        self.assertIsNone(nsp.stage_external_dlc(self.work, self.source))
+        self.assertEqual(list(staged.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in cached.iterdir()), ['1.img', '1.img.inputs.json', '4.img'])
+
+    def test_invalid_image_keeps_the_previous_stage(self):
+        one = self.image('1.img', b'original')
+        staged = nsp.stage_external_dlc(self.work, self.source)
+        assert staged is not None
+        before = one.read_bytes()
+        self.image(one.name, b'replaced')
+        broken = self.source / '2.img'; broken.write_bytes(b'not a RomFS image')
+        with self.assertRaisesRegex(nsp.BuildError, r'invalid RomFS image .*2\.img'):
+            nsp.stage_external_dlc(self.work, self.source)
+        self.assertEqual(list(staged.iterdir()), [staged / '1.img'])
+        self.assertEqual((staged / '1.img').read_bytes(), before)
+        self.assertFalse(staged.parent.with_suffix('.partial').exists())
+        broken.unlink()
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual((staged / '1.img').read_bytes(), one.read_bytes())
+
+    def test_invalid_index_is_rejected(self):
+        img = self.image('2001.img', b'dlc')
+        with self.assertRaisesRegex(nsp.BuildError, r'indices 1 to 2000: .*2001\.img'):
+            nsp.stage_external_dlc(self.work, self.source)
+        self.assertTrue(img.is_file())
+
+    def test_option_requires_a_nup_without_embedded_dlc(self):
+        for target in (self.source, self.path):
+            with self.subTest(target=target), self.assertRaisesRegex(nsp.BuildError, 'requires a NUP without embedded DLC'):
+                nsp.main(nsp.parse_args([str(target), '--aoc-dir', str(self.source)]))
+
+
 class Main(Base):
+    def test_aoc_dir_supplies_the_builds_dlc(self):
+        write_nup(self.path, [(0, TID, 0, version(), META), (1, TID, VER, version(), b'')])
+        romfs = self.dir / 'dlc-romfs'; romfs.mkdir()
+        (romfs / 'marker').touch()
+        source = self.dir / 'aoc'; source.mkdir()
+        romfs_image.pack(romfs, source / '1.img')
+        work = self.dir / f'{TID:016X}_build'
+        stale = work / 'aoc'; stale.mkdir(parents=True)
+        romfs_image.pack(romfs, stale / '2.img')
+        from game import Game
+        game = Game(REPO / 'dm/games' / f'{TID:016X}')
+        sources = {'graphics': ('gl', 'test'), 'gl_capture': (False, ''), 'gl_fixed': (False, '')}
+        with mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'check_versions_aarch64'), \
+             mock.patch.object(nsp, 'build_mismatch', return_value=[]), mock.patch.object(nsp, 'build_sources', return_value=sources), \
+             mock.patch.object(nsp, 'rewrite', return_value=game), mock.patch.object(nsp, 'chain_header'), \
+             mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'build_gl_shaders', side_effect=Stop) as shaders:
+            for extra, expected in ((['--aoc-dir', str(source)], [work / 'external-dlc/aoc/1.img']), ([], [])):
+                with self.subTest(extra=extra), self.assertRaises(Stop):
+                    nsp.main(nsp.parse_args([str(self.path)] + extra))
+                self.assertEqual(shaders.call_args.args[2][2:], expected)
+
     def test_app_version_from_a_nup_when_only_the_update_is_extracted(self):
         tid, ver = 0x0400486024DEC000, 131072
         from game import Game

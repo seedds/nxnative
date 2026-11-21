@@ -78,6 +78,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
+| [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
@@ -486,6 +487,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`game`**, runtime, at goal, checked: function-matched on 1.1.1, the only build on hand: exactly one match, a boot to the field setup, and the patched function run on the module's own bytes in a small interpreter for both null paths. Issue #712's reporters ran the earlier cuts for about 7 hours with no crash; the path itself has not been reached with these cuts: capture demo: the empty result when the weak reference at +0x88 is unset or dead. The game's own function dereferences its own weak reference; no host service is on the path, so no host or engine rule can hold it. Whether another Game Freak game shares the function is unchecked
 
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
+
+### South Park: The Stick of Truth
+
+[South Park: The Stick of Truth](../../dm/games/010095300B6A4000/README.md), `010095300B6A4000`, [patches.py](../../dm/games/010095300B6A4000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: 1.0.0 and 1.01 match the complete caller and setter: South Park 60 fps target. The title passes 30 to its own Onyx frame-rate setter while requesting NVN present interval 1. The matched caller selects 60 through the same setter.
+
+- **function-matched** (`main` of builds without CUTS): South Park 60 fps target: 1 function, 1 cut
 
 ### Super Mario 3D All-Stars: Super Mario Sunshine
 

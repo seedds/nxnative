@@ -59,6 +59,14 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table, as
 UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
 
 
+def game_modules(folder):   # main and the NROs nro.tsv lists, the modules loader.c dm_game_imports reads
+    folder = Path(folder)
+    names, table = ['main'], folder / 'nro.tsv'
+    if table.is_file():
+        names += [w[0] for w in (l.split() for l in table.read_text(encoding='utf-8').splitlines()) if w and not w[0].startswith('#') and w[0] != 'refused']
+    return [p for p in (folder / f'{n}.patched.bin' for n in names) if p.is_file()]
+
+
 def build(gid, patched, control, other_programs=()):
     platform = os.environ.get('SETTINGS_PLATFORM') or 'ios'
     if platform not in ('ios', 'mac'): sys.exit(f'SETTINGS_PLATFORM must be ios or mac: {platform}')
@@ -67,6 +75,7 @@ def build(gid, patched, control, other_programs=()):
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
     mac_mic = platform == 'mac' and nso_syms.audio_input_capable(
         p for folder in (patched, *other_programs) for p in Path(folder).glob('*.patched.bin'))
+    vi_hdr = []   # read once, when a row asks: main is large
     have = nacp.languages(control)
     langs = [(c, n) for c, n in nacp.LANGUAGES if not have or c in have]   # no list (a dump or a NUP has no control data, none of its packages may): any language may be the game's, as DM_LANG and the NSP script's check take it
 
@@ -77,6 +86,9 @@ def build(gid, patched, control, other_programs=()):
     def shown(cond, n):
         if cond == 'always': return True
         if cond == 'mac-mic': return mac_mic
+        if cond == 'vi-hdr':
+            if not vi_hdr: vi_hdr.append(nso_syms.imports_prefix((m for folder in (patched, *other_programs) for m in game_modules(folder)), '_ZN2nn2vi21QueryDisplayHdrStatus'))
+            return vi_hdr[0]
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]

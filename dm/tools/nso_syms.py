@@ -39,6 +39,14 @@ def audio_input_capable(modules):
     return False
 
 
+def imports_prefix(modules, prefix):   # a module imports a symbol whose name starts with prefix, as loader.c dm_game_imports reads main and the NROs
+    for module in modules:
+        try: symbols = dynsyms(module.read_bytes())
+        except (AssertionError, KeyError, IndexError, ValueError, struct.error): continue
+        if any(not defined and name.startswith(prefix) for name, defined, _ in symbols): return True
+    return False
+
+
 def defined(img):   # {name: (offset, size)} of the module's defined dynamic symbols; {} without a symbol table it can read (New Super Mario Bros. U Deluxe's sdk: a 32-bit module, whose dynamic table has 8-byte entries)
     try:
         mod0 = struct.unpack_from('<I', img, 4)[0]

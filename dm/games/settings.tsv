@@ -9,6 +9,7 @@
 #             <ios>|<mac> selects the platform's default before resolving a profile macro or build variable
 #   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
 #             mac-mic: a Mac app whose modules import the supported polling InputStream API;
+#             vi-hdr: main or an NRO imports nn::vi::QueryDisplayHdrStatus, as loader.c dm_game_imports reads them (the game can render HDR itself; HDR's Game's HDR is listed only with it);
 #             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads
 #   section   Game, Controls or Performance: a heading on the single settings screen. Rows appear in table order within each section
 #             Reset to tested defaults clears all launcher choices; values fixed by an env file stay
@@ -21,7 +22,7 @@ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		le
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
-DM_HDR	choice	0=Off,1=BT.2446,2=Game's HDR	0	always	Game	HDR	Brighter picture on an HDR (EDR) screen. A brighter screen uses more power.
+DM_HDR	choice	0=Off,1=BT.2446,2=Game's HDR?vi-hdr	0	always	Game	HDR	Brighter picture on an HDR (EDR) screen. A brighter screen uses more power.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.

@@ -94,6 +94,17 @@ import Foundation
         expect(SaveSyncReport.step(none) == .play("ask") && none.localChoice == "local:none", "no cloud save and never synced: ask, local:none")
         let missing = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=1 pull=0")!
         expect(SaveSyncReport.step(missing) == .missing && missing.localChoice == "local:none", "no cloud save though previously synced: missing, local:none")
+        // A value hidden for this game (settings.tsv ?: Game's HDR for a game without nn::vi::QueryDisplayHdrStatus) is not listed: a saved one loads the default, and choose (the
+        // path of the in-game menu's live settings, which do not include HDR) refuses it
+        let hdr = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_HDR","kind":"choice","label":"HDR","note":"","default":"0","options":[["0","Off"],["1","BT.2446"]]}"#.utf8))
+        unsetenv("DM_HDR"); d.set("2", forKey: "launcher.DM_HDR")
+        let hm = LauncherModel([hdr], defaults: d)
+        expect(hm.values["DM_HDR"] == "0", "a saved value the game does not list loads the default")
+        hm.choose(hdr, "2")
+        expect(hm.values["DM_HDR"] == "0" && getenv("DM_HDR") == nil, "choose refuses a value the game does not list")
+        hm.apply()
+        expect(d.object(forKey: "launcher.DM_HDR") == nil && String(cString: getenv("DM_HDR")) == "0", "Play forgets a saved value the game does not list and runs the default")
+        d.removeObject(forKey: "launcher.DM_HDR"); unsetenv("DM_HDR")
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)

@@ -18,6 +18,9 @@
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
 #include "romfs_image.h"
+#include "arh1.h"
+#include <ctype.h>
+#include <fts.h>
 #include "save_sync.h"
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
@@ -42,6 +45,10 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 #define IMG_H(h) (((h) >> 58) == 1)
 #define IMG_M(h) ((int)(((h) >> 32) & 0x3ffffff))
 #define IMG_K(h) ((uint32_t)(h))
+// An ARH1 index or archive that mod folders change (vf_open, "Archive members of mod folders"): bit 59, its entry in g_vf
+#define VF_HANDLE(k) ((2ull << 58) | (uint64_t)(k))
+#define VF_H(h) (((h) >> 58) == 2)
+#define VF_K(h) ((uint32_t)(h))
 // On Horizon a FileHandle is a pointer to the SDK's FileAccessor, a heap object, so its low bits are clear, and a game may use them: Metroid Prime 4's file device masks
 // them off (handle & ~7) before ReadFile, which read image entry 7 as entry 0 (another file, then a null pointer at boot). The guest sees the host's handle shifted
 // left by 4, 16-byte aligned as AArch64 heap blocks are (the image flag then lands on bit 62, as before): FH_OUT where a handle goes to the guest, FH_IN in each call that takes one
@@ -244,6 +251,19 @@ static Result mount(const char *name, const char *dir, int ro) { return mount_ex
 // AocVersionCheker mounts each add-on as "AVCtitle", reads its AocVersion/AocVersion_<label>.json and unmounts it. The host's table keeps its entries, as an open
 // image file names its entry by index (IMG_HANDLE): Unmount marks an add-on's entry released (aoc_release; it keeps its name for the log, and no name lookup matches it, mnt_is), and a later mount of the same image takes that entry back,
 // so cycling through the add-ons does not grow the table. A name still in use keeps its target, as mount_ex does for every mount.
+// The add-on content's mod folders: DM_AOC_OVERLAY_<index> (a front end sets it from the mods that are on, or env.txt), searched before the add-on's own files as DM_ROMFS_OVERLAY is for
+// the game's RomFS. A mod for a DLC replaces files of that DLC's RomFS: Xenoblade Chronicles 2's balance mods change bdat/common.bdat of the Torna add-on (its index 1), which the game reads instead of the base game's
+static void aoc_overlay(const char *name, int index) {
+    char key[40]; snprintf(key, sizeof key, "DM_AOC_OVERLAY_%d", index);
+    const char *overlay = getenv(key);
+    if (!overlay || !*overlay) return;
+    PATH_LOCK(); pthread_mutex_lock(&g_lock);
+    for (int i = g_nmnt - 1; i >= 0; i--) if (mnt_named(&g_mnt[i], name)) {
+        if (strcmp(g_mnt[i].overlay, overlay)) { strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); LOG("fs mount %s: add-on content %d with mod folders first (%s)", name, index, overlay); }
+        break;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
 static Result mount_aoc(const char *name, const char *dir) {
     {
         PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -614,7 +634,9 @@ HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv; add-on content → D
         LOG("fs mount add-on content %s: index %d does not exist (DM_AOC_DIR=%s)", name, index, getenv("DM_AOC_DIR") ? getenv("DM_AOC_DIR") : "unset");
         return RES_TARGET_NOT_FOUND;
     }
-    return mount_aoc(name, dir);
+    Result r = mount_aoc(name, dir);
+    if (r == RES_OK) aoc_overlay(name, index);
+    return r;
 }
 // System data archives are firmware content, which the host does not ship. A player can supply their own console's: <DM_SYSTEM_DIR>/sysdata/<id as 16 hex digits>/ holds an archive's
 // RomFS files, mounted read-only. Without it, the two Mii model archives are the host's stand-in, one directory of files in their shared layout with every part blank (hle_mii.c
@@ -1079,10 +1101,162 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op,
     sdk_unmount(name);
 }
 
+// ---------- Archive members of mod folders ----------
+// Monolith's games (Xenoblade Chronicles 2 and 3, their Switch 2 Editions) read nearly all their files from one archive, bf2.ard / bf3.ard, through its index, bf2.arh /
+// bf3.arh (arh1.h); the RomFS holds no loose bdat/, chr/ or menu/ for an overlay folder to replace, so a mod's files were never read. On a mount with mod folders (DM_ROMFS_OVERLAY,
+// DM_AOC_OVERLAY_<index>), the first open of an ARH1 index or its archive builds both as the game would see them with the mods packed in: each file of a mod folder that the
+// RomFS does not have but the index names (its path relative to the index's folder) is appended to the archive, 16-byte aligned, and its member pointed there, stored as is.
+// The first folder wins, as for loose files. The archive is then the game's own bytes followed by the mod files, read in place (no copy of the 9 to 15 GB archive); the index is a
+// copy in memory. A file handle of either is VF_HANDLE(its entry). A mount with no such file keeps its archive as it was. XC3's mods were made for RoccoDev's xc3-file-loader,
+// a skyline plugin that serves the same loose paths in place of the members (docs/reference/services.md, Archive members of mod folders)
+typedef struct { uint64_t at, n, src; int fd; const uint8_t *mem; } vf_seg;   // bytes [at, at + n) of the file: n bytes of fd from src, or of mem
+typedef struct { int mount; char rest[512]; int virt; vf_seg *seg; int nseg; uint64_t size; } vfile_t;   // virt 0: the archive stays as it was
+#define VF_MAX 64
+static vfile_t g_vf[VF_MAX]; static int g_nvf;   // entries are only added, under g_path_lock, and never change after; readers index them by handle
+static int vf_add_seg(vfile_t *v, uint64_t at, uint64_t n, int fd, uint64_t src, const uint8_t *mem) {
+    vf_seg *s = realloc(v->seg, (size_t)(v->nseg + 1) * sizeof *s);
+    if (!s) die("archive member table allocation failed");
+    v->seg = s; s[v->nseg++] = (vf_seg){ at, n, src, fd, mem };
+    if (at + n > v->size) v->size = at + n;
+    return 0;
+}
+// The bytes of a RomFS file of mount m: a descriptor kept open and the file's place in it; 0 when there is none
+static int vf_base(const mount_t *m, const char *rest, int *fd, uint64_t *src, uint64_t *n) {
+    if (m->img) {
+        int64_t k = img_find(m->img, rest);
+        if (k < 0 || !m->img->e[k].type) return 0;
+        *fd = m->img->fd; *src = m->img->e[k].a; *n = m->img->e[k].b; return 1;
+    }
+    char hp[1024]; struct stat st;
+    if (!root_path(m->dir, rest, hp, sizeof hp) || (*fd = open(hp, O_RDONLY)) < 0) return 0;
+    if (fstat(*fd, &st) || !S_ISREG(st.st_mode)) { close(*fd); return 0; }
+    *src = 0; *n = (uint64_t)st.st_size; return 1;
+}
+static int vf_overlay_has(const mount_t *m, const char *rest) {
+    char *roots = strdup(m->overlay), *save = NULL, hp[1024]; int found = 0;
+    if (!roots) die("archive member table allocation failed");
+    for (char *root = strtok_r(roots, ":", &save); root && !found; root = strtok_r(NULL, ":", &save))
+        found = root_path(root, rest, hp, sizeof hp) && !access(hp, F_OK);
+    free(roots); return found;
+}
+typedef struct { uint32_t id; int fd; uint64_t n; } vf_member;
+// The folders whose files may replace members of an archive on mount m: its own overlay first, then every other mod folder of the game (DM_ROMFS_OVERLAY, DM_AOC_OVERLAY_<index>),
+// as the games resolve one path through all their archives: XC3's mods put bdat/dlc.bdat, a member of the add-on content's bf3_dlc02.arh to bf3_dlc04.arh only, beside the base's files,
+// and xc3-file-loader serves it by its path; XC2's Switch mods put bdat/common.bdat in the Torna add-on's folder, which the Switch 2 Edition keeps in the base's bf2.arh. NULL: none
+extern char **environ;
+static char *vf_roots(const mount_t *m) {
+    size_t n = strlen(m->overlay) + 1;
+    for (char **e = environ; *e; e++) if (!strncmp(*e, "DM_ROMFS_OVERLAY=", 17) || !strncmp(*e, "DM_AOC_OVERLAY_", 15)) n += strlen(*e) + 1;
+    char *r = malloc(n); if (!r) die("archive member table allocation failed");
+    strlcpy(r, m->overlay, n);
+    for (char **e = environ; *e; e++) {
+        const char *v = !strncmp(*e, "DM_ROMFS_OVERLAY=", 17) || !strncmp(*e, "DM_AOC_OVERLAY_", 15) ? strchr(*e, '=') : NULL;
+        if (v && v[1]) { if (*r) strlcat(r, ":", n); strlcat(r, v + 1, n); }
+    }
+    if (!*r) { free(r); return NULL; }
+    return r;
+}
+// Builds the index (g_vf[*ia]) and archive (g_vf[*id]) of stem ("/bf3") on mount mi. Called with g_path_lock held
+static void vf_build(int mi, const char *stem, int *ia, int *id) {
+    const mount_t *m = &g_mnt[mi];
+    char arh_rest[512], ard_rest[512], dir[512];
+    snprintf(arh_rest, sizeof arh_rest, "%s.arh", stem); snprintf(ard_rest, sizeof ard_rest, "%s.ard", stem);
+    strlcpy(dir, stem, sizeof dir); *strrchr(dir, '/') = 0;   // the index's folder, "" for the root: member paths are relative to it
+    if (g_nvf + 2 > VF_MAX) die("archive member table full");
+    vfile_t *va = &g_vf[g_nvf], *vd = &g_vf[g_nvf + 1];
+    *va = (vfile_t){ .mount = mi }; *vd = (vfile_t){ .mount = mi };
+    strlcpy(va->rest, arh_rest, sizeof va->rest); strlcpy(vd->rest, ard_rest, sizeof vd->rest);
+    *ia = g_nvf; *id = g_nvf + 1; g_nvf += 2;
+    int afd, dfd; uint64_t asrc, an, dsrc, dn;
+    if (!vf_base(m, arh_rest, &afd, &asrc, &an)) return;
+    if (!vf_base(m, ard_rest, &dfd, &dsrc, &dn)) { if (!m->img) close(afd); return; }
+    uint8_t *idx = an <= (1u << 30) ? malloc(an) : NULL; arh1_t a;
+    if (!idx || !romfs_image_read(afd, idx, an, (off_t)asrc) || arh1_open(idx, an, &a)) {
+        if (idx) LOG("[RED] fs archive %s:%s: not an ARH1 index the host can read; its mod folders' files are not packed in", m->name, arh_rest);
+        free(idx); if (!m->img) { close(afd); close(dfd); } return;
+    }
+    if (!m->img) close(afd);
+    uint8_t *taken = calloc(a.nfiles ? a.nfiles : 1, 1); vf_member *mem = NULL; int nmem = 0, nloose = 0; char first_loose[512] = "";
+    char *roots = vf_roots(m), *save = NULL;
+    if (!taken) die("archive member table allocation failed");
+    for (char *root = roots ? strtok_r(roots, ":", &save) : NULL; root; root = strtok_r(NULL, ":", &save)) {
+        char top[1024]; if (!root_path(root, dir, top, sizeof top)) continue;
+        char *argv[] = { top, NULL }; FTS *f = fts_open(argv, FTS_PHYSICAL | FTS_NOCHDIR, NULL); FTSENT *e;
+        if (!f) continue;
+        size_t tl = strlen(top);
+        while ((e = fts_read(f))) {
+            if (e->fts_info == FTS_D && e->fts_level > 0 && e->fts_name[0] == '.') { fts_set(f, e, FTS_SKIP); continue; }
+            if (e->fts_info != FTS_F || e->fts_name[0] == '.' || strlen(e->fts_path) <= tl) continue;
+            const char *rel = e->fts_path + tl;   // "/chr/pc/pc010101.wimdo"
+            char full[1024]; snprintf(full, sizeof full, "%s%s", dir, rel);
+            int bfd; uint64_t bs, bn;
+            if (!strcmp(full, arh_rest) || !strcmp(full, ard_rest)) continue;
+            if (vf_base(m, full, &bfd, &bs, &bn)) { if (!m->img) close(bfd); continue; }   // a loose RomFS file: the overlay itself serves it
+            int64_t fid = arh1_find(&a, rel);
+            if (fid < 0) { char low[512]; size_t i = 0; for (; rel[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)rel[i]); low[i] = 0; fid = arh1_find(&a, low); }
+            if (fid < 0 || (uint64_t)fid >= a.nfiles) { if (!nloose++) strlcpy(first_loose, rel, sizeof first_loose); continue; }
+            if (taken[fid]) continue;   // a folder before this one has it
+            int fd = open(e->fts_path, O_RDONLY); struct stat st;
+            if (fd < 0 || fstat(fd, &st) || st.st_size > UINT32_MAX) { LOG("[RED] fs archive %s:%s: cannot read %s (%s)", m->name, arh_rest, e->fts_path, fd < 0 ? strerror(errno) : "over 4 GB"); if (fd >= 0) close(fd); continue; }
+            // An empty file is what an archive tool leaves when it cannot unpack an entry (7-Zip and RAR 7's compression: XC3's Ultimate Rebalance mod came out as nine
+            // 0-byte bdat files, and the game, given empty tables, stayed on a black screen). No game file is empty where a mod replaces one: it is left out, named in red
+            if (!st.st_size) { LOG("[RED] fs archive %s:%s: %s is empty (a mod download that did not unpack?); the game's own %s is kept", m->name, arh_rest, e->fts_path, rel); close(fd); continue; }
+            if (!(mem = realloc(mem, (size_t)(nmem + 1) * sizeof *mem))) die("archive member table allocation failed");
+            taken[fid] = 1; mem[nmem++] = (vf_member){ (uint32_t)fid, fd, (uint64_t)st.st_size };
+            if (g_flag.fs) LOG("fs archive %s:%s: %s from %s (%lld bytes)", m->name, arh_rest, rel, e->fts_path, (long long)st.st_size);
+        }
+        fts_close(f);
+    }
+    free(roots); free(taken);
+    if (nloose && g_flag.fs) LOG("fs archive %s:%s: %d file%s of the mod folders not in this archive (first: %s; another archive or the RomFS may have %s)",
+                                 m->name, arh_rest, nloose, nloose == 1 ? "" : "s", first_loose, nloose == 1 ? "it" : "them");
+    if (!nmem) { arh1_free(&a); free(idx); if (!m->img) close(dfd); return; }
+    uint64_t at = (dn + 15) & ~15ull, added = 0;
+    vf_add_seg(vd, 0, dn, dfd, dsrc, NULL);
+    for (int i = 0; i < nmem; i++) {
+        if (arh1_redirect(&a, idx, mem[i].id, at, (uint32_t)mem[i].n)) die("archive member vanished");
+        vf_add_seg(vd, at, mem[i].n, mem[i].fd, 0, NULL);
+        added += mem[i].n; at = (at + mem[i].n + 15) & ~15ull;
+    }
+    vf_add_seg(va, 0, an, -1, 0, idx);
+    va->virt = vd->virt = 1;
+    arh1_free(&a); free(mem);
+    LOG("fs archive %s:%s: %d member%s replaced by files of the mod folders (%.1f MB, read past the archive's %.2f GB)", m->name, arh_rest, nmem, nmem == 1 ? "" : "s", added / 1e6, dn / 1e9);
+}
+// 1 with *out a handle when path is an ARH1 index or archive the mod folders change; 0 to open it as usual
+static int vf_open(const char *path, int mode, uint64_t *out) {
+    PATH_LOCK(); char fwd[1024]; path = fwd_slashes(path, fwd, sizeof fwd);
+    const char *c = path ? strchr(path, ':') : NULL; if (!c) return 0;
+    size_t pl = strlen(path);
+    if (pl < 4 || (strcmp(path + pl - 4, ".arh") && strcmp(path + pl - 4, ".ard"))) return 0;
+    int mi = -1;
+    for (int i = 0; i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, (size_t)(c - path))) { mi = i; break; }
+    if (mi < 0 || g_mnt[mi].commit[0] || !g_mnt[mi].ro) return 0;   // archives live on the read-only RomFS and add-on content mounts
+    { char *r = vf_roots(&g_mnt[mi]); if (!r) return 0; free(r); }
+    char normed[1024]; const char *rest = c + 1;
+    if (rest[0] != '/' || strstr(rest, "/.") || strstr(rest, "//")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }
+    if (vf_overlay_has(&g_mnt[mi], rest)) return 0;   // a mod folder has the whole file
+    int k = -1;
+    for (int i = 0; i < g_nvf; i++) if (g_vf[i].mount == mi && !strcmp(g_vf[i].rest, rest)) { k = i; break; }
+    if (k < 0) {
+        char stem[512]; size_t rl = strlen(rest);
+        if (rl - 4 >= sizeof stem) return 0;
+        memcpy(stem, rest, rl - 4); stem[rl - 4] = 0;
+        int ia, id; vf_build(mi, stem, &ia, &id);
+        k = rest[rl - 1] == 'h' ? ia : id;
+    }
+    if (!g_vf[k].virt) return 0;
+    if (mode & (MODE_WRITE | MODE_APPEND)) return 0;   // the read-only mount refuses it as usual
+    *out = FH_OUT(VF_HANDLE(k));
+    if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → archive with mod files %d", (now_ns() - g_t0_ns) / 1e9, path, mode, k);
+    return 1;
+}
+
 // ---------- Files ----------
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) { dm_thread_service_request();
     Result (*sdk_open)(uint64_t *, const char *, int) = sdk_path_call(path, "_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci");
     if (sdk_open) return sdk_opened(sdk_open(out, path, mode), out, "_ZN2nn2fs9CloseFileENS0_10FileHandleE");
+    if (vf_open(path, mode, out)) return RES_OK;
     int mi; int64_t k;
     if (img_path(path, &mi, &k)) {
         if (k < 0) return err_res("open", path);
@@ -1111,24 +1285,17 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { dm_thread_service_request();
-    SDK_HANDLE(h, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", Result (*)(size_t *, uint64_t, int64_t, void *, size_t), RES_FAIL, out, h, off, buf, sz);
-    h = FH_IN(h);
-    if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
-    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
-    if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
-        const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
-        fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
-        sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
-    }
-    dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
+// sz bytes of fd at pos into the guest's buf (prepared by the caller); *got: how many came before the end of the file
+static Result read_at(int fd, int64_t pos, void *buf, size_t sz, size_t *got_out, int *reprep) {
+    size_t got = 0;
     while (got < sz) {
-        ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
+        ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, pos + got);
+
         if (r < 0) { if (errno == EINTR) continue;
             // The graphics layer write-protects tracked pages again after each upload (nvn_dirty.c), so a page made writable above can be read-only again by the time pread
             // writes it: a plain write would fault into the tracker's handler, a system call gets EFAULT. Prepare the rest again (unprotect, mark dirty) and read on. Monster Train 2
             // at 60 fps lost one read this way in two of three runs on the Mac (0x2c000 bytes of pool pages, protection read-only), never at 30 fps, where uploads come half as often
-            if (errno == EFAULT && reprep++ < 8) {
+            if (errno == EFAULT && (*reprep)++ < 8) {
                 static _Atomic int once; if (!once++) LOG("[fs] ReadFile into %p+%#zx: the destination was write-protected again during the read, prepared again at +%#zx (first case)", buf, sz, got);
                 dm_guest_write_prepare((uint8_t *)buf + got, sz - got); continue; }
             if (errno == EFAULT) {   // the destination is not writable host memory: say where, with the protection of its VM region
@@ -1140,12 +1307,49 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         if (r == 0) break;
         got += r;
     }
+    *got_out = got; return RES_OK;
+}
+// sz bytes at off of an archive with mod files: its segments, and zeros between them
+static Result vf_read(const vfile_t *v, int64_t off, void *buf, size_t sz, size_t *got_out) {
+    size_t got = 0; int reprep = 0;
+    while (got < sz) {
+        uint64_t pos = (uint64_t)off + got; int lo = 0, hi = v->nseg;   // the first segment that ends past pos
+        while (lo < hi) { int mid = (lo + hi) / 2; if (v->seg[mid].at + v->seg[mid].n <= pos) lo = mid + 1; else hi = mid; }
+        if (lo == v->nseg) break;
+        const vf_seg *g = &v->seg[lo];
+        if (pos < g->at) { size_t z = g->at - pos < sz - got ? (size_t)(g->at - pos) : sz - got; memset((uint8_t *)buf + got, 0, z); got += z; continue; }
+        size_t n = g->at + g->n - pos < sz - got ? (size_t)(g->at + g->n - pos) : sz - got, r = 0;
+        if (g->mem) { memcpy((uint8_t *)buf + got, g->mem + (pos - g->at), n); r = n; }
+        else { Result e = read_at(g->fd, (int64_t)(g->src + (pos - g->at)), (uint8_t *)buf + got, n, &r, &reprep); if (e != RES_OK) return e; }
+        got += r;
+        if (r < n) break;   // the file under the segment got shorter
+    }
+    *got_out = got; return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { dm_thread_service_request();
+    SDK_HANDLE(h, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", Result (*)(size_t *, uint64_t, int64_t, void *, size_t), RES_FAIL, out, h, off, buf, sz);
+    h = FH_IN(h);
+    if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
+    if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
+        const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
+        fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
+        sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
+    }
+    const vfile_t *vf = NULL;
+    if (VF_H(h)) {   // an archive with mod files: never past its end
+        vf = &g_vf[VF_K(h)];
+        sz = off < 0 || (uint64_t)off >= vf->size ? 0 : (size_t)(vf->size - off) < sz ? (size_t)(vf->size - off) : sz;
+    }
+    dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
+    Result rr = vf ? vf_read(vf, off, buf, sz, &got) : read_at(fd, base + off, buf, sz, &got, &reprep);
+    if (rr != RES_OK) return rr;
     *out = got;
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;
-        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
-        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf);
+        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && !VF_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
+        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && !VF_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf);
         pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) {   // Read metering: print a line every 64 MiB accumulated or every 1000 reads
         static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
@@ -1158,7 +1362,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
 HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp-srv → pwrite(2)", Result, h_fs_WriteFile, uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) { dm_thread_service_request();
     SDK_HANDLE(h, "_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", Result (*)(uint64_t, int64_t, const void *, size_t, const void *), RES_FAIL, h, off, buf, sz, opt);
     h = FH_IN(h);
-    if (!h || IMG_H(h)) return RES_FAIL;
+    if (!h || IMG_H(h) || VF_H(h)) return RES_FAIL;
     int fd = (int)h & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = NULL;
     if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
@@ -1183,13 +1387,14 @@ HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", 
     h = FH_IN(h);
     if (!h) return RES_FAIL;
     if (IMG_H(h)) { *out = (int64_t)g_mnt[IMG_M(h)].img->e[IMG_K(h)].b; return RES_OK; }
+    if (VF_H(h)) { *out = (int64_t)g_vf[VF_K(h)].size; return RES_OK; }
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
     *out = st.st_size; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)", Result, h_fs_SetFileSize, uint64_t h, int64_t sz) { dm_thread_service_request();
     SDK_HANDLE(h, "_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", Result (*)(uint64_t, int64_t), RES_FAIL, h, sz);
     h = FH_IN(h);
-    if (!h || IMG_H(h)) return RES_FAIL;
+    if (!h || IMG_H(h) || VF_H(h)) return RES_FAIL;
     int fd = (int)h & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = NULL;
     if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
@@ -1208,12 +1413,12 @@ HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void,
         return;
     }
     h = FH_IN(h);
-    if (!h || IMG_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
+    if (!h || IMG_H(h) || VF_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
     g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
     close((int)h); }
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) {
     SDK_HANDLE(h, "_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", int (*)(uint64_t), 0, h);
-    h = FH_IN(h); return IMG_H(h) ? MODE_READ : g_fmode[(int)h & 0xffff]; }
+    h = FH_IN(h); return IMG_H(h) || VF_H(h) ? MODE_READ : g_fmode[(int)h & 0xffff]; }
 
 // ---------- Path operations ----------
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) { dm_thread_service_request();

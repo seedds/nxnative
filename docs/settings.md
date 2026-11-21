@@ -234,6 +234,8 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+For horizontal purple bands on a primary mirrored HDMI display, `DM_MAC_COMPOSITED=1` makes the Mac's Metal layer non-opaque while keeping native fullscreen. This is opt-in and has been checked on Ocarina of Time with an M5 Pro and a 60 Hz TV; other games and display arrangements have not been checked. It needs a host built with support for this switch. Unset it or use `0` to keep the original policy. See [the fullscreen presentation finding](reference/rendering.md#a-purple-band-on-the-opaque-mac-fullscreen-layer) for the comparison and measurements.
+
 ### Switch 2 controllers
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.

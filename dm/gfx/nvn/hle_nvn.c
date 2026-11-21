@@ -1,5 +1,5 @@
 // NVN interface layer: takes over the nvnBootstrapLoader imported by main; the NVN driver in sdk is not executed at all.
-// All 523 NVN names return counting thunks (nvn_thunks.S), and the thunks forward to the implementations here:
+// All 743 NVN names return counting thunks (nvn_thunks.S), and the thunks forward to the implementations here:
 //   - those with semantics (device / memory pools / textures and samplers / queue / window / sync / events / command buffer memory) are implemented per NVN semantics, and the objects are real;
 //   - those that only change GPU state and have no CPU-visible result (state objects, bindings, draws, clears...) are recorded as commands and replayed at submit;
 //   - the rest (the 307 that main only loads but never calls + those without a prototype in the header) go to nvn_unimpl_entry: reports a failure and prints the name when called.

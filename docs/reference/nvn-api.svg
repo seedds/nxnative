@@ -1,0 +1,842 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="820" viewBox="0 0 960 820" role="img" aria-label="NVN / NVN2 API coverage map">
+<rect width="960" height="820" fill="#0d1117"/>
+<text x="16" y="34" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="bold" fill="#e6edf3" text-anchor="start">NVN / NVN2 API coverage in the nxnative host</text>
+<text x="16" y="58" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="start">743 entry points: 421 translated (56.7%), 19 partial, 72 stubbed, 231 missing</text>
+<rect x="16.00" y="72" width="525.83" height="14" fill="#2ea043"><title>translated: 421 of 743</title></rect>
+<rect x="541.83" y="72" width="23.73" height="14" fill="#7ee787"><title>partial: 19 of 743</title></rect>
+<rect x="565.56" y="72" width="68.69" height="14" fill="#2d9a8c"><title>stub-ok: 55 of 743</title></rect>
+<rect x="634.25" y="72" width="21.23" height="14" fill="#d29922"><title>stub-risky: 17 of 743</title></rect>
+<rect x="655.48" y="72" width="288.52" height="14" fill="#5b6472"><title>missing: 231 of 743</title></rect>
+<rect x="16" y="102" width="12" height="12" fill="#2ea043"/>
+<text x="34" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#e6edf3" text-anchor="start">immediate 344</text>
+<rect x="170" y="102" width="12" height="12" fill="#2ea043"/>
+<text x="188" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#e6edf3" text-anchor="start">recorded 77</text>
+<rect x="324" y="102" width="12" height="12" fill="#7ee787"/>
+<text x="342" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#e6edf3" text-anchor="start">partial 19</text>
+<rect x="478" y="102" width="12" height="12" fill="#2d9a8c"/>
+<text x="496" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#e6edf3" text-anchor="start">stub-ok 55</text>
+<rect x="632" y="102" width="12" height="12" fill="#d29922"/>
+<text x="650" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#e6edf3" text-anchor="start">stub-risky 17</text>
+<rect x="786" y="102" width="12" height="12" fill="#5b6472"/>
+<text x="804" y="112" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#e6edf3" text-anchor="start">missing 231</text>
+<text x="16" y="148" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">NVN2: DLSS, ray tracing, cooperative vectors</text>
+<text x="468" y="148" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">28/94</text>
+<g>
+<rect x="16" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindAccelerationStructure: missing</title></rect>
+<rect x="30" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindAccelerationStructures: missing</title></rect>
+<rect x="44" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindAccelerationStructuresDeferred: missing</title></rect>
+<rect x="58" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindDeviceMessageBuffer: missing</title></rect>
+<rect x="72" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindDeviceMessageBufferDeferred: missing</title></rect>
+<rect x="86" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBuildAccelerationStructures: missing</title></rect>
+<rect x="100" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferCompactAccelerationStructure: missing</title></rect>
+<rect x="114" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferConvertCooperativeVectorMatrix: missing</title></rect>
+<rect x="128" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferCopyAccelerationStructure: missing</title></rect>
+<rect x="142" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferDispatchRays: missing</title></rect>
+<rect x="156" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferDispatchRaysIndirect: missing</title></rect>
+<rect x="170" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferEvaluateDlss: recorded</title></rect>
+<rect x="184" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferGetAccelerationStructureVisualizationData: missing</title></rect>
+<rect x="198" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferRelocateAccelerationStructure: missing</title></rect>
+<rect x="212" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferResetDeviceMessageBuffer: missing</title></rect>
+<rect x="226" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferResetDeviceMessageBufferDeferred: missing</title></rect>
+<rect x="240" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCalculateAccelerationStructureMemoryRequirements: missing</title></rect>
+<rect x="254" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCompactAccelerationStructure: missing</title></rect>
+<rect x="268" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceConvertCooperativeVectorMatrix: missing</title></rect>
+<rect x="282" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCopyAccelerationStructure: missing</title></rect>
+<rect x="296" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceGetCooperativeVectorMatrixSize: missing</title></rect>
+<rect x="310" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferBeginMessages: missing</title></rect>
+<rect x="324" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferEndMessages: missing</title></rect>
+<rect x="338" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferGetNextMessage: missing</title></rect>
+<rect x="352" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferReset: missing</title></rect>
+<rect x="366" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferSetDefaults: missing</title></rect>
+<rect x="380" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferSetDevice: missing</title></rect>
+<rect x="394" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceMessageBufferSetStorage: missing</title></rect>
+<rect x="408" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRelocateAccelerationStructure: missing</title></rect>
+<rect x="422" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetDevice: missing</title></rect>
+<rect x="436" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetFlags: missing</title></rect>
+<rect x="450" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetMaxEvaluationEntries: missing</title></rect>
+<rect x="16" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetMemory: missing</title></rect>
+<rect x="30" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetMemorySize: missing</title></rect>
+<rect x="44" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetMethod: missing</title></rect>
+<rect x="58" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkBuilderGetOptimalSettings: immediate</title></rect>
+<rect x="72" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetOutputResolution: missing</title></rect>
+<rect x="86" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetPreset: missing</title></rect>
+<rect x="100" y="172" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDlssNetworkBuilderGetStorageSize: stub-ok</title></rect>
+<rect x="114" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetTextureIDs: missing</title></rect>
+<rect x="128" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssNetworkBuilderGetTexturePool: missing</title></rect>
+<rect x="142" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkBuilderSetDefaults: immediate</title></rect>
+<rect x="156" y="172" width="12" height="12" rx="2" fill="#d29922"><title>nvnDlssNetworkBuilderSetDevice: stub-risky</title></rect>
+<rect x="170" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkBuilderSetFlags: immediate</title></rect>
+<rect x="184" y="172" width="12" height="12" rx="2" fill="#d29922"><title>nvnDlssNetworkBuilderSetMaxEvaluationEntries: stub-risky</title></rect>
+<rect x="198" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkBuilderSetMethod: immediate</title></rect>
+<rect x="212" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkBuilderSetOutputResolution: immediate</title></rect>
+<rect x="226" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkBuilderSetPreset: immediate</title></rect>
+<rect x="240" y="172" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDlssNetworkBuilderSetStorage: stub-ok</title></rect>
+<rect x="254" y="172" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDlssNetworkBuilderSetTextureIDs: stub-ok</title></rect>
+<rect x="268" y="172" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDlssNetworkFinalize: stub-ok</title></rect>
+<rect x="282" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkInitialize: immediate</title></rect>
+<rect x="296" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssNetworkResize: immediate</title></rect>
+<rect x="310" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetBiasCurrentColorSubrectangleBase: missing</title></rect>
+<rect x="324" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetDepthSubrectangleBase: missing</title></rect>
+<rect x="338" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetEvaluationIndex: missing</title></rect>
+<rect x="352" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetHistoryReset: missing</title></rect>
+<rect x="366" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetInputColorSubrectangleBase: missing</title></rect>
+<rect x="380" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetInputSubrectangleSize: missing</title></rect>
+<rect x="394" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetJitterOffset: missing</title></rect>
+<rect x="408" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetMotionVectorScale: missing</title></rect>
+<rect x="422" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetMotionVectorSubrectangleBase: missing</title></rect>
+<rect x="436" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetOutputSubrectangleBase: missing</title></rect>
+<rect x="450" y="172" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersGetPreExposure: missing</title></rect>
+<rect x="16" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetBiasCurrentColorMask: immediate</title></rect>
+<rect x="30" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetBiasCurrentColorSubrectangleBase: immediate</title></rect>
+<rect x="44" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetDefaults: immediate</title></rect>
+<rect x="58" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetDepth: immediate</title></rect>
+<rect x="72" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetDepthSubrectangleBase: immediate</title></rect>
+<rect x="86" y="186" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDlssParametersSetEvaluationIndex: stub-ok</title></rect>
+<rect x="100" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetExposureTexture: immediate</title></rect>
+<rect x="114" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetHistoryReset: immediate</title></rect>
+<rect x="128" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetInputColor: immediate</title></rect>
+<rect x="142" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetInputColorSubrectangleBase: immediate</title></rect>
+<rect x="156" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetInputSubrectangleSize: immediate</title></rect>
+<rect x="170" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetJitterOffset: immediate</title></rect>
+<rect x="184" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetMotionVectorScale: immediate</title></rect>
+<rect x="198" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetMotionVectorSubrectangleBase: immediate</title></rect>
+<rect x="212" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetMotionVectors: immediate</title></rect>
+<rect x="226" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetOutputColor: immediate</title></rect>
+<rect x="240" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetOutputSubrectangleBase: immediate</title></rect>
+<rect x="254" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersSetOverlayDebugLayer: missing</title></rect>
+<rect x="268" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersSetOverlayFullScreen: missing</title></rect>
+<rect x="282" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersSetOverlayJitterDebug: missing</title></rect>
+<rect x="296" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDlssParametersSetOverlayShowNans: missing</title></rect>
+<rect x="310" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDlssParametersSetPreExposure: immediate</title></rect>
+<rect x="324" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetProgramRayTracingFlags: missing</title></rect>
+<rect x="338" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetRayTracingModuleCount: missing</title></rect>
+<rect x="352" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetRayTracingModuleData: missing</title></rect>
+<rect x="366" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetProgramRayTracingFlags: missing</title></rect>
+<rect x="380" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetRayTracingModules: missing</title></rect>
+<rect x="394" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderGetRayTracingMemorySize: immediate</title></rect>
+<rect x="408" y="186" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetRayTracingMemorySize: immediate</title></rect>
+<rect x="422" y="186" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueGetTotalRayTracingMemoryUsed: missing</title></rect>
+</g>
+<text x="492" y="148" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">buffers/memory pools</text>
+<text x="944" y="148" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">25/36</text>
+<g>
+<rect x="492" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnBufferBuilderGetDevice: missing</title></rect>
+<rect x="506" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferBuilderGetMemoryOffset: immediate</title></rect>
+<rect x="520" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferBuilderGetMemoryPool: immediate</title></rect>
+<rect x="534" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferBuilderGetSize: immediate</title></rect>
+<rect x="548" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferBuilderSetDefaults: immediate</title></rect>
+<rect x="562" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferBuilderSetDevice: immediate</title></rect>
+<rect x="576" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferBuilderSetStorage: immediate</title></rect>
+<rect x="590" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferFinalize: immediate</title></rect>
+<rect x="604" y="158" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnBufferFlushMappedRange: stub-ok</title></rect>
+<rect x="618" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferGetAddress: immediate</title></rect>
+<rect x="632" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnBufferGetDebugID: missing</title></rect>
+<rect x="646" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferGetMemoryOffset: immediate</title></rect>
+<rect x="660" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferGetMemoryPool: immediate</title></rect>
+<rect x="674" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferGetSize: immediate</title></rect>
+<rect x="688" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferInitialize: immediate</title></rect>
+<rect x="702" y="158" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnBufferInvalidateMappedRange: stub-ok</title></rect>
+<rect x="716" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBufferMap: immediate</title></rect>
+<rect x="730" y="158" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnBufferSetDebugLabel: stub-ok</title></rect>
+<rect x="744" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMemoryPoolBuilderGetDevice: missing</title></rect>
+<rect x="758" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMemoryPoolBuilderGetFlags: missing</title></rect>
+<rect x="772" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMemoryPoolBuilderGetMemory: missing</title></rect>
+<rect x="786" y="158" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMemoryPoolBuilderGetSize: missing</title></rect>
+<rect x="800" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolBuilderSetDefaults: immediate</title></rect>
+<rect x="814" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolBuilderSetDevice: immediate</title></rect>
+<rect x="828" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolBuilderSetFlags: immediate</title></rect>
+<rect x="842" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolBuilderSetStorage: immediate</title></rect>
+<rect x="856" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolFinalize: immediate</title></rect>
+<rect x="870" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolFlushMappedRange: immediate</title></rect>
+<rect x="884" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolGetBufferAddress: immediate</title></rect>
+<rect x="898" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolGetFlags: immediate</title></rect>
+<rect x="912" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolGetSize: immediate</title></rect>
+<rect x="926" y="158" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolInitialize: immediate</title></rect>
+<rect x="492" y="172" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnMemoryPoolInvalidateMappedRange: stub-ok</title></rect>
+<rect x="506" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolMap: immediate</title></rect>
+<rect x="520" y="172" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMemoryPoolMapVirtual: immediate</title></rect>
+<rect x="534" y="172" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnMemoryPoolSetDebugLabel: stub-ok</title></rect>
+</g>
+<text x="492" y="218" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: bindings</text>
+<text x="944" y="218" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">28/38</text>
+<g>
+<rect x="492" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindBlendState: recorded</title></rect>
+<rect x="506" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindChannelMaskState: recorded</title></rect>
+<rect x="520" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindColorState: recorded</title></rect>
+<rect x="534" y="228" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindCoverageModulationTable: missing</title></rect>
+<rect x="548" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindDepthStencilState: recorded</title></rect>
+<rect x="562" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindImage: recorded</title></rect>
+<rect x="576" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindImages: recorded</title></rect>
+<rect x="590" y="228" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindImagesDeferred: missing</title></rect>
+<rect x="604" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindMultisampleState: recorded</title></rect>
+<rect x="618" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindPolygonState: recorded</title></rect>
+<rect x="632" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindProgram: recorded</title></rect>
+<rect x="646" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindSeparateSampler: recorded</title></rect>
+<rect x="660" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindSeparateSamplers: recorded</title></rect>
+<rect x="674" y="228" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindSeparateSamplersDeferred: missing</title></rect>
+<rect x="688" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindSeparateTexture: recorded</title></rect>
+<rect x="702" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindSeparateTextures: recorded</title></rect>
+<rect x="716" y="228" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindSeparateTexturesDeferred: missing</title></rect>
+<rect x="730" y="228" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferBindShadingRateImage: stub-ok</title></rect>
+<rect x="744" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindStorageBuffer: recorded</title></rect>
+<rect x="758" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindStorageBuffers: recorded</title></rect>
+<rect x="772" y="228" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindStorageBuffersDeferred: missing</title></rect>
+<rect x="786" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindTexture: recorded</title></rect>
+<rect x="800" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindTextures: recorded</title></rect>
+<rect x="814" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindTexturesDeferred: recorded</title></rect>
+<rect x="828" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindTransformFeedbackBuffer: recorded</title></rect>
+<rect x="842" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindTransformFeedbackBuffers: recorded</title></rect>
+<rect x="856" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindUniformBuffer: recorded</title></rect>
+<rect x="870" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindUniformBuffers: recorded</title></rect>
+<rect x="884" y="228" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBindUniformBuffersDeferred: missing</title></rect>
+<rect x="898" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindVertexAttribState: recorded</title></rect>
+<rect x="912" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindVertexBuffer: recorded</title></rect>
+<rect x="926" y="228" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindVertexBuffers: recorded</title></rect>
+<rect x="492" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBindVertexStreamState: recorded</title></rect>
+<rect x="506" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferPushComputeConstants: recorded</title></rect>
+<rect x="520" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferPushComputeConstantsDeferred: missing</title></rect>
+<rect x="534" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferPushGraphicsConstants: recorded</title></rect>
+<rect x="548" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferPushGraphicsConstantsDeferred: missing</title></rect>
+<rect x="562" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetProgramSubroutines: missing</title></rect>
+</g>
+<text x="16" y="232" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: clears and copies</text>
+<text x="468" y="232" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">10/19</text>
+<g>
+<rect x="16" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferClearBuffer: recorded</title></rect>
+<rect x="30" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferClearColor: recorded</title></rect>
+<rect x="44" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferClearColori: recorded</title></rect>
+<rect x="58" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferClearColorui: recorded</title></rect>
+<rect x="72" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferClearDepthStencil: recorded</title></rect>
+<rect x="86" y="242" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferClearTexture: partial</title></rect>
+<rect x="100" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferClearTexturei: missing</title></rect>
+<rect x="114" y="242" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferClearTextureui: partial</title></rect>
+<rect x="128" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferCopyBufferToBuffer: recorded</title></rect>
+<rect x="142" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferCopyBufferToTexture: recorded</title></rect>
+<rect x="156" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferCopyCommands: immediate</title></rect>
+<rect x="170" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferCopyTextureToBuffer: recorded</title></rect>
+<rect x="184" y="242" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferCopyTextureToTexture: partial</title></rect>
+<rect x="198" y="242" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDownsample: partial</title></rect>
+<rect x="212" y="242" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDownsampleTextureView: partial</title></rect>
+<rect x="226" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferResolveDepthBuffer: missing</title></rect>
+<rect x="240" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferTiledDownsample: missing</title></rect>
+<rect x="254" y="242" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferTiledDownsampleTextureView: missing</title></rect>
+<rect x="268" y="242" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferUpdateUniformBuffer: recorded</title></rect>
+</g>
+<text x="16" y="288" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: compute</text>
+<text x="468" y="288" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">2/4</text>
+<g>
+<rect x="16" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferComputeDirtyTileMap: missing</title></rect>
+<rect x="30" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferComputeDirtyTileMapEx: missing</title></rect>
+<rect x="44" y="298" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferDispatchCompute: recorded</title></rect>
+<rect x="58" y="298" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferDispatchComputeIndirect: recorded</title></rect>
+</g>
+<text x="492" y="288" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: draw</text>
+<text x="944" y="288" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">3/19</text>
+<g>
+<rect x="492" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawArrays: partial</title></rect>
+<rect x="506" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawArraysIndirect: partial</title></rect>
+<rect x="520" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawArraysInstanced: partial</title></rect>
+<rect x="534" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawElements: partial</title></rect>
+<rect x="548" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawElementsBaseVertex: partial</title></rect>
+<rect x="562" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawElementsIndirect: partial</title></rect>
+<rect x="576" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawElementsInstanced: partial</title></rect>
+<rect x="590" y="298" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferDrawMeshTasks: recorded</title></rect>
+<rect x="604" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferDrawMeshTasks3D: missing</title></rect>
+<rect x="618" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferDrawMeshTasks3DIndirect: missing</title></rect>
+<rect x="632" y="298" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferDrawMeshTasksIndirect: recorded</title></rect>
+<rect x="646" y="298" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferDrawTexture: recorded</title></rect>
+<rect x="660" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferDrawTransformFeedback: partial</title></rect>
+<rect x="674" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferMultiDrawArraysIndirectCount: partial</title></rect>
+<rect x="688" y="298" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferMultiDrawElementsIndirectCount: partial</title></rect>
+<rect x="702" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferMultiDrawMeshTasks3DIndirect: missing</title></rect>
+<rect x="716" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferMultiDrawMeshTasks3DIndirectCount: missing</title></rect>
+<rect x="730" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferMultiDrawMeshTasksIndirect: missing</title></rect>
+<rect x="744" y="298" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferMultiDrawMeshTasksIndirectCount: missing</title></rect>
+</g>
+<text x="16" y="344" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: fixed-function state</text>
+<text x="468" y="344" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">26/66</text>
+<g>
+<rect x="16" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferDiscardColor: stub-ok</title></rect>
+<rect x="30" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferDiscardDepthStencil: stub-ok</title></rect>
+<rect x="44" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferEnableExclusiveScissor: missing</title></rect>
+<rect x="58" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferOverrideSubtileSize: missing</title></rect>
+<rect x="72" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetAlphaRef: recorded</title></rect>
+<rect x="86" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetBlendColor: recorded</title></rect>
+<rect x="100" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetColorReductionEnable: stub-ok</title></rect>
+<rect x="114" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetColorReductionThresholds: stub-ok</title></rect>
+<rect x="128" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetCommandMemoryCallbackEnabled: stub-ok</title></rect>
+<rect x="142" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetComputeEnable: missing</title></rect>
+<rect x="156" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetComputeEnableConditional: missing</title></rect>
+<rect x="170" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetComputeOverlapMode: stub-ok</title></rect>
+<rect x="184" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetComputeWorkloadPriority: stub-ok</title></rect>
+<rect x="198" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetConservativeRasterDilate: missing</title></rect>
+<rect x="212" y="354" width="12" height="12" rx="2" fill="#d29922"><title>nvnCommandBufferSetConservativeRasterEnable: stub-risky</title></rect>
+<rect x="226" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetConservativeRasterMode: missing</title></rect>
+<rect x="240" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetControlMemoryCallbackEnabled: stub-ok</title></rect>
+<rect x="254" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetCopyEnable: missing</title></rect>
+<rect x="268" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetCopyEnableConditional: missing</title></rect>
+<rect x="282" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetCopyImageStride: immediate</title></rect>
+<rect x="296" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetCopyRowStride: immediate</title></rect>
+<rect x="310" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetDebugLabel: stub-ok</title></rect>
+<rect x="324" y="354" width="12" height="12" rx="2" fill="#d29922"><title>nvnCommandBufferSetDepthBounds: stub-risky</title></rect>
+<rect x="338" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetDepthClamp: recorded</title></rect>
+<rect x="352" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetDepthRange: recorded</title></rect>
+<rect x="366" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetDepthRanges: recorded</title></rect>
+<rect x="380" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetExclusiveScissor: missing</title></rect>
+<rect x="394" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetExclusiveScissors: missing</title></rect>
+<rect x="408" y="354" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferSetFloatBlendClamp: partial</title></rect>
+<rect x="422" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetGeometryProcessingMode: stub-ok</title></rect>
+<rect x="436" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetGraphicsWorkloadPriority: missing</title></rect>
+<rect x="450" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetInnerTessellationLevels: missing</title></rect>
+<rect x="16" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetLineWidth: recorded</title></rect>
+<rect x="30" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetMemoryCallback: immediate</title></rect>
+<rect x="44" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetMemoryCallbackData: immediate</title></rect>
+<rect x="58" y="368" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetOuterTessellationLevels: missing</title></rect>
+<rect x="72" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetPatchSize: recorded</title></rect>
+<rect x="86" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetPointSize: stub-ok</title></rect>
+<rect x="100" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetPolygonOffsetClamp: recorded</title></rect>
+<rect x="114" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetPrimitiveRestart: recorded</title></rect>
+<rect x="128" y="368" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferSetProvokingVertexMode: partial</title></rect>
+<rect x="142" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetRasterizerDiscard: recorded</title></rect>
+<rect x="156" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetRecordingMode: stub-ok</title></rect>
+<rect x="170" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetRenderEnable: recorded</title></rect>
+<rect x="184" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetRenderEnableConditional: recorded</title></rect>
+<rect x="198" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetRenderTargets: recorded</title></rect>
+<rect x="212" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetRepresentativeFragmentTest: stub-ok</title></rect>
+<rect x="226" y="368" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetResourceOccupancy: missing</title></rect>
+<rect x="240" y="368" width="12" height="12" rx="2" fill="#d29922"><title>nvnCommandBufferSetSampleMask: stub-risky</title></rect>
+<rect x="254" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetSamplerPool: recorded</title></rect>
+<rect x="268" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetScissor: recorded</title></rect>
+<rect x="282" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetScissors: recorded</title></rect>
+<rect x="296" y="368" width="12" height="12" rx="2" fill="#d29922"><title>nvnCommandBufferSetShaderScratchMemory: stub-risky</title></rect>
+<rect x="310" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetShadingRatePaletteMode: stub-ok</title></rect>
+<rect x="324" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetStencilCullCriteria: stub-ok</title></rect>
+<rect x="338" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetStencilMask: recorded</title></rect>
+<rect x="352" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetStencilRef: recorded</title></rect>
+<rect x="366" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetStencilValueMask: recorded</title></rect>
+<rect x="380" y="368" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSetSubpixelPrecisionBias: missing</title></rect>
+<rect x="394" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetTexturePool: recorded</title></rect>
+<rect x="408" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetTiledCacheAction: stub-ok</title></rect>
+<rect x="422" y="368" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetTiledCacheTileSize: stub-ok</title></rect>
+<rect x="436" y="368" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetViewport: recorded</title></rect>
+<rect x="450" y="368" width="12" height="12" rx="2" fill="#7ee787"><title>nvnCommandBufferSetViewportSwizzles: partial</title></rect>
+<rect x="16" y="382" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSetViewports: recorded</title></rect>
+<rect x="30" y="382" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSetZCullZF32CompressionEnable: stub-ok</title></rect>
+</g>
+<text x="492" y="344" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: lifecycle, memory, debug</text>
+<text x="944" y="344" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">7/26</text>
+<g>
+<rect x="492" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferBeginDeviceCommands: missing</title></rect>
+<rect x="506" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBeginRecording: immediate</title></rect>
+<rect x="520" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBeginTransformFeedback: recorded</title></rect>
+<rect x="534" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferCallCommands: immediate</title></rect>
+<rect x="548" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferEndDeviceCommands: missing</title></rect>
+<rect x="562" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferEndRecording: immediate</title></rect>
+<rect x="576" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferEndTransformFeedback: recorded</title></rect>
+<rect x="590" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferFinalize: immediate</title></rect>
+<rect x="604" y="354" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferInitialize: immediate</title></rect>
+<rect x="618" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferInsertCheckpointDynamic: missing</title></rect>
+<rect x="632" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferInsertCheckpointStatic: missing</title></rect>
+<rect x="646" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferInsertDebugMarker: stub-ok</title></rect>
+<rect x="660" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferInsertDebugMarkerCompute: missing</title></rect>
+<rect x="674" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferInsertDebugMarkerDynamic: stub-ok</title></rect>
+<rect x="688" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferInsertDebugMarkerGraphics: missing</title></rect>
+<rect x="702" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferInsertDebugMarkerStatic: stub-ok</title></rect>
+<rect x="716" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferPopDebugGroup: stub-ok</title></rect>
+<rect x="730" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferPopDebugGroupCompute: missing</title></rect>
+<rect x="744" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferPopDebugGroupGraphics: missing</title></rect>
+<rect x="758" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferPopDebugGroupId: stub-ok</title></rect>
+<rect x="772" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferPushDebugGroup: stub-ok</title></rect>
+<rect x="786" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferPushDebugGroupCompute: missing</title></rect>
+<rect x="800" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferPushDebugGroupDynamic: stub-ok</title></rect>
+<rect x="814" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferPushDebugGroupGraphics: missing</title></rect>
+<rect x="828" y="354" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferPushDebugGroupStatic: stub-ok</title></rect>
+<rect x="842" y="354" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferSubmitDeviceCommands: missing</title></rect>
+</g>
+<text x="492" y="400" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: other</text>
+<text x="944" y="400" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">13/18</text>
+<g>
+<rect x="492" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferAddCommandMemory: immediate</title></rect>
+<rect x="506" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferAddControlMemory: immediate</title></rect>
+<rect x="520" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetCommandMemoryFree: immediate</title></rect>
+<rect x="534" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetCommandMemorySize: immediate</title></rect>
+<rect x="548" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetCommandMemoryUsed: immediate</title></rect>
+<rect x="562" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetControlMemoryFree: immediate</title></rect>
+<rect x="576" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetControlMemorySize: immediate</title></rect>
+<rect x="590" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetControlMemoryUsed: immediate</title></rect>
+<rect x="604" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetCopyImageStride: immediate</title></rect>
+<rect x="618" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferGetCopyRowStride: immediate</title></rect>
+<rect x="632" y="410" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferGetMemoryCallback: missing</title></rect>
+<rect x="646" y="410" width="12" height="12" rx="2" fill="#5b6472"><title>nvnCommandBufferGetMemoryCallbackData: missing</title></rect>
+<rect x="660" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferIsRecording: immediate</title></rect>
+<rect x="674" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferPauseTransformFeedback: recorded</title></rect>
+<rect x="688" y="410" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferRestoreZCullData: stub-ok</title></rect>
+<rect x="702" y="410" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferResumeTransformFeedback: recorded</title></rect>
+<rect x="716" y="410" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferSaveZCullData: stub-ok</title></rect>
+<rect x="730" y="410" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnCommandBufferShadingRateImagePalette: stub-ok</title></rect>
+</g>
+<text x="16" y="428" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">command buffer: sync and queries</text>
+<text x="468" y="428" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">8/8</text>
+<g>
+<rect x="16" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferBarrier: recorded</title></rect>
+<rect x="30" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferFenceSync: recorded</title></rect>
+<rect x="44" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferReportCounter: recorded</title></rect>
+<rect x="58" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferReportValue: recorded</title></rect>
+<rect x="72" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferResetCounter: recorded</title></rect>
+<rect x="86" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferSignalEvent: recorded</title></rect>
+<rect x="100" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferWaitEvent: recorded</title></rect>
+<rect x="114" y="438" width="12" height="12" rx="2" fill="#2ea043"><title>nvnCommandBufferWaitSync: recorded</title></rect>
+</g>
+<text x="492" y="456" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">debug and vendor (NVX etc.)</text>
+<text x="944" y="456" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">0/2</text>
+<g>
+<rect x="492" y="466" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceIsExternalDebuggerAttached: missing</title></rect>
+<rect x="506" y="466" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnSetExternalDebuggerEnabledNVX: stub-ok</title></rect>
+</g>
+<text x="16" y="484" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">device</text>
+<text x="468" y="484" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">19/50</text>
+<g>
+<rect x="16" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceApplyDeferredFinalizes: missing</title></rect>
+<rect x="30" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceBuilderGetFlags: missing</title></rect>
+<rect x="44" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceBuilderSetDefaults: immediate</title></rect>
+<rect x="58" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceBuilderSetFlags: immediate</title></rect>
+<rect x="72" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCommandBufferGetHandle: missing</title></rect>
+<rect x="86" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCommandBufferSetCommandMemorySize: missing</title></rect>
+<rect x="100" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCommandBufferSetComputeMemorySize: missing</title></rect>
+<rect x="114" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCommandBufferSetDefaults: missing</title></rect>
+<rect x="128" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCommandBufferSetDevice: missing</title></rect>
+<rect x="142" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceCommandBufferSetStorage: missing</title></rect>
+<rect x="156" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceFinalize: immediate</title></rect>
+<rect x="170" y="494" width="12" height="12" rx="2" fill="#d29922"><title>nvnDeviceFinalizeCommandHandle: stub-risky</title></rect>
+<rect x="184" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGenerateDebugDomainId: immediate</title></rect>
+<rect x="198" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceGetCommandHandleMemorySize: missing</title></rect>
+<rect x="212" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetCurrentTimestampInNanoseconds: immediate</title></rect>
+<rect x="226" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetDepthMode: immediate</title></rect>
+<rect x="240" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceGetFlags: missing</title></rect>
+<rect x="254" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetImageHandle: immediate</title></rect>
+<rect x="268" y="494" width="12" height="12" rx="2" fill="#7ee787"><title>nvnDeviceGetInteger: partial</title></rect>
+<rect x="282" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetProcAddress: immediate</title></rect>
+<rect x="296" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetSeparateSamplerHandle: immediate</title></rect>
+<rect x="310" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetSeparateTextureHandle: immediate</title></rect>
+<rect x="324" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetTexelFetchHandle: immediate</title></rect>
+<rect x="338" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetTextureHandle: immediate</title></rect>
+<rect x="352" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetTimestampInNanoseconds: immediate</title></rect>
+<rect x="366" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetUniformBufferHandle: immediate</title></rect>
+<rect x="380" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceGetWindowOriginMode: immediate</title></rect>
+<rect x="394" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceInitialize: immediate</title></rect>
+<rect x="408" y="494" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceInstallDebugCallback: immediate</title></rect>
+<rect x="422" y="494" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDeviceRegisterFastClearColor: stub-ok</title></rect>
+<rect x="436" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearColorIndex: missing</title></rect>
+<rect x="450" y="494" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearColori: missing</title></rect>
+<rect x="16" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearColoriIndex: missing</title></rect>
+<rect x="30" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearColorui: missing</title></rect>
+<rect x="44" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearColoruiIndex: missing</title></rect>
+<rect x="58" y="508" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDeviceRegisterFastClearDepth: stub-ok</title></rect>
+<rect x="72" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearDepthIndex: missing</title></rect>
+<rect x="86" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearStencil: missing</title></rect>
+<rect x="100" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceRegisterFastClearStencilIndex: missing</title></rect>
+<rect x="114" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetAutomaticCheckpointsByDebugGroup: missing</title></rect>
+<rect x="128" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetAutomaticCheckpointsEnable: missing</title></rect>
+<rect x="142" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetAutomaticCheckpointsMask: missing</title></rect>
+<rect x="156" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetAutomaticCheckpointsSamplingInterval: missing</title></rect>
+<rect x="170" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetCheckpointCallStacksEnable: missing</title></rect>
+<rect x="184" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetCheckpointMaxCallStacksDepth: missing</title></rect>
+<rect x="198" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceSetDebugLabel: missing</title></rect>
+<rect x="212" y="508" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceSetDepthMode: immediate</title></rect>
+<rect x="226" y="508" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnDeviceSetIntermediateShaderCache: stub-ok</title></rect>
+<rect x="240" y="508" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDeviceSetWindowOriginMode: immediate</title></rect>
+<rect x="254" y="508" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDeviceWalkDebugDatabase: missing</title></rect>
+</g>
+<text x="492" y="512" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">other</text>
+<text x="944" y="512" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">0/13</text>
+<g>
+<rect x="492" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersGetConstantColorTable: missing</title></rect>
+<rect x="506" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersGetDepthStencilMask: missing</title></rect>
+<rect x="520" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersGetExpandFootprint: missing</title></rect>
+<rect x="534" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersGetInputs: missing</title></rect>
+<rect x="548" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersGetOutputs: missing</title></rect>
+<rect x="562" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersGetTexture: missing</title></rect>
+<rect x="576" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetConstantColorTable: missing</title></rect>
+<rect x="590" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetDefaults: missing</title></rect>
+<rect x="604" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetDepthStencilMask: missing</title></rect>
+<rect x="618" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetExpandFootprint: missing</title></rect>
+<rect x="632" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetInputs: missing</title></rect>
+<rect x="646" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetOutputs: missing</title></rect>
+<rect x="660" y="522" width="12" height="12" rx="2" fill="#5b6472"><title>nvnDirtyTileMapParametersSetTexture: missing</title></rect>
+</g>
+<text x="16" y="554" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">pipeline state blocks</text>
+<text x="468" y="554" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">78/83</text>
+<g>
+<rect x="16" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetAdvancedMode: immediate</title></rect>
+<rect x="30" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetAdvancedNormalizedDst: immediate</title></rect>
+<rect x="44" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetAdvancedOverlap: immediate</title></rect>
+<rect x="58" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetAdvancedPremultipliedSrc: immediate</title></rect>
+<rect x="72" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetBlendEquation: immediate</title></rect>
+<rect x="86" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetBlendFunc: immediate</title></rect>
+<rect x="100" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateGetBlendTarget: immediate</title></rect>
+<rect x="114" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetAdvancedMode: immediate</title></rect>
+<rect x="128" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetAdvancedNormalizedDst: immediate</title></rect>
+<rect x="142" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetAdvancedOverlap: immediate</title></rect>
+<rect x="156" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetAdvancedPremultipliedSrc: immediate</title></rect>
+<rect x="170" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetBlendEquation: immediate</title></rect>
+<rect x="184" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetBlendFunc: immediate</title></rect>
+<rect x="198" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetBlendTarget: immediate</title></rect>
+<rect x="212" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnBlendStateSetDefaults: immediate</title></rect>
+<rect x="226" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnChannelMaskStateGetChannelMask: immediate</title></rect>
+<rect x="240" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnChannelMaskStateSetChannelMask: immediate</title></rect>
+<rect x="254" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnChannelMaskStateSetDefaults: immediate</title></rect>
+<rect x="268" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateGetAlphaTest: immediate</title></rect>
+<rect x="282" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateGetBlendEnable: immediate</title></rect>
+<rect x="296" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateGetLogicOp: immediate</title></rect>
+<rect x="310" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateSetAlphaTest: immediate</title></rect>
+<rect x="324" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateSetBlendEnable: immediate</title></rect>
+<rect x="338" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateSetDefaults: immediate</title></rect>
+<rect x="352" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnColorStateSetLogicOp: immediate</title></rect>
+<rect x="366" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateGetDepthFunc: immediate</title></rect>
+<rect x="380" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateGetDepthTestEnable: immediate</title></rect>
+<rect x="394" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateGetDepthWriteEnable: immediate</title></rect>
+<rect x="408" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateGetStencilFunc: immediate</title></rect>
+<rect x="422" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateGetStencilOp: immediate</title></rect>
+<rect x="436" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateGetStencilTestEnable: immediate</title></rect>
+<rect x="450" y="564" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetDefaults: immediate</title></rect>
+<rect x="16" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetDepthFunc: immediate</title></rect>
+<rect x="30" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetDepthTestEnable: immediate</title></rect>
+<rect x="44" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetDepthWriteEnable: immediate</title></rect>
+<rect x="58" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetStencilFunc: immediate</title></rect>
+<rect x="72" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetStencilOp: immediate</title></rect>
+<rect x="86" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnDepthStencilStateSetStencilTestEnable: immediate</title></rect>
+<rect x="100" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetAlphaToCoverageDither: immediate</title></rect>
+<rect x="114" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetAlphaToCoverageEnable: immediate</title></rect>
+<rect x="128" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetCoverageModulationMode: immediate</title></rect>
+<rect x="142" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetCoverageToColorEnable: immediate</title></rect>
+<rect x="156" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetCoverageToColorOutput: immediate</title></rect>
+<rect x="170" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMultisampleStateGetCoverageTruncationEnable: missing</title></rect>
+<rect x="184" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetMultisampleEnable: immediate</title></rect>
+<rect x="198" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetRasterSamples: immediate</title></rect>
+<rect x="212" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMultisampleStateGetSampleLocations: missing</title></rect>
+<rect x="226" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetSampleLocationsEnable: immediate</title></rect>
+<rect x="240" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMultisampleStateGetSampleLocationsGrid: missing</title></rect>
+<rect x="254" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetSampleLocationsGridEnable: immediate</title></rect>
+<rect x="268" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateGetSamples: immediate</title></rect>
+<rect x="282" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetAlphaToCoverageDither: immediate</title></rect>
+<rect x="296" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetAlphaToCoverageEnable: immediate</title></rect>
+<rect x="310" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetCoverageModulationMode: immediate</title></rect>
+<rect x="324" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetCoverageToColorEnable: immediate</title></rect>
+<rect x="338" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetCoverageToColorOutput: immediate</title></rect>
+<rect x="352" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnMultisampleStateSetCoverageTruncationEnable: missing</title></rect>
+<rect x="366" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetDefaults: immediate</title></rect>
+<rect x="380" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetMultisampleEnable: immediate</title></rect>
+<rect x="394" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetRasterSamples: immediate</title></rect>
+<rect x="408" y="578" width="12" height="12" rx="2" fill="#d29922"><title>nvnMultisampleStateSetSampleLocations: stub-risky</title></rect>
+<rect x="422" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetSampleLocationsEnable: immediate</title></rect>
+<rect x="436" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetSampleLocationsGridEnable: immediate</title></rect>
+<rect x="450" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnMultisampleStateSetSamples: immediate</title></rect>
+<rect x="16" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateGetCullFace: immediate</title></rect>
+<rect x="30" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateGetFrontFace: immediate</title></rect>
+<rect x="44" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateGetPolygonMode: immediate</title></rect>
+<rect x="58" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateGetPolygonOffsetEnables: immediate</title></rect>
+<rect x="72" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateSetCullFace: immediate</title></rect>
+<rect x="86" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateSetDefaults: immediate</title></rect>
+<rect x="100" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateSetFrontFace: immediate</title></rect>
+<rect x="114" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateSetPolygonMode: immediate</title></rect>
+<rect x="128" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnPolygonStateSetPolygonOffsetEnables: immediate</title></rect>
+<rect x="142" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexAttribStateGetFormat: immediate</title></rect>
+<rect x="156" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexAttribStateGetStreamIndex: immediate</title></rect>
+<rect x="170" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexAttribStateSetDefaults: immediate</title></rect>
+<rect x="184" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexAttribStateSetFormat: immediate</title></rect>
+<rect x="198" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexAttribStateSetStreamIndex: immediate</title></rect>
+<rect x="212" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexStreamStateGetDivisor: immediate</title></rect>
+<rect x="226" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexStreamStateGetStride: immediate</title></rect>
+<rect x="240" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexStreamStateSetDefaults: immediate</title></rect>
+<rect x="254" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexStreamStateSetDivisor: immediate</title></rect>
+<rect x="268" y="592" width="12" height="12" rx="2" fill="#2ea043"><title>nvnVertexStreamStateSetStride: immediate</title></rect>
+</g>
+<text x="492" y="568" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">program/shader</text>
+<text x="944" y="568" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">9/29</text>
+<g>
+<rect x="492" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetDebugDataHashes: missing</title></rect>
+<rect x="506" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetDevice: missing</title></rect>
+<rect x="520" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetMaxCallableRecursionDepth: missing</title></rect>
+<rect x="534" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetMaxTraceRecursionDepth: missing</title></rect>
+<rect x="548" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetSampleShading: missing</title></rect>
+<rect x="562" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetShaderCount: missing</title></rect>
+<rect x="576" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetShaders: missing</title></rect>
+<rect x="590" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetSubroutineLinkage: missing</title></rect>
+<rect x="604" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderGetSubroutineLinkageCount: missing</title></rect>
+<rect x="618" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetDebugDataHashes: missing</title></rect>
+<rect x="632" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramBuilderSetDefaults: immediate</title></rect>
+<rect x="646" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramBuilderSetDevice: immediate</title></rect>
+<rect x="660" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetMaxCallableRecursionDepth: missing</title></rect>
+<rect x="674" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetMaxTraceRecursionDepth: missing</title></rect>
+<rect x="688" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetSampleShading: missing</title></rect>
+<rect x="702" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramBuilderSetShaders: immediate</title></rect>
+<rect x="716" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramBuilderSetSubroutineLinkage: missing</title></rect>
+<rect x="730" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramFinalize: immediate</title></rect>
+<rect x="744" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramGetDeviceComputeMemorySize: missing</title></rect>
+<rect x="758" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramGetScratchBytesPerWarp: missing</title></rect>
+<rect x="772" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramGetShaderGroupHandle: missing</title></rect>
+<rect x="786" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramGetSubtileSize: missing</title></rect>
+<rect x="800" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramInitialize: immediate</title></rect>
+<rect x="814" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramInitializeFromBuilder: immediate</title></rect>
+<rect x="828" y="578" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnProgramSetDebugLabel: stub-ok</title></rect>
+<rect x="842" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramSetSampleShading: immediate</title></rect>
+<rect x="856" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramSetShaders: immediate</title></rect>
+<rect x="870" y="578" width="12" height="12" rx="2" fill="#2ea043"><title>nvnProgramSetShadersExt: immediate</title></rect>
+<rect x="884" y="578" width="12" height="12" rx="2" fill="#5b6472"><title>nvnProgramSetSubroutineLinkage: missing</title></rect>
+</g>
+<text x="492" y="624" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">queue</text>
+<text x="944" y="624" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">21/36</text>
+<g>
+<rect x="492" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueAcquireTexture: immediate</title></rect>
+<rect x="506" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetCommandFlushThreshold: missing</title></rect>
+<rect x="520" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderGetCommandMemorySize: immediate</title></rect>
+<rect x="534" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderGetComputeMemorySize: immediate</title></rect>
+<rect x="548" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderGetControlMemorySize: immediate</title></rect>
+<rect x="562" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetDevice: missing</title></rect>
+<rect x="576" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetFlags: missing</title></rect>
+<rect x="590" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetMemory: missing</title></rect>
+<rect x="604" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetMemorySize: missing</title></rect>
+<rect x="618" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetPrimaryQueue: missing</title></rect>
+<rect x="632" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderGetQueueMemorySize: immediate</title></rect>
+<rect x="646" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueBuilderGetQueuePriority: missing</title></rect>
+<rect x="660" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetCommandFlushThreshold: immediate</title></rect>
+<rect x="674" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetCommandMemorySize: immediate</title></rect>
+<rect x="688" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetComputeMemorySize: immediate</title></rect>
+<rect x="702" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetControlMemorySize: immediate</title></rect>
+<rect x="716" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetDefaults: immediate</title></rect>
+<rect x="730" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetDevice: immediate</title></rect>
+<rect x="744" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetFlags: immediate</title></rect>
+<rect x="758" y="634" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnQueueBuilderSetPrimaryQueue: stub-ok</title></rect>
+<rect x="772" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueBuilderSetQueueMemory: immediate</title></rect>
+<rect x="786" y="634" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnQueueBuilderSetQueuePriority: stub-ok</title></rect>
+<rect x="800" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueFenceSync: immediate</title></rect>
+<rect x="814" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueFinalize: immediate</title></rect>
+<rect x="828" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueFinish: immediate</title></rect>
+<rect x="842" y="634" width="12" height="12" rx="2" fill="#d29922"><title>nvnQueueFlush: stub-risky</title></rect>
+<rect x="856" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueGetError: immediate</title></rect>
+<rect x="870" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueGetTotalCommandMemoryUsed: missing</title></rect>
+<rect x="884" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueGetTotalComputeMemoryUsed: missing</title></rect>
+<rect x="898" y="634" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueGetTotalControlMemoryUsed: missing</title></rect>
+<rect x="912" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueInitialize: immediate</title></rect>
+<rect x="926" y="634" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueuePresentTexture: immediate</title></rect>
+<rect x="492" y="648" width="12" height="12" rx="2" fill="#5b6472"><title>nvnQueueResetMemoryUsageCounts: missing</title></rect>
+<rect x="506" y="648" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnQueueSetDebugLabel: stub-ok</title></rect>
+<rect x="520" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueSubmitCommands: immediate</title></rect>
+<rect x="534" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnQueueWaitSync: immediate</title></rect>
+</g>
+<text x="16" y="638" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">sync/fences</text>
+<text x="468" y="638" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">13/17</text>
+<g>
+<rect x="16" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventBuilderGetMemoryOffset: immediate</title></rect>
+<rect x="30" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventBuilderGetMemoryPool: immediate</title></rect>
+<rect x="44" y="648" width="12" height="12" rx="2" fill="#5b6472"><title>nvnEventBuilderGetStorage: missing</title></rect>
+<rect x="58" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventBuilderSetDefaults: immediate</title></rect>
+<rect x="72" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventBuilderSetStorage: immediate</title></rect>
+<rect x="86" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventFinalize: immediate</title></rect>
+<rect x="100" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventGetMemoryOffset: immediate</title></rect>
+<rect x="114" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventGetMemoryPool: immediate</title></rect>
+<rect x="128" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventGetValue: immediate</title></rect>
+<rect x="142" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventInitialize: immediate</title></rect>
+<rect x="156" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnEventSignal: immediate</title></rect>
+<rect x="170" y="648" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSyncCreateGLSync: missing</title></rect>
+<rect x="184" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSyncFinalize: immediate</title></rect>
+<rect x="198" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSyncInitialize: immediate</title></rect>
+<rect x="212" y="648" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSyncInitializeFromFencedGLSync: missing</title></rect>
+<rect x="226" y="648" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnSyncSetDebugLabel: stub-ok</title></rect>
+<rect x="240" y="648" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSyncWait: immediate</title></rect>
+</g>
+<text x="16" y="694" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">textures/samplers/pools</text>
+<text x="468" y="694" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">114/147</text>
+<g>
+<rect x="16" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetBorderColor: missing</title></rect>
+<rect x="30" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetBorderColori: missing</title></rect>
+<rect x="44" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetBorderColorui: missing</title></rect>
+<rect x="58" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetCompare: missing</title></rect>
+<rect x="72" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetDevice: missing</title></rect>
+<rect x="86" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetLodBias: missing</title></rect>
+<rect x="100" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderGetLodClamp: immediate</title></rect>
+<rect x="114" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetLodSnap: missing</title></rect>
+<rect x="128" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetMaxAnisotropy: missing</title></rect>
+<rect x="142" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderGetMinMagFilter: immediate</title></rect>
+<rect x="156" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerBuilderGetReductionFilter: missing</title></rect>
+<rect x="170" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderGetWrapMode: immediate</title></rect>
+<rect x="184" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetBorderColor: immediate</title></rect>
+<rect x="198" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetBorderColori: immediate</title></rect>
+<rect x="212" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetBorderColorui: immediate</title></rect>
+<rect x="226" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetCompare: immediate</title></rect>
+<rect x="240" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetDefaults: immediate</title></rect>
+<rect x="254" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetDevice: immediate</title></rect>
+<rect x="268" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetLodBias: immediate</title></rect>
+<rect x="282" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetLodClamp: immediate</title></rect>
+<rect x="296" y="704" width="12" height="12" rx="2" fill="#d29922"><title>nvnSamplerBuilderSetLodSnap: stub-risky</title></rect>
+<rect x="310" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetMaxAnisotropy: immediate</title></rect>
+<rect x="324" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetMinMagFilter: immediate</title></rect>
+<rect x="338" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetReductionFilter: immediate</title></rect>
+<rect x="352" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerBuilderSetWrapMode: immediate</title></rect>
+<rect x="366" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerCompare: immediate</title></rect>
+<rect x="380" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerFinalize: immediate</title></rect>
+<rect x="394" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetBorderColor: immediate</title></rect>
+<rect x="408" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerGetBorderColori: missing</title></rect>
+<rect x="422" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerGetBorderColorui: missing</title></rect>
+<rect x="436" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetCompare: immediate</title></rect>
+<rect x="450" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerGetDebugID: missing</title></rect>
+<rect x="16" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetLodBias: immediate</title></rect>
+<rect x="30" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetLodClamp: immediate</title></rect>
+<rect x="44" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetMaxAnisotropy: immediate</title></rect>
+<rect x="58" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetMinMagFilter: immediate</title></rect>
+<rect x="72" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetReductionFilter: immediate</title></rect>
+<rect x="86" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerGetWrapMode: immediate</title></rect>
+<rect x="100" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerInitialize: immediate</title></rect>
+<rect x="114" y="718" width="12" height="12" rx="2" fill="#d29922"><title>nvnSamplerPoolFinalize: stub-risky</title></rect>
+<rect x="128" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerPoolGetMemoryOffset: immediate</title></rect>
+<rect x="142" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerPoolGetMemoryPool: immediate</title></rect>
+<rect x="156" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerPoolGetSize: immediate</title></rect>
+<rect x="170" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerPoolInitialize: immediate</title></rect>
+<rect x="184" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerPoolRegisterSampler: immediate</title></rect>
+<rect x="198" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnSamplerPoolRegisterSamplerBuilder: immediate</title></rect>
+<rect x="212" y="718" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnSamplerPoolSetDebugLabel: stub-ok</title></rect>
+<rect x="226" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnSamplerPoolWriteDescriptorTableData: missing</title></rect>
+<rect x="240" y="718" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnSamplerSetDebugLabel: stub-ok</title></rect>
+<rect x="254" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetDepth: immediate</title></rect>
+<rect x="268" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetDepthStencilMode: immediate</title></rect>
+<rect x="282" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTextureBuilderGetDevice: missing</title></rect>
+<rect x="296" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetFlags: immediate</title></rect>
+<rect x="310" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetFormat: immediate</title></rect>
+<rect x="324" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTextureBuilderGetGLTextureName: missing</title></rect>
+<rect x="338" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetHeight: immediate</title></rect>
+<rect x="352" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetLevels: immediate</title></rect>
+<rect x="366" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetMemoryOffset: immediate</title></rect>
+<rect x="380" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetMemoryPool: immediate</title></rect>
+<rect x="394" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTextureBuilderGetPackagedTextureData: missing</title></rect>
+<rect x="408" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTextureBuilderGetPackagedTextureLayout: missing</title></rect>
+<rect x="422" y="718" width="12" height="12" rx="2" fill="#d29922"><title>nvnTextureBuilderGetRawStorageClass: stub-risky</title></rect>
+<rect x="436" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetSamples: immediate</title></rect>
+<rect x="450" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetSparseTileLayout: immediate</title></rect>
+<rect x="16" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetStorageAlignment: immediate</title></rect>
+<rect x="30" y="732" width="12" height="12" rx="2" fill="#d29922"><title>nvnTextureBuilderGetStorageClass: stub-risky</title></rect>
+<rect x="44" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetStorageSize: immediate</title></rect>
+<rect x="58" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetStride: immediate</title></rect>
+<rect x="72" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetSwizzle: immediate</title></rect>
+<rect x="86" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetTarget: immediate</title></rect>
+<rect x="100" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetViewOffset: immediate</title></rect>
+<rect x="114" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetWidth: immediate</title></rect>
+<rect x="128" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderGetZCullStorageSize: immediate</title></rect>
+<rect x="142" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetDefaults: immediate</title></rect>
+<rect x="156" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetDepth: immediate</title></rect>
+<rect x="170" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetDepthStencilMode: immediate</title></rect>
+<rect x="184" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetDevice: immediate</title></rect>
+<rect x="198" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetFlags: immediate</title></rect>
+<rect x="212" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetFormat: immediate</title></rect>
+<rect x="226" y="732" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTextureBuilderSetGLTextureName: missing</title></rect>
+<rect x="240" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetHeight: immediate</title></rect>
+<rect x="254" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetLevels: immediate</title></rect>
+<rect x="268" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetPackagedTextureData: immediate</title></rect>
+<rect x="282" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetPackagedTextureLayout: immediate</title></rect>
+<rect x="296" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetSamples: immediate</title></rect>
+<rect x="310" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetSize1D: immediate</title></rect>
+<rect x="324" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetSize2D: immediate</title></rect>
+<rect x="338" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetSize3D: immediate</title></rect>
+<rect x="352" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetStorage: immediate</title></rect>
+<rect x="366" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetStride: immediate</title></rect>
+<rect x="380" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetSwizzle: immediate</title></rect>
+<rect x="394" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetTarget: immediate</title></rect>
+<rect x="408" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureBuilderSetWidth: immediate</title></rect>
+<rect x="422" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureCompare: immediate</title></rect>
+<rect x="436" y="732" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureFinalize: immediate</title></rect>
+<rect x="450" y="732" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnTextureFlushTexels: stub-ok</title></rect>
+<rect x="16" y="746" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTextureGetDebugID: missing</title></rect>
+<rect x="30" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetDepth: immediate</title></rect>
+<rect x="44" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetDepthStencilMode: immediate</title></rect>
+<rect x="58" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetFlags: immediate</title></rect>
+<rect x="72" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetFormat: immediate</title></rect>
+<rect x="86" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetHeight: immediate</title></rect>
+<rect x="100" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetLevels: immediate</title></rect>
+<rect x="114" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetMemoryOffset: immediate</title></rect>
+<rect x="128" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetMemoryPool: immediate</title></rect>
+<rect x="142" y="746" width="12" height="12" rx="2" fill="#d29922"><title>nvnTextureGetRawStorageClass: stub-risky</title></rect>
+<rect x="156" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetSamples: immediate</title></rect>
+<rect x="170" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetSparseTileLayout: immediate</title></rect>
+<rect x="184" y="746" width="12" height="12" rx="2" fill="#d29922"><title>nvnTextureGetStorageClass: stub-risky</title></rect>
+<rect x="198" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetStorageSize: immediate</title></rect>
+<rect x="212" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetStride: immediate</title></rect>
+<rect x="226" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetSwizzle: immediate</title></rect>
+<rect x="240" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetTarget: immediate</title></rect>
+<rect x="254" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetTextureAddress: immediate</title></rect>
+<rect x="268" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetViewOffset: immediate</title></rect>
+<rect x="282" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetWidth: immediate</title></rect>
+<rect x="296" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureGetZCullStorageSize: immediate</title></rect>
+<rect x="310" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureInitialize: immediate</title></rect>
+<rect x="324" y="746" width="12" height="12" rx="2" fill="#d29922"><title>nvnTextureInvalidateTexels: stub-risky</title></rect>
+<rect x="338" y="746" width="12" height="12" rx="2" fill="#d29922"><title>nvnTexturePoolFinalize: stub-risky</title></rect>
+<rect x="352" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTexturePoolGetMemoryOffset: immediate</title></rect>
+<rect x="366" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTexturePoolGetMemoryPool: immediate</title></rect>
+<rect x="380" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTexturePoolGetSize: immediate</title></rect>
+<rect x="394" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTexturePoolInitialize: immediate</title></rect>
+<rect x="408" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTexturePoolRegisterImage: immediate</title></rect>
+<rect x="422" y="746" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTexturePoolRegisterTexture: immediate</title></rect>
+<rect x="436" y="746" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnTexturePoolSetDebugLabel: stub-ok</title></rect>
+<rect x="450" y="746" width="12" height="12" rx="2" fill="#5b6472"><title>nvnTexturePoolWriteDescriptorTableData: missing</title></rect>
+<rect x="16" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureReadTexels: immediate</title></rect>
+<rect x="30" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureReadTexelsStrided: immediate</title></rect>
+<rect x="44" y="760" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnTextureSetDebugLabel: stub-ok</title></rect>
+<rect x="58" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewCompare: immediate</title></rect>
+<rect x="72" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewGetDepthStencilMode: immediate</title></rect>
+<rect x="86" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewGetFormat: immediate</title></rect>
+<rect x="100" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewGetLayers: immediate</title></rect>
+<rect x="114" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewGetLevels: immediate</title></rect>
+<rect x="128" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewGetSwizzle: immediate</title></rect>
+<rect x="142" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewGetTarget: immediate</title></rect>
+<rect x="156" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetDefaults: immediate</title></rect>
+<rect x="170" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetDepthStencilMode: immediate</title></rect>
+<rect x="184" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetFormat: immediate</title></rect>
+<rect x="198" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetLayers: immediate</title></rect>
+<rect x="212" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetLevels: immediate</title></rect>
+<rect x="226" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetSwizzle: immediate</title></rect>
+<rect x="240" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureViewSetTarget: immediate</title></rect>
+<rect x="254" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureWriteTexels: immediate</title></rect>
+<rect x="268" y="760" width="12" height="12" rx="2" fill="#2ea043"><title>nvnTextureWriteTexelsStrided: immediate</title></rect>
+</g>
+<text x="492" y="694" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#e6edf3" text-anchor="start">window/present</text>
+<text x="944" y="694" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#9da7b3" text-anchor="end">17/38</text>
+<g>
+<rect x="492" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowAcquireTexture: immediate</title></rect>
+<rect x="506" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetAcquireTimeout: missing</title></rect>
+<rect x="520" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetColorSpace: missing</title></rect>
+<rect x="534" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetDevice: missing</title></rect>
+<rect x="548" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetHdrContentMetadata: missing</title></rect>
+<rect x="562" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetHdrDisplayMetadata: missing</title></rect>
+<rect x="576" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetNativeWindow: missing</title></rect>
+<rect x="590" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderGetNumActiveTextures: immediate</title></rect>
+<rect x="604" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetNumTextures: missing</title></rect>
+<rect x="618" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderGetPresentInterval: immediate</title></rect>
+<rect x="632" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderGetTexture: missing</title></rect>
+<rect x="646" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderSetAcquireTimeout: missing</title></rect>
+<rect x="660" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderSetColorSpace: missing</title></rect>
+<rect x="674" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderSetDefaults: immediate</title></rect>
+<rect x="688" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderSetDevice: immediate</title></rect>
+<rect x="702" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderSetHdrContentMetadata: missing</title></rect>
+<rect x="716" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowBuilderSetHdrDisplayMetadata: missing</title></rect>
+<rect x="730" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderSetNativeWindow: immediate</title></rect>
+<rect x="744" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderSetNumActiveTextures: immediate</title></rect>
+<rect x="758" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderSetPresentInterval: immediate</title></rect>
+<rect x="772" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowBuilderSetTextures: immediate</title></rect>
+<rect x="786" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowFinalize: immediate</title></rect>
+<rect x="800" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowGetAcquireTimeout: missing</title></rect>
+<rect x="814" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowGetCrop: immediate</title></rect>
+<rect x="828" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowGetHdrContentMetadata: missing</title></rect>
+<rect x="842" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowGetHdrDisplayMetadata: missing</title></rect>
+<rect x="856" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowGetNativeWindow: missing</title></rect>
+<rect x="870" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowGetNumActiveTextures: immediate</title></rect>
+<rect x="884" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowGetNumTextures: missing</title></rect>
+<rect x="898" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowGetPresentInterval: immediate</title></rect>
+<rect x="912" y="704" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowInitialize: immediate</title></rect>
+<rect x="926" y="704" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowSetAcquireTimeout: missing</title></rect>
+<rect x="492" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowSetCrop: immediate</title></rect>
+<rect x="506" y="718" width="12" height="12" rx="2" fill="#2d9a8c"><title>nvnWindowSetDebugLabel: stub-ok</title></rect>
+<rect x="520" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowSetHdrContentMetadata: missing</title></rect>
+<rect x="534" y="718" width="12" height="12" rx="2" fill="#5b6472"><title>nvnWindowSetHdrDisplayMetadata: missing</title></rect>
+<rect x="548" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowSetNumActiveTextures: immediate</title></rect>
+<rect x="562" y="718" width="12" height="12" rx="2" fill="#2ea043"><title>nvnWindowSetPresentInterval: immediate</title></rect>
+</g>
+<text x="16" y="808" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9da7b3" text-anchor="start">translated = immediate or recorded. A cell is one name of dm/gfx/nvn/names.txt; hover for its name and class. Generated by dm/tools/nvn_api_map.py.</text>
+</svg>

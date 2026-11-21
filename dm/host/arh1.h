@@ -31,7 +31,7 @@ static int arh1_open(const uint8_t *d, size_t n, arh1_t *a) {
     uint32_t so = arh1_u32(d + 12), sn = arh1_u32(d + 16), no = arh1_u32(d + 20), nn = arh1_u32(d + 24), fo = arh1_u32(d + 28), fn = arh1_u32(d + 32);
     uint32_t key = arh1_u32(d + 36) ^ 0xF3F35353u;
     if (so > n || sn > n - so || no > n || nn > n - no || nn % 8 || fo > n || fn > (n - fo) / ARH1_ENTRY || !nn) return -1;
-    a->strings = malloc(sn + 1); a->dict = malloc(nn);
+    a->strings = calloc((size_t)sn + 1, 1); a->dict = calloc(nn, 1);   // zeroed: every word is then defined, whatever the loops below cover
     if (!a->strings || !a->dict) { arh1_free(a); return -1; }
     memcpy(a->strings, d + so, sn); a->strings[sn] = 0;   // a terminator past the end bounds every string scan
     for (uint32_t i = 0; i + 4 <= sn; i += 4) { uint32_t w = arh1_u32(a->strings + i) ^ key; memcpy(a->strings + i, &w, 4); }

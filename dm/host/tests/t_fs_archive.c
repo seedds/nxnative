@@ -86,8 +86,8 @@ int main(void) {
         CHECK(arh1_find(&a, "/ab") == 0 && arh1_find(&a, "/cd") == 1 && arh1_find(&a, "/d/ef") == 2 && arh1_find(&a, "/d/g") == 3, "members found: %lld %lld %lld %lld", (long long)arh1_find(&a, "/ab"), (long long)arh1_find(&a, "/cd"), (long long)arh1_find(&a, "/d/ef"), (long long)arh1_find(&a, "/d/g"));
         CHECK(arh1_find(&a, "/a") < 0 && arh1_find(&a, "/abc") < 0 && arh1_find(&a, "/xb") < 0 && arh1_find(&a, "/d") < 0 && arh1_find(&a, "/d/e") < 0 && arh1_find(&a, "/d/") < 0 && arh1_find(&a, "/d/gg") < 0 && arh1_find(&a, "") < 0, "other paths are not members");
         arh1_free(&a);
-        uint8_t bad[64] = "arh2"; CHECK(arh1_open(bad, sizeof bad, &a) == -1, "not ARH1");
-        memcpy(bad, arh, 48); put32(bad + 28, 60); CHECK(arh1_open(bad, sizeof bad, &a) == -1, "a file table past the end is refused");
+        uint8_t bad[64] = "arh2"; CHECK(arh1_open(bad, sizeof bad, &a) == -1, "not ARH1"); arh1_free(&a);
+        memcpy(bad, arh, 48); put32(bad + 28, 60); CHECK(arh1_open(bad, sizeof bad, &a) == -1, "a file table past the end is refused"); arh1_free(&a);
     }
 
     CHECK(mount("plain", base, 1) == RES_OK && mount("mod", base, 1) == RES_OK && mount("none", base, 1) == RES_OK, "mount the base three times");
@@ -102,7 +102,8 @@ int main(void) {
     CHECK(read_all("mod:/bf.arh", buf, sizeof buf, &size) == an && size == (int64_t)an, "the index with mod files has the game's size");
     arh1_t a;
     if (arh1_open(buf, an, &a)) { fprintf(stderr, "t_fs_archive: the index with mod files is not ARH1 any more\n"); return 1; }
-    uint8_t *e0 = arh1_entry(&a, buf, 0), *e1 = arh1_entry(&a, buf, 1), *e2 = arh1_entry(&a, buf, 2); uint64_t o0, o2; memcpy(&o0, e0, 8); memcpy(&o2, e2, 8);
+    uint8_t *e0 = arh1_entry(&a, buf, 0), *e1 = arh1_entry(&a, buf, 1), *e2 = arh1_entry(&a, buf, 2); uint64_t o0, o2;
+    if (!e0 || !e1 || !e2) { fprintf(stderr, "t_fs_archive: the index with mod files lacks a member\n"); arh1_free(&a); return 1; } memcpy(&o0, e0, 8); memcpy(&o2, e2, 8);
     CHECK(o0 == 32 && arh1_u32(e0 + 8) == 8 && arh1_u32(e0 + 12) == 0 && arh1_u32(e0 + 16) == 0, "/ab: the first folder's 8 bytes at 32, stored as is (offset %llu size %u)", (unsigned long long)o0, arh1_u32(e0 + 8));
     CHECK(o2 == 48 && arh1_u32(e2 + 8) == 6 && arh1_u32(e2 + 16) == 1, "/d/ef from D/EF at 48, hidden flag kept (offset %llu)", (unsigned long long)o2);
     CHECK(!memcmp(e1, arh + a.table + ARH1_ENTRY, ARH1_ENTRY), "/cd unchanged");

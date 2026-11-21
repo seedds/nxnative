@@ -1353,7 +1353,7 @@ static void vf_build(int mi, const char *stem, int *ia, int *id) {
             if (!strcmp(full, arh_rest) || !strcmp(full, ard_rest)) continue;
             if (vf_base(m, full, &bfd, &bs, &bn)) { if (!m->img) close(bfd); continue; }   // a loose RomFS file: the overlay itself serves it
             int64_t fid = arh1_find(&a, rel);
-            if (fid < 0) { char low[512]; size_t i = 0; for (; rel[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)rel[i]); low[i] = 0; fid = arh1_find(&a, low); }
+            if (fid < 0) { char low[512] = ""; size_t i = 0; for (; rel[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)rel[i]); low[i] = 0; fid = arh1_find(&a, low); }
             if (fid < 0 || (uint64_t)fid >= a.nfiles) { if (!nloose++) strlcpy(first_loose, rel, sizeof first_loose); continue; }
             if (taken[fid]) continue;   // a folder before this one has it
             int fd = open(e->fts_path, O_RDONLY); struct stat st;

@@ -67,7 +67,7 @@ class Package:
         self.required_version = 0
         self.name = f'{owner.path.name} (NX snapshot {index}, version {version})'
 
-    def meta(self):
+    def meta(self, *, say=None):
         out = {}
         if self.nacp != NO_DIR: out[pack_nup.T_NACP] = self.nup.media(self.nacp)
         if self.icon != NO_DIR: out[pack_nup.T_ICON] = self.nup.media(self.icon)

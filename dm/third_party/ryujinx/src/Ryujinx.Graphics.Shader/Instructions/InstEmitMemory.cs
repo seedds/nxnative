@@ -102,7 +102,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 srcA = context.BitwiseAnd(srcA, Const(0xffff));
             }
 
-            Operand addr = context.IAdd(srcA, Const(Imm16ToSInt(op.CbufOffset)));
+            // nxnative: added to a register, the immediate is signed and the sum 32 bits, as nvdisasm prints it (`LDC R11, c[0x3][R5+-0x4]` for 0xfffc) and as
+            // Xenoblade Chronicles 2's pixel shaders use it (c6 at R - 8 to R - 128); to reach past 32 KiB the compiler adds 0x10000 to the register (Ampere:
+            // Yoshi and the Mysterious Book's `IADD3 R40, R26, 0x10000` before c[6][R40 - 0x5578]). Alone (Ra = RZ), the immediate is the address as it is:
+            // Mortal Kombat 11 reads c[14][0x8448] that way, which sign-extended became the word 0x3FFFE112 and overflowed into the operand's slot field as c15
+            // (Operand.PackCbufInfo)
+            int immediate = op.SrcA == RegisterConsts.RegisterZeroIndex ? op.CbufOffset : Imm16ToSInt(op.CbufOffset);
+            Operand addr = context.IAdd(srcA, Const(immediate));
             Operand wordOffset = context.ShiftRightU32(addr, Const(2));
 
             for (int index = 0; index < count; index++)

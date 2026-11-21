@@ -9,3 +9,5 @@ reach	3000@100
 window	140	60
 shots	100,180
 hang	20
+# Ocean flight: replay identical commands when timed wave highlights/ship motion differ between live runs.
+capture	10800

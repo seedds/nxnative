@@ -29,7 +29,7 @@ RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 sys.path[:0] = [str(ROOT / 'dm/gfx/tools'), str(ROOT / 'dm/ios/tools')]
 import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
-XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
+XC = dmsh_chain.CROSS_MSL
 OP_ATOMIC_COMPARE_EXCHANGE = 230
 INIT = [0xabcd0000 + i for i in range(1024)]   # t_global_memory.m's starting words
 PLACEHOLDER = 123   # R4 (and Rd) before the instruction under test

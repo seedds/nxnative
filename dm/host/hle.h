@@ -3,16 +3,18 @@
 // such parameters are always declared as int/unsigned and truncated by ourselves. Variadic arguments go on the stack on Apple and in registers on Switch ⇒ variadic functions cannot use C's "..." directly.
 #pragma once
 #include "dm.h"
+#include "registration.h"
 #include <stddef.h>
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+    DM_REGISTER("swhle", hle_ent, hle_ent_##cname, {mangled, (void *)cname}); \
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
 #define RES_OK 0u
 #define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
+enum { DM_APPLET_RESOURCE_USER_ID = 0x80 };   // identity of the game's applet in the single-process host
 
 // Guest address → host object side table
 void *objmap_get(const void *guest);
@@ -22,13 +24,14 @@ uint64_t now_ns(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
+void dm_host_lock(pthread_mutex_t *m);  // contention on a host mutex releases the guest core
 void dm_thread_service_connect(void);   // an HLE call that stands for connecting to a service on Horizon: threads started so far get to run (hle_thread.c)
 void dm_thread_service_request(void);   // an HLE call that is a blocking service request on Horizon: the caller gives up its core (hle_thread.c)
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
-void dm_guest_clock_advanced(void);
 uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
 void guest_clock_freeze(int on);
+void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
@@ -56,14 +59,14 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
             "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n"              \
             ".if " HLE_STR(HLE_NARG(__VA_ARGS__)) " > 8\n    mov x17, #(((" HLE_STR(HLE_NARG(__VA_ARGS__)) " - 8) * 8 + 15) & ~15)\n" \
             "    b _dm_bigstack_enter_n\n.else\n    b _dm_bigstack_enter\n.endif\n");           \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)(uintptr_t)cname##_bs, why}); \
     static ret cname(__VA_ARGS__)
 // Same as above, but the implementation runs on the caller's stack. Only for a take-over that runs the game's own code (an NRO's init and fini, a JIT plugin): that code's stack
 // use is the game's, sized for the thread's own stack (which can be larger than the 512 KB host stack), and it may switch stacks itself (a coroutine), which would reuse the
 // host stack the take-over is on. A short call into the SDK (fs::IsMounted, the audio renderer's command generation) is no reason. Say why beside it
 #define HLE_FORCE_DIRECT(mangled, why, ret, cname, ...)                                            \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)cname, why}); \
     static ret cname(__VA_ARGS__)
 // A guest alias: every reference to mangled binds to the loaded modules' own definition of target instead, as if the module had imported target. No host code runs and no
 // signature is restated, so the alias holds for every SDK that defines both. For a hardware class whose constructor the host takes over to build the SDK's software class in the
@@ -72,7 +75,7 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
 #define HLE_FORCE_ALIAS(mangled, target, why) HLE_FORCE_ALIAS_(mangled, target, why, __COUNTER__)
 #define HLE_FORCE_ALIAS_(mangled, target, why, n) HLE_FORCE_ALIAS__(mangled, target, why, n)
 #define HLE_FORCE_ALIAS__(mangled, target, why, n) \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_alias_##n = {mangled, NULL, why, target}
+    DM_REGISTER("swforce", hle_force_ent, hle_force_alias_##n, {mangled, NULL, why, target})
 // Programs that do not link hle_bigstack.c (unit tests, whose stacks are host stacks) get this pass-through: the implementation runs on the caller's stack, as dm.h's weak dm_log
 // writes there. The host's entry (hle_bigstack.c) replaces it at link time
 __attribute__((weak, naked, visibility("hidden"))) void dm_bigstack_enter(void) { __asm__ volatile("br x16"); }
@@ -98,7 +101,7 @@ typedef Result (*sf_answer)(sf_req *r);
 uint32_t sf_session(const char *name, sf_answer answer, void *ctx, void (*close)(void *ctx));   // a new host session (its handle), for a service to move to its client
 // A service the host serves in its own file: SF_SERVICE("name", answer) registers it (the __DATA,swsf section), and connecting to that name gives a session answered by it
 typedef struct { const char *name; sf_answer answer; } sf_service_ent;
-#define SF_SERVICE(svc, fn) __attribute__((used, section("__DATA,swsf"))) static const sf_service_ent sf_service_##fn = {svc, fn}
+#define SF_SERVICE(svc, fn) DM_REGISTER("swsf", sf_service_ent, sf_service_##fn, {svc, fn})
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
 int dm_opmode(void);
 void dm_set_opmode(int m);          // On change, push notification 30 / 31 according to the switches the game has turned on
@@ -128,3 +131,11 @@ void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnit
 typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf;   // next, data, buffer_size, data_size, data_offset
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
+void dm_audio_route_changed(void);   // the output route changed: update channel layout and watch for stalled callbacks (hle_audio.c)
+int dm_audio_output_channels(void);   // the output route: 6 when the device takes six channels, else 2 (hle_audio.c); reads the device on a host stack
+int dm_audio_route(void);             // cached route, initialized on the calling host stack (hle_audio.c)
+// In-process DeviceSink PCM: L R C LFE Ls Rs, followed by the stereo fold made before clamping/resampling.
+// Both representations stay queued together; a device route change selects one without losing the original mix.
+enum { DM_AUDIO_SINK_CHANNELS = 8 };
+void *dm_pcmout_open_sink(void);
+void dm_audio_device_changed(void);   // signal the game's bound output-device notifications (hle_audren.c)

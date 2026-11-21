@@ -536,8 +536,8 @@ class PrimitiveIdOnTheGpu(unittest.TestCase):
 
 
 class IntegerPassThrough(unittest.TestCase):
-    """dmsh_entry.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the integer entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint output
-    comes from its mesh stage's per-primitive attribute. A smooth input is not integer data"""
+    """dmsh_entry.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the typed-output entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint
+    output comes from its mesh stage's per-primitive attribute. Every pixel shader has it now, whatever its code writes (GitHub issue #2760)"""
     SRC = """struct main0_out
 {
     float4 m_19 [[color(0)]];
@@ -605,13 +605,11 @@ fragment main0_out main0(main0_in in [[stage_in]])
         src = self.fs_uint(self.GBUFFER % '8.96831e-44')
         for n, nm in enumerate(('m_48', 'm_50', 'm_52', 'm_54')):
             self.assertIn(f'    float4 {nm} [[color({n}), function_constant(dm_uf{n})]];\n    uint4 {nm}_ui [[color({n}), function_constant(dm_ui{n})]];\n', src)
-            self.assertIn(f'    if (dm_ui{n}) r.{nm}_ui = as_type<uint4>(out.{nm}); else r.{nm} = out.{nm};\n', src)
+            self.assertIn(f'    if (dm_ui{n}) r.{nm}_ui = as_type<uint4>(out.{nm}); else if (dm_si{n}) r.{nm}_si = as_type<int4>(out.{nm}); else r.{nm} = out.{nm};\n', src)
 
-    def test_smooth_input_gets_none(self):
-        self.assertIsNone(self.fs_uint(self.SRC % ('', '_26')))
-
-    def test_computed_from_a_flat_input_gets_none(self):
-        self.assertIsNone(self.fs_uint(self.SRC % (', flat', '_26 * 2.0')))
+    def test_smooth_or_computed_inputs_too(self):   # the code no longer decides: an R8Uint target beside them would have been refused (Kirby and the Forgotten Land, #2760)
+        self.assertIsNotNone(self.fs_uint(self.SRC % ('', '_26')))
+        self.assertIsNotNone(self.fs_uint(self.SRC % (', flat', '_26 * 2.0')))
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_GPU') == '1' and shutil.which('xcrun') and shutil.which('clang'), 'set DMSH_TEST_GPU=1 on a Mac with Xcode')

@@ -73,7 +73,7 @@ static void ndve_build(void) {
         if (!lib) { MLOG("[RED] NDVE engine: no library (%s); the game's network runs", e.localizedDescription.UTF8String); g_nd.state = -1; return; }
         for (int k = 0; k < NK_N; k++) {
             id<MTLFunction> f = [lib newFunctionWithName:@(k_ndve_kern[k])];
-            g_nd.ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+            g_nd.ps[k] = f ? dev_cps(f, &e) : nil;
             if (!g_nd.ps[k]) { MLOG("[RED] NDVE engine: no pipeline for %s; the game's network runs", k_ndve_kern[k]); g_nd.state = -1; return; }
         }
         id<MTLCommandBuffer> cb = [[g_dev newCommandQueue] commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
@@ -203,11 +203,14 @@ static void ndve_compare(id<MTLTexture> a, id<MTLTexture> b, int slot) {
              slot ? "resampler" : "network", (unsigned long long)*n, c[2 * slot], (unsigned long)a.width, (unsigned long)a.height, c[2 * slot + 1]);
     }
 }
-// 1 when the dispatch was taken (skipped or replaced by the engine), 0 to run it
-static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
+static int ndve_dispatch_index(NvShader *cs) {
     const int chk = ndve_check();
-    if ((!ndve_mode() && !chk) || g_nd.off) return 0;
-    int i = ndve_index(cs, 0); if (i < 0) return 0;
+    if ((!ndve_mode() && !chk) || g_nd.off) return -1;
+    return ndve_index(cs, 0);
+}
+// 1 when the dispatch was taken (skipped or replaced by the engine), 0 to run it
+static int ndve_engine_dispatch(NvShader *cs, int i) {
+    const int chk = ndve_check();
     if (g_nd.state == 0) ndve_build();
     if (!chk && !g_nd.pos && !sw_on(ndve_mode())) return 0;   // an A/B phase changes only between sequences
     if (i == 0) {   // the colour conversion runs; a new frame's sequence may start. Under check, the game's resampled picture of the last frame is there now
@@ -251,5 +254,5 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp) {
     if (chk) g_nd.game_out = out;   // compared once the game's 5a7d69b0 has written it, at 4f41ccf2
     g_nd.pos = 13;   // the resampler next
     if (!g_nd.frames++) MLOG("NDVE engine: first movie frame by the engine (%llu dispatches skipped)", (unsigned long long)g_nd.skipped);
-    (void)dp; return !chk;
+    return !chk;
 }

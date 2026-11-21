@@ -1,7 +1,10 @@
 // Uploads from a large pool (BIG_MIN) read their storage through a zero-copy buffer of the upload batch (up_big_src), which the batch makes resident and retires. One texture
 // needs one such buffer: a second is made only when taking its staging flushed the batch that held the first. Before, every staged upload made two, and a scene load of Switch
 // Sports Resort (855 textures, 908 MB) added twice its storage to the residency set. Checks the count and every texel, for small textures in one batch and for 64 MB ones whose
-// staging splits the batches (UP_BATCH_BYTES)
+// staging splits the batches (UP_BATCH_BYTES). A buffer copy over a texture's storage: after it completes, only that texture is uploaded again (its pages stamped at completion,
+// post_run); in the same submission, a texture already uploaded and one not yet uploaded, both read after the run of copies has ended, show the copied texels (b2b_flush: the
+// copy is committed before the upload batch that reads it), including a destination accessed before the copy in that submission. A CPU upload waits for the copy before reading
+// its storage; a queue event keeps the copy pending until after the lookup starts. DM_NVN_COPY_CUT=0 fails the same-submission checks
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -66,12 +69,63 @@ int main(void) { @autoreleasepool {
     printf("small: %llu source buffers for 8 textures, %u batches\n", (unsigned long long)made, batches);
     CHECK("one zero-copy source buffer per texture in one batch", made == 8 && batches == 1);
 
+    upl incoming;
+    make(&incoming, mem, &pool, 9u << 20, small[0].t.d.width, small[0].t.d.height, 99);
+    mtl_sub_begin();
+    mtl_sub_copy((uintptr_t)incoming.t.mem, (uintptr_t)small[0].t.mem, small[0].t.L.size);
+    CHECK("buffer copy completes", mtl_wait(mtl_sub_commit(), 10000000000ull));
+    free(small[0].ref); small[0].ref = incoming.ref;
+    upload_all(small, 2, &made, &batches);
+    CHECK("only the overwritten texture was uploaded", made == 1);
+    mtl_tex_release(&incoming.t);
+
+    // Pool compaction as Skywalker Saga does it: copies move texture storage, then a command, then the textures are read in the same submission
+    upl moved[2], late;
+    make(&late, mem, &pool, 11u << 20, small[1].t.d.width, small[1].t.d.height, 200);   // written by the CPU, not uploaded yet
+    for (int i = 0; i < 2; i++) make(&moved[i], mem, &pool, (size_t)(12 + i) << 20, small[1].t.d.width, small[1].t.d.height, 300 + i);
+    struct { op_hdr c0; uint64_t a0[3]; op_hdr c1; uint64_t a1[3]; op_hdr bc; p_blend_color col; op_hdr end; } ops = {
+        .c0 = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a0 = {(uintptr_t)moved[0].t.mem, (uintptr_t)small[1].t.mem, small[1].t.L.size},
+        .c1 = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a1 = {(uintptr_t)moved[1].t.mem, (uintptr_t)late.t.mem, late.t.L.size},
+        .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
+    mtl_sub_begin();
+    CHECK("the destination is accessed before its copy in the same submission", tex_mtl(&small[1].t) != nil);
+    mtl_exec((const uint8_t *)&ops);
+    id<MTLTexture> kept = tex_mtl(&small[1].t), fresh = tex_mtl(&late.t);
+    CHECK("same-submission copy completes", mtl_wait(mtl_sub_commit(), 10000000000ull) && !mtl_last_commit_error());
+    CHECK("an uploaded texture read after a copy over it in the same submission shows the copy", kept && same_texels(kept, &moved[0]));
+    CHECK("a new texture read after a copy over it in the same submission shows the copy", fresh && same_texels(fresh, &moved[1]));
+
+    // Force the CPU fallback while the GPU is held behind an event. Committing the copy alone is insufficient: the CPU must wait before snapshotting its destination.
+    upl cpu;
+    make(&cpu, mem, &pool, 14u << 20, moved[1].t.d.width, moved[1].t.d.height, 500);
+    struct { op_hdr c; uint64_t a[3]; op_hdr bc; p_blend_color col; op_hdr end; } cpu_ops = {
+        .c = {OP_COPY_B2B, sizeof(op_hdr) + 24}, .a = {(uintptr_t)moved[1].t.mem, (uintptr_t)cpu.t.mem, cpu.t.L.size},
+        .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
+    int gpu = g_nvn_deswz_gpu; g_nvn_deswz_gpu = 0;
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    [g_q4 waitForEvent:gate value:1];
+    mtl_sub_begin(); mtl_exec((const uint8_t *)&cpu_ops);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200000000), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ gate.signaledValue = 1; });
+    id<MTLTexture> from_cpu = tex_mtl(&cpu.t);
+    CHECK("CPU upload waits for the buffer copy", gate.signaledValue == 1);
+    CHECK("CPU upload submission completes", mtl_wait(mtl_sub_commit(), 10000000000ull) && !mtl_last_commit_error());
+    CHECK("CPU upload reads copied texels", from_cpu && same_texels(from_cpu, &moved[1]));
+    g_nvn_deswz_gpu = gpu;
+    mtl_tex_release(&cpu.t); free(cpu.ref);
+    for (int i = 0; i < 2; i++) { mtl_tex_release(&moved[i].t); free(moved[i].ref); }
+    mtl_tex_release(&late.t); free(late.ref);
+
     upl big[3];   // 64 MB each: the third's staging no longer fits the batch's 128 MB, so taking it flushes the batch
     for (int i = 0; i < 3; i++) make(&big[i], mem, &pool, (size_t)(16 + 72 * i) << 20, 4096, 4096, 100 + i);
     upload_all(big, 3, &made, &batches);
     printf("big: %llu source buffers for 3 textures, %u batches\n", (unsigned long long)made, batches);
-    CHECK("staging splits the batches", batches >= 2);
-    CHECK("a second source buffer only for a texture whose staging flushed its batch", made == 3 + (batches - 1));
+    if (up_src_budget()) {
+        CHECK("the source budget splits before each 64 MiB texture", batches == 3);
+        CHECK("each texture needs only the source buffer in its own batch", made == 3);
+    } else {
+        CHECK("staging splits the batches", batches >= 2);
+        CHECK("a second source buffer only for a texture whose staging flushed its batch", made == 3 + (batches - 1));
+    }
 
     for (int i = 0; i < 8; i++) { mtl_tex_release(&small[i].t); free(small[i].ref); }
     for (int i = 0; i < 3; i++) { mtl_tex_release(&big[i].t); free(big[i].ref); }

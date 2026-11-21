@@ -1614,6 +1614,16 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        // Opt-in workaround for the opaque fullscreen presentation path (issue #1821).
+        // On an M5 Pro with a primary, mirrored HDMI TV, the player saw the band
+        // disappear with opaque=NO and return with YES in the same running game.
+        // The driver/compositor fault remains unproven; do not change other games'
+        // presentation policy without checking their alpha and latency too.
+        const char *composited = getenv("DM_MAC_COMPOSITED");
+        if (composited && atoi(composited)) {
+            g_layer.opaque = NO;
+            LOG("front end: non-opaque Metal layer (DM_MAC_COMPOSITED=1), native fullscreen retained");
+        }
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

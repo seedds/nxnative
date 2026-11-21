@@ -1781,3 +1781,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### Offline applet pages close their browser window
+
+- **Symptom:** A plays the confirmation sound on an offline terms page but the page remains open and the game waits.
+- **Cause:** the page polls the standard gamepad's button 1 and calls `window.close()` after confirmation. WebKit ignores a native close request from a top-level window that was not opened by script. The host bridged `nx.endApplet` but not `window.close`.
+- **Fix:** the injected web bridge reports window closure as exit reason 4, leaving `nx.endApplet` at exit reason 0. It does not close the page until the page calls it.
+- **Check:** `test_web_shim.py` executes the injected bridge prefix in a window context and verifies both close APIs, no native window close and no completion on injection. The XCOM 2 terms page's confirmation sound in the log establishes that its button test succeeds before the close request.
+- **Found on:** [XCOM 2 Collection](../../dm/games/0100D0B00FB74000/README.md), launcher 1.0.3, package `v131072`. The launcher calls `ShowOfflineHtmlPage` at main `+0x6678`, reads `GetOfflineExitReason` and repeats unless the value is 4 (`+0x6688`). The SDK getter directly loads the first return-value word. The user confirmed that A advances past the terms page on the Mac after the host fix; iOS is untested.

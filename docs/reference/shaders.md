@@ -2750,6 +2750,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `gl_shaders.py` gained `uni_members()`, which walks a struct type's members and emits one row per member with the dotted name (`u:u_LightEnv.m_dirLights_dir[0]`), adding each member's offset to its parent's (the reflection gives a nested member's offset relative to its parent); arrays of structs return an error.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md), whose lighting programs were the missing ones.
 
+### Inactive GL uniforms receive locations
+
+- **Symptom:** `glGetUniformLocation` returns a location for an unused default-block uniform. A caller that skips uploads only for location `-1` can then enter an unnecessary upload, including a null-source palette upload.
+- **Cause:** SPIRV-Cross's reflection describes the whole default uniform block's layout, including members no shader instruction reads. Publishing each member as a `u:` row made the host treat those unused members as active.
+- **Fix:** `gl_shaders.py` takes active member names from glslang's linked reflection and publishes only those default-block members, including used nested struct members and arrays. It keeps SPIRV-Cross's offsets, array strides and block size, so omitting a location does not move the data the shader reads. Named uniform blocks keep their existing layout and binding rules. Regenerate the GL shader tables and libraries to apply the change.
+- **Found on:** synthetic shaders following [Tomb Raider I–III Remastered issue #2416](https://github.com/seedds/nxnative/issues/2416), which reports `glUniform4fv(loc, 96, NULL)` guarded by a location check. Whether that game's palette is inactive, and whether this resolves its crash, remain unverified without its shaders.
+
 ## Pipelines and caches
 
 ### A compile that does not return stalls every flush and draw

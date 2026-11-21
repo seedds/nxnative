@@ -184,16 +184,29 @@ def fixups(t, stage, renamed=None):
 def glsl_type(t, refl):
     return refl['types'][t]['name'] if t in refl.get('types', {}) else t
 
-def uni_members(refl, ms, prefix, base, f, bools):
+def live_uniforms(output):
+    """glslang's linked reflection gives the used members; SPIRV-Cross gives the whole block's layout, including unused members."""
+    _, header, rows = output.partition('Uniform reflection:\n')
+    if not header: return 'glslang: missing uniform reflection'
+    active = set()
+    for row in rows.splitlines():
+        if not row: break
+        name, sep, _ = row.partition(': offset ')
+        if not sep: return 'glslang: invalid uniform reflection row: ' + row
+        active.add(name.removesuffix('[0]'))
+    return active
+
+def uni_members(refl, ms, prefix, base, f, bools, active):
     """Table rows for default block members. A struct's members recurse with their dotted name, which is the name the game passes to GL (u_LightEnv.m_dirLights_dir[0]); the
     reflection gives a nested member's offset relative to its parent, so the parent's offset is added"""
     for mb in ms:
         arr = mb.get('array', [])
         name = prefix + mb['name']
+        if not any(n == name or n.startswith((name + '.', name + '[')) for n in active): continue
         if len(arr) > 1: return f'uniform {name}: arrays of arrays'
         if 'members' in refl['types'].get(mb['type'], {}):
             if arr: return f'uniform {name}: an array of structs is not implemented'
-            e = uni_members(refl, refl['types'][mb['type']]['members'], name + '.', base + mb['offset'], f, bools)
+            e = uni_members(refl, refl['types'][mb['type']]['members'], name + '.', base + mb['offset'], f, bools, active)
             if e: return e
             continue
         ty = glsl_type(mb['type'], refl)
@@ -295,8 +308,10 @@ def translate(src, stage, key, tmp):
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
     if desktop_legacy: pre = legacy_desktop_io(pre, stage)
     open(g, 'w').write(fixups(pre, stage, renamed))
-    r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
+    r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-l', '-q', '--reflect-basic-array-suffix', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
+    active = live_uniforms(r.stdout)
+    if isinstance(active, str): return active
     refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
@@ -329,7 +344,7 @@ def translate(src, stage, key, tmp):
         if t['name'] != 'gl_DefaultUniformBlock':   # a named block: the buffer the game binds to its binding point (glUniformBlockBinding, glBindBufferRange)
             f.append(f'n:{t["name"]}={aid}:{u["block_size"]}'); continue
         f.append(f'b:{aid}:{u["block_size"]}')
-        e = uni_members(refl, t['members'], '', 0, f, bools)
+        e = uni_members(refl, t['members'], '', 0, f, bools, active)
         if e: return e
     # the samplers the MSL takes: spirv-cross leaves out one the shader never reads, but its reflection still lists it, and glslang gives it the binding of a used one (Mega Man Legacy
     # Collection's default_ps.glsl declares T1 for code under #if 0: T0 and T1 both at 0). Listed, the host bound the unit T1 names, an empty one, over T0's texture: every sprite sampled black

@@ -741,6 +741,12 @@ static void test_argument_buffers(const char *dir) {
         assert(shader_of(shaders[st])->fn); h_glAttachShader(pr, shaders[st]);
     }
     h_glLinkProgram(pr); assert(prog_of(pr)->linked && prog_of(pr)->ae[0] && prog_of(pr)->ae[1]); h_glUseProgram(pr);
+    // An unused array shares each stage's default block with live uniforms. A GL driver gives it no location,
+    // so the game's palette upload is ignored, including a null source (the pattern reported in issue #2416).
+    GLint unused = h_glGetUniformLocation(pr, "unusedPalette");
+    assert(unused == -1 && h_glGetUniformLocation(pr, "unusedPalette[0]") == -1);
+    h_glUniform4fv(unused, 96, NULL);
+    assert(h_glGetError() == 0);
     GLuint textures[17], samplers[17], vao, vb, ub, target, fb;
     h_glGenTextures(17, textures); h_glGenSamplers(17, samplers);
     for (int i = 0; i < 17; i++) {

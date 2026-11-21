@@ -479,6 +479,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Not checked:** the link's new range after a switch has not run here (Hades windowed and fullscreen paced at 60 as before).
 - **Later:** a variable-refresh screen in fullscreen switches too, to a fixed-rate mode at a multiple of the game's rate, though its own rate is one: [The 60 Hz link at 40 fps in fullscreen on a ProMotion screen](#the-60-hz-link-at-40-fps-in-fullscreen-on-a-promotion-screen).
 
+### A fixed 60 Hz mode read as the variable one
+
+- **Symptom:** a player sets a variable-refresh screen to its fixed 60 Hz mode in System Settings during a fullscreen game, and it switches to 120 Hz again at once; the log says `variable-refresh screen at 60 Hz switched to fixed 120 Hz for 60 fps in fullscreen`, a 60 Hz mode that is not variable.
+- **Cause:** `screen_match_apply` judged the mode by `g_screen_variable_refresh`, which the screen observer and `screen_match_restore` set. Opening System Settings took the game out of fullscreen, the host gave the screen its variable mode back and kept the flag set; the player's fixed 60 Hz mode then read as the variable mode at 60 Hz, the fixed candidates left out every 60 Hz mode, and fixed 120 Hz was taken.
+- **Fix:** with no mode of its own switched, `screen_match_apply` reads the screen's state again (`screen_refresh`) before judging it.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) on an Apple M6 with a DELL S2725QC (modes 116 variable 48–120 Hz, 117 fixed 120, 119 fixed 60; 2026-11-18): three switches to fixed 120 Hz in one session, each right after the player chose 60 Hz. From the variable mode the fixed 60 Hz mode is still taken, once (`dmhost` with the fix, the `field-run` route in fullscreen).
+- **Not checked:** the System Settings round trip itself with the fix, by hand.
+
 ### macOS Game Mode holds the GPU at its lowest clock
 
 - **Symptom:** a Mac game in fullscreen holds 60 fps for 45 s to 3 minutes, then the same work takes about twice the GPU time (Tears of the Kingdom 10.5 → 19.7 ms) and the frame step falls to 30 fps. `powermetrics` shows the GPU at its lowest clock (338 MHz on an M4 Pro) while it is 72–98% busy, with thermal pressure nominal. Probes back to 60 fail, because the clock does not rise within a probe. `gamepolicyd` logs `Game mode enabled` and `Set DPS to 2`.
@@ -535,6 +543,20 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** `link_sync` started the link thread without recording the link's mode as applied (it stayed 0 until the next call set the range). A rescue in those first frames asks for mode 0, which matched, so `link_sync` returned without invalidating the link: the link kept the layer and dropped every frame (its callback returns early in a rescue), the present thread never took one (it does not own the layer), and the acquire waited for a present that nobody presented.
 - **Fix:** the start records the link's mode as applied (`present pacing mode 0 → 2 (frame 0; the display link starts)`), so the rescue differs from it and the link is invalidated. The acquire's wait for a present the link took is also bounded (2 s, a `[RED]` line), with its cause open should it still come.
 - **Found on:** Ocarina of Time on the ROG XG27AQNGV at variable refresh up to 240 Hz, twice (Apple M6, macOS 27.0).
+
+### The display link started before fullscreen's mode switch
+
+- **Symptom:** in fullscreen on a variable-refresh screen, some starts were clean and some had the link silent 100-500 ms two or three times, a rescue, and then a minute of frames at 20-30 fps; which one depended on when the switch fell.
+- **Cause:** the link started at the game's first frames, and fullscreen and [the screen match](#fullscreen-switches-the-screen-to-a-rate-the-frame-rate-divides) came after: the mode switch (variable 240 Hz to a fixed 120 Hz) happened under a running link.
+- **Fix:** `front_screen_settling` (`front_mac.m`), read by `link_sync` before it starts the link: while fullscreen asked for at launch has not been entered (at most 5 s), while a match is asked for and not yet applied, and for 1 s after a mode switch, the link waits and the present thread shows the frames (`display link: waits for fullscreen and the screen's mode to settle`, then `the screen settled after N frames`).
+- **Found on:** Ocarina of Time on the ROG XG27AQNGV at variable refresh up to 240 Hz: five starts in a row with no silence and no rescue, the link starting about 1.6 s in (frames 96-99).
+
+### Fullscreen's mode switch repeated, and the switched screen read as variable
+
+- **Symptom:** started from a front end on a DELL S2725QC at variable 48-120 Hz, Ocarina of Time at 60 fps ran at 33-66 fps, the frame step going between 1 and 2 vsyncs; the log showed `switched to fixed 120 Hz` four to eleven times in a row as fullscreen started and `frame latency 2 (fullscreen, variable refresh)` after it.
+- **Cause:** three in `front_mac.m`. The mode switch posts the screen's change notifications at once, and their observer called `screen_match_apply` inside the switch, before it had recorded the screen as switched; that call read the old variable-refresh flag, took the fixed mode for the variable one and switched back (modes 116 → 117 → 116 …). The rate asked for went from 60 to 120 as fullscreen started (the 120 Hz link is fullscreen's), each change asking again. And `screen_refresh` took `NSScreen`'s refresh range, which kept the variable range for a while after the switch, so the link took the variable-refresh latency.
+- **Fix:** `screen_match_apply` is not re-entered (a call during a switch runs once after it); a screen in the mode this host picked for the rate is left alone; the rate asked for is 120 wherever the 120 Hz link will pace a 60 fps game, whether or not fullscreen has been entered; `screen_refresh` takes a screen this host switched as fixed at its mode's rate. Choosing the fixed mode, only the current (variable) mode is left out: the top rate is listed twice, variable and fixed (116 and 117 on the DELL), and leaving out every mode at that rate had left the DELL no fixed 120 Hz mode. For the 120 Hz link 120 Hz is preferred to a higher multiple (152 late frames and a stall at a fixed 240 Hz on the ROG, against about 20 at 120).
+- **Found on:** Ocarina of Time, Apple M6, macOS 27.0: eight starts in a row (five on the DELL, three on the ROG XG27AQNGV at variable 240 Hz) switched once each, to a fixed 120 Hz, at latency 1 with no stall; a sprint across Hyrule Field on the DELL held 60.0 fps, 20 late frames in 30 s.
 
 ### The fallback pacer slept a lead the display link built up
 

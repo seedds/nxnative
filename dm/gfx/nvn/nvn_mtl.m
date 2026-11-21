@@ -3108,17 +3108,30 @@ void mtl_tex_init(const tex_t *t) {
 // dirty-page checks and re-uploads are one. Weak: the serials' entries own it, and a table entry never keeps one alive. Under g_smu; a pool's entries go when it is finalized (mtl_alias_drop_pool)
 @interface NvPkgRef : NSObject { @public __weak NvPkg *pkg; } @end
 @implementation NvPkgRef @end
+// A share entry outlives its package (NvPkgRef's pkg is weak), and only a Finalize of the entry's own pool took it out. A pool that lives on while its textures come and go at other offsets
+// (Ocarina of Time's texture heaps) kept every dead entry: 357,000 after 200 loads from the pause menu, 99 % of them dead, and every pool Finalize walks the table under g_smu, which the replay
+// thread and the game's submit wait on. So a Finalize also takes out the dead entries, once the table has doubled since the last time it did (a sweep loads every entry's package, so it is not
+// done at each Finalize). A dead entry reads as a missing one (pkg_shared), so nothing else changes. A package that a sweep's load turns out to hold last is released here, under g_smu, as
+// own_pool_finalize_locked releases its serials' packages (NvPkg's dealloc only queues releases, defer_obj_release). Under g_smu
+static uint32_t g_pkg_swept;   // g_pkg_share.n after the last sweep of dead entries
 void mtl_alias_drop_pool(const void *pool) {
     if (!pool) return;
     pthread_mutex_lock(&g_smu);
     image_desc_drop_pool(pool);
     NSMutableSet *pkgs = [NSMutableSet set];   // the pool's packaged textures still alive: finalized serials may hold them, and they end with the pool as its other textures do
-    { uint32_t ns = 0; alias_key *ks = NULL;   // a later pool at this address holds other bytes (g_pkg_share)
+    int sweep = g_pkg_share.n > 2 * g_pkg_swept + 1024;
+    { uint32_t ns = 0, nc = 0; alias_key *ks = NULL;   // a later pool at this address holds other bytes (g_pkg_share)
         for (uint32_t i = 0; i < g_pkg_share.cap; i++) { if (!g_pkg_share.vals[i]) continue; alias_key k; memcpy(&k, g_pkg_share.keys + (size_t)i * g_pkg_share.klen, sizeof k);
-            if (k.pool == (uint64_t)(uintptr_t)pool) { alias_key *nk = realloc(ks, (ns + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[ns++] = k;
-                NvPkg *pk = ((NvPkgRef *)(__bridge id)g_pkg_share.vals[i])->pkg; if (pk) [pkgs addObject:pk]; } }
+            int mine = k.pool == (uint64_t)(uintptr_t)pool;
+            if (!mine && !sweep) continue;
+            NvPkg *pk = ((NvPkgRef *)(__bridge id)g_pkg_share.vals[i])->pkg;
+            if (!mine && pk) continue;
+            if (ns == nc) { alias_key *nk = realloc(ks, (nc = nc ? nc * 2 : 256) * sizeof *ks); if (!nk) abort(); ks = nk; }
+            ks[ns++] = k;
+            if (pk) [pkgs addObject:pk]; }
         for (uint32_t i = 0; i < ns; i++) hm_del_id(&g_pkg_share, &ks[i]);
-        free(ks); }
+        free(ks);
+        if (sweep) g_pkg_swept = g_pkg_share.n; }
     own_pool_finalize_locked(pool, (__bridge CFSetRef)pkgs);   // the pool's textures and every serial entry that names one (nvn_owner.m; a new epoch: every texture ID takes the slow path once)
     pthread_mutex_unlock(&g_smu);
     // The pool's texture IDs are marked gone before their CPU-written classification goes: a pool walk (pool_gpu, holding g_rmu) reaching an ID in between found it not gone, the
@@ -3139,7 +3152,7 @@ static alias_key tex_alias_key(const tex_t *t) {
 }
 static NvPkg *pkg_shared(const tex_t *t) {
     alias_key k = tex_alias_key(t); NvPkg *pk = nil;
-    pthread_mutex_lock(&g_smu); NvPkgRef *r = hm_get_id(&g_pkg_share, &k); if (r) pk = r->pkg; pthread_mutex_unlock(&g_smu);
+    pthread_mutex_lock(&g_smu); NvPkgRef *r = hm_get_id(&g_pkg_share, &k); if (r) { pk = r->pkg; if (!pk) hm_del_id(&g_pkg_share, &k); } pthread_mutex_unlock(&g_smu);   // a dead entry reads as a missing one
     return pk;
 }
 static void pkg_share_put(const tex_t *t, NvPkg *pk) {

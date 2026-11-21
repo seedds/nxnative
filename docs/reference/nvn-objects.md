@@ -380,6 +380,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** a registry entry carries `gone` (`cap_treg`), and a gone entry keeps neither its pool nor its storage address and is not read back. `nvn_replay` registers it and then marks it gone (`mtl_reg_tex_gone`), as the live run left it. Captures made before keep working (the byte was padding, 0). `check_t_capture_live` registers a texture on a pool of its own and finalizes that pool, then fills the pool object with such bytes. Without the fix the capture is incomplete.
 - **Found on:** [Pokemon Scarlet](../../dm/games/0100A3D008C5C000/README.md) (texture IDs 1726 to 1786 in the bedroom, each texture with a pool of its own).
 
+### A sparse mapping scan reads a finalized pool object
+
+- **Symptom:** `CRASH sig=10` at `nvn_sparse_pool+0x4` from `mtl_sub_begin` on the submission worker during a level change. The instruction reads `pool->vp`, 24 bytes into the freed pool object.
+- **Cause:** a registered descriptor keeps a copy of `tex_t.pool` after its memory pool is finalized. `nvnMemoryPoolFinalize` already marks the descriptor `gone` under `g_rmu` before tearing the pool down, but `treg_sparse_notes` did not check that state before calling `nvn_sparse_pool` on the copied pointer. A later mapping in another pool sends it through that scan even when no draw reads the old descriptor.
+- **Fix:** the sparse mapping scan removes gone descriptors before reading their pool pointers, under the same registry lock that finalization holds. A registration that revives a removed descriptor restores its sparse tracking even when the descriptor data is identical.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sparse_pool_cache` with `MTL_DEBUG_LAYER=1`. The fixture finalizes a texture and its pool while leaving the descriptor registered, makes the pool object's page inaccessible, then maps another pool. The next submission must retire the gone entry without reading that page. The fixture faults on the unmodified scan. It also checks that a descriptor revived by an identical registration receives a mapping note and that the GPU reads the newly mapped page.
+- **Found on:** Tony Hawk's Pro Skater 1 + 2 1.0.3 with DLC, title `0100CC00102B4000` ([issue #496](https://github.com/seedds/nxnative/issues/496)), on an M3 MacBook Air, 16 GB, macOS 27.2.1. The original host crashed while loading the tutorial. With only the host swapped for the crash fix, the tutorial loaded and eight levels ran at a steady 30 fps without the crash. The separately reported black surfaces did not recur in those runs and remain unexplained. [PR #3091](https://github.com/seedds/nxnative/pull/3091)
+
 ### A texture read after its memory pool object was freed
 
 - **Symptom:** `CRASH sig=11 … pc=nvn_sparse_protect+0x40`, an address that looks like data, `x8` 8 below it, after a long session; the backtrace `tex_by_id` ← `tex_mtl` ← `pkg_upload`. The pool need not be sparse.

@@ -4,6 +4,8 @@ Readers opt into Path/open/os/mmap here; the real filesystem is untouched. A pat
 like /game/RomFS.img/Data/archive is a bounded view of that image entry. Ordinary
 paths retain their normal behavior, including writes to generated outputs.
 """
+from __future__ import annotations
+
 import builtins
 from contextlib import contextmanager, ExitStack
 from contextvars import ContextVar

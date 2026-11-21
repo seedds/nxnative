@@ -216,6 +216,12 @@ $(B)/t_audio_input: t_audio_input.c ../audio_input.c ../audio_input.h | $(B)
 audio-input: $(B)/t_audio_input
 	$(B)/t_audio_input
 run: audio-input
+$(B)/t_dualsense_mic: t_dualsense_mic.c ../dualsense_mic.c ../dualsense_mic.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_dualsense_mic.c ../dualsense_mic.c
+.PHONY: dualsense-mic
+dualsense-mic: $(B)/t_dualsense_mic
+	$(B)/t_dualsense_mic
+run: dualsense-mic
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c

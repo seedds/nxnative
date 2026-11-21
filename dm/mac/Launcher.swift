@@ -7,6 +7,8 @@
 import AppKit
 import AVFAudio
 import CoreAudio
+import IOKit
+import IOKit.hid
 import QuartzCore
 import SwiftUI
 
@@ -255,7 +257,7 @@ private enum MicrophoneInputDevices {
         return ids.compactMap { device in
             guard hasInput(device), let uid = string(device, selector: kAudioDevicePropertyDeviceUID),
                   let name = string(device, selector: kAudioObjectPropertyName), !uid.isEmpty else { return nil }
-            return MicrophoneInputDevice(uid: uid, name: name)
+            return MicrophoneInputDevice(uid: uid, name: dualSenseOverUSB(device, name: name) ? "\(name) (USB)" : name)
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
@@ -271,6 +273,36 @@ private enum MicrophoneInputDevices {
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, data) == noErr else { return false }
         let buffers = UnsafeMutableAudioBufferListPointer(data.assumingMemoryBound(to: AudioBufferList.self))
         return buffers.contains { $0.mNumberChannels > 0 }
+    }
+
+    // A DualSense's USB audio: Sony's, on USB, with a DualSense HID device beside it (a DualShock 4's is Sony's too, named alike)
+    private static func dualSenseOverUSB(_ device: AudioDeviceID, name: String) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr, transport == kAudioDeviceTransportTypeUSB else { return false }
+        let maker = string(device, selector: kAudioObjectPropertyManufacturer) ?? ""
+        return (name.localizedCaseInsensitiveContains("DualSense") || maker.localizedCaseInsensitiveContains("Sony")) && dualSenseHIDOnUSB()
+    }
+
+    // A DualSense or DualSense Edge HID device on USB, from the registry (no device is opened, so nothing prompts)
+    private static func dualSenseHIDOnUSB() -> Bool {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(kIOHIDDeviceKey), &iterator) == KERN_SUCCESS else { return false }
+        defer { IOObjectRelease(iterator) }
+        func property(_ service: io_service_t, _ key: String) -> Any? {
+            IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+        }
+        while true {
+            let service = IOIteratorNext(iterator)
+            if service == 0 { return false }
+            defer { IOObjectRelease(service) }
+            let vendor = property(service, kIOHIDVendorIDKey) as? Int, product = property(service, kIOHIDProductIDKey) as? Int
+            let transport = property(service, kIOHIDTransportKey) as? String ?? ""
+            if vendor == 0x054C, product == 0x0CE6 || product == 0x0DF2, transport == "USB" { return true }
+        }
     }
 
     private static func string(_ device: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {

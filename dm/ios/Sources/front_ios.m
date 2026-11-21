@@ -581,6 +581,14 @@ int dm_ios_output_channels(void) { return (int)AVAudioSession.sharedInstance.out
 // All of this runs on the main queue, like the scene callbacks
 static int g_audio_bg, g_audio_intr;
 static void front_ios_audio_apply(void) { dm_audio_suspend(g_audio_bg || g_audio_intr); }
+static BOOL front_ios_same_outputs(NSArray<AVAudioSessionPortDescription *> *previous, NSArray<AVAudioSessionPortDescription *> *current) {
+    if (previous.count != current.count) return NO;
+    for (NSUInteger i = 0; i < current.count; i++) {
+        AVAudioSessionPortDescription *a = previous[i], *b = current[i];
+        if (![a.UID isEqualToString:b.UID] || ![a.portType isEqualToString:b.portType]) return NO;
+    }
+    return YES;
+}
 static void front_ios_audio_watch(void) {
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
@@ -592,12 +600,20 @@ static void front_ios_audio_watch(void) {
         }
         front_ios_audio_apply();
     }];
-    // A new output (an HDMI adapter, AirPods, a dock) or one gone: ask for the channels the new route takes, then the host gives each output a unit at that count (dm_audio_route_changed)
+    // Reapply the channel preference first. A changed output can also interrupt callbacks at the same channel count.
     [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         NSUInteger reason = [n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
-        if (reason == AVAudioSessionRouteChangeReasonCategoryChange) return;   // our own setCategory at activation; the route is the same
-        LOG("audio session: route changed (reason %lu)", (unsigned long)reason);
-        front_ios_audio_channels(AVAudioSession.sharedInstance); dm_audio_route_changed();
+        AVAudioSession *session = AVAudioSession.sharedInstance;
+        AVAudioSessionRouteDescription *previous = n.userInfo[AVAudioSessionRouteChangePreviousRouteKey];
+        BOOL moved = previous ? !front_ios_same_outputs(previous.outputs, session.currentRoute.outputs)
+                              : reason != AVAudioSessionRouteChangeReasonCategoryChange;
+        if (!moved && reason == AVAudioSessionRouteChangeReasonCategoryChange) return;
+        int old_channels = dm_audio_route();
+        front_ios_audio_channels(session);
+        if (moved || (session.outputNumberOfChannels >= 6 ? 6 : 2) != old_channels) {
+            LOG("audio session: output route changed (reason %lu)", (unsigned long)reason);
+            dm_audio_route_changed();
+        }
     }];
     [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         (void)n; LOG("audio session: the media services were reset; setting the session and the outputs up again");

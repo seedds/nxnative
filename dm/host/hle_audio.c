@@ -53,6 +53,7 @@ typedef struct {
     audio_stats st_report; _Atomic int st_pending; // one snapshot, consumed by the watchdog or Close under g_aos_lock
     _Atomic uint64_t cb_n;             // device callbacks of this output (the watchdog's evidence that the device still plays it)
     uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock)
+    uint64_t route_until;              // allow the device switch to settle before intervening (under g_aos_lock)
     int stalled, retry_ms; uint64_t retry_at;   // the device stopped calling back (or would not start): the silent sink stands in and the watchdog retries the AudioUnit at retry_at, backing off
 } aout;
 
@@ -237,8 +238,9 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
     return noErr;
 }
 // A route check off the calling thread (dm_audio_route_changed): once for a burst of requests, since the flag is cleared before the check reads the route
+static void audio_route_check(int from_front);
 static _Atomic int g_route_queued;
-static void route_check(void *unused) { (void)unused; atomic_store(&g_route_queued, 0); dm_audio_route_changed(); }
+static void route_check(void *unused) { (void)unused; atomic_store(&g_route_queued, 0); audio_route_check(0); }
 static void route_queue(void) { if (!atomic_exchange(&g_route_queued, 1)) dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), NULL, route_check); }
 #if !TARGET_OS_IPHONE
 // Mac DefaultOutput's default 512 device frames can exceed the PCM a game has queued, producing zero-filled gaps.
@@ -335,6 +337,7 @@ static pthread_mutex_t g_route_mu = PTHREAD_MUTEX_INITIALIZER;
 static void route_notify(void *unused) { (void)unused; dm_audio_device_changed(); }
 #if !TARGET_OS_IPHONE
 static AudioDeviceID g_route_device;
+static int g_route_moved;   // kept until the route check, even if an open refreshed the cache first
 static OSStatus route_device_changed(AudioObjectID id, UInt32 n, const AudioObjectPropertyAddress *pa, void *ctx) {
     (void)id; (void)n; (void)pa; (void)ctx; route_queue(); return noErr;
 }
@@ -344,11 +347,12 @@ static void route_listen(void) {
     if (st) LOG("[RED] audio: cannot listen for the default output device (status %d)", (int)st);
 }
 #endif
-int dm_audio_output_channels(void) {
+static int audio_output_channels(int *moved) {
     pthread_mutex_lock(&g_route_mu);
     int device_changed = 0;
 #if TARGET_OS_IPHONE
     int ch = dm_ios_output_channels() >= 6 ? 6 : 2;
+    (void)moved;   // the front end reports changed outputs through dm_audio_route_changed
 #else
     static pthread_once_t listener = PTHREAD_ONCE_INIT; pthread_once(&listener, route_listen);
     AudioDeviceID device = out_device();
@@ -360,9 +364,11 @@ int dm_audio_output_channels(void) {
             if (st) LOG("[RED] audio: cannot listen for output channels (status %d)", (int)st);
         }
         device_changed = g_route_device != 0; g_route_device = device;
+        if (device_changed) g_route_moved = 1;
     }
     char name[256]; int n = device_out_channels(device, name, sizeof name);
     int ch = n >= 6 ? 6 : 2;
+    if (moved) { *moved = g_route_moved; g_route_moved = 0; }
 #endif
     int old = atomic_exchange(&g_route, ch);
 #if !TARGET_OS_IPHONE
@@ -374,6 +380,7 @@ int dm_audio_output_channels(void) {
     pthread_mutex_unlock(&g_route_mu);
     return ch;
 }
+int dm_audio_output_channels(void) { return audio_output_channels(NULL); }
 int dm_audio_route(void) {
     int r = atomic_load(&g_route);
     return r ? r : dm_audio_output_channels();
@@ -453,7 +460,7 @@ static void au_halt(aout *a) {
         a->start_phase = AU_IDLE;
         if (a->backend == BK_AU) a->backend = BK_NONE;
     }
-    a->stalled = 0; a->retry_ms = 0; a->retry_at = 0;
+    a->stalled = 0; a->retry_ms = 0; a->retry_at = 0; a->route_until = 0;
 }
 static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE; }
 static void au_retry(aout *a, uint64_t now) {
@@ -509,7 +516,20 @@ static void au_request_start(aout *a) {
 // After 200 ms without a callback the silent sink takes over (the game's audio keeps its real-time pace) and the AudioUnit is retried after 1, 2, 4, 8 s. A late wake-up of the watchdog itself (the whole process was stopped) only restarts the count.
 // The time is read under g_aos_lock: the startup helper stamps wd_t under it too, and a watchdog time read before the lock was older than the stamp of an AudioUnit the return from the background had just
 // started (DRAGON QUEST VII Reimagined on an iPhone: "has not called back for 18446744073662 ms", a restart of a running AudioUnit)
-enum { WD_TICK_MS = 50, WD_STALL_MS = 200 };
+enum { WD_TICK_MS = 50, WD_STALL_MS = 200, WD_ROUTE_SETTLE_MS = 250, WD_ROUTE_MAX_MS = 500 };
+// Core Audio may pause callbacks while moving a running unit. Keep the PCM queued while it does.
+// If the new route stays silent, try once promptly, then fall back to the usual retry schedule.
+static int au_route_stalled(const aout *a, uint64_t t) {
+    uint64_t idle = t - a->wd_t;
+    return a->route_until && idle > WD_STALL_MS * 1000000ull &&
+           (t >= a->route_until || idle >= WD_ROUTE_MAX_MS * 1000000ull);
+}
+static void au_route_recover(aout *a) {
+    LOG("audio #%d: restarting the AudioUnit for the new output route", a->id);
+    au_halt(a);
+    if (a->backend == BK_NONE) null_start(a);
+    au_request_start(a);
+}
 typedef struct { audio_stats stats; int id, ch; } audio_report;
 // Both consumers hold g_aos_lock. A local copy owns every log argument, so a slow log cannot hold up registry changes or retain a closed output.
 static int stats_take(aout *a, audio_report *r) {
@@ -531,6 +551,41 @@ static void stats_drain(void) {
     pthread_mutex_unlock(&g_aos_lock);
     for (int i = 0; i < n; i++) stats_log(&reports[i]);
 }
+// One output's watchdog tick, with the registry locked.
+static void au_watchdog_output(aout *a, uint64_t t, uint64_t gap) {
+    uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
+    if (a->start_phase == AU_WAIT_CALLBACK) {
+        if (n != a->wd_n) {
+            null_stop(a);
+            atomic_store_explicit(&a->hold_device, 0, memory_order_release);
+            if (a->stalled) LOG("audio #%d: AudioUnit restarted", a->id);
+            a->backend = BK_AU; a->start_phase = AU_IDLE; a->stalled = a->retry_ms = 0;
+            a->wd_n = n; a->wd_t = t;
+        } else if (gap > 4ull * WD_TICK_MS * 1000000) a->wd_t = t;
+        else if (au_route_stalled(a, t)) au_route_recover(a);
+        else if (t - a->wd_t >= 1000000000ull) {
+            if (!a->stalled) LOG("[RED] audio #%d: no device callback after start; continuing on the silent sink", a->id);
+            AudioOutputUnitStop(a->au); a->start_phase = AU_IDLE; au_retry(a, t);
+        }
+        return;
+    }
+    if (a->backend == BK_NULL) {
+        if (a->route_until && a->start_phase == AU_IDLE) au_route_recover(a);
+        else if (t >= a->retry_at) au_request_start(a);
+        return;
+    }
+    if (a->backend != BK_AU) return;
+    if (gap > 4ull * WD_TICK_MS * 1000000 || n != a->wd_n) {
+        if (a->route_until && t >= a->route_until && n != a->wd_n) a->route_until = 0;
+        a->wd_n = n; a->wd_t = t;
+    } else if (a->route_until) {
+        if (au_route_stalled(a, t)) au_route_recover(a);
+    } else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {
+        LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the AudioUnit", a->id, (t - a->wd_t) / 1e6);
+        AudioOutputUnitStop(a->au); a->backend = BK_NONE; null_start(a);
+        au_retry(a, t);
+    }
+}
 static void *au_watchdog(void *p) {
     (void)p; uint64_t last = now_ns();
     for (;;) {
@@ -539,33 +594,7 @@ static void *au_watchdog(void *p) {
         uint64_t t = now_ns(), gap = t - last; last = t;
         for (int i = 0; i < AOMAX; i++) {
             aout *a = g_aos[i]; if (!a || !a->au) continue;
-            uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
-            if (a->start_phase == AU_WAIT_CALLBACK) {
-                if (n != a->wd_n) {
-                    null_stop(a);
-                    atomic_store_explicit(&a->hold_device, 0, memory_order_release);
-                    if (a->stalled) LOG("audio #%d: AudioUnit restarted", a->id);
-                    a->backend = BK_AU; a->start_phase = AU_IDLE; a->stalled = a->retry_ms = 0;
-                    a->wd_n = n; a->wd_t = t;
-                } else if (gap > 4ull * WD_TICK_MS * 1000000) a->wd_t = t;
-                else if (t - a->wd_t >= 1000000000ull) {
-                    if (!a->stalled) LOG("[RED] audio #%d: no device callback after start; continuing on the silent sink", a->id);
-                    AudioOutputUnitStop(a->au); a->start_phase = AU_IDLE; au_retry(a, t);
-                }
-                continue;
-            }
-            if (a->backend == BK_NULL) {
-                if (t >= a->retry_at) au_request_start(a);
-                continue;
-            }
-            if (a->backend != BK_AU) continue;
-            if (gap > 4ull * WD_TICK_MS * 1000000 || n != a->wd_n) {
-                a->wd_n = n; a->wd_t = t;
-            } else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {
-                LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the AudioUnit", a->id, (t - a->wd_t) / 1e6);
-                AudioOutputUnitStop(a->au); a->backend = BK_NONE; null_start(a);
-                au_retry(a, t);
-            }
+            au_watchdog_output(a, t, gap);
         }
         pthread_mutex_unlock(&g_aos_lock);
         stats_drain();
@@ -585,7 +614,7 @@ HLE_FORCE("_ZN2nn5audio13ListAudioOutsEPNS0_12AudioOutInfoEi", "audio output dev
 // its GetAudioOutSampleRate / ChannelCount / SampleFormat are single loads from there); CloseAudioOut sets the state to stopped and leaves the rest. Code outside the SDK reads these fields too:
 // middleware that checks the first word before it stops and closes its output skipped the close while the host left it zero, freed the PCM buffers and the host's consumer read freed memory (Luigi's Mansion 3, PR #109)
 static void au_info(void *g, int ch, int state) { uint32_t *f = g; f[0] = RATE; f[1] = (uint32_t)ch; f[2] = FMT_PCM16; f[3] = (uint32_t)state; }
-static void route_sync(int route);
+static void route_sync(int route, int moved);
 static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *param, void *lr, int source) {
     static _Atomic int nopen;
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
@@ -978,7 +1007,7 @@ void dm_audio_suspend(int on) {
     pthread_mutex_lock(&g_aos_lock);
     if (g_suspended != on) {
         g_suspended = on;
-        if (!on) route_sync(dm_audio_output_channels());   // the route may have changed while suspended; first, so the outputs restart at the route's count (a replaced unit is started there; the loop below then finds it starting)
+        if (!on) route_sync(dm_audio_output_channels(), 0);   // the route may have changed while suspended; first, so the outputs restart at the route's count (a replaced unit is started there; the loop below then finds it starting)
         for (int i = 0; i < AOMAX; i++) {
             aout *a = g_aos[i];
             if (!a || !a->au) continue;
@@ -1025,20 +1054,26 @@ void dm_audio_reset(void) {
 // the route read under it too, so of two checks the later read is the one applied; not while suspended (iOS may refuse a unit in the background or during an interruption, and
 // the resume syncs instead). Outputs the guest opened with another count keep it: a game that wants six on the new route reopens its output after
 // GetActiveAudioDeviceChannelCountForOutput says so, and host DeviceSink blocks already contain both representations (hle_audren.c)
-static void route_sync(int route) {
+static void route_sync(int route, int moved) {
     if (g_suspended) return;
+    uint64_t settle_until = moved ? now_ns() + WD_ROUTE_SETTLE_MS * 1000000ull : 0;
     for (int i = 0; i < AOMAX; i++) {
         aout *a = g_aos[i]; if (!a || a->reset_pending) continue;
         if (!a->au) { if (a->unit_lost) au_remake(a, route, "the route change"); continue; }
         int want = unit_channels(a, route);
-        if (want == a->dev_ch) continue;
+        if (want == a->dev_ch) {
+            if (moved && atomic_load(&a->state) == STATE_STARTED) a->route_until = settle_until;
+            continue;
+        }
         LOG("audio #%d: the output route takes %d channels now: the AudioUnit is replaced (%d → %d channels%s)", a->id, route, a->dev_ch, want, want == 2 && (a->sink_pcm || a->ch == 6) ? ", stereo fold by the host" : "");
         au_reopen(a, route);
     }
 }
-void dm_audio_route_changed(void) {
+static void audio_route_check(int from_front) {
     pthread_mutex_lock(&g_aos_lock);
-    int route = dm_audio_output_channels();   // a Core Audio / audio session read (it logs a change), as au_create makes under the lock too
-    route_sync(route);
+    int moved = from_front;
+    int route = audio_output_channels(&moved);   // read the route and consume a move together
+    route_sync(route, moved);
     pthread_mutex_unlock(&g_aos_lock);
 }
+void dm_audio_route_changed(void) { audio_route_check(1); }

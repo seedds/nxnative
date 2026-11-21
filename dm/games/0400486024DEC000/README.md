@@ -301,6 +301,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 ## Found on this game
 
 - [Autoreleased temporaries collect during background pipeline builds](../../../docs/reference/memory.md#autoreleased-temporaries-collect-during-background-pipeline-builds). The audit finding is resolved in the host.
+- [Periodic GPU profiles stopped after a lost report](../../../docs/reference/frame-rate.md#periodic-gpu-profiles-stopped-after-a-lost-report). On cut9s (E2 v2, `DM_NVN_MTLQ2`), 2 of 12 cap-60 A/B runs lost every `DM_NVN_GPUPROF` profile after frame 810, which voided their A/B blocks; the cause is open.
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.
 - [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
 

@@ -371,6 +371,31 @@ int main(void) {
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      // the frame rate changed while the game runs (loader.c dm_fps_target_set): every reader takes the page's new target at its next call
+      EXPECT("live change 60 → 30: the page takes it",60,nvn_fstep_target_change(state,30));
+      EXPECT("live 30: present cap",30,fps_present_cap());
+      EXPECT("live 30: two vsyncs a frame",2,present_itv(&w));
+      EXPECT("live 30: display-link target",30,nvn_game_fps());
+      EXPECT("live change 30 → 60: the page takes it",30,nvn_fstep_target_change(state,60));
+      EXPECT("live 60: present cap",60,fps_present_cap());
+      EXPECT("live 60: one vsync a frame",1,present_itv(&w));
+      EXPECT("live 60: display-link target",60,nvn_game_fps());
+      EXPECT("a page in vsyncs refuses 40",0,nvn_fstep_target_change(state,40));
+      // a page in ticks of 1/120 s (+0x38 120, Ocarina of Time's FRAME_STEP_120 stub; headless: no window): 40 fps is 3 ticks, 25 ms; 60 and 30 are 2 and 4 ticks
+      uint32_t unit=120;memcpy(state+FSTEP_UNIT_OFF,&unit,4);nvn_present_config(120,0);
+      EXPECT("ticks: live change 60 → 40: the page takes it",60,nvn_fstep_target_change(state,40));
+      EXPECT("live 40: present cap",40,fps_present_cap());
+      EXPECT("live 40: three ticks a frame",3,present_itv(&w));
+      EXPECT("live 40: period ns",25000000,present_period(&w));
+      EXPECT("live 40: display-link target",40,nvn_game_fps());
+      EXPECT("live 40: the graphics layer's target (statistics, link)",40,mtl_fps_target());
+      EXPECT("ticks: live change 40 → 60",40,nvn_fstep_target_change(state,60));
+      EXPECT("ticks, 60: two ticks a frame",2,present_itv(&w));
+      EXPECT("ticks, 60: period ns",16666666,present_period(&w));
+      EXPECT("ticks, 60: graphics layer's target",60,mtl_fps_target());
+      nvn_fstep_target_change(state,30);
+      EXPECT("ticks, 30: four ticks a frame",4,present_itv(&w));
+      EXPECT("ticks, 30: graphics layer's target",30,mtl_fps_target());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's

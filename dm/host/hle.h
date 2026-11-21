@@ -118,6 +118,10 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
 extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+int dm_fps_target_live(void);   // loader.c: the frame rate target in force (30 / 40 / 60) when the running game takes a change at once (a state page the host steps, no engine limiter the host writes), else 0
+int dm_fps_target_set(int fps);   // loader.c: 30 or 60, or 40 for a stub in ticks of 1/120 s (dm_fps_40_able), into the state page while the game runs; 1 = taken, 0 = refused (logged)
+int dm_fps_40_able(void);   // loader.c: 1 when the game's frame step stub takes ticks of 1/120 s (the FRAME_STEP_120 capability), so 40 fps can be offered; the screen is checked by the host (hle_nvn.c fps_step_cap)
+int dm_fps_lock_engine(void);   // hle_fpslock.c: the host writes fps_target into an engine frame limit of this main
 int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (the fastest video decoder that handed out a picture in the last half second), 0 when none: the frame step follows it
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
 void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now

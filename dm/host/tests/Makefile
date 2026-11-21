@@ -501,3 +501,5 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+# loader.c includes the frame step's header (dm_fps_target_set)
+$(B)/t_symbols $(B)/t_nro: ../../gfx/nvn/nvn_fstep.h

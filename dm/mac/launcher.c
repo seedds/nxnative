@@ -167,6 +167,47 @@ static void microphone_at_launch(void) {
     if (value) CFRelease(value);
 }
 
+// Mods (docs/frontends.md, Mods): <sup>/mods.txt names the mods that are on, one folder of <sup>/mods per line, the first winning where two have the same file. Of each one:
+//   - romfs/ (or the folder itself when it has no romfs/, exefs/ or aoc/) becomes a DM_ROMFS_OVERLAY folder
+//   - exefs/ becomes a DM_EXEFS_PATCHES folder: its IPS and pchtxt patches are applied at load (hle_exefs.c)
+//   - aoc/<index>/ becomes a DM_AOC_OVERLAY_<index> folder, over the add-on content of that index (hle_fs.c)
+// A variable the launch environment or an env file set wins over the list
+static void env_append(char **v, size_t *n, const char *p) {
+    size_t k = strlen(p); char *o = realloc(*v, *n + k + 2); if (!o) return;
+    *v = o; if (*n) o[(*n)++] = ':'; memcpy(o + *n, p, k + 1); *n += k;
+}
+static int is_dir(const char *p) { struct stat st; return !stat(p, &st) && S_ISDIR(st.st_mode); }
+#define AOC_MAX 256
+static void mods_overlay(const char *sup) {
+    char p[PATH_MAX], ln[512], *rom = NULL, *exe = NULL, *aoc[AOC_MAX] = { 0 }; size_t nrom = 0, nexe = 0, naoc[AOC_MAX] = { 0 };
+    int keep_rom = getenv("DM_ROMFS_OVERLAY") != NULL, keep_exe = getenv("DM_EXEFS_PATCHES") != NULL;
+    snprintf(p, sizeof p, "%s/mods.txt", sup);
+    FILE *f = fopen(p, "r"); if (!f) return;
+    while (fgets(ln, sizeof ln, f)) {
+        char *s = ln; while (*s == ' ' || *s == '\t') s++;
+        char *e = s + strlen(s); while (e > s && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
+        if (!*s || *s == '#' || strchr(s, '/') || strchr(s, ':') || !strcmp(s, ".") || !strcmp(s, "..")) continue;
+        char mod[PATH_MAX]; snprintf(mod, sizeof mod, "%s/mods/%s", sup, s);
+        if (!is_dir(mod)) { fprintf(stderr, "[RED] launcher: mod %s: no folder %s\n", s, mod); continue; }
+        char ex[PATH_MAX], ao[PATH_MAX]; snprintf(p, sizeof p, "%s/romfs", mod); snprintf(ex, sizeof ex, "%s/exefs", mod); snprintf(ao, sizeof ao, "%s/aoc", mod);
+        int has_rom = is_dir(p), has_exe = is_dir(ex), has_aoc = is_dir(ao);
+        if (has_rom) env_append(&rom, &nrom, p);
+        else if (!has_exe && !has_aoc) env_append(&rom, &nrom, mod);   // the game's files directly in the mod's folder
+        if (has_exe) env_append(&exe, &nexe, ex);
+        if (has_aoc) for (int i = 0; i < AOC_MAX; i++) { snprintf(p, sizeof p, "%s/%d", ao, i); if (is_dir(p)) env_append(&aoc[i], &naoc[i], p); }
+        fprintf(stderr, "launcher: mod %s (%s%s%s%s)\n", s, mod, has_rom || (!has_exe && !has_aoc) ? ", files" : "", has_exe ? ", exefs patches" : "", has_aoc ? ", add-on content files" : "");
+    }
+    fclose(f);
+    if (rom && !keep_rom) setenv("DM_ROMFS_OVERLAY", rom, 1);
+    if (exe && !keep_exe) setenv("DM_EXEFS_PATCHES", exe, 1);
+    for (int i = 0; i < AOC_MAX; i++) if (aoc[i]) {
+        char key[40]; snprintf(key, sizeof key, "DM_AOC_OVERLAY_%d", i);
+        if (!getenv(key)) setenv(key, aoc[i], 1);
+        free(aoc[i]);
+    }
+    free(rom); free(exe);
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -230,6 +271,7 @@ int main(int argc, char **argv) {
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Pictures/nxnative/%s", home, id); setenv("DM_ALBUM_DIR", p, 0);   // local album screenshots (hle_album.c); created lazily on first save
+    mods_overlay(getenv("DM_ROOT"));
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);

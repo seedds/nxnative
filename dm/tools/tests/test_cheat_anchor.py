@@ -144,6 +144,16 @@ class Anchors(unittest.TestCase):
 
     # ---- data anchors ----
 
+    def test_bss_is_inside_the_module_up_to_the_headers_size(self):
+        """.bss follows .data for the size at 0x3C, though the loaded image stops at .data's end: a pointer cheat's base
+        there is a data anchor, and only past the bss is an address outside the module."""
+        b = self.build('a/exefs/main', {0x100: [RET]})
+        self.assertEqual(b.where(SIZE), 'bss')
+        self.assertEqual(b.where(SIZE + BSS - 8, 8), 'bss')
+        self.assertIsNone(b.where(SIZE + BSS - 4, 8))
+        self.assertIsNone(b.where(SIZE + BSS))
+        self.assertIsNone(b.where(SIZE - 4, 8))   # across .data's end and the bss's start
+
     def test_data_field_follows_the_object_the_code_references(self):
         """A stat field keeps its offset from the object the code references, wherever the object moves."""
         old = self.build('a', {0x100: reader(0x100, 0x4100), 0x200: reader(0x200, 0x4100, 0x20)})

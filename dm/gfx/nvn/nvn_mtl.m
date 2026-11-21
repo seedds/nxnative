@@ -7281,7 +7281,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (the control section's key bytes) and <key>.code (code area, nvn_ctl_lens), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; if (shd && *shd) mkdir(shd, 0777); }   // create the dump folder: a missing one made every fopen fail silently
             if (shd) { char path[1024]; FILE *f; uint32_t ncode, nctl; nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);   // with SHDUMP set the control section is the host's copy
-                snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, nctl, f); fclose(f); }
+                snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, nvn_ctl_dump_len(p->sd[i].control), f); fclose(f); }   // the host's copy holds that many (ProgramSetShaders)
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
             continue;

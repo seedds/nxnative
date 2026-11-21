@@ -11,7 +11,7 @@ sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / 'tools'))
 import game, nacp, nso_syms
 
 SECTIONS = ('Game', 'Controls', 'Performance')   # headings on the single settings screen
-SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows only by optional fields, so a reader of 1 reads every 1
+SCHEMA = 2   # launcher.json's version (docs/launcher.schema.json): 2 added the text kind; within a version it grows only by optional fields
 # The meta column's keys, each with the pattern its value must match. A key is added here, in docs/frontends.md and in
 # docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
 META = {
@@ -132,6 +132,11 @@ def build(gid, patched, control, other_programs=()):
             on_off = ['1', '0'] if values == '-' else values.split('/')
             if len(on_off) != 2 or not all(on_off) or on_off[0] == on_off[1]: sys.exit(f'settings.tsv:{n}: toggle values are - or <on>/<off>: {values}')
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
+        elif kind == 'text':   # a short free text (a room code, an address): printable ASCII up to its length, empty by default
+            if not re.fullmatch(r'[1-9][0-9]?', values) or int(values) > 64: sys.exit(f'settings.tsv:{n}: text values are its longest length, 1-64: {values}')
+            if len(s['default']) > int(values) or not all(' ' <= ch <= '~' for ch in s['default']):
+                sys.exit(f'settings.tsv:{n}: a text default is printable ASCII of at most {values} characters: {s["default"]}')
+            s['length'] = int(values)
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
         out.append(s)
     return {'schema': SCHEMA, 'game': g.id, 'settings': out}

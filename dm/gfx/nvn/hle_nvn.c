@@ -811,6 +811,9 @@ void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
     memcpy(&own, c + 0x20, 4);
     *nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
 }
+// The control bytes a shader dump keeps (DM_NVN_SHDUMP, nvn_mtl.m): an NVN2 section whole, 0xe0 bytes (a compute shader's thread group at +0x58 and shared memory at +0xb8 lie past
+// the 0x48 key bytes; Pokopia's GLSLC 0x00220015 sections are 0xe0 bytes, pokopia-native's s2_dumps.py reads them), else the key bytes
+uint32_t nvn_ctl_dump_len(const void *control) { uint32_t nctl, ncode; nvn_ctl_lens(control, &nctl, &ncode); return nvn2_ctl(control) ? 0xe0 : nctl; }
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0, nctl;
     if (!sd->control) return 0;
@@ -822,6 +825,8 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
     if (nvn2_ctl(sd->control)) {
         uint8_t ctl[NVN2_KEY_CTL]; memcpy(ctl, sd->control, NVN2_KEY_CTL); memset(ctl + 0x30, 0, 4);
+        // the profile's shader_key_skip within the key bytes: Pokopia's driver rewrites +0x20..+0x27 of some sections at run time (6 of 71 requests in pokopia-native's survey differed only there), so 0x20+0x8
+        if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= NVN2_KEY_CTL) memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
         CC_SHA256_Update(&hc, ctl, NVN2_KEY_CTL);
     } else if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
         uint8_t ctl[0x880]; memcpy(ctl, sd->control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
@@ -857,7 +862,8 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // and its copies point at it, so it stays as long as the process, as the record does. nvn_ctl_lens reads it again: NVN's key bytes hold +0x20 and +0x704, NVN2's +0x44
         if (sd[i].control && (dump || !(k->ok >> i & 1))) {
             uint32_t nctl, ncode; nvn_ctl_lens(sd[i].control, &nctl, &ncode);
-            void *c = malloc(nctl); memcpy(c, sd[i].control, nctl); o->sd[i].control = c;
+            uint32_t keep = dump ? nvn_ctl_dump_len(sd[i].control) : nctl;   // a dump keeps the whole NVN2 section (nvn_ctl_dump_len)
+            void *c = malloc(keep); memcpy(c, sd[i].control, keep); o->sd[i].control = c;
         }
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {

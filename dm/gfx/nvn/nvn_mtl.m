@@ -8179,6 +8179,38 @@ static unsigned arena_trim(uint64_t idle) {
     }
     return n;
 }
+// The geometry path's large scratch, which only the GPU writes (nvn_geometry.inc geo_prep: the vertex capture, the geometry shader's output and its index lists and counts). In the
+// arena every geometry draw took a region of its own until its submission completed: Immortals Fenyx Rising draws 98,304 primitives with 13 instances through a geometry shader
+// a few times a frame, split into a draw per instance (geo_split) of up to 256 MB each, and the arena reached 115 blocks, 10 GB, as the player looked at the sea; macOS swapped
+// and froze. Here a geometry draw that opens encoders of its own (geo_draw_) takes its regions again from the start of the submission's block (geo_big_reset): every encoder
+// this host opens begins with a barrier after all earlier work, so the geometry draws before it have been drawn. The draws of one run (geo_run_walk) take regions one after the
+// other. A block is reused by a later submission once the GPU has completed the one that used it, and released once unused for ARENA_IDLE submissions
+static NSMutableArray<NvArena *> *g_gb_pool, *g_gb_sub; static NvArena *g_gb_cur; static uint64_t g_gb_made, g_gb_live_bytes;
+static void geo_big_reset(void) { if (g_gb_cur) g_gb_cur->used = 0; }
+static uint64_t geo_big_take(uint64_t n) {
+    n = (n + 255) & ~255ull;
+    if (!g_gb_pool) { g_gb_pool = [NSMutableArray array]; g_gb_sub = [NSMutableArray array]; }
+    if (!g_gb_cur || g_gb_cur->used + n > g_gb_cur->len) {
+        NvArena *r = nil;
+        for (NvArena *it in g_gb_pool) if (it->fence && it->fence <= g_done && it->len >= n && (!r || it->len < r->len)) r = it;
+        if (r) [g_gb_pool removeObjectIdenticalTo:r];
+        else {
+            r = [NvArena new]; r->buf = [g_dev newBufferWithLength:MAX(n, 64ull << 20) options:MTLResourceStorageModePrivate];
+            if (!r->buf) MDIE("cannot allocate %llu bytes of geometry scratch", (unsigned long long)n);
+            r->gpu = r->buf.gpuAddress; r->len = r->buf.length; res_add(r->buf); g_gb_made++; g_gb_live_bytes += r->len;
+            static uint64_t nlog; if (nlog++ < 8) MLOG("geometry scratch block %llu: %zu MB (%llu MB in all)", (unsigned long long)g_gb_made, r->len >> 20, (unsigned long long)(g_gb_live_bytes >> 20));
+        }
+        r->fence = 0; r->used = 0; g_gb_cur = r; [g_gb_sub addObject:r];
+    }
+    uint64_t g = g_gb_cur->gpu + g_gb_cur->used; g_gb_cur->used += n; return g;
+}
+static void geo_big_commit(uint64_t fence) {
+    for (NvArena *a in g_gb_sub) { a->fence = fence; [g_gb_pool addObject:a]; }
+    [g_gb_sub removeAllObjects]; g_gb_cur = nil;
+    uint64_t done = g_done;
+    for (NSUInteger i = g_gb_pool.count; i-- > 0;) { NvArena *a = g_gb_pool[i];
+        if (a->fence && a->fence <= done && g_fence >= a->fence + ARENA_IDLE) { res_remove(a->buf); g_gb_live_bytes -= a->len; [g_gb_pool removeObjectAtIndex:i]; } }
+}
 void arena_begin(void) {
     if (!g_arenas) { g_arenas = [NSMutableArray array]; g_sub_arenas = [NSMutableArray array]; }
     g_cur_arena = nil;
@@ -8186,6 +8218,7 @@ void arena_begin(void) {
     if (g_arena_next) { NvArena *a = g_arena_next; g_arena_next = nil; [g_arenas removeObjectIdenticalTo:a]; [g_sub_arenas addObject:a]; g_cur_arena = a; }
 }
 void arena_commit(uint64_t fence) {
+    geo_big_commit(fence);
     for (NvArena *a in g_sub_arenas) { a->fence = fence; [g_arenas addObject:a]; }
     [g_sub_arenas removeAllObjects];
     g_arena_next = arena_share_on() && g_cur_arena && g_cur_arena->len <= ARENA_KEEP && g_cur_arena->used + 256 <= g_cur_arena->len ? g_cur_arena : nil;

@@ -39,6 +39,8 @@ scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
 scripts/cheat_anchor.py	-	cheat files carried between builds offline: no game runs it
 scripts/prepare_mod.py	-	offline mod exefs rewriter: no game runs it
+scripts/bdat_port.py	-	mod tables ported offline: no game runs it
+dm/tools/bdat.py	-	the BDAT reader of scripts/bdat_port.py
 dm/tools/usage.py	-	the usage manifests
 dm/tools/il2cpp_sym.py	-	read-only IL2CPP address analysis; not part of a game build or the host
 dm/tools/impact_map.tsv	-	this map

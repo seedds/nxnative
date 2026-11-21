@@ -121,6 +121,17 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
   - `import` refuses a file named after another build unless `--assume-build`; its unanchored cheats then stay bound to the file's own build. A file named after the game's title ID names no build, so it is taken as written for the NSO's build. `import` also counts the writes into the code that put back the word already there (restore entries): evidence that the file belongs to the NSO's build.
 - **Not yet:** `min` / `max` and never-decrease through pointer chains, anchors by IL2CPP names. Validation on FFCC and 13 Sentinels: [Cheats carried across game updates](reference/rewriter.md#cheats-carried-across-game-updates).
 
+### Table mods for another version of a game
+
+`scripts/bdat_port.py` ports a mod of Monolith's BDAT tables (`*.bdat`: Xenoblade Chronicles 2 and Definitive Edition) to another version of the game's data, as a three-way merge: what the mod changed from the file it was made from (`--original`) is written into the other version's file (`--target`), nothing more, so that version's own changes stay. It reads and writes the tables with `dm/tools/bdat.py`. Rows are matched by content, not by ID, since a newer version may insert rows; a field the target changed too is reported and left, unless `--prefer-mod`; rows the mod added go after the target's own with new IDs, and fields named by `--ref TABLE=REGEX` that hold the old IDs get the new ones (`--idmap-out` / `--idmap-in` carry the renumbering into another file, as XC2's captions in `gb/common_ms.bdat` are named from `common.bdat`). [A table mod ported by row ID lands on the wrong rows](reference/packing.md#a-table-mod-ported-by-row-id-lands-on-the-wrong-rows) has the case it was made for.
+
+```
+python3 scripts/bdat_port.py --original <2.1.0 common.bdat> --mod <mod's common.bdat> --target <3.0.1 common.bdat> -o <mod folder>/romfs/bdat/common.bdat \
+    --ref 'BTL_Enhance=Enhance\d*' --ref 'FLD_QuestReward=Reward' --ref 'ITM_PcEquip=ItemID\d*'
+```
+
+Several mods that change different fields go into one file by passing each output as the next `--target`.
+
 ## Guest memory SVCs
 
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack
@@ -890,6 +901,7 @@ Each game's notes are in its profile folder, `dm/games/<id>/README.md`: what the
 |---|---|
 | `nx_extract/` | NSP → ExeFS / RomFS image / icon with LibHac, merging an update over the base game (C#, committed as the native `nx_extract_bin/nx_extract`, which `native_tools.sh` builds; `--romfs-image`). `--manifest` writes ExeFS and a RomFS file list only, for surveys; omitting both options retains legacy folder extraction |
 | `native_tools.sh` | Builds the two C# tools, the shader translator and `nx_extract`, as native universal executables (NativeAOT) into `dm/gfx/tools/dmsh_xlate_bin/` and `nx_extract_bin/`, after a change to their sources; the only step that needs the .NET SDK |
+| `bdat.py` | Monolith's BDAT tables, version 1 (XC2, XCDE): reads them by table, row ID and member, writes fields and strings in place (a longer string at the end of the strings), appends rows, and writes the file again, its names and strings scrambled with each table's own key; `scripts/bdat_port.py` ports table mods with it |
 | `nso.py` | The one loader of code modules (NSO and NRO), which every tool that reads a module's code uses: it checks a module as Horizon does (the loader's layout rules and segment hashes for an NSO, nn::ro's for an NRO), and against the file's size before allocating, so a damaged or truncated module stops the tool with a `[RED]` line. On its own, `nso.py <module> <out.bin>` writes the whole memory image (bss as a zero tail) |
 | `nso_fnmap.py` | Carries offsets from one build to another (function matching with addresses masked; globals via their references) |
 | `nso2elf.py` | Converts NSO to ELF for Ghidra / REA |

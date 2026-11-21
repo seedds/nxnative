@@ -24,13 +24,28 @@ class Alu(Translated):
 
 class FloatRed(Translated):
     """RED.F32.FTZ.RN (0x98e, type 3 at bits 73..76, add): agl's scene analysis sums luminance with it (Ocarina of Time's probe_analyze 6e28359aa3558f61). Dropped with a log line, the exposure the CPU
-    reads back from those buffers was several times too bright. A compare-and-swap loop on the word"""
+    reads back from those buffers was several times too bright. A compare-and-swap loop on the word. On a storage buffer, dmsh_rewrite.float_add_msl makes the loop one native
+    atomic add: test_storage_add_is_one_native_add fails when the translator or spirv-cross changes the loop's shape so that the rewrite no longer finds it (PR #1930)"""
     RED = (0x000fe20000000000 | 3 << 9, 0x0000000608ff098e)   # RED.F32.FTZ.RN [R8], R6: (control and type, opcode and registers)
+    ULDC_SB0 = (0x000fe20000000a00, 0x0000040000047ab9)   # ULDC.64 UR4, c[0][0x10]: storage entry 0 of an NVN2 compute c0 with one storage slot
+    MOV_R8_UR4, MOV_R9_UR5 = (0x000fe20008000000, 0x0000000400087c02), (0x000fe20008000000, 0x0000000500097c02)
+    RED_E = (RED[0] | 1 << 8, RED[1])   # RED.E.F32.FTZ.RN [R8.64], R6: the 64-bit address of that storage buffer, as agl's analysis shaders add into theirs
 
     def test_adds_in_a_loop(self):
         msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(6), s2r_tid(8), s2r_tid(9), self.RED)) + inst(*EXIT))
         self.assertIn('atomic_compare_exchange_weak_explicit', msl)
         self.assertNotIn('atomic_fetch_add', msl)
+
+    def test_storage_add_is_one_native_add(self):
+        import dmsh_rewrite
+        code = b''.join(inst(*i) for i in (self.ULDC_SB0, self.MOV_R8_UR4, self.MOV_R9_UR5)) + b''.join(inst(*waiting(i)) for i in (s2r_tid(6), self.RED_E)) + inst(*EXIT)
+        for reduced in (True, False):   # dmsh_build's default (an add) and XLATE_REDUCED=0 (spvFAdd)
+            with self.subTest(reduced=reduced):
+                msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0], reduced=reduced)
+                self.assertIn('cp_s0', msl)   # traced to the storage buffer, not the memory pool table
+                out = dmsh_rewrite.float_add_msl(msl)
+                self.assertRegex(out, r'atomic_fetch_add_explicit\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\], _\d+, memory_order_relaxed\);')
+                self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
 
 
 class DeadChannel(Translated):
@@ -122,6 +137,41 @@ class HalfImmediate(Alu):
         msl = self.kept(self.HMUL2, srcs=(6,))
         self.assertIn('spvFMul', msl)
         self.assertRegex(msl, r'\b2\.0\b')
+
+
+class HalfFmaAlias(Alu):
+    """HFMA2.MMA shares decoding and result modifiers with ordinary HFMA2.
+    These are synthetic translation checks, including forms absent from the Orin recording."""
+    R2UR = (0x000fe200000e0000, 0x00000000130473c2)   # R2UR UR4, R19
+
+    def test_all_operand_forms_and_result_modifiers(self):
+        for form in range(1, 8):
+            slot32 = (21 << 32 if form == 1 else 0x3c003c00 << 32 if form in (2, 4) else
+                      (3 << 54 | 0x10 << 38) if form in (3, 5) else 4 << 32)
+            lo = 0x031 | form << 9 | 7 << 12 | 6 << 16 | 19 << 24 | slot32
+            for modifier in (0, 1 << (77 - 64), 1 << (78 - 64), 1 << (79 - 64), 1 << (80 - 64)):
+                with self.subTest(form=form, modifier=modifier):
+                    hi = 0x000fe20000000014 | modifier   # the register in the 64-bit slot is R20
+                    normal = self.kept(self.R2UR, (hi, lo), srcs=(19, 20, 21))
+                    if modifier == 1 << (78 - 64):
+                        self.assertNotIn('fma(half(', normal)
+                    else:
+                        self.assertIn('fma(half(', normal)
+                    normal_info = self.res
+                    mma = self.kept(self.R2UR, (hi, lo | 4), srcs=(19, 20, 21))
+                    self.assertEqual(mma, normal)
+                    self.assertEqual(self.res, normal_info)
+
+    def test_f32_source_in_each_slot_uses_float_fma(self):
+        lo = 0x0000001513067231
+        hi = 0x000fe20000000014
+        for source, words in (('A', (hi | 1 << (74 - 64), lo)),
+                              ('B', (hi, lo | 1 << 60)),
+                              ('C', (hi | 1 << (81 - 64), lo))):
+            with self.subTest(source=source):
+                msl = self.kept(words, srcs=(19, 20, 21))
+                self.assertIn('fma(', msl)
+                self.assertNotIn('fma(half(', msl)
 
 
 class GlobalMemory(Alu):

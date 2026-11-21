@@ -43,7 +43,8 @@ struct SaveSyncReport {
         return .play("ask")   // nothing to choose now; if the cloud's changes before the mount, the mount replaces neither (save_sync.c read_choice)
     }
 
-    var localChoice: String { "local:" + localHash }
+    // Both choices name the cloud's save the player chose against (save_sync.c read_choice): the mount takes one only while the cloud still has that save
+    var localChoice: String { "local:" + (cloudHash.isEmpty ? "none" : cloudHash) }
     var cloudChoice: String { "cloud:" + cloudHash }
 
     private static func when(_ d: Date) -> String {

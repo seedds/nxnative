@@ -243,10 +243,65 @@ static void queued_case(void) {
     h_nvnWindowFinalize((NVNwindow *)&win); h_nvnQueueFinish(&fixture_queue);
     h_nvnCommandBufferFinalize(&command); h_nvnEventFinalize(&event); h_nvnMemoryPoolFinalize(&pool); free(memory);
 }
+// The acquire's wait for the screen without the display link (mtl_present_screen_wait, DM_PRESENT_DEPTH 1): presents queued against the newest one the presented handlers reported
+static void *screen_report_later(void *arg) { usleep(20000); pres_seen((uint64_t)(uintptr_t)arg, -1); return NULL; }
+static void screen_case(void) {
+    const double per = 0.02;   // timeout 2 periods = 40 ms
+    pthread_mutex_lock(&g_pq_mu); uint64_t base = g_pq_in; pthread_mutex_unlock(&g_pq_mu);
+    // A screen that has reported no present at all (newest seen 0: a window covered from its first frame, a headless run): one timeout, then no more waits
+    if (!atomic_load(&g_pres_seen)) {
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 3; pthread_mutex_unlock(&g_pq_mu);
+        uint64_t to0 = atomic_load(&g_sdw_to), t0 = now_ns(), w = mtl_present_screen_wait(per), dt = now_ns() - t0;
+        CHECK("screen: no report ever, the first wait times out after two periods", w > 0 && dt >= 38000000ull && atomic_load(&g_sdw_to) == to0 + 1);
+        int fast = 1;
+        for (int i = 0; i < 3; i++) { t0 = now_ns(); w = mtl_present_screen_wait(per); fast &= w == 0 && now_ns() - t0 < 5000000ull; }
+        CHECK("screen: no report ever, then no wait while it stays silent (newest seen 0)", fast);
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+        pres_seen(base + 1, -1); base++;   // the screen's first report ends the silence
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+    }
+    pres_seen(base, -1);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 1; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t t0 = now_ns(); uint64_t w = mtl_present_screen_wait(per);
+    CHECK("screen: one present not yet shown, depth 1: no wait", w == 0 && now_ns() - t0 < 5000000ull && g_sdw_depth == 1);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 3; pthread_mutex_unlock(&g_pq_mu);
+    pthread_t th; pthread_create(&th, NULL, screen_report_later, (void *)(uintptr_t)(base + 2));
+    t0 = now_ns(); w = mtl_present_screen_wait(per); uint64_t dt = now_ns() - t0; pthread_join(th, NULL);
+    CHECK("screen: three queued waits until the screen reports the second", w > 0 && dt >= 15000000ull && dt < 38000000ull);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 5; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t to0 = atomic_load(&g_sdw_to); t0 = now_ns(); w = mtl_present_screen_wait(per); dt = now_ns() - t0;
+    CHECK("screen: a silent screen times out after two periods", w > 0 && dt >= 38000000ull && dt < 80000000ull && atomic_load(&g_sdw_to) == to0 + 1);
+    t0 = now_ns(); w = mtl_present_screen_wait(per);
+    CHECK("screen: then no wait while the screen stays silent", w == 0 && now_ns() - t0 < 5000000ull);
+    pthread_create(&th, NULL, screen_report_later, (void *)(uintptr_t)(base + 3)); pthread_join(th, NULL);
+    t0 = now_ns(); w = mtl_present_screen_wait(per); dt = now_ns() - t0;
+    CHECK("screen: a new report brings the wait back", w > 0 && dt >= 38000000ull);
+    pres_seen(base + 5, -1);
+    t0 = now_ns(); w = mtl_present_screen_wait(per);
+    CHECK("screen: all shown, no wait", w == 0 && now_ns() - t0 < 5000000ull);
+    // counted in the game's presents: the game recorded frame 1002's present while the replay has queued only up to frame 1000's (a stale g_pq_in would release at once)
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base + 10; pthread_mutex_unlock(&g_pq_mu);
+    g_pres_frm[(base + 10) % PRING] = 1000; g_pres_frm[(base + 11) % PRING] = 1001;
+    pres_seen(base + 10, -1); mtl_present_recorded(1002);
+    pthread_create(&th, NULL, screen_report_later, (void *)(uintptr_t)(base + 11));
+    t0 = now_ns(); w = mtl_present_screen_wait(per); dt = now_ns() - t0; pthread_join(th, NULL);
+    CHECK("screen: counted in the game's presents, waits for frame 1001's present although the replay's count is caught up", w > 0 && dt >= 15000000ull && dt < 38000000ull && atomic_load(&g_seen_frame) == 1001);
+    t0 = now_ns(); w = mtl_present_screen_wait(per);
+    CHECK("screen: frame 1001 shown, frame 1002 recorded: no wait at depth 1", w == 0 && now_ns() - t0 < 5000000ull);
+    atomic_store(&g_rec_frame, 0);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+}
+// With present snapshots the game runs a frame ahead of the screen on purpose and their ring paces it: the screen wait stays off, as the display link's drain does
+static void screen_snap_case(void) {
+    pthread_mutex_lock(&g_pq_mu); uint64_t base = g_pq_in; g_pq_in = base + 3; pthread_mutex_unlock(&g_pq_mu);
+    uint64_t t0 = now_ns(), w = mtl_present_screen_wait(0.02);
+    CHECK("screen: with present snapshots, three queued and none shown: no wait", mtl_snap_on() && w == 0 && now_ns() - t0 < 5000000ull);
+    pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(15); setbuf(stdout, NULL);
     if (argc != 2) return 2;
-    setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1);
+    setenv("DM_PRESENT_SNAP", strcmp(argv[1], "screen") ? "1" : "0", 1); setenv("DM_PRESENT_HZ", "0", 1);   // the screen wait is off with snapshots (screen_snap)
     mtl_init();
     NVNdeviceBuilder db = {0}; h_nvnDeviceBuilderSetDefaults(&db); CHECK("fixture device initialized", h_nvnDeviceInitialize(&fixture_device, &db));
     NVNqueueBuilder qb = {0}; h_nvnQueueBuilderSetDefaults(&qb); h_nvnQueueBuilderSetDevice(&qb, &fixture_device);
@@ -257,6 +312,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     else if (!strcmp(argv[1], "resize")) resize_case();
     else if (!strcmp(argv[1], "queued")) queued_case();
     else if (!strcmp(argv[1], "ticket")) ticket_case();
+    else if (!strcmp(argv[1], "screen")) screen_case();
+    else if (!strcmp(argv[1], "screen_snap")) screen_snap_case();
     else return 2;
     printf("present snapshots: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

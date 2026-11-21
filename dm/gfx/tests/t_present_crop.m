@@ -6,6 +6,7 @@
 #define g_ft g_ft_hle   // both files have a static g_ft (nvn_mtl.m's fragment argument table, hle_nvn.c's textures a flush can mark CPU-written), so hle_nvn.c's is renamed too
 #include "../nvn/hle_nvn.c"
 #undef g_ft
+#include <assert.h>
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -34,6 +35,7 @@ static int check_present_resize(id<MTLTexture> src, int w, int h) {
     d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageRenderTarget;
     id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];res_add(out);res_commit();
     id<MTL4CommandAllocator> al=[g_dev newCommandAllocator];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];id<MTLSharedEvent> ev=[g_dev newSharedEvent];
+    assert(al && ev);
     [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,src,out,NULL,g_present_uv[0],&g_fx_present);[cb endCommandBuffer];
     [g_q4 commit:&cb count:1];[g_q4 signalEvent:ev value:1];
     EXPECT("resize present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);res_remove(out);return kind;
@@ -77,9 +79,81 @@ static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
     return queued;
 }
 
-int main(void) { @autoreleasepool {
+#ifndef CROP_LEGACY_HEADER
+static void check_external_png(const char *path) {
+    NSURL *url = [NSURL fileURLWithPath:@(path)];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+    CGImageRef image = source ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
+    int green = 0;
+    if (image) {
+        uint8_t pixels[4 * 4 * 4];
+        CGColorSpaceRef color = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(pixels, 4, 4, 8, 16, color, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+        if (ctx) {
+            CGContextDrawImage(ctx, CGRectMake(0, 0, 4, 4), image);
+            for (int i = 0; i < 16; i++)
+                green += pixels[4*i] == 0 && pixels[4*i+1] == 255 && pixels[4*i+2] == 0;
+            CGContextRelease(ctx);
+        }
+        CGColorSpaceRelease(color);
+        CGImageRelease(image);
+    }
+    if (source) CFRelease(source);
+    EXPECT(path, 16, green);
+}
+
+static void check_external_screenshots(void) {
+    char dir[] = "/tmp/nxnative-external-shot.XXXXXX";
+    if (!mkdtemp(dir)) { EXPECT("screenshot test directory", 1, 0); return; }
+    char scheduled[sizeof dir + 16], queued[sizeof dir + 16], spec[sizeof scheduled + 3];
+    snprintf(scheduled, sizeof scheduled, "%s/scheduled.png", dir);
+    snprintf(queued, sizeof queued, "%s/queued.png", dir);
+    snprintf(spec, sizeof spec, "1:%s", scheduled);
+    setenv("DM_NVN_SHOT", spec, 1);
+    unsetenv("DM_NVN_SHOT_OUT");
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [g_dev newTextureWithDescriptor:td];
+    const uint8_t black[4 * 4 * 4] = {0};
+    [tex replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:black bytesPerRow:16];
+
+    id<MTLSharedEvent> ready = [g_dev newSharedEvent];
+    assert(ready);
+    id<MTLCommandQueue> producer = [g_dev newCommandQueue];
+    id<MTLCommandBuffer> cb = [producer commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = tex;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
+    [[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+    [cb encodeSignalEvent:ready value:1];
+    // Leave the producer unsubmitted while the external present first reaches readback.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_global_queue(0, 0), ^{ [cb commit]; });
+    uint64_t serial = mtl_ext_tex((__bridge void *)tex);
+    dm_gfx_shot_at(1, queued);
+    uint64_t ticket = mtl_present_ext(serial, 1.0 / 60, (__bridge void *)ready, 1, NULL);
+    EXPECT("external present returns a ticket", 1, ticket != 0);
+    if (ticket) mtl_present_wait(ticket);
+    check_external_png(scheduled);
+    check_external_png(queued);
+    EXPECT("producer completes", 1, [ready waitUntilSignaledValue:1 timeoutMS:5000]);
+    mtl_ext_tex_release(serial);
+    unlink(scheduled);
+    unlink(queued);
+    rmdir(dir);
+}
+#endif
+
+int main(int argc, char **argv) { @autoreleasepool {
     mtl_init();
 #ifndef CROP_LEGACY_HEADER
+    if (argc == 2 && !strcmp(argv[1], "--external-screenshots")) {
+        check_external_screenshots();
+        return failed != 0;
+    }
     mtl_present_layer(1,1);   // square fixtures: a sized square layer, so the checks below see the crop's texels and the bars of that shape; the display's own shape is checked at the end
 #endif
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
@@ -170,11 +244,57 @@ int main(void) { @autoreleasepool {
         EXPECT("resizing keeps the previous scaler until replacement",1,g_fx_present.sc==first);
         g_present_n=31;
         EXPECT("stable new size makes its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
-        EXPECT("replacement has the new picture size",96,(int)g_fx_present.out.width);
+        EXPECT("replacement has the new picture size",96,(int)g_fx_present.sc.outputWidth);
         EXPECT("exactly two scalers made",2,g_fx_present.made);
         g_present_n=32;
         EXPECT("same size reuses its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
         EXPECT("reuse makes no new scaler",2,g_fx_present.made);
+        // DM_FX_INPLACE and DM_FX_DIRECT: the scaler reads a private window texture in place and writes a canvas it can write, while the frame that draws that texture is
+        // still running on the queue (committed just before, as a present follows its frame). The scaler must still see the whole frame: the encoder before it orders it after
+        // the queue's earlier work only around work of its own (an encoder of barriers alone ordered nothing, and the scaler read the frame before, in every round)
+        {
+            const int S=256,ROUNDS=8;
+            MTLTextureDescriptor *wd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:S height:S mipmapped:NO];
+            wd.storageMode=MTLStorageModePrivate;wd.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;id<MTLTexture> win=[g_dev newTextureWithDescriptor:wd];
+            MTLTextureDescriptor *cd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:2*S height:2*S mipmapped:NO];
+            cd.storageMode=MTLStorageModePrivate;cd.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;id<MTLTexture> canvas=[g_dev newTextureWithDescriptor:cd];
+            id<MTLBuffer> args=[g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared],rb=[g_dev newBufferWithLength:4*S*S*4 options:MTLResourceStorageModeShared];
+            res_add(win);res_add(canvas);res_add(args);res_commit();
+            NSError *err=nil;id<MTL4Compiler> comp=[g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];
+            id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct A { uint iters; uint tag; };\n"
+                "kernel void frame(constant A &a [[buffer(0)]], texture2d<float, access::write> t [[texture(0)]], uint2 i [[thread_position_in_grid]]) {\n"
+                "  float x = float(i.x); for (uint k = 0; k < a.iters; k++) x = fma(x, 1.0000001f, 0.5f); float g = x > -1.0f ? float(a.tag) / 255.0f : 0.0f; t.write(float4(g, g, g, 1), i); }\n" options:nil error:&err];
+            MTL4LibraryFunctionDescriptor *fd=[MTL4LibraryFunctionDescriptor new];fd.name=@"frame";fd.library=lib;
+            MTL4ComputePipelineDescriptor *pd=[MTL4ComputePipelineDescriptor new];pd.computeFunctionDescriptor=fd;
+            id<MTLComputePipelineState> ps=lib&&comp?[comp newComputePipelineStateWithDescriptor:pd compilerTaskOptions:nil error:&err]:nil;
+            EXPECT("the slow frame kernel compiles",1,ps!=nil);
+            MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new];ad.maxBufferBindCount=1;ad.maxTextureBindCount=1;
+            id<MTL4ArgumentTable> at=[g_dev newArgumentTableWithDescriptor:ad error:&err];
+            id<MTL4CommandAllocator> fal=[g_dev newCommandAllocator],pal=[g_dev newCommandAllocator];id<MTLSharedEvent> ev=[g_dev newSharedEvent];
+            g_present_n=1000;int stale=0,kinds=0;
+            for (int round=1;ps&&round<=ROUNDS;round++) {
+                uint32_t tag=40+round*23;((uint32_t *)args.contents)[0]=50000;((uint32_t *)args.contents)[1]=tag;
+                [at setAddress:args.gpuAddress atIndex:0];[at setTexture:win.gpuResourceID atIndex:0];[fal reset];[pal reset];
+                id<MTL4CommandBuffer> fcb=[g_dev newCommandBuffer];[fcb beginCommandBufferWithAllocator:fal];
+                id<MTL4ComputeCommandEncoder> ce=[fcb computeCommandEncoder];[ce setComputePipelineState:ps];[ce setArgumentTable:at];
+                [ce dispatchThreads:MTLSizeMake(S,S,1) threadsPerThreadgroup:MTLSizeMake(16,16,1)];[ce endEncoding];[fcb endCommandBuffer];
+                id<MTL4CommandBuffer> pcb=[g_dev newCommandBuffer];[pcb beginCommandBufferWithAllocator:pal];
+                kinds+=present_encode_m4(pcb,win,canvas,NULL,g_present_uv[0],&g_fx_present)==PRESENT_METALFX;[pcb endCommandBuffer];
+                [g_q4 commit:&fcb count:1];[g_q4 commit:&pcb count:1];[g_q4 signalEvent:ev value:round];
+                if (![ev waitUntilSignaledValue:round timeoutMS:10000]) { EXPECT("in-place present completes",1,0); break; }
+                id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+                [bl copyFromTexture:canvas sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(2*S,2*S,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:2*S*4 destinationBytesPerImage:4*S*S*4];
+                [bl endEncoding];[cb commit];[cb waitUntilCompleted];
+                const uint8_t *o=rb.contents;int bad=0;
+                for (int y=4;y<2*S-4;y+=9) for (int x=4;x<2*S-4;x+=9) bad+=abs(o[4*(y*2*S+x)+1]-(int)tag)>3;
+                stale+=bad!=0;
+            }
+            EXPECT("in-place presents go through MetalFX",ROUNDS,kinds);
+            EXPECT("the scaler read the window texture in place: no input copy made",1,g_fx_present.in==nil&&g_fx_present.in_place_n>=ROUNDS);
+            EXPECT("the scaler wrote the canvas: no present pass, no output texture made",1,g_fx_present.out==nil&&g_fx_present.direct_n>=ROUNDS);
+            EXPECT("the scaler saw the whole frame still drawing at the present, rounds stale",0,stale);
+            res_remove(win);res_remove(canvas);res_remove(args);
+        }
         g_present_n=savedPresent;
 
         // Whole-window capture uses the same upscale and remains asynchronous; its completion includes the final BGRA readback.

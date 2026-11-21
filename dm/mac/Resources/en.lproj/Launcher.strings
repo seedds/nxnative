@@ -1,5 +1,11 @@
 // English fallback for the Mac launcher. Keep keys in sync with the other catalogs.
 "Up to one frame more display latency." = "Up to one frame more display latency.";
+"Microphone" = "Microphone";
+"Lets the game hear your microphone. macOS asks for access when you launch with this enabled." = "Lets the game hear your microphone. macOS asks for access when you launch with this enabled.";
+"Microphone gain" = "Microphone gain";
+"Microphone input" = "Microphone input";
+"System Default" = "System Default";
+"Selected device unavailable" = "Selected device unavailable";
 "Switch 2 controllers" = "Switch 2 controllers";
 "Game" = "Game";
 "General" = "General";
@@ -69,6 +75,8 @@
 "Keeps a pipeline archive; uses more memory." = "Keeps a pipeline archive; uses more memory.";
 "Traditional Chinese" = "Traditional Chinese";
 "Renders about a quarter more pixels: a little slower and warmer." = "Renders about a quarter more pixels: a little slower and warmer.";
+"Polish" = "Polish";
+"Thai" = "Thai";
 "Brazilian Portuguese" = "Brazilian Portuguese";
 "Handheld" = "Handheld";
 "iCloud Drive" = "iCloud Drive";

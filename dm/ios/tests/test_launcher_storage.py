@@ -10,7 +10,6 @@ import unittest
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
-TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
 sys.path.insert(0, str(REPO / 'dm/games'))
 import settings
 
@@ -18,8 +17,7 @@ import settings
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs the macOS Swift toolchain')
 class LauncherStorageTests(unittest.TestCase):
     def test_only_changed_choices_are_stored(self):
-        TEST_ROOT.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             (tmp / 'patched').mkdir()
             (tmp / 'patched/main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')   # the render-scale row, a range

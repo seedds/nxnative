@@ -8,7 +8,7 @@
 static int test_clock_gettime(clockid_t clock, struct timespec *t);
 static dispatch_time_t test_dispatch_time(dispatch_time_t when, int64_t delta);
 static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, dispatch_block_t block);
-static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match, io_iterator_t *it);
+static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match CF_RELEASES_ARGUMENT, io_iterator_t *it);
 static io_object_t test_iterator_next(io_iterator_t it);
 static kern_return_t test_object_release(io_object_t o);
 static kern_return_t test_entry_id(io_registry_entry_t s, uint64_t *id);
@@ -133,7 +133,7 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 @property NSSet *supportedLocalities;
 @property NSMutableArray<TestEngine *> *engines;
 @property NSMutableArray<GCHapticsLocality> *requestedLocalities;
-@property int attempts, failureStage;
+@property int attempts, failureStage, failureAttempt;
 @property BOOL noAdvanced;
 @end
 @implementation TestHaptics
@@ -148,9 +148,10 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
     assert([self.supportedLocalities containsObject:locality]);
     self.attempts++;
     [self.requestedLocalities addObject:locality];
-    if (self.attempts == 1 && self.failureStage == 1) return nil;
+    BOOL failing = self.attempts == (self.failureAttempt ?: 1);
+    if (failing && self.failureStage == 1) return nil;
     TestEngine *e = [TestEngine new]; [self.engines addObject:e]; e.noAdvanced = self.noAdvanced;
-    if (self.attempts == 1) {
+    if (failing) {
         e.fail = self.failureStage == 2; e.failPattern = self.failureStage == 3;
         e.failPlayer = self.failureStage == 4; e.failSend = self.failureStage == 5;
         e.resetDuringStart = self.failureStage == 2;
@@ -260,6 +261,86 @@ static void expire_retries(void) {
 static void send_pair(float left, float right) {
     dm_vibration_update u[] = {{0, 0, {left, 160, 0, 320}}, {0, 1, {right, 160, 0, 320}}};
     dm_haptics_send(u, 2); drain();
+}
+static void t_joycon_recovery(NSSet *localities, GCHapticsLocality left, GCHapticsLocality right) {
+    // Both halves, with and without advanced players: a refused factory or engine start must retry that same actuator, never Default.
+    for (int side = 0; side < 2; side++) for (int stage = 1; stage <= 2; stage++) for (int plain = 0; plain < 2; plain++) {
+        TestController *controller = [TestController new]; TestHaptics *h = [TestHaptics new]; controller.haptics = h;
+        h.supportedLocalities = localities; h.failureStage = stage; h.noAdvanced = plain;
+        h.failureAttempt = plain ? 2 : 1;   // fail the replacement plain engine too, after the advanced player's refusal
+        dm_haptics_apple_controller(0, (id)controller); drain();
+        NSArray<DmRumbleChannel *> *route = channels[0];
+        send_pair(side ? 0 : 0.6, side ? 0.6 : 0);
+        assert(h.attempts == h.failureAttempt && channels[0] == route && route.count == 2);
+        assert(!route[0].fallback && !route[1].fallback && route[0].motor == 0 && route[1].motor == 1);
+        assert(dm_haptics_actual(0, side).amplitude_low == 0);
+        void (^lateReset)(void) = h.engines.lastObject.startingReset;
+        for (int i = 0; i < 3; i++) send_pair(side ? 0 : 0.6, side ? 0.6 : 0);
+        assert(h.attempts == h.failureAttempt);   // retain the existing backoff instead of hammering the failed helper
+        send_pair(side ? 0.4 : 0, side ? 0 : 0.4);
+        TestEngine *other = h.engines.lastObject;
+        assert(h.attempts == h.failureAttempt + (plain ? 2 : 1) && other.testPlayer.levels.lastObject.floatValue == 0.4f);
+        expire_retries(); send_pair(side ? 0.4 : 0.6, side ? 0.6 : 0.4);
+        TestEngine *recovered = h.engines.lastObject;
+        GCHapticsLocality failedLocality = side ? right : left, otherLocality = side ? left : right;
+        NSArray *want = plain ? @[failedLocality, failedLocality, otherLocality, otherLocality, failedLocality] : @[failedLocality, otherLocality, failedLocality];
+        assert([h.requestedLocalities isEqual:want] && channels[0] == route);
+        assert((id)route[1 - side].engine == other && recovered != other);
+        if (lateReset) { lateReset(); drain(); }
+        assert(recovered.testPlayer.levels.lastObject.floatValue == 0.6f && other.testPlayer.levels.lastObject.floatValue == 0.4f);
+        assert(dm_haptics_actual(0, side).amplitude_low == 0.6f && dm_haptics_actual(0, 1 - side).amplitude_low == 0.4f);
+        send_pair(0, 0);
+    }
+}
+static void t_joycon_lifetime(NSSet *localities, GCHapticsLocality left, GCHapticsLocality right) {
+    // Simulate controller-object replacement on a physical split/join. The guest's npad assignment is tested in t_hid.
+    TestController *pair = [TestController new]; pair.haptics = [TestHaptics new];
+    pair.haptics.supportedLocalities = localities; pair.haptics.noAdvanced = YES;
+    dm_haptics_apple_controller(0, (id)pair); send_pair(0.2, 0.7);
+    NSArray<DmRumbleChannel *> *oldRoute = channels[0];   // keep old channels alive: callbacks must be stale, not merely lose their weak target
+    TestEngine *oldLeft = pair.haptics.engines[1], *oldRight = pair.haptics.engines[3];
+    void (^oldReset)(void) = oldLeft.resetHandler;
+    void (^oldStopped)(CHHapticEngineStoppedReason) = oldRight.stoppedHandler;
+    dm_haptic_state oldPair = {0, dm_haptics_epoch(0), {{1, 160, 0, 320}, {1, 160, 0, 320}}};
+    TestController *singleLeft = [TestController new], *singleRight = [TestController new];
+    singleLeft.haptics = [TestHaptics new]; singleRight.haptics = [TestHaptics new];
+    singleLeft.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, left, nil];
+    singleRight.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, right, nil];
+    singleLeft.haptics.noAdvanced = singleRight.haptics.noAdvanced = YES;
+    dm_haptics_apple_controller(0, (id)singleLeft); dm_haptics_apple_controller(1, (id)singleRight); drain();
+    assert(oldLeft.testPlayer.levels.lastObject.floatValue == 0 && oldRight.testPlayer.levels.lastObject.floatValue == 0);
+    dm_vibration_update u[] = {{0, 0, {0.4, 160, 0, 320}}, {1, 1, {0.6, 160, 0, 320}}};
+    dm_haptics_send(u, 2); drain();
+    TestEngine *splitLeft = singleLeft.haptics.engines.lastObject, *splitRight = singleRight.haptics.engines.lastObject;
+    assert(splitLeft.testPlayer.levels.lastObject.floatValue == 0.4f && splitRight.testPlayer.levels.lastObject.floatValue == 0.6f);
+    NSArray<DmRumbleChannel *> *leftRoute = channels[0], *rightRoute = channels[1];
+    dm_haptic_state oldSingle = {1, dm_haptics_epoch(1), {{1, 160, 0, 320}, {1, 160, 0, 320}}};
+    dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil);
+    dm_haptics_apple_controller(0, (id)pair); drain();   // rejoin, with no effect replayed until a fresh send
+    assert(pair.haptics.attempts == 4 && !(dm_haptics_available() & 2));
+    assert(splitLeft.testPlayer.levels.lastObject.floatValue == 0 && splitRight.testPlayer.levels.lastObject.floatValue == 0);
+    send_pair(0.5, 0.8);
+    TestEngine *joinedLeft = pair.haptics.engines[5], *joinedRight = pair.haptics.engines[7];
+    oldReset(); oldStopped(CHHapticEngineStoppedReasonSystemError);
+    splitLeft.startingReset(); splitRight.startingReset();
+    apply(oldPair); apply(oldSingle); drain();
+    advance(1.1);   // old pulse renewals and delayed stops run alongside the rejoined pair's renewals
+    assert(oldRoute[0].pattern == nil && oldRoute[1].pattern == nil && leftRoute[0].pattern == nil && rightRoute[0].pattern == nil);
+    assert(oldLeft.plainPlayers == 1 && oldRight.plainPlayers == 1 && splitLeft.plainPlayers == 1 && splitRight.plainPlayers == 1);
+    assert(oldLeft.stops == 1 && oldRight.stops == 1 && splitLeft.stops == 1 && splitRight.stops == 1);
+    assert(joinedLeft.stops == 0 && joinedRight.stops == 0 && joinedLeft.plainPlayers > 1 && joinedRight.plainPlayers > 1);
+    assert(dm_haptics_actual(0, 0).amplitude_low == 0.5f && dm_haptics_actual(0, 1).amplitude_low == 0.8f);
+    NSArray *joinedRoute = channels[0];
+    dm_haptics_apple_controller(0, (id)pair); drain();
+    assert(channels[0] == joinedRoute && pair.haptics.attempts == 8 && dm_haptics_actual(0, 1).amplitude_low == 0.8f);
+    dm_haptics_apple_controller(0, nil); drain();
+    assert(joinedLeft.testPlayer.levels.lastObject.floatValue == 0 && joinedRight.testPlayer.levels.lastObject.floatValue == 0);
+    dm_haptics_apple_controller(0, (id)pair); drain();
+    assert(pair.haptics.attempts == 8 && dm_haptics_actual(0, 0).amplitude_low == 0 && dm_haptics_actual(0, 1).amplitude_low == 0);
+    send_pair(0, 0.3);
+    assert(pair.haptics.attempts == 10 && [pair.haptics.requestedLocalities.lastObject isEqual:right]);
+    assert(pair.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue == 0.3f);
+    send_pair(0, 0);
 }
 static int made;   // engines the test factories made
 int main(void) { @autoreleasepool {
@@ -419,6 +500,29 @@ int main(void) { @autoreleasepool {
     assert(sense2.haptics.engines[0].plainPlayers == 0 && sense2.haptics.engines[1].plainPlayers == 0);
     assert(fabsf(sense2.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
     send_pair(0, 0); drain();
+    // Paired Joy-Cons report "JoyCon (L)" and "JoyCon (R)" instead of handle localities, and keep both channels on plain players
+    GCHapticsLocality joyL = (GCHapticsLocality)@"JoyCon (L)", joyR = (GCHapticsLocality)@"JoyCon (R)";
+    NSSet *joyLocalities = [NSSet setWithObjects:GCHapticsLocalityAll, GCHapticsLocalityDefault, joyL, joyR, nil];
+    TestController *joy = [TestController new]; joy.haptics = [TestHaptics new]; joy.haptics.noAdvanced = YES;
+    joy.vendorName = @"Joy-Con (L/R)"; joy.productCategory = @"Nintendo Switch Joy-Con (L/R)";
+    joy.haptics.supportedLocalities = joyLocalities;
+    dm_haptics_apple_controller(0, (id)joy); drain();
+    assert(channels[0].count == 2 && !channels[0][0].simple && !channels[0][0].merge && !channels[0][1].merge);
+    send_pair(0.6, 0); drain();   // left Joy-Con alone (e.g. npad 0 in single Joy-Con mode): right engine is not even started
+    NSArray *joyLeftOnly = @[joyL, joyL];
+    assert(channels[0].count == 2 && channels[0][0].simple && !channels[0][1].simple && [joy.haptics.requestedLocalities isEqual:joyLeftOnly]);
+    assert(fabsf(joy.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.6f) < 1e-6f);
+    send_pair(0, 0.4); drain();   // right Joy-Con alone (e.g. npad 1 in single Joy-Con mode): left silences, right starts its own plain player
+    NSArray *joyBoth = @[joyL, joyL, joyR, joyR];
+    assert(channels[0][1].simple && [joy.haptics.requestedLocalities isEqual:joyBoth]);
+    assert(joy.haptics.engines[1].testPlayer.levels.lastObject.floatValue == 0);
+    assert(fabsf(joy.haptics.engines[3].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
+    send_pair(0.3, 0.7); drain();
+    assert(fabsf(joy.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.3f) < 1e-6f);
+    assert(fabsf(joy.haptics.engines[3].testPlayer.levels.lastObject.floatValue - 0.7f) < 1e-6f);
+    send_pair(0, 0); drain();
+    t_joycon_recovery(joyLocalities, joyL, joyR);
+    t_joycon_lifetime(joyLocalities, joyL, joyR);
     dm_haptics_apple_controller(0, nil); drain();   // disconnect discards the controller factory and its old callbacks
     assert(!(dm_haptics_available() & 1));
     TestController *unsupported = [TestController new]; unsupported.haptics = [TestHaptics new];
@@ -485,5 +589,5 @@ int main(void) { @autoreleasepool {
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, the DualSense's handles, level cutoff and the DualShock 4 route passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, Joy-Con recovery and lifetime, the DualSense's handles, level cutoff and the DualShock 4 route passed");
 } }

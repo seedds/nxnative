@@ -300,6 +300,9 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case InstName.Shfl:
                         context.SetUsedFeature(FeatureFlags.Shuffle);
                         break;
+                    case InstName.S2r:
+                        SetDirectCbeUses(definitions, context, new InstS2r(opCode).SReg);
+                        break;
                     case InstName.Ldl:
                     case InstName.Stl:
                         context.SetUsedFeature(FeatureFlags.LocalMemory);
@@ -336,6 +339,25 @@ namespace Ryujinx.Graphics.Shader.Decoders
             while (!op.Props.HasFlag(InstProps.Bra));
 
             block.EndAddress = address;
+        }
+
+        // nxnative: a hull shader that reads the address of the stage's circular buffer writes its control points there with global stores, which DirectCbeWrites turns into
+        // outputs; the words it writes are the header's output words, so the generic ones among them are outputs as an AST of each would make them
+        private static void SetDirectCbeUses(ShaderDefinitions definitions, Context context, SReg sReg)
+        {
+            if (definitions.Stage != ShaderStage.TessellationControl ||
+                sReg is not (SReg.DirectCbeWriteAddressLow or SReg.DirectCbeWriteAddressHigh) ||
+                context.UsedFeatures.HasFlag(FeatureFlags.DirectCbe))
+            {
+                return;
+            }
+
+            context.SetUsedFeature(FeatureFlags.DirectCbe);
+
+            foreach (int word in definitions.OutputWords)
+            {
+                SetUserAttributeUses(definitions, context, word, 1, isStore: true, indexed: false, perPatch: false);
+            }
         }
 
         private static void SetUserAttributeUses(ShaderDefinitions definitions, Context context, InstName name, ulong opCode)

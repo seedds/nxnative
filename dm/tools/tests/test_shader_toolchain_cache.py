@@ -25,6 +25,8 @@ TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
 import dmsh_mtlcache  # noqa: E402
+import dmsh_rewrite  # noqa: E402
+import dmsh_rt_compile  # noqa: E402
 import shader_cache  # noqa: E402
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs  # noqa: E402
@@ -47,10 +49,10 @@ class ShaderCache(unittest.TestCase):
                        DUAL_WANT=set(), BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
                        STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
-                       STAMP_BEFORE=None, INPUTS='inputs')
+                       STAMP_BEFORE=None, INPUTS='inputs', dmsh_rt_compile=dmsh_rt_compile, RT_KEYS=set())
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
-                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library', 'submit', 'results'}
+                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library', 'owned_output', 'submit', 'results'}
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
@@ -188,7 +190,7 @@ class ShaderCache(unittest.TestCase):
         # Execute the real selection and cleanup block, stopping before temporary jobs or tools start.
         start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'keys' for t in n.targets))
         end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.FunctionDef) and n.name == 'sweep_work')   # not the sweep of the working folders
-        self.ns.update(want={vertex}, loc=locations, PAIRS=pairs, INPUTS='inputs')
+        self.ns.update(want={vertex}, loc=locations, PAIRS=pairs, INPUTS='inputs', SOURCE_ONLY=False)
         exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         self.assertEqual(self.ns['want'], {vertex, pixel})
         self.assertFalse((out / (vertex + '_b.metal')).exists())
@@ -267,6 +269,18 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in img.iterdir()), sorted([a + '_b.metal', a + '_b.metallib', b + '_b.metal', b + '_b.metallib', 'inputs.tsv']))
         self.assertEqual((img / (a + '_b.metallib')).read_bytes(), a.encode())
 
+    def test_a_stage_the_cache_cannot_take_leaves_every_file_on_disk(self):   # a full drive: the stage's batch is rolled back, earlier writes too, so none of its files may go
+        out, key = Path(self.ns['out']), '1' * 16
+        (out / (key + '_b.json')).write_text('{}'); (out / (key + '_b.metallib')).write_bytes(b'x' * 200000)
+        store = self.ns['STORE']; store.put('before', b'0')
+        n = store.db.execute('PRAGMA page_count').fetchone()[0]; store.db.execute(f'PRAGMA max_page_count={n + 2}')
+        with mock.patch('builtins.print'): self.ns['commit'](key)
+        self.assertTrue(store.full); self.assertEqual(store.names('stage/'), set())
+        self.assertEqual(sorted(p.name for p in out.iterdir()), [key + '_b.json', key + '_b.metallib'])
+        (out / 'inputs.tsv').write_text('game\tid\ninputs\tinputs\n')
+        self.ns['publish_library']('mac')
+        self.assertEqual(sorted(p.name for p in shader_lib.view(out).iterdir()), sorted([key + '_b.json', key + '_b.metallib', 'inputs.tsv']))
+
     def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
         out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16
         shader_lib.write({built + '_b.metal': b'old', built + '_bf.metallib': b'old variant', kept + '_b.metal': b'kept', 'inputs.tsv': b'game\tid\ninputs\told\n'},
@@ -307,7 +321,7 @@ class TargetSelection(unittest.TestCase):
                     ns: dict[str, Any] = dict(os=os, json=json, subprocess=subprocess, out=td, w=td, TARGETS=targets,
                               IOSOUT=str(ios) if 'ios' in targets else None, MESH_STATS=collections.Counter(),
                               MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose),
-                              output=output, commit=mock.Mock())
+                              dmsh_rewrite=dmsh_rewrite, output=output, commit=mock.Mock())
                     exec(compile(ast.Module(body=[function], type_ignores=[]), '<mesh targets>', 'exec'), ns)
                     ns['mesh_finish'](('vertex', 'geometry'))
                     compose.assert_called_once_with('vertex source', 'geometry source', [36])
@@ -319,7 +333,7 @@ class TargetSelection(unittest.TestCase):
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'IOSOUT' for t in n.targets))
         end = next(i for i, n in enumerate(tree.body) if i > start and isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == 'IOSOUT')
-        ns = dict(os=os, sys=sys)
+        ns = dict(os=os, sys=sys, SOURCE_ONLY=False)
         with mock.patch.dict(os.environ, env, clear=True):
             exec(compile(ast.Module(body=tree.body[start:end], type_ignores=[]), '<target selection>', 'exec'), ns)
         return ns['TARGETS'], ns['IOSOUT']
@@ -423,6 +437,56 @@ class MetalPrefill(unittest.TestCase):
         (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}_bf.metallib').write_bytes(b'TILE')
         notes = self.cache.fill(str(self.old))
         self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+
+    def test_a_vertex_library_beside_a_pulling_or_shadow_input_library_does_not_prefill(self):   # it may be a piece of the vertex unit (dmsh_side.vs_unit), not the compile of its .metal
+        for side in ('_bp', '_bv'):
+            with self.subTest(side=side):
+                self.cache.store = shader_cache.Store(self.root / f'cas{side}.db'); self.cache.stats.clear()
+                self.earlier_libraries(self.cache.ident['mac'].hex())
+                (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}{side}.metallib').write_bytes(b'SIDE')
+                notes = self.cache.fill(str(self.old))
+                self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+                (self.old / f'{2:016x}{side}.metallib').unlink()
+
+    def test_a_cut_library_is_told_in_its_own_targets_folder(self):   # an iPhone-only build: the Mac folder holds the sources and no library that would tell
+        ios = self.root / 'ios-old'; ios.mkdir()
+        def compile_current(msl, air, lib): Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
+            cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas-ios.db'), {'ios': ('iphoneos', 'flags', compile_current)}, str(self.root))
+        for i in range(3):
+            stem = f'{i:016x}_b'; src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src)
+            (ios / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'CUT FROM ANOTHER SOURCE')
+            (ios / (stem + '.json')).write_text(json.dumps({'chain_metal': 'flags', 'stage': 'vs', 'chain_compiler': cache.ident['ios'].hex()}))
+        (ios / f'{2:016x}_bp.metallib').write_bytes(b'PULLING')
+        notes = cache.fill(str(self.old), str(ios))
+        self.assertEqual(cache.stats['ios', 'filled'], 2, notes)
+
+    def test_a_cut_ios_base_cannot_prefill_after_packing_omits_its_pulling_library(self):
+        ios = self.root / 'b-ios'; ios.mkdir()
+
+        def compile_current(msl, air, lib):
+            Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
+            cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas-ios.db'), {'ios': ('iphoneos', 'flags', compile_current)}, str(self.root))
+        for i in range(3):
+            stem = f'{i:016x}_b'
+            src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src)
+            (ios / (stem + '.metallib')).write_bytes(b'TESTED ' + src if i < 2 else b'CUT FROM ANOTHER SOURCE')
+            reflection = cache.with_compiler('ios', {'stage': 'vs'})
+            if i == 2: reflection['chain_metal_cut'] = True
+            (ios / (stem + '.json')).write_text(json.dumps(reflection))
+        (ios / f'{2:016x}_bp.metallib').write_bytes(b'PULLING')
+        self.assertTrue(shader_lib.pack(ios, leave_out=True))
+        self.assertTrue(shader_lib.left_out_pulling(ios))
+
+        notes = cache.fill(str(self.old), str(ios))
+        self.assertEqual(cache.stats['ios', 'filled'], 2, notes)
+        result = self.root / 'result.metallib'
+        cache.compile('ios', str(self.old / f'{2:016x}_b.metal'), str(result))
+        self.assertEqual(result.read_bytes(), b'TESTED MSL 2')
 
     def test_compile_split_keeps_every_piece(self):
         msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'

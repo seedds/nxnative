@@ -44,7 +44,6 @@ final class MacI18n: ObservableObject {
 
     private static func when(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = shared.locale
         formatter.doesRelativeDateFormatting = true
         formatter.dateStyle = .short
         formatter.timeStyle = .short

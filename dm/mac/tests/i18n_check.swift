@@ -74,8 +74,12 @@ import SwiftUI
         let local = MacI18n.localSaveLabel(report), cloud = MacI18n.cloudSaveLabel(report)
         expect(local.hasPrefix(chinese ? "本机存档：" : "This Mac's: "), "the local save has a localized label")
         expect(cloud.hasPrefix(chinese ? "iCloud 中的 Mac 存档：" : "The Mac's in iCloud: "), "the cloud save identifies its device")
-        let date = DateFormatter(); date.locale = MacI18n.shared.locale; date.doesRelativeDateFormatting = true; date.dateStyle = .short; date.timeStyle = .short
-        expect(local.contains(date.string(from: report.localSaved)) && cloud.contains(date.string(from: report.cloudSaved)), "both save times survive formatting")
+        let systemDate = DateFormatter()
+        systemDate.doesRelativeDateFormatting = true
+        systemDate.dateStyle = .short
+        systemDate.timeStyle = .short
+        let localTime = systemDate.string(from: report.localSaved)
+        let cloudTime = systemDate.string(from: report.cloudSaved)
         expect(local.contains(ByteCountFormatter.string(fromByteCount: report.localSize, countStyle: .file)) && cloud.contains(ByteCountFormatter.string(fromByteCount: report.cloudSize, countStyle: .file)), "both save sizes survive formatting")
         var unknownDevice = report; unknownDevice.cloudDevice = ""
         expect(MacI18n.cloudSaveLabel(unknownDevice).contains(chinese ? "其他设备" : "another device"), "an unknown cloud device is localized")
@@ -85,7 +89,7 @@ import SwiftUI
         expect(conflict.hasPrefix(chinese ? "本机和 iCloud" : "Both this Mac's save"), "the conflict explanation is localized")
         expect(unreadable.contains("60") && unreadable.hasPrefix(chinese ? "iCloud 未能" : "iCloud didn't"), "the cloud timeout is formatted in the selected language")
         expect(![local, cloud, conflict, unreadable].contains { $0.contains("%@") || $0.contains("%d") }, "save messages contain no unexpanded format arguments")
-        expect(SaveSyncReport.step(report) == .choose && report.localChoice == "local:aaa" && report.cloudChoice == "cloud:bbb", "localized save messages leave conflict handling and choices unchanged")
+        expect(SaveSyncReport.step(report) == .choose && report.localChoice == "local:bbb" && report.cloudChoice == "cloud:bbb", "both localized save choices identify the cloud save the player compared")
 
         let values = model.values
         let saved = defaults.persistentDomain(forName: suite) as NSDictionary?
@@ -98,6 +102,8 @@ import SwiftUI
             let modeLabel = language == .simplifiedChinese ? "主机模式" : "Console mode"
             MacI18n.shared.language = language
             expect(MacI18n.text("Play") == label && localizedRow.displayText(mode.label) == modeLabel, "changing the interface language immediately updates display text")
+            expect(MacI18n.localSaveLabel(report).contains(localTime) && MacI18n.cloudSaveLabel(report).contains(cloudTime),
+                   "local and cloud save times keep the system region in either interface language")
             expect(standard.object(forKey: "window.language") == nil, "changing the interface language does not save a preference")
             expect(model.values == values && (defaults.persistentDomain(forName: suite) as NSDictionary?) == saved, "changing the interface language keeps current and saved game settings")
             expect(String(cString: getenv("DM_LANG")) == "en-US", "changing the interface language does not set DM_LANG")

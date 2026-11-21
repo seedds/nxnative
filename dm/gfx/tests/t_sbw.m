@@ -37,6 +37,16 @@ int main(void){@autoreleasepool{
     uint64_t done=g_done;gw_commit(done+1000);
     CHECK("a running submission's wide write is seen by the next",gw_live(base+0x41000,base+0x41010));
     CHECK("and not elsewhere",!gw_live(ub,ub+0x100));
+    // The commit reads the pages this submission noted, not the whole page set (Ocarina of Time commits about 30 submissions a frame): a GPU page goes into the running writes,
+    // a page only a report wrote does not (the report counts by its own 16 bytes), and a page of an earlier submission is not met again
+    pend_reset();{const uint64_t a=0x7300000000ull,b=0x7300100000ull,r=0x7300200000ull;
+    sbw_note(a,16,SBW_GPU);sbw_note(b+0x10,0x1800,SBW_GPU);sbw_note(r,16,SBW_REPORT);sbw_note(a+8,8,SBW_GPU);
+    CHECK("the submission lists each page it noted once",g_nsbw==4&&g_sbwp[g_sbw_list[0]].page==a>>12&&g_sbwp[g_sbw_list[1]].page==b>>12&&g_sbwp[g_sbw_list[2]].page==(b>>12)+1&&g_sbwp[g_sbw_list[3]].page==r>>12);
+    gw_commit(done+900);
+    CHECK("its GPU pages are running writes",gw_live(a+0x800,a+0x810)&&gw_live(b+0x1000,b+0x1010));
+    CHECK("a page only a report wrote is not",!gw_live_in(g_gw,r+0x100,r+0x110));
+    pend_reset();sbw_note(ub+0x3000,16,SBW_GPU);
+    CHECK("the next submission lists only its own pages",g_nsbw==1&&g_sbwp[g_sbw_list[0]].page==(ub+0x3000)>>12);}
     // A write of 16 MB or more is kept whole: a uniform block elsewhere stays readable, and the same range coming back takes no new slot
     pend_reset();uint64_t wide=0x7100000000ull,big=0x2000000;
     sbw_note(wide,big,SBW_GPU);gw_commit(done+1001);

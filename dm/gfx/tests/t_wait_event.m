@@ -5,9 +5,23 @@
 #include "../nvn/nvn_mtl.m"
 #undef nvn_event_publish_gpu
 #undef nvn_game_fps
+// Pause the producer inside a command after a fence. This exercises an open job
+// whose published prefix the real replay worker can completely drain.
+#include "../nvn/nvn_capture.h"
+static _Atomic int pause_clear;
+static dispatch_semaphore_t copy_paused, resume_copy;
+static int copy_fields(uint32_t op,uint8_t *payload,uint32_t size,const cap_ops *ops,void *ctx) {
+    if(op==OP_CLEAR_BUF && atomic_exchange(&pause_clear,0)) {
+        dispatch_semaphore_signal(copy_paused);
+        if(dispatch_semaphore_wait(resume_copy,dispatch_time(DISPATCH_TIME_NOW,10000000000ll))) abort();
+    }
+    return cap_rec_fields(op,payload,size,ops,ctx);
+}
+#define cap_rec_fields copy_fields
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft
+#undef cap_rec_fields
 #define P(name) ((NVNT_##name)nvn_lookup(#name))
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -319,6 +333,28 @@ static void frame_shares_allocator(void) {
     CHECK(done && *result==before,"all of them complete once the GPU runs"); if(!done) _Exit(2);
     for(int i=0;i<N;i++) P(nvnSyncFinalize)(&fences[i]);
 }
+// Counting submissions in flight each take a buffer of the visibility ring, which grows, instead of a one-off buffer that joins the residency set and leaves it after the
+// submission: 24 of them, three times the old ring of 8, with none complete; once they are, the next one reuses a ring buffer and the ring does not grow
+static void vis_ring_grows(void) {
+    enum { N=24 };
+    printf("CASE counting submissions in flight take buffers of the visibility ring\n");
+    pthread_mutex_lock(&g_sub_mu);
+    const uint64_t far=g_done+(1ull<<40); __strong id<MTLBuffer> taken[N]; int took=0;
+    for(int i=0;i<N;i++) {
+        g_vis_ring_i=-1; g_vis=nil; vis_take(); taken[i]=g_vis;
+        if(g_vis && g_vis_ring_i>=0 && vis_in_ring(g_vis)) { took++; g_vis_ring[g_vis_ring_i].fence=far+(uint64_t)i; }   // in flight: its fence is far ahead of g_done
+    }
+    CHECK(took==N,"24 counting submissions in flight each take a ring buffer");
+    int distinct=1; for(int i=0;i<N;i++) for(int k=0;k<i;k++) if(taken[i]==taken[k]) distinct=0;
+    CHECK(distinct,"no two of them share a buffer");
+    const int grown=g_vis_ring_n;
+    for(int i=0;i<grown;i++) if(g_vis_ring[i].fence>=far) g_vis_ring[i].fence=0;   // their submissions complete
+    g_vis_ring_i=-1; g_vis=nil; vis_take();
+    CHECK(g_vis && g_vis_ring_n==grown && vis_in_ring(g_vis),"once they complete, the next one reuses a ring buffer");
+    if(g_vis_ring_i>=0) g_vis_ring[g_vis_ring_i].fence=0;
+    g_vis_ring_i=-1; g_vis=nil; g_vis_n=0;
+    pthread_mutex_unlock(&g_sub_mu);
+}
 // A wait on a sync no fence has reached when it is submitted is already satisfied: the queue's own later work, its fence included, runs (issue #1808)
 static void receipt_unfenced(int command_wait) {
     printf("CASE %s wait on a never-fenced sync does not park its queue\n",command_wait?"command-buffer":"queue");
@@ -359,6 +395,35 @@ static void event_mirror_publication(void) {
     CHECK(P(nvnEventGetValue)(&event)==11,"the terminal event publishes once the storage is visible");
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);
 }
+static void streamed_queue_order(void) {
+    if(!mtl_sub_stream_on()) return;
+    NVNsync prefix, tail, independent;
+    P(nvnSyncInitialize)(&prefix,&device); P(nvnSyncInitialize)(&tail,&device); P(nvnSyncInitialize)(&independent,&device);
+    *source=before; *result=sentinel;
+    begin_cmd(0);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&prefix,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    P(nvnCommandBufferClearBuffer)(&commands[0],result_addr,4,after);
+    NVNcommandHandle first=P(nvnCommandBufferEndRecording)(&commands[0]);
+    begin_cmd(1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],result_addr,source_addr,4,0);
+    NVNcommandHandle next=P(nvnCommandBufferEndRecording)(&commands[1]);
+    copy_paused=dispatch_semaphore_create(0); resume_copy=dispatch_semaphore_create(0);
+    atomic_store(&pause_clear,1);
+    job j; enqueue(&j,&queues[0],first);
+    if(dispatch_semaphore_wait(copy_paused,dispatch_time(DISPATCH_TIME_NOW,5000000000ll))) abort();
+    CHECK(landed(&prefix,5000000000ull) && *result==before,"prefix reaches the GPU before the submit thread finishes copying");
+    P(nvnQueueSubmitCommands)(&queues[0],1,&next);
+    P(nvnQueueFenceSync)(&queues[0],&tail,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    CHECK(!landed(&tail,0),"later submission stays behind an empty open job");
+    P(nvnQueueSubmitCommands)(&queues[1],1,&next);
+    P(nvnQueueFenceSync)(&queues[1],&independent,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    CHECK(landed(&independent,5000000000ull) && *source==before,"another ready queue runs while the producer is parked");
+    CHECK(!landed(&tail,0),"independent queue progress does not release the open job's tail");
+    dispatch_semaphore_signal(resume_copy); require_returned(&j,0);
+    CHECK(landed(&tail,5000000000ull) && *source==after,"later submission sees the first job's suffix");
+    P(nvnSyncFinalize)(&prefix); P(nvnSyncFinalize)(&tail); P(nvnSyncFinalize)(&independent);
+}
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
@@ -381,12 +446,14 @@ int main(void) { @autoreleasepool {
     case_wait("wrap rejects ffffffff before zero",1,0xffffffff,0,0);
     case_wait("wrap accepts half-range minus one",1,0x7fffffff,0,1);
     case_wait("wrap rejects exactly half-range",1,0x80000000,0,0);
+    streamed_queue_order();
     case_cross_queue();
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
     event_signal_no_cut();
     frame_shares_allocator();
+    vis_ring_grows();
     receipt_tests();
     event_mirror_publication();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);

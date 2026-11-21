@@ -12,6 +12,7 @@
 #include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <mach/vm_statistics.h>
+#include <stdatomic.h>
 #if TARGET_OS_IPHONE
 #include <os/proc.h>
 #endif
@@ -52,6 +53,53 @@ static void dump_regions(const char *path) {
         a += sz;
     }
     fclose(f);
+}
+
+// The address-space census the crash handler writes after every crash and abort (crash.c on_crash): how much of the process's address space each class holds, the largest free gaps
+// between the lowest and highest address the task may use (TASK_VM_INFO min / max_address) and the thread count. An iPhone without the extended-virtual-addressing entitlement has
+// a few GB of address space (docs/reference/memory.md): a thread's stack, a realloc or a Metal heap that finds no room aborts there with the footprint far below the memory limit
+// (GitHub issue #2444). Regions inside a submap (the dyld shared cache) are "system" here and never a gap. Only mach calls and fprintf: it runs in the signal handler
+void dm_vm_census(FILE *f) {
+    enum { C_SYS = NC, NCC };
+    uint64_t virt[NCC] = {0}, gap[3] = {0}, gap_at = 0, prev = 0, lo = 0, hi = 0, nreg = 0, tag[256] = {0};   // tag: "other" by VM user tag
+    task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS && n >= TASK_VM_INFO_REV2_COUNT) { lo = vi.min_address; hi = vi.max_address; }
+    prev = lo;
+    vm_address_t a = 0; vm_size_t sz; natural_t depth = 0; uint64_t sub_end = 0;
+    for (;;) {
+        vm_region_submap_info_data_64_t in; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&in, &cnt) != KERN_SUCCESS) break;
+        uint64_t s = a, e = (uint64_t)a + sz;
+        if (s > prev) {   // free address space between the last region and this one: keep the three largest
+            uint64_t g = s - prev;
+            if (g > gap[0]) { gap[2] = gap[1]; gap[1] = gap[0]; gap[0] = g; gap_at = prev; } else if (g > gap[1]) { gap[2] = gap[1]; gap[1] = g; } else if (g > gap[2]) gap[2] = g;
+        }
+        if (e > prev) prev = e;
+        if (in.is_submap) { if (e > sub_end) sub_end = e; depth++; continue; }
+        int c = s < sub_end ? C_SYS : classify(a, &in); virt[c] += sz; nreg++;
+        if (c == C_OTHER) tag[in.user_tag & 255] += sz;
+        a += sz;
+    }
+    if (hi > prev) { uint64_t g = hi - prev; if (g > gap[0]) { gap[2] = gap[1]; gap[1] = gap[0]; gap[0] = g; gap_at = prev; } else if (g > gap[1]) { gap[2] = gap[1]; gap[1] = g; } else if (g > gap[2]) gap[2] = g; }
+    uint64_t used = 0; for (int c = 0; c < NCC; c++) used += virt[c];
+    thread_act_array_t th; mach_msg_type_number_t nt = 0; int threads = -1;
+    if (task_threads(mach_task_self(), &th, &nt) == KERN_SUCCESS) {
+        threads = (int)nt;
+        for (mach_msg_type_number_t i = 0; i < nt; i++) mach_port_deallocate(mach_task_self(), th[i]);
+        vm_deallocate(mach_task_self(), (vm_address_t)th, nt * sizeof *th);
+    }
+    const double G = 1073741824.0;
+    fprintf(f, "[dm] address space: %.2f GB in %llu regions between %#llx and %#llx (%.2f GB); largest free %.2f GB at %#llx, then %.2f and %.2f GB; threads %d\n",
+            used / G, (unsigned long long)nreg, (unsigned long long)lo, (unsigned long long)hi, (hi - lo) / G, gap[0] / G, (unsigned long long)gap_at, gap[1] / G, gap[2] / G, threads);
+    fprintf(f, "[dm] address space by class (GB):");
+    for (int c = 0; c < NCC; c++) fprintf(f, " %s %.2f", c == C_SYS ? "system" : k_cls[c], virt[c] / G);
+    fprintf(f, "; footprint %.2f GB; other by VM tag:", vi.phys_footprint / G);
+    for (int k = 0; k < 3; k++) {   // the three largest tags of "other" (mach/vm_statistics.h VM_MEMORY_*; 0 = untagged, which holds plain mmap reservations)
+        int best = -1; for (int t = 0; t < 256; t++) if (tag[t] && (best < 0 || tag[t] > tag[best])) best = t;
+        if (best < 0) break;
+        fprintf(f, " %d %.2f", best, tag[best] / G); tag[best] = 0;
+    }
+    fputc('\n', f);
 }
 
 static void sample(FILE *f, double t, id<MTLDevice> dev) {
@@ -102,7 +150,7 @@ static void *memstat_thread(void *p) {
     return NULL;
 }
 
-__attribute__((constructor)) static void memstat_start(void) {
+static void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
     char *path = strdup(p);
@@ -144,7 +192,7 @@ static void *thrcpu_thread(void *p) {
     }
     return NULL;
 }
-__attribute__((constructor)) static void thrcpu_start(void) {
+static void thrcpu_start(void) {
     const char *p = getenv("DM_THRCPU");
     if (!p || !*p) return;
     char *spec = strdup(p);
@@ -152,4 +200,11 @@ __attribute__((constructor)) static void thrcpu_start(void) {
     if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; spec = malloc(n); snprintf(spec, n, "%s/Documents/%s", getenv("HOME"), p); }
 #endif
     pthread_t th; pthread_create(&th, NULL, thrcpu_thread, spec); pthread_detach(th);
+}
+// DM_MEMSTAT and DM_THRCPU, started once by the host's loading (main.c host_preload), not by a constructor: on iOS a constructor runs before the app's main() sets what Documents/env.txt
+// holds, so either switch set there did nothing (GitHub issue #1184)
+void dm_diag_samplers_start(void) {
+    static atomic_int once;
+    if (atomic_exchange(&once, 1)) return;
+    memstat_start(); thrcpu_start();
 }

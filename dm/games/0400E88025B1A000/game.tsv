@@ -37,3 +37,7 @@ sys_resource	0x1000000
 # every shader is a member of /data.zip
 shader_groups	/data.zip=shader
 shader_note	Star Fox shaders
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode with near = 0 before its first frame. Use that mode for the offline archive and the Mac prebuild (README.md).
+depth_mode	zero

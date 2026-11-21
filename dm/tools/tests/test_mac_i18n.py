@@ -13,7 +13,6 @@ import uuid
 
 REPO = Path(__file__).resolve().parents[3]
 RESOURCES = REPO / 'dm/mac/Resources'
-TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
 sys.path.insert(0, str(REPO / 'dm/games'))
 import settings
 
@@ -77,6 +76,7 @@ class CatalogTests(unittest.TestCase):
         required = {'Set at launch', 'Set by an env file', 'Cancel', 'Quit', 'another device',
                     'General', 'Language', 'Applies only to this settings window.',
                     'Choose a folder…', 'Choose a different folder…',
+                    'Microphone input', 'System Default', 'Selected device unavailable',
                     'Which save do you want to play?', "The cloud save didn't come"}
         quoted = r'"(?:[^"\\]|\\.)*"'
         for name in ('Launcher.swift', 'I18n.swift'):
@@ -94,8 +94,7 @@ class CatalogTests(unittest.TestCase):
 class NativeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        TEST_ROOT.mkdir(parents=True, exist_ok=True)
-        cls.tmp = Path(tempfile.mkdtemp(prefix='mac-i18n-', dir=TEST_ROOT))
+        cls.tmp = Path(tempfile.mkdtemp(prefix='mac-i18n-'))
         cls.addClassCleanup(shutil.rmtree, cls.tmp)
         bundle_id = 'org.nxnative.localization-test.' + uuid.uuid4().hex
         cls.addClassCleanup(subprocess.run, ['defaults', 'delete', bundle_id], capture_output=True)
@@ -130,6 +129,9 @@ class NativeTests(unittest.TestCase):
                                    ('de', 'en'), ('ja', 'en'), ('zh-Hant', 'en'), ('de,zh-Hans', 'zh')]:
             with self.subTest(language=language):
                 self.run_check(language, expected)
+
+    def test_save_times_keep_the_system_region(self):
+        self.run_check('en-GB', '-AppleLocale', 'en_GB', 'en')
 
     def test_manual_language_only_affects_the_current_launch(self):
         for selected, system, expected in [('zh-Hans', 'en', 'en'), ('en', 'zh-Hans', 'zh'), ('zh-Hans', 'de', 'en')]:

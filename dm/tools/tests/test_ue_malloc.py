@@ -44,8 +44,10 @@ def find(img): return ue_malloc.find(bytes(img), TEXT, RO, DATA)
 
 class FindTest(unittest.TestCase):
     def test_found_in_place(self):
-        call, vt, slot, why = find(image())
-        self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 19), why)
+        for getter in (17, 19):
+            with self.subTest(getter=getter):
+                call, vt, slot, why = find(image(slot=getter))
+                self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, getter), why)
 
     def test_found_through_relocations(self):
         call, vt, slot, why = find(image(slot=26, relocated=True))

@@ -1,0 +1,37 @@
+# Persona 5 Strikers (Switch, 1.0.0 / v0), Koei Tecmo's KTGL on NVN, SDK 8.3.2.
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100801011C3E000
+program_id	0100801011C3E000
+
+# ---- App ----
+name	Persona 5 Strikers
+ipa	Persona5Strikers.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0.0	main=c4df04f647bdc727926348bd9a9918c8	subsdk0=721b196b95fde7248f270bdbcad7ac53	sdk=0444aea83c4abc8f12a7ac7ba5c0dd3a
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# subsdk0 is NintendoSDK_movie (startup videos and opening movie).
+modules	main subsdk0 sdk
+romfs_marker	data/motor_rsc/FieldEditor4.rdb.bin_0
+zip_store	.bin:.bin_0:.file:.mp4:.rdb:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource. The stock application pool in a 4 GiB partition gives the SDK a 3.14 GB heap at startup.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+# NVN reports near=0 at device setup. The pipeline prebuild uses the same depth mode as the game.
+depth_mode	zero
+shader_groups	/data/=data
+shader_note	Persona 5 Strikers shaders

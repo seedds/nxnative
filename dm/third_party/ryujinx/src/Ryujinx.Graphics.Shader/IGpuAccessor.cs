@@ -8,6 +8,11 @@ namespace Ryujinx.Graphics.Shader
     /// </summary>
     public interface IGpuAccessor : ILogger
     {
+        // A serialized callable program may use constant banks for its runtime
+        // descriptor arena, rather than the ordinary game-UBO address convention.
+        // Keep such global addresses in the checked flat address space.
+        bool QueryRawGlobalMemory() => false;
+
         // Fixed VS capture ABI used by the offline Metal geometry path.
         bool QueryGeometryInputFixed() => false;
 
@@ -328,6 +333,14 @@ namespace Ryujinx.Graphics.Shader
         bool QueryHostSupportsNonConstantTextureOffset()
         {
             return true;
+        }
+
+        /// <summary>
+        /// Queries host support for the full range of runtime per-texel gather offsets.
+        /// </summary>
+        bool QueryHostSupportsNonConstantTextureGatherOffsets()
+        {
+            return QueryHostSupportsNonConstantTextureOffset();
         }
 
         /// <summary>

@@ -43,6 +43,12 @@
 "Rumble strength" = "震动强度";
 "Rumble cutoff" = "震动过滤阈值";
 "Press a button to join" = "按键加入";
+"Microphone" = "麦克风";
+"Lets the game hear your microphone. macOS asks for access when you launch with this enabled." = "允许游戏接收麦克风声音。启用后启动游戏时，macOS 会请求麦克风访问权限。";
+"Microphone gain" = "麦克风增益";
+"Microphone input" = "麦克风输入设备";
+"System Default" = "系统默认";
+"Selected device unavailable" = "所选设备不可用";
 "Switch 2 controllers" = "Switch 2 控制器";
 "Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access." = "通过蓝牙连接 Joy-Con 2 和 Pro Controller 2。游戏运行时长按控制器的同步按钮进行配对。macOS 首次连接时会请求蓝牙权限。";
 "Picture shape" = "画面比例";
@@ -74,6 +80,8 @@
 "Korean" = "韩语";
 "Traditional Chinese" = "繁体中文";
 "Simplified Chinese" = "简体中文";
+"Polish" = "波兰语";
+"Thai" = "泰语";
 "Brazilian Portuguese" = "葡萄牙语（巴西）";
 
 "Cloud saves" = "云存档";

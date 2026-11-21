@@ -43,7 +43,7 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 ### Upscaling
 
-A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.
+A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales. **FSR 1** uses AMD's FSR 1 edge adaptive upsampling in the present pass, for a similar look. On an iPad Pro 13" M4 (1920x1440 to 2752x2064) it took 1.6 ms a frame and Standard 0.4 ms; MetalFX took 1.3 ms there once it wrote the screen itself.
 
 ```mermaid
 flowchart LR
@@ -282,7 +282,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
-| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx`, `fsr` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |

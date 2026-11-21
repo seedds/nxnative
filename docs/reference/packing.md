@@ -54,6 +54,13 @@
 - **Check:** `test_nsp_nup` Read.test_folder_cycle_refused: a folder made its own parent, then a cycle of two folders, each with the TOC hash fixed up, are refused, and the script exits 1 with no traceback. Without the check the container opens.
 - **Found on:** a code audit; no damaged NUP of this kind is known.
 
+### A NUP icon is written as control data
+
+- **Symptom:** the JPEG icon in a NUP is written as `control.nacp` and the display version is written as `icon.jpg`. A wrong-size NACP can also supply incorrect application and DLC IDs during scanning.
+- **Cause:** [nup PR #20](https://github.com/a55uka/nup/pull/20) replaced explicit TLV values with an enum that starts at 0. SPEC §5 starts at 1, so each type in a block produced by that writer is one too low. The upstream writer fix in [nup PR #22](https://github.com/a55uka/nup/pull/22) starts the enum at 1. In nxnative, scanning used the offsets of the ID fields as its only NACP size check.
+- **Fix:** `Package.meta()` normalizes a shifted block at read time. NACP and icon payloads determine the numbering when they can, with type 0 or a non-32-byte type 7 as fallback markers ([nup PR #32](https://github.com/a55uka/nup/pull/32)). The same reader omits NACP records whose size differs from `0x4000` before scanning or extraction uses them. Extraction reports these decisions once per package.
+- **Found on:** a sample written with upstream `nup` at `a4840f06` reproduced the swapped files. A Resident Evil 4 archive confirmed shifted numbering. A Super Mario Bros. Wonder archive contained a valid NACP at type 2 alongside shifted records.
+
 ### A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"
 
 - **Symptom:** `[RED] <file>.nup: 2 base packages`, `base program ID 040015100B514001 is not a base title ID`, or `010015100B515001 is not a DLC of 040015100B514001`, from a NUP of a Switch 1 game's Nintendo Switch 2 Edition ([PR #2692](https://github.com/seedds/nxnative/pull/2692)). Packed by hand on its own RomFS, the Switch 2 program crashed within a second of `nnMain` on a null `this` in a constructor: with no heap sizes the engine's heaps were never made. With an add-on older than the program: `[RED] game asks to show an error: its upgrade add-on content is older than this program needs`, then `CRASH sig=4` at the game's own trap (before the hook, a crash in `sdk` under `nn::applet::StartLibraryAppletImmediately`).
@@ -180,6 +187,35 @@
 - **Fix:** with `DMSH_TABLE_MEMO` set to a folder, each tool keeps a line per shader there (`c1_guard.memo`, `cb_extent.memo`): the SHA-256 of the files it read, then its answer. The next run takes the answer of every shader whose files hash the same and analyses the rest. The NSP script sets it to its shader cache folder for the build and for `chain_tables`. The memo's first line is a fingerprint of `c1_guard.py`, `cb_extent.py`, `dmsh_abi.py` and the header it reads (`dm/gfx/nvn/dmsh_abi.h`: the binding kinds `cb_extent.py` filters on), so an edit to any of them starts it empty. It holds the last run's answers only (6.5 MB for Ocarina of Time). Without the variable nothing is hashed.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072 on an M3 Max: both tables in 95.1 s without the memo, 96.8 s with an empty one and 6.5 s from a full one, byte-identical after the header in all three runs. `dm/tools/tests/test_nsp_chain.py` (`TableTools`: the same tables from the memo, its answer used, changed bytes analysed again, another version's memo not taken).
 
+### A cold build spends half a minute on the c1 and uniform extent tables
+
+- **Symptom:** after the last shader of a cold full build, `dmsh_build.py` keeps every core busy for about another half minute before it prints `c1_full.tsv: …` and `cb_extent.tsv: …`: Tears of the Kingdom's 28,669 shaders on an M5 Pro, 33 s of a 507 s build when the build runs them. The tools alone on a finished library: 27 s, and 14 s for Breath of the Wild.
+- **Cause:** `c1_guard.py` and `cb_extent.py` spent their time in patterns over each shader's whole MSL. The interval arithmetic was 1% of it.
+  - `definitions_of` scanned every shader with a c1 read or a bounded uniform read for its temporaries: the declarations twice, the assignments once. It was 85% of `c1_guard.py` and 52% of `cb_extent.py`. Most indices are literals and ask for no definition: of 484 sampled shaders with a c1 read, 11 have a temporary in an index.
+  - `ASSIGNMENT` starts with a lookbehind or an alternation, and `cb_extent.py` ran two patterns that start with `\b` for each binding of each shader (45% of its time). `re` tries such a pattern at every character ([Rewrites that try every character of a large source](shaders.md#rewrites-that-try-every-character-of-a-large-source)).
+- **Fix:** the same answers from less scanning, in the two tools.
+  - `Definitions` makes `definitions_of` when `Interval` first looks a temporary up.
+  - `definitions_of` counts the declarations in the scan that collects them. It finds the assignments with `ASSIGNED`, `ASSIGNMENT`'s first form with its literal first, when the text has no `++` and no `--`: the other two forms need one. A text with one takes `ASSIGNMENT` as before.
+  - `cb_extent.py` `uses_of` counts a binding's uses and its declaration with `str.find` and the characters on both sides.
+  - The memo's fingerprint covers both tools, so the first build after this fills the memo again.
+- **Measurement:** M5 Pro (18 cores), Python 3.13, the Mac library image, no memo, the two tools one after the other as the build runs them, best of three.
+
+  | Both tools, wall (CPU) | Before | After |
+  |---|---|---|
+  | Tears of the Kingdom, 28,669 shaders | 26.7 s (458 s) | 5.0 s (79 s) |
+  | Breath of the Wild, 19,592 | 14.3 s (241 s) | 3.0 s (45 s) |
+  | Pokémon Scarlet, 30,142 | 24.2 s (417 s) | 4.8 s (76 s) |
+
+  A whole cold Mac build of Tears of the Kingdom, one run each: 507.1 to 490.9 s. The two tools inside it: 33.3 s (543 s of CPU) to 10.5 s (109 s). The rest of the build, the same work in both, took 473.8 and 480.4 s.
+
+  Both tables of the three games are the same line for line after the header, which holds the time of the run, and so are the two whole builds' tables.
+- **Open:**
+  - Reading a vertex shader's body once was measured and not taken. Its MSL holds `main0`'s body in `main0`, `main0_z` and `main0_gs`, and the copies are 55% of a library's text. Dropping them halves the unchanged tools (26.7 to 13.3 s) and saves 1.4 s after this change (5.0 to 3.6 s), for a check of the three entry points' forms.
+  - The memo ([A reuse build spends a minute and a half on the c1 and uniform extent tables](#a-reuse-build-spends-a-minute-and-a-half-on-the-c1-and-uniform-extent-tables)) no longer gains on these games: a run from a full memo is 4.9 s for Tears of the Kingdom, since every file is still read and hashed. Not measured on Ocarina of Time, which the memo was written for.
+  - `ACCESS` also starts with `\b` and is most of what `c1_guard.py` still costs.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), in a profile of its cold Mac build.
+- **Check:** `dm/gfx/tests/test_table_scans.py`: the assignment scan against the plain one, definitions made only for a temporary, `uses_of` against the two patterns.
+
 ### Every second build signs the whole Mac app again
 
 - **Symptom:** a build's last stage shows `Mac app · game files` without `(reused, signed)` and signs for three minutes, though the game files did not change and the build before it showed `game files (reused, signed)`; a build that changed nothing still shows `Mac app · pipeline archive` and signs for half a minute. Ocarina of Time (a 36 GB app) on an M3 Max: `Mac app` took 3:33 in the build after one where it took 1:11, and four packs that each changed one small file took 8 s, 220 s, 8 s and 220 s.
@@ -221,6 +257,15 @@
 - **Cause:** every check read `shutil.disk_usage` (`statvfs`), which counts only unallocated blocks. On APFS, space held by purgeable data (local Time Machine snapshots, caches the system deletes on demand) is not in it, though macOS frees that space while a write needs it.
 - **Fix:** `dm/tools/vol_space.py` `free_bytes` returns macOS's `kCFURLVolumeAvailableCapacityForImportantUsageKey` for the path's volume (the capacity for writes a user asked for, queried through CoreFoundation), never less than `statvfs`'s figure, and `statvfs` alone where macOS gives none. It asks the nearest existing folder of a path not made yet. The NSP script's `free_gb`, `pack_app.py`'s copy check and `pso_offline.py`'s checks before `metal-tt` and before the merge use it. Two reads keep `statvfs`: `tree_tar.pack_quiet`, housekeeping nobody asked for, which should make macOS purge nothing, and `pso_offline.py`'s diagnosis of a failed `metal-tt`, which reports what was really left. Tests: `dm/tools/tests/test_vol_space.py`.
 - **Found on:** a user's APFS volume with a local Time Machine snapshot holding over 50 GB of deleted files ([PR #2257](https://github.com/seedds/nxnative/pull/2257)): `statvfs` showed 18.84 GiB free and the capacity for important usage 68.02 GiB. With the capacity, an [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072 `--platform mac-app` build wrote 57 GB of work and a 35.2 GB app there, with 24 GiB still unallocated at the end. Applies to every game built on a Mac.
+
+### The shader split takes a minute on a RomFS of 300,000 files
+
+- **Symptom:** the NSP script's `shader split` step takes 60 to 77 s for Tears of the Kingdom on an M5 Pro. `shader_split.py` prints nothing for its first 26 s, then its `progress: n/304243` count slows after the first half.
+- **Cause:** only 1,683 of the 304,243 files hold a shader container, and parsing and de-duplicating shaders took under 1% of worker time. The CRA, zip, PDAT and RPF6 finders made 1.2 million opens in the parent process (22.9 of the 26.4 s before the scan). `unzs` also started `zstd` for each of 32,176 files without a dictionary, 39% of worker time. Image opens themselves added contention ([Processes that scan one RomFS image in parallel wait on its opens](#processes-that-scan-one-romfs-image-in-parallel-wait-on-its-opens)).
+- **Fix:** the pool reads the first eight bytes of each file in batches. The CRA, zip, PDAT and RPF6 finders validate the candidates selected by their first four bytes. The EA finder uses the same read and matches its four- and eight-byte signatures. `unzs` decodes all zstd frames in process, using the existing dictionary lookup when a dictionary is named. The separate Next Level Games decoder still uses the command.
+- **Measurement:** the [original PR](https://github.com/seedds/nxnative/pull/3002) measured a cold split on an 18-core M5 Pro, Python 3.13, with `J=18`. Tears of the Kingdom 1.4.3 went from 60.0 s (528 s CPU) to 17.5 s (215 s CPU) with both optimizations. Its split inside a cold pack went from 70.6 to 21.9 s. Breath of the Wild went from 70.1 to 67.1 s and Pokémon Scarlet stayed at 10.4 s. The package files and all four tables were byte-identical in all three comparisons on the PR base.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), while profiling the shader split.
+- **Check:** `test_split_magics.py` splits an image with a renamed zip, an eight-byte EA signature and concatenated zstd frames with an empty `PATH`. `test_easf.py` covers EA's version keys and DLC routing.
 
 ## Diagnostic reports
 
@@ -415,7 +460,7 @@
 
 - **Symptom:** the NSP script stops at the shader split of a registered profile with `[RED] 13744 file(s) could not be read, their shaders are left out (first: AI/FileEntry/FileEntry.Product.100.byml.zs: CalledProcessError: Command ['zstd', '-d', '-c', '-q', '…/extract/v0/RomFS.img/AI/…'] returned non-zero exit status 1.)`.
 - **Cause:** `shader_split.py`'s `unzs` read a `.zs` file through `romfs.open`, which reads inside the image, but then handed its path to the `zstd` command, which can only open real files (`Not a directory`).
-- **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
+- **Fix:** `unzs` initially fed the command the bytes it read and now [decodes zstd in process](#the-shader-split-takes-a-minute-on-a-romfs-of-300000-files). `test_romfs_read.py` checks a zstd file inside an image.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
 ### Under `--work-dir` the programs of one game overwrote each other's RomFS
@@ -431,6 +476,15 @@
 - **Cause:** an FTP dump keeps the server's directory listing as `.listing` in every folder, which the NUP spec (§6.3) allows a producer to keep. The RomFS image packed it as a game file, so a game that lists a folder saw one more entry. Switch Sports Resort cuts each name at its first `.`, got an empty name, loaded `Parameter/<folder>/` and found no resource.
 - **Fix:** `ARTIFACTS` in `dm/tools/romfs_image.py`, the dump-tool files that are not game files (`.listing`), is left out of the image, out of a NUP's RomFS (`scripts/pack_nup.py`) and out of the survey's file list (`dm/games/profile_guess.py`). Other dot files stay game files. Test: `test_romfs_image.py` (`test_dump_tool_listings_are_left_out`).
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md#found-on-this-game) (v65536, from a dump folder).
+
+### Processes that scan one RomFS image in parallel wait on its opens
+
+- **Symptom:** a tool that scans the files of one RomFS image spends much of its time opening them. In Tears of the Kingdom’s shader split, an open took 133 µs with 18 workers, against 28 µs with one.
+- **Cause:** every virtual file read opened the same backing image by path. Workers shared the kernel cost of repeated path resolution and opens of that image.
+- **Fix:** `romfs.reuse_descriptors` keeps a backing descriptor per image for the parent’s archive planning and for the lifetime of each scan worker. The virtual file gets a duplicate for its bounded `pread` or `mmap`. It reuses a descriptor only when the image identity still matches. The scan closes the backing descriptors on exit, and the metadata cache owns none.
+- **Measurement:** the [original PR](https://github.com/seedds/nxnative/pull/3002) isolated descriptor reuse on Tears of the Kingdom, with 60.0 → 47.7 s wall time and 528 → 471 s CPU time on an M5 Pro.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), while profiling the shader split.
+- **Check:** `test_romfs_read.py` verifies distinct virtual file descriptors, cleanup after an exception and correct reads after an image is replaced.
 
 ## Add-on content
 
@@ -461,9 +515,24 @@
 
 - **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
 - **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
-- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build. The selected package's numeric label can supply the version when those sources have no answer.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
 - **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
+
+### An unregistered NUP build loses its numeric version label
+
+- **Symptom:** the title menu of a game packed from a NUP with a version label shows `version: ?`.
+- **Cause:** the NUP has no NACP and the profile has no matching build. The packer discarded the NUP label and wrote `?` into the derived build row that `nn::oe::GetDisplayVersion` reads.
+- **Fix:** the survey, derived profile and app read the selected package's version label from the NUP. The label accepts one to three ASCII numeric components, an optional `v` and up to 15 version bytes. A label equal to the package's `v<number>` tag is ignored. The label stays with its package and is read again on each build.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0. The reporter rebuilt the game and verified the title menu. Reading the local NUP and deriving its profile also gave `1.8.0` for both the build row and bundle metadata. [Issue #2902](https://github.com/seedds/nxnative/issues/2902)
+
+### An app packed without control data says version 1.0
+
+- **Symptom:** Finder shows `Version 1.0` for a Mac app whose game is at another version.
+- **Cause:** the app packer got its version from the game's NACP. A dump or NUP can have no NACP, leaving the bundle packer to write its default even when another source identifies the version.
+- **Fix:** Mac apps and IPAs take the packed version's NACP first, then the numeric version from the packed build's profile row, then the base game's NACP, then the selected NUP package's version label. The build can read the base NACP from the NUP even when it only extracts the update. With no usable value the app defaults to `1.0`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The author rebuilt the Mac app from a NUP whose selected update was labelled `1.1.1` and checked both version fields in `Info.plist`. The local NUP has neither a NACP nor a display label. The profile registers `1.1.1` for its verified v131072 build ID, which gives the local build the same app version. [PR #2822](https://github.com/seedds/nxnative/pull/2822)
+- **Check:** `dm/tools/tests/test_nsp_nup.py` exercises the app fallback through the packing entry point with a synthetic NUP and the registered Ocarina of Time build IDs.
 
 ### No Game language row in an app packed from a NUP or a dump
 
@@ -471,6 +540,14 @@
 - **Cause:** `settings.py` shows the row when the game's `control.nacp` lists more than one language, and two cases gave it none. A NUP update may carry no control data: the NSP script's language check fell back to the base game's file, but the Mac settings got only the update's path, and `build_ipa.sh`'s fallback (`$W/data/v0`) is a folder the NSP script does not make. And there may be no NACP at all: the Yoshi and the Mysterious Book and [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) NUPs carry none in any package, and an FTP dump such as Bananza's has no control data.
 - **Fix:** `languages_control` in `build_ipa_from_nsp.py` picks the file once (the packed version's, else the base game's), for the check, `mac_app` and `build_ipa.sh` (`CONTROL`). With no list, `settings.py` offers every language with a note, as `game_language` and `DM_LANG` already accept any. Age of Imprisonment shows a language it lacks as English (Russian, Portuguese) and has more text languages than its voice folders suggest (Dutch, Simplified Chinese), so a game's list cannot be read from its folders.
 - **Found on:** code reading and the NUP records of the two games above, with [PR #1182](https://github.com/seedds/nxnative/pull/1182); boots of [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) to its first settings screen. Not confirmed on Bananza by the reporters.
+
+### An app packed from a NUP's update has no icon
+
+- **Symptom:** the Mac app has the system's blank application icon (no `AppIcon.icns` in its `Contents/Resources`), though the NUP carries the game's icon.
+- **Cause:** the NUP has the icon on its base game's record and none on the update's. `pack_version` saved the packed package's own records only, and the NSP script looks for `icon.jpg` in the packed version's folder, then in the folder the base game is extracted to alone. A profile that builds from the update only makes no such folder, so the base game's icon was never written.
+- **Fix:** `pack_nup.control` gives an update without an icon its base game's (the icon record, else its localized icons, as for its own). The NACP stays the package's own, since its display version and languages are that version's.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072). The profile builds from the update alone, and its Mac app had no icon because the NUP's 256×256 JPEG was on the base record. The [PR #2823](https://github.com/seedds/nxnative/pull/2823) author applied the fix to an older main revision and repacked the Mac app. The update's extraction contained the base game's `icon.jpg`, the app contained `AppIcon.icns` with the game's artwork, and the signature verified.
+- **Check:** `dm/tools/tests/test_nsp_nup.py` `test_update_without_an_icon_takes_its_base_games`.
 
 ### A Mac front end's default settings change Metal execution paths
 

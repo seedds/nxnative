@@ -1,6 +1,7 @@
 // Direct GL imports and eglGetProcAddress must reach the same implementations (issue #228), including big-stack entries.
 #include "../gl/hle_gl.m"
 #include <assert.h>
+#include <unistd.h>
 
 uint64_t resolve_import(module_t *m, const char *name);
 int hle_implements(const char *name);
@@ -593,6 +594,54 @@ static void test_program_validation(void) {
     h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
 }
 
+static void test_fixed_function_caps(void) {
+    static const GLenum unimplemented[] = {
+        0x4000, 0x4001, 0x4002, 0x4003, 0x4004, 0x4005, 0x4006, 0x4007,  // LIGHT0..7
+        0x0c60, 0x0c61, 0x0c62, 0x0c63,  // TEXTURE_GEN_S / T / R / Q
+        0x0b57 /* COLOR_MATERIAL */, 0x0ba1 /* NORMALIZE */,
+    };
+    const uint8_t blend = S.blend, atest = F.atest;
+    const uint8_t depth = S.depth, cull = S.cull, scissor = S.scissor, stencil = S.stencil;
+    const uint8_t poffset = S.poffset, poffset_line = S.poffset_line;
+    h_glEnable(GL_BLEND);
+    h_glEnable(GL_ALPHA_TEST);
+    assert(S.blend && F.atest);
+
+    // Disabling an unsupported cap is silent and leaves its first enable free to warn.
+    FILE *log = tmpfile();
+    int saved_stderr = dup(STDERR_FILENO);
+    assert(log && saved_stderr >= 0);
+    assert(fflush(stderr) == 0);
+    assert(dup2(fileno(log), STDERR_FILENO) == STDERR_FILENO);
+    for (size_t i = 0; i < sizeof unimplemented / sizeof *unimplemented; i++) h_glDisable(unimplemented[i]);
+    assert(fflush(stderr) == 0);
+    off_t disable_bytes = lseek(fileno(log), 0, SEEK_CUR);
+    for (size_t i = 0; i < sizeof unimplemented / sizeof *unimplemented; i++) h_glEnable(unimplemented[i]);
+    assert(fflush(stderr) == 0);
+    assert(dup2(saved_stderr, STDERR_FILENO) == STDERR_FILENO);
+    close(saved_stderr);
+
+    assert(disable_bytes == 0 && "disabling unsupported fixed-function caps should be silent");
+    assert(fseek(log, 0, SEEK_SET) == 0);
+    for (size_t i = 0; i < sizeof unimplemented / sizeof *unimplemented; i++) {
+        char line[80], expected[80];
+        snprintf(expected, sizeof expected, "[dm] [gl] [RED] glEnable(%#x) not implemented\n", unimplemented[i]);
+        assert(fgets(line, sizeof line, log) && "enabling an unsupported fixed-function cap should warn");
+        assert(!strcmp(line, expected));
+    }
+    assert(fgetc(log) == EOF && !ferror(log));
+    fclose(log);
+
+    assert(S.blend && F.atest && S.depth == depth && S.cull == cull && S.scissor == scissor && S.stencil == stencil);
+    assert(S.poffset == poffset && S.poffset_line == poffset_line);
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glDisable(GL_BLEND);
+    h_glDisable(GL_ALPHA_TEST);
+    assert(!S.blend && !F.atest);
+    S.blend = blend;
+    F.atest = atest;
+}
+
 static void test_active_attributes(void) {
     void (*active)(GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, GLchar *) = import("glGetActiveAttrib");
     assert(active && h_eglGetProcAddress("glGetActiveAttrib") == (void *)active);
@@ -928,6 +977,7 @@ int main(int argc, char **argv) {
     }
     if (fixture) setenv("DM_MSL_DIR", fixture, 1);
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
+    test_fixed_function_caps();
     test_rg_texture_uploads();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
@@ -1059,7 +1109,7 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, the error flag, a depth texture's data, vertex formats and bindings, the uniform buffer target, compressed 2D arrays, DOOM 3's calls (ARB names, extensions, named blocks, two-sided stencil, frame copies, compressed and byte-swapped images, vertex-only programs), sampler objects and uniform locations, extension names and EGL's current binding, Fate's program validation, line width and texture clears, fixed-function capability diagnostics, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     printf("GL rendering (stride 0, texture LOD bias, sampler objects): %s\n", cpu ? "not run (--cpu)" : "OK");
     return 0;
 }

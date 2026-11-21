@@ -128,11 +128,12 @@ static OSStatus mock_remove(AudioUnit au, AudioUnitPropertyID id, AudioUnitPrope
 }
 // The system's default output and its stream format (its output channels): the route the host reads. A system object, unlike the unit's CurrentDevice, which disposal clears
 enum { SYS_OUT = 100 };
+static _Atomic AudioDeviceID default_device = SYS_OUT;
 static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *pa, UInt32 q, const void *qd, UInt32 *sz, void *data) {
     (void)q; (void)qd; (void)sz;
-    if (pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice) { assert(id == kAudioObjectSystemObject); *(AudioDeviceID *)data = SYS_OUT; return noErr; }
+    if (pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice) { assert(id == kAudioObjectSystemObject); *(AudioDeviceID *)data = default_device; return noErr; }
     if (pa->mSelector == kAudioDevicePropertyStreamFormat) {
-        assert(id == SYS_OUT && pa->mScope == kAudioObjectPropertyScopeOutput);
+        assert((id == SYS_OUT || id == SYS_OUT + 1) && pa->mScope == kAudioObjectPropertyScopeOutput);
         AudioStreamBasicDescription f = {.mChannelsPerFrame = (UInt32)unit.route_ch}; memcpy(data, &f, sizeof f); return noErr;
     }
     return kAudioHardwareUnknownPropertyError;   // no device name (DM_AUDIO_DEVICE is unset in this test)
@@ -287,6 +288,97 @@ static void test_route_without_output(void) {
     while (dm_audio_route() != 2 && now_ns() < until) usleep(1000);
     assert(dm_audio_route() == 2);
 }
+static void wait_for_phase(aout *a, int phase) {
+    uint64_t until = now_ns() + 3 * NSEC_PER_SEC;
+    for (;;) {
+        pthread_mutex_lock(&g_aos_lock);
+        int ready = a->start_phase == phase;
+        pthread_mutex_unlock(&g_aos_lock);
+        if (ready) return;
+        assert(now_ns() < until);
+        usleep(1000);
+    }
+}
+// Drive the watchdog's time explicitly before any AudioOut has started the watchdog thread.
+// The only wall-clock limits are for synchronizing with the normal asynchronous start worker.
+static void test_same_channel_route(void) {
+    aout a = {.au = fake_au(), .ch = 2, .dev_ch = 2, .state = STATE_STARTED, .backend = BK_AU, .vol = 0x3f800000u};
+    int16_t pcm[2] = {1234, 1234};
+    aout_buf b = {.ptr = pcm, .size = sizeof pcm};
+    a.q[0] = &b;
+    atomic_store(&a.q_tail, 1);
+    start_entered = dispatch_semaphore_create(0);
+    start_allowed = dispatch_semaphore_create(0);
+    device_stopped = dispatch_semaphore_create(0);
+    pthread_mutex_lock(&g_aos_lock);
+    g_aos[0] = &a;
+    pthread_mutex_unlock(&g_aos_lock);
+    default_device = SYS_OUT + 1;
+    assert(dm_audio_output_channels() == 2);   // an open can refresh the cache before the route worker sees the move
+    dm_audio_route_changed();
+    pthread_mutex_lock(&g_aos_lock);
+    uint64_t deadline = a.route_until;
+    assert(deadline && !unit.disposals);
+    a.wd_t = deadline - WD_ROUTE_SETTLE_MS * 1000000ull;
+    au_watchdog_output(&a, deadline - 1, WD_TICK_MS * 1000000ull);
+    assert(a.backend == BK_AU && a.start_phase == AU_IDLE && atomic_load(&a.q_head) == 0);
+    int16_t samples[2];
+    AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof samples, samples}}};
+    au_render(&a, NULL, NULL, 0, 1, &bl);
+    assert(samples[0] == 1234 && samples[1] == 1234);
+    au_watchdog_output(&a, deadline, WD_TICK_MS * 1000000ull);
+    assert(a.backend == BK_AU && !a.route_until);
+    pthread_mutex_unlock(&g_aos_lock);
+
+    default_device = SYS_OUT;
+    dm_audio_route_changed();
+    pthread_mutex_lock(&g_aos_lock);
+    deadline = a.route_until;
+    a.wd_t = deadline - WD_ROUTE_SETTLE_MS * 1000000ull;
+    au_watchdog_output(&a, deadline, WD_TICK_MS * 1000000ull);
+    assert(a.backend == BK_NULL && a.start_phase == AU_STARTING && !a.route_until && !a.retry_at);
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(signaled(device_stopped, 3) && signaled(start_entered, 3));
+
+    // A switch during a blocked Start still gets a prompt attempt if the old Start returns without callbacks.
+    default_device = SYS_OUT + 1;
+    dm_audio_route_changed();
+    dispatch_semaphore_signal(start_allowed);
+    wait_for_phase(&a, AU_WAIT_CALLBACK);
+    pthread_mutex_lock(&g_aos_lock);
+    assert(a.route_until);
+    uint64_t stalled_at = a.wd_t + (WD_STALL_MS + 1) * 1000000ull;
+    au_watchdog_output(&a, stalled_at > a.route_until ? stalled_at : a.route_until, WD_TICK_MS * 1000000ull);
+    assert(a.start_phase == AU_STARTING && !a.route_until && !a.retry_at);
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(signaled(device_stopped, 3) && signaled(start_entered, 3));
+    start_result = kAudioUnitErr_FailedInitialization;
+    dispatch_semaphore_signal(start_allowed);
+    wait_for_phase(&a, AU_IDLE);
+    pthread_mutex_lock(&g_aos_lock);
+    au_watchdog_output(&a, a.retry_at - 1, WD_TICK_MS * 1000000ull);
+    assert(a.backend == BK_NULL && a.start_phase == AU_IDLE && a.retry_ms == 1000 && !unit.disposals);
+    pthread_mutex_unlock(&g_aos_lock);
+
+    // A route notification received after the silent sink has taken over clears the old backoff.
+    default_device = SYS_OUT;
+    dm_audio_route_changed();
+    pthread_mutex_lock(&g_aos_lock);
+    au_watchdog_output(&a, a.retry_at - 1, WD_TICK_MS * 1000000ull);
+    assert(a.backend == BK_NULL && a.start_phase == AU_STARTING && !a.retry_at);
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(signaled(start_entered, 3));
+    dispatch_semaphore_signal(start_allowed);
+    wait_for_phase(&a, AU_IDLE);
+    pthread_mutex_lock(&g_aos_lock);
+    null_stop(&a);
+    g_aos[0] = NULL;
+    pthread_mutex_unlock(&g_aos_lock);
+    start_result = noErr;
+    dispatch_release(device_stopped);
+    dispatch_release(start_allowed);
+    dispatch_release(start_entered);
+}
 static void test_sink_route(void) {
     unit.route_ch = 2; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
     void *key = dm_pcmout_open_sink(); aout *a = ao(key);
@@ -317,6 +409,7 @@ static void test_sink_route(void) {
 int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
     test_route_without_output();
+    test_same_channel_route();
     unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096}; unit.frames = 512;
     uint32_t out[16] = {0}; uint8_t prm[16]; h_au_InitParam(prm);
     check_open_publication = 1;

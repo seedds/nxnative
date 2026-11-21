@@ -534,6 +534,10 @@ static void t_script(void) {
     CHECK(buttons_of(1, STYLE_FULLKEY) == 0, "player 2 does not receive or consume scripted presses");
     NpadState s; fill(&s, NPAD_HANDHELD, STYLE_HANDHELD);
     CHECK(s.buttons == DM_BTN_A && s.lx == 100 && s.ly == -200 && s.rx == 300 && s.ry == -400, "scripted buttons and all four axes reach player 1 in handheld mode");
+    script_set(0, DM_STICK_MAX, DM_STICK_MAX, -DM_STICK_MAX, 20000);   // a Mac controller's diagonal: each axis at full tilt on its own
+    fill(&s, NPAD_HANDHELD, STYLE_HANDHELD);
+    CHECK(hypot(s.lx, s.ly) <= DM_STICK_MAX + 1 && hypot(s.rx, s.ry) <= DM_STICK_MAX + 1, "a diagonal past full tilt is held inside the stick's circle");
+    CHECK(s.lx == s.ly && s.lx > 23000 && s.rx < 0 && s.ry > 0 && abs(s.rx * 20000 + s.ry * DM_STICK_MAX) < DM_STICK_MAX, "the held diagonal keeps its direction and reaches the circle");
     script_set(0, 0, 0, 0, 0); buttons_of(NPAD_HANDHELD, STYLE_HANDHELD);
     g_mode = 1; dm_pad_players(1);
     g_nsteps = 0; g_steps = NULL;

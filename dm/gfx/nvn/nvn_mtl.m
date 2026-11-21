@@ -107,10 +107,20 @@ static id compile_done(id result, NSError *error, NSError **out) {
 static id<MTLComputePipelineState> dev_cps(id<MTLFunction> f, NSError **out) {
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newComputePipelineStateWithFunction:f error:&e]; return compile_done(ps, e, out);
 }
+static id<MTLRenderPipelineState> missing_pipeline_function(NSString *stage, NSError **out) {
+    if (out) *out = [NSError errorWithDomain:@"nxnative.NVN.Pipeline" code:3
+        userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"missing %@ function", stage]}];
+    return nil;
+}
 static id<MTLRenderPipelineState> dev_rps(MTLRenderPipelineDescriptor *d, NSError **out) {
+    if (!d.vertexFunction) return missing_pipeline_function(@"vertex", out);
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e]; return compile_done(ps, e, out);
 }
 static id<MTLRenderPipelineState> dev_mps(MTLMeshRenderPipelineDescriptor *d, NSError **out) {
+    // A mesh pipeline requires a fragment function even for depth-only rendering (mtk_nop_fragment).
+    // Return a normal build failure if a required function could not be loaded or compiled.
+    if (!d.meshFunction) return missing_pipeline_function(@"mesh", out);
+    if (!d.fragmentFunction) return missing_pipeline_function(@"mesh fragment", out);
     plain_compile_begin(); NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithMeshDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&e]; return compile_done(ps, e, out);
 }
 static id<MTLFunction> dev_fn(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **out) {
@@ -132,6 +142,7 @@ static id<MTL4CommandQueue> g_q4;
 static _Atomic int g_classic_ok;   // mtl_device_classic permits fallback while initialization is in progress
 static int g_classic;   // the device has no Metal 4 and only the classic part started
 static dispatch_queue_t g_feedback_q;
+static dispatch_group_t g_present_readbacks;   // Asynchronous screenshot and luminance work on the classic queue
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
 enum { ALLOC_SHARE = 64 };   // submissions one allocator serves before the next takes another (see g_alloc_fence)
@@ -174,6 +185,8 @@ static _Atomic int g_link_drain_req; static _Atomic uint64_t g_link_blocked_ns, 
 static uint64_t g_link_waiter, g_link_latched, g_link_latch_out; static unsigned g_link_latch_misses; static int g_link_waiter_end;
 static double g_link_hold_until; static uint64_t g_link_held;   // Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
+static _Atomic int g_link_presenting;   // Display-link callbacks that have taken a frame but have not finished handing it off
+static _Atomic int g_present_suspended;
 static NSMutableArray *g_ext_retire;   // Under g_pq_mu: released external textures (mtl_ext_tex_release) waiting for the presents in flight; retired when g_pq_inflight reaches 0
 static void ext_retire(NSArray *textures);
 #define EXT_SERIAL (1ull << 62)   // mtl_ext_tex's serials: external producers' textures, which the present path owns (never pinned, never on the deferred-release queue)
@@ -373,6 +386,36 @@ static MTL4CommitOptions *commit_opts(DmCommitFB *fb) {
     return o;
 }
 static id<MTL4CounterHeap> g_ts_heap;   // tentative: defined with the segment timestamps below
+// ---------- Slow residency and queue commits ----------
+// Time changes to g_res and the Metal 4 commits for main command buffers, uploads and snapshot copies.
+// Log calls that return after at least 100 ms, excluding time spent acquiring the commit lock.
+// Each kind logs the first 20 and every 100th. The graphics test lowers the threshold.
+static uint64_t g_slow_commit_ns = 100000000ull;
+static _Atomic uint64_t g_slow_res_commits, g_slow_queue_commits;
+static char g_feedback_key;
+static inline int on_feedback_q(void) { return dispatch_get_specific(&g_feedback_key) != NULL; }
+static inline uint64_t commit_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static uint64_t slow_commit_log_number(_Atomic uint64_t *count) {
+    uint64_t n = atomic_fetch_add_explicit(count, 1, memory_order_relaxed) + 1;
+    return n <= 20 || n % 100 == 0 ? n : 0;
+}
+static void commit_thread_name(char *th, size_t n) {
+    th[0] = 0; pthread_getname_np(pthread_self(), th, n);
+    if (!th[0]) snprintf(th, n, "%#x", pthread_mach_thread_np(pthread_self()));
+}
+static inline uint64_t q4_commit_elapsed(const id<MTL4CommandBuffer> *buffers, NSUInteger count, MTL4CommitOptions *options) {
+    uint64_t start = commit_now();
+    if (options) [g_q4 commit:buffers count:count options:options];
+    else [g_q4 commit:buffers count:count];
+    return commit_now() - start;
+}
+// Call after releasing g_res_commit_mu and publishing progress for that commit.
+static void q4_commit_slow(uint64_t dt, const char *site) {
+    if (dt < g_slow_commit_ns) return;
+    uint64_t k = slow_commit_log_number(&g_slow_queue_commits); if (!k) return;
+    char th[64]; commit_thread_name(th, sizeof th);
+    MLOG("[RED] slow queue commit: %.1f ms at %s on thread %s%s (#%llu)", dt / 1e6, site, th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)k);
+}
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 // Ends a Metal 4 command buffer, naming the residency sets first (see res_name). A recorded one (DM_NVN_ENC_THREAD) records its end, and the encode thread names them at RO_CB_END.
 // Nothing else calls endCommandBuffer (dm/tools/tests/test_residency_naming.py)
@@ -586,23 +629,40 @@ static void res_check(id r, const char *what, int reg) {
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
 // Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
-// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
-static void res_commit(void) { @autoreleasepool {
+// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set.
+// Upload staging is queued with the commit lock held so this caller also owns the removal references through their release.
+static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autoreleasepool {
     pthread_mutex_lock(&g_res_commit_mu);
+    if (staging) for (id<MTLAllocation> obj in staging) res_remove(obj);
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
     pthread_mutex_unlock(&g_res_mu);
+    uint64_t dt = 0;
     if (n) {
-        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        uint64_t t0 = commit_now();
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+        dt = commit_now() - t0;
         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
     }
     pthread_mutex_unlock(&g_res_commit_mu);
+    uint64_t slow = n && dt >= g_slow_commit_ns ? slow_commit_log_number(&g_slow_res_commits) : 0;
+    uint64_t adds = 0, removes = 0, added_bytes = 0, removed_bytes = 0;
+    if (slow) for (size_t i = 0; i < n; i++) {
+        uint64_t size = ((__bridge id<MTLAllocation>)q[i].o).allocatedSize;
+        if (q[i].add) { adds++; added_bytes += size; }
+        else { removes++; removed_bytes += size; }
+    }
     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
     free(q);
+    if (slow) {
+        char th[64]; commit_thread_name(th, sizeof th);
+        MLOG("[RED] slow residency commit: %.1f ms (adds %llu, %.1f MB; removes %llu, %.1f MB) on thread %s%s (#%llu)",
+             dt / 1e6, (unsigned long long)adds, added_bytes / 1048576.0, (unsigned long long)removes, removed_bytes / 1048576.0,
+             th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)slow);
+    }
 } }
+static void res_commit(void) { res_commit_retiring(nil); }
 static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
@@ -829,6 +889,7 @@ static void mtl_init_once(void) {
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
     g_q = [g_dev newCommandQueue];
+    g_present_readbacks = dispatch_group_create();
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
     // run-time shader capture needs (the NSP script's capture_shaders boots headless; GitHub issue #112: Balatro's capture aborted here)
@@ -845,6 +906,7 @@ static void mtl_init_once(void) {
     if (!no4) {
         dispatch_queue_attr_t feedback_attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
         g_feedback_q = dispatch_queue_create("dm.nvn.mtl4-feedback", feedback_attr);
+        dispatch_queue_set_specific(g_feedback_q, &g_feedback_key, &g_feedback_key, NULL);
         MTL4CommandQueueDescriptor *q4d = [MTL4CommandQueueDescriptor new]; q4d.feedbackQueue = g_feedback_q;
         g_q4 = [g_dev newMTL4CommandQueueWithDescriptor:q4d error:&re];
         if (!g_q4) no4 = "failed to create the MTL4CommandQueue";
@@ -2917,8 +2979,18 @@ void mtl_present_flush(void);
 // took 78 s on the iPhone (5 s windowless on the Mac). A swapchain texture is not handed back before its previous present is processed (AcquireTexture waits for that ticket)
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
-static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+static void present_suspend_wait(void);
+static void snap_drain(int strict);
+void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(1); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+void mtl_suspend_drain(void) {
+    @autoreleasepool {
+        mtl_init();
+        present_suspend_wait();
+        snap_drain(0);
+        dispatch_group_wait(g_present_readbacks, DISPATCH_TIME_FOREVER);
+        do { mtl_finish_gpu(); } while (mtl_completed_fence() < mtl_last_fence());
+    }
+}
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -3337,10 +3409,23 @@ static _Atomic uint64_t g_upload_gpu_ns;
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[3];
-// Waiting for upload batches to finish (g_up_pending, g_up_alloc_busy): the batches' completion handler broadcasts after it updates them, so waiters sleep until then (they used to poll every 0.2–1 ms;
+// Waiting for upload batches to finish (g_up_pending, g_up_alloc_busy): up_complete broadcasts after updating them, so waiters sleep until then (they used to poll every 0.2–1 ms;
 // Three Houses' loader calls QueueFinish after each resource, each one waited up to a millisecond late). The 10 ms timeout is only a safety net
 static pthread_mutex_t g_up_wmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_up_wcv = PTHREAD_COND_INITIALIZER;
 static void up_wake(void) { pthread_mutex_lock(&g_up_wmu); pthread_cond_broadcast(&g_up_wcv); pthread_mutex_unlock(&g_up_wmu); }
+static void up_complete(unsigned slot) {
+    atomic_store(&g_up_alloc_busy[slot], 0);
+    atomic_fetch_sub(&g_up_pending, 1);
+    up_wake();
+}
+static dispatch_queue_t res_commit_q(void) {
+    static dispatch_once_t once;
+    static dispatch_queue_t queue;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("dm.nvn.res-commit", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+    });
+    return queue;
+}
 static void up_wait_zero(_Atomic int *v, int site) {
     if (!atomic_load(v)) { if (ws_on()) ws_put(site, 0, 0); return; }
     uint64_t w0 = ws_t0();
@@ -3455,7 +3540,7 @@ static id<MTLBuffer> g_up_block;
 static size_t g_up_block_off, g_up_block_size;
 static NSMutableArray *g_up_keep;
 // Limit overflow staging per batch. The three upload slots bound in-flight
-// batches; up_begin publishes queued commits before waiting for a slot. A single
+// batches through staging retirement; up_begin publishes queued commits before waiting for a slot. A single
 // texture larger than the budget gets its own block (uploads are not tiled here).
 static size_t g_up_staging_bytes;
 #define UP_BATCH_BYTES (128u * 1024u * 1024u)
@@ -3513,15 +3598,20 @@ static void up_flush(void) {
         }
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
-        @autoreleasepool {
-            for (id<MTLResource> obj in staging) res_remove(obj);
-            [staging removeAllObjects];
-            [views removeAllObjects];   // upload-only integer views share their targets' residency
-            res_commit();
+        @autoreleasepool { [views removeAllObjects]; }   // upload-only integer views share their targets' residency
+        if (staging.count) {
+            // Keep the slot busy through retirement to bound staging memory during a burst.
+            // The feedback queue can run later completions while the worker waits for the commit lock.
+            dispatch_async(res_commit_q(), ^{
+                @autoreleasepool {
+                    res_commit_retiring(staging);
+                    [staging removeAllObjects];
+                }
+                up_complete(slot);
+            });
+        } else {
+            up_complete(slot);
         }
-        atomic_store(&g_up_alloc_busy[slot], 0);
-        atomic_fetch_sub(&g_up_pending, 1);
-        up_wake();
     }];
     res_commit();
     cb_end(cb, nil);
@@ -6617,7 +6707,7 @@ static void shmap_read(void) {
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
     uint32_t tess_out_cp, tess_in_bytes, tess_md; int tess_ok;   // a hull / domain shader rewritten for replay (dmsh_tess.py, nvn_tess.inc); tess_md: a domain's mode (dmsh_tess.mode_bits)
-    id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
+    id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: the dispatch pipeline was refused or cannot run the shader's local size
     uint64_t loop_sub, loop_gpu; _Atomic int loop_reported;   // this submission's per-kernel cap-hit state; feedback logs at most once per loaded kernel
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
@@ -6765,25 +6855,28 @@ static NSString *lib_digest(const void *p, size_t n) {
     char hex[33]; for (int i = 0; i < 16; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
     return @(hex);
 }
-// Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
-// while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed.
-// The library is tagged with its digest (lib_tag), from the mapped bytes
+// Metal retains a library's input data while its functions live. Borrowing a file mapping here therefore kept one mapping per distinct library for the run, consuming room
+// in #2965's restricted iOS task map even with prewarm off. Give Metal owned bytes, then unmap before calling it. Both loose files and image entries follow this ownership rule.
+// Owned data can use malloc's existing arenas when new file mappings have no gap; the tradeoff is charged memory instead of reclaimable file pages.
+// The descriptor is closed promptly too: newLibraryWithURL keeps one open per library and exceeded iOS's soft limit of 256. The digest still names the original library bytes.
+static id<MTLLibrary> lib_from_map(msl_map f, NSError **err) {
+    NSString *tag = lib_digest(f.data, f.size);
+    dispatch_data_t d = dispatch_data_create(f.data, f.size, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    munmap(f.base, f.base_len);
+    if (!d) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil]; return nil; }
+    return lib_tag([g_dev newLibraryWithData:d error:err], tag);
+}
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
         int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
-        if (x && msl_image_map(img, x, &f)) {
-            void *base = f.base; size_t base_len = f.base_len;
-            dispatch_data_t d = dispatch_data_create(f.data, f.size, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(base, base_len); });
-            return lib_tag([g_dev newLibraryWithData:d error:err], lib_digest(f.data, f.size));
-        }
+        if (x && msl_image_map(img, x, &f)) return lib_from_map(f, err);
         if (!x) errno = open_errno;
     }
     if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
-    size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
-    if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
-    dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
-    return lib_tag([g_dev newLibraryWithData:d error:err], lib_digest(m, len));
+    size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); int map_errno = errno; close(fd);
+    if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:map_errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
+    return lib_from_map((msl_map){.data = m, .size = len, .base = m, .base_len = len}, err);
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_entry.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
 // main0_z leaves z as is (near = 0, which Link's Awakening, 13 Sentinels and Engage set). Loading picks by the mode the game set, so no game needs a setting for it
@@ -7189,11 +7282,22 @@ static uint8_t prog_stage_mask(const prog_t *p) {
     if (ser) smc[h] = (smc_ent){ser, gen, m};
     return m;
 }
+// The submit thread reads the switch under g_sub_mu and latches it for the job.
+int mtl_sub_stream_on(void) {
+    static int mode = -1;
+    if (mode < 0) mode = getenv("DM_NVN_CAPTURE") ? 0 : sw_mode("DM_NVN_SUB_STREAM", 1);
+    return sw_on(mode);
+}
 // A submitted descriptor and a queue binding pin the program by its serial (own_prog_pin; mtl_prog_release and mtl_prog_unpin are nvn_owner.m's)
-void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
-    prog_get(source); *copy=*source;
+// Replay can resolve a program from the owned serial and shader keys.
+void mtl_prog_snapshot_pin(prog_t *copy,const prog_t *source) {
+    *copy=*source;
     if(!source->serial) MDIE("cannot retain a program without an initialization serial");
     own_prog_pin(source->serial);
+}
+void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
+    prog_get(source);
+    mtl_prog_snapshot_pin(copy,source);
 }
 
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
@@ -8015,7 +8119,26 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+// The driver seeds slot 0 of each sampler pool (NVN SDKs 11.4.3 / 15.3.0 and NVN2 SDK 20.5.19).
+// All pools can share this Metal state. Use a distinct ID because 0 in replay means no binding.
+enum { SAMP_POOL_ZERO = -1 };
+static uint64_t g_samp_zero_rid;
+static id<MTLSamplerState> samp_pool_zero(void) {   // Caller holds g_rmu
+    static id<MTLSamplerState> s;
+    if (!s) {
+        MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
+        d.minFilter = d.magFilter = MTLSamplerMinMagFilterLinear;
+        d.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        d.sAddressMode = d.tAddressMode = d.rAddressMode = MTLSamplerAddressModeClampToEdge;
+        d.lodMaxClamp = 15;
+        d.supportArgumentBuffers = YES;
+        s = [g_dev newSamplerStateWithDescriptor:d];
+        g_samp_zero_rid = s.gpuResourceID._impl;
+    }
+    return s;
+}
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
+    if (sid == SAMP_POOL_ZERO) return samp_pool_zero();
     if (g_spool_n && sid >= g_spool_n) { if (!g_stat_samp_oob++) MLOG("sampler ID %d outside the pool (capacity %d) treated as an empty slot", sid, g_spool_n); return nil; }
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
@@ -8053,6 +8176,12 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
 static inline __attribute__((always_inline)) void *samp_fast(int sid) {
     if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid] && g_sview[sid]) return g_sview[sid];
     return (__bridge void *)samp_by_id(sid);
+}
+static inline int samp_known(int sid) {
+    return sid == SAMP_POOL_ZERO || (sid > 0 && sid < g_nsreg && g_sreg_ok[sid]);
+}
+static inline uint64_t samp_rid(int sid) {
+    return sid == SAMP_POOL_ZERO ? g_samp_zero_rid : sid > 0 && sid < g_nsreg ? g_srid[sid] : 0;
 }
 
 // ---------- Argument buffer blocks: written by the CPU as a submission is encoded, reclaimed after the GPU completes ----------
@@ -8162,6 +8291,10 @@ static inline int resource_range_fits(int stage, int first, int count, int slots
 static inline uint64_t bound_handle(uint64_t h) {
     unsigned t = (uint32_t)h & 0xfffff, s = (uint32_t)h >> 20;
     return (t ? t + (uint64_t)S.tex_base : 0) | (s ? s + (uint64_t)S.samp_base : 0) << 20;
+}
+static inline int bound_samp_id(uint64_t h) {
+    int sid = (int)(h >> 20);
+    return sid || !h ? sid : SAMP_POOL_ZERO;
 }
 static inline uint64_t bound_tex(int stage, int reg) { return bound_handle(tex_slot_h(S.tex[stage], S.img[stage], reg)); }
 static inline uint64_t bound_img(int stage, int reg) { return bound_handle(S.img[stage][reg]); }
@@ -9753,7 +9886,7 @@ static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
 }
 static ArchEpoch *g_ep; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;   // the current period
 static _Atomic uint64_t g_ep_t0;   // when the current period began (bp_now): a prewarm's timer flush hands it over once it is old enough (arch_warm_flush_due)
-static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
+static _Atomic int g_arch_cap;   // Published once the archive is ready for saves from another thread
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
@@ -10066,6 +10199,12 @@ static ArchEpoch *ep_enter(void) {   // the current period, joined: a flush hand
     return ep;
 }
 static void ep_leave(ArchEpoch *ep) { atomic_fetch_sub(&ep->active, 1); dispatch_group_leave(ep->busy); }
+extern _Atomic uint64_t dm_present_ns;   // hle_thread.c, updated by present_enqueue
+enum { ARCH_FLUSH_INTERVAL_S = 10 };
+static int arch_recent_present(void) {
+    uint64_t last = atomic_load_explicit(&dm_present_ns, memory_order_relaxed);
+    return last && now_ns() - last < ARCH_FLUSH_INTERVAL_S * (uint64_t)NSEC_PER_SEC;
+}
 // A period's serialization (arch_write_file) and a pipeline compile do not overlap. Metal frees entries of its compiled-binary cache while it serializes a period's archive, and
 // a compile under way through another compiler then reads one: SIGSEGV in MultiLevelAirntBinaryCache::getElementAtDestination under newRenderPipelineStateWithDescriptor,
 // every time with the MTLBinaryArchive_Serialize thread in airntSerializeToURL (Super Mario Party's prebuild of 39,111 pairs, three crashes on an M4 Pro with macOS 27.2,
@@ -10100,6 +10239,14 @@ static int ser_begin(void) {
     static _Atomic int told; if (left && !atomic_exchange(&told, 1)) MLOG("pipeline archive: %d compiles still under way after %d ms (%d plain): %s", left, SER_WAIT_MS, plain,
         plain ? "the period is not written before those compiles report their errors" : "the write goes ahead beside captures of other periods (Metal may crash on that, see ser_begin)");
     return plain;
+}
+// An optional windowed write must be ready to serialize now. Leave the current period in place if play has resumed or any compile is still under way.
+static int ser_try_begin(void) {
+    pthread_mutex_lock(&g_ser_mu);
+    int ready = !g_ser_compiles && !g_ser_want && !arch_recent_present();
+    if (ready) g_ser_want++;
+    pthread_mutex_unlock(&g_ser_mu);
+    return ready;
 }
 static void ser_end(void) { pthread_mutex_lock(&g_ser_mu); g_ser_want--; pthread_cond_broadcast(&g_ser_cv); pthread_mutex_unlock(&g_ser_mu); }
 // A flush period's size. Metal keeps each serializer's state in an LMDB environment of fixed map size (10 MB, in its own com.apple.gpuarchiver/gpuarchiver-* folder under the
@@ -10424,9 +10571,12 @@ static void pso4_init(void) {
         NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
         if (!g_comp4) MLOG("[RED] no Metal 4 compiler (%s): render pipelines are built through the MTLDevice", ce.localizedDescription.UTF8String);
         else if (g_arch_dir) {
-            g_ep = ep_new(); g_arch_cap = g_ep != nil; atomic_store(&g_ep_t0, bp_now());
-            if (g_arch_cap) atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
-            if (!g_ep) MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
+            g_ep = ep_new();
+            atomic_store(&g_ep_t0, bp_now());
+            if (g_ep) {
+                atexit(arch_at_exit);   // what is not written yet, written at quit (mtl_arch_save)
+                atomic_store(&g_arch_cap, 1);
+            } else MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
         }
     });
 }
@@ -10511,15 +10661,15 @@ static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) { return cps_new_b(f, 0, e); }
 // Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned
 static void arch_compact_finish(void);
-static void arch_write_file(ArchEpoch *ep);
-static void arch_write(ArchEpoch *ep) {
-    arch_write_file(ep);
+static void arch_write_file(ArchEpoch *ep, int gate_held);
+static void arch_write(ArchEpoch *ep, int gate_held) {
+    arch_write_file(ep, gate_held);
     if (ep->compacting && atomic_fetch_sub(&g_compact_periods, 1) == 1 && atomic_load(&g_compact_closed)) arch_compact_finish();   // the compaction's last period to be written
 }
-static void arch_write_file(ArchEpoch *ep) {
+static void arch_write_file(ArchEpoch *ep, int gate_held) {
     int n = atomic_load(&ep->n), vd = atomic_load(&ep->vd), cs = atomic_load(&ep->cs), ms = atomic_load(&ep->ms);   // exact: no compile of the period is under way
-    if (!n) return;
-    int plain = ser_begin();   // a plain compile may report service death only after Metal's retries: an expired wait cannot certify this period
+    if (!n) { if (gate_held) ser_end(); return; }
+    int plain = gate_held ? 0 : ser_begin();   // a plain compile may report service death only after Metal's retries: an expired wait cannot certify this period
     int crashed = atomic_load(&ep->crashed) || ep->deaths != atomic_load(&g_arch_deaths);
     if (crashed || plain) {
         ser_end();
@@ -10551,10 +10701,11 @@ static void arch_write_file(ArchEpoch *ep) {
              (unsigned long long)atomic_load(&g_ser_holds), atomic_load(&g_ser_held_ns) / 1e6);
     }
 }
-// A flush: the compiles from here on capture into a new period, and the current one is written once its compiles have returned. Returns at once, on any thread; a compile that
+// A flush: the compiles from here on capture into a new period, and the current one is written once its compiles have returned. Except for the windowed timer on g_arch_q, a flush
+// returns at once on any thread; a compile that
 // does not return holds back only its own period's file. only: hand over that period alone, and only while it is the current one (a full period, a failed capture); those go
 // ahead during the prewarm, where the timer's flushes wait so that its bases, compiled or captured again, make as few files as they can: a cold start's timer flushes wrote a
-// file each 10 s (Ocarina of Time: 80 files; GitHub issue #1747's, 43), more than PSO_ARCH_COMPACT, and the next start compacted them all. any_time: hand it over during the
+// file each 10 s (Ocarina of Time: 80 files; GitHub issue #1747's, 43), more than PSO_ARCH_COMPACT, and the next start compacted them all. ARCH_FLUSH_NOW: hand it over during the
 // prewarm too (going to the background, quitting: mtl_arch_save)
 // A timer flush during a prewarm the game plays through (g_warm_bg; DM_PSO_ARCH_WARM_FLUSH_MS, default 60000; 0: none, the prewarm writes full periods alone): the period is handed
 // over once it is that old, and each next one waits twice as long, up to 16 times (60 s, 120 s, ... 16 min), so a long cold start's prewarm adds a file per doubling and not one per
@@ -10569,19 +10720,28 @@ static int arch_warm_flush_due(void) {
     uint64_t wait_ns = ((uint64_t)g_warm_flush_ms << MIN(atomic_load(&g_warm_flushes), 4)) * NSEC_PER_MSEC;
     return bp_now() - atomic_load(&g_ep_t0) >= wait_ns;
 }
-static void arch_hand_over(ArchEpoch *only, int any_time) {
+enum ArchFlush { ARCH_FLUSH_NORMAL, ARCH_FLUSH_NOW, ARCH_FLUSH_TIMER };
+// Returns 1 when a windowed timer needs to try again. The timer claims the Metal serialization gate before detaching the period and writes it on this queue right away.
+static int arch_hand_over(ArchEpoch *only, enum ArchFlush mode) {
     int warm_due = 0;
-    if (!g_arch_cap || (!only && !any_time && atomic_load(&g_warm_running) && !(warm_due = arch_warm_flush_due()))) return;
-    os_unfair_lock_lock(&g_ep_lock); int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || atomic_load(&g_ep->active) || atomic_load(&g_ep->crashed)); os_unfair_lock_unlock(&g_ep_lock);
+    if (!g_arch_cap || (!only && mode != ARCH_FLUSH_NOW && atomic_load(&g_warm_running) && !(warm_due = arch_warm_flush_due()))) return 0;
+    int windowed_timer = mode == ARCH_FLUSH_TIMER && mtl_has_window();
+    if (windowed_timer && arch_recent_present()) return 1;
+    os_unfair_lock_lock(&g_ep_lock);
+    int active = atomic_load(&g_ep->active);
+    int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || active || atomic_load(&g_ep->crashed));
+    os_unfair_lock_unlock(&g_ep_lock);
+    if (windowed_timer && active) return 1;
     // nothing captured or under way: the period goes on. A compaction due to close (the prewarm over, no recapture queued) closes all the same: its recaptures are all in periods
     // handed over, and the last of them to be written finishes it, or this does when they all are (before, it stayed open for the run and the next start compacted again)
     if (!any) {
         if (!only && g_compact_enabled && atomic_load(&g_compacted) && !atomic_load(&g_warm_running) && !atomic_load(&g_compact_harvests) && !atomic_exchange(&g_compact_closed, 1))
             dispatch_async(g_arch_q, ^{ if (!atomic_load(&g_compact_periods)) arch_compact_finish(); });   // on the queue that writes them: after any write under way
-        return;
+        return 0;
     }
     ArchEpoch *ne = ep_new();
-    if (!ne) { MLOG("[RED] pipeline archive: Metal made no compiler for a new flush period: the captures go on into the current one"); return; }
+    if (!ne) { MLOG("[RED] pipeline archive: Metal made no compiler for a new flush period: the captures go on into the current one"); return 0; }
+    if (windowed_timer && !ser_try_begin()) return 1;
     os_unfair_lock_lock(&g_ep_lock);
     ArchEpoch *old = g_ep; any = (!only || old == only) && (atomic_load(&old->n) || atomic_load(&old->active) || atomic_load(&old->crashed));   // again: another flush may just have handed it over
     if (any) {
@@ -10592,13 +10752,19 @@ static void arch_hand_over(ArchEpoch *only, int any_time) {
             old->compacting = 1; atomic_fetch_add(&g_compact_periods, 1);
             if (!atomic_load(&g_warm_running) && !atomic_load(&g_compact_harvests)) atomic_store(&g_compact_closed, 1);
         }
+        dispatch_group_enter(g_arch_pending);
     }
     os_unfair_lock_unlock(&g_ep_lock);
-    if (!any) return;
-    dispatch_group_enter(g_arch_pending);
-    dispatch_group_notify(old->busy, g_arch_q, ^{ @autoreleasepool { arch_write(old); } dispatch_group_leave(g_arch_pending); });
+    if (!any) { if (windowed_timer) ser_end(); return 0; }
+    if (windowed_timer) {
+        @autoreleasepool { arch_write(old, 1); }
+        dispatch_group_leave(g_arch_pending);
+    } else {
+        dispatch_group_notify(old->busy, g_arch_q, ^{ @autoreleasepool { arch_write(old, 0); } dispatch_group_leave(g_arch_pending); });
+    }
+    return 0;
 }
-static void arch_flush_from(ArchEpoch *only) { arch_hand_over(only, 0); }
+static void arch_flush_from(ArchEpoch *only) { arch_hand_over(only, ARCH_FLUSH_NORMAL); }
 static void arch_flush(void) { arch_flush_from(nil); }
 // What the archive has captured and not written, written now, prewarm or not: a quit during a cold start's prewarm otherwise lost the period under way, up to ARCH_PERIOD_MAX
 // bases (Ocarina of Time on an M4: about 2,000 bases, minutes of compiling), built again at the next start. Going to the background (dm_gfx_suspend): wait_ms 0, the write goes
@@ -10611,7 +10777,7 @@ void mtl_arch_save(int wait_ms, int ending) {
     uint64_t t0 = bp_now(); dispatch_time_t until = dispatch_time(DISPATCH_TIME_NOW, (int64_t)wait_ms * NSEC_PER_MSEC);
     long late = wait_ms > 0 && arch_harvest_wait(until);
     int n = atomic_load(&g_arch_new);
-    arch_hand_over(nil, 1);
+    arch_hand_over(nil, ARCH_FLUSH_NOW);
     if (!wait_ms && !ending) return;
     if (n && wait_ms > 0) MLOG("pipeline archive at exit: writing %d pipelines (up to %d ms)", n, wait_ms);
     late = (wait_ms > 0 && dispatch_group_wait(g_arch_pending, until)) || late;
@@ -10622,11 +10788,14 @@ void mtl_arch_save(int wait_ms, int ending) {
 static void arch_at_exit(void) { mtl_warm_stop(); mtl_arch_save(MTL_QUIT_ARCH_MS, 1); }
 // What the harvest queue holds captured, then a flush, then every period handed over is written (not on g_arch_q, which writes them, nor on the harvest queue)
 static void arch_flush_wait(void) { arch_harvest_wait(DISPATCH_TIME_FOREVER); arch_flush(); if (g_arch_pending) dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER); }
-static void arch_note_new(void) {   // a base was compiled: flush 10 s later (one flush for a burst of them)
+static void arch_note_new(void) {   // a base was compiled: try a flush after one interval (one timer for a burst of them)
     if (!g_arch_q || atomic_exchange(&g_arch_sched, 1)) return;
     // during a prewarm the game plays through, the flush waits for the period's age (arch_warm_flush_due): look again 10 s later while captures wait, new ones or not
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC), g_arch_q, ^{ atomic_store(&g_arch_sched, 0); arch_flush();
-        if (atomic_load(&g_warm_running) && atomic_load(&g_warm_bg) && atomic_load(&g_arch_new) > 0) arch_note_new(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ARCH_FLUSH_INTERVAL_S * (int64_t)NSEC_PER_SEC), g_arch_q, ^{
+        atomic_store(&g_arch_sched, 0);
+        int deferred = arch_hand_over(nil, ARCH_FLUSH_TIMER);
+        if ((deferred || (atomic_load(&g_warm_running) && atomic_load(&g_warm_bg))) && atomic_load(&g_arch_new) > 0) arch_note_new();
+    });
 }
 static void arch_compact_finish(void) {   // after every period that may hold recaptured bases is written (arch_write): the old files go once their bases are in the new ones
     if (!g_compact_files || !g_compacted) return;
@@ -12479,7 +12648,7 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
         if (!pools) ids_keep(0, &nd, &p->dead);    // not taken again: they stay on the list for the next pool change
         if (!stale) ids_keep(1, &nt, &p->trans);   // this submission's views, still good
         for (size_t k = 0; k < nid; k++) {
-            int i = ids[k] - base; if (i < 0 || i >= nn) continue;
+            int i = ids[k] - base; if (i < 0 || i >= nn || (samp && !i)) continue;
             uint64_t used = g_walk_spent - spent, limit = used < room ? room - used : 0;   // what this patch made comes off the room
             int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, ids[k], limit, &gone, &left, &left_req, &t, &d, NULL); r = r ? r : dummy;
             if (d) ids_add(0, &nd, ids[k]);
@@ -12515,7 +12684,8 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
     uint64_t *e = (uint64_t *)(c + DMSH_POOL_HEAD), dummy = samp ? dummy_samp_rid() : (dummy_tex(dtt, dpf) ? g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] : 0);
     int real = 0, gone = 0, left = 0, left_req = 0; uint64_t limit = samp ? UINT64_MAX : pool_walk_limit(base, n);
     pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
-    for (int i = 0; i < n; i++) {
+    if (samp) { e[0] = samp_pool_zero() ? g_samp_zero_rid : dummy; real += e[0] != dummy; }
+    for (int i = samp ? 1 : 0; i < n; i++) {
         int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, base + i, limit, &gone, &left, &left_req, &t, &d, leads ? leads + i : NULL);
         if (d) ids_add(0, &nd, base + i);
         if (t) ids_add(1, &nt, base + i);
@@ -12943,42 +13113,50 @@ static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_
 // Read on the CPU side at replay time (the memory at the same moment a real GPU would read it at execution); slot unbound / out of range / unreadable = 0 (empty slot: dummy texture / dummy sampler).
 // A location with a GPU-side write queued in this submit (pend_hits) is still read at its current value; the first case is reported red.
 // The same read serves storage buffer addresses kept in uniform memory (SBUFU: 8 bytes)
-static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
+static int ubo_read(int stage, int reg, int off, size_t n, void *out) {
     memset(out, 0, n);
-    if ((unsigned)stage >= NVN_RESOURCE_STAGES || (unsigned)reg >= 16) return;
+    if ((unsigned)stage >= NVN_RESOURCE_STAGES || (unsigned)reg >= 16) return 0;
     const p_bind_buf *u = &S.ubo[stage][reg];
-    if (!u->addr || (uint64_t)off + n > u->size) return;
-    if (g_nubd && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return; }   // written by an inline update deferred in this pass
-    { uint64_t g; const uint8_t *c; if (pend_hits(u->addr + off, n) && ubp_get(u->addr + off, u->addr + off + n, &g, &c)) { ubc_wait(g_ubp_ready); memcpy(out, c, n); return; } }   // memory and the inline updates queued over it
-    if (pend_hits(u->addr + off, n)) { int kind; if (pend_read(u->addr + off, n, out, &kind)) return;   // written by an inline update queued in this submission: its data
+    if (!u->addr || (uint64_t)off + n > u->size) return 0;
+    if (g_nubd && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return 1; }   // written by an inline update deferred in this pass
+    { uint64_t g; const uint8_t *c; if (pend_hits(u->addr + off, n) && ubp_get(u->addr + off, u->addr + off + n, &g, &c)) { ubc_wait(g_ubp_ready); memcpy(out, c, n); return 1; } }   // memory and the inline updates queued over it
+    if (pend_hits(u->addr + off, n)) { int kind; if (pend_read(u->addr + off, n, out, &kind)) return 1;   // written by an inline update queued in this submission: its data
         RED_ONCE(47, "the uniform buffer holding bindless handles (stage %d slot %d +%#x) has GPU-side writes in this submission (%s): the current value is read", stage, reg, off,
                  kind == 2 ? "a buffer copy" : kind == 3 ? "a fill" : kind == 1 ? "an inline update covering part of it" : "more writes than the host tracks"); }
     // A pool's buffer wraps guest memory without a copy (mtl_pool_add), so its contents at mo are the guest bytes at the address itself: read there, once a pool is found to hold
     // them. Asking the buffer for its contents cost a message, and, contents being an inner pointer, a retain and autorelease of the buffer at every handle read (Fire Emblem:
     // Fortune's Weave: about 4% of the submit thread's samples, and as much again draining the autorelease pool at commit)
     void *mb; uint64_t mo;
-    if (!mtl_addr(u->addr + off, n, &mb, &mo)) return;
+    if (!mtl_addr(u->addr + off, n, &mb, &mo)) return 0;
     memcpy(out, (const void *)(uintptr_t)(u->addr + off), n);
+    return 1;
 }
 static uint32_t ubo_handle(int stage, int reg, int off) { uint32_t h; ubo_read(stage, reg, off, 4, &h); return h; }
 // The handle a TEXU / SAMPU binding reads: a word, or two the shader ORs (handle type 1), which hold the texture and the sampler in either order. Unreal Engine 5.4's lighting shaders on the Switch 2 put the
 // shared sampler's word first, so its G-buffer textures read as ID 0 from the first word alone: the dummy, and a black scene
 static uint32_t ubo_bind_handle(int stage, const nvn_rbind *b) { uint32_t h = ubo_handle(stage, b->reg, b->off); if (b->soff) h |= ubo_handle(stage, b->sreg, b->soff - 1); return h; }
-// A handle in uniform memory is relative to the pools active when the draw runs, just like an explicitly bound handle (0 = none).
+// A handle in uniform memory is relative to the pools active when the draw runs, just like an explicitly bound handle.
 static int ubo_tex_id(uint32_t h) { int t = (int)(h & 0xfffff); return t ? t + S.tex_base : 0; }
-static int ubo_samp_id(uint32_t h) { int s = (int)(h >> 20); return s ? s + S.samp_base : 0; }
+static int ubo_samp_id(uint32_t h) { int s = (int)(h >> 20); return s ? s + S.samp_base : h ? SAMP_POOL_ZERO : 0; }
 // A SAMPU binding's sampler ID: from its handle, or the separate sampler word of the driver table (sreg DMSH_SREG_C2, whose IDs are moved already, as the words TEXA / SAMPA read)
 static int sampu_id(int stage, const nvn_rbind *b, int k) {
-    if (b->soff && b->sreg == DMSH_SREG_C2) return (int)(c2_handle(stage, b->soff - 1u) >> 20);
-    uint32_t h = k < 0 ? ubo_bind_handle(stage, b) : ubo_handle(stage, b->reg, b->off + 8 * k);
-    return ubo_samp_id(b->raw_id ? h << 20 : h);   // raw_id: the word is a SeparateSamplerId (the ID itself), not a handle with the sampler in its high 12 bits
+    if (b->soff && b->sreg == DMSH_SREG_C2) return bound_samp_id(c2_handle(stage, b->soff - 1u));
+    int off = b->off + (k < 0 ? 0 : 8 * k);
+    if (b->raw_id) {   // SeparateSamplerId: an ID of 0 in a readable uniform word selects the reserved sampler
+        uint32_t sid;
+        if (!ubo_read(stage, b->reg, off, sizeof sid, &sid)) return 0;
+        return sid ? ubo_samp_id(sid << 20) : SAMP_POOL_ZERO;
+    }
+    return ubo_samp_id(k < 0 ? ubo_bind_handle(stage, b) : ubo_handle(stage, b->reg, off));
 }
 // The sampler ID a sampler binding reads in the current state: SAMPT the sampler part of a combined handle (texture ID | sampler ID << 20), SAMPU the same with the handle in a uniform buffer,
 // SAMPI a sampler ID the shader names as a constant
 static int bind_sid(int nvn_stage, const nvn_rbind *b) {
     int reg = b->reg;
-    return b->kind == NVN_RB_SAMPU ? sampu_id(nvn_stage, b, -1) :
-           b->kind == NVN_RB_SAMPI ? ubo_samp_id((uint32_t)reg << 20) : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(bound_handle(S.tex[nvn_stage][reg]) >> 20) : 0) : reg < 128 ? (int)(bound_handle(S.samp[nvn_stage][reg]) >> 20) : 0;
+    if (b->kind == NVN_RB_SAMPU) return sampu_id(nvn_stage, b, -1);
+    if (b->kind == NVN_RB_SAMPI) return reg ? reg + S.samp_base : SAMP_POOL_ZERO;
+    if (b->kind == NVN_RB_SAMPT) return reg < NTEX ? bound_samp_id(bound_handle(S.tex[nvn_stage][reg])) : 0;
+    return reg < 128 ? (int)(bound_handle(S.samp[nvn_stage][reg]) >> 20) : 0;
 }
 // Whether a draw of sh binds a sampler with a twin (dmsh_rewrite.py border_emu, nvn_border.h), whose samples it must correct: then its pipeline keeps the corrections (pso_key.border),
 // otherwise it is specialized without them (fn_off). Inspect the registered parameters: the pipeline is chosen before encode_args creates Metal samplers, including their twins
@@ -13025,7 +13203,8 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     const p_bind_buf *u = reg < 16 ? &S.ubo[stage][reg] : NULL;
     uint64_t addr = u ? u->addr + b->off : 0, rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen);
     uint32_t bytes = u && u->addr && u->size > b->off ? (uint32_t)MIN(u->size - b->off, 65536u) : 0;
-    int c2s = samp && b->soff && b->sreg == DMSH_SREG_C2 ? sampu_id(stage, b, 0) : -1;
+    enum { SAMP_FROM_UBO_HANDLES = -2 };
+    int c2s = samp && b->soff && b->sreg == DMSH_SREG_C2 ? sampu_id(stage, b, 0) : SAMP_FROM_UBO_HANDLES;
     htab_snap *p = NULL, *free_ = NULL;
     for (int i = 0; i < HTAB_SNAPS && !p; i++) { htab_snap *q = &g_htab[i];
         if (!q->buf) { if (!free_) free_ = q; }
@@ -13045,7 +13224,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     if (p->cap < bytes) { free(p->copy); free(p->ser); p->copy = malloc(bytes ? bytes : 8); p->ser = malloc(bytes ? bytes : 8); p->cap = bytes; }
     static uint64_t e[8193]; static uint32_t lead[8193]; memset(lead, 0, sizeof lead);
     for (uint32_t k = 0; k < n; k++) { uint64_t r = 0; p->ser[k] = 0;
-        if (samp) { int sid = c2s >= 0 ? c2s : ubo_samp_id(w[k * 2]); if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid] && samp_fast(sid)) r = g_srid[sid]; }
+        if (samp) { int sid = c2s == SAMP_FROM_UBO_HANDLES ? ubo_samp_id(w[k * 2]) : c2s; if (samp_known(sid) && samp_fast(sid)) r = samp_rid(sid); }
         else { int tid = ubo_tex_id(w[k * 2]); if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && (g_treg[tid].view || (!g_treg[tid].gone && tex_storage_live(&g_treg[tid].t)))) {   // as for the samplers: other data, not a handle
                 void *tv = NULL; uint64_t tr = tex_fast_rid(tid, &tv); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
                 if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; t = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); tr = t ? r2 : 0; }   // a handle the shader does not pick here may be another kind
@@ -13381,10 +13560,10 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             }
         } else if (b->kind == NVN_RB_SAMPU && b->n) {   // the samplers of an array of handles in a uniform buffer: element k = the sampler ID of the handle at the array's base + 8k (see the textures below)
             for (int k = 0; k < b->n; k++) {   // only registered IDs are looked up: most elements are other data the shader never picks as a handle
-                int sid = sampu_id(nvn_stage, b, k); if (sid >= g_nsreg || !g_sreg_ok[sid]) sid = 0;
+                int sid = sampu_id(nvn_stage, b, k); if (!samp_known(sid)) sid = 0;
                 if (bl && (sid || (b->soff && b->sreg == DMSH_SREG_C2 && !k))) PD("B %llu st%d sampu [%d] sid=%d%s", g_stat_pass, nvn_stage, k, sid, b->soff && b->sreg == DMSH_SREG_C2 ? " from c2" : "");
                 __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-                slots[aid + k] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
+                slots[aid + k] = ss ? samp_rid(sid) : dummy_samp_rid();
                 USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             }
         } else if (b->kind == NVN_RB_TEXU && b->n) {   // an array of handles in a uniform buffer that the shader indexes at run time (Ryujinx's texture array from a buffer): element k = the handle
@@ -13404,11 +13583,12 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPI) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
             int sid = bind_sid(nvn_stage, b);
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-            if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_rewrite.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
+            if (b->bw && ss && sid > 0 && g_sview_w[sid]) {   // a twin (dmsh_rewrite.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
                 ss = (__bridge id<MTLSamplerState>)g_sview_w[sid]; slots[aid] = g_srid_w[sid];
                 bmask |= 1u << (b->bw - 1); memcpy(bk[b->bw - 1], g_sbk[sid], sizeof bk[0]);
-            } else slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();   // a twin of any other sampler is never sampled
+            } else slots[aid] = ss ? samp_rid(sid) : dummy_samp_rid();   // a twin of any other sampler is never sampled
             USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
+            if (bl && sid == SAMP_POOL_ZERO) PD("B %llu st%d samp reg%d sid=0 (reserved pool sampler)", g_stat_pass, nvn_stage, reg);
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d (0 nearest / 1 linear; 2–5 with mips) wrap=%d,%d,%d border=%g,%g,%g,%g lod=%g..%g bias=%g aniso=%g cmp=%d/%d %s", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,
                            (int)sp.ws, (int)sp.wt, (int)sp.wr, sp.border[0], sp.border[1], sp.border[2], sp.border[3], sp.lod_min, sp.lod_max, sp.lod_bias, sp.aniso, (int)sp.cmp_mode, (int)sp.cmp_func, ss ? "real" : "failed"); }
@@ -13534,17 +13714,18 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         } else if (b->kind == NVN_RB_SAMPA) {   // its samplers: element k = the sampler of the handle at c2 byte off + 8k, ORed with the separate sampler word at soff (handle type 1) as the GPU does
             uint64_t sw = b->soff ? c2_handle(nvn_stage, b->soff) : 0;
             for (int k = 0; k < b->n; k++) {
-                int sid = (int)((c2_handle(nvn_stage, b->off + 8u * k) | sw) >> 20);
+                uint64_t h = c2_handle(nvn_stage, b->off + 8u * k) | sw;
+                int sid = b->soff && !sw ? (int)(h >> 20) : bound_samp_id(h);
                 __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-                slots[aid + k] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
+                slots[aid + k] = ss ? samp_rid(sid) : dummy_samp_rid();
                 USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             }
         } else if (b->kind == NVN_RB_SAMPD) {   // its samplers: element k = the separate sampler in slot k, else the sampler of a combined handle in texture slot k
             for (int k = 0; k < b->n; k++) {
                 int sid = k < 128 ? (int)(bound_handle(S.samp[nvn_stage][k]) >> 20) : 0;
-                if (!sid && k < NTEX) sid = (int)(bound_handle(S.tex[nvn_stage][k]) >> 20);
+                if (!sid && k < NTEX) sid = bound_samp_id(bound_handle(S.tex[nvn_stage][k]));
                 __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-                slots[aid + k] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
+                slots[aid + k] = ss ? samp_rid(sid) : dummy_samp_rid();
                 USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             }
         } else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) {   // B: storage buffers / compute-stage uniforms are device pointers; the address is taken by NVN slot
@@ -13634,15 +13815,15 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
                     if (nvn_stage == 5) for (int r = 0; r < DMSH_C0_CS_UBO_SLOTS; r++) { uint64_t a = S.ubo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ubo[nvn_stage][r].size; if (ounce) a = ucb_handle(a, n); memcpy(d + DMSH_C0_CS_UBO + DMSH_C0_ROW * r, &a, 8); memcpy(d + DMSH_C0_CS_UBO + DMSH_C0_ROW * r + 8, &n, 4); }
                 } else {
                     // A shader with dynamic handle arrays (TEXD / SAMPD, profile key tex_dyn_slots) picks a table slot at run time and ORs a texture word with a sampler word into a handle,
-                    // whose texture / sampler IDs index the arrays. For it the tables hold slot indices instead of handles (texture slot r → r, and r << 20 when a combined handle carries
-                    // a sampler; sampler slot r → r << 20), and the arrays hold the bound slots, so the shader's own arithmetic picks the binding (Octopath Traveler 0: separate texture slots 0-10, samplers 0-4)
+                    // whose texture / sampler IDs index the arrays. For it the tables hold slot indices instead of handles (combined slot r → r | r << 20, separate texture slot r → r,
+                    // sampler slot r → r << 20), and the arrays hold the bound slots, so the shader's own arithmetic picks the binding (Octopath Traveler 0: separate texture slots 0-10, samplers 0-4)
                     // Pool shaders index relative descriptors; shaders whose tables name host resources take the active bases, as do ordinary slot bindings.
                     const uint64_t *tx = S.tex[nvn_stage], *im = S.img[nvn_stage]; int dyn = sh->rf.dyn;
                     #define C2_HANDLE(h) ((uint32_t)(sh->rf.pool ? (h) : bound_handle(h)))
                     for (int r = 0; r < DMSH_C2_IMG_SLOTS; r++) { uint32_t ih = C2_HANDLE(im[r]); memcpy(d + DMSH_C2_IMG + DMSH_C2_ROW * r, &ih, 4); }
                     for (int r = 0; r < DMSH_C2_TEX_SLOTS; r++) {   // a combined slot past 31 is written when it is bound and the image slot it shares is not (Hades II binds texture slot 34, no image)
                         if (r >= 32 && (!tx[r] || (r - 32 < DMSH_C2_IMG_SLOTS && im[r - 32]))) continue;
-                        uint32_t v = !dyn ? C2_HANDLE(tx[r]) : !tx[r] ? 0 : (uint32_t)r | (tx[r] >> 20 ? (uint32_t)r << 20 : 0); memcpy(d + DMSH_C2_TEX + DMSH_C2_ROW * r, &v, 4); }
+                        uint32_t v = !dyn ? C2_HANDLE(tx[r]) : !(uint32_t)tx[r] ? 0 : (uint32_t)r | (uint32_t)r << 20; memcpy(d + DMSH_C2_TEX + DMSH_C2_ROW * r, &v, 4); }
                     for (int r = 0; r < DMSH_C2_SEP_SLOTS; r++) { uint64_t h = tx[NVN_SEPTEX_SLOT0 + r]; uint32_t v = !dyn ? C2_HANDLE(h) : h ? (uint32_t)r : 0; memcpy(d + DMSH_C2_SEPTEX + DMSH_C2_ROW * r, &v, 4); }
                     for (int r = 0; r < DMSH_C2_SEP_SLOTS; r++) { uint64_t h = S.samp[nvn_stage][r]; uint32_t v = !dyn ? C2_HANDLE(h) : h ? (uint32_t)r << 20 : 0; memcpy(d + DMSH_C2_SAMP + DMSH_C2_ROW * r, &v, 4); }
                     #undef C2_HANDLE
@@ -15674,7 +15855,7 @@ static int lc_keeps(uint32_t op) {
 
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
-static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
+static int ndve_dispatch_index(NvShader *cs), ndve_engine_dispatch(NvShader *cs, int i);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
 // Breath of the Wild runs one GPU particle dispatch per emitter between the G-buffer's effect draws, six to eight splits of a 1600x900 G-buffer a frame (about 350 MB of attachment
@@ -16451,6 +16632,35 @@ static uint64_t loop_state(NvShader *cs) {
     }
     return cs->loop_gpu;
 }
+static id<MTLComputePipelineState> dispatch_pso(NvShader *cs) {
+    int off = !border_need(cs, 5);
+    cps_key k = {(__bridge const void *)cs, (uintptr_t)off};
+    id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
+    if (!ps) {
+        if (cs->cps_failed) return nil;   // asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
+        NSError *e = nil; uint64_t bt = bp_now(); ps = cps_new_b(cs->fn, off, &e);
+        g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+        if (!ps) {
+            int interrupted = err_compiler_died(e);
+            if (!interrupted) cs->cps_failed = 1;
+            MLOG("[RED] failed to create compute pipeline for %s: %s (%s)", cs->key, e.localizedDescription.UTF8String,
+                 interrupted ? "this dispatch is skipped, a later dispatch can retry" : "its dispatches are skipped");
+            return nil;
+        }
+        // A pipeline's thread limit falls with the kernel's registers on the M1 and M2 (dmsh_rewrite.py max_threads); a dispatch of the shader's local size past it runs no invocation
+        NSUInteger want = (NSUInteger)MAX(cs->rf.tg[0], 1) * MAX(cs->rf.tg[1], 1) * MAX(cs->rf.tg[2], 1);
+        if (!cs->builtin && cs->rf.tg[0] && want > ps.maxTotalThreadsPerThreadgroup) {
+            cs->cps_failed = 1;
+            MLOG("[RED] compute pipeline for %s allows %lu threads a threadgroup, its local size %ux%ux%u needs %lu (its dispatches are skipped)", cs->key,
+                 (unsigned long)ps.maxTotalThreadsPerThreadgroup, cs->rf.tg[0], cs->rf.tg[1], cs->rf.tg[2], (unsigned long)want);
+            return nil;
+        }
+        pso_record("C\t%s\n", cs->key);
+        if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
+        hm_put_id(&g_cps, &k, ps);
+    }
+    return ps;
+}
 static void dispatch_(const p_dispatch *dp) {
     // An empty direct grid invokes no shader and changes no resources. Metal
     // rejects it; indirect counts belong to the GPU and are left untouched.
@@ -16461,31 +16671,15 @@ static void dispatch_(const p_dispatch *dp) {
     void *ib = NULL; uint64_t io = 0, ig = 0;
     if (dp->ind && !mtl_gpu_addr(dp->ind, 12, &ib, &io, &ig)) { RED_ONCE(94, "indirect dispatch skipped: argument address %#llx is in no memory pool", (unsigned long long)dp->ind); return; }
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
-    NvShader *cs = prog_get(S.cprog)->sh[5];
+    NvProg *pr = prog_get(S.cprog);
+    NvShader *cs = pr->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
     if (dp->ind) ind_fly_put(cs->key, dp->ind, io, ib);
     if (passdump()) { uint32_t n[3] = {0, 0, 0}; if (dp->ind && nvn_host_readable(dp->ind, 12)) memcpy(n, (const void *)(uintptr_t)dp->ind, 12);
         PD("g %llu dispatch %s %ux%ux%u indirect=%#llx (now %u %u %u)", g_stat_pass, cs->key, dp->x, dp->y, dp->z, (unsigned long long)dp->ind, n[0], n[1], n[2]); }
-    int off = !border_need(cs, 5);
-    cps_key k = {(__bridge const void *)cs, (uintptr_t)off};
-    id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
-    if (!ps) {
-        if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
-        NSError *e = nil; uint64_t bt = bp_now(); ps = cps_new_b(cs->fn, off, &e);
-        g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-        if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
-        // A pipeline's thread limit falls with the kernel's registers on the M1 and M2 (dmsh_rewrite.py max_threads); a dispatch of the shader's local size past it runs no invocation
-        NSUInteger want = (NSUInteger)MAX(cs->rf.tg[0], 1) * MAX(cs->rf.tg[1], 1) * MAX(cs->rf.tg[2], 1);
-        if (!cs->builtin && cs->rf.tg[0] && want > ps.maxTotalThreadsPerThreadgroup) {
-            cs->cps_failed = 1;
-            MLOG("[RED] compute pipeline for %s allows %lu threads a threadgroup, its local size %ux%ux%u needs %lu (its dispatches are skipped)", cs->key,
-                 (unsigned long)ps.maxTotalThreadsPerThreadgroup, cs->rf.tg[0], cs->rf.tg[1], cs->rf.tg[2], (unsigned long)want);
-            return;
-        }
-        pso_record("C\t%s\n", cs->key);
-        if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
-        hm_put_id(&g_cps, &k, ps);
-    }
+    int ndve = cs->builtin ? -1 : ndve_dispatch_index(cs);
+    id<MTLComputePipelineState> ps = nil;
+    if (ndve < 0 && !(ps = dispatch_pso(cs))) return;
     if (cs->builtin) {   // Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];
         void *ub, *sb, *db; uint64_t uo, so, dof;
@@ -16509,8 +16703,10 @@ static void dispatch_(const p_dispatch *dp) {
     if (dp->ind || (dp->x && dp->y && dp->z)) for (int i = 0; i < cs->rf.nfirst; i++) { const p_bind_buf *u = &S.ssbo[5][cs->rf.first[i].reg]; if (u->addr) mtl_sub_fill(u->addr + 4ull * cs->rf.first[i].word, 4, cs->rf.first[i].value); }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
-    image_prepare(prog_get(S.cprog), 0x20);
-    if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
+    image_prepare(pr, 0x20);
+    // NDVE needs the prepared bindings and sees the whole sequence even when a translated pipeline is unavailable.
+    if (ndve >= 0 && ndve_engine_dispatch(cs, ndve)) return;
+    if (!ps && !(ps = dispatch_pso(cs))) return;
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
@@ -16859,7 +17055,8 @@ static void draw_tex(const p_draw_tex *c) {
         pso = [NSMutableDictionary dictionary];
     }
     os_unfair_lock_lock(&g_rmu);
-    id<MTLTexture> t = tex_by_id((int)(bound_handle(c->h) & 0xfffff)); id<MTLSamplerState> ss = samp_by_id((int)(bound_handle(c->h) >> 20));
+    uint64_t h = bound_handle(c->h);
+    id<MTLTexture> t = tex_by_id((int)(h & 0xfffff)); id<MTLSamplerState> ss = samp_by_id(bound_samp_id(h));
     os_unfair_lock_unlock(&g_rmu);
     if (!t || !ss) { RED_ONCE(122, "DrawTexture: texture handle %#llx has no texture or sampler", (unsigned long long)c->h); return; }
     if (t.textureType != MTLTextureType2D || fmt_int_or_ds(t.pixelFormat)) { RED_ONCE(123, "DrawTexture: source type %lu format %lu not drawn (2D float / unorm only)", (unsigned long)t.textureType, (unsigned long)t.pixelFormat); return; }
@@ -18032,7 +18229,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     if (!buf) { MLOG("[RED] full-window screenshot: cannot create output (%zux%zu)", w, h); cb(NULL); return; }
     // GPU completion starts the readback, keeping the present thread free. Each capture owns its scaler and textures until completion.
     void (^readback)(int) = ^(int ok) {
-        if (!ok) { cb(NULL); return; }
+        if (!ok || atomic_load(&g_present_suspended)) { cb(NULL); dispatch_group_leave(g_present_readbacks); return; }
         id<MTLCommandBuffer> cb2 = q_cb(); id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
         [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
         [b endEncoding];
@@ -18040,13 +18237,15 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
             CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
             CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL; cb(img);
-            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); }];
+            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+            dispatch_group_leave(g_present_readbacks); }];
         [cb2 commit];
     };
-    if (g_q4) { if (!present_offscreen_m4(src, crop, out, readback)) cb(NULL); }
+    dispatch_group_enter(g_present_readbacks);
+    if (g_q4) { if (!present_offscreen_m4(src, crop, out, readback)) readback(0); }
     else {
         id<MTLCommandBuffer> draw = q_cb();
-        if (!present_encode(draw, src, out, crop)) { cb(NULL); return; }
+        if (!present_encode(draw, src, out, crop)) { readback(0); return; }
         [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { readback(c.status == MTLCommandBufferStatusCompleted); }]; [draw commit];
     }
 }
@@ -18883,13 +19082,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
         [b endEncoding];
         unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        dispatch_group_enter(g_present_readbacks);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
             for (NSUInteger k = 0; k < w * h; k++) sum += q[4 * k] + q[4 * k + 1] + q[4 * k + 2];
             pthread_mutex_lock(&rlmu); fprintf(rlf, "%llu\t%llu\t%.4f\t", n, tns, sum / (3.0 * w * h));
             for (NSUInteger k = 0; k < ng; k++) fprintf(rlf, "%02x", g[k]);
-            fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); }];
+            fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu);
+            dispatch_group_leave(g_present_readbacks); }];
         [cb commit];
     }
     // DM_NVN_SHOT=frame number[,frame number...]:path (%d in the path is replaced with the frame number)
@@ -18904,7 +19105,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { present_shot(src, g_shotq[i].path, crop, ev_val, &shot_ready); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
     pthread_mutex_unlock(&g_shotq_mu);
 
-    if (atomic_load(&g_gpu_lost)) return 0;   // the display command buffer would be ignored too: take no drawable from the screen the front end is about to close
+    if (atomic_load(&g_gpu_lost) || atomic_load(&g_present_suspended)) return 0;
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
 #if TARGET_OS_OSX
@@ -18922,6 +19123,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pthread_mutex_unlock(&g_pq_mu);
     }
+    if (atomic_load(&g_present_suspended)) return 0;
     [g_present_alloc4[alloc_i] reset];
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
@@ -19102,7 +19304,7 @@ static struct timespec link_deadline(uint64_t ns);
             if (g_pq_in > in0) { g_link_latched++; g_link_latch_misses = 0; } else { g_link_latch_out++; g_link_latch_misses++; }
         }
     }
-    if (g_pq_read == g_pq_in) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (g_pq_read == g_pq_in || atomic_load(&g_present_suspended)) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
     if (hold) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
@@ -19112,6 +19314,7 @@ static struct timespec link_deadline(uint64_t ns);
     if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
     g_pq_read = ticket;
+    atomic_fetch_add(&g_link_presenting, 1);
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
     if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
@@ -19130,11 +19333,15 @@ static struct timespec link_deadline(uint64_t ns);
     }
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
-    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
+    @autoreleasepool {
+        submitted = !atomic_load(&g_present_suspended) && present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, update.drawable, update.targetPresentationTimestamp);
+        mtl_tex_unpin(it.t.serial);
+    }
     g_link_hold_until = submitted && hold_ticks >= 2 ? tick_time + hold_ticks * tick_period : 0;
-    if (!submitted) {
+    atomic_fetch_sub(&g_link_presenting, 1);
+    if (!submitted || atomic_load(&g_present_suspended)) {
         pthread_mutex_lock(&g_pq_mu);
-        if (ticket > g_pq_done) g_pq_done = ticket;
+        if (!submitted && ticket > g_pq_done) g_pq_done = ticket;
         pthread_cond_broadcast(&g_pq_cv);
         pthread_mutex_unlock(&g_pq_mu);
     }
@@ -19250,17 +19457,39 @@ static void link_sync(void) {   // Called every frame by the game's present thre
 // Before going to the background (mtl_drain): when the display link drives presents, frames queued but not yet presented can only be taken by the display-link callback, and in the background the system no longer calls back --
 // waiting as-is for "the present queue to empty" would wait forever, the enter-background callback would not return, and the system would kill the process (the process disappears within 22 seconds after switching to another App).
 // These frames will not be seen anyway: discard them directly (accounted as dropped frames) and only wait for the one present already submitted to the GPU to finish.
+static uint64_t drop_queued_presents_locked(void) {
+    uint64_t n = g_pq_in - g_pq_read;
+    for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) {
+        g_pres[k % PRING] = (pres_ent){k, -1};
+        mtl_tex_unpin(g_pq[(k - 1) % PQ].t.serial);
+    }
+    g_link_dropped += n;
+    g_pq_read = g_pq_in;
+    return n;
+}
 static void present_drop_for_suspend(void) {
     pthread_mutex_lock(&g_pq_mu);
     if (g_link_owns_layer) {
-        uint64_t n = g_pq_in - g_pq_read;
-        for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
-        g_link_dropped += n; g_pq_read = g_pq_in;
+        uint64_t n = drop_queued_presents_locked();
         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         if (g_pq_done < g_pq_in) g_pq_done = g_pq_in;
         pthread_cond_broadcast(&g_pq_cv);
         if (n) MLOG("entering the background: dropping %llu queued frames not yet displayed (the display link does not fire in the background)", (unsigned long long)n);
     }
+    pthread_mutex_unlock(&g_pq_mu);
+}
+void mtl_set_present_suspended(int on) { atomic_store(&g_present_suspended, on != 0); }
+void mtl_drop_queued_presents(void) {
+    pthread_mutex_lock(&g_pq_mu);
+    drop_queued_presents_locked();
+    pthread_cond_broadcast(&g_pq_cv);
+    pthread_mutex_unlock(&g_pq_mu);
+}
+static void present_suspend_wait(void) {
+    pthread_mutex_lock(&g_pq_mu);
+    while (atomic_load(&g_link_presenting) || g_classic_busy || g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    g_pq_done = g_pq_in;
+    pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
 }
 static void *present_main(void *arg) {
@@ -19270,21 +19499,22 @@ static void *present_main(void *arg) {
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp); atomic_store(&g_present_qos, (uint32_t)qc);
     for (;;) {
         pthread_mutex_lock(&g_pq_mu);
-        while (g_pq_read == g_pq_in || g_link_owns_layer) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken
+        while (g_pq_read == g_pq_in || g_link_owns_layer || atomic_load(&g_present_suspended)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pq_item it = g_pq[g_pq_read % PQ];
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
-        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, nil, 0); mtl_tex_unpin(it.t.serial); }
-        pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
-        if (!submitted) {
-            pthread_mutex_lock(&g_pq_mu);
-            if (ticket > g_pq_done) g_pq_done = ticket;
-            pthread_cond_broadcast(&g_pq_cv);
-            pthread_mutex_unlock(&g_pq_mu);
-            pres_seen(ticket, -1);   // never reaches the screen: the screen wait must not wait for it
+        @autoreleasepool {
+            submitted = !atomic_load(&g_present_suspended) && present_now(&it.t, it.period, it.frame, ticket, it.crop, it.ev_val, nil, 0);
+            mtl_tex_unpin(it.t.serial);
         }
+        pthread_mutex_lock(&g_pq_mu);
+        g_classic_busy = 0;
+        if (!submitted && ticket > g_pq_done) g_pq_done = ticket;
+        pthread_cond_broadcast(&g_pq_cv);
+        pthread_mutex_unlock(&g_pq_mu);
+        if (!submitted) pres_seen(ticket, -1);   // never reaches the screen: the screen wait must not wait for it
     }
     return NULL;
 }
@@ -19333,7 +19563,6 @@ uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_v
     if (ev && !g_ext_ev) g_ext_ev = (__bridge id<MTLSharedEvent>)ev;
     return present_enqueue(&t, period, crop, ev ? ev_val : 0, NULL);
 }
-extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); the NVN, Vulkan and GL presents all come through present_enqueue
 // Present snapshots (DM_PRESENT_SNAP). A game with two swapchain textures (Breath of the Wild) gets one back only when the display link has taken its previous present on a
 // tick, so the next frame's CPU work starts on the tick and the GPU idles from the end of one frame to the first work of the next. macOS reads that idle time as room and holds the GPU
 // at its lowest clock (444 MHz on an M2 Max) even while frames miss the screen, and there 12 ms of GPU work a frame plus the time to the frame's first submission often missed 16.7 ms.
@@ -19360,11 +19589,13 @@ int mtl_snap_on(void) {
     return v;
 }
 static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
-static void snap_drain(void) {
+static void snap_drain(int strict) {
     // Display tickets may have been dropped during suspend, but their copies still belong to the Metal 4 queue.
     uint64_t v = g_snap_v; if (!v) return;
     snap_commit_wait(v);
-    if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
+    while (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) {
+        if (strict) MDIE("present snapshots: GPU did not drain within 10 s");
+    }
 }
 uint64_t mtl_snap_acquire_wait(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
@@ -19427,13 +19658,17 @@ static uint64_t snap_take(const tex_t *t) {
     if (rec_on() && g_rb_started) {   // a block of the encode thread's queue, behind the frame's work (see above)
         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
         rec_blk *b = rec_own_begin();
-        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
+        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb); r->a[2] = (uintptr_t)"encode thread (snapshot copy)";
         r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_commit_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_commit_mu);
+        pthread_mutex_lock(&g_res_commit_mu);
+        uint64_t elapsed = q4_commit_elapsed(&cb, 1, nil);
+        [g_q4 signalEvent:g_snap_ev value:v];
+        pthread_mutex_unlock(&g_res_commit_mu);
         atomic_store(&g_snap_cmt, v);
+        q4_commit_slow(elapsed, "snap_take (snapshot copy)");
     }
     g_snap[k].ev = v;
     return g_snap[k].serial;
@@ -19441,7 +19676,7 @@ static uint64_t snap_take(const tex_t *t) {
 // copy (may be NULL): the g_snap_ev value of the snapshot copy this present took, 0 when it took none (mtl_present_wait_texture)
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val, uint64_t *copy) {
     atomic_store(&dm_present_ns, now_ns()); if (copy) *copy = 0;
-    if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
+    if (g_classic || atomic_load(&g_present_discard) || atomic_load(&g_present_suspended)) return 0;
     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
     // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.
     // Resolve it here, where the game queues the present, and commit the batch, so the display command buffer comes after the upload on the queue and the present thread finds it uploaded.
@@ -19465,7 +19700,17 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     }
     if (t->serial < EXT_SERIAL) mtl_tex_pin(t->serial);   // an external texture is the present path's until mtl_ext_tex_release, which waits for its presents (the unpins find no pin)
     pthread_mutex_lock(&g_pq_mu);
-    while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
+    while (g_pq_in - g_pq_done >= PQ && !atomic_load(&g_present_suspended)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    if (atomic_load(&g_present_suspended)) {
+        if (ss) {
+            g_snap[slot].ticket = 0;
+            atomic_fetch_add(&g_snap_next, 1);
+            if (copy) *copy = g_snap[slot].ev;
+        }
+        pthread_mutex_unlock(&g_pq_mu);
+        mtl_tex_unpin(t->serial);
+        return 0;
+    }
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, !ss && !ev_val && on_sub_thread() ? g_fence : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;

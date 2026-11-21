@@ -153,6 +153,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Check:** `check_t_vpool_first_map` (a 4,000-entry pool, IDs 4095 and 300). In the game, Super Mario Party's opening, `sampler ID 4095 outside the pool (capacity 4000)`, no red line.
 - **Found on:** Super Mario Party (`010036B0034E4000`, no profile yet), [#2513](https://github.com/seedds/nxnative/issues/2513): one sampler pool of 4,000 entries.
 
+### The reserved sampler at pool slot zero
+
+- **Symptom:** thin strokes disappear from UI text. Fragment shader `bfd75fb65cc56ac0` samples a 1024×1024 glyph atlas with sampler ID 0. A Mac comparison in [#3049](https://github.com/seedds/nxnative/issues/3049) restored the strokes with linear filtering.
+- **Cause:** replay treated the sampler part of the handle as an empty binding and supplied its nearest-filtered dummy. The driver initializes slot 0 of every sampler pool. Mario vs. Donkey Kong’s SDK 15.3.0 writes the descriptor in `SamplerPoolInitialize` (`sdk+0x45c880`), using the encoder at `sdk+0x47d380`. The [Maxwell descriptor fields](https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/3d/clb197tex.h#L1924-L1988) give linear min/mag, no mip filtering, and clamp-to-edge on all axes. Metroid Dread’s SDK 11.4.3 and Donkey Kong Bananza’s NVN2 SDK 20.5.19 write the same sampling state.
+- **Fix:** `nvn_mtl.m` resolves pool slot 0 to a Metal sampler with that state. Sampler tables and populated combined handles can select it. Empty bindings and invalid sampler IDs still use the dummy. A shader’s samplerless texel fetch still reads only its texture.
+- **Found on:** [The Witcher 3: Wild Hunt — Complete Edition](../../dm/games/0100A0800E9C4000/README.md) (reported on 4.04d, with the same shader in the 4.04b profile).
+
 ### The sparse tile layout of a texture
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnTextureBuilderGetSparseTileLayout`, then an out-of-memory abort in Unreal's allocator (`Failed to allocate 1879113728 bytes from Standard Allocator`, on `DM_DBG=1`).
@@ -577,6 +584,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** the CPU-only `t_gfx_suspend` runs the real submit entry on two threads with a prepare step held by semaphores. It checks that the step runs outside the gate as host work, that the queued second submission is not in flight, that the suspend returns while the step holds the lock, that nothing commits in the background, and that both queued submissions execute after resume. It also suspends with an unresolved event, releases that event in the background, and verifies that its continuation executes only after resume. With the gate taken before the lock it fails before suspending.
 - **Found on:** no game named in the source (general: every NVN game with a prewarm list; a first start without the Metal cache takes longest). **Open:** not yet run by going to the background during a real game's prepare step on an iPhone.
 
+### Going to the background while graphics do not drain
+
+- **Symptom:** after the game freezes, going to the background leaves the log at the focus and audio messages without `[nvn] graphics suspended`. The callback can get stuck before iOS starts syncing committed saves.
+- **Cause:** the lifecycle caller synchronously waited for graphics calls, presents, and GPU work to finish. A successful drain still handed the archive over on that thread, which can wait for the Metal compiler. Cloud sync was behind both.
+- **Fix:** `dm_gfx_suspend` closes admission and waits up to three seconds for one drain worker. The worker drops queued frames and waits for existing graphics work. The same worker completes the drain if work returns later, and the graphics gate opens only when the latest request is for the foreground. An independent worker hands over the pipeline archive. iOS starts cloud sync before waiting for the drain.
+- **Check:** `t_gfx_suspend` holds the drain and archive handoff independently and overlaps lifecycle requests. `t_present_snap` checks that the real Metal drain still waits for snapshot commits and GPU copies.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), in NX18 on an iPhone 18 Pro Max. **Open:** the device report did not identify what stopped the GPU, and the revised lifecycle still needs an iOS device run.
+
 ### A GPU command buffer that never completes
 
 - **Symptom:** frames stop, no crash, the main thread sits in `nvnSyncWait(sync, -1)`, and the watchdog's wait-state line shows the main fence one short (`main fence submitted N / completed N-1`).
@@ -623,9 +638,9 @@ Games read this count as a position in their own command memory and size their h
 ### CPU deswizzle copies use slice and row offsets
 
 - **Symptom:** CPU texture uploads spend time recalculating block-linear addresses and calling variable-length `memcpy` for every 16-byte segment.
-- **Cause:** `move` called `nvn_bl_offset` inside its innermost loop, repeating slice/row calculations and division by runtime block dimensions.
-- **Fix:** hoist slice and row offsets, express power-of-two block dimensions as shifts/masks, and use the four fixed x offsets and eight fixed y offsets within a GOB. Full segments use constant-size 16-byte copies; byte counts not divisible by 16 retain a tail copy. ASTC blocks are always 16 bytes irrespective of their texel dimensions. Both copy directions preserve the layout, sparse row padding and mip/layer offsets.
-- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), reported in [PR #261](https://github.com/seedds/nxnative/pull/261).
+- **Cause:** the ordinary copy loop (`move`) and the placement sparse tile decoder (`nvn_deswizzle_tile`) originally called `nvn_bl_offset` for every segment, repeating slice and row calculations and division by runtime block dimensions.
+- **Fix:** calculate slice and row offsets outside the segment loop and share one row copier using fixed GOB offsets and constant-size 16-byte copies. A placement sparse tile is one block row, so its decoder needs only the offset within the GOB column for each scanline. A clipped edge copies the remaining bytes and leaves the destination padding alone. ASTC blocks remain 16 bytes irrespective of their texel dimensions.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([PR #261](https://github.com/seedds/nxnative/pull/261)) and [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#found-on-this-game) (placement sparse textures when loading a race).
 - **Check:** `t_tex` compares both directions against the byte-address formula for 1,029 deterministic layouts, including 1D/2D/3D, arrays/cubes, packaged block dimensions, sparse mip tails, 1/2/3/4/6/8/12/16-byte formats, padded pitches and partial segments. All 5,334 checks pass, including under AddressSanitizer and UBSan. A local arm64 Mac comparison against the old implementation, Apple clang 21 at `-O1` (the host's level then), measured 7.4–7.7 GB/s before and 35.1–37.6 GB/s after (4.6–5.1x) across 1024x1024 sparse ASTC 6x6, 2048x2048 BC7, 1920x1080 RGBA8 and 1280x720 RGBA16F. Each result is the median of seven runs copying about 128 MiB, with implementation order alternated. This is a CPU microbenchmark; no new gameplay run here.
 
 ### The Switch 2's order inside a GOB

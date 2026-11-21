@@ -738,6 +738,12 @@ def raw_noinline(msl, stage='cs'):
     attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
     return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
+# Work around SIGBUS in Apple's mesh backend at the macOS 26.6 minimum (issue #2825).
+# Keep SPIRV-Cross helpers with subgroup inputs out of line. Ordinary inlining can still crash on these helpers.
+MESH_SUBGROUP_HELPER = re.compile(r'(?m)^static inline __attribute__\(\(always_inline\)\)(?=\n\w+ \w+\([^\n]*\bgl_Subgroup\w*\b)')
+def mesh_subgroup_noinline(msl):
+    return MESH_SUBGROUP_HELPER.sub('static __attribute__((noinline))', msl)
+
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 
 def gather_offsets(msl):

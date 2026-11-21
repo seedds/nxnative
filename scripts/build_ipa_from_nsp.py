@@ -836,7 +836,7 @@ def survey_nup(n, k, base, out):
                 with open(o, 'wb') as f: n.copy(i, f)
     try:
         for d in [pack_nup.romfs_of(k, base), *pack_nup.sibling_romfs(n, k).values()]: walk(d, '')   # then the other programs' RomFS, which this one mounts by program index (a Switch 2 Edition's game data is its Switch 1 program's)
-        pack_nup.control(k, out, pack_nup.app_package(n) if base is None else base)   # what an update lacks, from its base game (or the metadata record, as pack_version takes it)
+        pack_nup.control(k, out, pack_nup.app_package(n) if base is None else base, say=say)   # what an update lacks, from its base game (or the metadata record)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
@@ -876,7 +876,12 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     else: run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), logs / 'extract.log')
     swap_in(tmp, ex)
     PROG.stage('survey: code modules', step='reading')
-    dv = nacp.version(ex / 'control.nacp') if files else (m.group(1) if (m := re.search(r'display version (\S+)', (logs / 'extract.log').read_text(errors='replace'))) else '')
+    if files:
+        dv = nacp.version(ex / 'control.nacp')
+        if nup and not dv: dv = pack_nup.display_label(upd or fam['base'])
+    else:
+        m = re.search(r'display version (\S+)', (logs / 'extract.log').read_text(errors='replace'))
+        dv = m.group(1) if m else ''
     title = nacp.name(ex / 'control.nacp') or (nsp_dir.name if dump else '')   # a dump has no control data: its folder names the game
     check_aarch64(ex / 'ExeFS', f'{title or "?"} ({app:016X})')
     F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv'); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
@@ -1088,7 +1093,7 @@ def frame_step_builds(path, table='FRAME_STEP'):   # the keys of a table of a pa
     return set()
 
 
-def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
+def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_label=''):
     """The game's profile for a version it was not brought up on (the folder has no update, another update, files of other builds, or a registered build under another title ID: app),
     in pdir (outside the repository, where a provisional profile goes): its keys as they are, with this version's build row, package and shader versions, and app's title ID and
     main.npdm's program ID when app is not the profile's title. The shader tables, the chain header and the run-time capture list are
@@ -1102,10 +1107,10 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
     src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
     # The display version: the package's control data, else the one the profile registers for this main build. A NUP update or a dump carries no control data, and the game asks
     # the host for the version by its main's build ID (hle_sdk16.c GetDisplayVersion, the build rows): a row with ? is what the game then shows (Super Mario Bros. Wonder 1.2.1
-    # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1)
+    # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1). An unregistered NUP build can use its own numeric label.
     main = d / 'ExeFS/main'; bid = build_id(main) if main.exists() else None
     known = next((b['display'] for b in g.builds().values() if bid and b.get('main') == bid and b.get('display') not in (None, '', '?')), None)
-    T, disp = '\t', nacp.version(d / 'control.nacp') or known or '?'
+    T, disp = '\t', nacp.version(d / 'control.nacp') or known or nup_label or '?'
     add = pg.main_modules(d / 'ExeFS', mods) if not shader_only and (d / 'ExeFS/main').exists() else {}   # a module's slot can change between versions: what main imports and the profile's list leaves out (Absolum 1.2.1's movie module). The host loads what the row names
     mods = sorted({*mods, *add}, key=pg.load_order) if add else mods
     row = T.join(['build', ver, disp] + [f'{m}={build_id(d / "ExeFS" / m)}' for m in mods if (d / 'ExeFS' / m).exists()])
@@ -1400,7 +1405,7 @@ def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its bas
         except OSError: return None
     try:
         PROG.stage(f'unpack {name}', poll=poll, unit='B', total=pack_nup.romfs_bytes(n, k, base), est=True)
-        how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
+        how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s), note=say)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
     return dst
@@ -1760,9 +1765,8 @@ def boot_mac(host, patched, henv, rd, log, secs, done=lambda: False, *, group=Fa
     t0 = time.time()
     with open(log, 'w') as f, contextlib.ExitStack() as stack:
         args = [str(host), str(patched)]
-        options = dict(env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)
-        run_group = stack.enter_context(proc_group.Group(args, **options)) if group else None
-        p = run_group.p if run_group else subprocess.Popen(args, **options)
+        run_group = stack.enter_context(proc_group.Group(args, env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)) if group else None
+        p = run_group.p if run_group else subprocess.Popen(args, env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)
         try:
             while not done() and p.poll() is None and time.time() - t0 < secs: time.sleep(0.25)
         finally:
@@ -3169,6 +3173,18 @@ def app_icon(given, spare, *dirs):
     return given or own or spare, bool(spare and not (given or own))
 
 
+def app_version_of(game, base, g, pkg_ver, nup_label='', *, nup_base=None):
+    """Prefer the packed version's NACP or registered version, then fall back to base control data or the selected NUP label."""
+    if version := nacp.version(game / 'control.nacp'): return version
+    if version := nacp.bundle_version(g.builds().get(pkg_ver, {}).get('display', '')): return version
+    if nup_base is not None:
+        # The base NUP package can carry a NACP even when the build extracts only the update.
+        version = nacp.version_data(nup_base.meta().get(pack_nup.T_NACP, b''))
+    elif base is not None and base != game:
+        version = nacp.version(base / 'control.nacp')
+    return version or nup_label
+
+
 def say_game(app, name, version, bundle_id, out, icon):
     """Which game the app is, once its name, version and bundle ID are settled (before the shader stages): the event game for a front end (json mode; the base game's title ID as DMTitleID has it,
     out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg, else --fallback-icon / FALLBACK_ICON; None without one), then the message for people"""
@@ -3381,6 +3397,7 @@ def main(args=None):
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
+    nup_label = pack_nup.display_label(picks[pkg_ver][1] or picks[pkg_ver][0]) if nup else ''
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     gb = (sum(pack_nup.romfs_bytes(fam['nup'], u or b, b) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
@@ -3404,7 +3421,7 @@ def main(args=None):
     reg = g   # the profile as registered (a derived build reports what it lacks against it)
     if derived:   # the derived profile goes where a provisional one would, and every tool (game.py, make, build_ipa.sh) takes it first (DM_GAMES_FIRST)
         pdir = profile_folder(args, nsp_dir, app)
-        disp = derive_profile(g, pdir / g.id, pkg_ver, dirs[pkg_ver], g.words('modules'), app)
+        disp = derive_profile(g, pdir / g.id, pkg_ver, dirs[pkg_ver], g.words('modules'), app, nup_label=nup_label)
         os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
         os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
         g = gamemod.load(g.id)
@@ -3436,8 +3453,7 @@ def main(args=None):
     if prepare_xcode:
         try: xcode_projects.check_bundle_id(workspace, project, bundle_id)
         except ValueError as e: raise BuildError(str(e)) from e
-    # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
-    app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
+    app_version = app_version_of(game, None if nup else base, g, pkg_ver, nup_label, nup_base=fam['base'] if nup else None)
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
     icon, stand_in = app_icon(user_icon, spare_icon, game, base)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app

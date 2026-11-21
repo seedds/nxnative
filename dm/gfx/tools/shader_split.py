@@ -2071,7 +2071,7 @@ def zstd_frame_len(d, p):
         if h & 1: return q + 4 * (fhd >> 2 & 1) - p
 
 def nlg4_unzs(d):
-    """zstd frames, decompressed as one stream (the zstd command, as unzs; fed the bytes, since inside a RomFS image the path is not a file the command can open). A '.data' pads some
+    """zstd frames, decompressed as one stream (the zstd command is fed bytes so this also works inside a RomFS image). A '.data' pads some
     frames to 8 bytes (init.data: the third at 0x26688 after one ending at 0x26683) and the command stops at the padding, so each frame is measured and the zero gaps are left out"""
     frames, p = [], 0
     while p < len(d):
@@ -3502,11 +3502,10 @@ def unzs_dict(d, did, where):
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
 def unzs(path):
-    """A zstd file decompressed: frames without a dictionary through the zstd command as before (fed the bytes: inside a RomFS image the path is not a file the command can open),
-    frames that name one with that dictionary from ZDICTS"""
-    d = open(path, 'rb').read()
+    """Decompress all frames in process, using the dictionary from ZDICTS if the file names one."""
+    with open(path, 'rb') as f: d = f.read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
+    if not did: return zstd_mod().decompress(d)
     return unzs_dict(d, did, path)
 
 def frame_size(f):

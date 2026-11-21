@@ -21783,6 +21783,7 @@ void dm_gfx_shot_at(long k, const char *path) {
 // Without it, a window the game crops (nvnWindowSetCrop) is captured the same way at the window texture's own size: what is outside the crop is never presented and holds
 // whatever the texture held before (Bastion crops its 1920x1080 window textures to 1600x900; the strip outside was black in some runs and purple in others, which regress.py
 // took for a rendering change). An uncropped window is read as it is, so its shots are the texture's own pixels
+int vi_hdr_native_white(void);
 static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
     static int out_w = -1, out_h;
     if (out_w < 0) {
@@ -21802,9 +21803,13 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         else { id<MTLCommandBuffer> cb = q_cb(); if (!present_encode(cb, src, out, crop)) return; [cb commit]; [cb waitUntilCompleted]; }
         read = out;
     }
-    if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
+    // A game's HDR picture (native HDR: RGBA16Float, linear, 1.0 the SDR white the game was told) is read as half floats; the log gives its luminance (the share above SDR
+    // white and the brightest values, which show the game's own peak) and the PNG holds it clipped at SDR white and encoded as sRGB
+    int pqw = read.pixelFormat == MTLPixelFormatRGB10A2Unorm ? vi_hdr_native_white() : 0;   // a native-HDR game's HDR10 picture (PQ, BT.2020; its paper white as SDR white)
+    int hdr = read.pixelFormat == MTLPixelFormatRGBA16Float || pqw > 0;
+    if (!hdr && read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
         read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
-    size_t w = read.width, h = read.height, row = w * 4;
+    size_t w = read.width, h = read.height, row = w * (read.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4);
     id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb();
     id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
@@ -21815,7 +21820,32 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
-    int bgra = read.pixelFormat == MTLPixelFormatBGRA8Unorm || read.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+    if (hdr) {   // half floats to luminance statistics and 8-bit sRGB in place (row shrinks to 4 bytes a pixel)
+        const __fp16 *f = buf.contents; const uint32_t *q = buf.contents; uint8_t *o = buf.contents; size_t n = w * h, above = 0; static uint32_t hist[4096];
+        memset(hist, 0, sizeof hist); double sum = 0, mx = 0;
+        for (size_t i = 0; i < n; i++) {
+            float r, g, bl;
+            if (pqw) {   // RGB10A2: R in bits 0-9; PQ to nits, BT.2020 to BT.709, over the paper white
+                float c[3];
+                for (int k = 0; k < 3; k++) {
+                    float e = ((q[i] >> (10 * k)) & 1023) / 1023.0f, pe = powf(e, 1 / 78.84375f);
+                    c[k] = powf(fmaxf(pe - 0.8359375f, 0) / (18.8515625f - 18.6875f * pe), 1 / 0.1593017578125f) * 10000.0f / (float)pqw;
+                }
+                r = 1.6605f * c[0] - 0.5876f * c[1] - 0.0728f * c[2]; g = -0.1246f * c[0] + 1.1329f * c[1] - 0.0083f * c[2]; bl = -0.0182f * c[0] - 0.1006f * c[1] + 1.1187f * c[2];
+            } else { r = f[i * 4]; g = f[i * 4 + 1]; bl = f[i * 4 + 2]; }
+            double y = 0.2126 * r + 0.7152 * g + 0.0722 * bl; if (!(y > 0)) y = 0;
+            sum += y; if (y > mx) mx = y; if (y > 1.0) above++;
+            hist[y >= 16 ? 4095 : (int)(y * 256)]++;
+            float c[3] = {r, g, bl}; uint8_t e[3];
+            for (int k = 0; k < 3; k++) { float v = c[k] > 0 ? (c[k] < 1 ? c[k] : 1) : 0; v = v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1 / 2.4f) - 0.055f; e[k] = (uint8_t)(v * 255 + 0.5f); }
+            o[i * 4] = e[0]; o[i * 4 + 1] = e[1]; o[i * 4 + 2] = e[2]; o[i * 4 + 3] = 255;
+        }
+        size_t acc = 0; double p50 = 0, p99 = 0; int got50 = 0;
+        for (int i = 0; i < 4096; i++) { acc += hist[i]; if (!got50 && acc >= n / 2) { p50 = i / 256.0; got50 = 1; } if (acc >= n - n / 100) { p99 = i / 256.0; break; } }
+        MLOG("screenshot HDR picture: luminance mean %.3f, median %.3f, 99th percentile %.3f, max %.3f (1.0 = SDR white), %.2f %% above SDR white", n ? sum / n : 0, p50, p99, mx, n ? 100.0 * above / n : 0);
+        row = w * 4;
+    }
+    int bgra = !hdr && (read.pixelFormat == MTLPixelFormatBGRA8Unorm || read.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB);
     CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
     CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, bi);
@@ -22099,10 +22129,14 @@ static float present_hdr_peak(MTLPixelFormat f) {
     double h = front_hdr_headroom(), p = fmin(h > 1 ? h : 1, cap);
     return (float)(round(p * 4) / 4);
 }
-static float g_blit_peak = -1;
-static void present_pipeline(MTLPixelFormat format) {
+static float g_blit_peak = -1, g_blit_pq = -1;
+// Native HDR (hle_vi.c vi_hdr_native): the game's own HDR10 picture, its paper white in nits (0: not an HDR10 source); on the HDR layer its peak is the screen's headroom
+__attribute__((weak)) int vi_hdr_native_white(void) { return 0; }   // hle_vi.c; the graphics unit tests have none
+static void present_pipeline(MTLPixelFormat format, MTLPixelFormat src) {
+    float pq = src == MTLPixelFormatRGB10A2Unorm ? (float)vi_hdr_native_white() : 0;
     float peak = present_hdr_peak(format);
-    if (!g_blit_pso || g_blit_fmt != format || g_blit_peak != peak) {
+    if (pq > 0 && peak > 0) { double h = front_hdr_headroom(); peak = (float)(round((h > 1 ? h : 1) * 4) / 4); }
+    if (!g_blit_pso || g_blit_fmt != format || g_blit_peak != peak || g_blit_pq != pq) {
         NSError *e = nil;
         id<MTLLibrary> lib = host_lib("present", &e);
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
@@ -22112,6 +22146,7 @@ static void present_pipeline(MTLPixelFormat format) {
         // validation and aborted every game on an SDR screen
         MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
         if (peak > 0) [cv setConstantValue:&peak type:MTLDataTypeFloat atIndex:0];
+        if (pq > 0) [cv setConstantValue:&pq type:MTLDataTypeFloat atIndex:1];
         pd.fragmentFunction = [lib newFunctionWithName:@"fs" constantValues:cv error:&e];
         if (!pd.fragmentFunction) MDIE("present shader specialisation failed %s", e.localizedDescription.UTF8String);
         pd.colorAttachments[0].pixelFormat = format;
@@ -22119,7 +22154,8 @@ static void present_pipeline(MTLPixelFormat format) {
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
         if (peak != g_blit_peak && (peak > 0 || g_blit_peak > 0))
             MLOG("present: %s", peak > 0 ? [NSString stringWithFormat:@"HDR, the game's highlights lifted to %.2f times SDR white (screen headroom %.2f, DM_HDR_PEAK caps)", peak, front_hdr_headroom()].UTF8String : "SDR");
-        g_blit_fmt = format; g_blit_peak = peak;
+        if (pq != g_blit_pq && pq > 0) MLOG("present: the game's HDR10 picture (PQ, BT.2020), its %.0f-nit white as SDR white, up to %.2f times it on this screen", pq, peak > 0 ? peak : 1.0);
+        g_blit_fmt = format; g_blit_peak = peak; g_blit_pq = pq;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
     }
@@ -22220,7 +22256,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     if (memcmp(meta, last_crop, sizeof meta)) { memcpy(last_crop, meta, sizeof meta);
         MLOG("present crop: source texture %lux%lu, valid %lu,%lu %lux%lu → target %lux%lu", (unsigned long)src.width, (unsigned long)src.height,
              (unsigned long)cx, (unsigned long)cy, (unsigned long)cw, (unsigned long)ch, (unsigned long)dst.width, (unsigned long)dst.height); }
-    present_pipeline(dst.pixelFormat);
+    present_pipeline(dst.pixelFormat, src.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
@@ -22550,7 +22586,7 @@ static int up_mfx_encode(NvShader *cs) {
 // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
-    present_pipeline(dst.pixelFormat);
+    present_pipeline(dst.pixelFormat, src.pixelFormat);
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_fit(src, crop, r, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
@@ -22706,7 +22742,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
 #endif
-    present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
+    present_pipeline(layer.pixelFormat, src.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];

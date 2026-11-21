@@ -68,6 +68,8 @@ static int32_t g_match_pick; static int g_match_pick_vrr;   // main thread: the 
 // brightness (read each second while the layer is HDR); 0 while the layer is SDR
 static _Atomic double g_hdr_head;
 double front_hdr_headroom(void) { return g_hdr_head; }
+static _Atomic double g_hdr_pot;   // the screen's HDR range at full brightness (1 on an SDR screen); hle_vi.c tells a game with HDR of its own what it can show
+double front_hdr_potential(void) { return g_hdr_pot; }
 static void hdr_apply(NSScreen *scr) {   // main thread
     if (!g_layer) return;
     static int want = -1;
@@ -82,10 +84,14 @@ static void hdr_apply(NSScreen *scr) {   // main thread
         LOG("front end: %s (screen %s: HDR headroom up to %.2f, now %.2f%s)", on ? "HDR layer, the game's picture lifted into the screen's HDR range" : "SDR layer",
             scr.localizedName.UTF8String ?: "?", pot, cur, !want ? "; DM_HDR=0" : "");
     }
-    g_hdr_head = on ? cur : 0;
+    g_hdr_head = on ? cur : 0; g_hdr_pot = on ? pot : 1;
 }
+// The window's screen's name (NSScreen.localizedName), for the player's HDR calibration of that screen (hle_vi.c vi_hdr_calibration); written on the main thread, read by the game
+static char g_screen_name[128]; static pthread_mutex_t g_screen_name_mu = PTHREAD_MUTEX_INITIALIZER;
+void front_screen_name(char *out, size_t n) { pthread_mutex_lock(&g_screen_name_mu); strlcpy(out, g_screen_name, n); pthread_mutex_unlock(&g_screen_name_mu); }
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
     if (!screen) return;
+    pthread_mutex_lock(&g_screen_name_mu); strlcpy(g_screen_name, screen.localizedName.UTF8String ?: "", sizeof g_screen_name); pthread_mutex_unlock(&g_screen_name_mu);
     hdr_apply(screen);
     g_screen_fps = (int)screen.maximumFramesPerSecond;
     g_screen_id = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];

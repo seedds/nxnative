@@ -433,6 +433,8 @@ int front_screen_max_fps(void) { return atomic_load_explicit(&g_screen_hz, memor
 // a device: built on the Mac's path, where the Dell in HDR mode showed it at 60 fps
 static _Atomic double g_hdr_head;
 double front_hdr_headroom(void) { return g_hdr_head; }
+static _Atomic double g_hdr_pot;   // the screen's HDR range at full brightness (1 on an SDR screen); hle_vi.c tells a game with HDR of its own what it can show
+double front_hdr_potential(void) { return g_hdr_pot; }
 static void hdr_apply(UIScreen *scr) {   // main thread
     CAMetalLayer *l = g_layer; if (!l || !scr) return;
     static int want = -1; if (want < 0) { const char *e = getenv("DM_HDR"); want = !(e && !strcmp(e, "0")); }
@@ -447,7 +449,7 @@ static void hdr_apply(UIScreen *scr) {   // main thread
             !want ? "; DM_HDR=0" : dm_low_power_now() && pot > 1.05 ? "; Low Power Mode" : "");
         static NSTimer *t; if (on && !t) t = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *x) { (void)x; screen_refresh(); }];   // brightness moves the headroom
     }
-    g_hdr_head = on ? cur : 0;
+    g_hdr_head = on ? cur : 0; g_hdr_pot = on ? pot : 1;
 }
 static void screen_refresh(void) {
     UIWindowScene *ws = (g_root.game ?: g_root.view).window.windowScene;

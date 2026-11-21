@@ -1,5 +1,6 @@
 # The shader keys (column 4 of shader_map.tsv) in the library of the Mac playtest (chain 38df94307792, 2026-11-03): the shaders its runs from the language screen to walking asked for, with their pixel shaders.
 # A partial build of these alone: docs/development.md, Building selected Mac shaders. Rows: key<TAB>stage.
+# Also includes the later M1 Max desktop runs on chain cd5ecdaec434 (update 2.0.1, through 2026-11-04).
 key	stage
 000274aec30d28fb	pixel
 000443f25501673e	pixel
@@ -700,6 +701,7 @@ key	stage
 16735a687e29d6b3	pixel
 1674647346b120e5	pixel
 16769c8e77f55e18	pixel
+167abc08c4edaba3	pixel
 16832b90d3774f5c	compute
 1685ebf491cb4dd7	pixel
 16a2dfc150240f23	pixel
@@ -889,6 +891,7 @@ key	stage
 1bc6a0e6931393bd	pixel
 1bcb2542fe845115	pixel
 1bccd5854e13c44e	pixel
+1bdb7e2691f9bae6	pixel
 1bdecfe3047a4773	compute
 1bdfa20f1afae439	compute
 1bebb6db17020d90	pixel
@@ -1555,6 +1558,7 @@ key	stage
 31761bbf87d4b7d3	pixel
 317fa5c0d3a7239d	vertex
 31814f8a04fc73c6	pixel
+3182e5c4f8218a0c	vertex
 31845adfdeb812a2	pixel
 318f3698ce563c5f	vertex
 31936658be09dd80	pixel
@@ -1714,6 +1718,7 @@ key	stage
 36a5adcd00d84a8e	pixel
 36a8fbe2e8ba5b5c	vertex
 36a9463562c50117	pixel
+36b7f49db42c771b	vertex
 36b8a28918c3058c	pixel
 36ba772ee931c551	compute
 36bfb5faf11d6d15	pixel
@@ -2453,6 +2458,7 @@ key	stage
 4dbd1f891182785b	compute
 4dd06137a54880f5	pixel
 4de0beaf7141e557	pixel
+4df73bce347fca26	pixel
 4e04a63cddec56bf	pixel
 4e151f5e0fe3170c	pixel
 4e195d7e4a605282	pixel
@@ -2708,7 +2714,9 @@ key	stage
 559c8da16c040c45	pixel
 55a3d819c2983cf1	vertex
 55a5928271eb2706	pixel
+55afc7e3ef7b1cd3	vertex
 55b956bb23a940e5	pixel
+55be50429c224a06	pixel
 55bf6c362ee9d76e	pixel
 55c296343888f981	compute
 55c5fc6d5d750c29	pixel
@@ -3038,6 +3046,7 @@ key	stage
 60985d53b767c3bb	pixel
 609fe324a6f8e052	pixel
 60a874dc9e73de0c	pixel
+60aa97f0f14cd314	pixel
 60b4727cc864f06a	pixel
 60b7946cd017ac21	pixel
 60be3707ccffc1e8	pixel
@@ -3588,6 +3597,7 @@ key	stage
 70e5cb0e28490c07	pixel
 70e8529e54d09054	pixel
 70ed79dc6e581295	pixel
+70f35110f42be03c	pixel
 70f51a35ff1b5344	vertex
 70f96753f1abb3ff	pixel
 70ffa984ca4ee8fe	vertex
@@ -5144,6 +5154,7 @@ a075361e12f447c0	pixel
 a079a46d8c8fa20b	pixel
 a085d12928c9c593	pixel
 a0952cb3210b7af0	pixel
+a09599043ae63349	pixel
 a09a1623db5d80ae	vertex
 a09ad0ebe781afd3	pixel
 a09eee848d5f0408	pixel
@@ -5237,6 +5248,7 @@ a3258a4c99c0ae7f	pixel
 a3288156a0aead33	pixel
 a32b9ecde6faa5c1	pixel
 a32c4f9aef477db6	pixel
+a3305c931b85d38a	pixel
 a334be3b98fadbf8	pixel
 a3356d523af0a768	pixel
 a338256083e85d4c	vertex
@@ -5410,6 +5422,7 @@ a8888a52ed1d5f66	pixel
 a8a3aad57bc6a59a	compute
 a8ac8d5b6056c126	vertex
 a8b6a155b72f2435	vertex
+a8bb6f04902d3b7c	pixel
 a8c2a5be7330953a	compute
 a8c5e42e4437880d	compute
 a8d1b220e9cc40bc	pixel
@@ -5499,6 +5512,7 @@ ac2612c01c1d405c	compute
 ac2eebaf4fbf6614	vertex
 ac3e8c7fa7ec6180	pixel
 ac3f000491fd23ba	pixel
+ac47a41b6affaff6	pixel
 ac49a69b1b94db76	vertex
 ac4d0b20a82f52f8	vertex
 ac4d51e1be14d024	pixel
@@ -5812,6 +5826,7 @@ b612a25e1808c296	pixel
 b614c99ba6a595f1	pixel
 b616846e4fa1afc1	vertex
 b622ddf72ee65b9c	compute
+b639e7c91c3eacfe	vertex
 b63af6815304ad53	pixel
 b63b659e3ed9a712	pixel
 b640798d081b4432	pixel
@@ -6151,6 +6166,7 @@ c10a37a306ee1510	pixel
 c113fb7bc3b64d47	pixel
 c11c6f399a2b19d7	pixel
 c123dd6a648e1f32	vertex
+c12d44f77b468ea7	vertex
 c1399c8d351ade7d	pixel
 c13d30b5acc6d7d2	pixel
 c14e5bd6b5fa8889	compute
@@ -7495,6 +7511,7 @@ ea8818f31ac9d180	pixel
 ea8f174819168b4e	pixel
 ea9665eb6164f8ba	compute
 eaaeca6934328713	vertex
+eab391a1fca1174d	vertex
 eac7a04743eac659	pixel
 eacec5f4056ab9c4	vertex
 ead869623cf3c9b5	pixel
@@ -7749,6 +7766,7 @@ f2c5411ddf61c847	compute
 f2c59a7ee2c642f0	vertex
 f2ceb1ff883ad34b	pixel
 f2d433231e1d4131	pixel
+f2d5d693d1cedbc7	pixel
 f2da310677e8713b	pixel
 f2dc09bde73fcb8a	pixel
 f2e937146230959a	pixel
@@ -8037,6 +8055,7 @@ fbf6291387d97c75	compute
 fc09616b0d4f7793	vertex
 fc0a63d1f16ac256	compute
 fc0edec77d21185f	pixel
+fc159b26df52cce2	pixel
 fc188b10307b3117	pixel
 fc1dfb10f5a90a08	vertex
 fc1f7b56f0a92b3c	compute

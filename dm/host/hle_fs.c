@@ -1361,7 +1361,9 @@ static void vf_build(int mi, const char *stem, int *ia, int *id) {
             // An empty file is what an archive tool leaves when it cannot unpack an entry (7-Zip and RAR 7's compression: XC3's Ultimate Rebalance mod came out as nine
             // 0-byte bdat files, and the game, given empty tables, stayed on a black screen). No game file is empty where a mod replaces one: it is left out, named in red
             if (!st.st_size) { LOG("[RED] fs archive %s:%s: %s is empty (a mod download that did not unpack?); the game's own %s is kept", m->name, arh_rest, e->fts_path, rel); close(fd); continue; }
-            if (!(mem = realloc(mem, (size_t)(nmem + 1) * sizeof *mem))) die("archive member table allocation failed");
+            vf_member *grown = realloc(mem, (size_t)(nmem + 1) * sizeof *mem);
+            if (!grown) die("archive member table allocation failed");
+            mem = grown;
             taken[fid] = 1; mem[nmem++] = (vf_member){ (uint32_t)fid, fd, (uint64_t)st.st_size };
             if (g_flag.fs) LOG("fs archive %s:%s: %s from %s (%lld bytes)", m->name, arh_rest, rel, e->fts_path, (long long)st.st_size);
         }

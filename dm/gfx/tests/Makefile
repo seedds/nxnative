@@ -398,6 +398,9 @@ check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
+t_stale_float: t_stale_float.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_stale_float.m $(MTL_T_SRC) $(FW)
+check_t_stale_float: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upload_idle: t_upload_idle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_idle.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_idle

@@ -1,0 +1,41 @@
+# Xenoblade Chronicles 2 – Nintendo Switch 2 Edition 3.0.1 (SDK 21.4.4 built for the Switch 2 (Ounce), Monolith's engine, NVN2 with DLSS).
+# The Switch 1 game is its own profile (0100E95004038000). See README.md for the measured bring-up and validation status.
+
+# ---- Identity ----
+title_id	0400E95004038001
+program_id	0400E95004038001
+
+# ---- App ----
+name	Xenoblade Chronicles 2 – Nintendo Switch 2 Edition
+ipa	XenobladeChronicles2NintendoSwitch2Edition.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	3.0.1	main=8bef68ed1eebc24bf7278040e63b83f6	subsdk0=593524e167fecd3c7a42a184c9da3963	subsdk3=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# main imports nothing from subsdk1 (NintendoSDK_DLSS) or subsdk2 (C / libc) that the host does not supply (dm/games/profile_guess.py modules)
+modules	main subsdk0 subsdk3 sdk
+romfs_marker	bf2.ard
+zip_store	.ard:.arh:.pck:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 96 MB of system resource, so virtual address memory is on, and main never sets a heap. nninitStartup sets up two 60 GB address regions; the second
+# (0xf00000000, asked by main+0xb7a540) found its limit 0 in a 64 GB alias region: a null first arena and a crash in memset at sdk+0x798ce8. 128 GB holds both, as
+# Xenoblade Chronicles: Definitive Edition's Switch 2 Edition
+mem_reserve	0x2028000000
+mem_alias	0x2000000000
+mem_stack	0x10000000
+# The Switch 2's 9 GB pool
+app_pool	0x240000000
+sys_resource	0x6000000
+# Horizon's physical-pool limit: the engine probes capacity by mapping until a map fails; without it the probe mapped all 60 GB of its address region and the arena
+# that follows was null (memset at sdk+0x798ce8 from main+0xb7a650)
+mem_map_limit	on
+
+# ---- Shader split ----
+shader_groups	/stream/=stream /sound/=sound
+shader_note	Xenoblade Chronicles 2 – Nintendo Switch 2 Edition shaders

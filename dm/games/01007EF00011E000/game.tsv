@@ -27,6 +27,11 @@ fps_target	60
 # pipeline archive, the prepare step and the hybrid pipelines on the iPhone too (5,100 prewarm lines prepared in 0.28 s at start instead of compiling on first use)
 present_snap	on
 pso_mtl4	on
+# Segment commits on the Mac (nvn_mtl.m sub_cut; README.md, GPU work): the game waits on the fence of the frame it just submitted, so with commits held back while earlier work
+# runs, the GPU waited for the host's translation inside each frame. Every cut commits, every 32 draws (about 12.6 command buffers a frame): circling outdoors at a 120 fps
+# target (M5 Max, encode thread on) 104 → 115 fps, and three 10-minute runs held 114–116 fps with no GPU errors. DM_NVN_CUT / DM_NVN_CUT_BUSY override; iOS keeps 64 and the rule
+cut_draws	32
+cut_busy	off
 # Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as
 # 1920x1344 with a 1280x896 layout space, the HUD at the screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
 screen_aspect	on

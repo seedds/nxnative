@@ -271,7 +271,12 @@ static void md_defer_body(void *arg) {
         if (k >= 0) {
             mdec_t *d = g_dfq[k].d; int e = g_dfq[k].ev;
             memmove(g_dfq + k, g_dfq + k + 1, (size_t)(--g_ndfq - k) * sizeof *g_dfq);
-            if (d->started) md_event(d, e);   // not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down)
+            // Stop takes these locks in the same order. An acquisition can
+            // re-arm video output after Flush has already emptied the queue.
+            dm_host_mutex_lock(&d->mu);
+            int ready = d->started && (e != 1 || d->noutq);
+            pthread_mutex_unlock(&d->mu);
+            if (ready) md_event(d, e);
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
@@ -809,6 +814,12 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
+    if (!MD_AUDIO(d)) {
+        // A deferred video signal admitted after the initial drop can still be
+        // running. Wait with both decoder locks released and keep new events.
+        dm_host_lock(&g_dfmu);
+        pthread_mutex_unlock(&g_dfmu);
+    }
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: acquire a free input index", int, h_movie_AcqIn, void **self, int *idx, int *left) {

@@ -118,12 +118,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 
 - **Symptom:** Super Mario Sunshine freezes at the first M graffiti while music continues. Hagi waits for frame 286 of `EX128x144_q0.mp4` with 14 pictures and an end-of-stream output ready in the host.
 - **Cause:** the host coalesces deferred video events. Hagi takes one output per auto-cleared event, and a completed AVC drain has no further decode work to signal the outputs still queued.
-- **Fix:** after a successful video acquisition, `h_movie_AcqOut` re-arms the deferred output event if more outputs are ready. `t_movie_avc` takes one output per event through the end of a synthetic drain.
+- **Fix:** after a successful video acquisition, `h_movie_AcqOut` re-arms the deferred output event if more outputs are ready. The signaller checks that the decoder is still started and the queue still has an output before delivering that event. `t_movie_avc` takes one output per event through a synthetic drain and checks that a late re-announcement after Flush finds the emptied queue.
 - **Found on:** [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) in [issue #2990](https://github.com/seedds/nxnative/issues/2990).
 
 ### `Flush`, `Stop` and `Start`
 
 - **Fix:** as with MediaCodec, `Flush` announces nothing, and no input or output index is handed out while the decoder is stopped. The "input available" after `Start` is signalled about 2 ms later from a guest thread, as the SDK's codec thread would. Pending signals are dropped at `Stop`, `Flush` and destruction.
+- **Video delivery:** a deferred signal can start after Flush drops the pending events. After clearing the queue and releasing the decoder locks, Flush waits for any such signal already in progress. It leaves queued notifications intact so a fresh picture can still signal. `t_movie_avc` exercises a signal held across reset and an output queued between reset and Flush's return.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md): the game ends a movie with `Flush`, `Flush`, `Stop`, destroy, and calls `Start` after a `Flush` when it loops.
 
 ### Input indices returned by a flush while a client holds them

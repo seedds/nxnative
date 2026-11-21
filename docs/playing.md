@@ -73,3 +73,5 @@ The mouse pointer hides when you press a key or a controller button, or move a s
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.
+
+If an NVN game compiles a shader during play and the log says its key is missing from the shader map, run it with `DM_GLSLC_CAPTURE` pointing to a separate folder. For the Mac development run, add `DM_GLSLC_CAPTURE=glslc_play` to the printed run command's environment. On iPhone or iPad, put `DM_GLSLC_CAPTURE=glslc_play` in the app's `Documents/env.txt` and copy `Documents/glslc_play` back from the device after playing the affected scene. Quit the game, then rebuild the same game version with `--glslc-play DIR`, giving the folder that holds the `.glslc` files. [Shaders compiled after boot](reference/shaders.md#shaders-compiled-after-boot)

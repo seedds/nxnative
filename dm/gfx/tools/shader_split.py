@@ -59,7 +59,7 @@
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 names the source chosen for the key); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated> [<play capture file list, JSON>]]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
@@ -3742,7 +3742,7 @@ def scan_blob(d, label, out, depth=0, left=None):
 def merge_keys(results):
     """The shaders of every scanned file, one row per key: (where, stage, control, code), the pairs, and the rows per source group. A key found more than once keeps its first copy,
     except that the game's own copy (base or update) takes the place of an add-on's (/aoc/<index>/): the game's rows are then the same with or without any DLC, so a registered build
-    packed with another DLC set changes only the DLC rows (build_ipa_from_nsp.py dlc_only_shader_change). PRAGMATA's re_dlc_000.pak holds 45 of the game's shaders, and with the DLC
+    packed with another DLC set changes only the DLC rows (build_ipa_from_nsp.py optional_shader_change). PRAGMATA's re_dlc_000.pak holds 45 of the game's shaders, and with the DLC
     installed the path order (aoc/ before re_chunk_000.pak) gave them to the DLC, so a profile split with it did not build without it (issue #2439)"""
     keys, pairs, per_src = {}, set(), collections.Counter()
     for rel, uniq, pr, _ in results:
@@ -3751,7 +3751,7 @@ def merge_keys(results):
             if key in keys:
                 old = keys[key]
                 if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
-                if old[0].startswith('/aoc/') and not v[0].startswith('/aoc/'): per_src[group(old[0])] -= 1; keys[key] = v; per_src[group(v[0])] += 1
+                if old[0].startswith('/aoc/') and not v[0].startswith(('/aoc/', '/glslc_play/')): per_src[group(old[0])] -= 1; keys[key] = v; per_src[group(v[0])] += 1
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
     return keys, pairs, per_src
@@ -4287,6 +4287,26 @@ def uniq_keys(found, registered_map: str = ''):
         except FileNotFoundError: pass   # the packer checks that registered tables exist
     return uniq
 
+def glslc_play(manifest):
+    """Read whole outputs of the existing host capture. Keep pairs within each file even when just one of their stages needs a new map row."""
+    with open(manifest, encoding='utf-8') as f: paths = json.load(f)
+    played, pairs = [], set()
+    for path in paths:
+        label = f'/glslc_play/{os.path.basename(path)}'
+        try:
+            with open(path, 'rb') as f: data = f.read()
+            whole = data.startswith(GLSLC_MAGIC) and glslc_layout(data, 0)[0] == len(data)
+            found = glslc_shaders(data, label, need=False, offsets=(0,)) if whole else []
+        except (OSError, struct.error) as e:
+            print(f'[RED] {path}: could not read GLSLC capture: {e}', flush=True)
+            continue
+        if not found:
+            print(f'[RED] {path}: no complete GLSLC shader output', flush=True)
+            continue
+        played.extend(found)
+        pairs.update(var_pairs(found))
+    return uniq_keys(played), pairs
+
 def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueError) on a damaged file
     import nso
     with open(path, 'rb') as f: return bytes(nso.load(f.read(), path).image)
@@ -4416,7 +4436,12 @@ def main():
         results = [r for r in results if r[3] != 'defer'] + again
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
+    play_pairs = set()
+    if len(sys.argv) > 9:
+        played, play_pairs = glslc_play(sys.argv[9])
+        results.append(('glslc_play', played, set(), {}))   # game files, boot captures and DLC retain ownership of any keys they share with play captures
     keys, pairs, per_src = merge_keys(results)
+    pairs.update(pair for pair in play_pairs if any(keys[k][0].startswith('/glslc_play/') for k in pair[:2]))
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')

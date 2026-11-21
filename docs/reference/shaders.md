@@ -2713,6 +2713,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the capture run presses A every 4 s from 5 s on (`GLSLC_KEYS` in `build_ipa_from_nsp.py`, through `DM_KEYS`). The run keeps its own save and temporary storage, so whatever the presses choose is thrown away with them; a game that compiles at boot (Three Houses) is done before the first press.
 - **Found on:** Crash Team Racing Nitro-Fueled (`0100F9F00C696000`, update 1.0.15, no profile yet): both outputs within the 30 s run.
 
+### Shaders compiled after boot
+
+- **Symptom:** a scene is missing geometry and logs `[RED] shader … is not in the shader map` when it first uses a material.
+- **Cause:** a miss in the game's own shader cache can make the game compile with `glslcCompile` long after the packer's boot capture ends. The compile produces Switch GPU code. A host with only the packaged Metal libraries skips any stage whose key is absent.
+- **Fix in testing:** the Mac host can translate missing NVN1 vertex and pixel stages from the code and control bytes supplied to `nvnProgramSetShaders`. `--platform mac --nvn-runtime` uses the packer's translator and Xcode tools. The first use waits for translation. Files are cached under `DM_TEMP/nvn-shaders` by shader, chain, and profile inputs. Translation currently works stage by stage. Linking pairs that need extra vertex outputs remains open.
+- **Mac app in testing:** `--platform mac-app --nvn-runtime-python DIR` bundles a relocatable Python installation and the shader translators. The Metal API compiles translated source without Xcode. Catherine's Night 2 save passed with an empty shader cache after fixing [CPU staging recycled before a texture upload](nvn-objects.md#cpu-staging-recycled-before-a-texture-upload). iOS has no runtime translator yet.
+- **Offline workaround for builds without the runtime compiler:** run the game with `DM_GLSLC_CAPTURE` set to a separate capture folder. Rebuild the same version with `--glslc-play DIR`. The splitter adds new keys and their program pairs after the game, boot and DLC sources. The packer uses a shader-only derived profile and keeps the registered module fixes.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md#shaders).
+
 ### Offline coverage after an empty GLSLC capture
 
 - **Symptom:** The Mac capture boot submits shader programs but writes no GLSLC capture files.

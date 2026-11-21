@@ -6603,6 +6603,7 @@ static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
 static NSString *g_shmap_path, *g_msl_dir;
+#include "nvn_live.inc"
 // The library may be one file beside its folder, b-<chain>.img (dm/tools/shader_lib.py, msl_image.h), read in place. Each file comes from the folder first: what a partial dmsh_build.py run rebuilt goes
 // over the image, a build folder from before the image works as it did, and a host running from a folder goes on when a build packs it (the image is whole before the folder goes). So the image is
 // opened at the first file the folder lacks, and tried again each time while it is not there. img: the image the entry is in
@@ -6626,7 +6627,10 @@ static NSData *msl_data(NSString *path) {   // a file of the library, nil when i
     NSData *d = [NSData dataWithContentsOfFile:path];
     if (d) return d;
     romfs_img *m; const img_ent *x = msl_image_file(path, &m);
-    if (!x) return nil;
+    if (!x) {
+        NSString *live = live_artifact(path.lastPathComponent);
+        return live ? [NSData dataWithContentsOfFile:live] : nil;
+    }
     NSMutableData *o = [NSMutableData dataWithLength:(NSUInteger)x->b];
     return romfs_image_read(m->fd, o.mutableBytes, (size_t)x->b, (off_t)x->a) ? o : nil;
 }
@@ -6636,7 +6640,7 @@ static NSString *exe_rel(const char *rel) {
     char *dir = dirname(buf);
     return [NSString stringWithFormat:@"%s/%s", dir, rel];
 }
-// Shader mapping table (output of tools/shader_map.py): at runtime only 'Switch control section key → stage' is used; shaders are always translations of the Switch originals (tools/dmsh_build.py produces <key>_b.metallib + reflection offline)
+// Shader mapping table (output of tools/shader_map.py): only 'Switch control section key → stage' is used. The Mac development compiler can add translations of new stages separately.
 static void shmap_read(void);
 static void warm_start(void);
 // The shader map, the library directory and its tables, read once from any thread (the prefetch, mtl_prog_prefetch, runs on the game's threads)
@@ -6871,7 +6875,25 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
         int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
         if (x && msl_image_map(img, x, &f)) return lib_from_map(f, err);
-        if (!x) errno = open_errno;
+        NSString *live = !x ? live_artifact(path.lastPathComponent) : nil;
+        if (live) {
+            fd = open(live.fileSystemRepresentation, O_RDONLY);
+            if (fd < 0) {
+                NSString *sourcePath = [[live stringByDeletingPathExtension] stringByAppendingString:@".runtime.metal"];
+                NSString *source = [NSString stringWithContentsOfFile:sourcePath encoding:NSUTF8StringEncoding error:nil];
+                if (source) {
+                    MTLCompileOptions *options = [MTLCompileOptions new];
+                    options.languageVersion = MTLLanguageVersion4_0;
+                    options.preserveInvariance = YES;
+                    options.mathMode = MTLMathModeRelaxed;
+                    plain_compile_begin();
+                    NSError *error = nil;
+                    id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:options error:&error];
+                    return lib_tag(compile_done(lib, error, err), lib_digest(source.UTF8String, [source lengthOfBytesUsingEncoding:NSUTF8StringEncoding]));
+                }
+            }
+        }
+        else if (!x) errno = open_errno;
     }
     if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); int map_errno = errno; close(fd);
@@ -7122,6 +7144,9 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
 }
 // The part of uniform slot reg's binding the shader can read: its first cb_ext bytes when cb_extent.tsv bounds them, else the whole binding
 static inline uint64_t cb_len(NvShader *sh, int reg, uint64_t size) { uint32_t e = sh && reg >= 0 && reg < 16 ? sh->cb_ext[reg] : 0; return e && e < size ? e : size; }
+static NSString *shader_stage(NSString *key) {
+    return g_shmap[key] ?: live_lookup(key)[@"stage"];
+}
 static int stage_of(NSString *stage) {
     if ([stage isEqualToString:@"vertex"]) return 0; if ([stage isEqualToString:@"pixel"]) return 1; if ([stage isEqualToString:@"compute"]) return 5;
     if ([stage isEqualToString:@"hull"]) return 3; if ([stage isEqualToString:@"domain"]) return 4; if ([stage isEqualToString:@"geometry"]) return 2;
@@ -7223,7 +7248,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
         uint8_t md[8]; if (!prog_key(p, i, md)) MDIE("program stage %u has no shader key", i);
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
-        NSString *stage = g_shmap[k];
+        NSString *stage = shader_stage(k);
         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
             NvShader *b = builtin_get(k.UTF8String);
             if (b) { o->sh[5] = b; o->stages |= (uint8_t)(1u << 5); continue; }
@@ -7275,7 +7300,7 @@ static uint8_t prog_stage_mask(const prog_t *p) {
         if (!prog_key(p, i, md)) { m |= PROG_ST_UNKNOWN; continue; }
         char hx[17];
         snprintf(hx, sizeof hx, "%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]);
-        NSString *stage = g_shmap[@(hx)];
+        NSString *stage = shader_stage(@(hx));
         if (stage) m |= prog_stage_bit(stage);
         else m |= builtin_has(hx) ? (uint8_t)(1u << 5) : (uint8_t)PROG_ST_UNKNOWN;
     }
@@ -16473,19 +16498,35 @@ static void warm_claim(void) {
         }
     }
 }
-// A program's libraries are loaded in the background when the game makes the program (nvnProgramSetShaders, most of them while it loads a scene), and the next submission
+// A Mac development run can build a missing stage here while nvnProgramSetShaders still has the input bytes.
+// A program's libraries are loaded in the background when the game makes the program (most of them while it loads a scene), and the next submission
 // takes them (warm_claim) instead of its first draw loading each on the submit thread: in Donkey Kong Bananza a level's first frames loaded 3 to 7 libraries there, 20-90 ms
 // with the drive idle and up to 4 s with it busy. A draw that comes before its library has loaded loads it itself, as before. DM_NVN_PREFETCH=0 turns it off
 static _Atomic uint64_t g_progpf_loaded;
 static int prefetch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PREFETCH"); v = !(e && !strcmp(e, "0")); } return v; }
 void mtl_prog_prefetch(const prog_t *cp) {
     prog_t *p = (prog_t *)cp;
-    if (!g_dev || !prefetch_on()) return;
+    if (!g_dev) return;
+    int prefetch = prefetch_on();
+#if TARGET_OS_OSX
+    live_configure();
+    if (!prefetch && !g_live_shaders) return;
+#else
+    if (!prefetch) return;
+#endif
     shmap_read_once();   // the map only: the prewarm starts on the submit thread (shmap_load)
     for (unsigned i = 0; i < p->nstage; i++) {
         uint8_t md[8]; if (!prog_key(p, i, md)) MDIE("program stage %u has no shader key", i);
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
-        NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
+        NSString *stage = shader_stage(k);
+#if TARGET_OS_OSX
+        if (!stage && g_live_shaders && !builtin_has(k.UTF8String)) {
+            live_compile(k, &p->sd[i]);
+            stage = shader_stage(k);
+        }
+#endif
+        if (!prefetch) continue;
+        int st = stage ? stage_of(stage) : -1;
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
         NSString *pc = [k stringByAppendingString:@"_b"];
         if (!progpf_first(pc)) continue;

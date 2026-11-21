@@ -18,7 +18,10 @@ DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Works
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
-_bad = tool_lock.check_tools()
+SOURCE_ONLY = os.environ.get('DMSH_SOURCE_ONLY') == '1'
+if SOURCE_ONLY and not want:
+    sys.exit('[RED] source-only translation requires explicit stage keys')
+_bad = tool_lock.check_tools(False) if SOURCE_ONLY else tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables come from here
@@ -29,6 +32,8 @@ SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
 IOSOUT = os.environ.get('IOSOUT')   # destination for requested iOS libraries (iphoneos metallib + reflection)
+if SOURCE_ONLY and IOSOUT:
+    sys.exit('[RED] source-only translation produces one set of sources without IOSOUT')
 # Which metallibs this run builds: DMSH_TARGETS=mac,ios (default: both when IOSOUT is set, else mac). The Mac
 # sources and reflection are written even when 'mac' is left out (the profile's c1_full / cb_extent tables are
 # made from them), so an iOS-only build skips only the macOS compile, about half of the Metal work.
@@ -62,17 +67,40 @@ MAC_RECORD = ' '.join(dmsh_chain.MAC_METAL) + '; xcrun -sdk macosx metallib'
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
 # MAC_RECORD names the xcrun command, which runs the same compiler
 def xcrun_out(*args): return subprocess.run(['xcrun', '-sdk', 'macosx', *args], capture_output=True, text=True, check=True).stdout.strip()
-MAC_RUN = [xcrun_out('-f', 'metal'), '-isysroot', xcrun_out('--show-sdk-path'), *dmsh_chain.MAC_METAL[4:]]
-MAC_LINK = [xcrun_out('-f', 'metallib')]
+MAC_RUN = [] if SOURCE_ONLY else [xcrun_out('-f', 'metal'), '-isysroot', xcrun_out('--show-sdk-path'), *dmsh_chain.MAC_METAL[4:]]
+MAC_LINK = [] if SOURCE_ONLY else [xcrun_out('-f', 'metallib')]
 # -fbracket-depth: the front end stops at 256 nested brackets ("bracket nesting level exceeded maximum of 256"). Ocarina of Time's compute shaders 1f78730053feb036 and e172bd7ec218ab8e
 # (3.5 MB of MSL each) nest 259 deep in one expression and were left out. A source within the default limit compiles to the same bytes with it (checked on macOS and iOS), so, like the
 # precompiled header, the records do not name it and the Metal cache keeps its libraries. ios_metal.DEPTH is the same
 METAL_DEPTH = ['-fbracket-depth=1024']
 # The outer shader cache restores compiled libraries directly, before the MSL compile cache can check their compiler. Keep override builds separate there too.
-METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
+METAL_FP = 'runtime source' if SOURCE_ONLY else dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the precompiled header and METAL_DEPTH change no output, so MAC_RECORD does not name them (dmsh_pch.py)
     dmsh_pch.compile(MAC_RUN + METAL_DEPTH, msl, air)
     subprocess.run([*MAC_LINK, air, '-o', lib], check=True)
+
+
+class SourceOutputs:
+    """Keep the same variants and their reflection for Metal to compile at runtime."""
+    def __init__(self):
+        self.stats = collections.Counter()
+
+    @staticmethod
+    def compile(target, msl, lib):
+        shutil.copyfile(msl, lib.removesuffix('.metallib') + '.runtime.metal')
+
+    def compile_split(self, target, msl, libs, split):
+        # Reflection names the exact entry points. Each side can use the whole unit.
+        for lib in libs:
+            self.compile(target, msl, lib)
+
+    @staticmethod
+    def with_compiler(target, reflection):
+        return reflection
+
+    @staticmethod
+    def summary():
+        return 'Metal sources prepared for runtime compilation'
 
 def record_index(path):   # → (an open descriptor, {a record's key: its bytes' (start, end)}): shader_split.py writes each record's key at +0x08, its bytes from its marker to the next one
     # Scanned through a read-only mapping that is closed again, so no package stays in this process. Pokopia's ps_rdb.bin (4.25 GB) read and cut into its 105,118
@@ -791,6 +819,14 @@ def geometry_finish(key, w, j, c1):
             save('_bgv', full, meta)
     return 'ok', '', base
 
+def cross_msl(spv, msl):
+    if SOURCE_ONLY:
+        from dmsh_wrap import wrap_signed_integers
+        with open(spv, 'rb') as f: data = wrap_signed_integers(f.read())
+        with open(spv, 'wb') as f: f.write(data)
+    return subprocess.run([SPIRV_CROSS, *XC, spv, '--output', msl], capture_output=True, text=True)
+
+
 def finish(key, w, j, c1):
     name, k = loc[key]
     msl = os.path.join(w, key + '.metal'); lib = os.path.join(out, key + '_b.metallib')
@@ -804,7 +840,7 @@ def finish(key, w, j, c1):
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
     if j['stage'] in ('vs', 'ds'): spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane); a domain shader is a vertex function in Metal too
-    r = subprocess.run([SPIRV_CROSS, *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+    r = cross_msl(os.path.join(w, key + '.spv'), msl)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()
     if j['stage'] == 'vs':   # second pass: re-translate with inputs that are only used as integers reported as uint (see int_inputs)
@@ -814,7 +850,7 @@ def finish(key, w, j, c1):
             rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
             if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
             spv_single_lane(os.path.join(w, key + '.spv'))
-            r = subprocess.run([SPIRV_CROSS, *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+            r = cross_msl(os.path.join(w, key + '.spv'), msl)
             if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
@@ -948,7 +984,7 @@ keys = build_keys(want, loc, PAIRS)
 if want: want = set(keys)   # dependency outputs are cleaned too, so a failed pixel build cannot leave old MSL for padding
 keys = [key for key in keys if key not in RT_KEYS]   # one universal RT library includes every discovered module, even on a partial build
 NJ = int(os.environ.get('J', '8'))
-PROCS = int(os.environ.get('DMSH_PROCS', NJ))   # processes that finish shaders (fin_worker); 0: NJ threads of this one
+PROCS = 0 if SOURCE_ONLY else int(os.environ.get('DMSH_PROCS', NJ))   # processes that finish shaders (fin_worker); 0: NJ threads of this one
 BATCH = 4 * NJ   # shaders translated and finished together: the next batch is translated while this one is finished, and a shader's working files go when it is (fin).
 # Minecraft Dungeons II, 15,826 shaders: at most 3,279 files under the build folder with batches of 256 removed whole, 68,230 before batches (Octopath Traveler 0's stopped build)
 # A full build starts from no shader outputs, a partial one from none of the keys it builds, so what a run leaves is what it built: every output is restored from the cache anyway.
@@ -990,9 +1026,9 @@ _work = os.environ.get('WORK') or tempfile.gettempdir()
 sweep_work(_work)
 w = tempfile.mkdtemp(prefix='dmsh_', dir=_work)
 with open(os.path.join(w, 'pid'), 'w') as _f: _f.write(str(os.getpid()))
-MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = SourceOutputs() if SOURCE_ONLY else dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ and b-*.img beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
-for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
+for _spec in [] if SOURCE_ONLY else [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
     for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
         if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
@@ -1040,7 +1076,7 @@ for key in keys:
 for i, key in enumerate(keys):
     name = loc[key][0]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
-    hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
+    hit, cache_reasons[key] = (False, 'source only') if SOURCE_ONLY else cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
     progress('cache check', i + 1, len(keys), cached=len(cache_hits))
 NMISS = sum(1 for k in keys if k not in cache_hits)
@@ -1082,7 +1118,7 @@ def fin(key, wb):
             return key, 'ok', '', refl
         if key in xerr or not os.path.exists(os.path.join(wb, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
         result = (key,) + finish(key, wb, jobs[key], c1s[key])
-        if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
+        if result[1] == 'ok' and not SOURCE_ONLY: publish_cache(key, digests[key], rule_fps[key], CODE_FP)
         return result
     finally:
         commit(key)

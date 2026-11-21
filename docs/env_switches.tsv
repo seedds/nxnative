@@ -124,6 +124,8 @@ DM_MEASURE_LOCK	path	`=<file>`: `scripts/regress.py`'s default `--lock`, the mea
 DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: footprint, Metal allocation and resident and charged memory by region class (guest, code, malloc, gpu, …); on iOS a relative path is under `Documents`, and `Documents/env.txt` can set it
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
+DM_MEM_CUTOFF_MB	switch	`=<MB>`: for a game without `mem_map_limit`, `MapPhysicalMemory` is refused with ResultLimitReached while the process holds more than that (footprint plus guest-file pages in memory), so the SDK frees its cached pages (`hle_svc.c` `mem_cutoff_hit`; off by default)
+DM_MEM_ROOM_MIN_MB	switch	`=<MB>`: on iOS, for a game without `mem_map_limit`, `MapPhysicalMemory` is refused with ResultLimitReached while less than that is left to the memory limit, so the SDK frees its cached pages (default 768; `0` turns it off)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
 DM_MIC	player	`1` lets a game use the Mac's microphone through SDK polling input streams, after macOS grants access. Off by default. A packed Mac app asks before launching the host, including with the settings window hidden

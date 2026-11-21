@@ -42,3 +42,10 @@ depth_mode	zero
 # everything is under Data/: the player's serialized files and the StreamingAssets bundles
 shader_groups	/Data/=data
 shader_note	Hollow Knight shaders
+
+# ---- Frame rate ----
+# 60 fps, as the game asks, up to 120 on the Mac: Unity steps the game by the time that really passed. The rewriter finds QualitySettings.vSyncCount and Application.targetFrameRate
+# through Unity's internal-call table (dm/tools/unity_fps.py; on 1.5.12620 targetFrameRate at main+0x63aeb60), the host writes the target there (hle_fpslock.c) and presents at it.
+# The speed checked at 60 and 120: the same walk in King's Pass is at the same place each second at both rates
+fps_target	60
+fps_max	120

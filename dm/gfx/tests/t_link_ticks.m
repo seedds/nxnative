@@ -27,6 +27,9 @@ static int test_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, cons
 #undef DM_GAME_FPS_MAX
 static int test_fps_max = 120;
 #define DM_GAME_FPS_MAX test_fps_max
+static int test_vi_hz = 60;   // the Switch 2 display's rate (hle_vi.c vi_refresh_hz)
+#define DM_VI_REFRESH_HZ_OWN
+int vi_refresh_hz(void) { return test_vi_hz; }
 #include "../nvn/hle_nvn.c"
 #undef g_ft
 void *front_metal_layer(void) { return NULL; }
@@ -155,6 +158,21 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(60, 0, 1, 2, "a game not checked at 120 presents at 60");
     CHECK(nvn_game_fps() == 60, "a game not checked at 120 reports 60");
     test_fps_max = 120; setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1; g_fps_high = -1;
+    // A Switch 2 display at 120 Hz (the game's 120 Hz capability on a 120 Hz screen): the game's present interval counts refreshes of 1/120 s, in game mode with no host cap
+    test_vi_hz = 120; g_link_mode = 2;
+    acquire_ticks(60, 0, 1, 1, "a 120 Hz Switch 2 display: game interval 1 is one tick of a 120 Hz link (120 fps)");
+    CHECK(nvn_game_fps() == 120 && nvn_vsync_hz() == 120, "a 120 Hz Switch 2 display: 120 fps and a 120 Hz vsync event");
+    acquire_ticks(60, 0, 2, 2, "a 120 Hz Switch 2 display: game interval 2 is two ticks (60 fps)");
+    CHECK(nvn_game_fps() == 60, "a 120 Hz Switch 2 display: interval 2 is 60 fps, not the 30 Hz link");
+    acquire_ticks(60, 1, 2, 2, "a 120 Hz Switch 2 display leaves display mode at its own rate");
+    setenv("DM_FPS_TARGET", "60", 1); g_present_cap = -1;
+    acquire_ticks(60, 0, 1, 2, "a 120 Hz Switch 2 display under the host's 60 fps cap keeps the cap");
+    setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1;
+    g_link_mode = 1;
+    acquire_ticks(60, 0, 1, 1, "a 120 Hz Switch 2 display on a 60 Hz link waits at least one tick");
+    test_vi_hz = 60; g_link_mode = 2;
+    acquire_ticks(60, 0, 1, 2, "the display back at 60 Hz: game interval 1 is a 60 Hz vsync again, two ticks");
+    CHECK(nvn_game_fps() == 60 && nvn_vsync_hz() == 60, "the display back at 60 Hz: 60 fps and a 60 Hz vsync event");
     g_link_mode = 1;
     CHECK(mtl_link_rate() == 60, "a 60 Hz link reports 60");
     a = per_wait(0, 1);

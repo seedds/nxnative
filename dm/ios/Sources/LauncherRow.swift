@@ -13,7 +13,7 @@ struct SettingRow: View {
     private var locked: Bool { m.fixed.contains(s.env) }
     private var note: String {
         guard locked else { return s.note }
-        return (s.note.isEmpty ? "" : s.note + " · ") + (m.fromLaunch.contains(s.env) ? "Set at launch" : "Set by an env file")
+        return (s.note.isEmpty ? "" : s.note + " · ") + (m.fromLaunch.contains(s.env) ? L("Set at launch") : L("Set by an env file"))
     }
     private var rangeValue: Binding<Double> {
         Binding(get: { Double(m.values[s.env] ?? s.def) ?? s.max ?? 1 },

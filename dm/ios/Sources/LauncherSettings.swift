@@ -32,7 +32,11 @@ struct Setting: Decodable, Identifiable {
     }
     enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
 }
-struct SettingsFile: Decodable { let settings: [Setting] }
+struct SettingsFile: Decodable { let settings: [Setting]; let ui: [String: String]? }   // ui: the window's own strings in the language settings.py was asked for (DM_SETTINGS_LANG)
+
+/// The launcher's own strings, translated when launcher.json carries them (settings.py with DM_SETTINGS_LANG); English otherwise
+var launcherUI: [String: String] = [:]
+func L(_ s: String) -> String { launcherUI[s] ?? s }
 
 // The Frame rate row offers 120 only where the screen shows it: on an iPhone or iPad the host's reading of the game's screen (front_ios.m front_screen_max_fps: 60 on a screen
 // below 120 Hz and in Low Power Mode, where the host holds 60 anyway, hle_nvn.c high_cap_tick). The value in use stays listed, so a choice made on another screen is not dropped.

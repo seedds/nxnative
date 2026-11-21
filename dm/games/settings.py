@@ -134,7 +134,31 @@ def build(gid, patched, control, other_programs=()):
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
         out.append(s)
-    return {'schema': SCHEMA, 'game': g.id, 'settings': out}
+    d = {'schema': SCHEMA, 'game': g.id, 'settings': out}
+    lang = os.environ.get('DM_SETTINGS_LANG', '')
+    if lang: translate(d, lang)
+    return d
+
+
+def translate(d, lang):
+    """The settings window in another language (DM_SETTINGS_LANG=it): settings.<lang>.tsv beside this file, one key and its text per line, tab-separated:
+    <VAR>.label / <VAR>.note / <VAR>=<value> (a choice's option) / section:<Name> / ui:<the window's own English string> (launcher.json's ui, which Launcher.swift's L() reads).
+    What the table lacks stays in English"""
+    path = Path(__file__).with_name(f'settings.{lang}.tsv')
+    if not path.is_file(): sys.exit(f'DM_SETTINGS_LANG={lang}: no {path.name}')
+    t = {}
+    for n, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+        if not line.strip() or line.startswith('#'): continue
+        k, sep, v = line.partition('\t')
+        if not sep or not v: sys.exit(f'{path.name}:{n}: <key><tab><text>')
+        t[k] = v
+    for s in d['settings']:
+        e = s['env']
+        s['label'] = t.get(e + '.label', s['label'])
+        if s.get('note'): s['note'] = t.get(e + '.note', s['note'])
+        s['section'] = t.get('section:' + s['section'], s['section'])
+        for o in s.get('options', []): o[1] = t.get(f'{e}={o[0]}', o[1])
+    d['ui'] = {k[3:]: v for k, v in t.items() if k.startswith('ui:')}
 
 
 if __name__ == '__main__':

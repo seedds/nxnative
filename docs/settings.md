@@ -11,6 +11,8 @@ The screen before the game starts shows the settings the game supports. A settin
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
 
+The list is in English. A Mac app built with `DM_SETTINGS_LANG=it` for the NSP script shows it, and the window's own buttons, in Italian (`dm/games/settings.it.tsv`; another language takes its own `settings.<lang>.tsv`); what the table lacks stays in English.
+
 ## Tested defaults
 
 Each game comes with the settings it was tested with: its profile in this repository says, for example, that Breath of the Wild runs with Frame buffering and Metal 4 pipelines on, because that combination held a steady 60 fps on an iPhone 17 Pro Max. Those are the defaults the settings screen shows the first time.

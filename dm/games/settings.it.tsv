@@ -1,0 +1,99 @@
+# Italian strings of the settings window (dm/games/settings.py translate, DM_SETTINGS_LANG=it). Key<TAB>text: <VAR>.label, <VAR>.note, <VAR>=<value>, section:<Name>, ui:<English>
+section:Game	Gioco
+section:Controls	Controlli
+section:Performance	Prestazioni
+DM_FPS_TARGET.label	Frequenza fotogrammi
+DM_FPS_TARGET=30	30 fps
+DM_FPS_TARGET=60	60 fps
+DM_FPS_TARGET=120	120 fps
+DM_DYNAMIC_RESOLUTION.label	Risoluzione dinamica
+DM_DYNAMIC_RESOLUTION.note	Il gioco abbassa la risoluzione sotto carico. Disattivala per tenere la risoluzione piena della modalità console scelta.
+DM_RENDER_SCALE.label	Scala di rendering
+DM_OPMODE.label	Modalità console
+DM_OPMODE=1	TV (dock)
+DM_OPMODE=0	Portatile
+DM_PRESENT_UPSCALE.label	Upscaling finale
+DM_PRESENT_UPSCALE.note	Usa più tempo GPU e può scaldare di più.
+DM_PRESENT_UPSCALE=off	Standard
+DM_PRESENT_UPSCALE=metalfx	MetalFX
+DM_UPSCALER.label	Upscaler del gioco
+DM_UPSCALER=game	Quello del gioco (rete neurale NDSR)
+DM_UPSCALER=metalfx	MetalFX
+DM_UPSCALER=off	Disattivato
+DM_LANG.label	Lingua del gioco
+DM_LANG.note	I file di questo gioco non elencano le sue lingue, quindi alcune potrebbero mancare. In quel caso il gioco ne mostra un'altra.
+DM_LANG=en-US	Inglese (americano)
+DM_LANG=en-GB	Inglese (britannico)
+DM_LANG=ja	Giapponese
+DM_LANG=fr	Francese
+DM_LANG=de	Tedesco
+DM_LANG=es-419	Spagnolo (America Latina)
+DM_LANG=es	Spagnolo
+DM_LANG=it	Italiano
+DM_LANG=nl	Olandese
+DM_LANG=fr-CA	Francese (Canada)
+DM_LANG=pt	Portoghese
+DM_LANG=ru	Russo
+DM_LANG=ko	Coreano
+DM_LANG=zh-Hant	Cinese tradizionale
+DM_LANG=zh-Hans	Cinese semplificato
+DM_LANG=pt-BR	Portoghese (Brasile)
+DM_PICTURE_FIT.label	Immagine
+DM_PICTURE_FIT.note	Riempi taglia l'immagine 16:9 del gioco per coprire lo schermo. Barre della salute, sottotitoli o mappe vicino ai bordi possono restare fuori. Un'immagine a tutto schermo senza tagli richiede una patch per ogni gioco.
+DM_PICTURE_FIT=fit	Adatta
+DM_PICTURE_FIT=fill	Riempi
+DM_SHOW_FPS.label	Contatore dei fotogrammi
+DM_TOUCH_HAPTICS.label	Risposta al tocco
+DM_SCREEN_ASPECT.label	Forma dell'immagine
+DM_SCREEN_ASPECT.note	Disegna circa un quarto di pixel in più: un po' più lento e più caldo.
+DM_SCREEN_ASPECT=auto	Come lo schermo
+DM_SCREEN_ASPECT=1.43	Schermo di iPhone Duo (1,43:1)
+DM_SCREEN_ASPECT=0	16:9 (Switch)
+DM_FULLSCREEN.label	Modalità schermo
+DM_FULLSCREEN=0	Finestra
+DM_FULLSCREEN=1	Schermo intero
+DM_RUMBLE.label	Vibrazione
+DM_RUMBLE_GAIN.label	Intensità vibrazione
+DM_RUMBLE_MIN.label	Soglia vibrazione
+DM_PAD_PRESS_TO_JOIN.label	Premi un tasto per unirti
+DM_SW2.label	Controller Switch 2
+DM_SW2.note	Usa Joy-Con 2 e Pro Controller 2 via Bluetooth: durante il gioco tieni premuto Sync su uno per abbinarlo. macOS chiede una volta l'accesso al Bluetooth.
+DM_MIC.label	Microfono
+DM_MIC.note	Permette al gioco di sentire il tuo microfono. macOS chiede l'accesso quando avvii il gioco con questa opzione attiva.
+DM_MIC_GAIN.label	Guadagno del microfono
+DM_PRESENT_SNAP.label	Buffer dei fotogrammi
+DM_PRESENT_SNAP.note	Fino a un fotogramma di latenza in più.
+DM_PSO_MTL4.label	Pipeline Metal 4
+DM_PSO_MTL4.note	Tiene un archivio delle pipeline; usa più memoria.
+DM_PSO_PREBUILD.label	Precompilazione pipeline
+DM_PSO_PREBUILD.note	Il primo avvio la attende qualche minuto, una volta sola.
+DM_NVN_ENC_THREAD.label	Thread di codifica
+DM_FPS_HOLD.label	Trattieni i fotogrammi in ritardo
+DM_METAL_HUD.label	HUD prestazioni
+ui:Version	Versione
+ui:Advanced settings	Impostazioni avanzate
+ui:Reset to tested defaults	Ripristina le impostazioni testate
+ui:Brings back all settings this game was tested with.	Riporta tutte le impostazioni con cui questo gioco è stato testato.
+ui:Show this window at launch	Mostra questa finestra all'avvio
+ui:Quit	Esci
+ui:Play	Gioca
+ui:Cloud saves	Salvataggi su iCloud
+ui:Off	Disattivati
+ui:Choose a folder…	Scegli una cartella…
+ui:Choose a different folder…	Scegli un'altra cartella…
+ui:Turn off	Disattiva
+ui:Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.	Scegli la cartella di iCloud Drive che l'app per iPhone usa per questo gioco. Il salvataggio viene letto all'avvio del gioco e inviato dopo ogni salvataggio; un salvataggio sostituito resta nella cartella -backups.
+ui:Use for Cloud Saves	Usa per i salvataggi
+ui:The folder the iPhone app chose in its launcher's Cloud saves	La cartella scelta dall'app per iPhone nei suoi salvataggi su iCloud
+ui:Close Window	Chiudi finestra
+ui:Quit %@	Esci da %@
+ui:Set at launch	Impostato all'avvio
+ui:Set by an env file	Impostato da un file env
+ui:Checking the cloud save…	Controllo del salvataggio su iCloud…
+ui:Waiting for iCloud to deliver this game's save.	In attesa che iCloud consegni il salvataggio di questo gioco.
+ui:Play Without It	Gioca senza
+ui:Play This Mac's Save	Usa il salvataggio di questo Mac
+ui:Try Again	Riprova
+ui:Microphone input	Ingresso microfono
+ui:System Default	Predefinito di sistema
+ui:Selected device unavailable	Dispositivo selezionato non disponibile

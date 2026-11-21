@@ -93,6 +93,11 @@ def run_one(a, gid, build, var, route, out, lock):
     if (build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(build / 'aoc')
     archive = var.get('pso') or a.pso_archive
     if archive: env['DM_PSO_ARCHIVE'] = archive if archive == 'off' else str(Path(archive).expanduser().resolve())
+    # The game language the app starts with: the build's launcher default, one the game's control data lists. Without it the host answers en-US, which not every game ships
+    # (Xenoblade Chronicles 3 lists British English and no American English, and crashed 2.5 s into the boot at main+0x10141ac)
+    if 'DM_LANG' not in env:
+        try: env['DM_LANG'] = next(s['default'] for s in json.loads((build / 'app/launcher.json').read_text())['settings'] if s.get('env') == 'DM_LANG' and s.get('default'))
+        except (OSError, ValueError, KeyError, StopIteration): pass
     if a.fps: env['DM_FPS_TARGET'] = str(a.fps)
     if a.fps and a.fps > 60: env.update(DM_PRESENT_HZ=str(a.fps), DM_PRESENT_LINK='2')   # the display link at the screen's rate for the variable frame step; at 60 or 30 the host matches the screen to the cap itself
     if a.scale: env['DM_RENDER_SCALE'] = str(a.scale)

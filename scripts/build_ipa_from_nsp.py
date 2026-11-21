@@ -1595,7 +1595,7 @@ def collect_nros(py, repo, romfs, dst, env, logs):
     if not nrrs:
         rmtree(dst); rmtree(kf)   # an update can remove its NRRs: do not carry the previous manifest into the rewrite
         return {}
-    key = fingerprint(('files', nrrs + [repo / f for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/gfx/tools/smash_arc.py', 'dm/tools/romfs.py')]), ('tree', romfs))
+    key = fingerprint(('files', nrrs + [repo / f for f in ('dm/tools/nro_collect.py', 'dm/tools/nro_layout.py', 'dm/tools/nso_code.py', 'dm/tools/nso_syms.py', 'dm/gfx/tools/smash_arc.py', 'dm/tools/romfs.py')]), ('tree', romfs))
     if not ((dst / 'nro.tsv').is_file() and reused(kf, key) is not None):
         tmp = dst.with_name(dst.name + '.partial'); rmtree(tmp)
         PROG.set(step=f'finding the NROs {len(nrrs)} NRR files register')
@@ -1711,11 +1711,12 @@ def capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional):
         with open(log, errors='replace') as f: tail = ''.join(collections.deque(f, maxlen=40)).rstrip('\n')
         PROG.say(f'---- last lines of {log} ----\n' + tail)
         raise BuildError(f'the game loaded none of the {len(want)} NRO(s) its NRR registers and no file holds, first {next(iter(want))} (host output: {log})')
-    sha = got[0].stem; manifest = nro_dir / 'nro.tsv'
+    sha = got[0].stem; manifest = nro_dir / 'nro.tsv'; size = got[0].stat().st_size   # the image's own size, which LoadModule passes (hle_ro.c)
     rows = [l for l in manifest.read_text().splitlines() if l]
     name = f'nro{sum(1 for l in rows if not l.startswith(("#", "refused")))}'
     shutil.move(got[0], nro_dir / f'{name}.nro')
-    manifest.write_text('\n'.join(rows + [f'{name}\t{sha}\t{(nro_dir / f"{name}.nro").stat().st_size}\t{want.pop(sha)}\tcapture']) + '\n')
+    run([py, repo / 'dm/tools/nro_layout.py', nro_dir / f'{name}.nro', nro_dir / f'{name}.nro'], logs / 'nro_layout.log', env=env)   # data on a 16 KB page of its own (nro_collect.py does the same)
+    manifest.write_text('\n'.join(rows + [f'{name}\t{sha}\t{size}\t{want.pop(sha)}\tcapture']) + '\n')
     missing.write_text(''.join(f'{h}\t{n}\n' for h, n in want.items()))
     rmtree(cap); rmtree(rd)
     PROG.end(f'{name}, {(nro_dir / f"{name}.nro").stat().st_size / 2**20:.1f} MB')

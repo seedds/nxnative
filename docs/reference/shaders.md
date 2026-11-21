@@ -743,6 +743,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `python3 dm/gfx/tests/test_dmsh_gather_offsets.py`. Offline, one captured dispatch of `b106afba1a18faa9`: about 40 % of the pixels differed between three runs of the old shader; the rewritten one gave the same bytes each time, equal to a version that reads the texels explicitly, and took 3.85 ms against 4.16 ms.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 28 NDSR compute shaders of its seen shaders. Every game with agl's upscaler builds it the same way. Not yet checked: whether this is the open cause of [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s isolated bright dots.
 
+### Runtime per-texel gathers wrap wide offsets on Metal
+
+- **Symptom:** a per-texel gather with a runtime offset of +8 reads as if the offset were -8. A ramp texture makes the wrong texel visible in the shader result.
+- **Cause:** the SPIR-V generator passes each tap's `Offset` through SPIRV-Cross to Metal's `gather`. Metal's offset range is -8 to +7. On an M4 Pro running macOS 27.2.1, the runtime argument uses only the low four bits. Ampere's six-bit decode preserves the offsets used by the affected compute shaders.
+- **Fix:** `dmsh_xlate` tells `TexturePass` to lower runtime per-texel offsets into normalized coordinate shifts using the base texture size. Each tap gathers at its own coordinate and returns the same corner of the footprint. The sampler still applies its addressing modes. Constant offset arrays continue through `gather_offsets`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py GatherOffsets`. On the M4 Pro, the coordinate shift matched explicit texel reads in all 1,788,750 samples per addressing mode on a 257×127 texture. The direct runtime offsets mismatched 1,325,760 samples with clamp and 1,341,888 with repeat.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) and [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) while reviewing PR #2831.
+
 ### F2IP
 
 - **Symptom:** `Ampere instruction 243 at 0x… is not implemented`, or `ISBERD mode b8 in a task or mesh shader`, in the build.

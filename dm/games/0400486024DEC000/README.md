@@ -414,6 +414,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [A full table of running GPU writes ends passes for nothing](../../../docs/reference/frame-rate.md#a-full-table-of-running-gpu-writes-ends-passes-for-nothing)
 - [Float atomics in storage memory](../../../docs/reference/shaders.md#float-atomics-in-storage-memory)
 - [textureGatherOffsets and a loop over its offsets](../../../docs/reference/shaders.md#texturegatheroffsets-and-a-loop-over-its-offsets)
+- [Runtime per-texel gathers wrap wide offsets on Metal](../../../docs/reference/shaders.md#runtime-per-texel-gathers-wrap-wide-offsets-on-metal): `55fcda025feae496` and `ce8270569d33a7af` compute offsets in 0…19. In `d17eefaff4f0bc23`, each runtime gather is guarded by the predicate that loads its packed offsets, which are literals in -4…4.
 - [Image atomics on a 32-bit colour texture](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture)
 - [A host's own store in a fragment shader moves its depth test](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test)
 - [Dead-code removal dropped a coordinate of a multi-output instruction](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction)

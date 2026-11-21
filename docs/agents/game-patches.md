@@ -258,7 +258,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0xc5ab8c`: queue pop: ldr x8, [x19] → dmb ishld (after the tail load; w8 = head)
   - cut `+0xc5ab94`: queue pop: ldr w9, [x19, #0x1c] (the head again) → and x9, x8, #0xffff
   - cut `+0xc5ab98`: queue pop: and x9, x9, #0xffff → ldr x8, [x19] (the ring; then ldr x8, [x8, x9, lsl #3]: the item)
-  - host [hle_uemalloc.c:41](../../dm/host/hle_uemalloc.c#L41): Unreal's allocator on a host malloc zone
+  - host [hle_uemalloc.c:45](../../dm/host/hle_uemalloc.c#L45): Unreal's allocator on a host malloc zone
 
 ### Catherine: Full Body
 

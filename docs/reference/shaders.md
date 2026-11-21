@@ -666,7 +666,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.
 - **Cause:** the paks are version 8, which `uepak.py` did not read (only 4 and 11): `footer` raised, and `unreal_paks` skipped both paks as no Unreal paks. Version 8 keeps version 4's per-file index, but its footer is version 11's (key GUID, encrypted flag, magic 0xcc from the end, five 32-byte compression method names after the SHA-1), and an FPakEntry's compression method is an index (from 1) into those names instead of version 4's flags.
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
-- **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
+- **Found on:** [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](../../dm/games/010051C0134F8000/README.md#shaders) (1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s. The base build played from the title through the opening fight.
 
 ### Unreal Engine short version 8 paks and version 1 shader archives
 

@@ -96,6 +96,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN |
 | [DOOM 3](010029D00E740000/README.md) | `010029D00E740000` | 1.0.5 | 14.3.0 | id Tech 4 (BFG Edition renderer), FMOD | OpenGL |
 | [DRAGON BALL: Sparking! ZERO](010035F022078000/README.md) | `010035F022078000` | 2.0.76 | 14.3.0 | Unreal Engine 5.1.1, CRIWARE | NVN |
+| [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](010051C0134F8000/README.md) | `010051C0134F8000` | 1.70 | 9.3.1 | Unreal Engine 4.24, CRIWARE | NVN |
 | [DRAGON QUEST BUILDERS 2](010042000A986000/README.md) | `010042000A986000` | 1.7.3d | 5.4.0 | Koei Tecmo's KTGL | NVN |
 | [DRAGON QUEST I & II HD-2D Remake](0100D7C01F254000/README.md) | `0100D7C01F254000` | 1.0.2 | 18.3.2 | Unreal Engine 4.27.2 | NVN |
 | [DRAGON QUEST III HD-2D Remake](01003E601E324000/README.md) | `01003E601E324000` | 1.1.2 | 16.2.6 | Unreal Engine 4.27 | NVN |

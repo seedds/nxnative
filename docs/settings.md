@@ -6,7 +6,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
-- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
+- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode), [Keyboard](#keyboard)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
@@ -233,6 +233,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 ### Display mode
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
+
+### Keyboard
+
+Below **Controls**: which key or mouse button presses each button and stick direction, and what mouse movement moves. **Customize…** opens the map, every button and stick direction with its key; click one and press its key, or hold Shift, Control or Option and press a key for a chord such as ⇧↑ (a mouse button counts as a key; Esc stops; right-click for **No Key**, or **Add Key…** for another key as well), or pick a layout under **Presets**. Under **Mouse and trackpad**, each stick and the motion controls has a source: **None**, **Mouse**, or **Hold a Key or Button…** (only while it is held; one output at a time, a held key's first), with its **Speed** and **Invert Y** ([Mouse and trackpad](playing.md#mouse-and-trackpad-mac)). The map is kept for the game and also changes in the game itself, under **Window › Keyboard Map…** ([Keyboard](playing.md#keyboard-mac)). In an `env.txt`: `DM_KEYMAP`.
 
 ### Switch 2 controllers
 

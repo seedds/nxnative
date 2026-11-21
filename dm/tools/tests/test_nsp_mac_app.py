@@ -134,8 +134,8 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'pso/gpu-prewarm-00.mtl4a': b'bases', 'pso/gpu-prewarm-00.keys': b'DMPSOIX1', 'pso/prewarm.tsv': b'stamp',   # --prebake's files and their index
-            'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
+            'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher', 'source/keymap_bridge.c': b'bridge',
+            'host/romfs_image.h': b'validator', 'host/keymap.h': b'keys', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -222,6 +222,7 @@ class PackReuse(unittest.TestCase):
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'pso/gpu-prewarm-00.mtl4a', 'pso/gpu-prewarm-00.keys', 'pso/prewarm.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
                  'tools/nso_syms.py', 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
+                 'host/keymap.h', 'source/keymap_bridge.c',   # the keyboard map the launcher checks and the settings window edits
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
@@ -859,6 +860,42 @@ class App(unittest.TestCase):
             r = run(pack('Rebuilt', listed))
             self.assertEqual((r.get('DM_FPS_TARGET'), r['DM_LANG']), (None, 'ja'))   # the host's tested default; the other saved choices still hold
             self.assertIn('saved choice DM_FPS_TARGET=30 ignored', (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text())
+        finally:
+            subprocess.run(['defaults', 'delete', domain], capture_output=True)
+            Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+
+    def test_saved_keymap(self):
+        """launcher.DM_KEYMAP: a saved choice that is no launcher.json row, checked by the host's own parser (keymap.h) instead of DMSettings; in the same order as the other
+        saved choices (the launch environment and the env files win) and with the same DM_SAVED_CHOICES=0"""
+        domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain
+        a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Keys.app'); a.icon = None; a.bundle_id = domain
+        with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
+        app = Path(a.out); log = self.tmp / f'home/Library/Logs/nxnative/{TID}.log'
+
+        def run(**env):
+            p = self.launch(app=app, **env); out = p.communicate(timeout=30)[0].decode()
+            self.assertEqual(p.returncode, 7, out)
+            return self.host_run(), log.read_text()
+
+        def save(*value): subprocess.run(['defaults', 'write', domain, 'launcher.DM_KEYMAP', *value], check=True)
+        try:
+            save('-string', 'A=space RUP=up')
+            r, text = run()   # from Finder or the Dock
+            self.assertEqual(r['DM_KEYMAP'], 'A=space RUP=up')
+            self.assertIn('launcher: env DM_KEYMAP=A=space RUP=up (saved choice)', text)
+            r, text = run(DM_KEYMAP='B=j')   # a launch override wins and is not saved
+            self.assertEqual(r['DM_KEYMAP'], 'B=j')
+            self.assertIn('not used: DM_KEYMAP=B=j is set', text)
+            r, _ = run(DM_SAVED_CHOICES='0')
+            self.assertNotIn('DM_KEYMAP', r)
+            save('-string', 'A=space FOO=j')   # an entry the host would leave out: the whole value is ignored
+            r, text = run()
+            self.assertNotIn('DM_KEYMAP', r)
+            self.assertIn('saved choice DM_KEYMAP=A=space FOO=j ignored: the host does not take it', text)
+            save('-string', 'A=40,B=38')   # PR #386's form
+            self.assertEqual(run()[0]['DM_KEYMAP'], 'A=40,B=38')
+            save('-int', '3')   # not a string
+            self.assertNotIn('DM_KEYMAP', run()[0])
         finally:
             subprocess.run(['defaults', 'delete', domain], capture_output=True)
             Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)

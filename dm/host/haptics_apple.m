@@ -452,6 +452,13 @@ static void suspend(unsigned reason, BOOL on) {
 void dm_haptics_apple_shutdown(void) {
     if (queue) suspend(DM_HAPTICS_INACTIVE, YES);
 }
+void dm_haptics_apple_tune(float g, float m) {
+    if (!queue) return;
+    dispatch_async(queue, ^{
+        if (g >= 0 && isfinite(g)) gain = fminf(3, g);
+        if (m >= 0 && isfinite(m)) rumble_min = fminf(0.9f, m);
+    });
+}
 void dm_haptics_apple_init(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{

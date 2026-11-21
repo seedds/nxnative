@@ -56,7 +56,7 @@ import vol_space   # the space metal-tt may write, with what APFS frees on deman
 
 # The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
 # device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
-HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
+HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True), 'dm_blend_off': (abi.BLEND_OFF_FC, True)}   # the common draw's specialization, as nvn_mtl.m pre_fn
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 MAX_FAILED = 8   # pipelines of one group metal-tt may fail on before the run counts as failed (compile_isolating)

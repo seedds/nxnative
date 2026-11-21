@@ -7016,15 +7016,22 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
 // cached by that descriptor. nil: f has no variant (no library descriptor, or its entry point does not declare the constant), and off builds what on builds
 @interface FnOff : NSObject { @public MTL4FunctionDescriptor *d4; MTLFunctionConstantValues *cv; id<MTLFunction> dev; int none, dev_failed; } @end
 @implementation FnOff @end
+// T-126 v2: off is a mask: FN_OFF_BORDER (the border corrections off, as before) and FN_OFF_BLEND (the blend fix-up off, DMSH_BLEND_OFF_FC, for a pipeline whose blend words are
+// both 0: pso_key.blend_live 0). One FnOff per descriptor and mask; a mask whose constants f's entry point does not declare is none (it builds as on)
+enum { FN_OFF_BORDER = 1, FN_OFF_BLEND = 2 };
+@interface FnOffSet : NSObject { @public FnOff *m[4]; } @end
+@implementation FnOffSet @end
 static os_unfair_lock g_fn_off_lock = OS_UNFAIR_LOCK_INIT;
-static NSMapTable *g_fn_off;   // MTL4FunctionDescriptor (fn4_of) → FnOff
-static FnOff *fn_off(id<MTLFunction> f) {
+static NSMapTable *g_fn_off;   // MTL4FunctionDescriptor (fn4_of) → FnOffSet
+static FnOff *fn_off(id<MTLFunction> f, int mask) {
+    mask &= 3; if (!mask) return nil;
     MTL4FunctionDescriptor *fd = fn4_of(f);
     if (!fd) return nil;   // no library to specialize from (diagnostic overrides)
     os_unfair_lock_lock(&g_fn_off_lock);
     if (!g_fn_off) g_fn_off = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];
-    FnOff *o = [g_fn_off objectForKey:fd];
-    if (!o) { o = [FnOff new]; [g_fn_off setObject:o forKey:fd]; }
+    FnOffSet *set = [g_fn_off objectForKey:fd];
+    if (!set) { set = [FnOffSet new]; [g_fn_off setObject:set forKey:fd]; }
+    FnOff *o = set->m[mask]; if (!o) o = set->m[mask] = [FnOff new];
     os_unfair_lock_unlock(&g_fn_off_lock);
     @synchronized(o) {
         if (o->d4 || o->none) return o->none ? nil : o;
@@ -7035,26 +7042,28 @@ static FnOff *fn_off(id<MTLFunction> f) {
         }
         MTL4LibraryFunctionDescriptor *ld = [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? (MTL4LibraryFunctionDescriptor *)fd : nil;
         // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
-        if (!ld || ![ld.library newFunctionWithName:ld.name].functionConstantsDictionary[@"dm_border_off"]) { o->none = 1; return nil; }   // the entry's, not f's: a specialized f lists no constants
+        NSDictionary *fc = ld ? [ld.library newFunctionWithName:ld.name].functionConstantsDictionary : nil;   // the entry's, not f's: a specialized f lists no constants
+        int border = (mask & FN_OFF_BORDER) && fc[@"dm_border_off"], blend = (mask & FN_OFF_BLEND) && fc[@"dm_blend_off"];
+        if (!border && !blend) { o->none = 1; return nil; }
         if (!cv) cv = [MTLFunctionConstantValues new];
-        BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
+        BOOL yes = YES; if (border) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; if (blend) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
         MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv;
         o->cv = cv; o->d4 = sd;
         return o;
     }
 }
 // f's Metal 4 descriptor, without the border corrections when off
-static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = off ? fn_off(f) : nil; return o ? o->d4 : fn4_of(f); }
+static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = fn_off(f, off); return o ? o->d4 : fn4_of(f); }   // off: the FN_OFF_* mask
 // The function an MTLDevice pipeline is built from (fn_dev), without the border corrections when off: specialized through its library, once. A failed specialization keeps the corrections
 static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
-    FnOff *o = off ? fn_off(f) : nil;
+    FnOff *o = fn_off(f, off);
     if (!o) return fn_dev(f);
     @synchronized(o) {
         if (!o->dev && !o->dev_failed) {
             MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)((MTL4SpecializedFunctionDescriptor *)o->d4).functionDescriptor;
             // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): fn_off made o->d4 from this ld after looking its name up; names are never nil (fn4_note, pre_fn)
             NSError *e = nil; o->dev = dev_fn(ld.library, ld.name, o->cv, &e);
-            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections failed: %s (its pipelines keep them)", f.name.UTF8String, e.localizedDescription.UTF8String); }
+            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections or the blend fix-up (mask %d) failed: %s (its pipelines keep them)", f.name.UTF8String, off, e.localizedDescription.UTF8String); }
         }
         if (o->dev) return o->dev;
     }
@@ -10958,7 +10967,7 @@ static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, i
     return m;
 }
 static void pbase_key_of(MTLRenderPipelineDescriptor *d, int off, pbase_key *k) {
-    memset(k, 0, sizeof *k); k->off = off != 0;
+    memset(k, 0, sizeof *k); k->off = (uint32_t)off;   // the FN_OFF_* mask
     k->vf = (__bridge const void *)d.vertexFunction; k->ff = (__bridge const void *)d.fragmentFunction;
     k->samples = (uint32_t)d.rasterSampleCount; k->a2c = d.alphaToCoverageEnabled; k->rast = d.rasterizationEnabled; k->topo = (uint32_t)d.inputPrimitiveTopology; k->amp = (uint32_t)d.maxVertexAmplificationCount;
     MTLVertexDescriptor *vd = d.vertexDescriptor;
@@ -11098,6 +11107,8 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
 }
 static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, int off, NSError **e) { return pso_build_ex(d, off, e, 1); }   // off: !pso_key.border of the key d was made from
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
+// The FN_OFF_* mask a pipeline of key k is built with (fn_off): without the border corrections when no bound sampler has a twin, without the blend fix-up when its words are both 0
+static inline int pso_off(const pso_key *k) { return (k->border ? 0 : FN_OFF_BORDER) | (k->blend_live ? 0 : FN_OFF_BLEND); }
 static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
     memset(k, 0, sizeof *k);
     k->vs = (__bridge void *)vs; k->fs = (__bridge void *)fs;
@@ -11106,6 +11117,7 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
     for (int i = 0; i < 8; i++) if (k->cfmt[i] || lmap) k->blend[i] = S.blend[i];
     k->logic = lop_key(k, fs, lmap);
     k->border = border_need(vs, vs->stage) || border_need(fs, 1);   // as prog_border, which the draw compares
+    k->blend_live = fs && fs->has_bz && (bz_word(g_pso_lmap) | rop_word(g_pso_lmap)) != 0;   // the words bz_bind binds for this draw (draw_ passes its copy of g_pso_lmap) (T-126 v2): both 0 → the fix-up specialized away (FN_OFF_BLEND)
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 32 && a < S.nattr) { if (a < 16) k->attr[a] = S.attr[a]; else k->attr_hi[a - 16] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
     pso_key_norm(k, lmap);
@@ -11199,7 +11211,7 @@ static int pso_pend_kick_d(const pso_key *k, MTLRenderPipelineDescriptor *d, int
     }
     pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
-    pso_pend_start(slot, gen, d, !k->border, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+    pso_pend_start(slot, gen, d, pso_off(k), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     return 1;
 }
 static int pso_pend_kick_budget(const pso_key *k, NvShader *vs, NvShader *fs, int spec, PsoPredictBudget *budget) {   // the submit thread
@@ -11229,7 +11241,7 @@ static int pso_pend_demand(const pso_key *k, NvShader *vs, NvShader *fs) {
     if (hm_get_id(&g_pso, k)) return 0;
     pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, 0, &gen); pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
-    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), !k->border, pp_bg_queue());
+    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), pso_off(k), pp_bg_queue());
     return 1;
 }
 // Called by the submit thread: a build in the table is taken (waited for while its worker runs it; made here at once while it is still queued, so a draw that waits waits for its
@@ -11240,7 +11252,7 @@ static id<MTLRenderPipelineState> pso_pend_take(const pso_key *k) {
     if (at >= 0 && !g_pp[at].done && !g_pp[at].run && g_pp[at].d) {
         MTLRenderPipelineDescriptor *d = g_pp[at].d; g_pp[at].d = nil; g_pp[at].used = 0; g_pp_stolen++;
         pthread_mutex_unlock(&g_pp_mu);
-        NSError *e = nil; return pso_build(d, !k->border, &e);
+        NSError *e = nil; return pso_build(d, pso_off(k), &e);
     }
     if (at >= 0) {
         g_pp[at].taking = 1;   // lookup workers may admit/reclaim while the condition wait releases g_pp_mu
@@ -11294,7 +11306,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     if (h) return h;
     MTLRenderPipelineDescriptor *d = vs->has_pull ? pso_desc_pull(k, vs, fs) : nil;
     if (!d) return nil;
-    NSError *e = nil; int off = !k->border; id<MTLRenderPipelineState> ps = pso_build_ex(d, off, &e, 0);
+    NSError *e = nil; int off = pso_off(k); id<MTLRenderPipelineState> ps = pso_build_ex(d, off, &e, 0);
     if (!ps) { hy_base_kick(d, off); g_hy_none++; return nil; }
     g_hy_made++; hm_put_id(&g_pso_hy, k, ps);
     return ps;
@@ -11311,7 +11323,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pull_pso(const pso_key *k,
     if (hm_get_id(&g_pso_pull_fail, k)) return nil;
     if (hybrid_on() && hm_get_id(&g_pso, k)) return hybrid_get(k, vs, fs);
     MTLRenderPipelineDescriptor *d = pso_desc_pull(k, vs, fs);
-    NSError *e = nil; uint64_t t0 = bp_now(); id<MTLRenderPipelineState> ps = d ? pso_build(d, !k->border, &e) : nil;
+    NSError *e = nil; uint64_t t0 = bp_now(); id<MTLRenderPipelineState> ps = d ? pso_build(d, pso_off(k), &e) : nil;
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - t0;
     if (!ps) {
         if (d) MLOG("[RED] pulling pipeline for vertex %s fragment %s: %s (its draws convert their vertex attributes on the CPU)", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String);
@@ -11426,6 +11438,7 @@ static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   //
     if (!f.functionConstantsDictionary.count) return ld;
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
     if (f.functionConstantsDictionary[@"dm_border_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; }
+    if (f.functionConstantsDictionary[@"dm_blend_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }   // and the blend fix-up (FN_OFF_BLEND), as most draws
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; return sd;
 }
 static NSDictionary *pre_json(NSString *key) { NSData *d = msl_data([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
@@ -11664,7 +11677,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
     if (i < g_sm_amp_n) { id ps = g_sm_amp[i].done ? g_sm_amp[i].ps : nil; os_unfair_lock_unlock(&g_sm_amp_lock); if (ps) { hm_put_id(&g_pso, k, ps); return hm_get_id(&g_pso, k); } return nil; }
     if (g_sm_amp_n >= SM_AMP_MAX) { os_unfair_lock_unlock(&g_sm_amp_lock); return nil; }
     g_sm_amp[i].k = *k; g_sm_amp[i].ps = nil; g_sm_amp[i].done = 0; g_sm_amp_n++; os_unfair_lock_unlock(&g_sm_amp_lock);
-    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = !k->border;
+    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = pso_off(k);
     int face = k->fsfn == FSP_MARK;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         if (!ps) MLOG("[RED] %s: no amplified pipeline for vertex %s fragment %s: %s (%s)", face ? "face-split draw" : "slice-merged pass", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String,
@@ -11684,7 +11697,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         if (cached) return cached;
         if (hm_get_id(&g_pso_fail, &k)) return nil;
         NSError *error = nil;
-        id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, vs, nil, nil, 0), !k.border, &error);
+        id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, vs, nil, nil, 0), pso_off(&k), &error);
         if (ps) hm_put_id(&g_pso, &k, ps);
         else { MLOG("[RED] rasterizer-discard pipeline (vertex %s): %s", vs->key, error.localizedDescription.UTF8String); hm_put_id(&g_pso_fail, &k, NSNull.null); }
         return ps;
@@ -11712,7 +11725,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         int st = pso_pend_try(&k, &ps);
         if (st == 2) took = 1;   // built in the background (nil: it failed, and is built again below for its message)
         else {
-            if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), !k.border, &e, 0);   // its base made or archived: no compile
+            if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), pso_off(&k), &e, 0);   // its base made or archived: no compile
             if (!ps) {
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
@@ -11730,7 +11743,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     if (ps) g_pp_taken++;
     else {
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, ms_fn ? ms_fn : g_pso_fsfn, g_pso_lmap != NULL);
-        ps = pso_build(d, !k.border, &e);
+        ps = pso_build(d, pso_off(&k), &e);
     }
     if (!took) {   // the draw waited (built here, made from its queued build, or waited for its running build)
         uint64_t w = bp_now() - bt - (g_pt_pred_ns - pred0); g_pw_n[why]++; g_pw_ns[why] += w;
@@ -11915,7 +11928,7 @@ static void warm_task(WarmTask *t) {
             int pull = !sk.merged && !sk.fz && pull_conversion(vs, &k);   // the layout's pipeline is its pulling one (pull_pso)
             MTLRenderPipelineDescriptor *desc = pull ? pso_desc_pull(&k, vs, fs) : nil;
             if (!desc) { pull = 0; desc = pso_desc(&k, vs, fs, fsfn, sk.merged); }
-            NSError *e = nil; id ps = pso_build(desc, !k.border, &e);
+            NSError *e = nil; id ps = pso_build(desc, pso_off(&k), &e);
             g_warm_done++;
             if (!ps) { g_pre_warm_failed++; MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
             if (g_pre_tool) { g_warm_rps++; continue; }   // the prebuild tool: the base is in the serializer; keep nothing
@@ -14215,7 +14228,7 @@ static int pso_base_made_d(const pso_key *k, NvShader *vs, NvShader *fs, MTLRend
     pso4_init(); if (!g_comp4) return 0;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); if (dp) *dp = d;
     if ([d.label isEqualToString:PSO_WHOLE] || !pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return 0;
-    pbase_key bk; pbase_key_of(d, !k->border, &bk); if (bkp) { *bkp = bk; *bkp_ok = 1; }
+    pbase_key bk; pbase_key_of(d, pso_off(k), &bk); if (bkp) { *bkp = bk; *bkp_ok = 1; }
     os_unfair_lock_lock(&g_pbase_lock); int made = hm_get_id(&g_pbase, &bk) != nil; os_unfair_lock_unlock(&g_pbase_lock);
     return made;
 }
@@ -14903,7 +14916,7 @@ static int fb_tile_ready(NvShader *vs, NvShader *fs, id<MTLFunction> fn, const u
         return 1; }
     if (g_fb_tp_n >= FB_TP_MAX) { os_unfair_lock_unlock(&g_fb_tp_lock); static int once; if (!once++) MLOG("same-pass feedback sampling: %d tile-reading pipelines built; later ones keep the snapshot", FB_TP_MAX); return 0; }
     g_fb_tp[i].k = k; g_fb_tp[i].ps = nil; g_fb_tp[i].done = 0; g_fb_tp_n++; os_unfair_lock_unlock(&g_fb_tp_lock);
-    MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, fn, 1); int off = !k.border;
+    MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, fn, 1); int off = pso_off(&k);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         if (!ps) MLOG("[RED] same-pass feedback sampling: no tile-reading pipeline for vertex %s fragment %s: %s (its draws keep the snapshot)", vs->key, fs->key, e.localizedDescription.UTF8String);
         os_unfair_lock_lock(&g_fb_tp_lock); g_fb_tp[i].ps = ps; g_fb_tp[i].done = 1; os_unfair_lock_unlock(&g_fb_tp_lock); } });

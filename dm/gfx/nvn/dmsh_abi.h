@@ -194,6 +194,10 @@
 // The corrections' function constant (bool, every stage): true turns them off, for a pipeline whose draw or dispatch binds no sampler with a
 // twin (nvn_mtl.m border_need, fn_off). The twin samples go, and the registers they kept: Ocarina of Time's 1080p material passes spilled 300-400 bytes a thread with them. Undefined, every sample corrects as its bit says
 #define DMSH_BORDER_FC 216
+// The blend fix-up's function constant (bool, pixel shaders with dm_blend0, dmsh_rewrite.py blend_zero): true for a pipeline whose blend words are both 0 (nvn_mtl.m bz_word / rop_word:
+// no zero-weight NaN rule and no NVIDIA rounding for any of its targets, which 89 % of Ocarina of Time's draws are), so the fix-up and the read of its words go. Undefined or false, the
+// words are read at DMSH_BLEND_BUFFER as before (T-126 v2: the read alone cost 2-6 % of the hottest pixel shaders on an M2)
+#define DMSH_BLEND_OFF_FC 217
 // The logic operation's state (dm/gfx/tools/dmsh_logic.py, the _l entry points of the <key>_bx libraries): uint operation (NVN_LOGIC_OP_*), 12 bytes of padding, a uint4 channel mask per colour target, at this fragment buffer index (nvn_mtl.m lo_bind)
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)

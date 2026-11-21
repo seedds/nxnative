@@ -5,7 +5,8 @@
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
-// Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
+// Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller;
+// the player's controls file changes it (controls.h), and can make the mouse a stick while the picture holds the pointer (a click captures it, Escape gives it back).
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -26,12 +27,14 @@
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
 #include "pad_switch2_apple.h"
+#include "controls.h"
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
 static void s2pad_read(s2_pad *d);
 static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where player 1's rumble goes, the pads last used (merge_rumble_to): NULL for GameController's
 static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
+#include "controls_card_mac.h"
 #include "ctrl_prompt.h"
 #include "user_select_mac.h"
 #include <signal.h>
@@ -39,9 +42,13 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
-static uint64_t g_btn;
-static int g_w, g_a, g_s, g_d;
-static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
+static uint8_t g_keys[CTL_KEYS];   // the keys held, by key code: their actions are the controls file's (controls.h)
+static uint8_t g_shift_dirs;   // arrow keys with their built-in action pressed with Shift held: the right stick (CTL_R*; each goes back up as it went down, whatever Shift does meanwhile)
+static uint8_t g_mbtn[3];      // mouse buttons held while the pointer is captured (left, right, middle)
+static int32_t g_msx, g_msy;   // the captured mouse's stick tilt
+static int g_mouse_captured;   // the picture holds the pointer: the mouse is a stick (controls.h mouse=), not the touch screen
+static void mouse_release(void);
+static void keys_clear(void);
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -144,21 +151,16 @@ static void cursor_hide_for_input(void) {
     NSView *v = g_win.contentView;
     if (NSPointInRect([v convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil], v.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
 }
+static int32_t more(int32_t a, int32_t b) { return abs(b) > abs(a) ? b : a; }
 static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    const controls *ct = dm_controls(); uint64_t b = 0; uint8_t d = g_shift_dirs;
+    for (int k = 0; k < CTL_KEYS; k++) if (g_keys[k]) { b |= ct->key[k].btn; d |= ct->key[k].dirs; }
+    for (int i = 0; i < 3; i++) if (g_mbtn[i]) { b |= ct->mouse_btn[i].btn; d |= ct->mouse_btn[i].dirs; }
+    int32_t lx, ly, rx, ry; ctl_dirs_sticks(d, &lx, &ly, &rx, &ry);
+    if (ct->mouse == CTL_MOUSE_LEFT) { lx = more(lx, g_msx); ly = more(ly, g_msy); } else { rx = more(rx, g_msx); ry = more(ry, g_msy); }
+    dm_input_set(b, lx, ly, rx, ry);
 }
-static int key_bit(unsigned short code) {
-    switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
-    }
-    return -1;
-}
+static void keys_clear(void) { memset(g_keys, 0, sizeof g_keys); g_shift_dirs = 0; memset(g_mbtn, 0, sizeof g_mbtn); g_msx = g_msy = 0; push(); }
 // fn held with a letter: the arrow and function keys carry the same modifier flag, so the key must be a letter for this to be a Globe shortcut
 static int fn_shortcut(NSEvent *e) {
     NSString *s = e.charactersIgnoringModifiers;
@@ -173,15 +175,17 @@ static void on_key(NSEvent *e, int down) {
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
     }
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
-    // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
-    // could be turned only with a controller (Donkey Kong Bananza)
-    int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
-    if (rs && (down ? (e.modifierFlags & NSEventModifierFlagShift) != 0 : *rs)) { *rs = down; push(); return; }
-    int b = key_bit(c);
-    uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
-    g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    if (c == 53 && down && g_mouse_captured) { mouse_release(); return; }   // Escape gives the pointer back
+    const controls *ct = dm_controls();
+    // An arrow key that keeps its built-in action, pressed with Shift held, is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick:
+    // a 3D game's camera could be turned only with a controller (Donkey Kong Bananza)
+    uint8_t rd = c == 123 ? CTL_RLEFT : c == 126 ? CTL_RUP : c == 124 ? CTL_RRIGHT : c == 125 ? CTL_RDOWN : 0;
+    if (rd && ctl_key_is_default(ct, c) && (down ? (e.modifierFlags & NSEventModifierFlagShift) != 0 : (g_shift_dirs & rd) != 0)) {
+        g_shift_dirs = down ? g_shift_dirs | rd : g_shift_dirs & ~rd; push(); return;
+    }
+    if (c >= CTL_KEYS) return;
+    g_keys[c] = (uint8_t)down;
+    if (down && (ct->key[c].btn || ct->key[c].dirs)) cursor_hide_for_input();   // a key the game takes
     push();
 }
 
@@ -355,7 +359,8 @@ static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0); dm_jc1_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    mouse_release();
+    keys_clear();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
 }
@@ -655,7 +660,7 @@ int front_ctrl_support(int min, int max) {
     if (!g_layer) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();   // nothing the game held stays pressed while the prompt has the input
+        mouse_release(); keys_clear();   // nothing the game held stays pressed while the prompt has the input
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
         pads_release();
         int a, b; cp_buttons(&a, &b);
@@ -690,10 +695,57 @@ static void pads_start(void) {
 // The picture's width / height (front.h front_picture_shape; 16:9 until the first present), which the present fits into the view
 static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
+// The mouse as a stick (controls.h mouse=right or left): a click in the picture captures the pointer (hidden, and held still: CGAssociateMouseAndMouseCursorPosition), its movement
+// is summed and turned into a tilt 120 times a second, and its buttons do the file's mouse_button actions; Escape, the window losing focus or the controller prompt give it back
+static NSTimer *g_mouse_timer;
+static double g_mdx, g_mdy;   // movement since the last tick, in points (y down)
+static void mouse_tick(void) {
+    const controls *ct = dm_controls();
+    // full tilt at 15 points a tick (1,800 points a second) at speed 1; half the last tilt is kept, so a steady movement gives a steady stick and a stop lets it settle in a few ticks
+    double k = DM_STICK_MAX / 15.0 * ct->mouse_speed, y = ct->mouse_invert_y ? g_mdy : -g_mdy;
+    double nx = fmax(-DM_STICK_MAX, fmin(DM_STICK_MAX, g_mdx * k)), ny = fmax(-DM_STICK_MAX, fmin(DM_STICK_MAX, y * k));
+    int32_t sx = (int32_t)(nx * 0.5 + g_msx * 0.5), sy = (int32_t)(ny * 0.5 + g_msy * 0.5);
+    if (abs(sx) < 300) sx = 0; if (abs(sy) < 300) sy = 0;
+    g_mdx = g_mdy = 0;
+    if (sx != g_msx || sy != g_msy) { g_msx = sx; g_msy = sy; push(); }
+}
+static void mouse_capture(NSWindow *w) {
+    if (g_mouse_captured || !g_input_on) return;
+    g_mouse_captured = 1; g_mdx = g_mdy = 0;
+    w.acceptsMouseMovedEvents = YES;
+    CGAssociateMouseAndMouseCursorPosition(false); [NSCursor hide];
+    g_mouse_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 120 repeats:YES block:^(NSTimer *t) { (void)t; mouse_tick(); }];
+    LOG("front end: the mouse is the %s stick (Escape gives the pointer back)", dm_controls()->mouse == CTL_MOUSE_LEFT ? "left" : "right");
+}
+static void mouse_release(void) {
+    if (!g_mouse_captured) return;
+    g_mouse_captured = 0;
+    [g_mouse_timer invalidate]; g_mouse_timer = nil;
+    CGAssociateMouseAndMouseCursorPosition(true); [NSCursor unhide];
+    memset(g_mbtn, 0, sizeof g_mbtn); g_msx = g_msy = 0; push();
+}
+static int mouse_button(NSEvent *e, int i, int down) {   // 1: the captured mouse took it
+    if (!g_mouse_captured) return 0;
+    (void)e; if (i >= 0 && i < 3) { g_mbtn[i] = (uint8_t)down; if (down) cursor_hide_for_input(); push(); }
+    return 1;
+}
+static int mouse_moved(NSEvent *e) { if (!g_mouse_captured) return 0; g_mdx += e.deltaX; g_mdy += e.deltaY; return 1; }
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+- (void)mouseDown:(NSEvent *)e {
+    if (mouse_button(e, 0, 1)) return;
+    if (dm_controls()->mouse != CTL_MOUSE_OFF && g_input_on && !cp_blocks_input(g_cp.phase)) { mouse_capture(self.window); return; }   // this click only captures
+    [self mouseDragged:e];
+}
+- (void)rightMouseDown:(NSEvent *)e { if (!mouse_button(e, 1, 1)) [super rightMouseDown:e]; }
+- (void)rightMouseUp:(NSEvent *)e { if (!mouse_button(e, 1, 0)) [super rightMouseUp:e]; }
+- (void)otherMouseDown:(NSEvent *)e { if (!mouse_button(e, e.buttonNumber == 2 ? 2 : -1, 1)) [super otherMouseDown:e]; }
+- (void)otherMouseUp:(NSEvent *)e { if (!mouse_button(e, e.buttonNumber == 2 ? 2 : -1, 0)) [super otherMouseUp:e]; }
+- (void)mouseMoved:(NSEvent *)e { if (!mouse_moved(e)) [super mouseMoved:e]; }
+- (void)rightMouseDragged:(NSEvent *)e { if (!mouse_moved(e)) [super rightMouseDragged:e]; }
+- (void)otherMouseDragged:(NSEvent *)e { if (!mouse_moved(e)) [super otherMouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
+    if (mouse_moved(e)) return;
     if (!g_input_on) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
@@ -703,7 +755,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e { if (mouse_button(e, 0, 0)) return; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -952,6 +1004,21 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 }
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
+// The controls card (controls_card_mac.h), Window → Show Controls (⌘/): its views exist only while it is shown, so a hidden card costs the game nothing
+static NSView *g_cc_card;
+@interface DmControlsCardTarget : NSObject @end
+@implementation DmControlsCardTarget
+- (void)toggleControls:(NSMenuItem *)it {
+    (void)it;
+    if (g_cc_card) { hq_fade(g_cc_card, 0); g_cc_card = nil; LOG("front end: controls card hidden"); return; }   // the fade's end removes and releases its views
+    NSView *cv = g_win.contentView; if (!cv) return;
+    g_cc_card = cc_card_view(cv.bounds, dm_controls());
+    [cv addSubview:g_cc_card]; hq_fade(g_cc_card, 1);
+    LOG("front end: controls card shown");
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)it { it.title = g_cc_card ? @"Hide Controls" : @"Show Controls"; return YES; }
+@end
+static DmControlsCardTarget *g_cc_target;   // NSMenuItem keeps its target unretained
 
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
@@ -1649,6 +1716,9 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        g_cc_target = [DmControlsCardTarget new];
+        [wm addItemWithTitle:@"Show Controls" action:@selector(toggleControls:) keyEquivalent:@"/"].target = g_cc_target;
+        if (getenv("DM_CONTROLS_CARD") && atoi(getenv("DM_CONTROLS_CARD"))) dispatch_async(dispatch_get_main_queue(), ^{ [g_cc_target toggleControls:nil]; });   // shown from the start
         NSApp.mainMenu = bar;
         static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;   // also for fullscreen entered later (⌃⌘F, the green button): no menu bar over the game
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
@@ -1775,7 +1845,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+        keys_clear();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

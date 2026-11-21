@@ -5,7 +5,7 @@
 # window of every run shows whether a variant changes the picture without stalling a measured frame.
 # Usage: python3 scripts/bench.py <id>_build folder [options]   (the folder the NSP script made with --platform mac: tools/dmhost, the rewritten modules, the extracted RomFS,
 #   shader/cache and font; the game's title ID is the folder name's start). -h lists the options. Exit code 0 when every run gave frames, 1 otherwise.
-#   --route <name>: a route of the game's profile (dm/games/<id>/bench.tsv); the first one by default. --save <folder>: the save the route starts from (default <id>_build/run/save);
+#   --route <name>: a route of the game's profile (dm/games/<id>/bench.tsv); the first one by default. --window <start>:<seconds>: another measuring window (for a recording replayed with --env DM_KEYS=@<file>). --save <folder>: the save the route starts from (default <id>_build/run/save);
 #   each run gets a copy, the folder itself is not changed. --variant 'label:KEY=VALUE,KEY=VALUE': a variant (repeatable; KEY host=<path> runs another host binary, msl=<folder>
 #   other Mac shader libraries, shmap=<file> another shader map (with the c1_full.tsv / cb_extent.tsv of those libraries beside it), patched=<folder> other rewritten modules,
 #   pso=<folder> another pipeline archive); without one, a single variant 'base'. --runs N: each variant N times, in turn (default 2).
@@ -174,6 +174,7 @@ def main():
     ap = argparse.ArgumentParser(description='Benchmark a game in the Mac host along a fixed route (see the comment at the top of this file).')
     ap.add_argument('build', help='the <id>_build folder of a --platform mac build')
     ap.add_argument('--route', help='a route name from dm/games/<id>/bench.tsv (default: its first)')
+    ap.add_argument('--window', help="<start>:<seconds>: the measuring window in seconds from host start instead of the route's (a route replayed from a recording, --env DM_KEYS=@<file>)")
     ap.add_argument('--save', help='the save folder the route starts from (default <id>_build/run/save)')
     ap.add_argument('--variant', action='append', default=[], help="'label:KEY=VALUE,…' (repeatable); keys host, msl, shmap, patched, pso take paths")
     ap.add_argument('--runs', type=int, default=2)
@@ -187,13 +188,16 @@ def main():
     ap.add_argument('--out', help='the output folder (default <id>_build/bench/<date-time>)')
     a = ap.parse_args()
     build = Path(a.build).expanduser().resolve()
-    m = re.match(r'([0-9A-Fa-f]{16})_build$', build.name)
+    m = re.match(r'([0-9A-Fa-f]{16})_build$', Path(a.build).name)   # the name as given: a link of that name reaches a work folder made with --work-dir
     if not m or not build.is_dir(): fail(f'{build} is not an <id>_build folder of the NSP script')
     gid = m.group(1).upper()
     rs = routes(gid)
     if a.route: route = rs.get(a.route) or fail(f'no route {a.route!r} in dm/games/{gid}/bench.tsv (routes: {", ".join(rs) or "none"})')
     elif rs: a.route, route = next(iter(rs.items()))
     else: fail(f'dm/games/{gid}/bench.tsv has no route')
+    if a.window:
+        w = re.fullmatch(r'(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)', a.window) or fail(f'--window is <start>:<seconds>: {a.window}')
+        route = dict(route, **{'from': float(w[1]), 'secs': float(w[2])})
     a.save = Path(a.save).expanduser() if a.save else build / 'run/save'
     if not a.save.is_dir(): fail(f'no save folder {a.save}')
     variants = {}

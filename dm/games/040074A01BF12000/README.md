@@ -1,6 +1,6 @@
 # Donkey Kong Bananza (`040074A01BF12000`)
 
-A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. The Mac tests cover only the first level's opening areas. An initial [community iOS report](#ios-community-report) is recorded below.
+A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. The Mac tests cover only the first level's opening areas. See the [community iOS reports](#ios-community-report) for iPhone 18 Pro and M4 iPad Pro testing.
 
 ## iOS community report
 
@@ -8,7 +8,36 @@ A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Sw
 
 - No crash or `[RED]` line was reported. The opening minutes ran at about 60 fps; after thermal state reached 2, most windows ran at 45–60 fps, with a session average of 50.5 fps. One stretch ran at 30 fps; its cause was not checked.
 - Peak reported footprint was 5,575 MiB. Loads and area changes had frame-time p99 spikes of 50–166 ms.
-- Coverage is limited to this device, build and short session. Longer play, current main and other iOS devices remain unvalidated.
+- Longer play and current main remain unvalidated on this device.
+
+### M4 iPad Pro with paid Xcode signing
+
+On an 11-inch M4 iPad Pro (8 GB RAM), Bananza built from `e5620b1a` stopped at `FATAL reserve guest AS` when installed with Sideloadly or run in LiveContainer 3.8.0. The profile requests a contiguous 9.75 GiB guest address range (`mem_reserve 0x270000000`), which exceeded the address space available without Extended Virtual Addressing on that setup. The game booted and played after Xcode signed it with both memory entitlements using a paid Apple Developer Program team. [Community report in issue #924](https://github.com/seedds/nxnative/issues/924#issuecomment-6584539618)
+
+Save this plist as `bananza.entitlements`. `DM_ENTITLEMENTS` replaces the entire entitlement set, so the plist includes Increased Memory Limit and Extended Virtual Addressing.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+    <key>com.apple.developer.kernel.extended-virtual-addressing</key>
+    <true/>
+</dict>
+</plist>
+```
+
+From the repository root, prepare the Xcode project with the paid team's ID.
+
+```sh
+DM_ENTITLEMENTS="/path/to/bananza.entitlements" \
+  python3 scripts/build_ipa_from_nsp.py "/path/to/Bananza dump" \
+  --platform ios --prepare-xcode --team-id YOUR_TEAM_ID --romfs separate
+```
+
+If the default bundle ID is unavailable to your team, add `--bundle-id` with an identifier you own. Build the game's scheme in Release for the connected iPad with the paid team and automatic provisioning. The reporter used `xcodebuild -allowProvisioningUpdates`, checked both keys in `embedded.mobileprovision`, and installed with `xcrun devicectl device install app`. Use the printed `scripts/push_romfs.sh` command after installation to copy the separate image to `Documents/romfs.img`. [Xcode setup](../../../docs/development.md#build-and-run-on-a-device-with-xcode) · [Separate RomFS transfer](../../../docs/development.md#quick-reinstalls)
 
 ## What it needs
 
@@ -76,7 +105,7 @@ Each step below stopped the boot before its fix:
   - The rest (37-50 fps): once the GPU takes more than about 12 ms a frame, the submitting thread blocks 5-15 ms inside the submission (`@sub_wall_ms` − `@sub_cpu_ms`, about 0.1 ms otherwise) and the game's SyncWait another 4-7 ms, so translation and GPU run one after the other: 12.6 ms of translation, 6.2 blocked, 4.7 in SyncWait, 23.8 ms a frame at 16,500 draws. Open: which wait it is; a session with `DM_NVN_WAITS=1` names it. The indirect-count multi-draws are a candidate: the log has their first CPU wait for the count (frame 1,860) and never the GPU masking path.
   - Geometry draws through the compute path: 0 a frame in a 60 fps window of 15,600 draws (frame 14,100), 1,600-3,400 a frame in every slow one (the `geometry hoist` line: 1,982 at frame 193,500, during the 3,229 s drop, with 4 mesh draws). Two vertex shaders with the geometry kernel had no mesh library (`a504d5de36060114`, `b64d15d642f9d2d6`); in PR #2641's 2026-11-09 session every compute-path geometry draw (50,000-225,000 per log window) was `b64d15d642f9d2d6`, now in `geo_mesh.tsv`, and `a504d5de36060114` never appeared. In the mining tunnel the compute path costs the submission about 1.7 ms a frame against mesh runs (p50 8.0 against 6.3 ms, CPU 4.3 against 3.3 W, M4 Pro, the first level's pair without its library). Open: the `geometry compute path` line now counts them by reason and pair ([Passthrough geometry shaders drawn by the vertex shader](../../../docs/reference/shaders.md#passthrough-geometry-shaders-drawn-by-the-vertex-shader)); a session in those areas decides between `geo_mesh.tsv` rows and host work.
 - The NVN2 device values the driver reads from the GPU at run time (17 items: scratch scale factors, L2 size, texture layers and sizes, linear stride alignment, pool page size, …) are still the Switch 1 ones; the constant ones are NVN2's ([The Switch 2's device values](../../../docs/reference/nvn-objects.md#the-switch-2s-device-values)).
-- iOS: longer sessions, current main and other devices remain unvalidated; see the initial [community report](#ios-community-report).
+- iOS validation on current main and broader device coverage remain open. See the [community reports](#ios-community-report).
 
 ## Found on this game
 

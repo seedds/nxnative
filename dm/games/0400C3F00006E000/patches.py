@@ -183,9 +183,13 @@ def screen_shape(ctx):
         fs_put(site, [B(site, start)], 'screen shape: a projection of the screen\'s ratio whose fovy was not widened draws with tan x k (16:9\'s sides, more above and below)')
 
     # The 2D layer: the UI renderer's stored ortho copied into each draw's uniform block (main+0x17ed900, Tears of the Kingdom's leaf byte for byte) and the text
-    # composites' flipped ortho before the quad's matrix (main+0x1822e50): a 16:9 one (|m11| / m00 = 16/9) has row 1 divided by k, a 16:9 band in the middle
-    UI_BAND = (0x5e040404, 0x5e0c0425, 0x1e2418a6, 0x1e20c0c6, 0x1e2600d1, 0x5289c730, 0x72a7fc50, 0x4b100231, 0x53127e31, 0x35000171, 'adrp',
-               0xb9405a11, 0x34000111, 0xbd405e06, 0x1e2e1007, 0x1e2618e6, 0x4f869021, 0xb9412611, 0x11000631, 0xb9012611, 'orig', 'back')
+    # composites' flipped ortho before the quad's matrix (main+0x1822e50). With the 16:9 layout (DM_SCREEN_UI=band: layout height 720, state +0x4c) the game fits its
+    # 2D to the screen's height, an ortho of the screen's ratio (|m11| / m00 = ratio, 1028x720 wide at 1.43) whose sides fell off the screen: both rows are divided by
+    # k, the 2D fitting the width in a 16:9 band across the middle. With the taller layout (896) the game's own 2D fills the screen and the stub leaves it. Assembled
+    # with clang; s4..s7, v6, w16 / w17 free, as the 16:9-only stub before it (checked)
+    UI_BAND = (0x5E040404, 0x5E0C0425, 'adrp', 0xB9404E11, 0x710B423F, 0x540002A1, 0xBD405A07, 0x1E2020E8, 0x54000240, 0x1E2418A6, 0x1E20C0C6, 0x1E2738C6,
+               0x1E20C0C6, 0x529AE151, 0x72A78471, 0x1E270227, 0x1E2720C0, 0x5400012A, 0xBD405E06, 0x1E2E1007, 0x1E2618E6, 0x4F869000, 0x4F869021, 0xB9412611,
+               0x11000631, 0xB9012611, 'orig', 'back')
     def ui_band(site, orig, why):
         fs_site(site, struct.pack('<I', orig).hex())
         start = here()

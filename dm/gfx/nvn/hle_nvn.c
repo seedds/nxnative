@@ -1522,7 +1522,8 @@ static int slots_bound(const char *what, int st, int first, int n, int slots) {
 __thread int dm_vp_rt[2];
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
     if (slots_fit(0, first, n, 16) != n) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
-    if (getenv("DM_VP_TRACE") && n > 0 && v[1] != 0) { static int seen; if (seen++ < 40) { module_t *m = NULL; void *ra = NULL;   // which game code sets a negative-y viewport: the first game return address up the frame chain
+    static int vpt = -1; if (vpt < 0) vpt = getenv("DM_VP_TRACE") != NULL;
+    if (vpt && n > 0 && v[1] != 0) { static int seen; if (seen++ < 40) { module_t *m = NULL; void *ra = NULL;   // which game code sets a negative-y viewport: the first game return address up the frame chain
         for (void **fp = __builtin_frame_address(0); fp && !m && (uint64_t)fp > 0x1000; fp = (void **)fp[0]) { ra = fp[1]; m = module_of(ra); }
         LOG("[nvn] viewport %.0f,%.0f %.0fx%.0f on a %dx%d target from %s+%#llx", v[0], v[1], v[2], v[3], dm_vp_rt[0], dm_vp_rt[1], m ? m->name : "?", m ? (unsigned long long)((uint64_t)ra - (uint64_t)m->base) : 0ULL); } }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8 | (uint32_t)(((dev_t_ *)CB(c)->dev)->origin + 1) << 16, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }

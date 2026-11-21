@@ -111,6 +111,9 @@ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewCont
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 1; }
 uint64_t mtl_present_count(void) { return 0; }
+static int g_present_stretch;   // what the front end last told the present (Picture Stretch)
+void mtl_present_stretch(int on) { g_present_stretch = on; }
+int duo_harness_present_stretch(void) { return g_present_stretch; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }

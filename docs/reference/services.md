@@ -1789,3 +1789,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the injected web bridge reports window closure as exit reason 4, leaving `nx.endApplet` at exit reason 0. It does not close the page until the page calls it.
 - **Check:** `test_web_shim.py` executes the injected bridge prefix in a window context and verifies both close APIs, no native window close and no completion on injection. The XCOM 2 terms page's confirmation sound in the log establishes that its button test succeeds before the close request.
 - **Found on:** [XCOM 2 Collection](../../dm/games/0100D0B00FB74000/README.md), launcher 1.0.3, package `v131072`. The launcher calls `ShowOfflineHtmlPage` at main `+0x6678`, reads `GetOfflineExitReason` and repeats unless the value is 4 (`+0x6688`). The SDK getter directly loads the first return-value word. The user confirmed that A advances past the terms page on the Mac after the host fix; iOS is untested.
+
+### Open users handed over between programs
+
+- **Symptom:** an in-game option to start another program does nothing, without calling `oe::ExecuteProgram`. The collection launcher can start either program directly.
+- **Cause:** `account::PushOpenUsers` was a no-op and `PopOpenUsers` returned no handles. XCOM 2 initializes its account context from `PopOpenUsers`; an empty list leaves the flag guarding its in-game mode switch clear.
+- **Fix:** `PushOpenUsers` snapshots the open local user set in an internal process environment value. `ExecuteProgram` inherits it. `PopOpenUsers` consumes it once, validates the mask and opens fresh sessions for the still-registered users. Session tokens are not copied from another process. A relaunch discards the context.
+- **Check:** `t_account` covers a real exec with two selected users, duplicate sessions, one-time consumption, malformed data and bounded output. `t_oe` covers preservation on ExecuteProgram and removal on relaunch.
+- **Found on:** [XCOM 2 Collection](../../dm/games/0100D0B00FB74000/README.md), package `v131072`. Program 1's mode-switch entry (`main+0xe6d7c0`) checks the flag set by `PopOpenUsers` before calling ExecuteProgram(2); program 2 makes the corresponding check before ExecuteProgram(1). The user confirmed in-game switching on the Mac with the handoff fix; repeated round trips and iOS remain untested.

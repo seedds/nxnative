@@ -529,6 +529,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
 - A plays the confirmation sound on an offline terms page but the page remains open and the game waits. → [Offline applet pages close their browser window](../reference/services.md#offline-applet-pages-close-their-browser-window)
+- an in-game option to start another program does nothing, without calling `oe::ExecuteProgram`. The collection launcher can start either program directly. → [Open users handed over between programs](../reference/services.md#open-users-handed-over-between-programs)
 
 ## Movies
 

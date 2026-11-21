@@ -70,17 +70,17 @@ static void plan_checks(void) {
     char dir[] = "/tmp/t_oe_plan.XXXXXX", old[4096], path[4200], self[4096], tsv[4200]; uint32_t ssz = sizeof self;
     if (!mkdtemp(dir) || !getcwd(old, sizeof old) || chdir(dir) || _NSGetExecutablePath(self, &ssz)) { CHECK(0, "plan: a scratch folder"); return; }
     int cur = (int)(DM_GAME_PROGRAM_ID & 0xf); prog_plan P = {0};   // each oe_plan frees the plan before it
-    unsetenv("DM_PROGRAMS"); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
+    unsetenv("DM_PROGRAMS"); setenv("DM_OPEN_USERS", "5", 1); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
     // a program run by itself: the relaunch is this host again, same arguments and folder, DM_RELAUNCH=1 once, no parameter or previous program
     CHECK(oe_plan(0, NULL, 0, 1, &P, "relaunch") && !strcmp(P.exe, self) && P.argv == *_NSGetArgv() && !P.cwd, "relaunch, no table: this host again, its own arguments, this folder");
-    CHECK(env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1,
+    CHECK(env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_OPEN_USERS=", 1) && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1,
           "relaunch, no table: DM_RELAUNCH=1 once, no launch parameter, no previous program, the rest kept");
     snprintf(path, sizeof path, "%s/launch_param.bin", dir); unlink(path);
     CHECK(access(path, F_OK) != 0, "relaunch, no table: no launch parameter file");
     // ExecuteProgram of its own index restarts it with the parameters; another program cannot start
     CHECK(oe_plan(cur, "ab", 2, 0, &P, "exec self") && !strcmp(P.exe, self) && !env_count(P.env, "DM_RELAUNCH=", 1), "ExecuteProgram(own index), no table: this host again, no DM_RELAUNCH");
     const char *lp = env_get(P.env, "DM_LAUNCH_PARAM"), *pv = env_get(P.env, "DM_PREV_PROGRAM"); char cv[16]; snprintf(cv, sizeof cv, "%d", cur);
-    CHECK(lp && file_is(lp, "ab", 2) && pv && !strcmp(pv, cv) && env_count(P.env, "DM_LAUNCH_PARAM=", 1) == 1, "ExecuteProgram(own index), no table: the parameters in launch_param.bin, DM_PREV_PROGRAM this program");
+    CHECK(env_count(P.env, "DM_OPEN_USERS=5", 0) == 1 && lp && file_is(lp, "ab", 2) && pv && !strcmp(pv, cv) && env_count(P.env, "DM_LAUNCH_PARAM=", 1) == 1, "ExecuteProgram(own index), no table: the parameters in launch_param.bin, DM_PREV_PROGRAM this program");
     CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other"), "ExecuteProgram(another), no table: nothing starts, this program ends");
     // a table: the relaunch starts program 0's row with its keys, and drops the keys any row sets
     snprintf(tsv, sizeof tsv, "%s/programs.tsv", dir); FILE *f = fopen(tsv, "w");
@@ -95,7 +95,7 @@ static void plan_checks(void) {
     CHECK(oe_plan(1, "xyz", 3, 0, &P, "exec 1") && !strcmp(P.exe, "/h/p1") && env_count(P.env, "T_OE_ROW=one", 0) == 1 && env_count(P.env, "T_OE_ONLY1=x", 0) == 1
           && !env_count(P.env, "DM_RELAUNCH=", 1) && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "xyz", 3), "ExecuteProgram(1), table: its row, its keys, the parameters");
     CHECK(oe_plan(7, "xyz", 3, 0, &P, "exec 7") && !strcmp(P.exe, "/h/p0") && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "", 0), "ExecuteProgram(7), no such row: program 0, no parameters");
-    unsetenv("DM_PROGRAMS"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
+    unsetenv("DM_PROGRAMS"); unsetenv("DM_OPEN_USERS"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
     CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other") && !P.env && !P.tsv && !P.own[0], "a plan that cannot be made frees the one before and holds nothing");
     prog_plan_free(&P);
     unlink(path); unlink(tsv); if (chdir(old)) {} rmdir(dir);

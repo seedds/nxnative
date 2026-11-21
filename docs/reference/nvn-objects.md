@@ -729,6 +729,13 @@ Games read this count as a position in their own command memory and size their h
   Copying the rows at the pixel pitch fails 5 of 6 rows. Axiom Verge's opening logs `linear texture ser=28 8x8 format 0x25 flags 0x10: offset 0x3f8000 / row pitch 32 not aligned to 64 bytes` and `CPU-written texture ser=28 …`, the same on the Mac with the switch and on both iOS devices without it. On the Mac its picture matches a run without the switch.
 - **Found on:** [Hades II](../../dm/games/0100A00019DE0000/README.md) v0 on an iPhone 15 Pro Max (GitHub issue #1956): the title screen's movie background grey and flickering, green and magenta blocks behind the options menu; 736x480 `IMAGE | LINEAR` R8 planes in a `CPU_UNCACHED` pool, rows of 736 bytes (the Mac asks for 16). Checked by `t_linear_readback`; not yet on the iPhone. Axiom Verge 1.0.3 (`0100052004384000`, SDK 4.4.0, MonoGame; its profile is a separate change) on an iPhone 16 Pro Max, iOS 26.0: the opening's sky and mountains are magenta. Its 8×8 RGBA8 linear textures sit in a `CPU_UNCACHED` pool. An iPad Pro with an M4 asks for 64 bytes on iPadOS 26.0 as well, while macOS 27.0 on an M4 Pro asks for 16. With the fix, both iOS devices log the four textures as uploaded, and the iPhone's opening is right.
 
+### A linear texture past Metal's 2D limit
+
+- **Symptom:** `-[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]` aborts on a Metal descriptor assertion before the host can log a red line.
+- **Cause:** a linear texture may become a view on its memory pool's buffer. This path bypassed `tex_desc`'s dimension check.
+- **Fix:** `linear_fit` and `tex_desc` share the 2D size check (16,384 on older supported GPUs, 32,768 from Apple10). An oversized linear texture falls through to the descriptor check and its red line. `t_linear_readback` checks that a buffer view at the device limit succeeds and that one pixel past either dimension is refused.
+- **Found on:** Nintendo Switch Sports 1.5.0 has a 1024×32768 R8 linear glyph cache ([PR #2908](https://github.com/seedds/nxnative/pull/2908)). An M4 Pro on macOS 27.2.1 reproduced the Metal assertion with a buffer view 16,385 rows high.
+
 ### Textures written with `nvnTextureWriteTexels`
 
 - **Symptom:** video frames, or a game's built-in default textures, are all zero.

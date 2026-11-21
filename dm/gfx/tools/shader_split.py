@@ -1156,14 +1156,20 @@ def cpk_jobs(files, parts=64):
         if cur: jobs.append((p, r, tuple(cur)))
     return jobs, {p for p, _, _ in with_head}
 
-def cpk_shaders(path, rel, ents, out):
-    """A range of CPK entries (cpk_jobs), each decoded (CRILAYLA or stored) and scanned like a loose file"""
-    import cpk
+def cpk_shaders(path, rel, ents, out, trees=None):
+    """A range of CPK entries (cpk_jobs), each decoded (CRILAYLA or stored) and scanned like a loose file. An entry that is a UnityFS bundle or a Unity serialized file is read as a loose
+    one is (unity_shaders; Ace Angler: Fishing Spirits keeps its Addressables bundles in 22 CPKs, 21,205 entries: scanned as blobs they gave no shader, and the game asked for shaders the
+    map did not have). → the legacy pass pairs of the Unity entries; raises unityfs.NoTree as unity_shaders does"""
+    import cpk, unityfs
+    pairs = set()
     for e in ents:
         try: d = cpk.read(path, e)
         except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
-        scan_blob(d, f'/{rel}/{e[0]}', out)
+        if d[:8] == b'UnityFS\0' or (COMMON is not None and d[8:11] == b'\0\0\0' and unityfs.is_serialized(d)):
+            pairs |= unity_shaders(d, f'/{rel}/{e[0]}', out, {} if trees is None else trees)
+        else: scan_blob(d, f'/{rel}/{e[0]}', out)
+    return pairs
 
 TTDAT = b'TTDAT'   # job tag: TT Games' indexed .nnx_shaders members (ttdat.py)
 def ttdat_jobs(files, parts=64):
@@ -4123,8 +4129,10 @@ def scan_file_in(args):
         d3cpk_shaders(path, rel, args[2][1], args[2][2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
-        cpk_shaders(path, rel, args[2], found)
-        return rel, uniq_keys(found), var_pairs(found), trees
+        import unityfs
+        try: pairs = cpk_shaders(path, rel, args[2], found, trees if not TREES else dict(TREES))
+        except unityfs.NoTree: return rel, {}, set(), 'defer'
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
     if len(args) > 2 and head[:4] == KPKA:   # entries of an RE Engine PAK (kpka_jobs)
         kpka_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -4420,17 +4428,17 @@ def main():
         with reuse_descriptors(roots):
             big, files = plan_jobs(files, heads, romfs_v, main_v)
         n = len(big) + len(files)
+        jobs = [None] * len(results) + big + files   # the job behind each result (pooled keeps job order); main's rows have none
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
-    for rel, uniq, pr, extra in results:
-        if extra == 'defer': defer.append(rel)
+    for job, (rel, uniq, pr, extra) in zip(jobs, results):
+        if extra == 'defer': defer.append(job)   # the whole job, so a range of archive entries is scanned again as that range (cpk_shaders)
         elif isinstance(extra, dict): trees.update(extra)
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
-        byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, defer))
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again

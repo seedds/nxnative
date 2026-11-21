@@ -4668,27 +4668,34 @@ static nvn_hmap g_cpu_tex = {.klen = 8}, g_cpu_tex_retired = {.klen = 8};   // s
 // The uncompressed 2D textures tex_cpu_content took from their storage, which leave the CPU-written set once the GPU writes that storage (cpu_unc_drop)
 typedef struct { const void *pool; uintptr_t lo, hi; } cpu_unc;
 static nvn_hmap g_cpu_unc = {.klen = 8};   // serial → malloc'ed cpu_unc
-static void hm_drop_pool(nvn_hmap *m, const void *pool, int owned) {   // owned: the values are malloc'ed cpu_unc records; g_cpu_tex_mu held
-    for (uint32_t i = 0; i < m->cap;) {
-        const void *v = m->vals[i];
-        const void *of = owned && v ? ((const cpu_unc *)v)->pool : v;
-        if (!v || of != pool) {
-            i++;
-            continue;
-        }
-
-        uint64_t serial; memcpy(&serial, m->keys + (size_t)i * 8, 8);
-        nvn_hm_del(m, &serial);   // deletion shifts entries: examine this slot again
-        if (owned) {
-            free((void *)v);
-        }
-    }
+// The serials in the three tables above that belong to each pool, so that a pool's Finalize takes out its own entries without walking the tables. Retired classifications stay until their pool
+// is finalized, and a pool that lives on collects them (Ocarina of Time: 63,726 entries after 15 loads from the pause menu, 2.3 million after 160); a walk of three tables of that size at
+// every Finalize, under g_cpu_tex_mu, is what the loads waited for. Every writer of the tables adds the serial here (mtl_tex_cpu_written, cpu_unc_take; mtl_tex_release moves an entry to
+// the retired table under the pool it already had). An entry that cpu_unc_drop or a release took out leaves its serial here until the pool goes, which the check against the table's
+// value makes harmless. g_cpu_tex_mu held
+typedef struct { uint64_t *s; uint32_t n, cap; } cpu_pix;
+static nvn_hmap g_cpu_pix = {.klen = 8};   // pool address -> malloc'ed cpu_pix
+static void cpu_pix_add(const void *pool, uint64_t serial) {
+    if (!pool) return;
+    uint64_t key = (uint64_t)(uintptr_t)pool; cpu_pix *x = nvn_hm_get(&g_cpu_pix, &key);
+    if (!x) { x = calloc(1, sizeof *x); if (!x) abort(); nvn_hm_put(&g_cpu_pix, &key, x); }
+    if (x->n && x->s[x->n - 1] == serial) return;
+    if (x->n == x->cap) { x->cap = x->cap ? x->cap * 2 : 64; x->s = realloc_or_die(x->s, (size_t)x->cap * sizeof *x->s, "a memory pool's CPU-written texture serials"); }
+    x->s[x->n++] = serial;
 }
 static void cpu_tex_drop_pool(const void *pool) {
     pthread_mutex_lock(&g_cpu_tex_mu);
-    hm_drop_pool(&g_cpu_tex, pool, 0);
-    hm_drop_pool(&g_cpu_tex_retired, pool, 0);
-    hm_drop_pool(&g_cpu_unc, pool, 1);
+    uint64_t key = (uint64_t)(uintptr_t)pool; cpu_pix *x = nvn_hm_get(&g_cpu_pix, &key);
+    if (x) {
+        for (uint32_t i = 0; i < x->n; i++) {
+            uint64_t s = x->s[i];
+            if (nvn_hm_get(&g_cpu_tex, &s) == pool) nvn_hm_del(&g_cpu_tex, &s);
+            if (nvn_hm_get(&g_cpu_tex_retired, &s) == pool) nvn_hm_del(&g_cpu_tex_retired, &s);
+            cpu_unc *u = nvn_hm_get(&g_cpu_unc, &s);
+            if (u && u->pool == pool) { nvn_hm_del(&g_cpu_unc, &s); free(u); }
+        }
+        free(x->s); free(nvn_hm_del(&g_cpu_pix, &key));
+    }
     pthread_mutex_unlock(&g_cpu_tex_mu);
 }
 // Storage the GPU writes, by address range: a render target, a texture clear, a copy into a texture or a shader image recorded over it (mtl_tex_gpu_written). tex_cpu_content takes an
@@ -4882,6 +4889,7 @@ void mtl_tex_cpu_written(const tex_t *t) {
     int live = own_tex_live_locked(serial);
     if ((live || (t->pool && t->mem)) && !nvn_hm_get(&g_cpu_tex, &serial) && !nvn_hm_get(&g_cpu_tex_retired, &serial)) {
         nvn_hm_put(live ? &g_cpu_tex : &g_cpu_tex_retired, &serial, t->pool ? (void *)t->pool : (void *)1);
+        cpu_pix_add(t->pool, serial);
         own_note(serial);   // its texture IDs resolve again through the packaged path (tex_by_id view_pkg)
         static int n; if (n++ < 16) MLOG("CPU-written texture ser=%llu %ux%ux%u format %#x target %d levels %u: uploaded / re-uploaded like a swizzled texture", (unsigned long long)serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels);
     }
@@ -4949,6 +4957,7 @@ static void cpu_unc_take(const tex_t *t) {   // an uncompressed texture is taken
     uint64_t s = t->serial;
     pthread_mutex_lock(&g_cpu_tex_mu);
     free(nvn_hm_put(&g_cpu_unc, &s, u));
+    cpu_pix_add(t->pool, s);
     pthread_mutex_unlock(&g_cpu_tex_mu);
     gws_take(lo, hi);
 }

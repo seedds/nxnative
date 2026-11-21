@@ -45,6 +45,23 @@ A balanced starting point if the picture is too blocky: big 8, medium 4, small 2
 
 Detail levels: higher number = bigger stand-in = more memory. 1 is tiny and blocky, 32 is close to normal. Pick the level, not the byte count.
 
+## Results
+
+Screenshots from the tested set above (Metal HUD on: top right shows window size, Metal working set, App memory, fps, GPU and frame time).
+
+| | |
+|---|---|
+| ![Kokiri Forest](ocarina-lowmem/screenshots/01-kokiri-forest-hud.jpg) | ![Navi dialogue](ocarina-lowmem/screenshots/02-navi-dialogue.jpg) |
+| Kokiri Forest: App 2.99 GB, Metal 5.14 GB, 19.99 fps | Navi dialogue: App 2.75 GB, Metal 4.89 GB, 19.99 fps |
+| ![Saria cutscene](ocarina-lowmem/screenshots/03-saria-cutscene.jpg) | ![Title card](ocarina-lowmem/screenshots/04-title-card.jpg) |
+| Saria cutscene: App 3.04 GB, Metal 5.13 GB, 19.88 fps | Area title card: App 2.99 GB, Metal 5.10 GB, 19.99 fps |
+| ![House interior](ocarina-lowmem/screenshots/05-house-interior.jpg) | ![Forest with map](ocarina-lowmem/screenshots/06-forest-map-sharp.jpg) |
+| House interior: App 2.91 GB, Metal 5.04 GB, 19.99 fps | Forest with the map: UI and map stay sharp (the `ui` bypass), App 2.76 GB, 19.51 fps |
+| ![Activity Monitor, the process](ocarina-lowmem/screenshots/07-activity-monitor-process.jpg) | ![Activity Monitor, summary](ocarina-lowmem/screenshots/08-activity-monitor-summary.jpg) |
+| The game process: real memory 993 MB, shared 1.13 GB, private 98 MB | Memory tab: game 2.35 GB of a machine with 8 GB, App Memory 2.20 GB |
+
+The textures are visibly coarser on rock and ground (the stand-ins); characters, UI text, the map and the hearts keep full detail. The memory climbs about 0.3 GB during a cutscene and returns to the earlier level in about 15 seconds with the texture sweep on.
+
 ## Mac: patch an existing app
 
 1. Keep `nx_ocarina_patcher.py`, `ocarina-host-156de5a1.patch` and `ocarina-fps20-156de5a1.patch` in one folder. Needs macOS, Python 3 with Tk, and (to build the host) Xcode with the Metal toolchain and git.

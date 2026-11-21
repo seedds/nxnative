@@ -4,6 +4,8 @@ The README covers packing and playing. This page is for working on nxnative itse
 
 ## How it works
 
+The host registers every rewritten module's gates, including preloaded NROs, before starting guest execution. Its [gate index grows with the combined module set](reference/rewriter.md#gate-tables-grow-with-the-loaded-modules); games do not need a profile-specific gate-count limit.
+
 | Part | State |
 |---|---|
 | Rewriter (`dm/tools/patch_nso.py`) | Runs unchanged on every module of every supported game. Per-build cuts are keyed by the module's build ID, in the profile's `patches.py` (a game's own modules) or `dm/tools/sdk_patches.py` (Nintendo's `sdk` modules). Profiles can opt verified cuts into [function matching](reference/rewriter.md#function-matched-cuts-for-unregistered-builds) across updates |

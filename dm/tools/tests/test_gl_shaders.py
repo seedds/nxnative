@@ -119,6 +119,18 @@ class Sources(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
+    def test_inactive_default_uniforms_are_not_published(self):
+        src = (b'#version 450\nuniform vec4 color;\nuniform vec4 palette[96];\n'
+               b'struct Light { vec4 used; vec4 unused; };\nuniform Light light;\n'
+               b'uniform vec4 weights[3];\nuniform int index;\nlayout(location=0) out vec4 result;\n'
+               b'void main() { result = color + light.used + weights[index]; }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', '4' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            uniforms = {row.split('=')[0] for row in r[1] if row.startswith('u:')}
+            self.assertEqual(uniforms, {'u:color', 'u:light.used', 'u:weights', 'u:index'})
+            self.assertTrue(any(row.endswith(':vec4:3:16') for row in r[1] if row.startswith('u:weights=')))
+
     def test_many_samplers_and_uniforms_have_independent_argument_ids(self):
         for count in (16, 17, 32):
             src = ('#version 320 es\nprecision highp float;\n'
@@ -227,9 +239,9 @@ def gpu_fixture(out):
     """Original GLSL → table and metallib → GL imports and GPU pixels in t_gl_imports.m."""
     out = Path(out); out.mkdir(exist_ok=True)
     vert = ('#version 320 es\nprecision highp float;\nlayout(location=15) in vec4 position;\nout vec2 uv;\n'
-            'uniform vec4 shift;\nuniform sampler2D tex0;\nuniform Block { vec4 factors; };\n'
+            'uniform vec4 unusedPalette[96];\nuniform vec4 shift;\nuniform sampler2D tex0;\nuniform Block { vec4 factors; };\n'
             'void main() { gl_Position = position + shift + vec4(factors.x, 0, 0, 0); uv = vec2(0.75 + texture(tex0, vec2(0.25, 0.5)).g, shift.y + factors.z); }\n')
-    frag = ('#version 320 es\nprecision highp float;\nin vec2 uv;\nout vec4 color;\nuniform vec4 weight;\nuniform Block { vec4 factors; };\n'
+    frag = ('#version 320 es\nprecision highp float;\nin vec2 uv;\nout vec4 color;\nuniform vec4 unusedPalette[96];\nuniform vec4 weight;\nuniform Block { vec4 factors; };\n'
             + ''.join(f'uniform sampler2D tex{i};\n' for i in range(17))
             + 'void main() { int i = int(gl_FragCoord.x) % 17; color = vec4(0);\n'
             + ''.join(f'if (i == {i}) color = texture(tex{i}, uv) * weight * factors.y;\n' for i in range(17)) + 'color.g = uv.y * factors.y; }\n')

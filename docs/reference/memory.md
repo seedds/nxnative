@@ -389,6 +389,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** the host reports each loaded module's real layout and reports other host memory as free (`hle_svc.c`).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) (its note lists it among the host changes first needed there). IL2CPP throws a C++ exception for every managed exception, so Unity games need this; Mario ([Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md)) never threw.
 
+### `svcQueryMemory` walks the whole guest process
+
+- **Symptom:** the SDK's module enumeration keeps calling `svcQueryMemory` after it has seen the last module and the game stays before `nnMain`.
+- **Cause:** the SDK advances from address zero by each block's reported size. Outside the guest reservation the host reported one free 4 KiB page per query, so the walk kept going page by page across the host address space.
+- **Fix:** outside the guest reservation, report each free span up to the adjacent loaded module, front patch area, current stack or guest reservation. Borrowed ranges still split the result. Inactive NROs are free until loaded. At Darwin's user address limit, report a reserved block whose end wraps to zero, as Horizon does at its process limit.
+- **Found on:** [Hitman Absolution, PR #3023](https://github.com/seedds/nxnative/pull/3023) (v131072, SDK 22.2.0). After the [loader lookup fix](services.md#the-sdk-rejects-a-module-that-svcquerymemory-finds), the old map was still scanning at the 10 s cutoff. With the free spans and reserved tail, the same SDK completes both list passes.
+
 ### `MapPhysicalMemory` in 16 KB host pages
 
 - **Symptom:** `MapPhysicalMemory` faults on part of a page.

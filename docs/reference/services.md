@@ -1614,6 +1614,13 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - `nn::ro::ProtectRelro` (called from `main`'s DSO init), a new import of SDK 20, needs nothing: it runs natively on the host's no-op `SetMemoryPermission` / `SetMemoryAttribute`. Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
 
+### The SDK rejects a module that `svcQueryMemory` finds
+
+- **Symptom:** `Failed to get our const data section!` before `nnMain`. The SDK's `GetRequiredBufferSizeForGetAllModuleInfo` finds the game's code mapping but returns zero.
+- **Cause:** `nn::ro::GetModuleAddressRange` and `LookupModuleSymbol` by base consult the guest rtld lists. The host runs its own loader, so the SDK's automatic-load list is empty. The native range lookup rejects the game's code address, and the native symbol lookup returns `0xa16` for its own `nndetailRoGetRoDataStart` export.
+- **Fix:** answer both `nn::ro` lookups from the host's loaded modules. The module size ends at the 4 KiB-aligned MOD0 bss end, as rtld computes it. The symbol lookup takes the exact module base and searches that module. The SDK keeps its own module list and calls the game's exports for the exact read-only data range. See also [whole-process memory walks](memory.md#svcquerymemory-walks-the-whole-guest-process).
+- **Found on:** [Hitman Absolution, PR #3023](https://github.com/seedds/nxnative/pull/3023) (v131072, SDK 22.2.0). The native walk lists all four modules and both boundary exports resolve before `nnMain` on the Mac.
+
 ### Loading NROs with `ro::LoadModule`
 
 - **Symptom:** the frame loop runs, but the game waits for code it loads itself (`ro::RegisterModuleInfo` / `ro::GetBufferSize` red lines; `main` imports 1,045 `lua2cpp::create_agent_*` functions, global, that no ExeFS module defines, bound to stubs at start).

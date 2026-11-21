@@ -201,7 +201,7 @@ static int prog_plan_make(char **rows, int nr, int hit, prog_plan *out, const vo
     char **env = out->env = calloc(ne + 68, sizeof *env); size_t k = 0;
     if (!env) die("%s: out of memory", call);
     for (size_t i = 0; i < ne; i++) {
-        int drop = prog_start_key(environ[i]);
+        int drop = prog_start_key(environ[i]) || (relaunch && !strncmp(environ[i], "DM_OPEN_USERS=", 14));
         for (int r = 0; r < nr && !drop; r++) drop = prog_row_sets(rows[r], environ[i]);
         if (!drop) env[k++] = environ[i];
     }

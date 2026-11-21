@@ -75,6 +75,25 @@ class Ue3CacheTests(unittest.TestCase):
         self.assertEqual([(st, ctl, code) for _, st, ctl, code in got], [('ps', k, c) for c, k in shaders])
         self.assertTrue(all('#UE3@' in w for w, *_ in got))   # single-stage programs (separable_pairs)
 
+    def test_shared_controls_and_code_arrays(self):
+        shaders = [shader(1), shader(2, 0x200)]
+        compute = bytearray(0x880); compute[:4] = shader_split.CTL_MAGIC
+        struct.pack_into('<I', compute, 0x704, 0x100); struct.pack_into('<3I', compute, 0x748, 8, 1, 1)
+        shaders.append((bytes(0x100), bytes(compute)))
+        controls = []
+        for _, ctl in shaders:
+            ctl = bytearray(ctl); struct.pack_into('<I', ctl, 0x20, len(ctl)); controls.append(bytes(ctl))
+        # Reflection bytes belong to the control array, but not to the shader key.
+        control = b'reflect'.join(controls)
+        code = b''.join(c for c, _ in shaders)
+        head = shader_split.UE3_TAG + b'UniShaderBuffer\0' + struct.pack('<I', len(control))
+        data = head + control + struct.pack('<I', len(code)) + code
+        got = shader_split.ue3_shaders(data, 'shared.upk')
+        self.assertEqual([(st, ctl, c) for _, st, ctl, c in got], [('cs' if i == 2 else 'ps', ctl, c) for i, (ctl, (c, _)) in enumerate(zip(controls, shaders))])
+        for broken in (data[:-1], head + control + struct.pack('<I', len(code) + 1) + code + b'x'):
+            with self.subTest(size=len(broken)), self.assertRaises(SystemExit):
+                shader_split.ue3_shaders(broken, 'shared.upk')
+
     def test_key_skip_masks_the_compile_information(self):
         (c1, k1), (_, k2) = shader(1), shader(2)
         k2 = k1[:0x7d0] + k2[0x7d0:0x7e8] + k1[0x7e8:]   # the same section but its compile information

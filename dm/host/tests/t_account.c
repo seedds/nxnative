@@ -40,6 +40,14 @@ int main(int argc, char **argv) {
             assert(h_acc_Exists(&exists, &u2) == RES_OK && exists);
             assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
             assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &k_uid, 16));
+        } else if (!strcmp(argv[1], "--handoff")) {
+            UserHandle users[8];
+            h_acc_PopOpen(&n, users, 8); assert(n == 2 && !getenv("DM_OPEN_USERS"));
+            assert(dm_uid_user(&users[0]) == 0 && dm_uid_user(&users[1]) == 2 && users[0].v[2] != users[1].v[2]);
+            h_acc_PopOpen(&n, users + 2, 6); assert(n == 0);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 2);
+            h_acc_CloseUser(&users[0]); h_acc_CloseUser(&users[1]);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
         } else if (!strcmp(argv[1], "--corrupt")) {
             assert(h_acc_ListAll(&n, list, 8) == RES_FAIL && n == 0);
             choice = FRONT_USER_CREATE; assert(h_acc_ShowCreator() == RES_FAIL && calls == 0);
@@ -118,6 +126,15 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; i++) assert(!pthread_join(threads[i], NULL));
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0 && waiting == 0);
     child(argv[0], "--restart", save);
+    // Transfer only the open users, once, through a real exec; duplicate sessions do not duplicate users.
+    assert(h_acc_OpenUser(&h, &k_uid) == RES_OK && h_acc_OpenUser(&other, &u3) == RES_OK);
+    UserHandle duplicate; assert(h_acc_OpenUser(&duplicate, &u3) == RES_OK);
+    h_acc_PushOpen(); h_acc_CloseUser(&h); h_acc_CloseUser(&other); h_acc_CloseUser(&duplicate);
+    child(argv[0], "--handoff", save); unsetenv("DM_OPEN_USERS");
+    UserHandle popped[2]; h_acc_PopOpen(&n, popped, 2); assert(n == 0);
+    setenv("DM_OPEN_USERS", "broken", 1); h_acc_PopOpen(&n, popped, 2); assert(n == 0 && !getenv("DM_OPEN_USERS"));
+    setenv("DM_OPEN_USERS", "ff", 1); h_acc_PopOpen(&n, popped, 1); assert(n == 1);
+    h_acc_CloseUser(popped); h_acc_PopOpen(&n, popped, 2); assert(n == 0);
     snprintf(path, sizeof path, "%s.users", save); FILE *f = fopen(path, "w"); assert(f); fputs("broken registry\n", f); fclose(f);
     child(argv[0], "--corrupt", save);
     unlink(path);

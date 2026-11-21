@@ -96,8 +96,22 @@ HLE_FORCE("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSetti
     DM_APPLET("user selector"); return show_selector(out, settings, 0);
 }
 // The host runs one program and has no sessions handed over by an earlier program.
-HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "no users handed over by another program", void, h_acc_PopOpen, int *n, UserHandle *out, int max) { (void)out; (void)max; *n = 0; }
-HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "the host runs only this program", void, h_acc_PushOpen, void) {}
+HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "consume users handed over by the previous program", void, h_acc_PopOpen, int *n, UserHandle *out, int max) {
+    const char *text = getenv("DM_OPEN_USERS"); char *end = NULL;
+    unsigned long mask = text && *text ? strtoul(text, &end, 16) : 0;
+    if (!end || *end || mask >= (1u << DM_USERS)) mask = 0;
+    unsetenv("DM_OPEN_USERS");   // consumed once; handles are sessions of this process, not the previous one's tokens
+    *n = 0;
+    for (int i = 0; out && i < DM_USERS && *n < max; i++) if (mask & (1u << i)) {
+        Uid uid = user_uid(i);
+        if (open_user(out + *n, &uid) == RES_OK) ++*n;
+    }
+}
+HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "hand the current open users to the next program", void, h_acc_PushOpen, void) {
+    pthread_mutex_lock(&g_account_lock); unsigned mask = opened_users(); pthread_mutex_unlock(&g_account_lock);
+    char text[16]; snprintf(text, sizeof text, "%x", mask);
+    setenv("DM_OPEN_USERS", text, 1);   // inherited by oe::ExecuteProgram's execve; a fresh launch has no handoff
+}
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "open a session for the launch user (returns bool)", unsigned, h_acc_TryOpenPre, UserHandle *h) { return open_user(h, &k_uid) == RES_OK; }
 // SDK 6 uses the Result; newer SDKs ignore it. Preserve that shared ABI.
 HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "open a session for the launch user", Result, h_acc_OpenPre, UserHandle *h) { return open_user(h, &k_uid); }

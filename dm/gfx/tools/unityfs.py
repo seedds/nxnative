@@ -217,6 +217,34 @@ PPtr<Shader>: int m_FileID; SInt64 m_PathID
 PPtr<Texture>: int m_FileID; SInt64 m_PathID
 Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int> platforms; vector<data:unsigned int> offsets; vector<data:unsigned int> compressedLengths; vector<data:unsigned int> decompressedLengths; vector<data:UInt8> compressedBlob; vector<data:PPtr<Shader>> m_Dependencies; map<data:pair(string,PPtr<Texture>)>~ m_NonModifiableTextures; bool! m_ShaderIsBaked
 '''
+# Unity 5.6.4p2 (INSIDE): the Shader tree from UnityPy's Unity 5.6 TPK, matched node for node to the TPK layout.
+SHADER_5_6 = '''
+BufferBinding: int m_NameIndex; int m_Index
+ConstantBuffer: int m_NameIndex; vector<data:MatrixParameter>~ m_MatrixParams; vector<data:VectorParameter>~ m_VectorParams; int m_Size
+MatrixParameter: int m_NameIndex; int m_Index; int m_ArraySize; SInt8 m_Type; SInt8! m_RowCount
+PPtr<Shader>: int m_FileID; SInt64 m_PathID
+ParserBindChannels: vector<data:ShaderBindChannel>~! m_Channels; int m_SourceMap
+SerializedPass: map<data:pair(string,int)>~ m_NameIndices; int m_Type; SerializedShaderState m_State; unsigned int m_ProgramMask; SerializedProgram progVertex; SerializedProgram progFragment; SerializedProgram progGeometry; SerializedProgram progHull; SerializedProgram progDomain; bool! m_HasInstancingVariant; string m_UseName; string m_Name; string m_TextureName; SerializedTagMap m_Tags
+SerializedProgram: vector<data:SerializedSubProgram>~ m_SubPrograms
+SerializedProperties: vector<data:SerializedProperty>~ m_Props
+SerializedProperty: string m_Name; string m_Description; vector<data:string>~ m_Attributes; int m_Type; unsigned int m_Flags; float m_DefValue[0]; float m_DefValue[1]; float m_DefValue[2]; float m_DefValue[3]; SerializedTextureProperty m_DefTexture
+SerializedShader: SerializedProperties m_PropInfo; vector<data:SerializedSubShader>~ m_SubShaders; string m_Name; string m_CustomEditorName; string m_FallbackName; vector<data:SerializedShaderDependency>~ m_Dependencies; bool! m_DisableNoSubshadersMessage
+SerializedShaderDependency: string from; string to
+SerializedShaderFloatValue: float val; string name
+SerializedShaderRTBlendState: SerializedShaderFloatValue srcBlend; SerializedShaderFloatValue destBlend; SerializedShaderFloatValue srcBlendAlpha; SerializedShaderFloatValue destBlendAlpha; SerializedShaderFloatValue blendOp; SerializedShaderFloatValue blendOpAlpha; SerializedShaderFloatValue colMask
+SerializedShaderState: string m_Name; SerializedShaderRTBlendState rtBlend0; SerializedShaderRTBlendState rtBlend1; SerializedShaderRTBlendState rtBlend2; SerializedShaderRTBlendState rtBlend3; SerializedShaderRTBlendState rtBlend4; SerializedShaderRTBlendState rtBlend5; SerializedShaderRTBlendState rtBlend6; SerializedShaderRTBlendState rtBlend7; bool! rtSeparateBlend; SerializedShaderFloatValue zTest; SerializedShaderFloatValue zWrite; SerializedShaderFloatValue culling; SerializedShaderFloatValue offsetFactor; SerializedShaderFloatValue offsetUnits; SerializedShaderFloatValue alphaToMask; SerializedStencilOp stencilOp; SerializedStencilOp stencilOpFront; SerializedStencilOp stencilOpBack; SerializedShaderFloatValue stencilReadMask; SerializedShaderFloatValue stencilWriteMask; SerializedShaderFloatValue stencilRef; SerializedShaderFloatValue fogStart; SerializedShaderFloatValue fogEnd; SerializedShaderFloatValue fogDensity; SerializedShaderVectorValue fogColor; int fogMode; int gpuProgramID; SerializedTagMap m_Tags; int m_LOD; bool! lighting
+SerializedShaderVectorValue: SerializedShaderFloatValue x; SerializedShaderFloatValue y; SerializedShaderFloatValue z; SerializedShaderFloatValue w; string name
+SerializedStencilOp: SerializedShaderFloatValue pass; SerializedShaderFloatValue fail; SerializedShaderFloatValue zFail; SerializedShaderFloatValue comp
+SerializedSubProgram: unsigned int m_BlobIndex; ParserBindChannels m_Channels; vector<data:UInt16>~ m_KeywordIndices; SInt8 m_ShaderHardwareTier; SInt8! m_GpuProgramType; vector<data:VectorParameter>~ m_VectorParams; vector<data:MatrixParameter>~ m_MatrixParams; vector<data:TextureParameter>~ m_TextureParams; vector<data:BufferBinding>~ m_BufferParams; vector<data:ConstantBuffer>~ m_ConstantBuffers; vector<data:BufferBinding>~ m_ConstantBufferBindings; vector<data:UAVParameter>~ m_UAVParams
+SerializedSubShader: vector<data:SerializedPass>~ m_Passes; SerializedTagMap m_Tags; int m_LOD
+SerializedTagMap: map<data:pair(string,string)>~ tags
+SerializedTextureProperty: string m_DefaultName; int m_TexDim
+Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int>~ platforms; vector<data:unsigned int>~ offsets; vector<data:unsigned int>~ compressedLengths; vector<data:unsigned int>~ decompressedLengths; vector<data:UInt8> compressedBlob; vector<data:PPtr<Shader>>~ m_Dependencies; bool! m_ShaderIsBaked
+ShaderBindChannel: SInt8 source; SInt8 target
+TextureParameter: int m_NameIndex; int m_Index; int m_SamplerIndex; SInt8! m_Dim
+UAVParameter: int m_NameIndex; int m_Index; int m_OriginalIndex
+VectorParameter: int m_NameIndex; int m_Index; int m_ArraySize; SInt8 m_Type; SInt8! m_Dim
+'''
 # Unity 2017.4.28f1 (Return of the Obra Dinn): the same layout except for these two absent fields, checked against
 # AssetRipper's TypeTreeDumps StructsDump/release/2017.4.28f1.dump. The built-in resources strip their trees and no bundle
 # supplies this hash. The instancing flag itself takes the alignment formerly carried by the following flag.
@@ -312,6 +340,7 @@ SHADER_2021_3 = SHADER_2021_2.replace('SerializedProgram: vector<data:Serialized
 
 CLASS_COMPUTE_SHADER = 72
 KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('4496e93f2179252104401c8dda0a1751')): ('Shader', SHADER_5_5),
+               (CLASS_SHADER, bytes.fromhex('a70f7abc6586fb35b3a0641aa81e9375')): ('Shader', SHADER_5_6),
                (CLASS_SHADER, bytes.fromhex('f0c184272a05e54447e36366ec4876a6')): ('Shader', SHADER_2021_3),
                (CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005')): ('Shader', SHADER_2022_3),
                (CLASS_SHADER, bytes.fromhex('d8236c9bd87d85edb203acf352348124')): ('Shader', SHADER_2021_2),

@@ -1,12 +1,20 @@
-// Server environment queries offline (hle_offline.c, from PR #1199): the takeovers are looked up by their mangled names in the real swforce registrations, so a missing or misspelled
-// one fails, as it would fall through to the SDK's nsd client and abort on a host that serves no nsd service
+// Offline service takeovers are looked up by their SDK names in the real swforce registrations. A missing or misspelled name would let the SDK call its own service client.
+#define DM_LOG_IMPL
 #include "../hle_offline.c"
 #include <mach-o/getsect.h>
+#include <stdarg.h>
 
-static int unexpected, checks, failed;
+static int unexpected, checks, failed, enters, leaves;
+static char message[256];
+void dm_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(message, sizeof message, fmt, ap);
+    va_end(ap);
+}
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; unexpected++; }
-void dm_applet_enter(const char *name) { (void)name; unexpected++; }
-void dm_applet_leave(void) { unexpected++; }
+void dm_applet_enter(const char *name) { if (strcmp(name, "error")) unexpected++; enters++; }
+void dm_applet_leave(void) { leaves++; }
 // hle_offline.c's socket overloads go to the host's sockets (hle_net.c): none may run here
 int dm_sk_socket(int f, int t, int p) { (void)f; (void)t; (void)p; unexpected++; return -1; }
 int dm_sk_bind(int fd, const void *a, unsigned n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }
@@ -36,7 +44,7 @@ static void *hook(const char *name) {
     CHECK(count == 1 && fn, name);
     return count == 1 ? fn : NULL;
 }
-int main(void) {
+static void check_server_environment(void) {
     int (*type)(void) = hook("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv");
     void (*identifier)(char *) = hook("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE");
     if (type && identifier) {
@@ -54,7 +62,49 @@ int main(void) {
         CHECK(status(&out) == RES_OK, "play report status succeeds offline");
         CHECK(out == 0, "play report transmission is idle");
     }
-    CHECK(unexpected == 0, "offline queries need no event, applet or network operation");
-    printf("server environment: %d checks, %d failed\n", checks, failed);
+}
+
+static void check_friend_ids(void) {
+    Result (*ids)(int *, void *, int, int, const void *) = hook("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdEiiRKNS0_12FriendFilterE");
+    Result (*ids_uid)(int *, void *, const void *, int, int, const void *) = hook("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE");
+    const uint64_t before[] = {0x123456789abcdef0, 0xfedcba9876543210};
+    uint64_t output[2];
+    uint8_t uid[16] = {1}, filter[32] = {0};
+    if (ids) {
+        int count = 7;
+        memcpy(output, before, sizeof output);
+        CHECK(ids(&count, output, 2, 2, filter) == RES_FAIL, "friend IDs without Uid remain unavailable offline");
+        CHECK(count == 0, "unavailable ID list reports zero entries");
+        CHECK(!memcmp(output, before, sizeof output), "unavailable ID list leaves client storage untouched");
+        count = 7;
+        CHECK(ids(&count, NULL, 0, 0, filter) == RES_FAIL && count == 0, "zero-capacity ID query remains empty");
+    }
+    if (ids_uid) {
+        int count = 7;
+        memcpy(output, before, sizeof output);
+        CHECK(ids_uid(&count, output, uid, 2, 2, filter) == RES_FAIL, "friend IDs with Uid remain unavailable offline");
+        CHECK(count == 0, "unavailable per-user ID list reports zero entries");
+        CHECK(!memcmp(output, before, sizeof output), "unavailable per-user ID list leaves client storage untouched");
+        count = 7;
+        CHECK(ids_uid(&count, NULL, uid, 0, 0, filter) == RES_FAIL && count == 0, "zero-capacity per-user query remains empty");
+    }
+}
+
+static void check_network_error(void) {
+    void (*show)(Result) = hook("_ZN2nn3err23ShowNetworkServiceErrorENS_6ResultE");
+    if (show) {
+        show(0x8ad23u); // Result with module 291 and description 1110
+        CHECK(strstr(message, "module 291") && strstr(message, "description 1110"), "Result error logs its module and description");
+        CHECK(enters == 1 && leaves == 1, "error applet notification enters and leaves once");
+    }
+}
+
+int main(void) {
+    check_server_environment();
+    check_friend_ids();
+    CHECK(enters == 0 && leaves == 0, "offline queries open no applet");
+    check_network_error();
+    CHECK(unexpected == 0, "offline handlers need no event binding or network operation");
+    printf("offline services: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }

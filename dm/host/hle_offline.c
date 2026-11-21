@@ -152,6 +152,12 @@ HLE_FORCE("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv", "server environme
 HLE_FORCE("_ZN2nn7friends12SetAllocatorEPFPvmEPFvS1_mE", "friends library allocator; no session is created, ignored", void, h_fr_SetAlloc, void *a, void *f) { (void)a; (void)f; }
 HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", "friend list is empty (cut)", Result, h_fr_List2,
           int *count, void *out, const void *uid, int off, int n, const void *filt) { (void)out; (void)uid; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
+// Super Kirby Clash (SDK 7.4) requests account IDs rather than Friend objects. These
+// overloads need the same offline cut: no service connection, no entries, and failure.
+HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdEiiRKNS0_12FriendFilterE", "friend ID list is empty (cut)", Result, h_fr_IdList,
+          int *count, void *out, int off, int n, const void *filt) { (void)out; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE", "friend ID list is empty (cut)", Result, h_fr_IdList2,
+          int *count, void *out, const void *uid, int off, int n, const void *filt) { (void)out; (void)uid; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends27CheckFriendListAvailabilityEPbRKNS_7account3UidE", "friend list unavailable (cut)", Result, h_fr_ListAvail, uint8_t *out, const void *uid) { (void)uid; *out = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", "friend list (cut): the request fails at once", Result, h_fr_ListEnsure, void *ctx, const void *uid) { (void)ctx; (void)uid; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends12AsyncContext7HasDoneEPb", "async context: always done", Result, h_fr_AcHasDone, void *self, uint8_t *done) { (void)self; *done = 1; return RES_OK; }
@@ -181,6 +187,12 @@ HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "game version
 HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) { DM_APPLET("error"); (void)arg; LOG("game asks to show an application error (ApplicationErrorArg)"); }
 // Pokémon Sword (SDK 7.3.2): the error applet's network service form, after a failed online call
 HLE_FORCE("_ZN2nn3err23ShowNetworkServiceErrorENS0_9ErrorCodeE", "network service error applet; the host only logs it", void, h_err_ShowNet, uint64_t code) { DM_APPLET("error"); LOG("game asks to show a network service error: %04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
+
+// SDK 7.4 also takes a Result here, not the separate ErrorCode pair. Keep the
+// host's log-only network error behavior rather than entering the absent applet service.
+HLE_FORCE("_ZN2nn3err23ShowNetworkServiceErrorENS_6ResultE", "network service error applet (Result); the host only logs it", void, h_err_ShowNetRes, Result r) {
+    DM_APPLET("error"); LOG("err::ShowNetworkServiceError Result=%#x (module %u, description %u)", r, r & 0x1ff, (r >> 9) & 0x1fff);
+}
 
 // ---------- pdm: the system's play log ----------
 // Pokémon Sword asks at boot how often this user has launched two other games (main+0xc88074, one ID each call, 0x18 bytes {application ID, play time, launch count} per entry; the result is

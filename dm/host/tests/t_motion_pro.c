@@ -49,5 +49,39 @@ int main(void) {
     assert(ds4_motion_decode(&d, q, 78, t + 8000000, out) == 1);   // real free fall after live data
     assert(!ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 1, out));   // stale stream must become live again
     q[17] = 0x01; assert(ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 4000001, out) == 1);
+    // Joy-Con 1: subcommand framing, SPI gyro calibration (factory 0x6020 and user 0x8026), and Joy-Con (R) flipped PCB axes
+    uint8_t cmd[16], arg = 1;
+    assert(pro_subcmd_build(cmd, 0x15, 0x40, &arg, 1) == 12 && cmd[0] == 0x01 && cmd[1] == 0x05 && cmd[10] == 0x40 && cmd[11] == 1);
+    assert(!pro_subcmd_build(cmd, 0, 0x10, cmd, 6));
+    uint8_t spi[64] = {0x21}; spi[13] = 0x90; spi[14] = 0x10; spi[15] = 0x20; spi[16] = 0x60; spi[19] = 24;
+    int16_t goff[3] = {-30, 10, -5}, gsens[3] = {15335, 13371, 13371};
+    for (int i = 0; i < 3; i++) {
+        spi[32 + 2 * i] = (uint8_t)goff[i]; spi[33 + 2 * i] = (uint8_t)((uint16_t)goff[i] >> 8);
+        spi[38 + 2 * i] = (uint8_t)gsens[i]; spi[39 + 2 * i] = (uint8_t)((uint16_t)gsens[i] >> 8);
+    }
+    pro_imu_cal cal = {0};
+    assert(!pro_imu_cal_parse(&cal, spi, 43));   // truncated (len < 20 + r[19])
+    assert(pro_imu_cal_parse(&cal, spi, 44) && cal.valid == 1 && cal.gyro_off[0] == -30);
+    // Out-of-range denom on axis 1 must fail without corrupting already-valid axis 0
+    uint8_t bad[64]; memcpy(bad, spi, sizeof bad); bad[32] = 99; bad[40] = 0; bad[41] = 0;
+    assert(!pro_imu_cal_parse(&cal, bad, 44) && cal.valid == 1 && cal.gyro_off[0] == -30);
+    // User calibration (0x8026 with magic 0xB2 0xA1) overrides factory; factory then does not overwrite user
+    uint8_t uspi[64] = {0x21}; uspi[13] = 0x90; uspi[14] = 0x10; uspi[15] = 0x26; uspi[16] = 0x80; uspi[19] = 26; uspi[20] = 0xb2; uspi[21] = 0xa1;
+    for (int i = 0; i < 3; i++) {
+        int16_t uo = (int16_t)(i + 1), us = 13371;
+        uspi[34 + 2 * i] = (uint8_t)uo; uspi[35 + 2 * i] = (uint8_t)((uint16_t)uo >> 8);
+        uspi[40 + 2 * i] = (uint8_t)us; uspi[41 + 2 * i] = (uint8_t)((uint16_t)us >> 8);
+    }
+    assert(pro_imu_cal_parse(&cal, uspi, 46) && cal.valid == 2 && cal.gyro_off[0] == 1);
+    assert(!pro_imu_cal_parse(&cal, spi, 44) && cal.valid == 2 && cal.gyro_off[0] == 1);
+    // Joy-Con (R) flipped PCB: level face-up has raw z = -4096 (acc z = -1), yaw left has raw gz = -1000 (+Switch Z)
+    pro_motion jr = {.flip_r = 1}; assert(pro_imu_cal_parse(&jr.cal, spi, 44));
+    memset(r, 0, sizeof r); r[0] = 0x30; r[1] = 1;
+    for (int k = 0; k < 3; k++) { word(r, k, 2, -4096); word(r, k, 3, -30); word(r, k, 4, 10); word(r, k, 5, -1005); }
+    assert(pro_motion_decode(&jr, r, 49, t, out) == 3);
+    assert(out[0].acc[0] == 0 && out[0].acc[1] == 0 && out[0].acc[2] == -1);
+    assert(fabsf(out[0].rot[0]) < 1e-6f && fabsf(out[0].rot[1]) < 1e-6f);
+    assert(fabsf(out[0].rot[2] - 1000.f * jr.cal.gyro_rad[2]) < 1e-5f);
+    pro_motion_reset(&jr); assert(!jr.live && !jr.seen && jr.flip_r == 1 && jr.cal.valid == 1);
     puts("t_motion_pro: passed");
 }

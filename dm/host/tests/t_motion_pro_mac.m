@@ -26,7 +26,14 @@ static void test_callback(IOHIDDeviceRef device, uint8_t *buffer, CFIndex len, I
     TestPro *d = (__bridge id)device; assert(len >= 49);
     d.buffer = buffer; d.callback = callback; d.context = ctx;
 }
-static int sent, player, cleared = -1, ds4_sent;
+static int sent, player, cleared = -1, ds4_sent, out_reports, out_subcmds[16];
+static IOReturn out_status = kIOReturnSuccess;
+static IOReturn test_set_report(IOHIDDeviceRef device, IOHIDReportType type, CFIndex reportID, const uint8_t *report, CFIndex len) {
+    (void)device; assert(type == kIOHIDReportTypeOutput && reportID == 0x01 && len >= 11 && report[0] == 0x01);
+    if (out_reports < 16) out_subcmds[out_reports] = report[10];
+    out_reports++;
+    return out_status;
+}
 static uint64_t tick = 1000000000, sample_time;
 uint64_t now_ns(void) { return tick; }
 void dm_motion_set_hid(int p, const float a[3], const float w[3], uint64_t ns) {
@@ -37,14 +44,16 @@ void dm_motion_clear_hid(int p) { cleared = p; }
 #define LOG(...) ((void)0)
 #define IOHIDDeviceGetProperty test_property
 #define IOHIDDeviceRegisterInputReportCallback test_callback
+#define IOHIDDeviceSetReport test_set_report
 #include "../motion_pro_mac.h"
 #undef IOHIDDeviceGetProperty
 #undef IOHIDDeviceRegisterInputReportCallback
+#undef IOHIDDeviceSetReport
 
 static IOHIDDeviceRef hid(TestPro *d) { return (__bridge IOHIDDeviceRef)d; }
 static void found(TestPro *d) { pro_found(NULL, kIOReturnSuccess, NULL, hid(d)); }
 static void removed(TestPro *d) { pro_removed(NULL, kIOReturnSuccess, NULL, hid(d)); }
-static int gc[PRO_MODELS], slot[PRO_MODELS] = {-1, -1};   // GameController's controllers of each model, as front_mac.m counts them
+static int gc[PRO_MODELS], slot[PRO_MODELS] = {-1, -1, -1};   // GameController's controllers of each model, as front_mac.m counts them
 static void players(int pros, int pro_slot) { gc[PRO_MODEL_PRO] = pros; slot[PRO_MODEL_PRO] = pro_slot; dm_motion_pro_players(gc, slot); }
 static void changed(void) { dm_motion_pro_players(gc, slot); }
 #define g_pro_player (g_pro_pair[PRO_MODEL_PRO].player)
@@ -108,6 +117,61 @@ int main(void) { @autoreleasepool {
     assert(g_pro_bound && g_pro_bound->hid == hid(c) && !g_pro_pair[PRO_MODEL_DS4].bound && player == 0);
     ds4_report(ds); assert(ds4_sent == ds4_before);   // the DS4 no longer feeds the shared player
     removed(ds); gc[PRO_MODEL_DS4] = 0; slot[PRO_MODEL_DS4] = -1; changed();
+    // Switch 1 Joy-Con (L/R) pair: R (0x2007) preferred over L (0x2006), active 0x40 -> 0x21 ACK -> 0x10 SPI cal, L fallback, ambiguity, DM_PAD_MERGE, and error stop
+    assert(pro_model_of_category("Nintendo Switch Joy-Con (L/R)") == PRO_MODEL_JC1);
+    assert(pro_model_of_category("Nintendo Switch Joy-Con (L)") == -1);
+    TestPro *jcl = [TestPro new]; jcl.product = @0x2006;
+    TestPro *jcr = [TestPro new]; jcr.product = @0x2007;
+    TestPro *jcr2 = [TestPro new]; jcr2.product = @0x2007;
+    found(jcl); found(jcr);
+    assert(out_reports == 0);   // never send output reports before a device is live and bound
+    gc[PRO_MODEL_JC1] = 1; slot[PRO_MODEL_JC1] = 2; changed();
+    // Empty 0x30 from L binds L and kicks 0x40
+    memset(jcl.buffer, 0, 49); jcl.buffer[0] = 0x30; jcl.buffer[1] = 1;
+    jcl.callback(jcl.context, kIOReturnSuccess, hid(jcl), kIOHIDReportTypeInput, 0x30, jcl.buffer, 49);
+    assert(g_pro_pair[PRO_MODEL_JC1].bound && g_pro_pair[PRO_MODEL_JC1].bound->hid == hid(jcl) && g_pro_pair[PRO_MODEL_JC1].player == 2);
+    assert(out_reports == 1 && out_subcmds[0] == 0x40);
+    // R starts sending empty 0x30: R takes over as primary gyro and kicks 0x40
+    memset(jcr.buffer, 0, 49); jcr.buffer[0] = 0x30; jcr.buffer[1] = 2;
+    jcr.callback(jcr.context, kIOReturnSuccess, hid(jcr), kIOHIDReportTypeInput, 0x30, jcr.buffer, 49);
+    assert(g_pro_pair[PRO_MODEL_JC1].bound && g_pro_pair[PRO_MODEL_JC1].bound->hid == hid(jcr));
+    assert(out_reports == 2 && out_subcmds[1] == 0x40);
+    // 0x21 ACK for 0x40 on bound R triggers 0x10 SPI read; 0x21 on unbound L is ignored
+    uint8_t ack40[49] = {0x21}; ack40[13] = 0x80; ack40[14] = 0x40;
+    jcl.callback(jcl.context, kIOReturnSuccess, hid(jcl), kIOHIDReportTypeInput, 0x21, ack40, 49);
+    assert(out_reports == 2);   // unbound L must not send
+    jcr.callback(jcr.context, kIOReturnSuccess, hid(jcr), kIOHIDReportTypeInput, 0x21, ack40, 49);
+    assert(out_reports == 3 && out_subcmds[2] == 0x10);
+    // 0x21 SPI factory cal reply loads into R; then live flipped-PCB R report (-4096 z) produces acc[2] == -1
+    uint8_t spi21[49] = {0x21}; spi21[13] = 0x90; spi21[14] = 0x10; spi21[15] = 0x20; spi21[16] = 0x60; spi21[19] = 24;
+    for (int i = 0; i < 3; i++) { spi21[38 + 2 * i] = 0x3b; spi21[39 + 2 * i] = 0x34; }   // gsens = 13371, goff = 0
+    jcr.callback(jcr.context, kIOReturnSuccess, hid(jcr), kIOHIDReportTypeInput, 0x21, spi21, 49);
+    assert(g_pro_pair[PRO_MODEL_JC1].bound->motion.cal.valid == 1);
+    int sent_before = sent; tick += 15000000;
+    memset(jcr.buffer, 0, 49); jcr.buffer[0] = 0x30; jcr.buffer[1] = 3;
+    for (int k = 0; k < 3; k++) { jcr.buffer[17 + 12 * k] = 0x00; jcr.buffer[18 + 12 * k] = 0xf0; }   // -4096 z on flipped R PCB
+    jcr.callback(jcr.context, kIOReturnSuccess, hid(jcr), kIOHIDReportTypeInput, 0x30, jcr.buffer, 49);
+    assert(sent == sent_before + 3 && player == 2);
+    // Second Right Joy-Con streams: ambiguous (2x R), unbinds without touching Pro
+    found(jcr2); tick += 15000000;
+    memset(jcr2.buffer, 0, 49); jcr2.buffer[0] = 0x30; jcr2.buffer[1] = 4;
+    jcr2.callback(jcr2.context, kIOReturnSuccess, hid(jcr2), kIOHIDReportTypeInput, 0x30, jcr2.buffer, 49);
+    assert(!g_pro_pair[PRO_MODEL_JC1].bound && cleared == 2);
+    removed(jcr2); removed(jcr);   // removing both R falls back to L (still live)
+    assert(g_pro_pair[PRO_MODEL_JC1].bound && g_pro_pair[PRO_MODEL_JC1].bound->hid == hid(jcl));
+    // DM_PAD_MERGE: Pro Controller on player 0 wins over Joy-Con on player 0
+    slot[PRO_MODEL_JC1] = 0; changed();
+    assert(!g_pro_pair[PRO_MODEL_JC1].bound && g_pro_bound && g_pro_bound->hid == hid(c));
+    // Output error stops retries immediately
+    slot[PRO_MODEL_JC1] = 2; changed(); out_status = kIOReturnNotPermitted; tick += 3000000000ull;
+    int out_before = out_reports;
+    jcl.buffer[1] = 9; jcl.callback(jcl.context, kIOReturnSuccess, hid(jcl), kIOHIDReportTypeInput, 0x30, jcl.buffer, 49);
+    assert(out_reports == out_before + 1 && g_pro_pair[PRO_MODEL_JC1].bound->send_failed == 1);
+    tick += 3000000000ull; jcl.buffer[1] = 10;
+    jcl.callback(jcl.context, kIOReturnSuccess, hid(jcl), kIOHIDReportTypeInput, 0x30, jcl.buffer, 49);
+    assert(out_reports == out_before + 1);   // no further sends after error
+    out_status = kIOReturnSuccess;
+    removed(jcl); gc[PRO_MODEL_JC1] = 0; slot[PRO_MODEL_JC1] = -1; changed();
     removed(c); removed(b); removed(synthetic); assert(!g_pro_devices);
     puts("t_motion_pro_mac: passed");
 } }

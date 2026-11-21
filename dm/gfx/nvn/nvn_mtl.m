@@ -18681,17 +18681,38 @@ int mtl_display_hz(void) {
 }
 static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
+// Auto-HDR: a drawable in half floats is the front end's HDR layer (front_mac.m hdr_apply: extended linear sRGB on a screen with HDR on), and the present shader
+// decodes the game's SDR picture and lifts its highlights up to this peak (present.metal hdr_lift): the screen's current headroom (front_hdr_headroom), at most DM_HDR_PEAK
+// times SDR white (2.5 by default: white menus and text reach it too, and 4 on a 4.2-headroom Dell glared), in quarter steps so a brightness change does not rebuild the
+// pipeline every frame. 0 for every other format: the SDR shader, the bytes as they are
+__attribute__((weak)) double front_hdr_headroom(void) { return 0; }   // front_mac.m; front_ios.m and the graphics unit tests have no HDR layer
+static float present_hdr_peak(MTLPixelFormat f) {
+    if (f != MTLPixelFormatRGBA16Float) return 0;
+    static double cap = -1; if (cap < 0) { const char *e = getenv("DM_HDR_PEAK"); cap = e ? atof(e) : 2.5; if (cap < 1) cap = 1; }
+    double h = front_hdr_headroom(), p = fmin(h > 1 ? h : 1, cap);
+    return (float)(round(p * 4) / 4);
+}
+static float g_blit_peak = -1;
 static void present_pipeline(MTLPixelFormat format) {
-    if (!g_blit_pso || g_blit_fmt != format) {
+    float peak = present_hdr_peak(format);
+    if (!g_blit_pso || g_blit_fmt != format || g_blit_peak != peak) {
         NSError *e = nil;
         id<MTLLibrary> lib = host_lib("present", &e);
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"];
+        // A function with a function constant takes its values even when none is set (SDR: hdr_peak left undefined): one made by name alone failed Metal's pipeline
+        // validation and aborted every game on an SDR screen
+        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        if (peak > 0) [cv setConstantValue:&peak type:MTLDataTypeFloat atIndex:0];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs" constantValues:cv error:&e];
+        if (!pd.fragmentFunction) MDIE("present shader specialisation failed %s", e.localizedDescription.UTF8String);
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = dev_rps(pd, &e);
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
-        g_blit_fmt = format;
+        if (peak != g_blit_peak && (peak > 0 || g_blit_peak > 0))
+            MLOG("present: %s", peak > 0 ? [NSString stringWithFormat:@"HDR, the game's highlights lifted to %.2f times SDR white (screen headroom %.2f, DM_HDR_PEAK caps)", peak, front_hdr_headroom()].UTF8String : "SDR");
+        g_blit_fmt = format; g_blit_peak = peak;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
     }
@@ -19082,7 +19103,9 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     int flipped = atomic_load_explicit(&g_origin_ll, memory_order_relaxed), wrote = 0;
     static int direct_ok = -1; if (direct_ok < 0) { const char *e = getenv("DM_FX_DIRECT"); direct_ok = !(e && !strcmp(e, "0")); }
     // The picture fills dst unflipped: MetalFX may write dst itself, as the pass would only copy its output 1:1 (fx_encode)
-    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present, direct_ok && full && !flipped ? dst : nil, &wrote) : nil;
+    // HDR (a half-float drawable): MetalFX scales the SDR bytes into a texture of its own, and the present pass decodes and lifts them; it never writes the drawable itself
+    int hdr = dst.pixelFormat == MTLPixelFormatRGBA16Float;
+    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, hdr ? MTLPixelFormatBGRA8Unorm : dst.pixelFormat, fx == &g_fx_present, direct_ok && full && !flipped && !hdr ? dst : nil, &wrote) : nil;
     if (wrote) return PRESENT_METALFX;
     if (up && fx == &g_fx_present) { static int once; if (!once++)
         MLOG("present upscaling: the present pass draws MetalFX's output into the drawable: %s (drawable %lux%lu format %lu usage %#lx, picture %lux%lu)",

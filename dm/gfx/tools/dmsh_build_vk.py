@@ -15,11 +15,22 @@
 #   type to match the format's. For every built shader, each image read whose declared sampled type is float, with how its result's bits are used (dmsh_spv.py bit_use: 'bits' when
 #   only bit casts to integers use it) and the slot's answer-table format where the table has one; a read is listed when its bits are used as an integer or the table names an
 #   integer format. The host decides per slot later (a translator answer, or a second entry point).
-# The job model is dmsh_build.py's: shader keys (with the target added), the content-addressed cache (DMSH_CAS, default <output cache dir>/cas; outputs under cas/vk/), a translator
-#   process per batch of J keys, pixel shaders before the vertex shaders paired with them (vs_pad reads their inputs).
-# Environment: DM_GAME (required), XLATE_VK (a dll or a published translator), SPIRV_CROSS_VK, DOTNET (dmsh_chain_vk.py), DMSH_CAS, J (concurrency, default 8), WORK (the temporary folder's parent), XLATE_DEBUG /
-#   XLATE_REDUCED (dmsh_chain.py options)
-import ast, collections, concurrent.futures as cf, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile, threading
+# The job model is dmsh_build.py's: shader keys (with the target added), the content-addressed cache (DMSH_CAS, default <output cache dir>/cas; outputs under cas/vk/), pixel shaders
+#   before the vertex shaders paired with them (vs_pad reads their inputs). A run takes its steps over every shader at once, each spread over J (run_steps):
+#   translating        the translator in batches of about equal size, the largest shaders first, J processes at a time (one process a batch: on Linux a translator
+#                      process costs about 15 ms to start, a translation in a batch about 3 ms)
+#   analysing          the analysis rendering of each module, in J worker processes (the Python passes and reads hold the GIL: threads would keep them on one core); it decides
+#                      which shaders are translated again
+#   translating again  those second translations (integer inputs, integer outputs) in batches too; a job of a batch that reports a failure is translated again alone, so its
+#                      outcome and message are those of one translation
+#   finishing          the rest of each shader in the worker processes: passes, spirv-val, reflection, outputs. Each output is written once, into vk-<V>/ under a temporary name
+#                      that spirv-val reads before it is renamed; the analysis rendering is renamed from the work folder; the content store gets hard links to them (copies
+#                      where the volume has none), which the library's files allow because none is ever changed in place (each is written anew and renamed over the old)
+#   Each step prints 'progress: <step> <done>/<total>' lines (shaders; at most twice a second), which the NSP script shows as the stage's count and time left; the run ends with
+#   a 'times:' line, each step's seconds.
+# Environment: DM_GAME (required), XLATE_VK (a dll or a published translator), SPIRV_CROSS_VK, DOTNET (dmsh_chain_vk.py), DMSH_CAS, J (concurrency: worker processes and translator
+#   processes, default 8), WORK (the temporary folder's parent), XLATE_DEBUG / XLATE_REDUCED (dmsh_chain.py options)
+import ast, collections, concurrent.futures as cf, hashlib, heapq, json, os, re, shutil, struct, subprocess, sys, tempfile, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import dmsh_chain, dmsh_chain_vk, dmsh_spv, dmsh_atomic   # noqa: E402
 
@@ -63,9 +74,12 @@ def tool_fingerprint():   # the part of every shader key the tools make (dmsh_bu
             dmsh_chain_vk._first_line([dmsh_chain_vk.spirv_cross(), '--revision'])).encode()
 
 
+def tmp_name(path): return path + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
+
+
 def atomic_json(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
+    tmp = tmp_name(path)
     with open(tmp, 'w') as f: json.dump(value, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
@@ -76,8 +90,77 @@ def read_json(path):
 
 def copy(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
+    tmp = tmp_name(dst)
     shutil.copyfile(src, tmp); os.replace(tmp, dst)
+
+
+def link(src, dst):
+    """dst as a second name of src's bytes: a hard link, or a copy where the volume has none (FAT, exFAT) or dst is on another volume. The library's files are never changed in
+    place (each is written under a temporary name and renamed over the old one), so a content-store entry linked to one keeps its bytes"""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = tmp_name(dst)
+    try: os.link(src, tmp)
+    except OSError: shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
+
+
+def move(src, dst):   # a work file that is an output as it is: renamed into place, copied where the two folders are on different volumes
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try: os.replace(src, dst)
+    except OSError: copy(src, dst); os.unlink(src)
+
+
+def unlink(path):
+    try: os.unlink(path)
+    except FileNotFoundError: pass
+
+
+class Count:
+    """A step's 'progress: <step> <done>/<total>' lines (the NSP script's count for the stage): the first at once, then at most twice a second, the last when the step is done"""
+    def __init__(self, step, total):
+        self.step, self.total, self.done, self.shown, self.at = step, total, 0, None, 0.0
+        self.show(True)
+
+    def add(self, n=1):
+        self.done += n
+        self.show(self.done >= self.total)
+
+    def show(self, force=False):   # also called while waiting, so a count held back goes out
+        if self.shown == self.done or not force and time.monotonic() - self.at < 0.5: return
+        print(f'progress: {self.step} {self.done}/{self.total}', flush=True); self.shown, self.at = self.done, time.monotonic()
+
+
+def wait_counting(futures, count):
+    """Wait for every future ({future: the shaders it does}), adding each to count as it finishes, in any order"""
+    pending = set(futures)
+    while pending:
+        done, pending = cf.wait(pending, timeout=0.5, return_when=cf.FIRST_COMPLETED)
+        if done: count.add(sum(futures[f] for f in done))
+        else: count.show()
+
+
+def balanced(items, n, cost):
+    """items in at most n lists of about equal total cost (the costliest item first, into the list with the least so far; ties by position), the costliest list first"""
+    heap = [(0, i, []) for i in range(min(n, len(items)))]
+    for x in sorted(items, key=lambda x: -cost(x)):
+        c, i, lst = heapq.heappop(heap); lst.append(x); heapq.heappush(heap, (c + cost(x), i, lst))
+    return [lst for _, _, lst in sorted(heap, key=lambda b: (-b[0], b[1])) if lst]
+
+
+# The worker processes of the analysing and finishing steps: each holds a Build made from the main one's spec (the attributes those steps read) and runs one shader per task
+_W = None
+
+
+def _worker(spec):
+    global _W
+    b = Build.__new__(Build); b.__dict__.update(spec)
+    b.stats, b.lock = collections.Counter(), threading.Lock()
+    b.s = shared(Build.scope())
+    _W = b
+
+
+def _analyse(key, j): return _W.analyse(key, j)
+def _finish(*a): return _W.finish_one(*a)
 
 
 class Build:
@@ -99,13 +182,20 @@ class Build:
         self.xlate = dmsh_chain_vk.xlate_cmd()   # the dll of a dotnet build with dotnet, or a published translator (dm/tools/publish_port_tools.sh) as it is
         self.cross = dmsh_chain_vk.spirv_cross()
         self.cas = os.path.join(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas')), 'vk')
-        self.nj = int(os.environ.get('J', '8'))
+        self.nj = max(1, int(os.environ.get('J', '8')))
         self.stats = collections.Counter(); self.lock = threading.Lock()
-        self.s = shared({'re': re, 'os': os, 'sys': sys, 'struct': struct, 'json': json, 'hashlib': hashlib, 'collections': collections, 'inspect': __import__('inspect')})
+        self.s = shared(Build.scope())
         self.read_map()
         self.s.update(FACTS=self.facts, MAP_ROWS=self.map_rows, MAP_CONFLICT_ROWS=self.map_conflict_rows, TOOL_FP=tool_fingerprint(), CODE_FP=code_fingerprint(),
                       PROFILE_ROWS=dmsh_chain.profile_rows(self.game), dmsh_facts=dmsh_facts)
         self.s['PAIRS'] = self.pairs = self.s['load_pairs'](self.game, dm_dir)
+
+    @staticmethod
+    def scope():   # the globals the shared functions of dmsh_build.py read
+        return {'re': re, 'os': os, 'sys': sys, 'struct': struct, 'json': json, 'hashlib': hashlib, 'collections': collections, 'inspect': __import__('inspect')}
+
+    def spec(self, w):   # what a worker process's Build holds (_worker): what analyse and finish_one read
+        return {'chain': self.chain, 'out': self.out, 'cas': self.cas, 'cross': self.cross, 'w': w, 'loc': self.loc, 'pc_of': self.pc_of, 'pairs': self.pairs}
 
     def read_map(self):   # the shader map, as dmsh_build.py reads it: key → (package, index), its PC pair, and the rows that enter its cache key
         path = str(self.game.table('shader_map.tsv'))
@@ -135,16 +225,39 @@ class Build:
         jp = os.path.join(w, f'job_{abs(hash(jobs[0]["key"]))}_{threading.get_ident()}.json'); atomic_json(jp, jobs)
         return subprocess.run([*self.xlate, jp, w], capture_output=True, text=True)
 
-    def translate_one(self, job, w):   # a second translation of one key (integer inputs, integer outputs): its outputs replace the first's
+    def translate_one(self, job, w):   # a second translation of one key (integer inputs, integer outputs): its outputs replace the first's; → None, or why it failed
         r = self.translate([job], w)
         if r.returncode or not os.path.exists(os.path.join(w, job['key'] + '.spv')): return (r.stderr.strip() or r.stdout.strip())[:160] or 'no spv'
         return None
+
+    def translate_all(self, jobs, w, step, cost):
+        """jobs in batches of about equal cost, J translator processes at a time, the costliest batch first; four batches a process, so the count moves and a batch that runs
+        long starts early. → [(batch, CompletedProcess)]"""
+        batches = balanced(jobs, 4 * self.nj, cost)
+        count = Count(step, len(jobs))
+        with cf.ThreadPoolExecutor(self.nj) as ex:
+            futures = {ex.submit(self.translate, b, w): len(b) for b in batches}
+            wait_counting(futures, count)
+        return [(b, f.result()) for b, f in zip(batches, futures)]
+
+    def retranslate(self, jobs, w, cost):
+        """The second translations (translate_one's jobs) in batches: → {job key: None, or why it failed}, what translate_one gives each. A job is taken from its batch when the
+        translator went through every job of it (its last line counts them), wrote the job's module and printed no [RED] line for it; any other job is translated again alone"""
+        out = {}
+        for b, r in self.translate_all(jobs, w, 'translating again', cost):
+            m = re.search(r'^translated: (\d+) ok, (\d+) failed$', r.stdout, re.M)
+            whole = r.returncode in (0, 1) and m and int(m[1]) + int(m[2]) == len(b)
+            red = set(re.findall(r'^\[RED\] (\w+):', r.stderr, re.M))
+            for j in b:
+                k = j['key']
+                out[k] = None if whole and k not in red and os.path.exists(os.path.join(w, k + '.spv')) else self.translate_one(j, w)
+        return out
 
     # The analysis rendering
     def render(self, spv_path, w):
         """The MSL of a module for analysis (the descriptors flattened into set 0, the Metal chain's SPIRV-Cross options); None when SPIRV-Cross does not render it
         (a geometry or tessellation stage, or what MSL cannot express)"""
-        flat = spv_path[:-4] + '.flat.spv'; dmsh_spv.flatten(dmsh_spv.Module.read(spv_path)).write(flat)
+        flat = spv_path[:-4] + '.flat.spv'; dmsh_spv.flatten(dmsh_spv.Module.read(spv_path), copy=False).write(flat)
         r = subprocess.run([self.cross, *dmsh_atomic.cross_args(self.s['XC'], flat), flat], capture_output=True, text=True)
         os.unlink(flat)
         return r.stdout if r.returncode == 0 else None
@@ -232,41 +345,89 @@ class Build:
         if j.get('tf'): refl['tf_strides'] = [e['stride'] if e else 0 for e in j['tf']]
         return refl
 
-    # One shader
-    def finish(self, key, j, c1, w):
+    # One shader, in two halves around the second translations (run_steps): analyse, then finish
+    def analyse(self, key, j):
+        """The analysing step of one translated shader: its analysis rendering, kept as <work>/<key>_b.metal for finish, and the second translations it calls for.
+        → {'msl': whether it rendered, 'more': the inputs only used as integers (a vertex shader), 'fs': (fs_uint's mask, the float colour outputs) (a pixel shader that writes
+        integer bits)}, or {'error': what failed, as the old one-step build reported it}"""
+        try:
+            stage, w = j['stage'], self.w
+            msl = self.render(os.path.join(w, key + '.spv'), w) if stage in ('vs', 'ps', 'cs') else None
+            a = {'msl': msl is not None}
+            if msl is not None: self.keep_msl(key, msl)
+            if stage == 'vs' and msl:   # inputs only used as integers: translated again with them reported as uint (dmsh_build.py int_inputs)
+                more = {l: t for l, t in self.s['int_inputs'](msl).items() if l not in j['attr']}
+                if more: a['more'] = more
+            if stage == 'ps' and msl:   # an output written from integer bits: main_u (every colour output uint) and, for a mix, main_m (dmsh_build.py fs_uint), by translating again
+                fu, mask = self.s['fs_uint'](msl)
+                if fu: a['fs'] = (mask, self.colors(msl))
+            return a
+        except Exception as e: return {'error': f'{type(e).__name__}: {e}'[:160]}
+
+    @staticmethod
+    def second_jobs(key, j, a):   # the second translations analyse asked for (translate_one's jobs): the vertex shader's own key, a pixel shader's <key>_u and <key>_m
+        out = []
+        if 'more' in a: out.append(dict(j, attr={**j['attr'], **a['more']}))
+        if 'fs' in a:
+            mask, cols = a['fs']
+            for sfx, targets in (('u', cols), ('m', [c for c in cols if mask >> c & 1] if mask else [])):
+                if targets: out.append(dict(j, key=f'{key}_{sfx}', fout={**j['fout'], **{str(c): 'uint' for c in targets}}))
+        return out
+
+    def keep_msl(self, key, msl):   # the rendering in the work folder, as the output file will hold it (written in text mode, as the build always wrote it; finish renames it)
+        with open(os.path.join(self.w, key + '_b.metal'), 'w') as f: f.write(msl)
+
+    WORK_FILES = ('.bin', '.spv', '.res.json', '_fp32.spv', '_fp32.res.json', '_b.metal', '.merged.spv', '.flat.spv')
+
+    def finish_one(self, key, j, c1, a, again, pad_known, digest):
+        """The finishing step of one shader (a worker process's task): finish, then the content store, then its work files go. → (status, error, reflection, the pixel inputs
+        of a pixel shader built, for vs_pad of the vertex shaders paired with it)"""
+        try: result = self.finish(key, j, c1, self.w, a, again, pad_known)
+        except Exception as e: result = ('failed', f'{type(e).__name__}: {e}'[:160], None, None)   # a key that fails is reported, the others still build (as the translator does)
+        if result[0] == 'ok': self.publish(key, digest)
+        for k in (key, key + '_u', key + '_m'):
+            for sfx in self.WORK_FILES: unlink(os.path.join(self.w, k + sfx))
+        return result
+
+    def finish(self, key, j, c1, w, a, again, pad_known):
+        """analyse's results a, the second translations' outcomes again ({job key: None or why it failed}) and pad_known (pixel_inputs of paired pixel shaders built in this
+        run) → (status, error, reflection, pixel inputs)"""
+        if 'error' in a: return 'failed', a['error'], None, None
         stage, spv = j['stage'], os.path.join(w, key + '.spv')
-        msl = self.render(spv, w) if stage in ('vs', 'ps', 'cs') else None
+        msl = None
+        if a['msl']:
+            with open(os.path.join(w, key + '_b.metal')) as f: msl = f.read()   # the rendering as analyse had it (text mode both ways)
         extra, notes = {}, []
         if stage in ('vs', 'ps', 'cs') and msl is None: notes.append('[RED] no analysis rendering (SPIRV-Cross): integer inputs and outputs not checked, c1 listed as unproven')
-        if stage == 'vs' and msl:   # inputs only used as integers: translated again with them reported as uint (dmsh_build.py int_inputs)
-            more = {l: t for l, t in self.s['int_inputs'](msl).items() if l not in j['attr']}
-            if more:
-                j = dict(j, attr={**j['attr'], **more}); err = self.translate_one(j, w)
-                if err: return 'translation failed', 'integer-input retranslation: ' + err, None
-                msl = self.render(spv, w)
-                extra['int_inputs'] = sorted(int(l) for l in more)
+        if 'more' in a:
+            j = dict(j, attr={**j['attr'], **a['more']}); err = again.get(key)
+            if err: return 'translation failed', 'integer-input retranslation: ' + err, None, None
+            msl = self.render(spv, w)
+            if msl is not None: self.keep_msl(key, msl)
+            extra['int_inputs'] = sorted(int(l) for l in a['more'])
         res = read_json(os.path.join(w, key + '.res.json'))
-        if stage == 'ps' and msl:   # an output written from integer bits: main_u (every colour output uint) and, for a mix, main_m (dmsh_build.py fs_uint), by translating again
-            fu, mask = self.s['fs_uint'](msl)
-            if fu:
-                parts, cols = [(spv, 'main')], self.colors(msl)
-                for sfx, targets in (('u', cols), ('m', [c for c in cols if mask >> c & 1] if mask else [])):
-                    if not targets: continue
-                    sk = f'{key}_{sfx}'; err = self.translate_one(dict(j, key=sk, fout={**j['fout'], **{str(c): 'uint' for c in targets}}), w)
-                    if err: notes.append(f'[RED] no main_{sfx} ({err})'); continue
-                    parts.append((os.path.join(w, sk + '.spv'), 'main_' + sfx))
-                if len(parts) > 1:
-                    merged = os.path.join(w, key + '.merged.spv')
-                    ok, why = dmsh_spv.merge_entries(parts, merged)
-                    if ok: os.replace(merged, spv); extra.update({'entry_u': 'main_u'} if any(p[1] == 'main_u' for p in parts) else {})
-                    else: notes.append(f'[RED] the integer-output entry points do not link ({why}): built without them')
-                    if ok and any(p[1] == 'main_m' for p in parts): extra.update(entry_m='main_m', uint_mask_m=mask)
+        if 'fs' in a:
+            mask, cols = a['fs']
+            parts = [(spv, 'main')]
+            for sfx, targets in (('u', cols), ('m', [c for c in cols if mask >> c & 1] if mask else [])):
+                if not targets: continue
+                sk = f'{key}_{sfx}'; err = again.get(sk)
+                if err: notes.append(f'[RED] no main_{sfx} ({err})'); continue
+                parts.append((os.path.join(w, sk + '.spv'), 'main_' + sfx))
+            if len(parts) > 1:
+                merged = os.path.join(w, key + '.merged.spv')
+                ok, why = dmsh_spv.merge_entries(parts, merged)
+                if ok: os.replace(merged, spv); extra.update({'entry_u': 'main_u'} if any(p[1] == 'main_u' for p in parts) else {})
+                else: notes.append(f'[RED] the integer-output entry points do not link ({why}): built without them')
+                if ok and any(p[1] == 'main_m' for p in parts): extra.update(entry_m='main_m', uint_mask_m=mask)
         pad_want = {}
         if stage == 'vs' and self.pairs.get(key):   # the inputs of the paired pixel shaders already built (vs_pad; pairs whose pixel module is missing are skipped, as on Metal)
             for ps in sorted(self.pairs[key]):
                 p = os.path.join(self.out, ps + '.spv')
-                if os.path.exists(p):
-                    for l, v in dmsh_spv.pixel_inputs(dmsh_spv.Module.read(p)).items(): pad_want.setdefault(l, v)
+                if ps in pad_known: got = pad_known[ps]   # built in this run: read from its bytes when it was written
+                elif os.path.exists(p): got = dmsh_spv.pixel_inputs(dmsh_spv.Module.read(p))
+                else: continue
+                for l, v in got.items(): pad_want.setdefault(l, v)
         m = dmsh_spv.Module.read(spv); done = dmsh_spv.apply(m, stage, pad=pad_want)
         extra['vs_pad'] = done.get('vs_pad', [])
         outputs = {key + '.spv': m}
@@ -277,11 +438,18 @@ class Build:
             mb = dmsh_spv.Module(m.data()); sh = dmsh_spv.shadow_inputs(mb)
             if isinstance(sh, list): outputs[key + '_bv.spv'] = mb; extra['vin'] = {'entry': 'main', 'shadow': sh}; self.count('shadow-input variants')
             elif sh not in ('no integer input', 'no stage input'): notes.append(f'[RED] no shadow-input variant ({sh}): its integer inputs keep the CPU conversion')
-        for name, mod in outputs.items():
-            p = os.path.join(w, 'final_' + name); mod.write(p)
-            ok, why = dmsh_spv.validate(p)
-            if not ok: return 'spirv-val failed', f'{name}: {why}', None
-        for name in outputs: copy(os.path.join(w, 'final_' + name), os.path.join(self.out, name))
+        written, pin = {}, None   # each output once, under a temporary name in the library: spirv-val reads it there, and it is renamed only when every output passed
+        try:
+            for name, mod in outputs.items():
+                data = mod.data(); p = written[name] = tmp_name(os.path.join(self.out, name))
+                with open(p, 'wb') as f: f.write(data)
+                ok, why = dmsh_spv.validate(p)
+                if not ok: return 'spirv-val failed', f'{name}: {why}', None, None
+                if name == key + '.spv' and stage == 'ps': pin = dmsh_spv.pixel_inputs(mod if mod.consistent() else dmsh_spv.Module(data))   # as the file reads back
+            for name, p in written.items(): os.replace(p, os.path.join(self.out, name))
+            written = {}
+        finally:
+            for p in written.values(): unlink(p)
         for sfx in ('_bv', '_fp32'):   # a variant this build did not make: none left from before
             if key + sfx + '.spv' not in outputs and os.path.exists(os.path.join(self.out, key + sfx + '.spv')): os.unlink(os.path.join(self.out, key + sfx + '.spv'))
         extra['notes'] = notes; extra['passes'] = {k: v for k, v in done.items() if k != 'vs_pad'}
@@ -289,14 +457,13 @@ class Build:
         atomic_json(os.path.join(self.out, key + '.json'), refl)
         an = os.path.join(self.out, 'analysis')
         if msl:
-            with open(os.path.join(w, key + '_b.metal'), 'w') as f: f.write(msl)
-            copy(os.path.join(w, key + '_b.metal'), os.path.join(an, key + '_b.metal'))
+            move(os.path.join(w, key + '_b.metal'), os.path.join(an, key + '_b.metal'))
             atomic_json(os.path.join(an, key + '_b.json'), {'key': key, 'c1': c1.hex(), 'bindings': [{'kind': b['kind'], 'reg': b.get('reg'), 'msl_name': b['name']}
                                                                                                       for b in refl['bindings'] if b['kind'] in ('cbuf', 'sbuf') and b.get('reg') is not None]})
         else:
             for n in (key + '_b.metal', key + '_b.json'):
                 if os.path.exists(os.path.join(an, n)): os.unlink(os.path.join(an, n))
-        return 'ok', '', refl
+        return 'ok', '', refl, pin
 
     def count(self, what, n=1):
         with self.lock: self.stats[what] += n
@@ -311,12 +478,12 @@ class Build:
         for n in self.outputs_of(key, d):
             if n == key + '.json':
                 value = read_json(os.path.join(d, n)); value['chain'] = self.chain; atomic_json(os.path.join(self.out, n), value)
-            else: copy(os.path.join(d, n), os.path.join(self.out, n))
+            else: link(os.path.join(d, n), os.path.join(self.out, n))
         return True
 
-    def publish(self, key, digest):
+    def publish(self, key, digest):   # the outputs into the content store: links to the library's files (link)
         d = os.path.join(self.cas, 'shader', digest)
-        for n in self.outputs_of(key, self.out): copy(os.path.join(self.out, n), os.path.join(d, n))
+        for n in self.outputs_of(key, self.out): link(os.path.join(self.out, n), os.path.join(d, n))
 
     def run(self):
         s = self.s
@@ -342,32 +509,63 @@ class Build:
         def plain(k): return digests[k] if k in digests else digest_of(k, *rec_of(k)) if k in self.loc else 'missing'
         for key in keys:
             if self.pairs.get(key): digests[key] = s['pair_keyed'](digests[key], [plain(p) for p in sorted(self.pairs[key])])
+        t, times = time.monotonic(), {}
+        count = Count('preparing', len(keys))   # each shader from the content store, or its translation job
         for key in keys:
             if self.restore(key, digests[key]): hits.add(key); self.count('cache hit')
             else: jobs[key], c1s[key] = s['job_for'](key, recs[key][0], recs[key][1], w); self.count('cache miss')
-        misses = [k for k in keys if k not in hits]
-        chunks = [c for c in (misses[i::self.nj] for i in range(self.nj)) if c]
-        with cf.ThreadPoolExecutor(self.nj) as ex: xr = list(ex.map(lambda ch: self.translate([jobs[k] for k in ch], w), chunks))
-        xerr = {}
-        for r in xr:
-            for ln in r.stderr.splitlines():
-                mr = re.match(r'\[RED\] (\w+): (.*)', ln)
-                if mr: xerr[mr.group(1)] = mr.group(2)[:160]
-        def fin(key):
-            if key in hits: return key, 'ok', '', read_json(os.path.join(self.out, key + '.json'))
-            if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
-            try: result = (key,) + self.finish(key, jobs[key], c1s[key], w)
-            except Exception as e: result = (key, 'failed', f'{type(e).__name__}: {e}'[:160], None)   # a key that fails is reported, the others still build (as the translator does)
-            if result[1] == 'ok': self.publish(key, digests[key])
-            return result
-        with cf.ThreadPoolExecutor(self.nj) as ex:   # two phases: paired vertex shaders read their pixel shaders' inputs (vs_pad), so they go last
-            res = list(ex.map(fin, [k for k in keys if k not in self.pairs])) + list(ex.map(fin, [k for k in keys if k in self.pairs]))
+            count.add()
+        times['preparing'] = time.monotonic() - t
+        res = self.run_steps(keys, hits, jobs, c1s, digests, {k: len(recs[k][1]) for k in keys}, w, times)
         shutil.rmtree(w, ignore_errors=True)
         self.summary(res)
         atomic_json(os.path.join(self.out, '_vk_build.json'), [{'key': r[0], 'st': r[1], 'err': r[2]} for r in res])
-        if not self.want: self.stamp_and_tables([r[3] for r in res if r[1] == 'ok'])
+        t = time.monotonic()
+        if not self.want: self.stamp_and_tables([r[3] for r in res if r[1] == 'ok']); times['tables'] = time.monotonic() - t
         elif stamp_before != self.inputs: print(f'no library stamp: the profile\'s inputs changed since the last full build ({stamp_before} → {self.inputs}), and a partial build does not rebuild the rest', flush=True)
+        print('times: ' + ', '.join(f'{k} {v:.1f} s' for k, v in times.items()), flush=True)
         return 0 if all(r[1] == 'ok' for r in res) else 1
+
+    def run_steps(self, keys, hits, jobs, c1s, digests, size, w, times):
+        """The steps of the file header over the shaders not taken from the cache (jobs); size: each shader's record size, the cost the batches and the order go by.
+        → [(key, status, error, reflection)] in the order of keys, the pixel shaders and the other unpaired keys first, then the paired vertex shaders (vs_pad), each in key order"""
+        misses = [k for k in keys if k not in hits]
+        out, xerr = {k: (k, 'ok', '', read_json(os.path.join(self.out, k + '.json'))) for k in keys if k in hits}, {}
+        t = time.monotonic()
+        if misses:
+            for _, r in self.translate_all([jobs[k] for k in misses], w, 'translating', lambda j: size[j['key']]):
+                for ln in r.stderr.splitlines():
+                    mr = re.match(r'\[RED\] (\w+): (.*)', ln)
+                    if mr: xerr[mr.group(1)] = mr.group(2)[:160]
+            times['translating'] = time.monotonic() - t
+        for k in misses:
+            if k in xerr or not os.path.exists(os.path.join(w, k + '.spv')): out[k] = (k, 'translation failed', xerr.get(k, 'no spv'), None)
+        todo = sorted((k for k in misses if k not in out), key=lambda k: -size[k])   # the costliest first: the step ends with small tasks on every worker
+        if todo:
+            nw = min(self.nj, 61) if os.name == 'nt' else self.nj   # Windows' ProcessPoolExecutor takes at most 61 workers
+            with cf.ProcessPoolExecutor(nw, initializer=_worker, initargs=(self.spec(w),)) as ex:
+                t = time.monotonic(); count = Count('analysing', len(todo))
+                futures = {ex.submit(_analyse, k, jobs[k]): 1 for k in todo}
+                wait_counting(futures, count)
+                an = {k: f.result() for k, f in zip(todo, futures)}
+                times['analysing'] = time.monotonic() - t; t = time.monotonic()
+                second = [x for k in todo if 'error' not in an[k] for x in self.second_jobs(k, jobs[k], an[k])]
+                rx = self.retranslate(second, w, lambda j: size[j['key'].split('_')[0]]) if second else {}
+                if second: times['translating again'] = time.monotonic() - t
+                t = time.monotonic(); count = Count('finishing', len(misses)); count.add(len(misses) - len(todo))   # the failed translations are done
+                pin = {}   # pixel_inputs of the pixel shaders built in this run
+                for phase in ([k for k in todo if k not in self.pairs], [k for k in todo if k in self.pairs]):   # paired vertex shaders read their pixel shaders' inputs (vs_pad), so they go last
+                    futures = {}
+                    for k in phase:
+                        ag = {x: rx[x] for x in (k, k + '_u', k + '_m') if x in rx}
+                        known = {p: pin[p] for p in self.pairs.get(k, ()) if p in pin}
+                        futures[ex.submit(_finish, k, jobs[k], c1s[k], an[k], ag, known, digests[k])] = 1
+                    wait_counting(futures, count)
+                    for k, f in zip(phase, futures):
+                        r = f.result(); out[k] = (k,) + r[:3]
+                        if r[0] == 'ok' and r[3] is not None: pin[k] = r[3]
+                times['finishing'] = time.monotonic() - t
+        return [out[k] for k in keys if k not in self.pairs] + [out[k] for k in keys if k in self.pairs]
 
     def summary(self, res):
         st = collections.Counter(r[1] for r in res); ok = [r[3] for r in res if r[1] == 'ok']
@@ -392,9 +590,14 @@ class Build:
         with tempfile.TemporaryDirectory(prefix='dmsh_vk_tables_', dir=os.environ.get('WORK')) as t:   # the analyses read a directory named as the library, with its stamp
             lib = os.path.join(t, os.path.basename(self.out)); os.makedirs(lib)
             shutil.copyfile(os.path.join(self.out, dmsh_chain.STAMP), os.path.join(lib, dmsh_chain.STAMP))
-            for n in os.listdir(an) if os.path.isdir(an) else []: shutil.copyfile(os.path.join(an, n), os.path.join(lib, n))
-            for tool, table in (('c1_guard.py', 'c1_full_vk.tsv'), ('cb_extent.py', 'cb_extent_vk.tsv')):
-                r = subprocess.run([sys.executable, os.path.join(HERE, tool), lib, str(self.game.table(table))], capture_output=True, text=True)
+            for n in os.listdir(an) if os.path.isdir(an) else []:   # linked where the volume allows (the tools only read them), else copied
+                try: os.link(os.path.join(an, n), os.path.join(lib, n))
+                except OSError: shutil.copyfile(os.path.join(an, n), os.path.join(lib, n))
+            tools = (('c1_guard.py', 'c1_full_vk.tsv'), ('cb_extent.py', 'cb_extent_vk.tsv'))
+            with cf.ThreadPoolExecutor(len(tools)) as ex:   # both at once: each reads the library and writes its own table
+                runs = [ex.submit(subprocess.run, [sys.executable, os.path.join(HERE, tool), lib, str(self.game.table(table))], capture_output=True, text=True) for tool, table in tools]
+            for (tool, table), f in zip(tools, runs):
+                r = f.result()
                 if r.returncode: sys.exit(f'[RED] {tool} failed ({r.returncode}): {r.stderr.strip()[-500:]}')
                 print(f'{table}: {(r.stdout.strip().splitlines() or [""])[-1]}', flush=True)
         unrendered = sorted(x['key'] for x in ok if not x.get('analysis') and any(b['kind'] == 'c1' for b in x['bindings']))

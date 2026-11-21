@@ -19,6 +19,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `scan_file` leaves out a file whose reader fails, with `[RED] <file>: <why> (its shaders are left out)`, and the split goes on; at the end it prints `[RED] <n> file(s) could not be read, their shaders are left out (first: …)` and writes its tables. The NSP script shows that line and packs a provisional profile's IPA without those shaders; for a registered profile it stops there, since the profile's tables were split from every file. `nlg_dict` checks that the records and chunks fit the index and every chunk index is in range before reading it. The format itself still needs a reader: the line names the archive and, for NLG, its header bytes.
 - **Found on:** Mario Strikers: Battle League (no profile; [seedds/nxnative#282](https://github.com/seedds/nxnative/pull/282)): one of its 879 Next Level Games archives, a revision `nlg_dict` does not read.
 
+### SARC archives with many members slow the split
+
+- **Symptom:** the shader split's count stops a few files short of the end for minutes, then finishes: Mario vs. Donkey Kong's first pack on Windows had 3,111 of its 3,159 files at 4.8 s and the last 16 at 99 s.
+- **Cause:** `sarc_members` took each member's name by splitting the rest of the archive at every NUL (`d[offset:].split(b'\0')[0]`): a copy and a list as long as the archive per member, so a SARC's time grew with its members times its size. One file was the tail, not the scheduling: Mario vs. Donkey Kong's `UI/LayoutArchive/Game.Product.100.Nin_NX_NVN.blarc.zs` (3.6 MB) took 86 s alone, `Menu` 34 s and `Pack/Bootup.Nin_NX_NVN.pack.zs` 18 s, while the other 3,156 files took 3.4 s per worker.
+- **Fix:** the name is read in place up to its NUL (`d.find`), with the same names for every archive. Those three files take 0.2 to 0.4 s; the whole split of that game 5.8 s instead of 85 s on Linux (16 workers), with the same package and tables. Test: `dm/gfx/tests/test_shader_split_sarc.py` (the names and data as before, and the time with 1,000 members).
+- **Found on:** [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md): its UI layout archives and its boot pack, at its first pack on Windows.
+
 ### BNSH in NintendoWare archives and in main
 
 - BNSH (`BNSH\0\0\0\0` + `grsc` block at +0x60) is found inside `bfsha`, particle effects (`esetb`, VFXB), UI layouts (`blarc`), and `main` itself.

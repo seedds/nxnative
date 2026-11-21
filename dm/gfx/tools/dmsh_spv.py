@@ -73,10 +73,14 @@ class Module:
         w = list(struct.unpack('<%dI' % n, data[:n * 4]))
         if n < 5 or w[0] != MAGIC: raise ValueError('not a SPIR-V module')
         self.header, self.ins, i = w[:5], [], 5
+        add = self.ins.append
         while i < n:
             c = w[i] >> 16
             if c == 0 or i + c > n: raise ValueError(f'malformed SPIR-V instruction at word {i}')
-            self.ins.append(w[i:i + c]); i += c
+            add(w[i:i + c]); i += c
+
+    def consistent(self):   # every instruction's length is the word count its first word gives: Module(self.data()) would hold the same instructions
+        return all(len(i) == i[0] >> 16 for i in self.ins)
 
     @classmethod
     def read(cls, path):
@@ -105,11 +109,14 @@ class Module:
         if o in RESULT_ONLY: return i[1] if len(i) > 1 else None
         return i[2] if len(i) > 2 else None
 
-    def defs(self):
+    def defs(self):   # {result id: instruction}, result() inlined (the build calls it several times per module)
         out = {}
         for i in self.ins:
-            r = self.result(i)
-            if r is not None: out[r] = i
+            o = i[0] & 0xffff
+            if o in NO_RESULT: continue
+            if o in RESULT_ONLY:
+                if len(i) > 1: out[i[1]] = i
+            elif len(i) > 2: out[i[2]] = i
         return out
 
     def names(self): return {i[1]: read_string(i[2:])[0] for i in self.of(NAME)}
@@ -542,10 +549,10 @@ def validate(path, spirv_val='spirv-val'):
     return r.returncode == 0, (r.stderr or r.stdout).strip()[:400]
 
 
-def flatten(m):
+def flatten(m, copy=True):
     """A copy for the MSL analysis rendering (dmsh_build_vk.py): every descriptor in set 0, numbered in (set, binding) order, so that SPIRV-Cross writes one argument buffer
-    and the analyses read its members as they do on Metal (spvDescriptorSet0.<name>)"""
-    c = Module(m.data()); dec = c.decorations()
+    and the analyses read its members as they do on Metal (spvDescriptorSet0.<name>); copy False: m itself, changed (a module read for this alone)"""
+    c = Module(m.data()) if copy else m; dec = c.decorations()
     new = {k: n for n, k in enumerate(sorted({(d[D_DESCRIPTOR_SET][0], d[D_BINDING][0]) for d in dec.values() if D_DESCRIPTOR_SET in d and D_BINDING in d}))}
     for i in c.of(DECORATE):
         d = dec.get(i[1], {})

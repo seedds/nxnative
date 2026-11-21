@@ -207,7 +207,8 @@ class Pack(unittest.TestCase):
         elif tool in ('dmsh_chain.py', 'dmsh_chain_vk.py'):   # --header: the repository's headers are not written by a test; --check-tools: the tools match the lock, unless vk_tools_bad
             if '--check-tools' in cmd and self.vk_tools_bad:
                 log.write_text('[RED] Vulkan translation chain tools do not match the lock file: spirv-cross_linux-x64: lock vulkan-sdk-1.4.363.0 / actual missing\n'); return 1
-        elif tool == 'dmsh_build_vk.py':   # a full build: the library, its stamp and the profile's tables naming it
+        elif tool == 'dmsh_build_vk.py':   # a full build: its count lines (the stage's bar), the library, its stamp and the profile's tables naming it
+            for ln in ('progress: preparing 0/1', 'progress: translating 1/1', 'progress: finishing 1/1', 'shaders 1: ok 1'): on_line and on_line(ln)
             lib = Path(cmd[3]) / f'vk-{nsp.chain_vk_of(REPO)}'; lib.mkdir(parents=True, exist_ok=True); (lib / '0123456789abcdef.spv').write_bytes(b'spv')
             (lib / 'inputs.tsv').write_text(f'# stamp\ngame\t{ID}\ninputs\tdigest\n')
             for n in nsp.CHAIN_TABLES_VK:   # into the profile DM_GAME names now (a derived one comes first)
@@ -281,6 +282,8 @@ class Linux(Pack):
         self.assertTrue((self.wdir / 'aot-cache').is_dir())
         # the NVN shaders: dmsh_build_vk.py from the split's package into the game's shader folder
         self.assertEqual(self.tools('dmsh_build_vk.py'), [[sys.executable, str(REPO / 'dm/gfx/tools/dmsh_build_vk.py'), str(self.work / 'shader/pkg'), str(self.work / 'shader/cache')]])
+        for step, done in (('preparing', 0), ('translating', 1), ('finishing', 1)):   # its count lines became the stage's step and count of shaders
+            nsp.PROG.set.assert_any_call(step=step, done=done, total=1, unit='shaders')
         self.assertEqual(self.tools('gl_shaders.py'), [])
         # the launch file: what run.sh and the launcher nxlauncher both read
         rows = launch_rows(self.work / 'launch-linux.tsv')

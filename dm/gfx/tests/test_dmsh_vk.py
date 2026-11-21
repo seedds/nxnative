@@ -3,7 +3,9 @@
 Run in the chain image (docker/README.md has the command): the translator built into build/xlate_vk (XLATE_VK selects another dmsh_xlate_vk.dll, or a published translator,
 dm/tools/publish_port_tools.sh, which runs without dotnet), dotnet, SPIRV-Tools (spirv-val, spirv-as, spirv-link) and spirv-cross on PATH (SPIRV_CROSS_VK selects another). Where one of them is missing, the tests that need it skip and say which; the portable checks still run.
 Each class prints its counts (shaders translated, entry points, validation results, bindings checked)."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 TOOLS = ROOT / 'dm/gfx/tools'
@@ -269,6 +272,64 @@ OpFunctionEnd
             ok, why = dmsh_spv.validate(str(spv)); self.assertFalse(ok); self.assertIn('WithoutFormat', why)
             m = dmsh_spv.Module.read(spv); self.assertEqual(dmsh_spv.apply(m, 'cs')['formatless'], ['read', 'write'])
             m.write(str(spv)); ok, why = dmsh_spv.validate(str(spv)); self.assertTrue(ok, why)
+
+    def test_module_reads(self):   # defs() as result() gives it, flatten in place as on a copy, and consistent(): whether data() reads back as the same instructions
+        m = self.image_module(0, ['read', 'write'])
+        m.decorate(4, dmsh_spv.D_DESCRIPTOR_SET, 3); m.decorate(4, dmsh_spv.D_BINDING, 7)
+        self.assertEqual(m.defs(), {r: i for i in m.ins if (r := dmsh_spv.Module.result(i)) is not None})
+        before = m.data(); copy = dmsh_spv.flatten(m); same = dmsh_spv.Module(m.data())
+        self.assertIs(dmsh_spv.flatten(same, copy=False), same)
+        self.assertEqual((same.data(), m.data()), (copy.data(), before))   # in place: the copy's bytes; m itself as it was
+        self.assertNotEqual(copy.data(), before)
+        self.assertTrue(m.consistent())
+        m.ins[0] = m.ins[0] + [0]; self.assertFalse(m.consistent())
+
+    def test_balanced_batches(self):   # every job once, in at most n batches of about equal cost (apart by less than the costliest job), the costliest first, the same for the same input
+        items = list(range(1, 101)); b = dmsh_build_vk.balanced(items, 8, lambda x: x)
+        self.assertEqual((sorted(x for lst in b for x in lst), len(b)), (items, 8))
+        tot = [sum(lst) for lst in b]
+        self.assertEqual(tot, sorted(tot, reverse=True)); self.assertLessEqual(max(tot) - min(tot), 100)
+        self.assertEqual(b, dmsh_build_vk.balanced(items, 8, lambda x: x))
+        self.assertEqual((dmsh_build_vk.balanced([5], 8, lambda x: x), dmsh_build_vk.balanced([], 8, lambda x: x)), ([[5]], []))
+
+    def test_progress_lines(self):   # a step's count: the first at once, then at most twice a second (a count held back goes out while waiting), the last when the step is done
+        out, now = io.StringIO(), [0.0]
+        with mock.patch.object(dmsh_build_vk, 'time', types.SimpleNamespace(monotonic=lambda: now[0])), contextlib.redirect_stdout(out):
+            c = dmsh_build_vk.Count('finishing', 3); c.add(); now[0] = 0.2; c.add(); c.show(); now[0] = 0.6; c.show(); c.show(); c.add()
+        self.assertEqual(out.getvalue().splitlines(), ['progress: finishing 0/3', 'progress: finishing 2/3', 'progress: finishing 3/3'])
+
+    def test_retranslate_as_one_translation_each(self):
+        """The second translations in batches give each job what translate_one gives it alone (a stand-in translator): a failure and its message, an FP32 variant's [RED] line
+        taken as a success, the jobs of a batch that stopped part way; the jobs of a batch that reported nothing are not run again"""
+        fake = ("import json, os, sys\n"
+                "jobs, out = json.load(open(sys.argv[1])), sys.argv[2]\n"
+                "with open(os.environ['FAKE_LOG'], 'a') as f: f.write(','.join(j['key'] for j in jobs) + '\\n')\n"
+                "ok = bad = 0\n"
+                "for j in jobs:\n"
+                "    k = j['key']\n"
+                "    if k == 'crash' and len(jobs) > 1: sys.exit(3)\n"
+                "    if k == 'bad': print(f'[RED] {k}: InvalidOperationException: no such register', file=sys.stderr); bad += 1; continue\n"
+                "    open(os.path.join(out, k + '.spv'), 'wb').write(b'spv'); ok += 1\n"
+                "    if k == 'fp64': print(f'[RED] {k}: the FP32 variant failed, devices without shaderFloat64 cannot run it: X: y', file=sys.stderr)\n"
+                "print(f'translated: {ok} ok, {bad} failed')\n"
+                "sys.exit(1 if bad else 0)\n")
+        keys = ('a', 'bad', 'fp64', 'crash', 'c', 'e', 'f', 'g', 'h')
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d); (d / 'xlate.py').write_text(fake); log = d / 'runs'
+            b = dmsh_build_vk.Build.__new__(dmsh_build_vk.Build); b.xlate, b.nj = [sys.executable, str(d / 'xlate.py')], 1   # 4 batches for 9 jobs
+            with mock.patch.dict(os.environ, FAKE_LOG=str(log)), contextlib.redirect_stdout(io.StringIO()):
+                one = {}
+                for k in keys:
+                    w = d / ('one_' + k); w.mkdir(); one[k] = b.translate_one({'key': k}, str(w))
+                log.unlink(); w = d / 'batch'; w.mkdir()
+                got = b.retranslate([{'key': k} for k in keys], str(w), lambda j: 1)
+            runs = log.read_text().split()
+        self.assertEqual(got, one)
+        self.assertEqual({k: v for k, v in one.items() if v}, {'bad': '[RED] bad: InvalidOperationException: no such register'})
+        batches = [r.split(',') for r in runs if ',' in r]; again = [r for r in runs if ',' not in r]
+        self.assertEqual(sorted(k for r in batches for k in r), sorted(keys))
+        crashed = next(r for r in batches if 'crash' in r)
+        self.assertEqual(sorted(again), sorted(['bad', 'fp64'] + crashed))   # run alone: a [RED] line, or a batch that did not finish
 
 
 @unittest.skipIf(missing('xlate', 'spirv-val'), 'needs ' + missing('xlate', 'spirv-val'))
@@ -550,6 +611,22 @@ class Build(unittest.TestCase):
         self.assertEqual(dmsh_chain.read_stamp(str(self.lib)), {'game': GAME_ID, 'inputs': dmsh_chain.inputs(game.load(str(self.profile)))})
         for t in ('c1_full_vk.tsv', 'cb_extent_vk.tsv'):
             self.assertTrue((self.profile / t).read_text().startswith(f'# chain {self.lib.name} inputs '), t)
+
+    def test_steps_and_store(self):   # each step's count to its end and the times line; every content-store entry holds its library file's bytes, a hard link where the volume has them
+        for step in ('preparing', 'translating', 'analysing', 'translating again', 'finishing'):
+            self.assertRegex(self.run1.stdout, rf'(?m)^progress: {step} (\d+)/\1$')
+        self.assertRegex(self.run1.stdout, r'(?m)^times: preparing [\d.]+ s, translating [\d.]+ s, analysing [\d.]+ s, translating again [\d.]+ s, finishing [\d.]+ s, tables [\d.]+ s$')
+        with tempfile.TemporaryDirectory(dir=self.tmp.name) as d:   # whether this volume has hard links
+            try: os.link(self.lib / '_vk_build.json', Path(d) / 'l'); links = True
+            except OSError: links = False
+        n = 0
+        for digest in (self.cache / 'cas/vk/shader').iterdir():
+            for f in digest.rglob('*'):
+                if not f.is_file(): continue
+                g = self.lib / f.relative_to(digest); n += 1
+                self.assertEqual(f.read_bytes(), g.read_bytes(), f)
+                if links and f.suffix != '.json': self.assertTrue(os.path.samefile(f, g), f)   # a cache hit (test_cache_hit) writes the library's json anew
+        self.assertEqual(n, sum(1 for p in self.lib.rglob('*') if re.fullmatch(r'[0-9a-f]{16}(_bv|_fp32|_b)?\.(spv|json|metal)', p.name)))
 
     def test_census(self):
         r = subprocess.run([sys.executable, str(TOOLS / 'dmsh_build_vk.py'), '--census', str(self.cache)], env=self.env, capture_output=True, text=True)

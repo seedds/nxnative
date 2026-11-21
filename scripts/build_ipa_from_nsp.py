@@ -2218,6 +2218,13 @@ def vk_tables_current(lib, g):   # both Vulkan tables name the stamp of the libr
     return True
 
 
+VK_PROGRESS = re.compile(r'progress: ([a-z][a-z ]*) (\d+)/(\d+)')   # dmsh_build_vk.py's count of each step (preparing, translating, analysing, translating again, finishing)
+
+
+def vk_counted(line):   # a dmsh_build_vk.py output line: its step and count of shaders become the stage's, so the bar shows them and the time left
+    if m := VK_PROGRESS.fullmatch(line): PROG.set(step=m[1], done=int(m[2]), total=int(m[3]), unit='shaders')
+
+
 def build_vk_chain(py, repo, sh, env, logs, g, chain, pkg_key=None, skipped=None):
     """An NVN game's shaders for the Vulkan backend (docs/design/vulkan-backend.md 2): dmsh_build_vk.py from the split's package (sh/pkg) into sh/cache/vk-<chain>/ (beside a Mac build's b-<V>/;
     one output folder per game), whose full run stamps the library (inputs.tsv) and writes the profile's c1_full_vk.tsv and cb_extent_vk.tsv naming that stamp. Returns the folder nxhost-run takes
@@ -2225,7 +2232,8 @@ def build_vk_chain(py, repo, sh, env, logs, g, chain, pkg_key=None, skipped=None
     else the dll that docker/README.md builds with .NET in the chain image, run with dotnet; and the SPIR-V tools of dm/gfx/tools/dmsh_chain_vk.lock (dmsh_chain_vk.py --check-tools).
     Without them the step is not run, a [RED] line says why and skipped gets an entry.
     Reused when the package, the chain's tools and translator, the profile and the split's pairs are as at the last full build and both tables name its stamp; a table that does not runs the
-    build again (dmsh_build_vk.py takes every shader from its cache then). Shaders that fail are reported, and the others are used (dmsh_build_vk.py's exit code 1), as the Metal build does"""
+    build again (dmsh_build_vk.py takes every shader from its cache then). Shaders that fail are reported, and the others are used (dmsh_build_vk.py's exit code 1), as the Metal build does.
+    The stage's step and count are dmsh_build_vk.py's (vk_counted)"""
     PROG.stage('Vulkan shader libraries', step='checking the inputs')
     out, log = sh / 'cache', logs / 'dmsh_build_vk.log'
     lib, kf = out / f'vk-{chain}', sh / f'vk-{chain}.key'
@@ -2254,7 +2262,7 @@ def build_vk_chain(py, repo, sh, env, logs, g, chain, pkg_key=None, skipped=None
     if note is not None and next(lib.glob('*.spv'), None) and vk_tables_current(lib, g):
         PROG.end(f'{note}, reused (inputs unchanged)'); return out
     rmtree(kf); PROG.set(step='translating')
-    rc = run([py, repo / 'dm/gfx/tools/dmsh_build_vk.py', sh / 'pkg', out], log, env=env, ok=(0, 1))
+    rc = run([py, repo / 'dm/gfx/tools/dmsh_build_vk.py', sh / 'pkg', out], log, env=env, ok=(0, 1), on_line=vk_counted)
     if not vk_tables_current(lib, g): raise BuildError(f'no stamped Vulkan shader library in {lib}, or {" / ".join(CHAIN_TABLES_VK)} do not name its stamp: dmsh_build_vk.py did not finish a full build (exit code {rc}; output: {log})')
     t = log.read_text(errors='replace'); m, c = re.search(r'shaders (\d+): ok (\d+)', t), re.search(r'shader cache: hit (\d+)', t)
     note = ''

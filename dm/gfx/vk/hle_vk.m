@@ -1859,7 +1859,9 @@ static int bind_args(rs_t *s, VkPipeline p, const shinfo *si, int st) {   // a s
     for (int k = 0; k < p->nab[st]; k++) {
         abuf_t *a = &p->ab[st][k]; VkDescriptorSet ds = a->set < 8 ? sets[a->set].s : NULL;
         if (!ds) { RED1("shader %s: set %u (an argument buffer) is not bound", si->key, a->set); return 0; }
-        uint64_t gen = ds->gen;   // capture before encoding: a concurrent update must not bless old contents with its new generation
+        // Use the same generation for the cache lookup and re-encoding. A new generation invalidates the cached
+        // argument buffer when descriptors change or an allocation reuses a set address.
+        uint64_t gen = ds->gen;
         if ((a->s != ds || a->gen != gen || !a->buf) && !ab_encode(a, ds, si, gen)) return 0;
         put_buf(s, st, a->buf, 0, a->slot);
         if (a->enc_id == s->enc_id) continue;

@@ -259,7 +259,7 @@ static void report(NSError *e, NSString *target, const char *stage) {
 // failed on every locality on macOS 27.0.1), is driven through its own effects report, as SDL's hidapi driver does: 0x11 over Bluetooth
 // (78 bytes, CRC32 over 0xA2 and the first 74 bytes, rumble only, so the light bar is left alone), 0x05 over USB (32 bytes). Unlike the
 // handle engines of a server without advanced players, the report keeps the strong (left) and weak (right) motor apart.
-typedef struct { IOHIDDeviceRef dev; uint64_t id; BOOL bluetooth; uint8_t motor[2], sent[2]; } ds4_out;   // id: its registry entry
+typedef struct { IOHIDDeviceRef dev; uint64_t id; BOOL bluetooth, swpro; uint8_t motor[2], sent[2], ctr; } ds4_out;   // id: its registry entry
 static ds4_out ds4[DM_PLAYERS];
 static uint32_t ds4_crc(const uint8_t *p, size_t n) {
     uint32_t c = ~0u;
@@ -268,13 +268,29 @@ static uint32_t ds4_crc(const uint8_t *p, size_t n) {
 }
 static void ds4_send(int p) {
     ds4_out *o = &ds4[p]; uint8_t r[78] = {0}; size_t n;
-    if (o->bluetooth) {
+    if (o->swpro) {   // a Switch Pro Controller clone's rumble report 0x10: a counter and one 4-byte HD rumble block per side; the strong motor drives the low band's amplitude, the weak one the high band's
+        uint8_t lf = o->motor[0] ? 0x40 + (o->motor[0] * 0x32 + 127) / 255 : 0x40, hf = o->motor[1] ? (uint8_t)(((o->motor[1] * 0xC8 + 127) / 255) & 0xFE) : 0;
+        if (o->motor[1] && !hf) hf = 2;
+        if (!o->bluetooth) {   // over USB the pad feels nothing below about 0x50 / 0x60 (the game's small rumbles are 1..20 of 255): any rumble starts at that floor
+            if (o->motor[0]) lf = 0x50 + (o->motor[0] * 0x22 + 127) / 255;
+            if (o->motor[1]) hf = (uint8_t)((0x60 + (o->motor[1] * 0x68 + 127) / 255) & 0xFE);
+            if (o->motor[0] && !o->motor[1]) hf = 0x60;   // the low band alone is faint on this pad: give it some high band too
+        }
+        uint8_t blk[4] = { 0x28, hf ? hf : 0x01, 0x60, lf };
+        if (!o->motor[0] && !o->motor[1]) { blk[0] = 0x00; blk[1] = 0x01; blk[2] = 0x40; blk[3] = 0x40; }   // neutral: the motors rest
+        r[0] = 0x10; r[1] = o->ctr++ & 0x0F; memcpy(r + 2, blk, 4); memcpy(r + 6, blk, 4); n = o->bluetooth ? 10 : 64;
+        if (!o->bluetooth && (o->motor[0] || o->motor[1]) && !o->sent[0] && !o->sent[1]) {   // over USB, whatever else talks to the pad (GameController) may have undone the handshake or vibration enable since the last buzz: do both again as each rumble starts
+            uint8_t h[64] = {0x80, 0x04}, en[64] = { 0x01, o->ctr++ & 0x0F, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x48, 0x01 };
+            IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, h[0], h, 64); IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, en[0], en, 64);
+        }
+    }
+    else if (o->bluetooth) {
         r[0] = 0x11; r[1] = 0xC4; r[3] = 0x01; r[6] = o->motor[1]; r[7] = o->motor[0]; n = 78;
         uint8_t c[75] = {0xA2}; memcpy(c + 1, r, 74);
         uint32_t crc = ds4_crc(c, sizeof c); r[74] = crc; r[75] = crc >> 8; r[76] = crc >> 16; r[77] = crc >> 24;
     } else { r[0] = 0x05; r[1] = 0x01; r[4] = o->motor[1]; r[5] = o->motor[0]; n = 32; }
     IOReturn e = IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, r[0], r, n);
-    if (e != kIOReturnSuccess) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: DualShock 4 effects report: IOReturn 0x%x\n", e); return; }
+    if (e != kIOReturnSuccess) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: %s report: IOReturn 0x%x\n", o->swpro ? "Switch Pro rumble" : "DualShock 4 effects", e); return; }
     o->sent[0] = o->motor[0]; o->sent[1] = o->motor[1];
 }
 // As the emulators feed SDL: the strong motor follows the low band and the weak one the high band, mostly from the left and the right motor
@@ -306,10 +322,10 @@ static void ds4_release(int p) {
 // The first DualShock 4 device no other player drives, opened for player p. The registry is asked at each connect: an IOHIDManager that is never scheduled
 // keeps the devices of the moment its matching was set, so a controller turned on later found none and stayed on Core Haptics, and one that came back got
 // its dead device. A scheduled one would depend on its arrival callback running before GameController's connect; the registry has the device by then
-static BOOL ds4_take(int p) {
+static BOOL ds4_take(int p, BOOL swpro, BOOL clone) {
     CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
     if (!match) return NO;
-    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x054C);
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)(swpro ? @0x057E : @0x054C));
     if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;   // takes match
     BOOL found = NO;
     for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
@@ -319,19 +335,38 @@ static BOOL ds4_take(int p) {
         IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
         if (!dev) continue;
         int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue];
-        if ((pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0) && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {   // DualShock 4 v1, v2, the USB wireless adapter
-            ds4[p].dev = dev; ds4[p].id = id; found = YES;
+        BOOL model = swpro ? pid == 0x2009 && (clone || ![(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"])
+                            : pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0;   // DualShock 4 v1, v2, the USB wireless adapter
+        if (model && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {
+            ds4[p].dev = dev; ds4[p].id = id; ds4[p].swpro = swpro; found = YES;
             ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+            if (swpro) {   // over USB the controller talks only after Nintendo's handshake (0x80 0x02, then 0x80 0x04: no time-out back to Bluetooth), in 64-byte reports
+                size_t len = ds4[p].bluetooth ? 12 : 64; uint8_t h[64] = {0};
+                if (!ds4[p].bluetooth) { h[0] = 0x80; h[1] = 0x02; IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, h[0], h, 64); usleep(50000); h[1] = 0x04; IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, h[0], h, 64); usleep(50000); }
+                uint8_t en[64] = { 0x01, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x48, 0x01 }; IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, en[0], en, len);   // subcommand 0x48: vibration on
+            }
         } else CFRelease(dev);
     }
     IOObjectRelease(it);
     return found;
 }
 // Only a controller GameController calls a DualShock 4, and only while such a HID device is free
+// A Switch Pro Controller clone (over Bluetooth GameController names it "Pro Controller" and a maker's word; over USB it is plain "Pro Controller"),
+// whose handle haptics GameController offers but the controller does not play: its rumble report goes straight to the HID device, Nintendo's report 0x10 as the real one takes it
+// (over USB after the handshake). A Pro Controller over Bluetooth with its own name stays on Core Haptics. DM_SWITCH_PRO_RAW=1 does it for every Pro Controller, 0 for none
+static BOOL swpro_candidate(GCController *controller) {
+    const char *opt = getenv("DM_SWITCH_PRO_RAW");
+    return [controller.vendorName hasPrefix:@"Pro Controller"] && (!opt || atoi(opt) != 0);
+}
+static BOOL swpro_clone(GCController *controller) {
+    const char *opt = getenv("DM_SWITCH_PRO_RAW");
+    return opt ? atoi(opt) != 0 : ![controller.vendorName isEqualToString:@"Pro Controller"];
+}
 static BOOL ds4_route(int p, GCController *controller) {
-    if (![controller.productCategory isEqualToString:GCProductCategoryDualShock4] || !ds4_take(p)) return NO;
-    for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = @"DualShock 4 report"; [channels[p] addObject:c]; }
-    fprintf(stderr, "haptics: player %d controller %s, rumble through the DualShock 4 effects report (%s, product 0x%04x)\n", p + 1, controller.vendorName.UTF8String ?: "unknown",
+    BOOL swpro = swpro_candidate(controller);
+    if (!(swpro || [controller.productCategory isEqualToString:GCProductCategoryDualShock4]) || !ds4_take(p, swpro, swpro && swpro_clone(controller))) return NO;
+    for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = swpro ? @"Switch Pro rumble report" : @"DualShock 4 report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the %s report (%s, product 0x%04x)\n", p + 1, controller.vendorName.UTF8String ?: "unknown", swpro ? "Switch Pro rumble" : "DualShock 4 effects",
             ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
     return YES;
 }

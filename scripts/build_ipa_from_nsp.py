@@ -2532,12 +2532,36 @@ def seen_keys(g, sh, logs):
 
 class ShaderWatch:
     """Progress of dmsh_build.py, from the small JSON file it rewrites at most every half second (DMSH_PROGRESS): the cache check over every key, then the compile, which finishes the keys
-    in batches (cache hits and misses alike) and counts them. It used to be read from the files dmsh_build.py wrote, one per shader output, which it no longer leaves on disk"""
-    def __init__(self, path): self.path = path
+    in batches (cache hits and misses alike) and counts them. It used to be read from the files dmsh_build.py wrote, one per shader output, which it no longer leaves on disk.
+    After the last shader dmsh_build.py writes no more progress, and its file holds the count of the last write, at most half a second before the end: a reuse build finishes a few dozen shaders
+    in that time, so the line stood at 99% (42,811 of 42,848 for Ocarina of Time) for the two minutes the rest took. That rest is followed here, without a change to dmsh_build.py, a chain input:
+    the library images (images: <lib>.img, written as <lib>.img.part while the progress file is still there), then, once the file is removed and with tables (a full build), c1_guard.py and
+    cb_extent.py, told apart by the line dmsh_build.py prints when the first is done (line, run()'s on_line)"""
+    def __init__(self, path, images=(), tables=False):
+        self.path, self.images, self.tables = path, [Path(i) for i in images], tables
+        self.read = self.writing = False   # the progress file was read: its removal then means the shaders and the images are done; an image's .part was seen
+        self.table = None   # 'cb_extent' once c1_guard.py's line is printed, 'done' once cb_extent.py's is
+
+    def line(self, line):   # dmsh_build.py's output, flushed after each table
+        if line.startswith('c1_full.tsv: '): self.table = 'cb_extent'
+        elif line.startswith('cb_extent.tsv: '): self.table = 'done'
 
     def __call__(self):
+        if self.table == 'cb_extent': return {'step': 'uniform read extents (cb_extent.py)'}
+        if self.table: return None
         try: p = json.loads(self.path.read_text())
-        except (OSError, ValueError): return None
+        except OSError: return {'step': 'c1 bounds (c1_guard.py)'} if self.read and self.tables else None
+        except ValueError: return None
+        self.read = True
+        parts = [i.with_name(i.name + '.part') for i in self.images]
+        self.writing = self.writing or any(t.is_file() for t in parts)
+        if self.writing:
+            done = 0
+            for i, t in zip(self.images, parts):
+                for f in (t, i):
+                    try: done += f.stat().st_size; break
+                    except OSError: pass
+            return {'step': 'writing the library image', 'done': done, 'unit': 'B'}
         cached, misses = p.get('cached', 0), p.get('misses')
         if p.get('step') == 'cache check':
             return {'step': 'cache check', 'done': p['done'], 'total': p['total'], 'unit': 'shaders', 'note': f'{cached:,} cached'}
@@ -2701,7 +2725,8 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if seen: benv['DMSH_CAS'] = str(sh / 'cache')   # the full build's folder: this chain's file there
     benv['DMSH_TABLE_MEMO'] = str(sh / 'cache')   # c1_guard.py / cb_extent.py keep each shader's answer there: a build that restores every shader makes the tables in seconds
     prog = sh / 'progress.json'; rmtree(prog); benv['DMSH_PROGRESS'] = str(prog)   # dmsh_build.py's progress (ShaderWatch)
-    try: PROG.watch(ShaderWatch(prog))
+    watch = ShaderWatch(prog, [shader_lib.image_of(sh / 'partial' / f'b-{chain}' if seen else sh / 'cache' / f'b-{chain}')] + ([] if mac else [shader_lib.image_of(ios / f'b-{chain}')]), tables=not seen)
+    try: PROG.watch(watch)
     except Exception: pass   # progress never stops the build
     try: stale = None if seen else stale_shaders(py, repo, env, [sh / 'cache'] if mac else [sh / 'cache', ios] if keep_mac else [ios], chain, g)
     except Exception: stale = None   # a note never stops the build
@@ -2715,7 +2740,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not seen:   # the run's folder replaces the library: a stopped build keeps no old shaders under the same chain, as dmsh_build.py removes a folder's
         shader_lib.remove_image(sh / 'cache' / f'b-{chain}')
         if not mac: shader_lib.remove_image(ios / f'b-{chain}')
-    run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', out if seen else sh / 'cache', *(seen or ())], log, env=benv)
+    run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', out if seen else sh / 'cache', *(seen or ())], log, env=benv, on_line=watch.line)
     PROG.watch(None)
     if not seen and not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
     what = 'Mac' if mac else 'iOS'

@@ -142,6 +142,13 @@
 - **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge. Applies to every Vulkan game's shader step.
 
+### The shader step stands at 99% for minutes before it ends
+
+- **Symptom:** a shader build's progress line stops just short of its total (`42,811 of 42,848` for Ocarina of Time, every shader from the cache) and stays there for about two minutes before the step ends, which looks like a hang.
+- **Cause:** `ShaderWatch` read only `dmsh_build.py`'s progress file, written at most every half second, so its last count is up to half a second old, and a reuse build finishes a few dozen shaders in that time. After the last shader, `dmsh_build.py` writes the library images and runs `c1_guard.py` and `cb_extent.py` (95 s for Ocarina of Time on an M3 Max), with no more progress.
+- **Fix:** `ShaderWatch` follows those steps without a change to `dmsh_build.py`, a chain input: an image being written (`<library>.img.part`, its bytes so far), then, once `dmsh_build.py` removes the progress file in a full build, `c1 bounds (c1_guard.py)` until its `c1_full.tsv:` line and `uniform read extents (cb_extent.py)` until its `cb_extent.tsv:` line (`run`'s `on_line`). A `--seen-shaders` build makes no tables and shows none.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072 on an M3 Max. `dm/tools/tests/test_nsp_mac.py` (`test_shader_watch_follows_the_steps_after_the_last_shader`, `test_shader_watch_partial_build_has_no_tables`, `test_the_build_follows_dmsh_builds_lines`).
+
 ### The split shader tables differ from a game profile's
 
 - **Symptom:** the shader split stops with `the split shader tables differ from game profile <id>'s`, on the game version the profile registers.

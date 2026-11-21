@@ -312,6 +312,14 @@ $(B)/t_pad_hid_mac: t_pad_hid_mac.m ../pad_hid_mac.h ../pad_hid.h ../pad_pro.h .
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid_mac.m -framework Foundation -framework GameController -framework IOKit
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
+# the frame-rate counter's count and rate (fps_meter.h: nvn_mtl.m's presented callbacks, front_mac.m's reading)
+# run as a prerequisite of run (before its recipe), so upstream's run recipe carries no line of this series
+.PHONY: check_fps_meter
+run: check_fps_meter
+check_fps_meter: $(B)/t_fps_meter
+	$(B)/t_fps_meter
+$(B)/t_fps_meter: t_fps_meter.c ../fps_meter.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. -o $@ t_fps_meter.c
 $(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
 $(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

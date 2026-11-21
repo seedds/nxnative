@@ -72,14 +72,22 @@ class LauncherSettingsTests(unittest.TestCase):
         s = build(BOTW, 'nvn')['DM_SHOW_FPS']
         self.assertEqual((s['on'], s['off']), ('1', '0'))
 
-    def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
+    def test_iphone_switches_only_on_the_iphone(self):   # touch feedback, the picture fit and the touch controls are the iOS front end's (DmGamepad.m, front_ios.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
+        self.assertEqual(set(ios) - set(mac), {'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
+
+    def test_frame_rate_counter_on_both_platforms_with_the_builds_default(self):   # front_ios.m and front_mac.m both read DM_SHOW_FPS; build_ipa.sh / the NSP script pass the default
+        for platform in ('ios', 'mac'):
+            for built, default in (('1', '1'), ('YES', '1'), ('0', '0'), ('NO', '0'), (None, '0')):
+                with self.subTest(platform=platform, built=built), patch.dict(os.environ, {'DM_SHOW_FPS': built} if built else {}):
+                    if built is None: os.environ.pop('DM_SHOW_FPS', None)
+                    s = build(BOTW, 'nvn', platform)['DM_SHOW_FPS']
+                    self.assertEqual((s['kind'], s['section'], s['label'], s['on'], s['off'], s['default']), ('toggle', 'Game', 'Frame-rate counter', '1', '0', default))
 
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.

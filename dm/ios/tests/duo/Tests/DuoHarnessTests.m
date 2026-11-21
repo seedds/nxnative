@@ -763,7 +763,15 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL) && dm_setting_live("DM_OPMODE", NULL) && dm_setting_live("DM_RUMBLE", NULL)
                   && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL));
     XCTAssertFalse(dm_setting_live("DM_LANG", NULL), @"A setting the game reads once at start is not offered");
-    XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL));
+    // Frame rate: at once only in a game the host steps through its frame step state page (loader.c dm_fps_target_live); other games take it at the next start
+    duo_harness_fps_page(0);
+    XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL), @"Without a frame step state page the frame rate is not offered");
+    XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", "30"), @"and a pick is not applied");
+    duo_harness_fps_page(60);
+    XCTAssertTrue(dm_setting_live("DM_FPS_TARGET", NULL), @"With one it is offered");
+    dm_setting_live("DM_FPS_TARGET", "30"); XCTAssertEqual(duo_harness_fps_target(), 30, @"30 applies at once");
+    dm_setting_live("DM_FPS_TARGET", "60"); XCTAssertEqual(duo_harness_fps_target(), 60, @"and 60 again");
+    duo_harness_fps_page(0);
 
     CGRect b = root.view.bounds;
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;

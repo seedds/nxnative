@@ -11,6 +11,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "../gfx/nvn/nvn_fstep.h"   // the state page's target (nvn_fstep_target_put / nvn_fstep_target_change)
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
 #endif
@@ -370,7 +371,7 @@ void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
-    float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
+    nvn_fstep_target_put(dm_fps_state, (float)t);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
     // Hades II's 3.0). Independent of the frame step: written at target 0 too
@@ -420,6 +421,23 @@ void dm_fps_state_apply(void) {
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+}
+// The frame rate chosen while the game runs (the in-game menus: front_ios.m dm_setting_live, front_mac.m's Frame Rate menu). Only a game with a frame step state page that the host
+// steps (a target of 30 or 60 at start) takes it at once: the graphics layer reads the target at every present (hle_nvn.c fps_step_cap; a movie's picture rate and the
+// thermal cap still decide over it), the stubs when they run. An engine limiter the host writes (hle_fpslock.c) reads the target once and keeps it, so a game with one needs the next start, as one without a page does.
+// Returns the target in force (30 or 60), or 0 when the game does not take a change at once
+int dm_fps_target_live(void) {
+    if (!dm_fps_state || dm_fps_lock_engine()) return 0;
+    float t = nvn_fstep_target(dm_fps_state);
+    return t <= 0 ? 0 : t <= 30 ? 30 : 60;
+}
+// 30 or 60 (fps_max 120 is for engine limiters only, which have no page): returns 1 when the page took it, 0 when refused (logged)
+int dm_fps_target_set(int fps) {
+    if (!dm_fps_target_live()) { LOG("[RED] frame rate %d fps refused: %s", fps, !dm_fps_state ? "this game has no frame step state page; it takes the frame rate at the next start" : nvn_fstep_target(dm_fps_state) > 0 ? "an engine frame limit the host writes takes it at the next start" : "the game's own frame step runs (DM_FPS_TARGET=0)"); return 0; }
+    int was = nvn_fstep_target_change(dm_fps_state, fps);
+    if (!was) { LOG("[RED] frame rate %d fps refused: must be 30 or 60", fps); return 0; }
+    if (was != fps) LOG("%s: frame step capped at %d fps (was %d), set while the game runs", g_fps_mod, fps, was);
+    return 1;
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);

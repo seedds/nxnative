@@ -101,6 +101,12 @@ void dm_set_opmode(int mode) { g_opmode = mode; }
 static int g_rumble = 1;
 void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
+// A synthetic frame step state page (loader.c dm_fps_target_live / dm_fps_target_set): 0 = the game has none, else its target, 30 or 60
+static int g_fps_page;
+void duo_harness_fps_page(int target) { g_fps_page = target; }
+int duo_harness_fps_target(void) { return g_fps_page; }
+int dm_fps_target_live(void) { return g_fps_page; }
+int dm_fps_target_set(int fps) { if (!g_fps_page || (fps != 30 && fps != 60)) return 0; g_fps_page = fps; return 1; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 

@@ -371,6 +371,15 @@ int main(void) {
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      // the frame rate changed while the game runs (loader.c dm_fps_target_set): every reader takes the page's new target at its next call
+      EXPECT("live change 60 → 30: the page takes it",60,nvn_fstep_target_change(state,30));
+      EXPECT("live 30: present cap",30,fps_present_cap());
+      EXPECT("live 30: two vsyncs a frame",2,present_itv(&w));
+      EXPECT("live 30: display-link target",30,nvn_game_fps());
+      EXPECT("live change 30 → 60: the page takes it",30,nvn_fstep_target_change(state,60));
+      EXPECT("live 60: present cap",60,fps_present_cap());
+      EXPECT("live 60: one vsync a frame",1,present_itv(&w));
+      EXPECT("live 60: display-link target",60,nvn_game_fps());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's

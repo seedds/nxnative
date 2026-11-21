@@ -69,6 +69,8 @@ With [Press a button to join](settings.md#press-a-button-to-join) on in the sett
 
 To quit with a controller, hold its Home button (the logo button on an Xbox or PlayStation controller) for 2 seconds, then press A to quit or B to go back to the game. Quitting this way is the same as ⌘Q: progress the game has not saved is lost. If holding Home opens the Games app instead, macOS keeps the Home button for itself: its controller settings for the Home button decide whether apps may use it. `DM_HOME_QUIT=0` in `env.txt` turns the hold off.
 
+To take a screenshot, press **Capture** (Share on an Xbox or PlayStation controller) or ⌘⇧S. It is saved at the game's own resolution in `~/Library/Application Support/nxnative/<title ID>/Screenshots/` (Window › Show Screenshots opens the folder).
+
 ### Switch 2 controllers (Mac)
 
 Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: they speak Nintendo's own Bluetooth LE protocol. Turn on **Switch 2 controllers** in the game's settings window ([Switch 2 controllers](settings.md#switch-2-controllers)), then:

@@ -1,0 +1,37 @@
+# Atelier Resleriana 1.4b (v524288); validated on iPhone.
+# ---- Identity ----
+title_id	01000F9020CD4000
+program_id	01000F9020CD4000
+
+# ---- App ----
+name	Atelier Resleriana: The Red Alchemist & the White Guardian
+ipa	AtelierReslerianaTheRedAlchemistTheWhiteGuardian.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v524288	1.4b	main=5e6f9d0c5161586bcd32dd7ddc5e9db0	subsdk0=e0ee365be8fb7ba6d2071082b5417b50	sdk=191086db0c8bb8477a320ccd7942a254
+package	v524288
+shader_versions	v524288
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Embed/3d68d9a6d5835b98ec54acca5820a441.bundle
+zip_store	.assets:.bundle:.dat:.json:.resource:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 20 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Atelier Resleriana: The Red Alchemist & the White Guardian shaders
+
+# Frame limit: verified Unity target plus FPSLocker cloth-frequency correction.
+fps_target	60
+present_interval	display

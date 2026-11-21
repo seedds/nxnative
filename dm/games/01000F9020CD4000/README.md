@@ -1,0 +1,35 @@
+# Atelier Resleriana: The Red Alchemist & the White Guardian (`01000F9020CD4000`)
+
+Update 1.4b (v524288) over the base game, SDK 19.3.5, Unity 2022.3.56f1 IL2CPP with FMOD on NVN. Modules `main`, `subsdk0` and `sdk`. Tested on iPhone 18 Pro Max (iPhone19,7), iOS 27.0.1: sustained gameplay through frame 29400 and at least 19m53s without allocation failures or crashes after the fixes below. Recent frame pacing was 30 fps. The Mac build is untested (the build machine was Intel). Initial validation used nxnative `15805ef`. A subsequent build based on upstream `659c69d` plus these fixes launched and passed approximately 15 minutes of user-reported gameplay without issues. Both builds used Xcode 26.3; the newer build used `--allow-other-metal` because Xcode 27.1 is incompatible with the build machine's macOS. The expected Xcode 27.1 configuration remains untested.
+
+## What it needs
+
+- [`patches.py`](patches.py): cap the startup StandardAllocator virtual reservation at 2 GiB. `nninitStartup` otherwise asks for pool minus used memory, approximately 3.14 GiB, alongside Unity's independent reservations. The cut is restricted to main build `5e6f9d0c5161586bcd32dd7ddc5e9db0` and asserts the original instruction.
+- [`sdk_patches.py`](../../tools/sdk_patches.py), SDK build `191086db0c8bb8477a320ccd7942a254`: reduce both AddressRegionManager node-area fields from 1022 MiB to 62 MiB, recovering 960 MiB of virtual address space. See [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
+- The same SDK entry uses the existing 64 KiB placement rule for regions of all sizes, preserving guard spacing. See [fragmentation with 2 MiB region alignment](../../../docs/reference/memory.md#fragmentation-with-2-mib-region-alignment).
+- The tested sideloaded app had `com.apple.developer.kernel.increased-memory-limit=true`; ensure the signing tool preserves/grants it. Extended Virtual Addressing was not used. The normal unsigned IPA workflow does not itself guarantee the final signed entitlement.
+- [`game.tsv`](game.tsv) keeps the original memory configuration: 5 GiB reservation, 4.375 GiB alias region, 256 MiB stacks, application pool `0xCD500000`, system resource `0x1400000`. No mapping limit.
+
+## Memory diagnosis
+
+The node-area reduction alone reached startup, but a 2 MiB `ALLOC_CACHEOBJECTS_THREAD` pool still failed (result `0x1803`) and Unity dereferenced its null result at main+0x8f13b0. Capping StandardAllocator allowed about ten minutes of gameplay before a 32 MiB Serialization request returned null and crashed at main+0xedd384. Another pre-alignment run failed while copying approximately 4.3 MiB into a null graphics buffer; its allocation origin was not proven.
+
+A live debugger caught the 2 MiB pool failure at fatal exit. The SDK region tree contained 812 records, reserving 3.9405 GiB of the 4.375 GiB alias region, including the 2 GiB StandardAllocator and 62 MiB node area. Gaps retained about 440.4 MiB after guards, but none accepted the request under the SDK's 2 MiB alignment rule. This proves virtual-address fragmentation for that failure, despite more than 5 GB of reported system memory-limit headroom.
+
+At SDK+0x14254c, select the 64 KiB mask already used for smaller regions; at +0x142560, retain its corresponding rounding offset `0x1ffff`. Both parameters must change together. Unicorn execution of the actual SDK search loop against the captured tree reproduced the original failure and patched success, with 16 candidate gaps under the small-region placement rule. Small requests retained identical placement; returned ranges preserved guards and bounds. Original instruction bytes are asserted by the rewriter.
+
+## Validation and remaining work
+
+Both patched IPAs built successfully; ZIP CRCs and packaged memory entitlements passed verification. Building the newer-upstream IPA required an isolated Python 3.13 / Capstone 5.0.9 environment and a local rewriter workaround for repeated native GC/shutdown crashes: cyclic GC disabled during rewriting, then fast exit after outputs were closed. Main binary and fixup/gate/site/observation tables matched the independent known-good baseline byte-for-byte. Those build-environment changes are excluded from this PR. The patch registry's 14 tests passed. The sustained device run ended this observation window at roughly 2.5 GiB footprint and 5.6 GB reported memory-limit headroom, without a crash or allocation-failure report. Longer sessions and additional areas remain untested.
+
+Temporary diagnostic cuts exposed Unity's formatted allocation-failure report through OutputDebugString; they are intentionally excluded from this profile. Debugger attachment caused substantial loading slowdown with conditional allocation/copy breakpoints; removing those restored normal gameplay. The player recalls no loading/audio stalls without the debugger, so stalls and underruns in attached-run logs are not established standalone defects. Controller-haptics helper connection errors also appeared. Before the fixes, the player usually saw crashes after a few minutes while moving to a new/different area; one also occurred in combat. Post-fix testing was general gameplay and area transitions, not a named scripted route. No gameplay screenshot has been collected yet.
+
+## Found on this game
+
+- [Fragmentation with 2 MiB region alignment](../../../docs/reference/memory.md#fragmentation-with-2-mib-region-alignment).
+
+## 60 fps adaptation
+
+FPSLocker-Warehouse includes an exact 1.4b build config (`5E6F9D0C5161586B`) at https://github.com/masagrator/FPSLocker-Warehouse/blob/v4/SaltySD/plugins/FPSLocker/patches/01000F9020CD4000/5E6F9D0C5161586B.yaml (checked 2026-10-29, repository revision 575eef0824e3519e6567c3fdb27707136448923a). It writes MagicaCloth's simulation frequency through `[MAIN,0x7791fe8,0xb8,0,0x10,0x20,0x10]` to FPS target plus five. FPSLocker's separate graphics-API override removes the interval-2 cap; the YAML alone does not unlock presentation.
+
+The local adaptation uses `fps_target 60` and `present_interval display`. Unity icall registration entries 325/326 in the name table at main+0x7596ed8 and function table at +0x759d890 resolve Application.get/set_targetFrameRate to +0x16a6e50/+0x16a6e60. Both access int32 main+0x7adfa70. Executing the original ARM64 getter/setter under Unicorn confirmed that field for 30, 60, 120, 0 and -1. `hle_fpslock.c` updates it each present and follows the null-checked cloth chain to maintain target+5. Existing memory fixes remain unchanged; no time-scale or fixed-delta-time patch was added. The launcher can select 30 or 60 fps. Tests cover both targets, scene recreation/reset writes, every missing chain level, unreadable memory, an unknown build and target zero. The rebuilt IPA defaults to 60 fps with 30/60 choices in its launcher; archive CRCs, memory entitlement and packaged correction were verified. The player confirms this 60 fps build works on the same iPhone; no exact FPS trace or duration was supplied. Further timing and long-session testing remain open.

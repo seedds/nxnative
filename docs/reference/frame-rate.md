@@ -757,6 +757,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the declaration also covers 1.1 × the window's peak (`nvn_rt_need` in `nvn_rt.h`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
 
+### Managed cloth frequency follows the frame target
+
+- **Symptom:** raising the presentation rate can leave cloth simulation using its original low-frequency setting.
+- **Cause:** the game's MagicaCloth frequency lives behind a managed-object pointer chain, separately from Unity's Application.targetFrameRate and the NVN present interval.
+- **Fix:** frame-limit rows can follow up to four additional safe-read pointer hops and apply an integer bias to the requested target. Missing/unreadable scene objects are skipped. The exact-build Atelier rows set Unity's verified int32 frame cap and the FPSLocker-provided cloth field to target plus five, with display present pacing.
+- **Found on:** [Atelier Resleriana](../../dm/games/01000F9020CD4000/README.md#60-fps-adaptation), 1.4b; synthetic-memory tests and original ARM64 getter/setter execution pass; the player confirms the rebuilt 60 fps IPA works on iPhone.
+
 ### Frame threads with no deadline of their own run on efficiency cores at 30 fps
 
 - **Symptom:** on an iPhone at the 30 fps cap, frames late with the CPU work mostly on efficiency cores: 1-25% of the process's CPU time on performance cores, the submit thread at 1.55-1.66 GHz with 16-24 ms of CPU a frame, frame p50 35-38 ms (25-26 fps) where the GPU needs 20-27 ms.

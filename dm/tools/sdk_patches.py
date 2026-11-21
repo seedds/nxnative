@@ -11,6 +11,20 @@ CUTS = {
     (0x93e8c, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),
     (0x93fe0, 'ea030232', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
   ],
+  # Atelier Resleriana 1.4b (v524288), SDK 19: verified AddressRegionManager
+  # constructor at +0x1423ec, with the same limit and occupied-length fields
+  # as other SDK 19 builds. The unpatched alias high-water reaches 4.27 GiB
+  # of 4.375 GiB, followed by a null allocator result and main+0x8f13b0.
+  # Node-area reduction reaches sustained gameplay. A live failure tree has
+  # 440 MiB in gaps but no legal 2 MiB placement under the large-region rule.
+  # Use the existing small-region 64 KiB mask AND rounding offset for all
+  # sizes; retain both guard pages. iPhone gameplay passed at least 19m53s.
+  '191086db0c8bb8477a320ccd7942a254': [
+    (0x1423fc, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit 1022 MiB to 62 MiB'),
+    (0x142468, '09fca752', '097ca052', 'AddressRegionManager constructor: occupied node area 1022 MiB to 62 MiB'),
+    (0x14254c, '4931899a', 'e9030aaa', 'AllocateAddressRegion: use existing 64 KiB alignment mask for all region sizes'),
+    (0x142560, '4a318b9a', '1f2003d5', 'AllocateAddressRegion: retain existing small-region rounding offset with guard spacing'),
+  ],
 }
 
 # SDK-wide function patches (dm/tools/nso_match.py): the two fixes above that hold for any game on an iPhone's small address space, for every game's sdk of a build with no CUTS
@@ -188,6 +202,8 @@ MATCH_CUTS = {'sdk': [
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'Atelier SDK node area and 64 KiB region placement (191086db)', 'now': 'build', 'goal': 'sdk', 'purpose': 'address space',
+     'why': 'this build needs the existing small-region placement rule for all sizes to fit fragmented address space'},
     {'what': 'node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB, as SDK 20: the SDK-wide rules', 'now': 'sdk', 'goal': 'sdk', 'purpose': 'address space',
      'checked': '20 registered builds rewritten byte-identical with the rules alone, 2026-10-29 and 2026-10-30; the 2 MB alignment on every sdk build on the drive, 2026-10-30',
      'why': 'one rule per reviewed implementation; every sdk build without CUTS gets them'},

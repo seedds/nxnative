@@ -26,8 +26,12 @@
 enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, VSYNCS_DEFAULT2_I32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
-typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
+typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; uint8_t depth; uint32_t chain[4]; int8_t bias; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
 static const lock_t k_locks[] = {
+    // Cloth frequency follows FPSLocker-Warehouse's exact-build 1.4b config:
+    // [MAIN,0x7791fe8,0xb8,0,0x10,0x20,0x10] = FPS_TARGET + 5.
+    // https://github.com/masagrator/FPSLocker-Warehouse/blob/master/SaltySD/plugins/FPSLocker/patches/01000F9020CD4000/5E6F9D0C5161586B.yaml
+    { "5e6f9d0c5161586bcd32dd7ddc5e9db0", "MagicaCloth simulation frequency", 0x7791fe8, 0x10, FPS_I32, 1, 0, 0, 4, {0xb8, 0, 0x10, 0x20}, 5 },
     // Monster Hunter Rise 16.0.2: RE Engine's frame limit, a float at [main+0x1295b3f0]+0x434 (the pointer is a global in main's bss). The frame loop (main+0x6b106c8) sleeps until
     // [+0x430] / [+0x434] sixtieths of a second have passed ([+0x430] = 60) and steps the game by the time that really passed (+0x41c), so a higher limit runs the game faster in frames
     // at the same speed. The game sets 30 after boot; it also asks for present interval 2, which the profile's present_interval display ignores.
@@ -302,6 +306,13 @@ void dm_fps_lock_tick(void) {
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
+        int ready = 1;
+        for (int d = 0; d < L->depth; d++) {
+            uint64_t next;
+            if (!rd(obj + L->chain[d], &next, sizeof next) || !next) { ready = 0; break; }
+            obj = next;
+        }
+        if (!ready) continue;   // managed objects may not exist until a scene loads
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
@@ -335,7 +346,7 @@ void dm_fps_lock_tick(void) {
                 snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = L->kind == FPS_I32;
-                want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
+                want = fps ? (uint32_t)(target + L->bias) : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
                 uint32_t value = !cur && L->kind == VSYNCS_DEFAULT2_I32 ? 2 : cur;   // Monolith's zero means its native two-vsync default
                 if (value == want || value < (fps ? 10u : 1u) || value > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);

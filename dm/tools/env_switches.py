@@ -26,6 +26,7 @@ def tracked():
 def scan():
     """({switch: files that read it}, {name quoted in the docs: docs})"""
     reads, docs, macros, direct = {}, {}, set(), set()
+    families = set()   # the prefixes of switches the code builds with a format ("DM_AOC_OVERLAY_%d"): a table row `DM_AOC_OVERLAY_<n>` stands for them
     for p in tracked():
         path = REPO / p
         if not path.is_file(): continue
@@ -43,8 +44,13 @@ def scan():
         elif p.endswith('.sh'): found = re.findall(r'\$\{?(' + NAME + r')\b', text) + re.findall(r'["\'](' + NAME + r')["\']', text)
         else: found = re.findall(r'["\'](' + NAME + r')=?["\']', text)   # any quoted name: helpers such as envdir("DM_TEMP", …) read it for their caller
         direct |= set(re.findall(READ, text))
+        if not p.endswith('.md') and '/tests/' not in p: families |= set(re.findall(r'["\'](' + NAME + r'_)(?:%\w|["\'])', text))
         for n in set(found): reads.setdefault(n, set()).add(p)
     for n in macros - direct: reads.pop(n, None); docs.pop(n, None)
+    if TABLE.exists():
+        for l in TABLE.read_text().split('\n'):
+            n = l.split('\t')[0]
+            if re.fullmatch(NAME + r'_<n>', n) and n[:-3] in families: reads.setdefault(n, set()).add('(a name built with a format)')
     return reads, docs
 
 

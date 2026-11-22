@@ -345,7 +345,9 @@ def toolchain_fp():
     for cmd in (['spirv-cross', '--version'], ['xcrun', '-sdk', 'macosx', 'metal', '--version'], ['xcrun', '-sdk', 'macosx', '--show-sdk-build-version']):
         try: r = sh(cmd); out.append(r.stdout + r.stderr)
         except FileNotFoundError: out.append('missing')   # spirv-cross on PATH: only revisions before the in-repo build (dm/gfx/tools/spirv_cross_bin) run it; a tree's own is in its chain key
-    return hashlib.sha256('\0'.join(out).encode()).hexdigest()
+    # metal --version ends with InstalledDir:, the Metal toolchain's mount point (Xcode 26 and later: a cryptex under /private/var/run/com.apple.security.cryptexd/mnt/, named
+    # with a random suffix at each boot); the version, build and target lines name the compiler, so the chain keys stay the same across reboots (dmsh_mtlcache.tools_key does the same)
+    return hashlib.sha256('\0'.join(re.sub(r'(?m)^InstalledDir:.*\n?', '', o) for o in out).encode()).hexdigest()
 
 
 def chain_key(tree, g, tools):

@@ -1898,6 +1898,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `TiledDownsample` and `TiledDownsampleTextureView` use the same recorded resolve as their ordinary counterparts. Texture descriptors and the selected views are copied when recorded; the resolve runs in submission order. Tegra tiled-cache scheduling hints remain host no-ops. This adds no new format, size-conversion or sample-count support to the existing resolve path.
 - **Found on:** Ikaruga 1.0.2, reported by [hada0127 in issue #592](https://github.com/seedds/nxnative/issues/592), with a [source-only patch](https://gist.github.com/hada0127/5cf963267ae4e0da47ecf8e150c7bdf6). The report's independent SDK audio-layout failure is separate. No repository game profile or current gameplay validation is provided by this change.
 
+### Multisample `Downsample` between different sizes
+
+- **Symptom:** `[RED] Downsample case not implemented: 1920x1080 4 samples format 92 → 1280x720 1 samples format 92`; handheld mode renders black while docked mode works.
+- **Cause:** Metal requires a render pass's `resolveTexture` to match the multisample source attachment's dimensions, so `copy_t2t_enc` (`DM_COPY_RESOLVE`) rejected multisample resolves when the source and destination level sizes differed. A game that allocates its MSAA render target at docked size (`1920x1080`) and renders handheld frames into the `1280x720` corner hits this path on `nvnCommandBufferDownsample`.
+- **Fix:** when `s.sampleCount > 1`, `d.sampleCount == 1`, `s.pixelFormat == d.pixelFormat`, and the source and destination level sizes differ, `copy_t2t_enc` resolves into a cached private staging texture matching `(sw, sh, pf)` (up to 4 slots, deferred release on eviction) and blits the common `(0, 0, min(sw, dw), min(sh, dh))` corner unscaled into the destination.
+- **Found on:** [Digimon Story Time Stranger](../../dm/games/010062E01FE0C000/README.md) ([issue #872](https://github.com/seedds/nxnative/issues/872)): handheld mode (`DM_OPMODE=0`) resolves `1920x1080` 4x `RG11B10Float` into `1280x720` 1x every frame.
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_tiled_resolve` (97 checks under `MTL_DEBUG_LAYER=1` for both `DM_NVN_ENC_THREAD=0` and `1`, including `16x12` 4x → `8x6` 1x and `8x6` 4x → `16x12` 1x unscaled corner checks).
+
 ### Depth-stencil copies carry the stencil
 
 - **Symptom:** no ambient occlusion (Mac); on a device the result depends on whatever that memory holds.

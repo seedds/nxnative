@@ -1055,7 +1055,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderGetLodBias`, `nvnSamplerBuilderGetCompare`, `nvnSamplerBuilderGetBorderColor`, `nvnSamplerBuilderGetMaxAnisotropy` or `nvnSamplerBuilderGetReductionFilter` during renderer setup.
 - **Cause:** the setters stored these values, but the builder getters still reached the generic unimplemented handler. Output parameters were left untouched, and scalar results did not follow the getters' float or enum return signatures.
 - **Fix:** the five getters read the builder's current sampler parameters through their typed NVN entry points, including the values restored by `SetDefaults`.
-- **Found on:** [Digimon Story Time Stranger, issue #872](https://github.com/seedds/nxnative/issues/872), whose reporter identified these calls before an early crash. No repository profile exists yet. Archive extraction, rendering and the reported iPhone freeze are separate unresolved parts of that report; these getters alone do not establish that the game runs.
+- **Found on:** [Digimon Story Time Stranger](../../dm/games/010062E01FE0C000/README.md) (reported in [#872](https://github.com/seedds/nxnative/issues/872) for v1.2.1).
 
 ### Integer sampler border colours
 

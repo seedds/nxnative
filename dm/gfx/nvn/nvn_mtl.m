@@ -17732,31 +17732,58 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
     if (!d || !tex_level_ok(d, dl, "texture copy destination")) return nil;
     { tex_t pair; bcp_before(c->dst, d, &pair); }   // a side of a compressed-alias pair: filled first, the copied region goes into its other side after (copy_t2t)
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
-        if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && s.width == d.width && s.height == d.height) {
-            enc_b_copy_texture(blit(), s, sz0, sl, MTLOriginMake(0, 0, 0), MTLSizeMake(s.width, s.height, 1), d, dz0, dl, MTLOriginMake(0, 0, 0));
+        NSUInteger sw = MAX(s.width >> sl, 1ul), sh = MAX(s.height >> sl, 1ul), dw = MAX(d.width >> dl, 1ul), dh = MAX(d.height >> dl, 1ul);
+        if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && sw == dw && sh == dh) {
+            enc_b_copy_texture(blit(), s, sz0, sl, MTLOriginMake(0, 0, 0), MTLSizeMake(sw, sh, 1), d, dz0, dl, MTLOriginMake(0, 0, 0));
             return d;
         }
         // A single-sample source: a filtered scale of the whole level into the destination, converting the format (Bayonetta 2, SDK 3.6: 320x176 → 80x48 RGBA8 every frame, a quarter of
         // its 1280x720 frame and a quarter of that, rounded up to 16; and its 1280x720 BGRA8 frame into an RGBA8 texture of the same size), drawn as a scaling copy with bilinear filtering
         if (s.sampleCount == 1 && d.sampleCount == 1 && c->src->d.target != 2 && c->dst->d.target != 2) {
             if (!(d.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(d.pixelFormat) && !fmt_int_or_ds(d.pixelFormat)) d = tex_upgrade(c->dst, d, MTLTextureUsageRenderTarget, d.pixelFormat);
-            NVNcopyRegion sr = {0, 0, 0, (int)MAX(s.width >> sl, 1u), (int)MAX(s.height >> sl, 1u), 1}, dr = {0, 0, 0, (int)MAX(d.width >> dl, 1u), (int)MAX(d.height >> dl, 1u), 1};
+            NVNcopyRegion sr = {0, 0, 0, (int)sw, (int)sh, 1}, dr = {0, 0, 0, (int)dw, (int)dh, 1};
             if (copy_t2t_draw(s, d, sl, sz0, dl, dz0, &sr, &dr, !fmt_int_or_ds(s.pixelFormat), 0)) return d;
         }
-        if (s.sampleCount <= 1 || d.sampleCount != 1 || s.pixelFormat != d.pixelFormat || s.width != d.width || s.height != d.height) {
+        if (s.sampleCount <= 1 || d.sampleCount != 1 || s.pixelFormat != d.pixelFormat) {
             RED_ONCE(72, "Downsample case not implemented: %lux%lu %lu samples format %lu → %lux%lu %lu samples format %lu", (unsigned long)s.width, (unsigned long)s.height, (unsigned long)s.sampleCount,
                      (unsigned long)s.pixelFormat, (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.sampleCount, (unsigned long)d.pixelFormat);
             return nil;
+        }
+        // Metal requires the resolve target to match the multisample source's dimensions. When a game resolves between different sizes (e.g. handheld mode resolving
+        // a 1920x1080 4x render target into 1280x720: Digimon Story Time Stranger, issue #872), resolve into a cached private staging texture of the source's size
+        // and blit the common (0, 0) corner unscaled into the destination.
+        id<MTLTexture> rdst = d; unsigned rdl = dl, rdz = dz0;
+        if (sw != dw || sh != dh) {
+            static id<MTLTexture> stage[4]; static int stage_n;
+            id<MTLTexture> st = nil;
+            for (int i = 0; i < stage_n; i++)
+                if (stage[i].width == sw && stage[i].height == sh && stage[i].pixelFormat == s.pixelFormat) { st = stage[i]; break; }
+            if (!st) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s.pixelFormat width:sw height:sh mipmapped:NO];
+                td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageRenderTarget;
+                st = [g_dev newTextureWithDescriptor:td];
+                if (!st) { RED_ONCE(72, "Downsample staging texture allocation failed: %lux%lu format %lu", (unsigned long)sw, (unsigned long)sh, (unsigned long)s.pixelFormat); return nil; }
+                res_add(st);
+                if (stage_n < 4) stage[stage_n++] = st;
+                else { defer_obj_release(stage[0]); for (int i = 0; i < 3; i++) stage[i] = stage[i + 1]; stage[3] = st; }
+            }
+            rdst = st; rdl = 0; rdz = 0;
         }
         rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
         MTLPixelFormat pf = s.pixelFormat;
         int depth = pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float_Stencil8;
         MTLRenderPassAttachmentDescriptor *a = depth ? rp.depthAttachment : rp.colorAttachments[0];
-        a.texture = s; a.level = sl; a.slice = sz0; a.resolveTexture = d; a.resolveLevel = dl; a.resolveSlice = dz0;
+        a.texture = s; a.level = sl; a.slice = sz0; a.resolveTexture = rdst; a.resolveLevel = rdl; a.resolveSlice = rdz;
         a.loadAction = MTLLoadActionLoad; a.storeAction = MTLStoreActionStoreAndMultisampleResolve;
         if (depth) rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
         ser_gate(); enc_r_end(enc_r_begin(rp));
+        if (rdst != d) {
+            enc_b_copy_texture(blit(), rdst, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(MIN(sw, dw), MIN(sh, dh), 1), d, dz0, dl, MTLOriginMake(0, 0, 0));
+            static int once; if (!once++) MLOG("multisample downsample with different sizes: %lux%lu %lu samples format %lu → %lux%lu (copied %lux%lu corner)",
+                                               (unsigned long)sw, (unsigned long)sh, (unsigned long)s.sampleCount, (unsigned long)s.pixelFormat,
+                                               (unsigned long)dw, (unsigned long)dh, (unsigned long)MIN(sw, dw), (unsigned long)MIN(sh, dh));
+        }
         return d;
     }
     PD("t src=%llu lv%u sl%u xyz=%d,%d,%d dst=%llu lv%u sl%u xyz=%d,%d,%d size=%d,%d,%d", c->src->serial, sl, sz0, c->sr.xoffset, c->sr.yoffset, c->sr.zoffset,

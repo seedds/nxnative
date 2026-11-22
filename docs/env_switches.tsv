@@ -163,7 +163,7 @@ DM_NVN_CPUPROF	diagnostic	1 records CPU wall/time/instruction totals by renderer
 DM_NVN_CSH_PRESCAN	diagnostic	`0` runs the compute-hoist scan at every pass's first draw even when no dispatch follows (as before; for timing)
 DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass end it (on by default: the dispatch runs ahead of the pass when that changes nothing the draws before it read)
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
-DM_NVN_CUT_BUSY	switch	`=0`: a segment boundary commits whatever the GPU is doing (the default commits only when earlier work has reported back, keeping the boundary's GPU timestamp otherwise)
+DM_NVN_CUT_BUSY	switch	`=0` / `=1` / `=<N>`: `0`, a segment boundary commits whatever the GPU is doing; `1` (the default), commits only when earlier work on the queue has finished (read from the queue's shared event `g_rx_ev`, or held on the encode thread with `DM_NVN_ENC_THREAD=1`); `<N>` (`>= 2`), commits while fewer than `N` commits are in flight on the queue
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
 DM_NVN_DEPTH_BOUNDS	diagnostic	`0` ignores NVN and Vulkan depth bounds on Apple10+ GPUs (`setDepthTestMinBound:maxBound:`); `ab` alternates with `DM_AB` (on by default on Apple10+ GPUs, inactive on older GPUs)
 DM_NVN_DIRECT_UPLOAD	switch	0 disables bounded direct RGBA16F array uploads and keeps staged copies; on by default for supported non-sparse textures.

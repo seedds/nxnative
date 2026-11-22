@@ -25,13 +25,14 @@ class NroHeader(unittest.TestCase):
     def check_rewrite(self, first_fde, header_word):
         # A real function starts immediately after the NRO header. Both it and the build ID name x18.
         raw = image({first_fde: [0xaa0003f2, RET]})
+        raw.extend(bytes(0x1000))   # data on its own 16 KB page (0x4000), so patch_nso.py does not relayout the header offsets
         struct.pack_into('<II', raw, 0x80, 0xaa0003f2, RET)   # mov x18, x0; ret, with or without an FDE
         raw[0x1100:0x111c] = raw[0x20:0x3c]
         struct.pack_into('<I', raw, 4, 0x1100)
         struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
         raw[0x10:0x14] = b'NRO0'
         struct.pack_into('<I', raw, 0x18, len(raw))
-        struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000)
+        struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x3000, 0x4000, 0x1000)
         struct.pack_into('<I', raw, 0x38, 0)
         struct.pack_into('<I', raw, 0x44, header_word)
         with tempfile.TemporaryDirectory() as tmp:

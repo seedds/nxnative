@@ -71,6 +71,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); after the fix its startup heap is 3.08 GB.
 - **Check:** the memory SVC tests compare used-memory queries with an ordinary large-bss module and a larger NRO present together.
 
+### Module data on the code's 16 KB page
+
+- **Symptom:** `CRASH sig=10 addr=nro<N>+0x… pc=relocate+…` with `lr=nro_load+…` under `h_ro_LoadModule` (or in `relocate` at startup for an NSO), at the first load of a module whose data starts below `text_end` rounded up to 16 KB; `x9` points at a RELA entry of type `0x403` (`R_AARCH64_RELATIVE`).
+- **Cause:** Horizon maps modules at 4 KB, the hosts at 16 KB. `map_image` (`loader.c`) seals `[0, text_end rounded up to 16 KB)` read + execute, and `gen_embed.py` puts the same range in the iOS executable's `__TEXT`, so any NSO or NRO whose data starts below that boundary has read-only data, and the first relocation into it faults. FINAL FANTASY VIII Remastered's Math.nro is text, ro and data of 4 KB each (data at `0x2000`); its Platform.nro has data at `0x3000`.
+- **Fix:** `dm/tools/mod_layout.py`, run by `patch_nso.py` on every NSO and NRO right after `nso.load()`, moves ro and data (and bss) up by whole 4 KB pages until data starts on a 16 KB page of its own, keeping `TEXT_END` at the true end of code and leaving on-disk `.nro` files and `nro.tsv` untouched. It rewrites the NRO header (when `NRO0`), `MOD0`, the dynamic tags, symbol values (excluding `STT_TLS`), RELA / JMPREL / RELR, the text's `adrp` / `adr` / literal loads into the moved part (skipping the `MOD0` offset at `+4` and in-text literal pools), and `.eh_frame_hdr` / `.eh_frame` (including LSDA `lpstart`). `read_layout` in `loader.c` stops with a message naming the module, not a SIGBUS, on a module rewritten before the fix.
+- **Found on:** FINAL FANTASY VIII Remastered (`01008B900DC0A000`; Math.nro and Platform.nro of its 14 NROs).
+- **Check:** `dm/tools/tests/test_mod_layout.py` covers synthetic NRO and NSO images, `patch_nso.py` end-to-end, `MOD0` in text, `DT_RELR`, inline literal pools, `STT_TLS`, and `.eh_frame` / LSDA edge cases.
+
 ### Thread stacks backed by active NRO data
 
 - **Symptom:** repeated `[RED] MapMemory refused (0xd401)` for a stack source inside a loaded NRO's writable data, then an abort in `MapAliasStack` / `CreateThread`.

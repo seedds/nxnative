@@ -7,6 +7,12 @@ static int test_fps_max = 120;
 #define DM_GAME_FPS_MAX test_fps_max
 static int test_high = 120;   // what the frame step's hold allows (hle_nvn.c)
 int nvn_fps_high_now(void) { return test_high; }
+static int orig_movie_pacing(void) { return DM_GAME_MOVIE_PACING; }
+static int test_movie_pacing = -1;
+#undef DM_GAME_MOVIE_PACING
+#define DM_GAME_MOVIE_PACING (test_movie_pacing >= 0 ? test_movie_pacing : orig_movie_pacing())
+static int test_movie_hz;     // active movie picture rate (hle_movie.c)
+int dm_movie_hz(void) { return test_movie_hz; }
 #include "../hle_fpslock.c"
 #include <assert.h>
 #include <math.h>
@@ -54,19 +60,26 @@ static void check(int which) {
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
     setenv("DM_FPS_TARGET", which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
-    if (which >= 30) setenv("DM_FPS_TARGET", which == 31 || which == 34 ? "30" : which == 32 ? "0" : "60", 1);
-    if (which == 20) test_fps_max = 60;
+    if (which >= 30 && which <= 37) setenv("DM_FPS_TARGET", which == 31 || which == 34 ? "30" : which == 32 ? "0" : "60", 1);
+    if (which >= 38) setenv("DM_FPS_TARGET", which == 39 ? "60" : "120", 1);
+    if (which == 20 || which == 40) test_fps_max = 60;
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
-    float *f = NULL; int32_t *sync = NULL;
+    float *f = NULL, *sim = NULL; int32_t *sync = NULL;
     if (which <= 5 && which != 3) g_mod[0].unity_target_fps = 0x4afc868;   // 0 to 5: Unity's targetFrameRate where the rewriter found it (Pokémon Brilliant Diamond 1.3.0); 3: nothing found
-    if (which >= 30) {   // any build with the engine-derived interval: its adjacent previous value belongs to the engine
+    if (which >= 30 && which <= 37) {   // any build with the engine-derived interval: its adjacent previous value belongs to the engine
         g_mod[0].monolith_interval = 0x6000;
         sync = (int32_t *)(base + 0x6000);
         sync[0] = which == 31 ? 1 : which == 33 || which == 34 ? 0 : which == 35 ? -1 : which == 36 ? 5 : 2;
         sync[1] = 17;
         if (which == 37) g_mod[0].native_fps_blocked = 1;
+    } else if (which >= 38) {   // Resident Evil 0: MT Framework render limit at [main+0x1baac60]+0x4c only; +0x48 simulation scale stays untouched
+        test_movie_pacing = 1;
+        strcpy(g_mod[0].build_id, "fb4239aa962b429b3d1776af92d93e79");
+        *(uintptr_t *)(base + 0x1baac60) = (uintptr_t)object;
+        sim = (float *)(object + 0x48); *sim = 30.0f;
+        f = (float *)(object + 0x4c); *f = 30.0f;
     } else if (which == 6) {
         strcpy(g_mod[0].build_id, "c9a3dd7702075ecd90101f4555389582");
         *(uintptr_t *)(base + 0x1295b3f0) = (uintptr_t)object;
@@ -134,7 +147,7 @@ static void check(int which) {
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
     assert(dm_fps_lock_engine() == engine);
-    if (which >= 30) {
+    if (which >= 30 && which <= 37) {
         assert(sync[1] == 17);   // no fabricated previous-frame state
         if (which == 30 || which == 33) {
             assert(sync[0] == 1 && writes == 1);
@@ -148,6 +161,24 @@ static void check(int which) {
             assert(sync[0] == -1 && writes == 0);   // not initialized yet
             sync[0] = 2; dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 1);
         } else assert(sync[0] == 5 && writes == 0);   // an unexpected value is left alone
+        munmap(base, len); return;
+    }
+    if (which >= 38) {
+        assert(*sim == 30.0f);
+        if (which == 38) {   // 120 target: tracks 120 outside movies, clamps to 30/60 Hz during movies
+            assert(*f == 120.0f);
+            test_movie_hz = 30; test_high = 30; dm_fps_lock_tick(); assert(*f == 30.0f && *sim == 30.0f);
+            test_movie_hz = 60; test_high = 60; dm_fps_lock_tick(); assert(*f == 60.0f);
+            test_movie_hz = 0; test_high = 120; dm_fps_lock_tick(); assert(*f == 120.0f && *sim == 30.0f);
+        } else if (which == 39) {   // 60 target: follows nvn_fps_high_now() during movies (including thermal 30 cap on 60 Hz movies) and restores 60 afterwards
+            assert(*f == 60.0f);
+            test_movie_hz = 30; test_high = 30; dm_fps_lock_tick(); assert(*f == 30.0f && *sim == 30.0f);
+            test_movie_hz = 60; test_high = 30; dm_fps_lock_tick(); assert(*f == 30.0f && *sim == 30.0f);
+            test_movie_hz = 60; test_high = 60; dm_fps_lock_tick(); assert(*f == 60.0f && *sim == 30.0f);
+            test_movie_hz = 0; dm_fps_lock_tick(); assert(*f == 60.0f && *sim == 30.0f);
+        } else {   // DM_GAME_FPS_MAX=60 caps 120 target to 60
+            assert(*f == 60.0f && *sim == 30.0f);
+        }
         munmap(base, len); return;
     }
     if (which == 19) {   // 120: the target follows the hold, so the game's step stays what the screen shows; the game setting its own 30 again changes nothing
@@ -232,7 +263,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 38; i++) {
+    for (int i = 0; i < 41; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

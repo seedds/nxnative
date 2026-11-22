@@ -19696,7 +19696,12 @@ static CAFrameRateRange link_range(int mode) {
         return CAFrameRateRangeMake(rate, hz, hz);
     }
     g_link_vperiod = 0;
+#if TARGET_OS_IPHONE
+    // A 60-120 range lets Core Animation settle on 60 even when the game explicitly requested 120 fps.
+    return mode == 3 ? CAFrameRateRangeMake(30, 30, 30) : mode == 2 ? CAFrameRateRangeMake(80, 120, 120) : CAFrameRateRangeMake(60, 60, 60);
+#else
     return mode == 3 ? CAFrameRateRangeMake(30, 30, 30) : mode == 2 ? CAFrameRateRangeMake(60, 120, 120) : CAFrameRateRangeMake(60, 60, 60);
+#endif
 }
 // The display link's frame latency: 2 in variable-refresh fullscreen, 1 otherwise (DM_PRESENT_LATENCY overrides both). In a window the system calls back about 50 ms before the target display
 // time; in fullscreen it shows the layer directly and, at latency 1, calls back only one 60 Hz period (16 ms) ahead. There, on ProMotion screens (M4 Pro, M5 Max), it shows some

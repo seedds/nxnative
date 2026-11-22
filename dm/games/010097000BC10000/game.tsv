@@ -1,0 +1,44 @@
+# Resident Evil 0, Switch 1.0.0 profile: MT Framework render limiter and shared movie pacing.
+
+# ---- Identity ----
+title_id	010097000BC10000
+program_id	010097000BC10000
+
+# ---- App ----
+name	Resident Evil 0
+ipa	ResidentEvil0.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=fb4239aa962b429b3d1776af92d93e79	subsdk0=41097c438a36afd2e879fa6f5e0f0850	sdk=26ffb122262ca25e4c016c0af2f92a29
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	nativeNXx64/movie/mt00.mp4
+zip_store	.arc:.mfx:.mp4:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool - 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/nativeNXx64/=nativenxx64
+shader_note	Resident Evil 0 shaders
+
+# ---- Frame rate ----
+# Native MT Framework limiter is raised through sMain::mpInstance + 0x4c only,
+# while +0x48 remains the original simulation-time scale. Default to adaptive 120 mode:
+# 120 Hz displays can reach 120 fps, while 60 Hz displays and movies step at 30/60 Hz.
+present_interval	display
+fps_target	120
+fps_max	120
+movie_pacing	on
+screen_match	off

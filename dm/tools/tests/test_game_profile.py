@@ -121,3 +121,30 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class FrameRateAndPacingKeys(unittest.TestCase):
+    def test_fps_target_120_and_pacing_keys(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            profile = Path(d, ID) / 'game.tsv'
+            profile.write_text(TSV + 'fps_target\t120\nfps_max\t120\nmovie_pacing\ton\nscreen_match\toff\n')
+            output = Path(d, ID) / 'game.h'
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = output.read_text()
+            self.assertIn('#define DM_GAME_FPS_TARGET 120', text)
+            self.assertIn('#define DM_GAME_FPS_MAX 120', text)
+            self.assertIn('#define DM_GAME_MOVIE_PACING 1', text)
+            self.assertIn('#define DM_GAME_SCREEN_MATCH 0', text)
+            profile.write_text(TSV + 'fps_target\t120\n')
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('fps_target 120 needs fps_max 120', r.stderr)
+            profile.write_text(TSV + 'fps_target\t90\n')
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('fps_target must be 0, 30, 60 or 120', r.stderr)

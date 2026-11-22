@@ -1,5 +1,22 @@
 // NVN null device unit tests: look up addresses from nvnBootstrapLoader the way the game does and go all the way to present; all expected values are hand-calculated, without calling the implementation under test.
 // For build and run see dm/gfx/tests/Makefile (make -C dm/gfx/tests).
+#include "../../host/hle.h"
+static int orig_fps_max(void) { return DM_GAME_FPS_MAX; }
+static int orig_fps_target(void) { return DM_GAME_FPS_TARGET; }
+static int orig_present_display(void) { return DM_GAME_PRESENT_DISPLAY; }
+static int orig_movie_pacing(void) { return DM_GAME_MOVIE_PACING; }
+static int test_fps_max = -1, test_fps_target = -1, test_present_display = -1, test_movie_pacing = -1;
+#undef DM_GAME_FPS_MAX
+#define DM_GAME_FPS_MAX (test_fps_max >= 0 ? test_fps_max : orig_fps_max())
+#undef DM_GAME_FPS_TARGET
+#define DM_GAME_FPS_TARGET (test_fps_target >= 0 ? test_fps_target : orig_fps_target())
+#undef DM_GAME_PRESENT_DISPLAY
+#define DM_GAME_PRESENT_DISPLAY (test_present_display >= 0 ? test_present_display : orig_present_display())
+#undef DM_GAME_MOVIE_PACING
+#define DM_GAME_MOVIE_PACING (test_movie_pacing >= 0 ? test_movie_pacing : orig_movie_pacing())
+static int test_movie_hz;
+static int test_dm_movie_hz(void) { return test_movie_hz; }
+#define dm_movie_hz test_dm_movie_hz
 #include "../nvn/hle_nvn.c"
 #include "../tex/nvn_deswizzle.h"
 #include <time.h>
@@ -1844,6 +1861,43 @@ int main(void) {
         EXPECT("1,048,576 R32 elements: 64 rows", 1, nvn_tbuf_rows(1048576, 4, 64, &w, &h, &row) && w == 16384 && h == 64 && row == 65536);
         EXPECT("no elements: no rows", 0, nvn_tbuf_rows(0, 4, 64, &w, &h, &row));
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
+    }
+
+    // 9. MT Framework (RE0) movie-clock synchronization across 120, 60, and capped-120->60 targets
+    for (int mode = 0; mode < 3; mode++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            win_t w = {.interval = 1};
+            dm_fps_state = NULL; g_engine_stub = 1;
+            g_fps_high = -1; g_present_cap = -1;
+            test_fps_max = mode == 2 ? 60 : 120; test_fps_target = mode == 0 ? 120 : 60; test_present_display = 1; test_movie_pacing = 1;
+            setenv("DM_FPS_TARGET", mode == 1 ? "60" : "120", 1);
+            nvn_present_config(mode == 0 ? 120 : 60, 1);
+            test_movie_hz = 0; atomic_store(&g_fs_k, 1);
+            if (mode == 0) {
+                high_cap_tick();
+                if (fps_high() != 1 || atomic_load(&g_high_cap) != 120 || nvn_fps_high_now() != 120 || present_itv(&w) != 1) _exit(1);
+                test_movie_hz = 30; high_cap_tick();
+                if (atomic_load(&g_high_cap) != 30 || nvn_fps_high_now() != 30 || present_itv(&w) != 4) _exit(2);
+                fstep_tick(&w, 30);
+                if (atomic_load(&g_fs_k) != 4 || nvn_game_fps() != 30) _exit(9);
+                test_movie_hz = 24; high_cap_tick();
+                if (atomic_load(&g_high_cap) != 30 || nvn_fps_high_now() != 30 || present_itv(&w) != 4) _exit(7);
+                test_movie_hz = 60; high_cap_tick();
+                if (atomic_load(&g_high_cap) != 60 || nvn_fps_high_now() != 60 || present_itv(&w) != 2) _exit(3);
+            } else {
+                if (fps_high() != 0 || present_itv(&w) != 1) _exit(4);
+                test_movie_hz = 30;
+                if (present_itv(&w) != 2) _exit(5);
+                test_movie_hz = 24;
+                if (present_itv(&w) != 2) _exit(8);
+                test_movie_hz = 60;
+                if (present_itv(&w) != 1) _exit(6);
+            }
+            _exit(0);
+        }
+        int st = 0; waitpid(pid, &st, 0);
+        EXPECT(mode == 0 ? "RE0 movie clock sync under 120 fps target" : mode == 1 ? "RE0 movie clock sync under 60 fps target" : "RE0 movie clock sync when 120 target falls back to 60", 1, WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
     printf("== %d checks, %d failed ==\n", g_n, g_fail);

@@ -195,7 +195,13 @@ def guess(F, hooks=None):
     giant = sum(m['bss'] for n, m in mods.items() if n in keep and m['far'])
     heap_api = HEAP_API in imp
     pool = OUNCE_POOL if F.get('ounce') else APP_POOL
-    if F['sysres']:   # virtual address memory: Engage's 5 GB block. With a heap, the heap check moves the alias / heap split once it sees the heap the game asks for (Wonder, Tears of the Kingdom);
+    if F['sysres'] and not heap_api and F.get('ounce'):
+        # a Switch 2 game with virtual address memory and no heap: its startup reserves address regions larger than a Switch 1's alias region. Xenoblade Chronicles 2's
+        # Switch 2 Edition reserves two of 60 GB (the second one, from main+0xb7a540, found no room in 64 GB and the arena after it was null: sdk+0x798ce8 from
+        # main+0xb7a650), Definitive Edition's one; both profiles give 128 GB, which a Switch 2 provides
+        mem = (0x2028000000, 0x2000000000, pool, 'the NPDM declares virtual address memory, main never sets a heap, and the sdk is built for the Switch 2: a 128 GB alias region for '
+               'the address regions such a game reserves at start (Xenoblade Chronicles 2 and Definitive Edition, Switch 2 Editions: 60 GB each)')
+    elif F['sysres']:   # virtual address memory: Engage's 5 GB block. With a heap, the heap check moves the alias / heap split once it sees the heap the game asks for (Wonder, Tears of the Kingdom);
         # without one the game maps everything in the alias region itself (Hollow Knight: Silksong's Unity 6 through AllocateAddressRegion / AllocateMemoryPages, 1.5 GB in its first room;
         # Absolum's and Pokémon Legends: Z-A's StandardAllocator), which a 256 MB alias region cannot hold
         mem = (0x140000000, 0x118000000, pool, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) and main ' +
@@ -207,6 +213,10 @@ def guess(F, hooks=None):
                ('main sets a heap of at most the pool − 64 MB' + (f' − {giant // MiB} MB of bss (counted as used memory)' if giant else '') + f': a {heap // MiB} MB heap region')
                if heap_api else 'main never sets a heap (its memory is its own bss): a 256 MB heap region')
     G['mem_reserve'] = (f'{mem[0]:#x}', mem[3]); G['mem_alias'] = (f'{mem[1]:#x}', ''); G['mem_stack'] = ('0x10000000', ''); G['app_pool'] = (f'{mem[2]:#X}'.replace('0X', '0x'), 'the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool' if F.get('ounce') else '')
+    if F.get('ounce') and F['sysres']:   # Horizon's physical-pool limit, which the Switch 2 enforces at the pool the guess gives (app_pool): engines that map until a map fails need it; only maps of virtual address memory meet it
+        G['mem_map_limit'] = ('on', 'the sdk is built for the Switch 2: a map past the application pool fails as on the console. Xenoblade Chronicles 2 and Definitive Edition probe '
+                              'their memory by mapping until a map fails (without it the probe mapped 60 GB and the next arena was null); Ocarina of Time\'s allocator keeps freed '
+                              'pages until a map fails (a black screen leaving the Deku Tree without it)')
     G['sys_resource'] = (f'{F["sysres"]:#x}', f'the NPDM declares {F["sysres"] // MiB} MB of system resource' + ('' if F['sysres'] else
                          ': IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)'))
 
@@ -596,9 +606,9 @@ def check(root):
         if nros and (add := nro_modules(ex[0], nros, G['modules'][0].split(), hooks)):
             G['modules'] = (' '.join(sorted({*G['modules'][0].split(), *add}, key=load_order)), '')
         diff, unknown, later = [], [], []
-        for k in list(DEFAULTS) + ['modules', 'mem_reserve', 'mem_alias', 'mem_stack', 'app_pool']:
+        for k in list(DEFAULTS) + ['modules', 'mem_reserve', 'mem_alias', 'mem_stack', 'app_pool', 'mem_map_limit']:
             want, got = g.get(k, DEFAULTS.get(k, '')), G.get(k, (DEFAULTS.get(k, ''),))[0]
-            if k.startswith('mem_') or k == 'app_pool': want, got = int(want, 0), int(got, 0)
+            if (k.startswith('mem_') and k != 'mem_map_limit') or k == 'app_pool': want, got = int(want, 0), int(got, 0)
             if want == got: continue
             if k in ('mem_alias', 'app_pool') and F['sysres']: later.append((k, got, want))
             elif k in NO_SIGNAL and k not in G: unknown.append((k, got, want))

@@ -229,6 +229,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [SUPER ROBOT WARS Y](010063301BD50000/README.md) | `010063301BD50000` | 1.4.1 | 18.3.5 | Unity 2022.3.44f1 IL2CPP, CRIWARE | NVN |
 | [Super Smash Bros. Ultimate](01006A800016E000/README.md) | `01006A800016E000` | 13.0.5 | 8.2.1 | Bandai Namco / Sora's engine | NVN |
 | [Taiko Risshiden V DX](0100346017304000/README.md) | `0100346017304000` | 1.1.1 | 12.3.3 | Koei Tecmo's KTGL | NVN |
+| [Tales of Eternia Remastered](010006E0230AC000/README.md) | `010006E0230AC000` | 2.1.0 | 21.4.4 | Unity 6000.0.66f2 IL2CPP, CRIWARE | NVN |
 | [Team Sonic Racing](010092B0091D0000/README.md) | `010092B0091D0000` | 1.0.3 | 5.6.0 | Sumo Digital's engine, Wwise | NVN |
 | [The Great Ace Attorney Chronicles](010036E00FB20000/README.md) | `010036E00FB20000` | 1.0.0 (base) | 10.4.1 | Capcom's MT Framework | NVN |
 | [The Legend of Zelda: Breath of the Wild](01007EF00011E000/README.md) | `01007EF00011E000` | 1.9.0 | 20.5.22 | Nintendo EPD (sead / agl / gsys / ksys, Havok) | NVN |

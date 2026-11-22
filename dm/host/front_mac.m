@@ -1,6 +1,6 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: run the guest on the current thread with the default application task role (front_role.h).
-// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
+// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way, DM_FULLSCREEN=2 the same but around the notch on a MacBook (panel_enter). ⌘Q quits, and so does a controller's Home button held for 2 s and
 // confirmed with A (home_quit.h); the left mouse button is the touchscreen.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
@@ -33,6 +33,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "notch_follow.h"
 #include "user_select_mac.h"
 #include <signal.h>
 #include <math.h>
@@ -76,6 +77,7 @@ int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency:
 // rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
 // 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
 // the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
+static int win_full(void);   // native full screen or the panel around the notch (DM_FULLSCREEN=2)
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
@@ -93,9 +95,9 @@ static void screen_match_restore(int on_it) {   // main thread: the screen this 
     if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
     CGDisplayModeRelease(g_match_orig); g_match_orig = NULL;
 }
-static void screen_match_apply(void) {   // main thread: on a new frame rate, on entering and leaving fullscreen and on a move to another screen
+static void screen_match_apply(void) {   // main thread: on a new frame rate, on entering and leaving fullscreen (or the panel around the notch) and on a move to another screen
     static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
-    NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    NSScreen *scr = g_win.screen; int want = g_match_want, full = win_full();
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
     if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id);
     if (off || !full || want <= 0 || !scr) return;
@@ -718,9 +720,184 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 
 // AppKit reports a refused fullscreen request only to the window delegate (there is no notification for it)
 static void (^g_fs_failed)(void);
+static void notch_follow_refused(int entering);   // the screen follow's own refusal handling (notch_follow below)
 @interface DmWinDelegate : NSObject <NSWindowDelegate> @end
 @implementation DmWinDelegate
-- (void)windowDidFailToEnterFullScreen:(NSWindow *)w { (void)w; if (g_fs_failed) g_fs_failed(); }
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)w { (void)w; if (g_fs_failed) g_fs_failed(); notch_follow_refused(1); }
+- (void)windowDidFailToExitFullScreen:(NSWindow *)w { (void)w; notch_follow_refused(0); }
+@end
+
+// Fullscreen around the notch (DM_FULLSCREEN=2): native full screen keeps a notched MacBook's picture below the menu bar (3024x1898), so on a screen with a camera housing the game
+// window becomes a borderless panel over the screen's whole frame instead (3024x1964; the present fits the game's 16:9 into it, with bars at the sides): the custom full screen Apple documents with NSScreen.safeAreaInsets and
+// auxiliaryTop*Area, built as SDL3 and GLFW build theirs. Level NSMainMenuWindowLevel+1, the Dock and menu bar hidden (HideDock|HideMenuBar, 0xa: no menu bar on hover either),
+// constrainFrameRect:toScreen: returning the frame as asked so AppKit does not push the window below the menu bar, and NSPrefersDisplaySafeAreaCompatibilityMode=false in the app's
+// Info.plist (pack_app.py) so macOS does not letterbox the whole screen instead. A prototype of exactly this held 3024x1964 at 113-120 fps as the key window on an M5 MacBook Pro
+// (macOS 27). The panel has no Space of its own (it stays on the current desktop), and the camera housing hides the picture's top centre. A screen without a notch gets native full
+// screen, exactly as DM_FULLSCREEN=1. The window's toggleFullScreen: picks one or the other, so ⌃⌘F, the green button, fn+F, startup and the GPU-lost path all go through it.
+// While another app is active the panel drops to the window's own level (its presentation options lapse anyway), so it never covers that app. Main thread
+static int g_fs_notch;   // DM_FULLSCREEN=2
+static int g_panel;      // the window is the panel
+static NSRect g_panel_frame; static NSWindowStyleMask g_panel_style; static NSWindowCollectionBehavior g_panel_behavior; static NSWindowLevel g_panel_level;   // the window as it was
+static const NSApplicationPresentationOptions PANEL_OPTIONS = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;   // HideMenuBar is only valid with HideDock
+static const NSWindowLevel PANEL_LEVEL = NSMainMenuWindowLevel + 1;
+static int win_full(void) { return g_panel || (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0; }   // native full screen or the panel
+static int screen_notched(NSScreen *s) { return s && s.safeAreaInsets.top > 0; }
+static void cheats_follow_game(void);
+// A modal box (the software keyboard, the user choice, a Cheats question) sits at the modal-panel level, below the panel's: the panel takes the window's own level while one is up
+static void panel_modal(int on) { if (g_panel) g_win.level = on || !NSApp.isActive ? g_panel_level : PANEL_LEVEL; }
+static void panel_enter(const char *why) {   // why: NULL for the player's or startup's request, else the reason in the [notch] line
+    NSWindow *w = g_win; NSScreen *s = w.screen ?: NSScreen.mainScreen;
+    g_panel_frame = w.frame; g_panel_style = w.styleMask; g_panel_behavior = w.collectionBehavior; g_panel_level = w.level;
+    g_panel = 1;
+    w.collectionBehavior = (g_panel_behavior & ~NSWindowCollectionBehaviorFullScreenPrimary) | NSWindowCollectionBehaviorFullScreenNone;   // nothing stacks native full screen on it
+    w.styleMask = NSWindowStyleMaskBorderless; w.hasShadow = NO; w.level = PANEL_LEVEL;
+    [w setFrame:s.frame display:YES animate:NO];
+    NSApp.presentationOptions = PANEL_OPTIONS;   // after the frame: the screen-parameters notification it posts at once (notch-proto's log) then finds the panel fitted (panel_refit)
+    [w makeKeyAndOrderFront:nil];
+    screen_refresh(s); g_fullscreen = 1; g_layer.contentsScale = w.backingScaleFactor; screen_match_apply();
+    [(DmGameView *)w.contentView fitDrawable];   // the drawable at the panel's size now, for the line below
+    cheats_follow_game();
+    LOG("[notch] fullscreen around the notch%s%s%s: drawable %.0fx%.0f on '%s' (top inset %.0f pt), level %ld, presentation options 0x%lx (DM_FULLSCREEN=2)", why ? " (" : "",
+        why ?: "", why ? ")" : "", g_layer.drawableSize.width, g_layer.drawableSize.height, s.localizedName.UTF8String, s.safeAreaInsets.top, (long)w.level,
+        (unsigned long)NSApp.presentationOptions);
+}
+static void panel_leave(const char *why, const char *next) {   // next: what the window becomes ("a window", or native full screen asked for next)
+    NSWindow *w = g_win;
+    g_panel = 0;
+    NSApp.presentationOptions = NSApplicationPresentationDefault;
+    w.styleMask = g_panel_style; w.hasShadow = YES; w.collectionBehavior = g_panel_behavior; w.level = g_panel_level;
+    [w setFrame:g_panel_frame display:YES animate:NO];
+    if (!w.screen) [w center];   // the screen it was on is gone
+    g_fullscreen = 0; screen_refresh(w.screen); g_layer.contentsScale = w.backingScaleFactor; screen_match_apply();
+    cheats_follow_game();
+    LOG("[notch] left fullscreen around the notch (%s): %s, drawable %.0fx%.0f", why, next, g_layer.drawableSize.width, g_layer.drawableSize.height);
+}
+// A screen change (a resolution, a display docked or gone, the panel's own presentation options and screen match): fit the screen again. Its screen gone (the lid closed on a
+// dock: constrainFrameRect: leaves the panel where it was, off every screen) → the main screen's frame. On a screen without a notch the panel covers it until notch_follow
+// (debounced) turns it into native full screen there. Only with no screen at all does it leave for a window
+static void panel_refit(void) {
+    if (!g_panel) return;
+    NSScreen *s = g_win.screen ?: NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    if (!s) { panel_leave("no screen", "a window"); return; }
+    if (NSEqualRects(g_win.frame, s.frame)) return;
+    [g_win setFrame:s.frame display:YES animate:NO];
+    LOG("[notch] refit to '%s': drawable %.0fx%.0f", s.localizedName.UTF8String, g_layer.drawableSize.width, g_layer.drawableSize.height);
+}
+static void panel_active(int on) {   // this app became active (on) or another app did: the panel's level and presentation options only while this app is in front
+    if (!g_panel) return;
+    if (on) { NSApp.presentationOptions = PANEL_OPTIONS; g_win.level = PANEL_LEVEL; panel_refit(); }
+    else { g_win.level = g_panel_level; NSApp.presentationOptions = NSApplicationPresentationDefault; }
+    cheats_follow_game();
+}
+// Fullscreen around the notch follows the screen (notch_follow.h). Under DM_FULLSCREEN=2 every screen event (DidChangeScreen, DidChangeScreenParameters, full screen entered and
+// left) re-arms a NF_SETTLE timer; once the burst has settled a full screen window takes the full screen its screen calls for. Native full screen on a screen with a notch (startup
+// chose it on a Studio Display, then the MacBook was undocked) leaves it and enters the panel on DidExit; the panel on a screen without a notch (docked, clamshell) leaves and asks
+// for native full screen. A window stays a window. One [notch] line per switch (panel_enter's or panel_leave's, with the reason). Native full screen transitions are asynchronous:
+// while one is under way (Will* to Did* or a refusal) the follow only waits, a refused request is asked once more, a request with no answer is dropped after 3 s, and nf_guard caps
+// the switches. The screen's capabilities (screen_refresh) follow through panel_enter/panel_leave and the DidEnter/DidExit observers, and the settle re-reads them and refits the drawable for
+// the screen and size as they ended up (the drawable's in-between sizes during an undock, 3024x1964 then 3024x1898, never decide anything). The window delegate (refusals) is set: setting 2 starts in full screen. Main thread
+#define NF_SETTLE 0.4
+static unsigned g_follow_gen;     // the latest screen event's number (the debounce)
+static int g_follow_transition;   // a native full screen transition is under way (WillEnter/WillExit until DidEnter/DidExit or a refusal)
+static int g_follow_to_panel;     // the follow left native full screen for the panel: its DidExit enters it
+static int g_follow_to_native;    // the follow asked for native full screen: a refusal is handled here
+static int g_follow_retried;      // that request was refused once and asked again
+static int g_follow_quiet;        // the follow's own toggleFullScreen: (its switch is logged already)
+static unsigned g_follow_req;     // the follow's latest request, for its timeout
+static nf_guard g_follow_guard;
+static void notch_follow_now(void);
+static void notch_follow_schedule(void) {
+    if (!g_fs_notch) return;
+    unsigned gen = ++g_follow_gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NF_SETTLE * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (gen == g_follow_gen) notch_follow_now(); });
+}
+static void notch_follow_request(int to_panel) {   // a native full screen request of the follow's own: busy until its Did*, a refusal or 3 s (as the GPU-lost path waits)
+    if (to_panel) g_follow_to_panel = 1; else g_follow_to_native = 1;
+    unsigned req = ++g_follow_req;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (req != g_follow_req || !(g_follow_to_panel || g_follow_to_native)) return;
+        LOG("[notch] no answer to the full screen request in 3 s: following the screen again");
+        g_follow_to_panel = g_follow_to_native = 0; g_follow_transition = 0; notch_follow_schedule(); });
+}
+static void notch_follow_native(void) {   // ask for native full screen: the window's toggleFullScreen: passes it to AppKit on a screen without a notch (on one, it enters the panel)
+    if (win_full()) { g_follow_to_native = 0; return; }
+    g_follow_quiet = 1; [g_win toggleFullScreen:nil]; g_follow_quiet = 0;
+    if (g_panel) g_follow_to_native = 0;   // the screen has a notch again: the panel is up at once
+}
+static void notch_follow_now(void) {
+    NSWindow *w = g_win; if (!w) return;
+    NSScreen *s = w.screen;
+    nf_mode mode = g_panel ? NF_PANEL : (w.styleMask & NSWindowStyleMaskFullScreen) ? NF_NATIVE : NF_WINDOW;
+    int busy = g_follow_transition || g_follow_to_panel || g_follow_to_native;
+    nf_action a = nf_decide(g_fs_notch, s ? screen_notched(s) : -1, mode, busy);
+    if (a == NF_WAIT) { if (busy) notch_follow_schedule(); return; }   // no screen: its DidChangeScreen comes when it has one
+    if (a == NF_KEEP) {   // settled: the screen's capabilities and the drawable for the screen and the size as they ended up
+        if (s) screen_refresh(s);
+        [(DmGameView *)w.contentView fitDrawable];
+        return;
+    }
+    double now = CACurrentMediaTime();
+    if (!nf_guard_allow(&g_follow_guard, now)) {
+        static double logged = -1e9;
+        if (now - logged > NF_GUARD_SPAN) { logged = now; LOG("[notch] %d switches within %.0f s: not switching %s on '%s' for now (⌃⌘F still works)", NF_GUARD_N, NF_GUARD_SPAN, nf_action_name(a), s.localizedName.UTF8String); }
+        return;
+    }
+    if (a == NF_NATIVE_TO_PANEL) {   // logged by panel_enter on DidExit (notch_follow_exited)
+        notch_follow_request(1);
+        [w toggleFullScreen:nil];   // not the panel: the window passes it to AppKit, which leaves native full screen
+        return;
+    }
+    char why[200]; snprintf(why, sizeof why, "followed the screen: '%s' has no notch", s.localizedName.UTF8String);
+    panel_leave(why, "native full screen next");
+    if (!w.screen || ![w.screen.deviceDescription[@"NSScreenNumber"] isEqual:s.deviceDescription[@"NSScreenNumber"]]) {   // the frame it had before the panel is on another screen: onto this one first, so native full screen takes this screen
+        NSRect v = s.visibleFrame, f = w.frame;
+        f.size.width = fmin(f.size.width, v.size.width); f.size.height = fmin(f.size.height, v.size.height);
+        f.origin = NSMakePoint(NSMidX(v) - f.size.width / 2, NSMidY(v) - f.size.height / 2);
+        [w setFrame:f display:YES animate:NO];
+    }
+    g_follow_retried = 0; notch_follow_request(0);
+    dispatch_async(dispatch_get_main_queue(), ^{ notch_follow_native(); });   // a turn later: the style and behaviour panel_leave restored settle first
+}
+static void notch_follow_exited(void) {   // DidExit of the follow's own request: the panel, or native full screen again if the screen has lost its notch meanwhile
+    if (win_full()) return;
+    NSScreen *s = g_win.screen;
+    if (screen_notched(s)) { panel_enter("followed the screen: it has a notch, native full screen left"); if (!NSApp.isActive) panel_active(0); return; }
+    LOG("[notch] '%s' has no notch any more: native full screen again", s ? s.localizedName.UTF8String : "(no screen)");
+    g_follow_retried = 0; notch_follow_request(0); notch_follow_native();
+}
+static void notch_follow_refused(int entering) {   // the window delegate: AppKit refused to enter (1) or leave (0) native full screen
+    g_follow_transition = 0;
+    if (entering && g_follow_to_native) {
+        g_follow_to_native = 0;
+        if (g_follow_retried) { LOG("[notch] native full screen was refused again: a window (⌃⌘F to try)"); return; }
+        g_follow_retried = 1;
+        LOG("[notch] native full screen was refused (app active %d, window on the active Space %d): asking once more", NSApp.isActive, g_win.isOnActiveSpace);
+        notch_follow_request(0);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{ notch_follow_native(); });
+    } else if (!entering && g_follow_to_panel) {
+        g_follow_to_panel = 0;
+        LOG("[notch] leaving native full screen was refused: it stays (⌃⌘F leaves it)");
+    }
+}
+// The game window: key and main while borderless; its full screen is the panel on a notched screen under DM_FULLSCREEN=2
+@interface DmGameWindow : NSWindow @end
+@implementation DmGameWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return YES; }
+- (NSRect)constrainFrameRect:(NSRect)r toScreen:(NSScreen *)s { return g_panel ? r : [super constrainFrameRect:r toScreen:s]; }
+- (void)toggleFullScreen:(id)sender {
+    if (g_panel) { panel_leave("toggled", "a window"); return; }
+    if (g_fs_notch && !(self.styleMask & NSWindowStyleMaskFullScreen)) {
+        NSScreen *s = self.screen ?: NSScreen.mainScreen;
+        if (screen_notched(s)) { panel_enter(NULL); return; }
+        if (!g_follow_quiet) LOG("[notch] '%s' has no notch: native full screen, as DM_FULLSCREEN=1", s.localizedName.UTF8String);   // the follow logged its own line
+    }
+    [super toggleFullScreen:sender];
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)it {   // borderless and without FullScreenPrimary, AppKit would disable ⌃⌘F, the way out
+    if (g_panel && it.action == @selector(toggleFullScreen:)) { it.title = @"Exit Full Screen"; return YES; }
+    return [super validateMenuItem:it];
+}
 @end
 
 typedef struct { void (*fn)(void); } guest_arg;
@@ -835,6 +1012,7 @@ static void cheats_open_folder(void) {
 - (void)show;      // create the panel if needed, order it front (not key) and refresh
 - (void)refresh;   // the one refresh for every trigger: shown, a click, Reload, a Cheats-menu toggle, the 1 s timer
 - (BOOL)importFiles:(NSArray<NSURL *> *)urls;   // copy dropped / found cheat files into the cheats folder, reload
+- (void)followGame;   // above the game window while the panel around the notch is up, floating otherwise
 @end
 static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Window, kept for the process's lifetime
 
@@ -1279,7 +1457,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     NSAlert *a = [NSAlert new];
     a.messageText = text; a.informativeText = info ?: @"";
     [a addButtonWithTitle:yes]; [a addButtonWithTitle:@"Cancel"];
-    BOOL r = [a runModal] == NSAlertFirstButtonReturn;
+    panel_modal(1); BOOL r = [a runModal] == NSAlertFirstButtonReturn; panel_modal(0);
     [self giveKeyBack];
     return r;
 }
@@ -1561,6 +1739,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 // key. While the panel is on screen a ~1 s timer refreshes it
 - (void)show {
     if (!_panel) [self makePanel];
+    [self followGame];
     [_panel orderFront:self];
     [self refresh];
     [self startTimer];
@@ -1576,7 +1755,9 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     [_panel orderOut:nil];
     return NO;
 }
+- (void)followGame { if (_panel) _panel.level = g_win && g_win.level > NSFloatingWindowLevel ? g_win.level + 1 : NSFloatingWindowLevel; }
 @end
+static void cheats_follow_game(void) { [g_cheats_panel followGame]; }
 
 void front_run(void (*guest)(void)) {
     // Keep the latency-critical activity token alive for the host process, including windowless play.
@@ -1596,16 +1777,20 @@ void front_run(void (*guest)(void)) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSRect r = NSMakeRect(0, 0, 1280, 720);
-        NSWindow *win = [[NSWindow alloc] initWithContentRect:r
+        NSWindow *win = [[DmGameWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        // Black until the game's first present (which clears the drawable to black around the picture): a layer with no drawable yet shows the window's background,
+        // windowBackgroundColor, white in the light appearance, over the whole screen when startup goes straight to full screen or the panel around the notch
+        win.backgroundColor = NSColor.blackColor;
         NSView *v = win.contentView = [[DmGameView alloc] initWithFrame:r];
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
+        g_layer.backgroundColor = NSColor.blackColor.CGColor;
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
@@ -1644,15 +1829,17 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
-        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
+        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 2: around the notch (DmGameWindow); 0, the settings window's Window, or unset: a window
+        g_fs_notch = fs && !strcmp(fs, "2");
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
             // (whichever happens last), and repeat a refused startup request once. Only a request made here owns a retry; a later player request must never restart startup handling
             static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;
             __block int want = 1, retried = 0, entering = 0;
             void (^enter)(void) = ^{
-                if (!want || (win.styleMask & NSWindowStyleMaskFullScreen) || !NSApp.isActive || !win.isOnActiveSpace) return;
-                want = 0; entering = 1; [win toggleFullScreen:nil]; };
+                if (!want || win_full() || !NSApp.isActive || !win.isOnActiveSpace) return;
+                want = 0; entering = 1; [win toggleFullScreen:nil];
+                if (g_panel) { entering = 0; g_fs_failed = nil; } };   // the panel around the notch is up at once: no refusal to retry
             g_fs_failed = ^{
                 if (!entering) return;
                 entering = 0;
@@ -1690,12 +1877,22 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
+        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; panel_refit(); screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); notch_follow_schedule(); }];
+        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; panel_refit(); screen_refresh(win.screen); notch_follow_schedule(); }];
+        // The panel around the notch stays over other apps only while this one is active (panel_active)
+        [nc addObserverForName:NSApplicationDidResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; panel_active(0); }];
+        [nc addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; panel_active(1); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
+        // The screen follow (notch_follow) waits while a transition is under way, re-checks after each, and on its own DidExit enters the panel
+        [nc addObserverForName:NSWindowWillEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_follow_transition = 1; }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
+            g_follow_transition = 0; g_follow_to_native = 0; notch_follow_schedule(); }];
+        [nc addObserverForName:NSWindowWillExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_follow_transition = 1; }];
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
+            g_follow_transition = 0;
+            if (g_follow_to_panel) { g_follow_to_panel = 0; dispatch_async(dispatch_get_main_queue(), ^{ notch_follow_exited(); }); }   // a turn later, as after any DidExit
+            else notch_follow_schedule(); }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
@@ -1756,7 +1953,7 @@ int front_user_select(const front_user *users, int count, int allow_create, int 
     __block int result = FRONT_USER_CANCEL;
     dispatch_sync(dispatch_get_main_queue(), ^{
         g_text_box = 1; input_release();
-        result = user_select_mac(users, count, allow_create, allow_skip);
+        panel_modal(1); result = user_select_mac(users, count, allow_create, allow_skip); panel_modal(0);
         g_text_box = 0;
         if (g_win.isKeyWindow) input_resume();
     });
@@ -1782,7 +1979,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
             f.stringValue = text ?: (initial ? @(initial) : @"");
             if (guide && *guide) f.placeholderString = @(guide);
             a.accessoryView = f; a.window.initialFirstResponder = f;
-            g_text_box = 1; r = [a runModal] == NSAlertFirstButtonReturn; g_text_box = 0;
+            g_text_box = 1; panel_modal(1); r = [a runModal] == NSAlertFirstButtonReturn; panel_modal(0); g_text_box = 0;
             text = f.stringValue;
             if (!r || (int)text.length >= min_chars) break;
             // On hardware the applet would not have accepted the shorter text (OK stayed disabled); a game that rejects it re-opens the keyboard for ever, so the box comes back with the rule instead
@@ -1819,6 +2016,7 @@ void front_gpu_lost(void) {
             exit(70);
         };
         NSWindow *win = g_win;
+        if (g_panel) { panel_leave("the GPU was lost", "a window"); tell(); return; }   // the panel leaves at once, without an animation
         if (!(win.styleMask & NSWindowStyleMaskFullScreen)) { tell(); return; }
         [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; tell(); }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), tell);

@@ -119,4 +119,22 @@ def screen_shape(ctx):
                            0xBD405E01, 0x1E210800, 'atanf', 0x1E204008, 0x1E20280A, 'adrp', 0xBD405A0C, 0xB9412611, 0x11000631, 0xB9012611, 'back'),
                 'fovy s10, half s8, aspect s12')
 
+    # The 2D layer: drawn with a 16:9 projection over the taller picture, stretched 1.244 tall (the hearts 207x45 at 16:9, 207x56 at 1.43, with the layout sites on or off).
+    # The UI renderer's stored ortho copied into each draw's uniform block (main+0x857c84, Tears of the Kingdom's and Mario Kart World's leaf byte for byte) and the text
+    # composites' flipped ortho before the quad's matrix (main+0x88eeb8, Mario Kart World's code byte for byte): a 16:9 one (|m11| / m00 = 16/9) has row 1 divided by k, the
+    # 2D fitting the width in a 16:9 band across the middle. Tears of the Kingdom's stub; s4..s7, v6, w16 / w17 free at both (checked there, the same code here)
+    UI_BAND = (0x5e040404, 0x5e0c0425, 0x1e2418a6, 0x1e20c0c6, 0x1e2600d1, 0x5289c730, 0x72a7fc50, 0x4b100231, 0x53127e31, 0x35000171, 'adrp',
+               0xb9405a11, 0x34000111, 0xbd405e06, 0x1e2e1007, 0x1e2618e6, 0x4f869021, 0xb9412611, 0x11000631, 0xb9012611, 'orig', 'back')
+    def ui_band(site, orig, why):
+        fs_site(site, struct.pack('<I', orig).hex())
+        start = here()
+        for w in UI_BAND:
+            if w == 'adrp': emit(ADRP(16, here(), FS_STATE_OFF))
+            elif w == 'back': emit(B(here(), site + 4))
+            elif w == 'orig': emit(orig)
+            else: emit(w)
+        fs_put(site, [B(site, start)], why)
+    ui_band(0x857c8c, 0xad000420, 'screen shape: the 2D layer\'s 16:9 ortho matrix copied as a 16:9 band in the middle of the taller picture')
+    ui_band(0x88eeb8, 0xf9401069, 'screen shape: the text composites\' 16:9 ortho (before the quad\'s matrix) as a 16:9 band in the middle')
+
 FRAME_STEP = {'e25c90c1c136638885659fd55bf8a03b': screen_shape}   # v458752 main: the state page for the screen shape (no frame interval stub)

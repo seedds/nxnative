@@ -24,14 +24,14 @@ def entry(off, size, raw, meth, blocks, bsz, short=False):
     return b + struct.pack('<BI', 0, bsz)
 
 
-def pak(path, files, *, short=False, fifth_slot=False):
+def pak(path, files, *, short=False, fifth_slot=False, codec=None):
     """files: [(name, data, compress)] → a version 8 pak whose footer names Zlib as method 1 or 5"""
     body, index = b'', b''
     method = 5 if fifth_slot else 1
     for name, data, comp in files:
         off = len(body)
         if comp:
-            z = zlib.compress(data)
+            z = (codec[1] if codec else zlib.compress)(data)
             head = len(entry(0, 0, 0, method, [(0, 0)], 0, short))
             e = entry(off, len(z), len(data), method, [(head, head + len(z))], 0x10000, short)
             body += e + z
@@ -42,6 +42,7 @@ def pak(path, files, *, short=False, fifth_slot=False):
     index = fstr('../../../') + struct.pack('<i', len(files)) + index
     names = bytes(32 * 4) + b'Zlib'.ljust(28, b'\0') if fifth_slot else b'Zlib'.ljust(32, b'\0') + bytes(32 * (3 if short else 4))
     foot = bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 8, len(body), len(index)) + bytes(20) + names
+    if codec: foot = foot.replace(b'Zlib', codec[0].encode())
     path.write_bytes(body + index + foot)
 
 
@@ -60,6 +61,20 @@ class Version8(unittest.TestCase):
         self.p = Path(self.tmp.name) / 'pakchunk0-Switch.pak'
         self.shader = b'LSLG' + bytes(range(256)) * 8
         pak(self.p, [('AT/Content/M_Test.uexp', self.shader, True), ('Engine/Config/a.ini', b'[x]\n', False)])
+
+    def test_zstd_pak_blocks_do_not_use_the_game_decoder(self):
+        zstd = uepak.zstd_mod()
+        pak(self.p, [('Game/Material.uexp', self.shader, True)], codec=('Zstd', zstd.compress))
+        pk = uepak.Pak(str(self.p))
+        def wrong_decoder(*args): self.fail('Zstd must not go to the game decoder')
+        self.assertEqual(pk.read('Game/Material.uexp', decode=wrong_decoder), self.shader)
+
+    def test_zstd_blocks_reject_wrong_sizes_and_incomplete_frames(self):
+        zstd = uepak.zstd_mod()
+        data = zstd.compress(self.shader)
+        for block, size in [(data, len(self.shader) - 1), (data, len(self.shader) + 1), (data[:-1], len(self.shader)), (data + b'extra', len(self.shader))]:
+            with self.subTest(size=size, stored=len(block)), self.assertRaises(zstd.ZstdError):
+                uepak.zstd_block(block, size)
 
     def test_footer(self):
         with open(self.p, 'rb') as f: enc, _, _, methods, ver = uepak.footer(f)

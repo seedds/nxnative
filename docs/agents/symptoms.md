@@ -106,6 +106,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the NSP script stops right after `extract v<version>` with `[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check` and `nx_extract exit code 3` from `logs/extract_html_<version>.log`, although every NCA's SHA-256 matches its name. → [The offline pages of a sparse base game stop the build as a damaged NSP](../reference/packing.md#the-offline-pages-of-a-sparse-base-game-stop-the-build-as-a-damaged-nsp)
 - the shader split for an Unreal 4.27 game finds no shaders or stops on the shader library: `shader library chunk … does not parse`, `pak version 12, only … are read`, or `not an LSLG record`. → [Unreal 4.27 shaders with 8-byte hashes, an untagged record or a version 12 pak](../reference/packing.md#unreal-427-shaders-with-8-byte-hashes-an-untagged-record-or-a-version-12-pak)
 - extracting a secondary program fails with `no Program NCA ... in the base NSP`, although the update contains that program. Packing only program 0 produces a launcher without the playable programs. → [Programs added by updates](../reference/packing.md#programs-added-by-updates)
+- shader splitting reports no shaders after every Zstd-compressed pak entry fails with `main has no "OodleLZ_Decompress" name and no streaming decoder to find`. → [Zstandard-compressed Unreal pak entries sent to Oodle](../reference/packing.md#zstandard-compressed-unreal-pak-entries-sent-to-oodle)
 
 ## Rewriter
 

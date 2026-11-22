@@ -797,3 +797,11 @@
 - **Cause:** an update may add a program absent from the base package. Its data may be complete or may use a relocation table over another base program's data. Matching only the Program NCA title ID misses this case.
 - **Fix:** `nx_extract` accepts a non-sparse added program with complete sections directly. For a patched data section, it tries the base package's Program NCAs and reads the entire combined data through integrity verification before selecting one. A program without a compatible base still fails. Control and HtmlDocument selection retain the requested program ID. The collection profile lists its child profiles through `programs`.
 - **Found on:** [XCOM 2 Collection](../../dm/games/0100D0B00FB74000/README.md), package `v131072`, program 2. Its full patched data and extracted manifest passed integrity checks. Gameplay and handoff remain untested.
+
+### Zstandard-compressed Unreal pak entries sent to Oodle
+
+- **Symptom:** shader splitting reports no shaders after every Zstd-compressed pak entry fails with `main has no "OodleLZ_Decompress" name and no streaming decoder to find`.
+- **Cause:** the pak footer names `Zstd`, but `Pak.read` delegated every method except Zlib and LZ4 to the game's decoder. A game with Zstandard packages need not contain Oodle at all.
+- **Fix:** decode Zstd blocks directly with Python's `compression.zstd` or `backports.zstd`. Limit output to the block's declared raw size plus one byte and require a complete frame, no trailing bytes and the exact raw size. Keep genuine decompression failures visible.
+- **Found on:** BRAVELY DEFAULT II 1.0.0, title `01006DC010326000`, main build `05de5a7f20bd1532d139c16c0b3e8920`, during bring-up with a provisional profile. Its version 8 pak has 155,207 Zstd entries. The fixed split found 33,335 shaders; one monster texture block failed two independent Zstandard decoders. This does not establish gameplay support or repair the package's integrity mismatch.
+- **Check:** `test_uepak_v8.py` covers a synthetic Zstd pak without calling the guest decoder, wrong raw sizes, truncated frames and trailing bytes.

@@ -15,7 +15,10 @@ static const unsigned mr_first[MR_DRAWS] = {0, 5, 60, 37, 41, 61}, mr_count[MR_D
 static int mr_bit(unsigned v) { return v % 5 != 2; }
 static int mr_discard(unsigned k) { return k == 2; }   // the fragment case: draws whose fragment uniform discards   // the kernel keeps triangle t of a draw when vertex (first + t)'s bit is set
 static NvProg *mr_nolib;   // the test pair's kernel after another vertex shader, which has no mesh library
-static int run_case(NSString *directory, int pass, int counting, int frag) {
+static int dbnd_sent;
+static void dbnd_take(float lo, float hi) { (void)lo; (void)hi; dbnd_sent++; }
+// bounds: 0 none, 1 on a GPU taken as having the depth bounds test, 2 on one without
+static int run_case(NSString *directory, int pass, int counting, int frag, int bounds) {
     NSError *error = nil;
     id<MTLLibrary> vl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"vertex.metallib"]] error:&error];
     id<MTLLibrary> ll = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"lean.metallib"]] error:&error];
@@ -68,6 +71,7 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
     p_scissor all = {0, 0, MR_W, MR_H}; EMIT(OP_SCISSOR, all);
     p_clear_ds cl = {.depth = 1, .depth_mask = 1}; EMIT(OP_CLEAR_DS, cl);
     p_bind_program bp = {frag ? &ck : &cp, 7}; EMIT(OP_BIND_PROGRAM, bp);
+    if (bounds) { p_depth_bounds db = {1, 0.5f, 1}; EMIT(OP_DEPTH_BOUNDS, db); }
     p_bind_vattr va = {.n = 1}; va_st attribute = {.fmt = NVN_FORMAT_RGBA32F}; memcpy(va.st, &attribute, 4); EMIT(OP_BIND_VATTR, va);
     p_bind_vstream stream = {.n = 1}; stream.st[0].stride = 16; EMIT(OP_BIND_VSTREAM, stream);
     p_bind_vbuf vb = {.n = 1}; vb.r[0] = (NVNbufferRange){(uint64_t)vtx, MR_TRIS * 3 * 16}; EMIT(OP_BIND_VBUF, vb);
@@ -86,11 +90,13 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
     #undef EMIT
     state_reset(); memset(&R, 0, sizeof R); S.ds.dt = 1; S.ds.dw = 1; S.ds.df = 2;   // LESS, written
     uint64_t runs0 = g_mrun_runs, rdraws0 = g_mrun_draws, mesh0 = g_geo_mesh_n, za0 = g_za_total;
+    g_dbnd_hw = bounds ? bounds == 1 : -1; g_dbnd_test_enc = bounds ? dbnd_take : NULL; dbnd_sent = 0;
     mtl_sub_begin(); mtl_exec(mem);
     id<MTLBuffer> b = [g_dev newBufferWithLength:MR_W * MR_H * 4 options:MTLResourceStorageModeShared]; res_add(b);
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MR_W, MR_H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:MR_W * 4 destinationBytesPerImage:MR_W * MR_H * 4];
     finish(); if (counting) mtl_drain();   // the report is written when the command buffer's completion work runs
-    int ready = g_geo_mesh_n - mesh0 == MR_DRAWS && (!geo_mesh_run_on() || g_mrun_draws - rdraws0 == MR_DRAWS);   // the pipelines are built in the background: earlier passes draw some other way
+    g_dbnd_hw = -1; g_dbnd_test_enc = NULL;
+    int ready = g_geo_mesh_n - mesh0 == MR_DRAWS && (!geo_mesh_run_on() || bounds == 1 || g_mrun_draws - rdraws0 == MR_DRAWS);   // the pipelines are built in the background: earlier passes draw some other way
     int bad = 0;
     if (ready) {
         EXPECT("mesh-local geometry scratch is not a missing GPU binding", 0, g_za_total - za0);
@@ -104,7 +110,9 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
         for (unsigned i = 0; i < MR_W * MR_H; i++) drawn += px[i] != 1;   // each pixel is covered by one triangle at most: one sample passed for each written
         if (counting) EXPECT("samples-passed counting on: the report holds every sample the draws passed", drawn, rep[0]);
         for (unsigned k = 0; k < MR_DRAWS; k++) EXPECT("each draw's kernel ran once per triangle with its own counter", mr_count[k], ctr[4 * k]);
-        if (geo_mesh_run_on() && frag) EXPECT("a change of the fragment bindings and the scissor split the draws into four runs", 4, g_mrun_runs - runs0);
+        if (bounds) EXPECT(bounds == 1 ? "depth bounds on a GPU with the test: the bounds sent" : "depth bounds on a GPU without the test: no call", bounds == 1, dbnd_sent > 0);
+        if (bounds == 1) EXPECT("depth bounds that can reject, with depth written: every draw drawn alone, no run", 0, g_mrun_runs - runs0);
+        else if (geo_mesh_run_on() && frag) EXPECT("a change of the fragment bindings and the scissor split the draws into four runs", 4, g_mrun_runs - runs0);
         else if (geo_mesh_run_on()) EXPECT(counting ? "with counting on, the scissor and the report split the draws into two runs" : "the scissor and the end split the draws into two runs", 2, g_mrun_runs - runs0);
         else EXPECT("no runs with DM_NVN_GEO_MESH_RUN=0", 0, g_mrun_runs - runs0);
     }
@@ -117,12 +125,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_PSO_RECORD", record, 1); setenv("DM_PSO_USER", "/dev/null", 1);   // the pipeline record (pso_record) is opened at its first line
     mtl_init();
     int r = 0;
-    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
+    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0, 0, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
     if (r < 0 || failed) return 1;
     if (!r) { fprintf(stderr, "the mesh pipelines were never ready\n"); return 1; }
-    if ((r = run_case(@(argv[1]), 40, 1, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
-    r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1)); pass++) usleep(100000);   // the fragment case's pipelines
+    if ((r = run_case(@(argv[1]), 40, 1, 0, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
+    r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1, 0)); pass++) usleep(100000);   // the fragment case's pipelines
     if (r <= 0 || failed) { if (!r) fprintf(stderr, "the fragment case's mesh pipelines were never ready\n"); return 1; }
+    for (int bounds = 1; bounds <= 2; bounds++)
+        if ((r = run_case(@(argv[1]), 81 + bounds, 0, 0, bounds)) <= 0 || failed) { if (!r) fprintf(stderr, "with depth bounds %s, the draws did not draw as expected\n", bounds == 1 ? "applied" : "not applied"); return 1; }
     {   // the log's compute-path line (mtl_geocomp_stats): the first passes drew while the mesh pipelines were built, the test pair's vertex and geometry keys among the most
         char gc[768]; uint64_t n = mtl_geocomp_stats(gc, sizeof gc); printf("geometry compute path: %s\n", gc);
         EXPECT("the compute path's draws are counted", 1, n > 0);

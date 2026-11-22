@@ -889,6 +889,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) 1.0.4 on an iPad mini 7 (A17 Pro), which presents three times before its first submission ([GitHub issue #626](https://github.com/seedds/nxnative/issues/626)). The reporter's Apple M4 test did not fault without the fix.
 - **Not checked:** the iPad with the fix.
 
+### A residency commit stays blocked in the iPhone kernel
+
+- **Symptom:** the last frame stays on screen at 0 fps while the process stays alive and audio continues. The log stops advancing with no `[RED]` line or GPU error. Within 10 s, `DM_THRCPU` shows the main thread, game workers, `NVN queue replay` and `dm-encode` at 0%. Ending the app can leave the process alive. In one run the phone restarted itself 15 minutes after the freeze.
+- **Cause:** the state dump showed `iokit_user_client_trap ← res_commit ← pool_res ← mtl_gpu_addr ← bind_vbufs ← draw_` on replay and `__psynch_mutexwait ← post_complete` on the completion queue. On the reported build, replay held `g_mu` and `g_res_mu` across `[MTLResidencySet commit]`. With completion waiting for `g_mu`, the main fence stayed at 206256 with 206262 submitted. A system stack report 15 minutes later showed replay as the process's last thread in `TH_WAIT | TH_UNINT` with `TH_SFLAG_RW_PROMOTED` and a kernel thread blocked on it. The phone reported 7.2 GB wired and 34 MB free at that point. An independent compute dispatch still completed once a second during the freeze. The game's footprint was 4.2 GB against its 8.2 GB limit, similar to the preceding run that kept playing.
+- **Open:** what made the kernel call stop returning. Main now [applies changes outside `g_res_mu`](memory.md#residency-changes-waited-for-another-threads-commit), under `g_res_commit_mu`. `pool_res` can still call `res_commit` with `g_mu` held, and `post_complete` still needs `g_mu` to advance the fence. A retest on current main and any link to the Mac GPU hangs remain open.
+- **Collect:** from a paired Mac, `xcrun devicectl device process signal --device <UDID> --pid <pid> --signal SIGALRM` asks the host to dump thread and wait state and exit. Save the app's `Documents/log.txt`. After a restart, `xcrun devicectl device copy from --device <UDID> --domain-type systemCrashLogs --source . --destination <folder>` collects `stacks-*.ips` and any `gpuEvent-*.ips`. The process can keep its memory until the phone restarts.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 (v917504), iPhone 19,4, iOS 27.3 beta (24C5037i), 2026-11-09. [PR #2098](https://github.com/seedds/nxnative/pull/2098) reports two freezes in four runs on `04811a63` plus #1709, #1695, #1262, #1599 and #1713. One froze 2–3 s into a race, 184 s after launch. The other froze in the title demo without input at 353 s with `DM_PSO_MTL4=1`. Both occurred during scene loads. The race logged about 1,400–1,800 residency commits and 2.3–3.9 GB added per 300 frames around the load. The 300 frames before the title freeze logged 678 commits and 1,599 MB added. Four 5–7 minute races with `6f50de00` and `12a44e09` also applied had no freeze. The small sample leaves the effect of those commits unknown.
+
 ### A GPU whose access macOS revoked stops the game
 
 - **Symptom:** after a GPU hang or GPU page faults, every upload, segment, submission and display command buffer comes back `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` ("Ignored (for causing prior/excessive GPU errors)"). Nothing is drawn again while the game's sound and logic go on, until the game aborts itself (`game called nn::diag abort`, about 70 s later); in full screen, WindowServer froze for 40 s and its watchdog killed it. With the fix the log has `[RED] GPU access revoked: the … command buffer was ignored`, and a Mac app shows an alert and quits.
@@ -1068,6 +1076,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `SetDepthClamp` is recorded (`OP_DEPTH_CLAMP`) and replayed as Metal's depth clip mode (it used to be ignored).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the game turns it on).
 
+### Depth bounds
+
+- **Symptom:** `nvnCommandBufferSetDepthBounds` was a no-op (`g_nops`), and the Vulkan layer did not forward `depthBoundsTestEnable` / `minDepthBounds` / `maxDepthBounds` or `vkCmdSetDepthBounds`, so draws expecting the depth bounds test ran over pixels outside `[min, max]`.
+- **Cause:** Metal added hardware depth bounds testing (`setDepthTestMinBound:maxBound:`) with `MTLGPUFamilyApple10` (macOS 26 / iOS 26 SDKs). Before that, no host path recorded or encoded depth bounds.
+- **Fix:** `dbnd_resolve` (`dm/gfx/nvn/nvn_dbnd.h`) resolves `(enable, min, max)` to off (`[0, 1]`), an active `[lo, hi]` interval, or empty (`lo > hi` or NaN). NVN records `SetDepthBounds` as `OP_DEPTH_BOUNDS` (preserving state across queues, deferred unbinds, compute-hoist scans and frame capture) and encodes `setDepthTestMinBound:maxBound:` (direct and deferred `RO_R_DBND`) on Apple10+ GPUs when a depth attachment is bound, skipping empty-bounds draws before opening a render pass and keeping depth-writing bounded draws out of reordered mesh runs (`nvn_geometry.inc`). Vulkan forwards both static pipeline bounds and dynamic `VK_DYNAMIC_STATE_DEPTH_BOUNDS` / `vkCmdSetDepthBounds` (`hle_vk.m`), resetting encoder state across pass reopens. `DM_NVN_DEPTH_BOUNDS=0` disables the test (`ab` alternates with `DM_AB`). Older GPUs (below `MTLGPUFamilyApple10`) ignore depth bounds without a red line.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_depth_bounds` runs `dbnd_resolve` edge cases, real Apple10+ GPU pixel pass/rejection (direct and deferred encoder thread under `MTL_DEBUG_LAYER=1`), mid-pass reset, `DM_NVN_DEPTH_BOUNDS=0`, simulated Apple9 fallback, redundant-call caching, empty-bounds pre-pass skip, deferred unbind and multi-queue state (85/85 on Apple M6 / Apple11 GPU, macOS 27.2.1, Xcode 27.2). `check_t_capture`, `check_t_geometry_mesh` and `check_t_vk_desc` cover capture serialization, mesh-run exclusion and Vulkan static/dynamic state.
+- **Found on:** [PR #2866](https://github.com/seedds/nxnative/pull/2866) (from kencalx/NX18). Measured on Apple M6 (Apple11 GPU, `DM_NVN_DEPTH_BOUNDS=ab`, `DM_AB=300`): [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (Great Plateau outdoors, 5,700 frames, 23–34.5 calls/frame), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (opening cave, 5,700 frames, 23–25.8 calls/frame) and [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md) (outdoors, 2,400 frames, 65–66.7 calls/frame) all called `SetDepthBounds` exclusively with `enable=0, (0, 1)` along those routes (0 tested draws, 0 ms GPU change). No Switch game tested so far enables a non-trivial depth bounds interval on those routes.
+
 ### Depth on the far plane
 
 - **Symptom:** blocks of another sky layer in the sky, in stair-stepped squares and half squares that follow the dome's mesh. In Mario Kart 8 Deluxe's Sky-High Sundae, salmon-red blocks of the sunset panorama show through the blue sky, the same blocks every time from the same camera.
@@ -1193,6 +1209,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the CPU conversion was made again in every submission, whether or not the source had changed, and a stadium's meshes do not change.
 - **Fix:** a conversion is kept across submissions while its source is unchanged (`vk_get` in `nvn_mtl.m`). A key (range, format, layout) is noted at its first submission with 64 samples of its source, and converted into a buffer of its own at the next one that finds the samples unchanged (a stream the game rewrites is then never kept; a change the samples miss is found by the checks below). The pages wholly inside the source are write-protected (`nvn_dirty_protect`, as a kept index range); the bytes before and after them, in pages shared with other data, are compared with a copy, so a neighbour written every frame neither drops the conversion nor takes a fault for it. A GPU write queued on the source (copy, update, fill, transform feedback, a writable storage binding: `vk_gpu_write`) drops it, and none may be queued or in flight when it is made. A changed source releases its buffer once the submissions that read it complete, and is tried again after 32 submissions, twice as many after each further change, so a stream rewritten every frame costs a write-protection that often.
 - **Note:** not kept: ranges below 4,096 vertices, sources outside tracked pools, anything while the game has sparse mappings (a write through an alias takes no fault), and conversions past 256 MB in all. A key not drawn for 600 submissions is forgotten. `DM_NVN_VCONV_KEEP=0` turns it off (`=n` sets the smallest range kept). The `vertex conversion:` line gives the vertices bound from kept conversions, the conversions held and their size, and how many were made and dropped, by cause. `t_vconv_keep` checks the content against `vconv_elem` and each way a conversion is dropped or left.
+- **Note:** the cache allocates the edge copy before write-protecting any pages. If allocation fails, the caller converts into the frame arena and the cache can try again on the next submission.
 - **Note:** PR #1727 proposed converting long ranges on every core instead (26.8 → 10.6–12.7 ms on that M4). That still writes the 122 MB every frame and takes every core beside the game's threads; it was not taken. A fetch on the GPU serves streams that do change too: such layouts are now [pulled](#attributes-the-vertex-fetch-cannot-read-pulled), and kept conversions serve the draws that still convert on the CPU.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (the measurement above is the PR author's; the stadium was not run here with this change, so its effect there is open). Run here on [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) with `DM_NVN_VCONV_CPU=1`: on the note's new-game route into the prologue battle (M4 Pro), the battle's bound ranges came to about 2.0 million vertices a submission, of which 1.8 million were bound from 144 kept conversions (18 MB) and 0.2 million converted; frame time p50 16.68 ms with and without, p99 17.2–17.6 against 20.4 ms, the same picture at 450 s. That run was made before the samples were added: in the cutscenes it made and dropped about 1.2 conversions a frame, nearly all of streams the game rewrites, which the samples are there to leave alone. The form with the samples passes `t_vconv_keep` and was not run in a game.
 
@@ -1241,7 +1258,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `[RED] vertex stream N's buffer 0x… is in no memory pool; draw skipped` (`; its attributes read zeros` for a pulling pipeline, `; a geometry capture reads the buffer bound before` for one). Before the line existed: a draw whose vertices came from an earlier draw's buffer, with nothing in the log.
 - **Cause:** the host failed to place a non-zero stream address in any memory pool it tracks (a pool it missed, or an address the game computed wrongly; on the Switch the GPU would fault). `bind_vbufs` skipped such a stream, so its Metal slot kept the buffer an earlier draw had bound there. A stream with address 0 is different: the vertex descriptor points its attributes at the zero buffer (`ZERO_ATTR`).
 - **Fix:** `bind_vbufs` reports the first stream the vertex shader reads (`vs_streams`, from its reflection) that is in no pool, after binding the others. The draw is skipped with the red line, as for an index buffer in no pool, and so are a transform feedback capture and the vertex dump; a pulling pipeline's layout gives the stream's attributes zeros. A geometry capture shares its encoder with the job's later stages, which read what it writes, so it runs with the red line and the old binding. A stale address on a stream no input reads changes nothing. Not a fix for the address itself: the red line is there to find which pool the host missed.
-- **Found on:** no game has shown the line. The S2Arm project reported the stale binding on its copy of this layer. `t_vbuf` checks that a read stream in no pool is reported and the others still bound, and that an unread one is not.
+- **Found on:** The S2Arm project reported the stale binding on its copy of this layer. [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md#rendering) also logged the warning for a stream whose declared range was too large, covered by the next entry. `t_vbuf` checks that a read stream in no pool is reported and the others still bound, and that an unread one is not.
+
+### A vertex stream bound past its memory pool
+
+- **Symptom:** South Park's character creator draws its backdrop, shadow and menus with the character missing. The loading screen is black and the title flickers between black and visible frames. The host may log only one skipped vertex stream, then silently skip later draws with the same problem.
+- **Cause:** Snowdrop binds a stream from an interior offset with the buffer's full size. In the captured preview frame, stream 0 began at `0x705f714b80`, inside the pool up to `0x705f7dd000`. Its declared `0xcb9c0` bytes ended `0x3540` past the pool. The UI binds a 4 MiB range from successive offsets, although individual draws may fetch only a few hundred bytes. Those offsets make the full-range lookup succeed near the start of the buffer and fail on most frames, even with the same indexed draws submitted by the game.
+- **Fix:** `bind_vbufs` and the pulling layout can resolve the mapped prefix of an aligned stream after the full lookup fails. They prove the last byte from the draw and every reflected attribute on that stream. For direct indexed draws the proof scans CPU-readable indices and includes the base vertex. Pending writes, possible sparse aliases and invalid indices prevent the proof. Draws with unknown bounds or a fetch beyond the mapped bytes still fail. The smaller limit also bounds format conversion for the draw. Full-range cache hits include the requested size, and a prefix-only result is checked again for the next draw.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md#rendering) 1.05. `t_vbuf` exercises the Metal binding and readback, the pulling range, rejection of draws beyond the mapped pool and cache reuse after the declared size changes.
 
 ### Programs bound per stage
 
@@ -1832,6 +1856,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a barrier with `ORDER_FRAGMENTS` or `ORDER_FRAGMENTS_TILED` now ends the open pass when a draw in it wrote an image or a storage buffer (`swrite_note` in `nvn_mtl.m`), so the next draw opens a pass behind the full consumer barrier; reflection marks an image binding written when its type has write access (`nvn_refl.m`, which left `rw` unset for images).
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md).
 
+### Draw passes without fragment order read unfinished attachments, and the damage persists
+
+- **Symptom:** a bright or purple patch grows on a still scene. Presented luma rose from 29 through 66 and 105 to 119, versus 41 in a clean run. The corruption remained visible in both phases of an in-run A/B (`DM_AB`).
+- **Cause:** the diagnostic switch `DM_NVN_BAR_FRAG` removed the Fragment stage from the end-of-pass barrier and disabled the `All → Fragment` barrier for aliased resources (`resource_vis()` includes `ResourceAlias`). Fragments could read an earlier pass's attachment before it was ready. Each luma increase began with the switch on, and later frames carried forward the damaged state.
+- **Fix:** keep fragment ordering at both pass boundaries. The end barrier's Fragment stage cost 5–10 µs per pass in the reported M2 comparison. Check the picture in a separate run per arm so corruption from one run cannot affect the other ([A/B in one run](../agents/05-debugging.md)).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), in Castle Town and Zora's Domain on a diagnostic build. The same build with the switch off rendered correctly.
+
 ### A segment committed after a buffer → texture copy
 
 - **Symptom:** a texture copied from a staging buffer shows another texture's blocks (Catherine: Full Body's cutscene subtitle band a hard-edged dark box with a magenta stroke through it).
@@ -2299,7 +2330,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** both entry points are in the GL import table and pack their stack arguments before the big-stack entry (`compressed_impl`, `hle_gl.m`); `glCompressedTexSubImage2D` (a 2D texture or a cube face, one layer) shares the sub-image path. A pending array level holds every layer, each with its own rounded block rows, mips smaller than a block included; the layer count is the same at every level. A sub-image into a texture not made yet goes into the level's pending copy (zeros first when the level was allocated with no data), so the texture is made with every level given before its first use, whatever order the game allocates and fills them in; into a made texture it goes through `tex_write`, in command order. An allocation with no data needs no matching `imageSize`. Other targets (`GL_TEXTURE_3D`, cube-map arrays) and compressed formats the layer does not map are the host's gaps: a red line, no GL error.
 - **Limitations:** compressed volume and cube-map-array targets and uploads from a pixel-unpack buffer are not implemented. `glTexImage3D` still gives level 0 only.
 - **Check:** `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` (`test_compressed_arrays`): BC7 sRGB arrays of two layers and three levels, partial and edge sub-images, an upload after a draw used the texture, immutable storage, levels allocated with no data and filled one after the other, and the red-line gaps.
-- **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, v851968, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416). Not run in the game: it also needs sampler objects ([#2724](https://github.com/seedds/nxnative/issues/2724)) and other GL calls the issue lists, and no profile is registered. [DOOM 3](../../dm/games/010029D00E740000/README.md) streams its DXT images with `glCompressedTexSubImage2DARB`.
+- **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, v851968, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416). Its startup also exposed [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations). [DOOM 3](../../dm/games/010029D00E740000/README.md) streams its DXT images with `glCompressedTexSubImage2DARB`.
 
 ### Extensions a GL renderer checks for, and its ARB names
 
@@ -2315,7 +2346,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cause:** the layer answered exact names, and ARB names by stripping the suffix, so an extension's name of a function it has got null. A suffix cannot just be stripped: under the bare name GL has another function for some extension names, such as `glVertexAttribPointerNV` (5 arguments, against 6), `glVertexAttribFormatNV` (a stride where the core one takes an offset), `glPolygonOffsetEXT` (a bias in other units) and `glGetProgramivARB` (an ARB assembly program asked by its target).
 - **Fix:** `gl_lookup` answers an extension name with the entry of the function it is the same as, from `dm/gfx/gl/gl_aliases.h`, which `dm/gfx/tools/gl_aliases.py` writes from Khronos's `gl.xml` (a command's `<alias>`) and a reviewed GL ES list (`OES_framebuffer_object`, `OES_texture_3D`, the OES blend functions, ANGLE's and NV's ES 3.0 functions), which `gl.xml` does not cover. `gl.xml` leaves out `EXT_framebuffer_object`'s binds, since a bind there makes the object of a name `glGen*` never gave; the layer's `glBindFramebuffer` and `glBindRenderbuffer` make it, as GL ES's and the compatibility profile's do (and as its `glBindTexture` did), so the list has them. This replaces the ARB rule, which gave `glGetProgramivARB` the GLSL `glGetProgramiv`.
 - **Check:** `t_gl_imports` (`test_extension_names_and_egl`); `test_gl_aliases.py` (the table sorted, the registry's names in, suffix-only names out).
-- **Found on:** Fate/hollow ataraxia REMASTERED (`010070E022546000`, update v131072, provisional profile), [issue #2818](https://github.com/seedds/nxnative/issues/2818); [PR #2819](https://github.com/seedds/nxnative/pull/2819) stripped any vendor suffix. Its loader asks for 3,331 names, the `EXT_framebuffer_object` ones among them; 113 more of them get their function this way. Over the strings of the other GL games' `main` (Balatro, DOOM 3, Digimon, Mega Man Legacy Collection, Well Dweller), no name the ARB rule answered lost its function, and `glGetProgramivARB` went to an entry of its own.
+- **Found on:** [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md) (`010070E022546000`, update v131072), [issue #2818](https://github.com/seedds/nxnative/issues/2818); [PR #2819](https://github.com/seedds/nxnative/pull/2819) stripped any vendor suffix. Its loader asks for 3,331 names, the `EXT_framebuffer_object` ones among them; 113 more of them get their function this way. Over the strings of the other GL games' `main` (Balatro, DOOM 3, Digimon, Mega Man Legacy Collection, Well Dweller), no name the ARB rule answered lost its function, and `glGetProgramivARB` went to an entry of its own.
 
 ### EGL's current context, per thread
 
@@ -2324,7 +2355,15 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `eglGetProcAddress` answers `egl` names from the same table. `eglMakeCurrent` records the calling thread's display, context and draw/read surfaces; `eglGetCurrentContext`, `eglGetCurrentDisplay` and `eglGetCurrentSurface` (`EGL_DRAW`, `EGL_READ`) answer that binding. The layer's one context has one owner, protected by a mutex. A conflicting bind returns false with `EGL_BAD_ACCESS` and leaves both threads' bindings unchanged. Making no context current, `eglReleaseThread`, or the owning thread's exit releases it for another thread. `eglGetError` returns and clears only the calling thread's error.
 - **Current limit:** multiple and shared contexts are unsupported. Every `eglCreateContext` returns the same handle (`0x2`), and GL state and command encoding are global, so a second creation does not give another thread an independent context. Keep the ownership check unchanged; revisit multiple contexts only when a real game needs them.
 - **Check:** `t_gl_imports` (`test_extension_names_and_egl`).
-- **Found on:** Fate/hollow ataraxia REMASTERED, [issue #2818](https://github.com/seedds/nxnative/issues/2818).
+- **Found on:** [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md), [issue #2818](https://github.com/seedds/nxnative/issues/2818).
+
+### `glGetShaderSource` returns the stored shader text
+
+- **Symptom:** a game jumps to address 0 or takes a dead branch after compiling and linking GLSL shaders, because `glGetShaderSource` was unimplemented and returned an empty buffer / length 0.
+- **Cause:** `glShaderSource` already stored each shader's source (`s->src`, `s->len`) and `glGetShaderiv(GL_SHADER_SOURCE_LENGTH)` reported its length, but `glGetShaderSource` had no entry in `dm/gfx/gl/hle_gl.m` (even though `gl_aliases.h` already aliased `glGetShaderSourceARB` to it).
+- **Fix:** implement `glGetShaderSource` in `dm/gfx/gl/hle_gl.m` (`SP_CHECK(sh, 0)`, `GL_INVALID_VALUE` for `size < 0`, safe no-op for `src == NULL` or `size == 0`, truncated NUL-terminated copy of `s->src`), and have `glGetShaderiv(GL_SHADER_SOURCE_LENGTH)` return 0 when no source is set.
+- **Check:** `make -C dm/gfx/tests GAME=0100CD801CE5E000 check_t_gl_imports` checks full copy, truncation, null `len`, null `src`, zero `size`, empty shader source, and `GL_INVALID_VALUE` / `GL_INVALID_OPERATION` error reporting.
+- **Found on:** [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md), [PR #3063](https://github.com/seedds/nxnative/pull/3063).
 
 ### GL named uniform blocks
 
@@ -2483,6 +2522,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): `default_ps.glsl` declares `T1` for code under `#if 0`. Reported in [PR #2727](https://github.com/seedds/nxnative/pull/2727).
 - **Check:** `test_gl_shaders.py`.
 
+### Inactive GL uniforms get locations
+
+- **Symptom:** `glUniform4fv` crashes in `uni_write` with a null source during startup. The game skips the upload when `glGetUniformLocation` returns `-1`.
+- **Cause:** SPIRV-Cross's default uniform block layout includes declared members the shader never reads. The shader table exposed all of them, so linking gave unused uniforms valid locations.
+- **Fix:** `gl_shaders.py` uses glslang's active-uniform reflection to select the default block members it exposes. SPIRV-Cross still supplies their Metal offsets, array strides and block size. Rebuild the GL shaders to update the table.
+- **Check:** `test_gl_shaders.py` checks that unused uniforms and struct members are omitted and that active arrays and named blocks keep their layout.
+- **Found on:** Tomb Raider I–III Remastered 1.1.4 ([issue #2416](https://github.com/seedds/nxnative/issues/2416)). The startup program gave `uJoints` and `uLightPos` locations even though neither shader stage read them.
+
 ### GLSL that NVIDIA's compiler accepts and glslang does not
 
 - Fix-ups on the preprocessed text: the GLSL ES 1.0 functions `textureCube` / `texture2D` in ES 3.20 code (with `-V` glslang reads `textureCube` as Vulkan's texture type, so a macro cannot rename it), `out vec4 gl_Position` redeclared through a macro, and `textureOffset` with an offset that is not a constant, which becomes a plain sample at P + offset ÷ level 0 size. A string in `main` says nothing of its stage, so it is translated as each stage that compiles.
@@ -2598,7 +2645,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 ### GL textures, swizzles and uploads
 
 - Textures are made on first use from the levels given so far (Digimon's loader defines them level by level). An upload into a texture a pending command buffer may still read is a blit in command order; any other is a CPU write. Metal reads a channel a format lacks as 0 (alpha 1) as GL does, so only luminance / alpha formats get a swizzle: Metal refuses a swizzle on a texture that can be a render target (`Texture swizzling is not compatable with MTLTextureUsageRenderTarget`, Digimon's first story scene).
-- `glTexStorage2D` makes every level up front (mipmaps filled by `glGenerateMipmap` as a blit), `glTexStorage3D` 3D and 2D array textures; the layer's units hold all four targets (96 of them, as `GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS` says). A `GL_TEXTURE_SWIZZLE_*` is applied when the texture is made (a swizzled texture cannot be a render target).
+- `glTexStorage2D` makes every level up front (mipmaps filled by `glGenerateMipmap` as a blit). `glTexStorage3D` makes 3D and 2D array textures. A `GL_TEXTURE_SWIZZLE_*` is applied when the texture is made (a swizzled texture cannot be a render target).
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md); [Balatro](../../dm/games/0100CD801CE5E000/README.md): the game's images are mipmapped; LÖVE makes a 1x1 default texture of each type, 3D and 2D array among them; font glyphs are RG8 with a swizzle of R, R, R, G.
 
 ### GL buffers orphaned, clears as load actions
@@ -2613,10 +2660,46 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** encode the pending clear before changing an attachment of that framebuffer. Unchanged attachments still allow the clear to fold into the next draw pass.
 - **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)). Empty layers were clearing the texture where the earlier layers had already been composed.
 
+### GL framebuffer sRGB conversion
+
+- **Symptom:** an sRGB framebuffer object still converts colour writes and blend reads with `GL_FRAMEBUFFER_SRGB` off, or the game's window stays dark with it on. In Tomb Raider's Remastered opening cave, nearly the entire image is black.
+- **Cause:** Metal applies sRGB conversion through the render attachment's pixel format. The framebuffer object always drew through its original sRGB format, and the window always drew through its raw RGBA8 format. Tomb Raider enables conversion for an ordinary RGBA8 window with no EGL surface attributes.
+- **Fix:** framebuffer objects with sRGB attachments use a linear view while conversion is off. The window uses an sRGB view while conversion is on and presents the stored bytes through its raw view. Changing the enable finishes deferred clears and the active pass before changing formats. New storage invalidates the cached views. Texture sampling keeps its own sRGB decoding, and alpha stays linear.
+- **Check:** `make -C dm/gfx/tests GAME=0100217023F6C000 gl-imports` reads pixels from framebuffer objects and the default window with conversion off and on, covering deferred and partial clears, draws, and destination blending.
+- **Found on:** [Tomb Raider I–III Remastered report #2416](https://github.com/seedds/nxnative/issues/2416), with the opening cave checked in Classic and Remastered modes. The game's startup crash came from [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations).
+
 ### GL draws and framebuffers
 
 - Batched quads share one 16-bit index buffer through `glDrawElementsBaseVertex`; canvases bind GL_FRAMEBUFFER (read and draw), check completeness, discard depth and stencil after use (`glInvalidateFramebuffer`) and clear with `glClearBufferfv`. `glBlitFramebuffer` (colour, same size) and `glReadPixels` (RGBA8) are there for multisample resolves and `Canvas:newImageData`, which the game does not use.
 - **Found on:** [Balatro](../../dm/games/0100CD801CE5E000/README.md).
+
+### GL integer vertex inputs and timestamp queries
+
+- **Symptom:** the GL loader returns null for `glVertexAttribIPointer`. A diagnostic run past that call also reaches missing `glQueryCounter` and `glGetQueryObjecti64v`.
+- **Cause:** the host registered only the floating-point attribute pointer entry point and the occlusion-query entry points.
+- **Fix:** `glVertexAttribIPointer` uses the existing unnormalized integer Metal formats and vertex-array bindings. `glQueryCounter(GL_TIMESTAMP)` ends the current Metal command buffer so its GPU completion time marks all work issued before the call. The 64-bit query read returns the result in nanoseconds.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). Its first integer attribute call jumps to address 0 from `main+0x9a89a8` in the old host.
+
+### GL framebuffer draw and read buffers
+
+- **Symptom:** `framebuffer attachment 0x8ce1 not implemented`, `glDrawBuffers of 2 buffers`, then `INVALID_VALUE` from `glColorMaski` on draw buffer 1.
+- **Cause:** the host held one color image per framebuffer and conflated shader output location 0 with attachment 0.
+- **Fix:** each framebuffer maps draw locations and its read buffer to up to eight attachments. Metal render passes and pipelines use the draw mapping and per-output write masks. Reads and copies use the selected read attachment. Whole clears use load actions, and masked or scissored clears keep their channel masks and rectangles.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). The validation test reverses two color attachments and reads each after a masked clear.
+
+### GL sprite-atlas copies and readback
+
+- **Symptom:** the game crashes at `main+0x9aa448` in atlas loading, then on missing compressed-image queries and readback. The new-game route also calls `glCopyTexSubImage3D`.
+- **Cause:** the host lacked named image copies and compressed texture readback. The renderer stores one packed BC block in each texel of an integer color target. A copy into a compressed image must reinterpret those bytes and scale the destination region to blocks.
+- **Fix:** the host maps unsigned integer image formats and blits matching images directly. For an integer texel and a same-size compressed block, it copies their raw bytes through a Metal buffer in command order. Compressed readback returns the blocks or samples the texture for RGBA8. Framebuffer copies can also write a 3D slice or an array layer.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). A synthetic Metal check copies a BC3 block in both directions and reads the compressed bytes and decoded pixels.
+
+### GL texel buffer views
+
+- **Symptom:** binding `GL_TEXTURE_BUFFER` logs an unsupported target and jumps to address 0 at `glTexBuffer`. After adding the view, tile transitions still render as black gaps.
+- **Cause:** the host lacks a typed view of the bound buffer. SPIRV-Cross generates a two-dimensional texture and `spvTexelBufferCoord` by default, while the view is a native Metal texture buffer.
+- **Fix:** bind a typed Metal view of the GL buffer's current storage. Request native texture buffers in `gl_shaders.py` so `samplerBuffer` reads the same resource type the host binds.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). The translated tile vertex shader now indexes the coordinate table directly and the shoreline renders across tile boundaries.
 
 ### GL orientation through the lower-left origin
 

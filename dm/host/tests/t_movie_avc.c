@@ -14,9 +14,41 @@ static OSStatus synthetic_decode(VTDecompressionSessionRef, CMSampleBufferRef, V
 
 uint64_t now_ns(void) { return 1; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
-void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+// Pause only the test acquisition at its deferred-event lock, after it released
+// the decoder queue lock, to order a concurrent Flush / Stop without sleeps.
+static pthread_mutex_t rearm_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t rearm_cv = PTHREAD_COND_INITIALIZER;
+static _Thread_local int pause_rearm;
+static int rearm_waiting, rearm_continue;
+static pthread_mutex_t flush_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t flush_cv = PTHREAD_COND_INITIALIZER;
+static _Thread_local pthread_mutex_t *flush_reset_mutex;
+static _Thread_local int flush_after_reset;
+static int flush_reset_waiting, flush_reset_continue, flush_fence_entered, flush_done;
+static int pause_flush_fence, flush_fence_continue;
+void dm_host_lock(pthread_mutex_t *m) {
+    if (m == flush_reset_mutex) {
+        // The initial deferred-event drop is complete; pause before reset.
+        pthread_mutex_lock(&flush_mu); flush_reset_waiting = 1; pthread_cond_broadcast(&flush_cv);
+        while (!flush_reset_continue) pthread_cond_wait(&flush_cv, &flush_mu);
+        pthread_mutex_unlock(&flush_mu); flush_after_reset = 1;
+    } else if (flush_after_reset && m == &g_dfmu) {
+        pthread_mutex_lock(&flush_mu);
+        flush_fence_entered = 1;
+        pthread_cond_broadcast(&flush_cv);
+        while (pause_flush_fence && !flush_fence_continue) pthread_cond_wait(&flush_cv, &flush_mu);
+        pthread_mutex_unlock(&flush_mu);
+    }
+    if (m == &g_dfmu && pause_rearm) {
+        pause_rearm = 0;
+        pthread_mutex_lock(&rearm_mu); rearm_waiting = 1; pthread_cond_broadcast(&rearm_cv);
+        while (!rearm_continue) pthread_cond_wait(&rearm_cv, &rearm_mu);
+        pthread_mutex_unlock(&rearm_mu);
+    }
+    pthread_mutex_lock(m);
+}
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
-void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) { (void)fn; (void)arg; (void)prio; (void)stack_size; return NULL; }   // the deferred signals' thread: none here, the queue is inspected
+void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) { (void)fn; (void)arg; (void)prio; (void)stack_size; return NULL; }   // fixtures start the signaller explicitly or inspect its queue
 
 typedef struct { uint8_t p[512]; unsigned bit; } writer;
 static void put(writer *w, unsigned v, unsigned n) {
@@ -311,6 +343,175 @@ static void pump_due(void) {
     md_job(&d, MDJ_QUIT); pthread_join(d.wk, NULL);
     for (int i = 0; i < MD_NOUT; i++) free(d.out[i].frm);
 }
+// One output per auto-cleared event, as Hagi consumes movie replacements.
+// Run the real deferred signaller; replace only the guest EventType boundary.
+typedef struct { int signalled, count, hold, entered, release; } movie_test_event;
+static pthread_mutex_t event_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t event_cv = PTHREAD_COND_INITIALIZER;
+static void movie_test_signal(void *p) {
+    movie_test_event *ev = p;
+    pthread_mutex_lock(&event_mu);
+    ev->entered = 1; pthread_cond_broadcast(&event_cv);
+    while (ev->hold && !ev->release) pthread_cond_wait(&event_cv, &event_mu);
+    ev->signalled = 1; ev->count++; pthread_cond_broadcast(&event_cv); pthread_mutex_unlock(&event_mu);
+}
+static void movie_test_wait(movie_test_event *ev) {
+    struct timespec limit; assert(!clock_gettime(CLOCK_REALTIME, &limit)); limit.tv_sec += 2;
+    pthread_mutex_lock(&event_mu);
+    while (!ev->signalled) assert(!pthread_cond_timedwait(&event_cv, &event_mu, &limit));
+    ev->signalled = 0; pthread_mutex_unlock(&event_mu);
+}
+static void event_unlock(void *mu) { pthread_mutex_unlock(mu); }
+static void *movie_test_signaller(void *arg) {
+    // Cancellation at its idle condition wait reacquires g_dfmu first.
+    pthread_cleanup_push(event_unlock, &g_dfmu);
+    md_defer_body(arg);
+    pthread_cleanup_pop(1);
+    return NULL;
+}
+static void output_batch(mdec_t *d) {
+    pthread_mutex_lock(&d->mu); d->noutq = 4;
+    for (int i = 0; i < 4; i++) { d->outq[i] = i; d->out[i].used = 1; d->out[i].pts = i * 33333; d->out[i].flags = i == 3 ? 4 : 0; }
+    pthread_mutex_unlock(&d->mu);
+}
+static void *delayed_acquire(void *arg) {
+    void *self[2] = {NULL, arg}; int idx, left; int64_t pts; uint32_t flags;
+    pause_rearm = 1;
+    assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left) && idx == 0 && left == 3);
+    return NULL;
+}
+static void *ordered_flush(void *arg) {
+    mdec_t *d = arg;
+    void *self[2] = {NULL, d}; flush_reset_mutex = &d->dmu;
+    assert(!h_movie_Flush(self));
+    pthread_mutex_lock(&flush_mu); flush_done = 1; pthread_cond_broadcast(&flush_cv); pthread_mutex_unlock(&flush_mu);
+    return NULL;
+}
+static void output_flush_fence(void) {
+    mdec_t d = {.type = MD_TYPE_AVC, .started = 1, .nout = 4};
+    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL);
+    movie_test_event output = {.hold = 1}; d.ev[1] = &output;
+    output_batch(&d); G.signal = movie_test_signal;
+    assert(!g_ndfq); g_dfthr = 1;
+    pthread_t flusher, signaller; assert(!pthread_create(&flusher, NULL, ordered_flush, &d));
+    pthread_mutex_lock(&flush_mu);
+    while (!flush_reset_waiting) pthread_cond_wait(&flush_cv, &flush_mu);
+    pthread_mutex_unlock(&flush_mu);
+    // Flush has dropped pending events. A later event now sees ready output,
+    // enters SignalEvent and is held there while Flush clears the output queue.
+    md_defer_at(&d, 1, now_ns());
+    assert(!pthread_create(&signaller, NULL, movie_test_signaller, NULL));
+    pthread_mutex_lock(&event_mu);
+    while (!output.entered) pthread_cond_wait(&event_cv, &event_mu);
+    pthread_mutex_unlock(&event_mu);
+    pthread_mutex_lock(&flush_mu); flush_reset_continue = 1; pthread_cond_broadcast(&flush_cv);
+    while (!flush_fence_entered && !flush_done) pthread_cond_wait(&flush_cv, &flush_mu);
+    assert(!flush_done && !d.noutq);   // queue reset alone must not let Flush return
+    pthread_mutex_unlock(&flush_mu);
+    pthread_mutex_lock(&event_mu); assert(!output.count); output.release = 1; pthread_cond_broadcast(&event_cv); pthread_mutex_unlock(&event_mu);
+    movie_test_wait(&output);
+    assert(!pthread_join(flusher, NULL) && flush_done && output.count == 1);
+    assert(!pthread_cancel(signaller) && !pthread_join(signaller, NULL));
+    md_defer_drop(&d); G.signal = NULL;
+    pthread_mutex_destroy(&d.mu); pthread_mutex_destroy(&d.dmu);
+    puts("movie Flush: already-ready output notification completes before Flush returns, even after its initial event drop");
+}
+static void output_after_flush_reset(void) {
+    mdec_t d = {.type = MD_TYPE_AVC, .fmt = MD_FMT_NV12, .nout = 2, .started = 1, .fmt_sent = 1, .w = 16, .h = 16};
+    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL);
+    pthread_mutex_init(&d.wmu, NULL); pthread_cond_init(&d.wcv, NULL);
+    assert(!pthread_create(&d.wk, NULL, md_worker, &d));
+    d.avc = synthetic_avc();
+    movie_test_event output = {0}; d.ev[1] = &output; G.signal = movie_test_signal;
+    assert(!g_ndfq); g_dfthr = 1;
+
+    // Let Flush reset the decoder, then hold it at the fence. Keep the signaller
+    // idle until Flush returns so a second drop would lose the new wake.
+    flush_reset_continue = pause_flush_fence = 1;
+    flush_fence_entered = flush_done = 0;
+    pthread_t flusher; assert(!pthread_create(&flusher, NULL, ordered_flush, &d));
+    pthread_mutex_lock(&flush_mu);
+    while (!flush_fence_entered && !flush_done) pthread_cond_wait(&flush_cv, &flush_mu);
+    assert(!flush_done);
+    pthread_mutex_unlock(&flush_mu);
+
+    void *self[2] = {NULL, &d}; int idx, left; int64_t pts; uint32_t flags;
+    queue_picture(d.avc);
+    assert(!h_movie_AcqIn(self, &idx, &left));
+    assert(!h_movie_SendIn(self, idx, 0, 0, 777, 4));
+    assert(d.noutq == 2 && g_ndfq == 1);
+    pthread_mutex_lock(&flush_mu);
+    flush_fence_continue = 1; pthread_cond_broadcast(&flush_cv);
+    pthread_mutex_unlock(&flush_mu);
+    assert(!pthread_join(flusher, NULL));
+
+    pthread_t signaller; assert(!pthread_create(&signaller, NULL, movie_test_signaller, NULL));
+    movie_test_wait(&output);
+    assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left) && d.out[idx].pic && !flags && left == 1);
+    assert(md_rel(&d, idx));
+    movie_test_wait(&output);
+    assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left) && pts == 777 && flags == 4 && !left);
+    assert(md_rel(&d, idx));
+    assert(!pthread_cancel(signaller) && !pthread_join(signaller, NULL));
+    md_defer_drop(&d); G.signal = NULL;
+    synthetic_free(d.avc); d.avc = NULL;
+    md_job(&d, MDJ_QUIT); pthread_join(d.wk, NULL);
+    for (int i = 0; i < MD_NOUT; i++) free(d.out[i].frm);
+    pthread_mutex_destroy(&d.mu); pthread_mutex_destroy(&d.dmu);
+    pthread_mutex_destroy(&d.wmu); pthread_cond_destroy(&d.wcv);
+    puts("movie Flush: a fresh picture and EOS queued after reset still signal after Flush returns");
+}
+static void output_notifications(void) {
+    mdec_t d = {.type = MD_TYPE_AVC, .started = 1, .nout = 4};
+    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL); pthread_mutex_init(&d.wmu, NULL); pthread_cond_init(&d.wcv, NULL);
+    assert(!pthread_create(&d.wk, NULL, md_worker, &d));
+    movie_test_event output = {0}, fence = {0};
+    d.ev[1] = &output;
+    mdec_t marker = {.started = 1}; marker.ev[3] = &fence; pthread_mutex_init(&marker.mu, NULL);
+    G.signal = movie_test_signal;
+    assert(!g_ndfq); g_dfthr = 1;   // explicitly run the real body below, not the guest-spawn stub
+    void *self[2] = {NULL, &d}; int idx, left; int64_t pts; uint32_t flags;
+    output_batch(&d);
+    for (int i = 0; i < 4; i++) md_defer_at(&d, 1, now_ns());   // a completed batch coalesces before delivery
+    assert(g_ndfq == 1);
+    pthread_t signaller; assert(!pthread_create(&signaller, NULL, movie_test_signaller, NULL));
+    for (int i = 0; i < 4; i++) {
+        movie_test_wait(&output);
+        assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left));
+        assert(idx == i && pts == i * 33333 && left == 3 - i && flags == (i == 3 ? 4u : 0u));
+        assert(md_rel(&d, idx));
+    }
+    assert(h_movie_AcqOut(self, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && idx == -1 && !left);
+    md_defer_at(&marker, 3, now_ns()); movie_test_wait(&fence);
+    assert(output.count == 4 && !output.signalled);
+    // An acquisition can leave mu before Flush/Stop, but reach the deferred
+    // queue afterwards. The old output notification must not survive either.
+    for (int stop = 0; stop < 2; stop++) {
+        output_batch(&d);
+        pthread_mutex_lock(&rearm_mu); rearm_waiting = rearm_continue = 0; pthread_mutex_unlock(&rearm_mu);
+        pthread_t acquirer; assert(!pthread_create(&acquirer, NULL, delayed_acquire, &d));
+        pthread_mutex_lock(&rearm_mu);
+        while (!rearm_waiting) pthread_cond_wait(&rearm_cv, &rearm_mu);
+        pthread_mutex_unlock(&rearm_mu);
+        assert(!(stop ? h_movie_Stop(self) : h_movie_Flush(self)));
+        pthread_mutex_lock(&rearm_mu); rearm_continue = 1; pthread_cond_broadcast(&rearm_cv); pthread_mutex_unlock(&rearm_mu);
+        assert(!pthread_join(acquirer, NULL));
+        md_defer_at(&marker, 3, now_ns()); movie_test_wait(&fence);
+        assert(output.count == 4 && !output.signalled && !d.noutq);
+        assert(h_movie_AcqOut(self, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && !left);
+    }
+    // A stopped decoder with a stale queued index neither hands it out nor signals.
+    output_batch(&d);
+    assert(h_movie_AcqOut(self, &idx, &pts, &flags, &left) == MD_NO_OUTPUT && !left);
+    md_defer_at(&d, 1, now_ns());
+    md_defer_at(&marker, 3, now_ns()); movie_test_wait(&fence);
+    assert(output.count == 4 && !output.signalled);
+    assert(!pthread_cancel(signaller) && !pthread_join(signaller, NULL));
+    md_defer_drop(&d); md_defer_drop(&marker); G.signal = NULL; pthread_mutex_destroy(&marker.mu);
+    md_job(&d, MDJ_QUIT); pthread_join(d.wk, NULL);
+    pthread_mutex_destroy(&d.mu); pthread_mutex_destroy(&d.dmu); pthread_mutex_destroy(&d.wmu); pthread_cond_destroy(&d.wcv);
+    puts("movie output events: coalesced batch and EOS drain one per event; empty, stopped and concurrent Flush/Stop stay quiet");
+}
 // End of stream with three pictures held for reordering (POC type 0): an end-of-stream packet without data, nout output slots of which the client
 // returns each one it takes. Every picture comes out without the end-of-stream flag, then one output without a picture carries it with the packet's time
 static void drain(int nout) {
@@ -471,6 +672,7 @@ static void color_keys(void) {
 }
 
 int main(void) {
+    output_notifications(); output_flush_fence(); output_after_flush_reset();
     dpb_order(); dpb_reordered_b(); dpb_limits(); pump_due();
     puts("AVC DPB: reference occupancy drives output, with variable/zero PTS, POC and frame_num wraps, IDR/Flush, reordered B-pictures, bounds, unsupported marking and slot-release pumping");
     loop_order(1); loop_order(0);

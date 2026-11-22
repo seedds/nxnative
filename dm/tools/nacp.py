@@ -32,6 +32,21 @@ def name(path):
     return ''
 
 
+def display_version(path):
+    """The raw NACP display version (0x10 bytes at 0x3060, e.g. '1.0.2 b723'), as Horizon's nn::oe::GetDisplayVersion returns it; a missing file or non-printable value returns an empty string"""
+    p = Path(path)
+    return display_version_data(p.read_bytes()) if p.is_file() else ''
+
+
+def display_version_data(data):
+    """Read the raw NACP display version from NACP bytes (0x10 bytes at 0x3060, NUL-terminated)."""
+    if len(data) < 0x3070: return ''
+    raw = data[0x3060:0x3070].split(b'\0', 1)[0]
+    try: s = raw.decode('ascii').strip()
+    except UnicodeDecodeError: return ''
+    return s if s and all(0x20 <= ord(c) < 0x7f for c in s) else ''
+
+
 def version(path):
     """The display version (0x10 bytes at 0x3060, e.g. 1.2.1), cut to what iOS accepts as a bundle version (up to three dot-separated integers); a missing file or no leading number returns an empty string"""
     p = Path(path)

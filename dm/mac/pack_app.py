@@ -28,6 +28,7 @@ MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ 
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
 # app makes no pulling bases, a hybrid draw has no stand-in and a new pipeline compiles on the submit thread (build_ipa.sh copies them into the IPA the same way)
 TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
+RUNTIME_TABLES = ('game.tsv', 'shader_facts.tsv', 'bf_want.tsv', 'dual_want.tsv')
 PSO_FILES = ('*.mtl4a', '*-prewarm-*.keys', 'prebuilt.tsv', 'rest_pairs.tsv', 'archive.tsv', 'prewarm.tsv')   # what the app takes of pso_offline.py's output folder
 EXE = 'nxnative'   # the launcher's file name (Contents/MacOS/nxnative)
 ICON_SIZES = (16, 32, 128, 256, 512)
@@ -379,6 +380,39 @@ def write_key(key_file, value):   # whole or not at all
         key_tmp.unlink(missing_ok=True)
 
 
+def runtime_sources():
+    """Files used by the shader source worker, located as they are in a checkout."""
+    gfx = HERE.parent / 'gfx'
+    tools = gfx / 'tools'
+    sys.path.insert(0, str(tools))
+    import dmsh_chain
+    files = {(gfx / name).resolve() for name in dmsh_chain.FILES}
+    files.update(tools.glob('dmsh_*.py'))
+    files.update(tools / name for name in ('shader_regressions.py', 'tool_lock.py', 'uepak.py',
+                                           'spirv_cross_bin/spirv-cross', 'spirv_cross_bin/LICENSE',
+                                           'dmsh_xlate_bin/dmsh_xlate'))
+    files.update(p for p in (tools / 'spirv_cross_bin/LICENSES').iterdir() if p.is_file())
+    files.update(HERE.parent / 'tools' / name for name in ('aes.py', 'nso_syms.py', 'romfs.py', 'romfs_image.py',
+                                                          'shader_cache.py', 'shader_lib.py'))
+    files.update(HERE.parent / 'games' / name for name in ('game.py', 'profile_guess.py'))
+    files.add(HERE.parent / 'third_party/ryujinx/LICENSE.txt')
+    files.add(Path(dmsh_chain.HEADER))
+    return sorted(files)
+
+
+def copy_runtime(python, sources, destination):
+    portable = destination / 'python'
+    shutil.copytree(python, portable, symlinks=True, ignore=shutil.ignore_patterns('__pycache__', 'site-packages'))
+    prefix = run([portable / 'bin/python3', '-B', '-E', '-c', 'import sys; print(sys.base_prefix)']).strip()
+    if Path(prefix).resolve() != portable.resolve():
+        raise SystemExit(f'the runtime Python must be relocatable: copied interpreter resolved its base to {prefix}')
+    repo = HERE.parent.parent
+    for source in sources:
+        copy_path = destination / source.relative_to(repo)
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, copy_path)
+
+
 def pack(a):
     out = Path(a.out).resolve()
     if out.suffix != '.app': raise SystemExit(f'the output must end in .app: {out}')
@@ -401,6 +435,20 @@ def pack(a):
         for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
+        runtime_python = getattr(a, 'runtime_python', None)
+        runtime = []
+        if runtime_python:
+            runtime_python = Path(runtime_python).resolve()
+            if not is_chain_library(Path(a.msl)) or not (runtime_python / 'bin/python3').is_file():
+                raise SystemExit('--runtime-python requires NVN shader libraries and a relocatable Python with bin/python3')
+            if a.program:
+                raise SystemExit('the bundled shader compiler currently supports single-program apps')
+            runtime = runtime_sources()
+            runtime_tables = [Path(a.tables) / name for name in RUNTIME_TABLES if (Path(a.tables) / name).is_file()]
+            if len(set(p.name for p in runtime_tables) & {'game.tsv', 'shader_facts.tsv'}) != 2:
+                raise SystemExit('the bundled shader compiler requires game.tsv and shader_facts.tsv')
+            tables += runtime_tables
+            files += runtime_tables + runtime
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
         programs = []
         for row in a.program or []:
@@ -424,6 +472,7 @@ def pack(a):
         romfs_rows = tree(a.romfs)
         inputs = {'options': vars(a), 'files': [as_packed(file_row(p, True), last.get(str(p)), moved) if p in large else file_row(p) for p in files + sources],
                   'trees': [(p, romfs_rows if p == a.romfs else inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, str(Path(a.romfs).parent / PROGRAM_ROMFS), *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                  'runtime_python': inventory(runtime_python) if runtime_python else None,
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
                             str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
@@ -460,6 +509,9 @@ def pack(a):
     shutil.copy(a.host, mac / 'dmhost')   # data and mode, not the build's extended attributes (copy2 would carry them into the app)
     copy(mods, dm, clone['mods'])
     if tables: copy(tables, dm, False)
+    if runtime:
+        step('bundled NVN shader compiler')
+        copy_runtime(runtime_python, runtime, res / 'nvn-compiler')
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
@@ -552,6 +604,7 @@ def parse(argv):
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
+    ap.add_argument('--runtime-python', help='bundle the NVN shader compiler with this relocatable Python installation')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')

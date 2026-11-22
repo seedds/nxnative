@@ -377,6 +377,19 @@ class StageMemory(Translated):
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
 
+    def test_spilled_stage_input_uses_its_own_shared_memory_for_all_widths(self):
+        # With stage_input_words > 0, ISBERD modes 0x38 (B32), 0x34 (U16) and 0x30 (U8) read from dm_stage_in at byte offset [Ra + imm], separate from stage_memory (even alongside stage[4..6] vertex records).
+        for mode, offset, bits in ((0x38, 0x20, 32), (0x34, 0x22, 16), (0x30, 0x23, 8)):
+            read = (self.INPUT[0] & ~0xff00 | mode << 8, self.INPUT[1] & ~(0xffffff << 40) | offset << 40)
+            src = self.translate(inst(*read) + inst(*self.KEEP_R19) + inst(*EXIT),
+                                 stage_memory=[0, 0x10, 0x10, 0x400, 0x3f0, 6, 128 * 24], stage_input_words=6976, shared=0x800)
+            self.assertIn('threadgroup spvUnsafeArray<uint, 512>', src)
+            self.assertIn('threadgroup spvUnsafeArray<uint, 6976>', src)
+            self.assertIn('[8]', src)   # 0x20 >> 2 = 8 (no stage[1] offset added)
+            if bits < 32:
+                self.assertRegex(src, rf'uint\(as_type<int>\(\w+\)\) >> uint\({(offset & 3) * 8}\)')
+                self.assertIn(f'& {(1 << bits) - 1};', src)
+
     def test_subword_inputs_are_unsigned_and_keep_the_byte_offset(self):
         # Fast Fusion reads packed U16 entries with mode 0x34. The high half of word 12 must stay unsigned, as must an U8 input at its own byte within the word.
         for mode, offset, bits in ((0x34, 0x22, 16), (0x30, 0x23, 8)):

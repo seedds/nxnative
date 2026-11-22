@@ -315,7 +315,7 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                                 'main imports nvnBootstrapLoader'),
             'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy), captured by booting it on the Mac'),
             'gl_fixed': (gl_fixed, 'the host provides the fixed pipeline and the GL shader table is empty'),
-            'gl_capture': (gl and not gl_fixed and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
+            'gl_capture': (gl and not gl_fixed and not gl_files, 'no standalone GLSL shader files in the RomFS: the game may assemble its shaders at run time (LÖVE: Balatro), captured by booting it on the Mac'),
             'glslc_capture': (not vulkan and not gl and bool(glsl_src or romfs_glsl) and 'glslcCompile' in imports and bool(glslc_mods) or nro_glslc,
                               f'the NROs the game loads call glslcCompile in {", ".join(glslc_mods)}: shaders compiled at run time (Portal), captured by booting it on the Mac' if nro_glslc and not ((glsl_src or romfs_glsl) and 'glslcCompile' in imports) else
                               f'the RomFS holds {romfs_glsl} GLSL source files and main calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Turrican Anthology Vol. I), captured by booting it on the Mac' if romfs_glsl and not glsl_src else
@@ -379,9 +379,14 @@ def build_sources(exefs, romfs, modules):
                 with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
     gl_files = 0
     if gl_names or fixed_calls:
-        from gl_shaders import paired_sources
+        from gl_shaders import is_standalone_glsl, paired_sources, text_of
         for d, _, names in os.walk(romfs):
-            gl_files += sum(n.lower().endswith(GL_FILES) for n in names) + len(paired_sources(d, names))
+            for n in names:
+                low = n.lower()
+                if low.endswith(('.mvgl', '.vert', '.frag')): gl_files += 1
+                elif low.endswith('.glsl'):
+                    with open(os.path.join(d, n), 'rb') as f: gl_files += is_standalone_glsl(text_of(f.read()))
+            gl_files += len(paired_sources(d, names))
     oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
     for d, _, names in os.walk(romfs):
         for n in names:

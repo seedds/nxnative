@@ -174,6 +174,10 @@ class GlslSources(unittest.TestCase):
         s = pg.shader_sources({'eglCreateWindowSurface'}, 0, [], 0, 0, gl_names=1, gl_src=2, gl_files=6)
         self.assertEqual(s['graphics'][0], 'gl'); self.assertFalse(s['gl_capture'][0])
 
+    def test_embedded_main_glsl_alone_still_enables_gl_capture(self):   # embedded movie/utility shaders in main must not suppress capture when RomFS has no standalone shaders
+        s = pg.shader_sources({'eglCreateWindowSurface'}, 0, [], 0, 0, gl_names=1, gl_src=3, gl_files=0)
+        self.assertEqual(s['graphics'][0], 'gl'); self.assertTrue(s['gl_capture'][0])
+
 
 class Npdm(unittest.TestCase):
     def npdm(self, flags):

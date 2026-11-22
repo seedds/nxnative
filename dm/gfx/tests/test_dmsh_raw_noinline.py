@@ -2,7 +2,7 @@
 """One copy of a raw global memory lookup's search (dmsh_rewrite.py raw_noinline): the translator's dmsh_raw_find (GlobalToStorage GetRawFindFunction), as spirv-cross writes it, is
 marked noinline outside mesh stages; final mesh code keeps it inline, including composed code whose inputs were already rewritten. The access helpers that check the last entry and
 call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the
-translator's own lookups on the GPU in both forms."""
+translator's own lookups on the GPU in both forms. Final mesh code keeps nested subgroup helpers out of line and passes their read-only subgroup inputs by value."""
 from pathlib import Path
 import re
 import shutil
@@ -67,6 +67,21 @@ kernel void main0(const device _29& cp_s2 [[buffer(0)]], device uint* out [[buff
 '''
 SRC = HEAD + FIND + OTHER + helper('_63', 'dmsh_raw_find') + helper('_64', 'dmsh_raw_find') + helper('_71', '_70') + MAIN
 
+SUBGROUP_HELPERS = f'''
+{INLINE}
+int subgroup_leaf(thread uint& gl_SubgroupInvocationID, thread int& result)
+{{
+    result = int(gl_SubgroupInvocationID);
+    return result;
+}}
+
+{INLINE}
+int subgroup_caller(thread uint& gl_SubgroupInvocationID, thread uint4& gl_SubgroupLtMask, thread int& result)
+{{
+    return subgroup_leaf(gl_SubgroupInvocationID, result) + int(gl_SubgroupLtMask.x);
+}}
+'''
+
 
 def attribute(src, name):
     return re.search(r'\n([^\n]*)\nint %s\(' % name, src).group(1)
@@ -101,17 +116,16 @@ class RawNoinline(unittest.TestCase):
     def test_mesh_subgroup_noinline(self):
         one_line = '\nstatic inline __attribute__((always_inline)) float dm_zsnap(float z) { return z; }\n'
         body = '\nstatic inline __attribute__((always_inline)) void dm_stage_body(uint gl_SubgroupInvocationID) {}\n'
-        subgroup = SRC.replace('int _71(thread const int&', 'int _71(thread uint& gl_SubgroupInvocationID, thread const int&')
-        src = raw_noinline(subgroup, stage='ms') + one_line + body
+        unchanged = raw_noinline(SRC, stage='ms') + one_line + body
+        by_value = SUBGROUP_HELPERS.replace('thread uint& gl_SubgroupInvocationID', 'uint gl_SubgroupInvocationID')
+        by_value = by_value.replace('thread uint4& gl_SubgroupLtMask', 'uint4 gl_SubgroupLtMask')
+        src = unchanged + SUBGROUP_HELPERS
+        expected = unchanged + by_value.replace(INLINE, NOINLINE)
+
         out = mesh_subgroup_noinline(src)
-        self.assertEqual(attribute(out, 'dmsh_raw_find'), INLINE)
-        self.assertEqual(attribute(out, '_71'), NOINLINE)
-        for name in ('_63', '_64', '_70'):
-            self.assertEqual(attribute(out, name), INLINE, name)
-        self.assertIn(one_line, out)
-        self.assertIn(body, out)
+        self.assertEqual(out, expected)
         self.assertEqual(mesh_subgroup_noinline(out), out)
-        self.assertEqual(out.replace(NOINLINE, INLINE), src)
+        self.assertEqual(mesh_subgroup_noinline(unchanged + SUBGROUP_HELPERS.replace(INLINE, NOINLINE)), expected)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):

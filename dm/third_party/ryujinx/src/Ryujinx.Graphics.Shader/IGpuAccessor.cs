@@ -62,6 +62,14 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// Words of a mesh shader's stage input (ISBERD modes 0x30 / 0x34 / 0x38) kept in its own shared memory (dm_stage_in) apart from stage_memory; 0 when it stays in stage_memory.
+        /// </summary>
+        int QueryAmpereStageInputWords()
+        {
+            return 0;
+        }
+
+        /// <summary>
         /// Gets a span of the specified memory location, containing shader code.
         /// </summary>
         /// <param name="address">GPU virtual address of the data</param>

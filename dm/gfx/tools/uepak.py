@@ -375,30 +375,57 @@ class Pak:
         off = r.take('<I' if v >> 31 & 1 else '<Q'); raw = r.take('<I' if v >> 30 & 1 else '<Q')
         size = r.take('<I' if v >> 29 & 1 else '<Q') if meth else raw
         cur, blocks = 53 + (4 + 16 * nblk if meth else 0), []
-        if nblk == 1 and not bsz: bsz = raw   # FINAL FANTASY RESONANCE's pak (UE 5.6) stores block size 0 for a file of one block
+        if nblk == 1: bsz = raw   # a single-block entry always holds raw bytes: UE 4.26 stores (raw >> 11) & 0x3f (truncated to 2 KB, e.g. 0x3800 for a ~15 KB file), UE 5.6 stores 0
         if nblk == 1 and not enc: blocks = [(cur, size)]
         else:
             for _ in range(nblk): s = r.take('<I'); blocks.append((cur, s)); cur += (s + 15) & ~15 if enc else s
         if meth > len(self.methods) or meth and not self.methods[meth - 1]: raise ValueError(f'{self.path}: {path} names compression method {meth}, which the footer does not')
         return dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=enc, block_size=bsz, blocks=blocks)
     def read(self, path, decode=None):
-        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
+        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib, LZ4 and Zstd blocks are decoded here (OCTOPATH TRAVELER II: Zlib, BRAVELY DEFAULT II: Zstd); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
         if not e['method']: return self.read_at(cast(int, e['off']) + self.stored_header, e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
+        elif e['method'] == 'Zstd':
+            zstd = zstd_mod()
+            decode = zstd_block; bad = (zstd.ZstdError,)
         elif e['method'] == 'LZ4': import lz4.block; decode = lambda b, k: lz4.block.decompress(b, uncompressed_size=lz4_raw(b, k, path)); bad = (lz4.block.LZ4BlockError,)
         elif not decode: raise ValueError(f'{path} is {e["method"]}-compressed in the pak')
-        out, left = [], e['raw']
+        raw = cast(int, e['raw']); out, left = [], raw
+        if left < 0: raise ValueError(f'{self.path}: {path} has negative raw size {left:#x}')
+        bsz = left if len(e['blocks']) == 1 else cast(int, e['block_size'])
+        if len(e['blocks']) > 1 and bsz <= 0: raise ValueError(f'{self.path}: {path} has non-positive block size {bsz:#x}')
         for i, (s, n) in enumerate(e['blocks']):
-            k = min(left, e['block_size'])
+            k = min(left, bsz)
             try: b = decode(self.read_at(e['off'] + s, n, e['encrypted']), k)
             except bad as x: raise ValueError(f'{self.path}: {path} block {i} does not decode ({x})') from None
             if len(b) != k: raise ValueError(f'{self.path}: {path} block {i} decodes to {len(b):#x} bytes, not {k:#x}')
             out.append(b); left -= k
+        if left: raise ValueError(f'{self.path}: {path} decoded {raw - left:#x} bytes, not {raw:#x}')
         return b''.join(out)
+
+_ZSTD = None
+def zstd_mod():
+    global _ZSTD
+    if _ZSTD is None:
+        try: from compression import zstd
+        except ImportError:
+            import importlib
+            zstd = importlib.import_module('backports.zstd')
+        _ZSTD = zstd
+    return _ZSTD
+
+def zstd_block(b, k):
+    """One Zstandard frame bounded by the pak block's raw size, including frames without a content size."""
+    zstd = zstd_mod()
+    if k < 0: raise zstd.ZstdError(f'negative raw size {k:#x}')
+    z = zstd.ZstdDecompressor(); out = z.decompress(b, max_length=k + 1)
+    if not z.eof or z.unused_data or len(out) != k:
+        raise zstd.ZstdError(f'the frame does not end at its {k:#x} raw bytes')
+    return out
 
 def zlib_block(b, k):
     """A Zlib block of k raw bytes: inflated no further than k (a damaged stream could inflate about 1,000 times its size), short when the stream ends early"""

@@ -365,7 +365,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             LsSize2 size,
             Operand srcA,
             int rd,
-            int offset)
+            int offset,
+            int memoryId = -1)
         {
             if (size > LsSize2.B128)
             {
@@ -373,9 +374,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            int id = storageKind == StorageKind.LocalMemory
-                ? context.ResourceManager.LocalMemoryId
-                : context.ResourceManager.SharedMemoryId;
+            int id = memoryId >= 0
+                ? memoryId
+                : storageKind == StorageKind.LocalMemory
+                    ? context.ResourceManager.LocalMemoryId
+                    : context.ResourceManager.SharedMemoryId;
             bool isSmallInt = size < LsSize2.B32;
 
             int count = size switch

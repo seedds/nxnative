@@ -113,6 +113,7 @@ uint64_t now_ns(void) { return 1; }
 uint64_t mtl_present_count(void) { return 0; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_fstep_settle(void) {}
 void dm_audio_suspend(int on) { (void)on; }
 void dm_audio_reset(void) {}
 void dm_audio_route_changed(void) {}

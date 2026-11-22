@@ -61,7 +61,8 @@ static UILabel *front_ios_fps_label(void);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
     screen_refresh();   // an iPad window moved to another display lays out again (the display scale trait above)
-    l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    CGSize px = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    if (!CGSizeEqualToSize(l.drawableSize, px)) { l.drawableSize = px; dm_fstep_settle(); }
 }
 @end
 static void tv_attach(void);

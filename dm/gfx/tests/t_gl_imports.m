@@ -1110,6 +1110,24 @@ int main(int argc, char **argv) {
     void (*getiv)(GLuint, GLenum, GLint *) = import("glGetShaderiv");
     GLint value = 0; getiv(sh, GL_SHADER_TYPE, &value); assert(value == GL_VERTEX_SHADER);
     getiv(sh, GL_SHADER_SOURCE_LENGTH, &value); assert(value == strlen(text) + 1);
+    void (*getsrc)(GLuint, GLsizei, GLsizei *, GLchar *) = import("glGetShaderSource");
+    GLsizei slen = -1; GLchar sbuf[32] = {0};
+    getsrc(sh, sizeof sbuf, &slen, sbuf); assert(slen == (GLsizei)strlen(text) && !strcmp(sbuf, text));
+    GLchar small[5] = {'x', 'x', 'x', 'x', 'x'}; slen = -1;
+    getsrc(sh, sizeof small, &slen, small); assert(slen == 4 && !strcmp(small, "void"));
+    getsrc(sh, sizeof small, NULL, small); assert(!strcmp(small, "void"));
+    slen = 99; getsrc(sh, sizeof sbuf, &slen, NULL); assert(slen == 0);
+    slen = 99; small[0] = 'z'; getsrc(sh, 0, &slen, small); assert(slen == 0 && small[0] == 'z');
+    GLuint empty = create(GL_FRAGMENT_SHADER);
+    getiv(empty, GL_SHADER_SOURCE_LENGTH, &value); assert(value == 0);
+    slen = 99; sbuf[0] = 'z'; getsrc(empty, sizeof sbuf, &slen, sbuf); assert(slen == 0 && sbuf[0] == 0);
+    h_glDeleteShader(empty);
+    assert(h_glGetError() == GL_NO_ERROR);
+    slen = 7; getsrc(sh, -1, &slen, sbuf); assert(h_glGetError() == GL_INVALID_VALUE && slen == 7);
+    getsrc(999999, sizeof sbuf, &slen, sbuf); assert(h_glGetError() == GL_INVALID_VALUE && slen == 7);
+    GLuint badpr = h_glCreateProgram();
+    getsrc(badpr, sizeof sbuf, &slen, sbuf); assert(h_glGetError() == GL_INVALID_OPERATION && slen == 7);
+    h_glDeleteProgram(badpr);
     // The import and loader paths must both keep the wrapper, rather than exposing the Metal implementation's small-stack entry.
     assert(import("glCompileShader") == (void *)h_glCompileShader_bs);
     assert(import("glClear") == (void *)h_glClear_bs);

@@ -852,9 +852,9 @@ def check_aarch64(exefs, what, hint=''):   # main.npdm's 64-bit instruction flag
 def check_versions_aarch64(dirs, logs, g, name):   # every extracted version of a game that has a profile; names the version and the registered ones that can be packed instead
     for ver, d in dirs.items():
         xlog = logs / f'extract_{ver}.log'
-        dv = re.search(r'display version (\S+)', xlog.read_text(errors='replace')) if xlog.is_file() else None
+        dv = re.search(r'display version ([^\r\n]+)', xlog.read_text(errors='replace')) if xlog.is_file() else None
         other = [f'{v} {b["display"]}' for v, b in g.builds().items() if v != ver]
-        check_aarch64(d / 'ExeFS', f'{name} {ver}{f" ({dv.group(1)})" if dv else ""}',
+        check_aarch64(d / 'ExeFS', f'{name} {ver}{f" ({dv.group(1).strip()})" if dv else ""}',
                       f'; game profile {g.id} registers {", ".join(other)}: pack {"that version" if len(other) == 1 else "one of those versions"} (-p / PACKAGE) with its update in the folder' if other else '')
 
 
@@ -877,12 +877,12 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     else: run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), logs / 'extract.log')
     swap_in(tmp, ex)
     PROG.stage('survey: code modules', step='reading')
-    if files:
-        dv = nacp.version(ex / 'control.nacp')
-        if nup and not dv: dv = pack_nup.display_label(upd or fam['base'])
-    else:
-        m = re.search(r'display version (\S+)', (logs / 'extract.log').read_text(errors='replace'))
-        dv = m.group(1) if m else ''
+    dv = nacp.display_version(ex / 'control.nacp')
+    if not dv:
+        if nup: dv = pack_nup.display_label(upd or fam['base'])
+        elif not files:
+            m = re.search(r'display version ([^\r\n]+)', (logs / 'extract.log').read_text(errors='replace'))
+            dv = m.group(1).strip() if m else ''
     title = nacp.name(ex / 'control.nacp') or (nsp_dir.name if dump else '')   # a dump has no control data: its folder names the game
     check_aarch64(ex / 'ExeFS', f'{title or "?"} ({app:016X})')
     F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv'); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
@@ -1111,7 +1111,7 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_la
     # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1). An unregistered NUP build can use its own numeric label.
     main = d / 'ExeFS/main'; bid = build_id(main) if main.exists() else None
     known = next((b['display'] for b in g.builds().values() if bid and b.get('main') == bid and b.get('display') not in (None, '', '?')), None)
-    T, disp = '\t', nacp.version(d / 'control.nacp') or known or nup_label or '?'
+    T, disp = '\t', nacp.display_version(d / 'control.nacp') or known or nup_label or '?'
     add = pg.main_modules(d / 'ExeFS', mods) if not shader_only and (d / 'ExeFS/main').exists() else {}   # a module's slot can change between versions: what main imports and the profile's list leaves out (Absolum 1.2.1's movie module). The host loads what the row names
     mods = sorted({*mods, *add}, key=pg.load_order) if add else mods
     row = T.join(['build', ver, disp] + [f'{m}={build_id(d / "ExeFS" / m)}' for m in mods if (d / 'ExeFS' / m).exists()])

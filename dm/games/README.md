@@ -104,6 +104,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](01006C300E9F0000/README.md) | `01006C300E9F0000` | 1.0.4 | 7.3.2 | Unreal Engine 4.18 | NVN |
 | [EA SPORTS FC 27](0100C49025D3E000/README.md) | `0100C49025D3E000` | 1.8d.310c | 22.2.0 | Frostbite 2025.1.2 (its NVN renderer in an NRO) | NVN |
 | [Farming Simulator 26: Nintendo Switch Edition](0100D440269E8000/README.md) | `0100D440269E8000` | 1.0.1.0 | 20.5.4 | GIANTS Engine | NVN |
+| [Fate/hollow ataraxia REMASTERED](010070E022546000/README.md) | `010070E022546000` | 1.0.2 | 16.2.6 | TYPE-MOON's Fuzz engine (`smash::fw`) | OpenGL |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](0100CE4010AAC000/README.md) | `0100CE4010AAC000` | 1.0.3 | 8.2.1 | Unity 2018.4.2f1 IL2CPP, FMOD | NVN |
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |

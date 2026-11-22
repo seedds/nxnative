@@ -2818,12 +2818,23 @@ GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
         case GL_COMPILE_STATUS: *v = g_capture_compiler ? s->compiled : 1; return;   // normal runs report missing library entries without aborting the game
         case GL_INFO_LOG_LENGTH: *v = 0; return;
         case GL_SHADER_TYPE: *v = s->type; return;
-        case GL_SHADER_SOURCE_LENGTH: *v = (GLint)s->len + 1; return;
+        case GL_SHADER_SOURCE_LENGTH: *v = s->len ? (GLint)s->len + 1 : 0; return;
         case GL_DELETE_STATUS: *v = s->deleted; return;
     }
     RED1("glGetShaderiv(%#x) not implemented", p); *v = 0;
 }
 GL(glGetShaderInfoLog, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *log) { (void)sh; if (len) *len = 0; if (log && size > 0) log[0] = 0; }
+GL(glGetShaderSource, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *src) {   // the source glShaderSource kept (Fate/hollow ataraxia REMASTERED reads it back after compiling)
+    if (!SP_CHECK(sh, 0)) return;
+    if (size < 0) { gl_error(GL_INVALID_VALUE); return; }
+    shader_t *s = shader_of(sh);
+    if (len) *len = 0;
+    if (!src || size == 0) return;
+    if (!s->src) { src[0] = 0; return; }
+    size_t c = s->len < (size_t)size - 1 ? s->len : (size_t)size - 1;
+    memcpy(src, s->src, c); src[c] = 0;
+    if (len) *len = (GLsizei)c;
+}
 static void shader_free(GLuint sh) { shader_t *s = &g_sps[sh]->s; free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL; }
 static void shader_release(GLuint *slot) {   // a program lets go of the shader in one of its stages
     GLuint sh = *slot; shader_t *s = shader_of(sh); *slot = 0;

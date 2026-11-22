@@ -2315,7 +2315,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** both entry points are in the GL import table and pack their stack arguments before the big-stack entry (`compressed_impl`, `hle_gl.m`); `glCompressedTexSubImage2D` (a 2D texture or a cube face, one layer) shares the sub-image path. A pending array level holds every layer, each with its own rounded block rows, mips smaller than a block included; the layer count is the same at every level. A sub-image into a texture not made yet goes into the level's pending copy (zeros first when the level was allocated with no data), so the texture is made with every level given before its first use, whatever order the game allocates and fills them in; into a made texture it goes through `tex_write`, in command order. An allocation with no data needs no matching `imageSize`. Other targets (`GL_TEXTURE_3D`, cube-map arrays) and compressed formats the layer does not map are the host's gaps: a red line, no GL error.
 - **Limitations:** compressed volume and cube-map-array targets and uploads from a pixel-unpack buffer are not implemented. `glTexImage3D` still gives level 0 only.
 - **Check:** `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` (`test_compressed_arrays`): BC7 sRGB arrays of two layers and three levels, partial and edge sub-images, an upload after a draw used the texture, immutable storage, levels allocated with no data and filled one after the other, and the red-line gaps.
-- **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, v851968, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416). Not run in the game: it also needs sampler objects ([#2724](https://github.com/seedds/nxnative/issues/2724)) and other GL calls the issue lists, and no profile is registered. [DOOM 3](../../dm/games/010029D00E740000/README.md) streams its DXT images with `glCompressedTexSubImage2DARB`.
+- **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, v851968, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416). Its startup also exposed [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations). [DOOM 3](../../dm/games/010029D00E740000/README.md) streams its DXT images with `glCompressedTexSubImage2DARB`.
 
 ### Extensions a GL renderer checks for, and its ARB names
 
@@ -2499,6 +2499,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): `default_ps.glsl` declares `T1` for code under `#if 0`. Reported in [PR #2727](https://github.com/seedds/nxnative/pull/2727).
 - **Check:** `test_gl_shaders.py`.
 
+### Inactive GL uniforms get locations
+
+- **Symptom:** `glUniform4fv` crashes in `uni_write` with a null source during startup. The game skips the upload when `glGetUniformLocation` returns `-1`.
+- **Cause:** SPIRV-Cross's default uniform block layout includes declared members the shader never reads. The shader table exposed all of them, so linking gave unused uniforms valid locations.
+- **Fix:** `gl_shaders.py` uses glslang's active-uniform reflection to select the default block members it exposes. SPIRV-Cross still supplies their Metal offsets, array strides and block size. Rebuild the GL shaders to update the table.
+- **Check:** `test_gl_shaders.py` checks that unused uniforms and struct members are omitted and that active arrays and named blocks keep their layout.
+- **Found on:** Tomb Raider I–III Remastered 1.1.4 ([issue #2416](https://github.com/seedds/nxnative/issues/2416)). The startup program gave `uJoints` and `uLightPos` locations even though neither shader stage read them.
+
 ### GLSL that NVIDIA's compiler accepts and glslang does not
 
 - Fix-ups on the preprocessed text: the GLSL ES 1.0 functions `textureCube` / `texture2D` in ES 3.20 code (with `-V` glslang reads `textureCube` as Vulkan's texture type, so a macro cannot rename it), `out vec4 gl_Position` redeclared through a macro, and `textureOffset` with an offset that is not a constant, which becomes a plain sample at P + offset ÷ level 0 size. A string in `main` says nothing of its stage, so it is translated as each stage that compiles.
@@ -2634,7 +2642,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Symptom:** `GL_FRAMEBUFFER_SRGB` produces a red warning, and switching it off still stores sRGB-encoded colours in an sRGB attachment. Blending also linearizes the destination when conversion is disabled.
 - **Cause:** the enable was recorded but never used. Metal always converted writes and destination blend reads through the attachment's sRGB pixel format.
 - **Fix:** draws and clears use a cached linear view of the same attachment storage while conversion is off, and the original sRGB image while it is on. Changing the enable finishes deferred clears and the active pass before changing formats. New storage invalidates the cached view. Texture sampling keeps its own sRGB decoding, and linear attachments and alpha are unaffected.
-- **Found on:** [Tomb Raider I–III Remastered report #2416](https://github.com/seedds/nxnative/issues/2416). This fixes the framebuffer-state mechanism; the game's remaining GL imports, uniform-source failure and gameplay are unverified.
+- **Found on:** [Tomb Raider I–III Remastered report #2416](https://github.com/seedds/nxnative/issues/2416). The game's startup crash came from [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations).
 
 ### GL draws and framebuffers
 

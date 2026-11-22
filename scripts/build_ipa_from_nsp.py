@@ -3724,6 +3724,7 @@ def main(args=None):
     if gpus and not re.fullmatch(r'none|(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS takes GPU architectures such as g18p,g17p, or none: {gpus}')
     gpus = ios_gpus(gpus, g)
     ipa_env['DM_PSO_GPUS'] = gpus
+    ipa_env['DM_PSO_PYTHON'] = py
     if gfx == 'nvn': say(f'pipeline archive: {"none, the device builds the bases on its first start if it takes the Metal 4 path (--gpu g18p builds one)" if gpus == "none" else gpus + " (made on this Mac with metal-tt; --gpu none leaves it out)"}')
     if show_fps: say('frame-rate counter: on (DM_SHOW_FPS=0 in the app\'s Documents/env.txt turns it off)')
     if programs:   # one app holding every program of the game (build_ipa.sh PROGRAMS_TSV)

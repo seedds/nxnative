@@ -19,10 +19,11 @@
 #     unit cannot name them all main0: the reflection's `pull` and `vin` give the names, which the host and pso_offline.py read). The optimizer then sees in each what it saw
 #     before, the copy of the body, so the GPU gets the code it got: every output compared on the GPU was bit-identical (the libraries are not byte-identical: main0 applies the
 #     depth line once, after the call, where the copy had it before every return);
-#   · one out-of-line copy, dm_vs_body_o, for the wide-line entries main0_wl / main0_z_wl, which few draws take and which ran the body twice each. A plain static function, never
-#     noinline: marked noinline, a body shared with main0_gs changed that entry's results in 24 of 52 shaders tried (up to 12,544 units in the last place);
-#   · main0_gs (dmsh_geometry.capture) and the rarer entry points (main0_discard, main0_tf, the layer ones) stay whole copies: main0_gs has its capture epilogue at every return, and
-#     with it once after a call one shader of 52 gave other low bits (docs/reference/shaders.md, One compile for a vertex shader's libraries, has the measurements).
+#   · one out-of-line copy, dm_vs_body_o, for the entry points few draws take: the wide-line entries main0_wl / main0_z_wl, which ran the body twice each, and the capture entry
+#     main0_gs (dmsh_geometry.capture), which calls it and writes its capture epilogue once, where the copy had the epilogue at every return. A plain static function, never
+#     noinline: marked noinline it changed main0_gs's captured words in 24 of 52 shaders tried (up to 12,544 units in the last place);
+#   · the rarer entry points (main0_discard, main0_tf, the layer ones) stay whole copies.
+# docs/reference/shaders.md, One compile for a vertex shader's libraries, has the measurements.
 # Usage: vs_unit(source with every entry point, dmsh_pull.variant's source or None, dmsh_vin.variant's source or None) → (the compile unit, the reflection's names of the pulling
 # entry points {'entry', 'entry_z', 'entry_wl', 'entry_z_wl'}, of the shadow-input ones {'entry', 'entry_z'}); raises ValueError on a source of another shape
 import re, struct
@@ -172,13 +173,20 @@ def vs_unit(full, pulled=None, shadowed=None):
             text += '\n' + calling(f'vertex main0_out {new}(' + one[len(f'vertex main0_out {n}('):], 'dm_vs_body', n == 'main0', n == 'main0_z'); got['entry' if n == 'main0' else 'entry_z'] = new
         return text, got
     wide = bool(pulled) and '\nstatic inline main0_in dm_wl_in(' in pulled
+    eg = es.get('main0_gs'); rest = full[ez['end']:]   # what follows main0_z: main0_gs, then the rarer entry points, which stay as they are
+    if eg:   # the capture entry (dmsh_geometry.capture): its prologue, then the body with the capture epilogue where each `return out;` was → the prologue, the body's call, the epilogue once
+        gs = full[eg['body']:eg['end']]; epi = re.search(r'\{ dm_cw\(.* return; \}', gs)
+        if not epi or eg['start'] < ez['end'] or eg['ret'] != 'void': raise ValueError('main0_gs is not the body with the capture epilogue')
+        copy = z.replace('return out;', epi[0])
+        if not gs.endswith(copy): raise ValueError('main0_gs is not the body with the capture epilogue')
+        rest = full[ez['end']:eg['body']] + gs[:-len(copy)] + f'    main0_out out = dm_vs_body_o({args});\n    {epi[0]}\n}}\n' + full[eg['end']:]
     head = full[:e0['start']]
     if pulled:   # the layout block and its fetch, where dmsh_pull.variant puts them
         ui = head.find('using namespace metal;')
         if ui < 0: raise ValueError('no "using namespace metal;"')
         ui += len('using namespace metal;'); head = head[:ui] + '\n\n' + dmsh_pull.FETCH + (dmsh_pull.WL_MSL if wide else '') + head[ui:]
-    src = (head + f'{VS_BODY}{decl})\n{{\n' + z + '\n' + (f'{VS_BODY_OUT}{decl})\n{{\n    return dm_vs_body({args});\n}}\n\n' if wide else '')
-           + calling(full[e0['start']:ez['end']], 'dm_vs_body', 1, 1) + full[ez['end']:])   # main0 and main0_z; what follows them stays: main0_gs and the rarer entry points, each a whole copy
+    src = (head + f'{VS_BODY}{decl})\n{{\n' + z + '\n' + (f'{VS_BODY_OUT}{decl})\n{{\n    return dm_vs_body({args});\n}}\n\n' if wide or eg else '')
+           + calling(full[e0['start']:ez['end']], 'dm_vs_body', 1, 1) + rest)   # main0 and main0_z
     pn, vn = {}, {}
     if pulled:
         text, pn = renamed(pulled, VS_PULLED); src += text

@@ -26,7 +26,7 @@ static void run(int mode, int store_all) {
     __attribute__((objc_precise_lifetime)) id<MTLRenderPipelineState> boundary_pipeline=nil;
     static unsigned frame;
     state_reset(); memset(&R,0,sizeof R); mtl_set_frame(++frame); mtl_sub_begin(); seed();
-    g_udc_ab=!store_all; g_udc_ab_on=0;
+    g_udc=!store_all;
     S.img[1][0]=701;
     struct { op_hdr rh; p_set_rt rt; op_hdr ph; p_bind_program pr; op_hdr dh; p_draw d; op_hdr end; } code={0};
     code.rh=(op_hdr){OP_SET_RT,sizeof(op_hdr)+sizeof(p_set_rt)}; code.rt.n=1; code.rt.color[0]=&color;
@@ -95,7 +95,7 @@ static void mapping_checks(NvProg *pr) {
     pr->sh[1]=fs;
 }
 int main(void) { @autoreleasepool {
-    setenv("DM_NVN_TBDR","0",1); mtl_init();
+    mtl_init();
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=4,.levels=1,.samples=1};
     MTLTextureDescriptor *td=tex_desc(&color,0); td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsagePixelFormatView;
     id<MTLTexture> texture=[g_dev newTextureWithDescriptor:td]; CHECK(texture!=nil,"array texture created"); res_add(texture); mtl_tex_init(&color); serial_put(color.serial,texture); mtl_reg_image(701,&color,NULL);

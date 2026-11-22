@@ -228,7 +228,7 @@ class Survey(Base):
         d = self.dump.parent / 'alias'; version(d / 'base', main=nso('ab' * 16)); version(d / f'updates/{VER}', main=nso('cd' * 16))
         app, fam = nsp.scan_dump(d)
         seen, prof = [], mock.Mock(id='P', builds=lambda: {'v0': {'main': 'ab' * 16}})
-        games = mock.Mock(by_build=lambda bid: seen.append(bid) or (prof if bid == 'ab' * 16 else None))
+        games = mock.Mock(by_build=lambda bid, skip=(): seen.append(bid) or (prof if bid == 'ab' * 16 else None))
         with mock.patch.dict(sys.modules, {'game': games}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')):
             self.assertEqual(nsp.same_build(d, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))
             self.assertEqual(seen, ['cd' * 16, 'ab' * 16])

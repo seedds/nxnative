@@ -1,9 +1,11 @@
 // Offline HTML pages in a web view (front.h front_web_*; hle_web.c drives them): a WKWebView over the game picture, on the Mac (front_mac.m) and the iPhone (front_ios.m) alike.
 // The page is served from its HtmlDocument folder through a scheme of its own (dmweb://doc/<document path>), so its scripts may read its other files (the pause menu's sounds
 // are XMLHttpRequests). A script at document start gives it the Switch browser's JavaScript extension and controller (SHIM below): window.nx (addEventListener("message"),
-// sendMessage, endApplet, the footer's setAssign / unsetAssign, anything else a logged no-op), navigator.getGamepads as the browser maps the controller (the standard mapping:
-// 0 B, 1 A, 2 Y, 3 X, 4 L, 5 R, 6 ZL, 7 ZR, 8 −, 9 +, 10 / 11 stick presses, 12-15 up down left right), and key events: the D-pad and the left stick are the arrow keys with key
-// repeat, A is keyCode 32 (as the pause menu reads it) and clicks the focused link or button when the page does not take it. B goes back, or ends the page from its first one
+// sendMessage, endApplet, the footer's setAssign / unsetAssign, playSystemSe silent, playReport's counters dropped, anything else at any depth a logged no-op),
+// navigator.getGamepads as the browser maps the controller (the standard mapping: 0 B, 1 A, 2 Y, 3 X, 4 L, 5 R, 6 ZL, 7 ZR, 8 −, 9 +, 10 / 11 stick presses, 12-15 up down
+// left right), and key events: the D-pad and the left stick are the arrow keys with key repeat, and the browser's spatial navigation as their default action (the focus moves
+// to the nearest focusable element that way, unless the page prevented the key or moved the focus itself); at load the first element in tab order takes the focus. A is
+// keyCode 32 (as the pause menu reads it) and clicks the focused link or button when the page does not take it. B goes back, or ends the page from its first one
 // (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3); other URLs outside the document are refused.
 // Input: hle_hid.c's state while the page is shown (dm_input_peek: the keyboard, every controller, DM_CTL), sent to the page 60 times a second; buttons held when it appears count
 // only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
@@ -35,10 +37,16 @@ static NSString *const SHIM = @R"JS(
   });
   window.addEventListener('error', function (e) { post({k: 'log', d: 'error: ' + e.message + ' (' + e.filename + ':' + e.lineno + ')'}); });
   var seen = {};
-  var noop = function (name) { return function () { if (!seen[name]) { seen[name] = 1; post({k: 'log', d: 'nx.' + name + ' is not implemented by the host; ignored'}); } }; };
+  var once = function (key, text) { if (!seen[key]) { seen[key] = 1; post({k: 'log', d: text}); } };
+  // What the host does not implement is a logged no-op, at any depth (nx.playReport.incrementCounter as much as nx.foo): a function whose own properties are such no-ops too
+  var noop = function (name) {
+    var f = function () { once(name, 'nx.' + name + ' is not implemented by the host; ignored'); };
+    return new Proxy(f, {get: function (t, p) { return p in t || typeof p !== 'string' || p === 'then' || p === 'toJSON' ? t[p] : noop(name + '.' + p); }});
+  };
   var stub = function (o, prefix) {
     return new Proxy(o, {get: function (t, p) { return p in t || typeof p !== 'string' || p === 'then' || p === 'toJSON' ? t[p] : noop(prefix + p); }});
   };
+  var nop = function () {};
   // The footer's buttons: true = the browser's own action (B: back), false = none (unsetAssign), a function = the page's
   var assign = {B: true};
   var listeners = {};
@@ -47,7 +55,12 @@ static NSString *const SHIM = @R"JS(
     removeEventListener: function (t, f) { listeners[t] = (listeners[t] || []).filter(function (x) { return x !== f; }); },
     sendMessage: function (s) { post({k: 'msg', d: String(s)}); return true; },
     endApplet: function () { post({k: 'end', r: 0}); },
-    setCursorScrollSpeed: function () {},
+    setCursorScrollSpeed: nop,
+    // The browser's system sounds (focus moves, decisions, the footer: SeWebNaviFocus, SeWebLinkDecide, SeFooterDecideBack…) are the web applet's own data, which the host
+    // does not have: silent
+    playSystemSe: function (name) { once('se ' + name, 'nx.playSystemSe("' + name + '"): the host has no system sounds; silent'); },
+    // Play reports are the console's usage telemetry: nothing to send them to
+    playReport: stub({setCounterSetIdentifier: nop, incrementCounter: nop}, 'playReport.'),
     footer: stub({
       setAssign: function (b, label, fn) { assign[b] = typeof fn === 'function' ? fn : true; },
       unsetAssign: function (b) { assign[b] = false; },
@@ -84,6 +97,26 @@ static NSString *const SHIM = @R"JS(
     for (var i = 0; i < o.length; i++) if (o[i] !== el) o[i].removeAttribute('data-dm-focus');
     if (el && el !== document.body && el !== document.documentElement && el.setAttribute) el.setAttribute('data-dm-focus', '');
   };
+  // The button icons in any font: on the Switch a character no font of the page's list has comes from the system's fonts, the extension font among them, so a page may name
+  // a family that does not exist (Mario Kart 8 Deluxe's footer: "none,NintendoExt0003") or its own font without the icons ("FontB",NintendoExt003). WebKit falls back to macOS's
+  // fonts instead, which have no such glyphs (an empty box). Each family the page names that is its own (@font-face) or not installed here gets the host's extension font for
+  // U+E000-E1FF as a face of that family, before the page's rules, so a page font that has the glyph still draws it; installed fonts (Arial, Helvetica) are left alone
+  var GENERIC = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|math|emoji|fangsong|-apple-system|ui-.*|inherit|initial|unset|revert|revert-layer)$/i;
+  var families = function (v, into) {
+    (v || '').split(',').forEach(function (f) { f = f.trim().replace(/^(['"])(.*)\1$/, '$2'); if (f && !GENERIC.test(f)) into[f] = into[f] || 1; });
+  };
+  var installed = function (f) {   // a font of that name on this system: text measures differently from the generic family alone
+    var c = installed.c || (installed.c = document.createElement('canvas').getContext('2d')), t = 'mmmmmmmmmmlli0WQ', g = ['monospace', 'serif'];
+    return g.some(function (b) { c.font = '72px ' + b; var w = c.measureText(t).width; c.font = '72px ' + JSON.stringify(f) + ',' + b; return c.measureText(t).width !== w; });
+  };
+  var extFaces = function (rules, named, own) {
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (window.CSSFontFaceRule && r instanceof CSSFontFaceRule) families(r.style.getPropertyValue('font-family'), own);
+      else if (r.style) families(r.style.fontFamily, named);
+      if (r.cssRules) extFaces(r.cssRules, named, own);
+    }
+  };
   var mirror = function () {
     var out = [];
     var walk = function (rules) {
@@ -93,9 +126,17 @@ static NSString *const SHIM = @R"JS(
         else if (r.cssRules && r.media) { var k = out.length; walk(r.cssRules); if (out.length > k) out.splice(k, 0, '@media ' + r.media.mediaText + '{'), out.push('}'); }
       }
     };
-    for (var i = 0; i < document.styleSheets.length; i++) { try { walk(document.styleSheets[i].cssRules); } catch (e) {} }
+    var named = {}, own = {};
+    for (var i = 0; i < document.styleSheets.length; i++) { try { walk(document.styleSheets[i].cssRules); extFaces(document.styleSheets[i].cssRules, named, own); } catch (e) {} }
+    var inl = document.querySelectorAll('[style]');
+    for (i = 0; i < inl.length; i++) families(inl[i].style.fontFamily, named);
     var s = document.createElement('style'); s.textContent = out.join('\n'); document.head.appendChild(s);
+    var faces = Object.keys(named).concat(Object.keys(own)).filter(function (f, k, a) { return a.indexOf(f) === k && (own[f] || !installed(f)); }).map(function (f) {
+      return '@font-face{font-family:' + JSON.stringify(f) + ';src:url("/__dm_font/nintendo_ext.ttf");unicode-range:U+E000-E1FF}';
+    });
+    if (faces.length) { var e = document.createElement('style'); e.textContent = faces.join('\n'); document.head.insertBefore(e, document.head.firstChild); }
     mark(document.activeElement);
+    first();
   };
   document.addEventListener('focus', function (e) { mark(e.target); }, true);
   document.addEventListener('blur', function () { setTimeout(function () { mark(document.activeElement); }, 0); }, true);
@@ -112,13 +153,60 @@ static NSString *const SHIM = @R"JS(
   };
   try { Object.defineProperty(Navigator.prototype, 'getGamepads', {configurable: true, value: function () { return [pad(), null, null, null]; }}); } catch (e) {}
 
+  // The Switch browser's spatial navigation: the D-pad moves the focus to the nearest focusable element in its direction, as the default action of the arrow key, so a page
+  // that prevents the key (Mario Kart 8 Deluxe's Info pages turn Left / Right off) or moves the focus in its own handler (their wrap from the last entry to the first) keeps
+  // what it did. With nothing in that direction the box the focus is in, or the page, scrolls. A synthetic key event has no default action in WebKit, so the host does it.
+  // At load the first element in tab order takes the focus when the page gave it to none, as on the Switch, where there is always a focused element for A to press
+  var FOCUSABLE = 'a[href],area[href],button,input,select,textarea,iframe,summary,[tabindex],[contenteditable]';
+  var focused = function () { var a = document.activeElement; return a && a !== document.body && a !== document.documentElement ? a : null; };
+  var candidates = function () {
+    return Array.prototype.filter.call(document.querySelectorAll(FOCUSABLE), function (el) {
+      if (el.tabIndex < 0 || el.disabled || (el.closest && el.closest('[inert]'))) return false;
+      var r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return false;
+      return getComputedStyle(el).visibility !== 'hidden';
+    });
+  };
+  var take = function (el) { el.focus(); return document.activeElement === el; };
+  var first = function () {
+    if (focused()) return;
+    var c = candidates().map(function (el, i) { return {el: el, k: el.tabIndex > 0 ? el.tabIndex : 1e9, i: i}; });
+    c.sort(function (a, b) { return a.k - b.k || a.i - b.i; });   // positive tab indices first, in order; then document order
+    for (var i = 0; i < c.length; i++) if (take(c[i].el)) return;
+  };
+  var navigate = function (dx, dy) {
+    var cur = focused(), w = innerWidth, h = innerHeight;
+    // No focus: from the viewport's edge facing the direction
+    var f = cur ? cur.getBoundingClientRect() : {left: dx < 0 ? w : 0, right: dx > 0 ? 0 : w, top: dy < 0 ? h : 0, bottom: dy > 0 ? 0 : h};
+    var fc = dx ? (f.top + f.bottom) / 2 : (f.left + f.right) / 2;
+    var best = candidates().filter(function (el) { return el !== cur; }).map(function (el) {
+      var c = el.getBoundingClientRect();
+      // Ahead: its far edge past the focus's far edge and its centre past the focus's centre
+      var ahead = dx > 0 ? c.right > f.right && c.left + c.right > f.left + f.right : dx < 0 ? c.left < f.left && c.left + c.right < f.left + f.right :
+                  dy > 0 ? c.bottom > f.bottom && c.top + c.bottom > f.top + f.bottom : c.top < f.top && c.top + c.bottom < f.top + f.bottom;
+      if (!ahead) return null;
+      var gap = Math.max(0, dx > 0 ? c.left - f.right : dx < 0 ? f.left - c.right : dy > 0 ? c.top - f.bottom : f.top - c.bottom);
+      var lap = dx ? Math.min(c.bottom, f.bottom) - Math.max(c.top, f.top) : Math.min(c.right, f.right) - Math.max(c.left, f.left);
+      var off = Math.abs((dx ? (c.top + c.bottom) / 2 : (c.left + c.right) / 2) - fc);
+      // The CSS spatial navigation draft's weights: off to the side counts 30 times going left or right, twice going up or down; among those in line, the most centred
+      return {el: el, s: gap + Math.max(0, -lap) * (dx ? 30 : 2) + off / 1000};
+    }).filter(Boolean).sort(function (a, b) { return a.s - b.s; });
+    for (var i = 0; i < best.length; i++) if (take(best[i].el)) return;
+    for (var b = cur && cur.parentElement; b && b !== document.body && b !== document.documentElement; b = b.parentElement) {
+      var s = getComputedStyle(b), o = dx ? s.overflowX : s.overflowY;
+      if ((o === 'auto' || o === 'scroll') && (dx ? b.scrollWidth > b.clientWidth : b.scrollHeight > b.clientHeight)) { b.scrollBy(dx * 64, dy * 64); return; }
+    }
+    window.scrollBy(dx * 64, dy * 64);
+  };
+  var NAV = {37: [-1, 0], 38: [0, -1], 39: [1, 0], 40: [0, 1]};
+
   var KEYS = {37: ['ArrowLeft', 'ArrowLeft'], 38: ['ArrowUp', 'ArrowUp'], 39: ['ArrowRight', 'ArrowRight'], 40: ['ArrowDown', 'ArrowDown'], 32: [' ', 'Space']};
   var target = function () { var a = document.activeElement; return a && a !== document.documentElement ? a : document.body || document.documentElement; };
   var key = function (type, code, repeat, at) {
     var e = new KeyboardEvent(type, {key: KEYS[code][0], code: KEYS[code][1], bubbles: true, cancelable: true, repeat: !!repeat});
     Object.defineProperty(e, 'keyCode', {get: function () { return code; }});
     Object.defineProperty(e, 'which', {get: function () { return code; }});
-    var t = at || target(), r = t.dispatchEvent(e);
+    var t = at || target(), was = document.activeElement, r = t.dispatchEvent(e);
+    if (type === 'keydown' && NAV[code] && r && document.activeElement === was) navigate(NAV[code][0], NAV[code][1]);
     if (cfg.debug && type === 'keydown') { var a = document.activeElement; post({k: 'log', d: 'key ' + code + ' at ' + (t.id || t.tagName) + ' -> focus ' + (a && (a.id || a.tagName)) + (a && a.matches(':focus') ? ' (:focus)' : ' (not :focus)') + ' hasFocus ' + document.hasFocus()}); }
     return r;
   };
@@ -132,7 +220,7 @@ static NSString *const SHIM = @R"JS(
     var a = assign[b];
     if (typeof a === 'function') { a(); return; }
     if (a !== true || b !== 'B') return;
-    if (history.length > 1) history.back(); else post({k: 'end', r: 1});
+    post({k: 'back'});   // the web view knows whether there is a page to go back to (history.length also counts the pages ahead, after a back)
   };
   // Arrow keys from the D-pad and the left stick (half way), repeated after `delay` frames every `pulse` frames while held
   var DIRS = [[37, 12, 0, -1], [38, 13, 1, -1], [39, 14, 0, 1], [40, 15, 1, 1]];   // key, host bit, axis, its sign (the page's axes: right and down positive)
@@ -331,6 +419,8 @@ static NSString *mime(NSString *ext) {
     if (_closed || ![m.body isKindOfClass:NSDictionary.class]) return;
     NSDictionary *b = m.body; NSString *k = b[@"k"];
     if ([k isEqualToString:@"msg"]) { const char *s = [b[@"d"] description].UTF8String ?: ""; dm_web_message(s, strlen(s)); }
+    else if ([k isEqualToString:@"back"] && _web.canGoBack) [_web goBack];   // B: back, or the end from the first page (exit reason 1)
+    else if ([k isEqualToString:@"back"]) { _closed = YES; [self stopInput]; [self setHiddenState:YES]; _shown = NO; g_touch = 0; dm_web_ended(1, NULL); }
     else if ([k isEqualToString:@"end"]) { _closed = YES; [self stopInput]; [self setHiddenState:YES]; _shown = NO; g_touch = 0; dm_web_ended((uint32_t)[b[@"r"] intValue], NULL); }
     else if ([k isEqualToString:@"log"]) { static int n; if (n++ < 200) LOG("web: page %s", [b[@"d"] description].UTF8String); }
 }

@@ -1,7 +1,7 @@
 // nn::hid (controller): on the real device shared memory is read through the hid service; the host takes the current state written by the front end (Mac keyboard / controller, iOS virtual gamepad / controller).
 // Generic, game-independent version: player 1 is always connected, as the handheld controller (Npad id 0x20) with DM_OPMODE=0 (handheld), otherwise as the 1P full-key controller (id 0);
 // players 2..8 are full-key controllers on No2..No8 (ids 1..7), in either mode. A controller on No1..No8 is shown as a dual Joy-Con pair instead when the game supports JoyDual but not
-// full-key (pad_style); the Handheld npad stays Handheld. Players 2..8 are on No2..No8 while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
+// full-key, or as one Joy-Con when the game takes only single Joy-Cons there (pad_style); the Handheld npad stays Handheld. Players 2..8 are on No2..No8 while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
 // of its own, front_mac.m). A player whose npad the game does not support (SetSupportedNpadIdType) is not reported: in a one-player game it feeds player 1, otherwise it is not used.
 // Six-axis sensor: one per connected controller (two for handheld), at rest lying flat, player 1's shaken side to side while the front end holds DM_BTN_SHAKE (see the six-axis section below).
 // Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected, and leaves out those past the game's maximum.
@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 #include "motion_fusion.h"
@@ -271,6 +272,13 @@ static void *ctl_main(void *arg) {
                     dm_touch_script(NULL, 0); continue;
                 }
                 key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+                if (line[0] == 'P' && line[1] >= '2' && line[1] <= '0' + DM_PLAYERS && line[2] == ' ') {   // P<n> <keys>: player n's controller, for games that need a second player (Orbitals)
+                    void dm_pad_script_player(int p); int p = line[1] - '1'; dm_pad_script_player(p);
+                    parse_keys(line + 3, &st);
+                    LOG("DM_CTL: player %d press %#llx (hold %.2f s)", p + 1, (unsigned long long)st.btn, st.hold);
+                    dm_pad_set_player(p, st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); dm_pad_set_player(p, 0, 0, 0, 0, 0);
+                    continue;
+                }
                 parse_keys(line, &st);
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
@@ -309,6 +317,10 @@ static uint32_t unsupported_players(void) {
 }
 static int one_player(void) { return !(atomic_load(&g_ids_supported) & ((1u << DM_PLAYERS) - 2)); }
 static uint32_t merged_players(void) { return one_player() ? unsupported_players() : atomic_load(&g_bench_one) ? atomic_load(&g_benched) & atomic_load(&g_players) : 0; }
+static uint32_t pad_sources(int p) {
+    if (p == 0) return 1u | merged_players();
+    return (unsigned)p < DM_PLAYERS ? 1u << p : 0;
+}
 static int player_of(uint32_t id) {   // the reported player on npad id; -1 when none
     if (id == connected_id()) return 0;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
@@ -362,13 +374,18 @@ static npad_ref npad_resolve(uint32_t id) {
 // The hid service connects a controller only in a style the game supports (SetSupportedNpadStyleSet), and games test the style before anything else: Nintendo Switch Sports Resort
 // supports Handheld | JoyDual (0x6) in its lobby (main+0xa9e940), and its player check (main+0x58d0f0) found no player 1 on a full-key No1, so it opened the controller applet
 // again every frame (main+0x3f9d264), 7,162 times in 3 minutes. On No1..No8 (docked, and players 2..8 in handheld mode), a full-key controller the game does not support is shown as a
-// JoyDual pair instead, the supported style that has all its buttons and both sticks; no other style has them, so a game that supports neither keeps full-key, as before. The
-// Handheld npad stays Handheld
+// JoyDual pair instead, the supported style that has all its buttons and both sticks. When the game takes only single Joy-Cons, use JoyRight first (it has the controller's own
+// A / B / X / Y), then JoyLeft. A game with none of these styles keeps full-key. The Handheld npad stays Handheld.
 static uint32_t pad_style(uint32_t id) {
     if (id == NPAD_HANDHELD) return STYLE_HANDHELD;
     uint32_t s = atomic_load(&g_styles_supported);
-    return !(s & STYLE_FULLKEY) && (s & STYLE_JOYDUAL) ? STYLE_JOYDUAL : STYLE_FULLKEY;
+    if (s & STYLE_FULLKEY) return STYLE_FULLKEY;
+    if (s & STYLE_JOYDUAL) return STYLE_JOYDUAL;
+    if (s & STYLE_JOYRIGHT) return STYLE_JOYRIGHT;
+    if (s & STYLE_JOYLEFT) return STYLE_JOYLEFT;
+    return STYLE_FULLKEY;
 }
+static int single_joy_style(uint32_t style) { return style == STYLE_JOYLEFT || style == STYLE_JOYRIGHT; }
 static uint32_t kind_style(npad_ref r, uint32_t id) {
     uint32_t two = r.pad >= 0 && r.pad < DM_PLAYERS && atomic_load(&g_joy_two[r.pad]) ? atomic_load(&g_styles_supported) : 0;
     switch (r.kind) {
@@ -392,15 +409,26 @@ enum { STYLE_SLOTS = DM_PLAYERS + 1 };
 static void *g_style_ev[STYLE_SLOTS];
 static uint32_t g_style_told[STYLE_SLOTS];
 static pthread_mutex_t g_style_lock = PTHREAD_MUTEX_INITIALIZER;
+// Physical pad slots backing a whole pad shown as JoyLeft or JoyRight. A change of assignment retires the old rumble before the style event.
+// Keep this separate from the style last told to each npad: binding an event can update that style without changing the vibration assignment.
+static uint32_t g_single_joy_rumble[2];
 static int style_slot(uint32_t id) { return id < DM_PLAYERS ? (int)id : id == NPAD_HANDHELD ? DM_PLAYERS : -1; }
 static void styles_sync(void) {
     pthread_mutex_lock(&g_style_lock);
+    uint32_t changed = 0, single_joy_rumble[2] = {0};
     for (int i = 0; i < STYLE_SLOTS; i++) {
-        uint32_t st = style_of(i < DM_PLAYERS ? (uint32_t)i : NPAD_HANDHELD);
+        uint32_t id = i < DM_PLAYERS ? (uint32_t)i : NPAD_HANDHELD;
+        npad_ref ref = npad_resolve(id);
+        uint32_t st = kind_style(ref, id);
+        if (ref.kind == KIND_PAD && single_joy_style(st)) single_joy_rumble[st == STYLE_JOYRIGHT] |= pad_sources(ref.pad);
         if (st == g_style_told[i]) continue;
         g_style_told[i] = st;
-        if (g_style_ev[i]) hle_signal_bound_system_event(g_style_ev[i]);
+        changed |= 1u << i;
     }
+    uint32_t reset = (single_joy_rumble[0] ^ g_single_joy_rumble[0]) | (single_joy_rumble[1] ^ g_single_joy_rumble[1]);
+    memcpy(g_single_joy_rumble, single_joy_rumble, sizeof g_single_joy_rumble);
+    for (int p = 0; p < DM_PLAYERS; p++) if (reset >> p & 1) dm_haptics_clear(p);
+    for (int i = 0; i < STYLE_SLOTS; i++) if ((changed >> i & 1) && g_style_ev[i]) hle_signal_bound_system_event(g_style_ev[i]);
     pthread_mutex_unlock(&g_style_lock);
 }
 // The console mode changed (dm_set_opmode): player 1 moves between Handheld and No1 (connected_id), as taking the Joy-Cons off the console's rails or putting them back does,
@@ -431,8 +459,16 @@ static void note_merged(void) {   // logs the players the game does not see, whe
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+// Players a DM_CTL "P<n> <keys>" line connected (a scripted controller, kept connected from its first press on): ORed into the front end's mask, so a front end's change does not drop them
+static _Atomic uint32_t g_script_players, g_front_players = 1;
+void dm_pad_script_player(int p) {
+    if (p <= 0 || p >= DM_PLAYERS || atomic_fetch_or(&g_script_players, 1u << p) >> p & 1) return;
+    LOG("DM_CTL: player %d's scripted controller connected", p + 1);
+    void dm_pad_players(uint32_t mask); dm_pad_players(atomic_load(&g_front_players));
+}
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    atomic_store(&g_front_players, mask);
+    mask = (mask | 1u | atomic_load(&g_script_players)) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     atomic_fetch_and(&g_benched, mask);   // a controller that went away is no longer left out: the next one on its slot is a player until the applet says otherwise
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1 && !(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
@@ -544,6 +580,15 @@ static void rec_start(void) {
     LOG("DM_REC: recording player 1's input to %s as DM_KEYS steps in presented frames", e);
 }
 
+// Each stick held inside the circle of radius DM_STICK_MAX, as Horizon's hid reports it: a Switch stick's calibrated value never leaves that
+// circle, while a Mac or iPhone controller's axes each reach ±1 on their own, so a diagonal read up to about 1.15 of full tilt (a DualSense
+// through GameController). A game that takes the magnitude as at most full tilt got more than it could; the direction is kept
+static void stick_circle(int32_t a[4]) {
+    for (int i = 0; i < 4; i += 2) {
+        double m = hypot((double)a[i], (double)a[i + 1]);
+        if (m > DM_STICK_MAX) { a[i] = (int32_t)lrint(a[i] * DM_STICK_MAX / m); a[i + 1] = (int32_t)lrint(a[i + 1] * DM_STICK_MAX / m); }
+    }
+}
 // Stick direction pseudo-buttons (NpadButton 16..23) from the sticks' values
 static uint64_t stick_dirs(const int32_t a[4]) {
     uint64_t b = 0;
@@ -564,19 +609,40 @@ static void fill_joy(NpadState *s, npad_ref r) {
         b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
         uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
     }
+    stick_circle(a);
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
     s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);
+}
+// The other half's buttons take the same positions on the selected side. Use the more deflected stick as that side's stick.
+static uint64_t single_joy_fold(uint32_t style, uint64_t buttons, int32_t a[4]) {
+    static const uint32_t pairs[][2] = {
+        {DM_BTN_RIGHT, DM_BTN_A}, {DM_BTN_DOWN, DM_BTN_B}, {DM_BTN_UP, DM_BTN_X}, {DM_BTN_LEFT, DM_BTN_Y},
+        {DM_BTN_LS, DM_BTN_RS}, {DM_BTN_L, DM_BTN_R}, {DM_BTN_ZL, DM_BTN_ZR}, {DM_BTN_MINUS, DM_BTN_PLUS},
+    };
+    int side = style == STYLE_JOYRIGHT;
+    uint64_t folded = 0;
+    for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++) {
+        if (buttons & (pairs[i][0] | pairs[i][1])) folded |= pairs[i][side];
+    }
+    // ax() supplies signed 16-bit values. The sum of the squares can reach 2^31.
+    int64_t left = (int64_t)a[0] * a[0] + (int64_t)a[1] * a[1];
+    int64_t right = (int64_t)a[2] * a[2] + (int64_t)a[3] * a[3];
+    int from = right > left ? 2 : 0;
+    a[2 * side] = a[from]; a[2 * side + 1] = a[from + 1];
+    a[2 * !side] = 0; a[2 * !side + 1] = 0;
+    return folded;
 }
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     npad_ref ref = npad_resolve(id);
-    if (!(kind_style(ref, id) & style) || ref.pad < 0 || ref.pad >= DM_PLAYERS) return;   // no controller of this id / style: attributes = 0
+    uint32_t shown = kind_style(ref, id);
+    if (!(shown & style) || ref.pad < 0 || ref.pad >= DM_PLAYERS) return;   // no controller of this id / style: attributes = 0
     if (ref.kind >= KIND_DUAL) { fill_joy(s, ref); return; }
     int pl = ref.pad;
     // Player 1: keyboard / touch, script, its controller and the players merged into it; another player: its own controller path
-    uint32_t src = pl ? 1u << pl : 1u | merged_players();
+    uint32_t src = pad_sources(pl);
     uint64_t b = 0; int32_t a[4] = {0};
     if (!pl) {
         keys_sync();   // DM_KEYS frame steps due in this frame, before the read
@@ -593,18 +659,17 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
-    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
-    if (s->lx < -STICK_THRESH) b |= 1u << 16;
-    if (s->ly > STICK_THRESH) b |= 1u << 17;
-    if (s->lx > STICK_THRESH) b |= 1u << 18;
-    if (s->ly < -STICK_THRESH) b |= 1u << 19;
-    if (s->rx < -STICK_THRESH) b |= 1u << 20;
-    if (s->ry > STICK_THRESH) b |= 1u << 21;
-    if (s->rx > STICK_THRESH) b |= 1u << 22;
-    if (s->ry < -STICK_THRESH) b |= 1u << 23;
-    s->buttons = b;
-    s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+    uint32_t halves = ATTR_LEFT_CONN | ATTR_RIGHT_CONN;
+    if (single_joy_style(shown)) {
+        b = single_joy_fold(shown, b, a);
+        halves = shown == STYLE_JOYRIGHT ? ATTR_RIGHT_CONN : ATTR_LEFT_CONN;
+    }
+    stick_circle(a);
+    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+    s->buttons = b | stick_dirs(a);
+    s->attributes = ATTR_CONNECTED | halves;
+    if (id == NPAD_HANDHELD) s->attributes |= ATTR_WIRED | ATTR_LEFT_WIRED | ATTR_RIGHT_WIRED;
 }
 // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
 // (the keyboard / touch source's bits included) plus the eight stick-direction pseudo buttons of the merged axes —
@@ -712,7 +777,7 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 // past the maximum, the highest first, are now left out (g_benched) until the applet opens for more players, the game sets its supported npads again or their controller goes
 // away; with a maximum of one their controllers feed player 1, as in a game that supports one npad, so whichever controller the player holds plays. No prompt asks which
 // controller stays: a Switch's does, and with a maximum above one the lowest players stay here
-// Both overloads run on the big host stack (HLE_FORCE_BIG): with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
+// Both overloads run on the big host stack, as every HLE_FORCE take-over: with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
 // thread with less than a log line's worth of stack left (PR #1943; memory.md, Host calls on small guest stacks)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
 int dm_players_reported(void) {   // a pair of Joy-Cons split into two npads is two players
@@ -747,14 +812,14 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
     for (int q = 1; arg && q < DM_PLAYERS; q++) if (atomic_load(&g_benched) >> q & 1)
         for (int p = DM_PLAYERS - 1; p > q; p--) if (reported(p)) { atomic_store(&g_benched, (atomic_load(&g_benched) | 1u << p) & ~(1u << q)); break; }
     if (arg) {
-        atomic_store(&g_bench_one, arg[1] == 1);
-        if (atomic_load(&g_benched) != bench_was) { styles_sync(); note_merged(); }   // their npads connect or disconnect: the style events tell the game
+        uint32_t bench_one = arg[1] == 1, bench_one_was = atomic_exchange(&g_bench_one, bench_one);
+        if (atomic_load(&g_benched) != bench_was || bench_one != bench_one_was) { styles_sync(); note_merged(); }
     }
     if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];   // a split pair of Joy-Cons on player 1 can still be one too many
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
     return ctrl_support(info, arg);
@@ -1126,12 +1191,12 @@ static int six_states(SixAxisState *out, int n, uint32_t h) {
     return n;
 }
 // A style set of several styles (FullKey | JoyDual, as a game that takes either passes) gets the style the npad's controller is shown in, when it is one of them (else the first, as
-// the SDK's utility); two handles when the set holds a style made of two Joy-Cons (handheld, dual), as the host always answered; none for a set with no style that has a sensor
+// the SDK's utility). A selected single Joy-Con has one sensor. For other styles the existing mixed-mask answer is two handles when the mask includes Handheld or JoyDual.
 HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "six-axis sensor handles: two for handheld / dual Joy-Cons, one otherwise",
           int, h_hid_SixHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
     uint32_t shown = six_style_index(style & style_of(*id & 0xff)), idx = shown ? shown : six_style_index(style);
     if (!idx || n <= 0) return 0;
-    int k = style & (STYLE_HANDHELD | STYLE_JOYDUAL | STYLE_JOYDUAL2) ? 2 : 1; if (k > n) k = n;
+    int k = idx != SIX_IDX_JOYLEFT && idx != SIX_IDX_JOYRIGHT && (style & (STYLE_HANDHELD | STYLE_JOYDUAL | STYLE_JOYDUAL2)) ? 2 : 1; if (k > n) k = n;
     uint32_t dev0 = idx == SIX_IDX_JOYRIGHT;   // a right Joy-Con's sensor is device 1, as the SDK's (0x10007)
     for (int i = 0; i < k; i++) h[i] = idx | (*id & 0xff) << 8 | ((uint32_t)i + dev0) << 16;
     return k;
@@ -1210,6 +1275,12 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
 // hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
 HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: the newest (cleared until a front end reports the sensor)",
           void, h_hid_JcmsState, void *out, const uint32_t *h) { if (out) { memset(out, 0, 32); if (h) jcms_copy(out, 1, *h); } }
+// Private applications label their current scene in the hid service. Welcome Tour's flow NRO calls the setter at boot (SDK 20.5.29 sdk+0x65d3b0); its detail call
+// dereferences the absent service at sdk+0x65c75c. Keep the service's setting here, shared by every module, and answer the paired getter without opening Horizon IPC.
+static _Atomic int g_private_scene;
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "private application's HID scene: recorded", void, h_hid_SetPrivateScene, int scene) { atomic_store(&g_private_scene, scene); }
+HLE_FORCE("_ZN2nn3hid23GetSceneIdForPrivateAppEv", "private application's HID scene: what the game set", int, h_hid_GetPrivateScene, void) { return atomic_load(&g_private_scene); }
+
 // A Switch 2 SDK's guard against a Home press made by accident on a controller (Drag x Drive turns it on for player 1's Joy-Con 2 as they connect, main+0x2c80c4). The SDK's own
 // opens the hid service, which the host does not serve, and calls through the null session (sdk+0x63ce10). It sets a flag in hid and returns nothing; the host handles Home itself
 // (home_quit.h: a 2 s hold, then a confirm), so the setting is recorded for the question below and logged, and changes nothing else
@@ -1509,36 +1580,48 @@ HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_1
 // Vibration handles: byte 0 = SDK style index (FullKey 3, Handheld 4), byte 1 = npad id, byte 2 = motor.
 // See libnx hid.c _hidGetVibrationDeviceHandles. Only the styles this host connects are exposed.
 // A Joy-Con style's handle (type 5 JoyDual, 6 JoyLeft, 7 JoyRight) reaches the pad's motor of its Joy-Con: the left one's is motor 0, the right one's motor 1, whichever npad the right one is on
-static uint32_t vib_targets(uint32_t h, int *motor) {
+// The players a vibration handle names, before its haptics output is asked about: the handle bytes are
+// checked and the npad's style decides the rest. A game asks whether a channel is mounted once, often
+// at boot: on the console the controller is there then, while a Bluetooth pad here may connect seconds
+// later, so mounted and GetVibrationDeviceInfo answer from this; sends keep only the players that have
+// a routed output (vib_targets).
+static uint32_t vib_valid(uint32_t h, int *motor) {
     unsigned type = h & 0xff, id = h >> 8 & 0xff, dev = h >> 16 & 0xff;
     *motor = (int)(dev & 1);
     if (h >> 24 || dev > 1 || type < 3 || type > 7) return 0;
     npad_ref r = npad_resolve(id);
-    int p = player_of(id);
-    uint32_t pad_players = p == 0 ? 1u | merged_players() : p > 0 ? 1u << p : 0;   // a whole controller's motors: player 1's merged controllers too
+    if (r.kind == KIND_PAD) {
+        uint32_t st = pad_style(id);
+        // A cached full-key handle still reaches a pair's motors or the exposed side of a single Joy-Con.
+        if (st != (1u << (type - 3)) && !(type == 3 && (st == STYLE_JOYDUAL || st == (dev ? STYLE_JOYRIGHT : STYLE_JOYLEFT)))) return 0;
+        if (type >= 6) {
+            if (dev) return 0;
+            *motor = type == 7;
+        }
+        return pad_sources(r.pad);
+    }
     if (type >= 5) {
-        if (type == 5 && r.kind == KIND_PAD && kind_style(r, id) == STYLE_JOYDUAL) return dm_haptics_available() & pad_players;   // a controller shown as a pair (pad_style)
         if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
         if (type != 5) *motor = type == 7;
-        return dm_haptics_available() & (1u << r.pad);
+        return 1u << r.pad;
     }
-    if (type > 4) return 0;
     // A full-key handle on an npad that now holds Joy-Cons still reaches them: a game keeps the handles it got before the Joy-Cons connected (Super Mario Odyssey asks for the
     // JoyDual handles when the pair connects, but keeps sending to its full-key ones). Its motor is the Joy-Con of that side; a single Joy-Con takes the handle of its side
-    if (p >= 0 && r.kind >= KIND_DUAL && type == 3 && id != NPAD_HANDHELD) {
+    if (r.kind >= KIND_DUAL && type == 3 && id != NPAD_HANDHELD && player_of(id) >= 0) {
         if (r.kind == KIND_LEFT && dev) return 0;
         if (r.kind == KIND_RIGHT && !dev) return 0;
-        return dm_haptics_available() & (1u << r.pad);
+        return 1u << r.pad;
     }
-    // A controller shown as a pair because the game supports no full-key style keeps the full-key handles it got before the game changed its styles, as a pair's Joy-Cons do
-    uint32_t st = kind_style(r, id);
-    if (p < 0 || r.kind != KIND_PAD || (st != (1u << (type - 3)) && !(type == 3 && st == STYLE_JOYDUAL))) return 0;
-    return dm_haptics_available() & pad_players;
+    return 0;
+}
+static uint32_t vib_targets(uint32_t h, int *motor) {
+    return vib_valid(h, motor) & dm_haptics_available();
 }
 static void vib_send(const uint32_t *handles, const dm_vibration *values, int n) {
     if (!handles || !values || n <= 0) return;
     dm_vibration_update updates[DM_PLAYERS * 2];
     uint32_t used = 0; int unrouted = 0;
+    pthread_mutex_lock(&g_style_lock);   // finish writes using the old routing before styles_sync retires its motors
     for (int i = 0; i < n; i++) {
         int m; uint32_t targets = vib_targets(handles[i], &m);
         if (!targets) unrouted++;
@@ -1549,6 +1632,8 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     }
     int count = 0;
     for (int k = 0; k < DM_PLAYERS * 2; k++) if (used >> k & 1) updates[count++] = updates[k];
+    dm_haptics_send(updates, count);
+    pthread_mutex_unlock(&g_style_lock);
     if (getenv("DM_RUMBLE_LOG")) {   // Count input values before deduplicating motors, including partially routed batches.
         static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
         static uint64_t sends, dropped, t0; static float peak; struct timespec ts;
@@ -1559,23 +1644,25 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
         if (now != t0) { LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", sends, dropped, peak, handles[0]); sends = dropped = 0; peak = 0; t0 = now; }
         pthread_mutex_unlock(&log_lock);
     }
-    dm_haptics_send(updates, count);
 }
-HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
+HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: the app's rumble setting with an output sink installed", unsigned, h_hid_VibPermit, void) {
+    unsigned on = dm_haptics_enabled() != 0;
+    if (getenv("DM_RUMBLE_LOG")) { static _Atomic int was = -1; if (atomic_exchange(&was, (int)on) != (int)on) LOG("rumble: IsVibrationPermitted -> %u", on); }
+    return on;
+}
 // Games can cache handles once at startup, before GameController routes the pad's haptics (Unicorn Overlord kept an empty answer and sent every value to handle 0).
 // On Horizon handles are computed from npad id and style (libnx _hidGetVibrationDeviceHandles); vib_send checks for an output at each send. With rumble off they are handed out too,
 // as on a Switch whose vibration setting is off (IsVibrationPermitted answers false and nothing is felt), so turning it on while the game runs works in a game that asked only once.
 HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices of the connected controller",
           int, h_hid_VibHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
-    if (!h || !id || n <= 0 || !(style & style_of(*id)) || !dm_haptics_has_output()) {
-        if (getenv("DM_RUMBLE_LOG") && id) LOG("rumble: game asked for vibration handles of npad %u style %#x: none (connected style %#x, %s)", *id, style, style_of(*id), dm_haptics_has_output() ? "output ready" : "no output yet");
+    uint32_t st = id ? style_of(*id) : 0;
+    if (!h || !id || n <= 0 || !(style & st) || !dm_haptics_has_output()) {
+        if (getenv("DM_RUMBLE_LOG") && id) LOG("rumble: game asked for vibration handles of npad %u style %#x: none (connected style %#x, %s)", *id, style, st, dm_haptics_has_output() ? "output ready" : "no output yet");
         return 0;
     }
-    npad_ref r = npad_resolve(*id);
-    uint32_t st = kind_style(r, *id);   // the handle's type follows the reported style (a whole controller may be shown as a pair, pad_style)
     uint32_t type = st & STYLE_JOYDUAL ? 5u : st & STYLE_JOYLEFT ? 6u : st & STYLE_JOYRIGHT ? 7u : st & STYLE_HANDHELD ? 4u : 3u;
     uint32_t base = (*id << 8) | type;
-    int count = n < (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2) ? n : (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2);
+    int count = type >= 6 || n == 1 ? 1 : 2;
     for (int i = 0; i < count; i++) h[i] = base | (uint32_t)i << 16;
     if (getenv("DM_RUMBLE_LOG")) LOG("rumble: game asked for vibration handles of npad %u style %#x: %d, first %#x", *id, style, count, h[0]);
     return count;
@@ -1636,8 +1723,11 @@ HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; 
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for a connected controller and on connect / disconnect", void, h_hid_BindStyleEv,
           const uint32_t *id, void *ev, int clear) {
     hle_bind_system_event(ev, clear);
-    int slot = style_slot(*id); uint32_t st = style_of(*id);
-    if (slot >= 0) { pthread_mutex_lock(&g_style_lock); g_style_ev[slot] = ev; g_style_told[slot] = st; pthread_mutex_unlock(&g_style_lock); }
+    // The style is read under the lock: a controller that came between a read before it and the lock was reported by styles_sync to no bound event and told as seen, so
+    // the bind would have told the style from before it and signalled nothing (t_hid t_bind_gap)
+    int slot = style_slot(*id); uint32_t st;
+    if (slot >= 0) { pthread_mutex_lock(&g_style_lock); g_style_ev[slot] = ev; g_style_told[slot] = st = style_of(*id); pthread_mutex_unlock(&g_style_lock); }
+    else st = style_of(*id);
     if (st) hle_signal_system_event(ev);
 }
 // The Switch's player LEDs by npad (No1 1, No2 1-2, No3 1-3, No4 1-4, No5 1+4, No6 1+3, No7 1+3+4, No8 2+3; bit 0 = LED 1); Handheld and Other light LED 1 as before
@@ -1649,7 +1739,7 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap guide applet with its argument (SDK 22); not shown by the host", Result, h_hid_StrapArg, const void *arg) { DM_APPLET("controller strap guide"); (void)arg; return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
@@ -1657,18 +1747,49 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
 // without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
-// the states of both modes from its one count
+// the states of both modes from its one count.
+// A read makes a sample only when 4 ms have passed since the newest one (or the mode changed) and otherwise copies the newest, as the Switch's touch resource does: it writes the
+// screen's LIFO every 4 ms (yuzu: GestureUpdatePeriod), so two reads within 4 ms see one sample and a Start / End edge sits in exactly one sampling number. The last 16 samples are kept
+// and GetTouchScreenStates returns the newest min(n, 16) of them, newest first, as Unity's reader expects (Pokemon Friends main+0xb00670 walks them from index n - 1 down and takes each
+// number above the last it took). Two games need this. Animal Crossing: New Horizons reads twice in one original frame (its input manager at main+0x1b65260 and its own keyboard's
+// reader): a read that used up the edges let the second reader see only a held point, so the keyboard highlighted a key and entered nothing (issue #2567). Unity 2022.3 (Pokemon Friends
+// 1.1.5) polls on its own thread at 60 Hz whatever the frame rate, and a poll that takes no new state while a finger is down (main+0x60d6a0) ends every live touch as cancelled: with one
+// sample per presented frame, the second poll of a 30 fps frame cancelled every drag. Giving each read a new number instead made Unity take the same Start again on every state.
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
-static void touch_read(void *s, int n) {
+#define TOUCH_GRID_NS 4000000ull   // the touch sampler's period (250 Hz)
+#define TOUCH_HIST 16              // samples kept: the most GetTouchScreenStates<16> returns
+static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time and mode; taken before hle_touch.c's g_tl
+static uint8_t g_touch_hist[TOUCH_HIST][0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+static int g_touch_kept, g_touch_newest, g_touch_points;   // samples kept (0-16), index of the newest, the points it was made with (1 handheld, 0 console)
+static uint64_t g_touch_at;   // now_ns() of the newest
+// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid or the mode asks for one
+static int touch_read(void *s, int N, int want) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    touch_fill_n(s, n, now_ns(), dm_opmode() == 0);
+    size_t stride = 0x10 + 0x28 * (size_t)N;
+    pthread_mutex_lock(&g_touch_mu);
+    uint64_t now = now_ns();   // under the lock: read before it, another thread's newer sample would make now - g_touch_at wrap
+    int handheld = dm_opmode() == 0;
+    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS || g_touch_points != handheld) {   // console mode: no touch points, as before
+        int next = g_touch_kept ? (g_touch_newest + 1) % TOUCH_HIST : 0;
+        touch_fill_n(g_touch_hist[next], 16, now, handheld);
+        g_touch_newest = next; g_touch_at = now; g_touch_points = handheld;
+        if (g_touch_kept < TOUCH_HIST) g_touch_kept++;
+    }
+    int cnt = want < g_touch_kept ? want : g_touch_kept;
+    for (int i = 0; i < cnt; i++) {
+        uint8_t *d = (uint8_t *)s + stride * (size_t)i;
+        memcpy(d, g_touch_hist[(g_touch_newest + TOUCH_HIST - i) % TOUCH_HIST], stride);
+        if (((int32_t *)d)[2] > N) ((int32_t *)d)[2] = N;   // more fingers than this reader asked for: the rest stay unseen here
+    }
+    pthread_mutex_unlock(&g_touch_mu);
+    return cnt;
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: 1 entry (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_read(s, N); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);
@@ -1716,16 +1837,25 @@ HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorH
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor firmware update: none", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
 // GetActual returns the sanitized guest value accepted by the host, before output-device adaptation.
 HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration: linear resonant actuator, left or right", void, h_hid_VibInfo, uint32_t *info, const uint32_t *h) {
-    int m = 0, on = h && vib_targets(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
+    int m = 0, on = h && vib_valid(*h, &m) != 0;
+    info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
+    if (getenv("DM_RUMBLE_LOG")) { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) LOG("rumble: GetVibrationDeviceInfo %#x -> mounted %u, actuator %u", h ? *h : 0, info[0], info[1]); }
 }
 // The SDK's own call reaches the hid service (a null read in hid::detail::IsVibrationDeviceMounted; Super Mario Odyssey asks for each handle of a controller).
-// On Horizon a device is mounted when the npad's connected controller has that style and an actuator on that side: here, when the channel has an output, as GetVibrationDeviceInfo reports it
-HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
-    int m; return h && vib_targets(*h, &m);
+// Mounting and device info describe a valid channel of the npad's reported controller, independently of the rumble setting or a routed haptics output (vib_valid).
+HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the handle names a valid npad channel", unsigned, h_hid_VibMounted, const uint32_t *h) {
+    int m = 0, on = h && vib_valid(*h, &m) != 0;
+    if (getenv("DM_RUMBLE_LOG")) { static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8) LOG("rumble: IsVibrationDeviceMounted %#x -> %d", h ? *h : 0, on); }
+    return on;
 }
+// A forced vibration session lets the application vibrate while the system's vibration setting is off (hid's Begin/EndPermitVibrationSession). The host has no such system setting: its own
+// rumble switch is the player's and a session does not override it, so there is nothing to begin or end. The SDK's own calls read the null hid service object: Super Mario Party (SDK 9.4)
+// crashed at sdk+0x3526bc in hid::detail::EndPermitVibrationSession while booting (issue #2513)
+HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: the host has no system vibration setting for it to override", void, h_hid_VibForceBegin, void) {}
+HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session ends: nothing to restore", void, h_hid_VibForceEnd, void) {}
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
-HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
-    int m; return h && vib_targets(*h, &m);
+HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the handle names a valid npad channel", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
+    int m; return h && vib_valid(*h, &m);
 }
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {
     int m = 0; uint32_t targets = h ? vib_targets(*h, &m) : 0;

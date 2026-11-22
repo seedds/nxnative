@@ -9,13 +9,14 @@
 
 static hle_ent entries[4];
 static hle_force_ent forces[3];
+static hle_force_ent *force_sec = forces; static unsigned long force_sec_n = 3;   // the alias phase swaps in its own table
 static int have_sections;
 static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, const char *sect, unsigned long *size) {
     (void)mh; assert(!strcmp(seg, "__DATA"));
     *size = 0;
     if (!have_sections) return NULL;
     if (!strcmp(sect, "swhle")) { *size = sizeof entries; return (uint8_t *)entries; }
-    assert(!strcmp(sect, "swforce")); *size = sizeof forces; return (uint8_t *)forces;
+    assert(!strcmp(sect, "swforce")); *size = force_sec_n * sizeof *force_sec; return (uint8_t *)force_sec;
 }
 #define getsectiondata test_section
 #include "../hle.c"
@@ -53,12 +54,57 @@ static void expect_abort(int duplicate) {
     if (!pid) {
         struct rlimit lim = {0, 0}; setrlimit(RLIMIT_CORE, &lim);
         freopen("/dev/null", "w", stderr);
-        if (duplicate) { forces[2] = forces[0]; force_init(); }
+        if (duplicate == 2) force_init();   // the alias table set up by the caller: a target that is itself taken over
+        else if (duplicate) { forces[2] = forces[0]; force_init(); }
         else resolve_import(NULL, "one_more_missing_symbol");
         _exit(0);
     }
     int status; assert(waitpid(pid, &status, 0) == pid);
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+}
+
+static void check_language_bindings(void) {
+    uint8_t image[0x100] = {0};
+    char names[sizeof k_language_list + sizeof k_language_count];
+    memcpy(names, k_language_list, sizeof k_language_list);
+    memcpy(names + sizeof k_language_list, k_language_count, sizeof k_language_count);
+    Elf64_Sym symbols[] = {
+        {0}, {.st_name = 0, .st_shndx = 1, .st_value = 4},
+        {.st_name = sizeof k_language_list, .st_shndx = 1, .st_value = 8},
+    };
+    module_t sdk = {.name = "sdk", .base = image, .size = sizeof image, .ro_off = 16,
+                    .symtab = symbols, .strtab = names, .nsym = 3};
+    module_t *loaded[] = {&sdk};
+    g_mod = &sdk; g_nmod = 1; g_loaded = loaded; g_nloaded = 1;
+    int list_fallback, count_fallback;
+    hle_force_ent hooks[] = {
+        {k_language_list, &list_fallback, "test"}, {k_language_count, &count_fallback, "test"},
+    };
+    force_sec = hooks; force_sec_n = 2;
+    const struct { const char *stamp; unsigned symbols; size_t data_off; int native; } cases[] = {
+        {"FS_ACCESS: { sdk_version: 20.5.25, spec: Ounce }", 3, sizeof image, 1},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }\n", 3, sizeof image, 1},
+        {"FS_ACCESS: { sdk_version: 22.2.11, spec: Ounce }", 3, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: NX }", 3, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }", 2, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }", 3, 0, 0},
+        {"", 3, sizeof image, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        strcpy((char *)image + sdk.ro_off, cases[i].stamp);
+        sdk.nsym = cases[i].symbols;
+        sdk.data_off = cases[i].data_off;
+        force_init();
+        int other, weak0;
+        Elf64_Sym list_import = {.st_name = symbols[1].st_name};
+        Elf64_Sym count_import = {.st_name = symbols[2].st_name};
+        assert(bind_sym(&sdk, &list_import, &other, &weak0) == (uint64_t)(cases[i].native ? (void *)(image + 4) : &list_fallback));
+        assert(bind_sym(&sdk, &count_import, &other, &weak0) == (uint64_t)(cases[i].native ? (void *)(image + 8) : &count_fallback));
+        force_check();
+        reset_sections();
+    }
+    g_mod = NULL; g_nmod = 0; g_loaded = NULL; g_nloaded = 0;
+    force_sec = forces; force_sec_n = 3;
 }
 
 int main(void) {
@@ -72,7 +118,7 @@ int main(void) {
         char candidate[32]; snprintf(candidate, sizeof candidate, "symbol_%u", i);
         if ((name_h(candidate) & 15) == 15) strcpy(names[found++], candidate);
     }
-    int values[5];
+    int values[5];   // [4]: the alias phase's taken-over function
     entries[0] = (hle_ent){names[0], &values[0]};
     entries[1] = (hle_ent){names[1], &values[1]};
     entries[2] = (hle_ent){names[1], &values[2]};
@@ -106,6 +152,34 @@ int main(void) {
     }
     assert(g_nstub == MAX_STUB); expect_abort(0);
     reset_sections();
+
+    // Guest aliases (hle.h HLE_FORCE_ALIAS): a reference to the hardware member binds to the loaded module's software member, even where the module defines the hardware one itself
+    // (as the sdk does); an alias whose target no module defines leaves the binding as it was; an alias to a taken-over name stops loading
+    static uint8_t image[0x100];
+    static const char strtab[] = "\0hw_member\0sw_member\0";
+    static Elf64_Sym symtab[3];
+    symtab[1] = (Elf64_Sym){.st_name = 1, .st_shndx = 1, .st_value = 0x80};
+    symtab[2] = (Elf64_Sym){.st_name = 11, .st_shndx = 1, .st_value = 0x40};
+    static module_t mod; mod.base = image; mod.symtab = symtab; mod.strtab = strtab; mod.nsym = 3; build_symhash(&mod);
+    static module_t *loaded[1]; loaded[0] = &mod; g_loaded = loaded; g_nloaded = 1;
+    static hle_force_ent aliases[3];
+    aliases[0] = (hle_force_ent){"hw_member", NULL, "test", "sw_member"};
+    aliases[1] = (hle_force_ent){"hw_orphan", NULL, "test", "sw_orphan"};
+    aliases[2] = (hle_force_ent){"forced_fn", &values[4], "test", NULL};
+    force_sec = aliases; force_sec_n = 3; have_sections = 1; force_init();
+    assert(force_lookup("hw_member") == image + 0x40 && !strcmp(wrap_kind, "ALIAS") && !strcmp(wrap_name, "hw_member") && g_force_hits[0] == 1);
+    int other, weak0;
+    assert(bind_sym(&mod, &symtab[1], &other, &weak0) == (uint64_t)(image + 0x40) && !other && !weak0);   // the module's own hw_member loses to the alias
+    assert(bind_sym(&mod, &symtab[2], &other, &weak0) == (uint64_t)(image + 0x40));                      // the software member itself is untouched
+    assert(!force_lookup("hw_orphan") && g_force_hits[1] == 1);
+    assert(force_lookup("forced_fn") == &values[4]);
+    aliases[1] = (hle_force_ent){"hw_bad", NULL, "test", "forced_fn"};
+    expect_abort(2);
+    g_loaded = NULL; g_nloaded = 0; force_sec = forces; force_sec_n = 3;
+    reset_sections();
+    check_language_bindings();
+    puts("Language list and count: verified SDK exports and paired host fallback: OK");
+    puts("Guest aliases: bound to the loaded definition over the module's own, orphan left as bound, alias to a taken-over name rejected: OK");
     puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");
     return 0;
 }

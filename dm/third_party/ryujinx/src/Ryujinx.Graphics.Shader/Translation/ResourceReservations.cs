@@ -135,7 +135,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (vacUsage.UsesViewportIndex && gpuAccessor.QueryHostSupportsViewportIndexVertexTessellation())
             {
-                _offsets.Add(new IoDefinition(storageKind, IoVariable.VertexIndex), offset++);
+                _offsets.Add(new IoDefinition(storageKind, IoVariable.ViewportIndex), offset++);
             }
 
             if (vacUsage.UsesViewportMask && gpuAccessor.QueryHostSupportsViewportMask())

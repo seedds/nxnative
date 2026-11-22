@@ -1,0 +1,40 @@
+# Resident Evil (HD Remaster), SDK 5_4_0, MT Framework (ARC version 9). Started from the survey's provisional profile; MT Framework settings from The Great Ace Attorney Chronicles
+
+# ---- Identity ----
+title_id	010050F00BC1A000
+program_id	010050F00BC1A000
+
+# ---- App ----
+name	Resident Evil
+ipa	ResidentEvil.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=6bec9b23b09df46c315aa6f4bfacf91c	subsdk0=41097c438a36afd2e879fa6f5e0f0850	sdk=26ffb122262ca25e4c016c0af2f92a29
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from (subsdk0 is NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	nativeNXx64/sa/NX_64/root.arc
+zip_store	.arc:.mfx:.mp4:.tex:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource
+sys_resource	0x0
+
+# ---- Graphics (as The Great Ace Attorney Chronicles, the other MT Framework title) ----
+tex_flush_upload	on
+tex_dirty_upload	on
+depth_mode	zero
+
+# ---- Shader split ----
+# 19,104 shaders in three SPKs (sc\NX_64\root, Title, Game; the only member of sa/NX_64/<name>.arc), 19,060 unique: shader_split.py mtspk_headed_shaders
+shader_groups	/nativeNXx64/=nativenxx64
+shader_note	Resident Evil shaders

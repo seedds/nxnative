@@ -51,6 +51,7 @@ Validation on the M4 Pro:
 ## Found on this game
 
 - [Frame-step state with a front patch area](../../../docs/reference/rewriter.md#frame-step-state-with-a-front-patch-area).
+- [Jump tables proved over control flow](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow): `main+0x6db1b4` sits behind `x17` tables indexed by `lsr x17,x11,#32; cmp w17,#5`, and its own guard on `w12 - 2` is joined from four blocks of a loop; shifts bound their result and widening keeps the parts that held.
 - [PKZ version 1 archives](../../../docs/reference/shaders.md#pkz-version-1-archives).
 - [Newest GPU code version reported by the driver](../../../docs/reference/nvn-objects.md#newest-gpu-code-version-reported-by-the-driver): precompiled shader versions do not follow the linked SDK.
 - [The alpha test through a library of its own](../../../docs/reference/rendering.md#the-alpha-test-through-a-library-of-its-own): the death effect's tendrils (`EffectOpacityBlood`, alpha written by the shader, no `discard`) stayed solid black; reported on PR #32 with an implementation of its own (358 of one frame's 3,048 draws alpha-tested, function 5, GREATER).

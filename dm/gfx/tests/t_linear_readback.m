@@ -192,10 +192,68 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     for (int i = 0; i < N; i++) h_nvnTextureFinalize(&tex[i]);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); defer_drain(); munmap(mem, len);
 }
+// IMAGE is a usage permission, not a linear layout. WriteTexels stores a
+// distinct pattern block-linearly; ReadTexels must undo that layout, even when
+// the serial is explicitly CPU-written and no Metal view has been created yet.
+static void nonlinear_image_readback_case(void) {
+    const size_t len = 262144;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    memset(mem, 0, len);
+    NVNmemoryPool pool; pool_builder_t pb = {.mem = mem, .size = len, .flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    EXPECT("nonlinear image pool init", 1, h_nvnMemoryPoolInitialize(&pool, (const NVNmemoryPoolBuilder *)&pb));
+    NVNtextureBuilder tb; NVNtexture tex;
+    h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 6); h_nvnTextureBuilderSetHeight(&tb, 6);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_IMAGE);
+    h_nvnTextureBuilderSetStorage(&tb, &pool, 65536);
+    EXPECT("nonlinear image init", 1, h_nvnTextureInitialize(&tex, &tb));
+    uint8_t pattern[24 * 6];
+    for (unsigned i = 0; i < sizeof pattern; i++) pattern[i] = (uint8_t)(i * 17 + 3);
+    NVNcopyRegion region = {0, 0, 0, 6, 6, 1};
+    h_nvnTextureWriteTexels(&tex, NULL, &region, pattern);
+    EXPECT("nonlinear image serial is CPU-written", 1, tex_cpu_written(((const tex_t *)&tex)->serial));
+    EXPECT("nonlinear IMAGE readback preserves block-linear rows", 0, read_bad(&tex, pattern, 24));
+    h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize(&pool); defer_drain(); munmap(mem, len);
+}
+static void linear_size_case(unsigned width, unsigned height, int fits) {
+    const NSUInteger align = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatR8Unorm]);
+    const size_t stride = (width + align - 1) / align * align;
+    const size_t page = (size_t)getpagesize();
+    const size_t len = (stride * height + page - 1) / page * page;
+    void *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    NVNmemoryPool pool;
+    pool_builder_t pb = {.mem = mem, .size = len, .flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    if (!h_nvnMemoryPoolInitialize(&pool, (const NVNmemoryPoolBuilder *)&pb)) abort();
+    NVNtextureBuilder tb;
+    NVNtexture tex;
+    h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, width);
+    h_nvnTextureBuilderSetHeight(&tb, height);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R8);
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_LINEAR);
+    h_nvnTextureBuilderSetStride(&tb, stride);
+    h_nvnTextureBuilderSetStorage(&tb, &pool, 0);
+    if (!h_nvnTextureInitialize(&tex, &tb)) abort();
+    id<MTLTexture> texture = tex_mtl((const tex_t *)&tex);
+    printf("LINEAR_SIZE %ux%u\n", width, height);
+    EXPECT("linear texture resolves within the device limit", fits, texture != nil);
+    if (fits) EXPECT("linear texture at the limit uses its pool's buffer", 1, texture.buffer != nil);
+    texture = nil;
+    h_nvnTextureFinalize(&tex);
+    h_nvnMemoryPoolFinalize(&pool);
+    defer_drain();
+    munmap(mem, len);
+}
 int main(void) { @autoreleasepool { setenv("DM_TBUF_ALIGN", "64", 1);   // before the first lookup (tbuf_align reads it once); the other cases' rows and offsets are 64-byte aligned
     mtl_init(); run_case(NVN_FORMAT_RGBA8); run_case(NVN_FORMAT_RGBA8_SRGB);
     render_target_stride_case();
     scaled_copy_case();
     unaligned_upload_case();
+    nonlinear_image_readback_case();
+    unsigned limit = [g_dev supportsFamily:MTLGPUFamilyApple10] ? 32768 : 16384;
+    linear_size_case(64, limit, 1);
+    linear_size_case(64, limit + 1, 0);
+    linear_size_case(limit + 1, 1, 0);
     printf("LINEAR_READBACK cases=%d failed=%d\n",cases,failed); return failed != 0;
 } }

@@ -91,7 +91,9 @@ static void image_case(int tid) {
     t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBX8, .width=2, .height=1, .depth=1, .levels=1, .samples=1, .flags=NVN_TEXTURE_FLAGS_IMAGE};
     MTLTextureDescriptor *d = tex_desc(&t, 0); d.storageMode = MTLStorageModeShared;
     id<MTLTexture> base = [g_dev newTextureWithDescriptor:d];
-    CHECK(base != nil && (base.usage & MTLTextureUsageShaderWrite), "image texture created");
+    BOOL writable = base != nil && (base.usage & MTLTextureUsageShaderWrite);
+    CHECK(writable, "image texture created");
+    if (!writable) return;
     serial_put(t.serial, base);
     mtl_reg_tex(tid, &t, NULL);
     os_unfair_lock_lock(&g_rmu);

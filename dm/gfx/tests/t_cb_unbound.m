@@ -42,11 +42,11 @@ int main(void) { @autoreleasepool {
     CHECK(encode_args((id<MTLCommandEncoder>)en, a, 5, 0), "A encoded with both slots unbound");
     enc_c_pso(en, pa); enc_c_dispatch(en, MTLSizeMake(1,1,1), MTLSizeMake(1,1,1));
     CHECK(g_cb_miss_n == 2, "A's two unbound slots are both reported");
-    g_args_dirty[5] = 1; CHECK(encode_args((id<MTLCommandEncoder>)en, a, 5, 0), "A encoded again");
+    args_dirty(5); CHECK(encode_args((id<MTLCommandEncoder>)en, a, 5, 0), "A encoded again");
     CHECK(g_cb_miss_n == 2, "the same shader and slots are not reported twice");
     // another shader with the same slots unbound: the single counter suppressed these
     [en barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:resource_vis()];
-    g_args_dirty[5] = 1; CHECK(encode_args((id<MTLCommandEncoder>)en, b, 5, 0), "B encoded with both slots unbound");
+    args_dirty(5); CHECK(encode_args((id<MTLCommandEncoder>)en, b, 5, 0), "B encoded with both slots unbound");
     enc_c_pso(en, pb); enc_c_dispatch(en, MTLSizeMake(1,1,1), MTLSizeMake(1,1,1)); enc_c_end(en);
     CHECK(g_cb_miss_n == 4, "a second shader's unbound slots are reported after the first's");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "first submission completed"); mtl_drain();

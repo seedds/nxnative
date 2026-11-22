@@ -234,6 +234,19 @@ class Bounds(Solver):
         w[5] = ADRP(12, 20, 0x5000)   # another real base on that path: two tables, no proof
         self.assertIsNone(self.site(w))
 
+    def test_yakuza_kiwami_far_adr_check(self):
+        # Yakuza Kiwami 1.01 main+0x91b24c: cmp w21,#3 followed by 23 float/bitfield instructions before b.hi; adr x18,#.; ldrsw x0,[x17,x16,lsl #2]; add x18,x18,x0; br x18
+        t = [136, 128, 144, 128]
+        self.table(t, rel=112)
+        w = ([cmp_w(21, 3), 0x1e270122, 0x1e220821, 0x1e39002b, 0x5301218f, 0x5293d3c9, 0x53185dee] + [NOP] * 17 +
+             [bcond(HI, 96, 152), mov_w(16, 21), ADRP(17, 104, self.TABLE), ADDI(17, 17, 0), adr(18, 112, 112),
+              ldrsw(0, 17, 16), ADDR(18, 18, 0), BR(18), RET, NOP, RET, RET, RET, NOP, RET])
+        self.assertEqual(self.site(w), t)
+        bad_flags = list(w); bad_flags[10] = cmp_w(0, 1)
+        self.assertIsNone(self.site(bad_flags))   # negative: intervening flag write destroys cmp w21,#3 guard
+        bad_copy = list(w); bad_copy[25] = mov_w(16, 0)
+        self.assertIsNone(self.site(bad_copy))    # negative: index copy severed from checked w21
+
 
 class FoundOnTheCorpus(Solver):
     """Forms the comparison with the recognizers on every supported game's modules brought out"""

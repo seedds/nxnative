@@ -2585,11 +2585,27 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 ### Desktop GLSL 1.10 and 1.20 from runtime generators
 
-- **Symptom:** captured desktop GLSL fails with `Desktop shaders for Vulkan SPIR-V require version 140 or higher` or with an undeclared `gl_TexCoord` or `gl_Color`.
-- **Cause:** MojoShader emits desktop compatibility GLSL 1.20 and names its built-in varyings through macros.
-- **Fix:** promote explicit desktop versions 110 and 120 through the existing GLSL ES 1.00 compatibility rewrite. After preprocessing, make the front colors, fog coordinate and constant-index texture coordinates explicit, with matching names across stages. Constant-index fragment outputs keep their locations.
-- **Limits:** this covers the programmable varyings used by MojoShader. Fixed-function vertex inputs, back-face color selection and dynamically indexed legacy arrays are outside this path.
-- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)).
+- **Symptom:** captured desktop GLSL fails with `Desktop shaders for Vulkan SPIR-V require version 140 or higher`, an undeclared `gl_TexCoord` or `gl_Color`, `cannot convert from 'const int' to 'temp highp float'`, or `sampler/image : type requires declaration of default precision qualifier` on `sampler3D` / `texture3D`.
+- **Cause:** legacy desktop GLSL (`#version 110`/`120`/`130`) relies on `attribute`, `varying`, `gl_FragColor`, `texture3D*`, implicit `int`-to-`float` conversions, and desktop samplers without ES precision qualifiers; promoting it to `#version 310 es` rejected desktop implicit conversions and `sampler3D`.
+- **Fix:** promote explicit desktop versions 110, 120 and 130 to `#version 450 core` (while keeping unversioned / `#version 100` on `#version 310 es`) and rewrite `texture3D`/`texture3DLod`/`texture3DProj` in `OLD_TEX`. After preprocessing, make the front colors, fog coordinate and constant-index texture coordinates explicit, with matching names across stages. Constant-index fragment outputs keep their locations.
+- **Limits:** this covers the programmable varyings used by MojoShader and desktop `#version 120` renderers. Fixed-function vertex inputs, back-face color selection and dynamically indexed legacy arrays are outside this path.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)) and Darkest Dungeon ([PR #2034](https://github.com/seedds/nxnative/pull/2034), [issue #3021](https://github.com/seedds/nxnative/issues/3021)).
+
+### Explicit sampler `layout(binding)` and `GL_TEXTURE_SWIZZLE_RGBA`
+
+- **Symptom:** multi-planar movie shaders that declare `layout(binding = 0)` / `layout(binding = 1)` without calling `glUniform1i` sample every plane from texture unit 0 (green NV12 video), and `glTexParameteriv(..., GL_TEXTURE_SWIZZLE_RGBA, ...)` logs `[RED] glTexParameter(0x8e46) not implemented`.
+- **Cause:** `gl_shaders.py` did not record explicit GLSL `layout(binding = N)` sampler units in `gl_shaders.tsv`, so `glLinkProgram` always initialized every sampler to unit 0; `hle_gl.m` handled individual `GL_TEXTURE_SWIZZLE_R..A` parameters but not the 4-component `GL_TEXTURE_SWIZZLE_RGBA` vector form.
+- **Fix:** `gl_shaders.py` records non-zero explicit `layout(... binding = N ...)` sampler bindings as an optional fifth colon-separated field on `t:` rows (leaving unqualified samplers at 0, distinct from glslang `--amb` auto-assignments), and `glLinkProgram` initializes `u->unit` from that field. `glTexParameteriv` and `glTexParameterfv` apply `GL_TEXTURE_SWIZZLE_RGBA` across all four channels.
+- **Check:** `test_gl_shaders.py` and `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports gl-arguments`.
+- **Found on:** Darkest Dungeon ([PR #2034](https://github.com/seedds/nxnative/pull/2034), [issue #3021](https://github.com/seedds/nxnative/issues/3021)).
+
+### Embedded `main` GLSL or `.glsl` templates suppressing `DM_GL_CAPTURE`
+
+- **Symptom:** an OpenGL game boots with audio and advancing frames but shows a black screen, logging only a few shader table entries (from `main`) and `[RED] vertex/fragment shader <key> is not in the library (DM_GL_CAPTURE collects it)` for its game shaders.
+- **Cause:** `profile_guess.py` turned `gl_capture` off whenever `main` contained any embedded GLSL string (`gl_src > 0`) or the RomFS contained any `.glsl` filename by extension alone, and `build_ipa_from_nsp.py` did not fall back to capture when offline `.glsl` files failed to translate standalone or when a profile provided `gl_capture.tsv`.
+- **Fix:** `profile_guess.py` only suppresses `gl_capture` when standalone RomFS shader files are present (ignoring `gl_src` alone and requiring `.glsl` files to define `void main()`), and `build_ipa_from_nsp.py` honors `gl_capture.tsv` and falls back to Mac `DM_GL_CAPTURE` when offline translation yields only `main`'s embedded shaders or fails with no translated RomFS shaders.
+- **Check:** `test_profile_guess.py`, `test_gl_shaders.py`, and `test_nsp_incremental.py`.
+- **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, [issue #3021](https://github.com/seedds/nxnative/issues/3021)).
 
 ### GL capture compiles missing shaders
 

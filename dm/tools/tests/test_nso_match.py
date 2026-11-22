@@ -221,6 +221,30 @@ class Matching(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stub'): locate_stub(moved, 0x2000, [dict(stub, stub=None)], messages.append)
         with self.assertRaisesRegex(ValueError, 'name, size'): locate_stub(moved, 0x2000, [dict(stub, cuts=[])], messages.append)
 
+    def test_stub_rule_supports_called_by(self):
+        # MATCH_STUBS / MATCH_FRAME_STEP: called_by disambiguates an identical short callee across relocations, with optional others
+        from nso_match import locate_stub
+        leaf = [0x52800020, RET]
+        wait = [0x52800080, RET]
+        original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: wait})
+        parsed = Image(original, 0x2000)
+        rule = dict(
+            name='wake', size=8, fingerprints=[parsed.fingerprint(0x500)], stub=lambda ctx: None,
+            called_by=dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12),
+            others={'wait': dict(size=8, fingerprints=[parsed.fingerprint(0x700)])},
+        )
+        moved = image({0x800: caller(0x800, 0x1200), 0x1200: leaf, 0x1400: leaf, 0x1600: wait})
+        messages = []
+        self.assertEqual(locate_stub(moved, 0x2000, [rule], messages.append), (rule, 0x1200, {'wait': 0x1600}, None))
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        # Changing the callee invalidates the caller match and installs nothing.
+        struct.pack_into('<I', moved, 0x1200, 0x52800040)
+        messages = []
+        self.assertIsNone(locate_stub(moved, 0x2000, [rule], messages.append))
+        self.assertTrue(messages[0].startswith('[RED] '), messages)
+        for bad in (dict(rule, called_by=dict(size=28)), dict(rule, called_by=dict(rule['called_by'], call=28))):
+            with self.assertRaises(ValueError): locate_stub(original, 0x2000, [bad], messages.append)
+
     def test_anchored_frame_step_finds_the_one_caller_or_nothing(self):
         # an anchored rule: the one function that calls the import, whatever its size or fingerprint, and what its find returned; find refusing, no caller or two give a red
         # line and no stub

@@ -14,11 +14,13 @@ import argparse
 import importlib.util
 from pathlib import Path
 import struct
+import types
 
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
 from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X22, UC_ARM64_REG_SP, UC_ARM64_REG_LR, UC_ARM64_REG_PC
 
 from nso2elf import load
+import nso_match
 
 BASE, STATE, STACK, STOP = 0x10000000, 0x40000000, 0x50000000, 0x60000000
 GAMES = Path(__file__).resolve().parents[1] / 'games'
@@ -26,22 +28,57 @@ GAMES = Path(__file__).resolve().parents[1] / 'games'
 
 class Replay:
     def __init__(self, path, game, patched):
-        img, _, bss, bid = load(path)
+        img, segs, bss, bid = load(path)
+        self.img = img
+        self.text_end = segs[0][0] + segs[0][1]
         spec = importlib.util.spec_from_file_location('thread_cuts', GAMES / game / 'patches.py')
         cuts = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cuts)
         build = bid[:16].hex()
-        if build not in cuts.CUTS:
-            raise ValueError(f'{path}: unregistered {game} main build {build}')
+        patch_off = (len(img) + bss + 0xfff) & ~0xfff
         self.vm = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
-        self.vm.mem_map(BASE, (len(img) + bss + 0xfff) & ~0xfff)
+        self.vm.mem_map(BASE, patch_off + 0x10000)
         self.vm.mem_write(BASE, img)
-        for off, before, after, _ in cuts.CUTS[build]:
-            old = bytes.fromhex(before)
-            if img[off:off + len(old)] != old:
-                raise ValueError(f'{path}: original instructions differ at {off:#x}')
+        self.matched = None
+        if build in getattr(cuts, 'CUTS', {}):
+            for off, before, after, _ in cuts.CUTS[build]:
+                old = bytes.fromhex(before)
+                if img[off:off + len(old)] != old:
+                    raise ValueError(f'{path}: original instructions differ at {off:#x}')
+                if patched:
+                    self.vm.mem_write(BASE + off, bytes.fromhex(after))
+        elif 'main' in getattr(cuts, 'MATCH_STUBS', {}):
+            got = nso_match.locate_stub(img, self.text_end, cuts.MATCH_STUBS['main'], report=lambda _: None)
+            if got is None:
+                raise ValueError(f'{path}: {game} MATCH_STUBS did not match main build {build}')
+            rule, base, others, found = got
+            self.matched = (base, others)
+            patch = bytearray()
+            writes = []
+
+            def site(off, orig):
+                old = bytes.fromhex(orig)
+                if img[off:off + len(old)] != old:
+                    raise ValueError(f'{path}: original instructions differ at {off:#x}')
+
+            def put(off, words, why):
+                writes.append((off, struct.pack('<' + 'I' * len(words), *words)))
+
+            ctx = types.SimpleNamespace(
+                here=lambda: patch_off + len(patch),
+                emit=lambda w: patch.extend(struct.pack('<I', w & 0xffffffff)),
+                site=site, put=put, address=lambda off, lo_off=None: 0,
+                base=base, others=others, found=found, fps_ready=False,
+            )
+            rule['stub'](ctx)
+            if not writes:
+                raise ValueError(f'{path}: {game} stub installed no sites for main build {build}')
             if patched:
-                self.vm.mem_write(BASE + off, bytes.fromhex(after))
+                self.vm.mem_write(BASE + patch_off, bytes(patch))
+                for off, data in writes:
+                    self.vm.mem_write(BASE + off, data)
+        else:
+            raise ValueError(f'{path}: unregistered {game} main build {build}')
         # Relocate the original vtables, including the completion destructor.
         mod = struct.unpack_from('<I', img, 4)[0]
         dyn = mod + struct.unpack_from('<i', img, mod + 4)[0]
@@ -77,6 +114,18 @@ class Replay:
 def fft(path, patched):
     r = Replay(path, '010038B015560000', patched)
     vm = r.vm
+    parsed = nso_match.Image(r.img, r.text_end)
+    signal_fn, others = r.matched
+    wait_fn = others['wait wrapper']
+    sig_plt = wait_plt = None
+    for off in range(0, r.text_end - 16, 4):
+        name = parsed._plt_import(off)
+        if name == '_ZN2nn2os11SignalEventEPNS0_9EventTypeE':
+            sig_plt = off
+        elif name == '_ZN2nn2os9WaitEventEPNS0_9EventTypeE':
+            wait_plt = off
+    if sig_plt is None or wait_plt is None:
+        raise ValueError(f'{path}: missing SignalEvent/WaitEvent PLT entries')
     wrapper, event = STATE, STATE + 0x100
     r.put(wrapper, event)
     waiters, ready = [], []
@@ -86,13 +135,13 @@ def fft(path, patched):
         nonlocal signals
         if uc.reg_read(UC_ARM64_REG_X0) != event:
             raise AssertionError('event wrapper passed the wrong event pointer')
-        if pc == BASE + 0x651630:
+        if pc == BASE + sig_plt:
             signals += 1
             if waiters:
                 ready.append(waiters.pop(0))
         uc.reg_write(UC_ARM64_REG_PC, uc.reg_read(UC_ARM64_REG_LR))
 
-    for off in (0x651630, 0x651640):
+    for off in (sig_plt, wait_plt):
         vm.hook_add(UC_HOOK_CODE, sdk, begin=BASE + off, end=BASE + off)
     results = []
     for order in ([0], [0, 1], [1, 0]):
@@ -101,11 +150,11 @@ def fft(path, patched):
             ready.clear()
             signals = 0
             r.put(wrapper + 8, 0)
-            r.call(0x12554, wrapper)
+            r.call(signal_fn, wrapper)
             done = False
             while ready:
                 worker = ready.pop(0)
-                r.call(0x12500, wrapper)
+                r.call(wait_fn, wrapper)
                 if worker == target:
                     done = True
                 else:

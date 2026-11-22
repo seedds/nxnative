@@ -328,6 +328,7 @@ static void display_awake(int on) {
 // stay pressed in the game. The front end releases only what it pressed itself: scripted buttons and sticks have their own path, and the touch is also DM_KEYS / DM_CTL's (hle_hid.c).
 // Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
+static uint32_t g_mac_mouse_btn;   // virtual Switch 2 Nmouse buttons currently held by Mac mouse events
 // Nothing the controllers pressed stays pressed (focus lost, the Home quit prompt open)
 static void pads_release(void) {
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
@@ -357,6 +358,10 @@ static void input_release(void) {
     dm_switch2_active(0); dm_jc1_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    if (g_mac_mouse_btn || dm_joy_mouse_wanted()) {
+        g_mac_mouse_btn = 0;
+        dm_host_mouse(0.f, 0.f, 0.f, 0.f, 0, 0, 0, DM_HOST_MOUSE_FLAG_RESET);
+    }
     pads_release();
 }
 static void input_resume(void) {
@@ -692,18 +697,52 @@ static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
-- (void)mouseDragged:(NSEvent *)e {
-    if (!g_input_on) return;
+- (BOOL)picturePoint:(NSEvent *)e nx:(float *)nx ny:(float *)ny {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) return NO;
     double a = g_picture_aspect; if (w / h > a) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT)
     double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
-    dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
+    *nx = (float)fmin(fmax((p.x - x0) / w, 0), 0.999);
+    *ny = (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999);   // AppKit view origin is bottom left, touchscreen / Nmouse origin is top left
+    return YES;
+}
+- (void)sendNmouse:(NSEvent *)e wheelX:(int)wx wheelY:(int)wy {
+    if (!g_input_on || !dm_joy_mouse_wanted()) return;
+    float nx, ny;
+    if (![self picturePoint:e nx:&nx ny:&ny]) return;
+    dm_host_mouse(nx, ny, (float)e.deltaX, (float)e.deltaY, wx, wy, g_mac_mouse_btn,
+                  DM_HOST_MOUSE_FLAG_ABS | DM_HOST_MOUSE_FLAG_REL | DM_HOST_MOUSE_FLAG_SURFACE);
+}
+- (void)mouseMoved:(NSEvent *)e { [self sendNmouse:e wheelX:0 wheelY:0]; }
+- (void)mouseDown:(NSEvent *)e {
+    if (!g_input_on) return;
+    g_mac_mouse_btn |= DM_HOST_MOUSE_LEFT;
+    [self mouseDragged:e];
+}
+- (void)mouseDragged:(NSEvent *)e {
+    if (!g_input_on) return;
+    float nx, ny;
+    if (![self picturePoint:e nx:&nx ny:&ny]) return;
+    if (dm_joy_mouse_wanted()) {
+        dm_host_mouse(nx, ny, (float)e.deltaX, (float)e.deltaY, 0, 0, g_mac_mouse_btn,
+                      DM_HOST_MOUSE_FLAG_ABS | DM_HOST_MOUSE_FLAG_REL | DM_HOST_MOUSE_FLAG_SURFACE);
+    }
+    dm_touch t = {0, nx, ny};
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e {
+    g_mac_mouse_btn &= ~DM_HOST_MOUSE_LEFT;
+    [self sendNmouse:e wheelX:0 wheelY:0];
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+}
+- (void)rightMouseDown:(NSEvent *)e { if (!g_input_on) return; g_mac_mouse_btn |= DM_HOST_MOUSE_RIGHT; [self sendNmouse:e wheelX:0 wheelY:0]; }
+- (void)rightMouseDragged:(NSEvent *)e { [self sendNmouse:e wheelX:0 wheelY:0]; }
+- (void)rightMouseUp:(NSEvent *)e { g_mac_mouse_btn &= ~DM_HOST_MOUSE_RIGHT; [self sendNmouse:e wheelX:0 wheelY:0]; }
+- (void)otherMouseDown:(NSEvent *)e { if (!g_input_on) return; if (e.buttonNumber == 2) { g_mac_mouse_btn |= DM_HOST_MOUSE_MIDDLE; [self sendNmouse:e wheelX:0 wheelY:0]; } }
+- (void)otherMouseDragged:(NSEvent *)e { if (e.buttonNumber == 2) [self sendNmouse:e wheelX:0 wheelY:0]; }
+- (void)otherMouseUp:(NSEvent *)e { if (e.buttonNumber == 2) { g_mac_mouse_btn &= ~DM_HOST_MOUSE_MIDDLE; [self sendNmouse:e wheelX:0 wheelY:0]; } }
+- (void)scrollWheel:(NSEvent *)e { [self sendNmouse:e wheelX:(int)lrint(e.scrollingDeltaX) wheelY:(int)lrint(e.scrollingDeltaY)]; }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1603,6 +1642,7 @@ void front_run(void (*guest)(void)) {
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        win.acceptsMouseMovedEvents = YES;
         NSView *v = win.contentView = [[DmGameView alloc] initWithFrame:r];
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
@@ -1770,7 +1810,12 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
         g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+        if (g_mouse_down) { g_mouse_down = 0; }
         dm_touch_set(NULL, 0);
+        if (g_mac_mouse_btn || dm_joy_mouse_wanted()) {
+            g_mac_mouse_btn = 0;
+            dm_host_mouse(0.f, 0.f, 0.f, 0.f, 0, 0, 0, DM_HOST_MOUSE_FLAG_RESET);
+        }
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];
         for (;;) {

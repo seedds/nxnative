@@ -89,6 +89,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_friends`, then `dm/host/tests/build/t_friends`, resolves both overloads by their actual registered names and checks the failure result and untouched output for both local flags, including guest bool arguments with upper bits set.
 - **Found on:** [Super Nintendo Entertainment System – Nintendo Classics](../../dm/games/01008D300C50C000/README.md) (`01008D300C50C000`, 6.0.0, SDK 20.5.21, `main+0xc608`). [PR #2162](https://github.com/seedds/nxnative/pull/2162) reports the original abort and a Mac boot past it with separate mission-events and profile changes.
 
+### SDK 14's `friends` calls without a `Uid`, blocked-user list availability, and cut-object methods
+
+- **Symptom:** `[RED] sf: the game connects to service friend:u itself`, then an `nn::diag` abort with Result 0xe15 in `friends::detail::ipc::Initialize` under `friends::EnsureBlockedUserListAvailable` (`sdk+0x341d28`) when leaving the title screen.
+- **Cause:** `hle_friends.c` / `hle_offline.c` did not take over `EnsureBlockedUserListAvailable` / `CheckBlockedUserListAvailability` (either form), several no-`Uid` overloads (`EnsureFriendListAvailable`, `CheckFriendListAvailability`, `DeclareOpenOnlinePlaySession`, `DeclareCloseOnlinePlaySession`, `GetProfileList`, `UpdateFriendInfo`, `NotificationQueue::Initialize`, `UserPresence::Initialize`, plus `Friend::Update`), or methods (`AsyncContext::Cancel`, `NotificationQueue::Clear`, `NotificationQueue::Finalize`) that lock mutexes left uninitialized by the cut constructors.
+- **Fix:** all 16 SDK symbols are taken over in `hle_friends.c` with the same offline policy as their existing `Uid` and `nn::account::AsyncContext` counterparts: `Ensure*` and service queries fail at once (`RES_FAIL`), `Check*Availability` reports unavailable (`*out = 0`) with `RES_OK`, `UserPresence::Initialize()` and `AsyncContext::Cancel()` return `RES_OK`, and `NotificationQueue::Finalize()` is a no-op. Bound to the SDK symbols with no title or build gate.
+- **Open:** returning `RES_FAIL` from `EnsureBlockedUserListAvailable` matches `EnsureFriendListAvailable` and works on SUPER BOMBERMAN R 2, though another title could turn it into an error applet (as DARK SOULS: REMASTERED did with SDK 4's `GetBlockedUserList`).
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_friends`, then `dm/host/tests/build/t_friends`, resolves all 16 registered symbols and verifies their results, output flags, null safety and untouched buffers.
+- **Found on:** SUPER BOMBERMAN R 2 (`0100B87017D94000`, 1.0.0, SDK 14.3.0; provisional profile, no note yet, [issue #3177](https://github.com/seedds/nxnative/issues/3177)): Mac gameplay through the title screen, main menu, Story (World 1) and Battle Offline vs 3 COMs at 60 fps with no `[RED]` lines or aborts.
+
 ### Friend-ID lists and network error Results on SDK 7
 
 - **Symptom:** `friends::GetFriendList` or `err::ShowNetworkServiceError` enters the SDK's service path despite the host's offline replacements.

@@ -403,7 +403,7 @@ static uint8_t g_seen[256];
 // The lock used to cover only the add and the delete, so two threads unmapping at once (stacks of exiting threads) could delete through a stale index and drop another live mapping
 #define MAX_MAP 4096
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
-enum { SHARED_MEMORY_STATE = 6 };
+enum { SHARED_MEMORY_STATE = 6, PROCESS_MEMORY_STATE = 0xF };   // ProcessMemory: an exlaunch plugin's view of module code (MapProcessMemory, hle_exl.c), which does not lock its source
 static unsigned g_shared_maps;   // under g_map_lock
 static int g_nmap;
 static hle_transfer_mapping *g_transfer_mappings;   // in-place service mappings, under g_map_lock
@@ -573,7 +573,7 @@ static uint32_t map_arguments(uint64_t dst, uint64_t src, uint64_t size) {
 }
 static int map_source_borrowed(uint64_t addr, uint64_t size) { // g_map_lock held; nonwrapping ranges
     for (int i = 0; i < g_nmap; ++i)
-        if (g_map[i].state != SHARED_MEMORY_STATE && addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
+        if (g_map[i].state != SHARED_MEMORY_STATE && g_map[i].state != PROCESS_MEMORY_STATE && addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
     return 0;
 }
 static int map_source_busy(uint64_t addr, uint64_t size) {
@@ -693,7 +693,7 @@ int svc_nro_deactivate(module_t *m) {
 static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint32_t *attr, uint64_t *perm) {
     uint64_t lo = *base, remaining = *size; // the final free page can end at 2^64
     for (int i = 0; i < g_nmap; ++i) {
-        if (g_map[i].state == SHARED_MEMORY_STATE) continue;
+        if (g_map[i].state == SHARED_MEMORY_STATE || g_map[i].state == PROCESS_MEMORY_STATE) continue;
         uint64_t src = g_map[i].src, end = src + g_map[i].size;
         uint64_t lower = lo, upper = remaining;
         if (addr >= src && addr < end) {
@@ -719,6 +719,7 @@ static void query_external_gap(uint64_t addr, uint64_t stack_lo, uint64_t stack_
     uint64_t guest = (uintptr_t)g_as;
     query_gap_bound(addr, guest, guest + g_reserve, &lo, &hi);
     query_gap_bound(addr, stack_lo, stack_hi, &lo, &hi);
+    if (dm_exl_rtld_base()) query_gap_bound(addr, dm_exl_rtld_base(), dm_exl_rtld_base() + dm_exl_rtld_size(), &lo, &hi);
     for (int i = 0; i < g_nmod; ++i) {
         const module_t *m = &g_mod[i];
         if (m == inactive || !m->loaded) continue;
@@ -969,6 +970,36 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = 0; return 0;
     }
+    // MapProcessMemory(dst, process, src, size) / UnmapProcessMemory(dst, process, src, size): an exlaunch plugin's writable view of module code (hle_exl.c). The view is a copy at dst
+    // in the ASLR region; what the plugin changes in it goes into the code at unmap and after the DT_INITs. The source stays as it is (PROCESS_MEMORY_STATE: not locked, as on Horizon)
+    case 0x74: case 0x75: {
+        uint64_t dst = regs[0], src = regs[2], size = regs[3];
+        if ((uint32_t)regs[1] != dm_exl_process_handle) { regs[0] = 0xE401; return 0; }   // InvalidHandle
+        if ((dst | src) & 0xfff) { regs[0] = 0xCC01; return 0; }
+        if (!size || (size & 0xfff) || size > UINT64_MAX - dst) { regs[0] = 0xCA01; return 0; }
+        if (!dm_guest_as_contains(dst) || !dm_guest_as_contains(dst + size - 1)) { regs[0] = 0xDC01; return 0; }   // InvalidMemoryRegion: the view goes in the ASLR region
+        if (!dm_exl_view_source_ok(src, size)) { LOG("[RED] %s of %#llx+%#llx: not code of one loaded module", num == 0x74 ? "MapProcessMemory" : "UnmapProcessMemory",
+                                                    (unsigned long long)src, (unsigned long long)size); regs[0] = 0xD401; return 0; }
+        pthread_mutex_lock(&g_map_lock);
+        int k = map_find(dst, size);
+        if (num == 0x75) {
+            if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0; }
+            map_del(k - 1);
+            pthread_mutex_unlock(&g_map_lock);
+            dm_exl_view_remove(dst, src, size);
+            regs[0] = 0; return 0;
+        }
+        if (k) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0; }
+        uint64_t mask = (size_t)getpagesize() - 1, lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
+        if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) die("MapProcessMemory mprotect errno=%d", errno);
+        dm_guest_write_prepare((void *)lo, hi - lo);
+        memcpy((void *)dst, (void *)src, size);
+        map_add(dst, size, src, PROCESS_MEMORY_STATE);
+        pthread_mutex_unlock(&g_map_lock);
+        dm_exl_view_add(dst, src, size);
+        if (g_flag.svc) LOG("MapProcessMemory %#llx <- %#llx +%#llx", dst, src, size);
+        regs[0] = 0; return 0;
+    }
     case 0x06: {  // QueryMemory(MemoryInfo* out, PageInfo* pout, addr) → x1 = pageinfo
         uint64_t mi = regs[0], addr = regs[2];
         // MemoryInfo: base(0) size(8) state(0x10) attr(0x14) perm(0x18) ...
@@ -1006,6 +1037,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                 if (g_map[i].base > addr && g_map[i].base < hi) hi = g_map[i].base;
             }
             base=lo; size=hi-lo; state=0; perm=0; }
+        else if (dm_exl_rtld_query(addr, &base, &size, &state, &perm)) {}   // the stand-in rtld an exlaunch plugin looks for below main (hle_exl.c)
         else if ((mm = module_of(a)) && mm->loaded) {
             // Loaded module: report the regions in Horizon's layout -- code [0, ro) Code+RX, read-only [ro, data) Code+R, data and bss [data, patch area) CodeData+RW.
             // The SDK's C++ exception unwinding (nn::ro::detail::GetExceptionInfo) walks back from the PC over "Code+RX" regions to find the module start, forward over Code then CodeData to find its end, then reads MOD0 at the module start for .eh_frame_hdr.
@@ -1214,6 +1246,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // nn::os::GetRemoteMemoryUsage returns types 31 and 32. The SDK's only user is the GPU driver's boot (nv::InitializeGraphics → nn::gs::sdk::BootGraphicsSystem →
         // BootWithRemoteMemory), which the host's own nv::InitializeGraphics replaces (dm/gfx/hle_nv.c), so the process has no remote region and no remote memory (Donkey Kong Bananza)
         case I_RemoteAddr: case I_RemoteSize: case I_RemoteUsage0: case I_RemoteUsage1: v = 0; break;
+        // Mesosphere's InfoType_MesosphereCurrentProcess (Atmosphère): a handle to the current process. An exlaunch plugin asks for it before it falls back to an IPC trick
+        // (cur_proc_handle.cpp) and passes it to MapProcessMemory (hle_exl.c). Answered 0 before, which read as success with handle 0
+        case 65001: v = dm_exl_process_handle; break;
         default: { static uint8_t seen[64]; if (id < 64 && !seen[id]) { seen[id] = 1; LOG("[RED] svc GetInfo: unknown info type %llu (answered 0)", (unsigned long long)id); } v = 0; break; }
         }
         regs[0] = 0; regs[1] = v; return 0;

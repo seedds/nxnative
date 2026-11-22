@@ -196,6 +196,18 @@ void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
 void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Resource count callback (registered by the graphics layer): called every 250 ticks, when the loading screen has been dismissed, and on exit when the record is full
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)
 void dm_guest_write_prepare(void *addr, size_t len);
+int dm_guest_as_contains(uintptr_t a);   // hle_svc.c: the address lies in the reserved guest address block
+// hle_exl.c: exlaunch code plugins (a mod's subsdk9). The process handle GetInfo 65001 answers; the stand-in rtld below the modules and its QueryMemory regions; the writable
+// views of module code MapProcessMemory makes, written back into the code at unmap and after the DT_INITs
+extern const uint32_t dm_exl_process_handle;
+void dm_exl_fake_rtld(void);
+int dm_exl_rtld_query(uint64_t addr, uint64_t *base, uint64_t *size, uint64_t *state, uint64_t *perm);
+uint64_t dm_exl_rtld_base(void);
+uint64_t dm_exl_rtld_size(void);
+int dm_exl_view_source_ok(uint64_t src, uint64_t size);
+void dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size);
+int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size);
+void dm_exl_sync_all(void);
 void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the guest heap's base and opened length (guest addresses), 0 / 0 when none
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: hole-free guest heap read for the cheat VM (under the memory lock); 0 = ok, 1 = a byte outside the opened span
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)

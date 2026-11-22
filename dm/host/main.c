@@ -33,6 +33,7 @@ static void guest_main(void) {
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
     ((fn0)req("_init_libc2"))();
     run_module_inits();   // rtld callback B: each module's DT_INIT (global constructors)
+    dm_exl_sync_all();    // an exlaunch plugin's hooks, written in its DT_INIT through views of the code, go into the code before nnMain (hle_exl.c)
     { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST self-test of host-created guest threads (hle_guestthread.c)
     { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(1); }   // DM_OODLE_SERVE with a decoder that needs the game's malloc (LZ5, hle_oodle.c)
     { void dm_oodle_job_maybe(void); dm_oodle_job_maybe(); }   // DM_OODLE_JOB: decode a job file with the game's own Oodle and exit (hle_oodle.c, for the offline shader tools)
@@ -139,6 +140,7 @@ static void host_preload(int argc, char **argv) {
     }
     if (!n) n = profile_modules(argv[1], names);
     load_modules(argv[1], names, n);
+    dm_exl_fake_rtld();   // with an exlaunch plugin among the modules: the rtld its module walk expects below main (hle_exl.c)
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();

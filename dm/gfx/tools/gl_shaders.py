@@ -317,7 +317,7 @@ def translate(src, stage, key, tmp):
             if r.get('array'): return f'{"sampler" if k == "textures" else "uniform block"} array {r["name"]}'
     textures, buffers = argument_names(spv)
     cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-argument-buffer-tier', '1',
-           '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
+           '--msl-texture-buffer-native', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--fixup-clipspace')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: return 'spirv-cross: ' + r.stderr.strip()[:300]

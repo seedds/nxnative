@@ -79,6 +79,10 @@ static void test_vertex_binding(void) {
     assert(!attr(3)->norm); FETCH(3, b[1], 4, 20, 0);
     attr_ptr(3, 0x80e1, GL_UNSIGNED_BYTE, 1, 0, (const void *)0);   // GL_BGRA is four components
     assert(attr(3)->size == 4 && attr(3)->norm); FETCH(3, b[1], 0, 4, 0);
+    void (*attr_iptr)(GLuint, GLint, GLenum, GLsizei, const void *) = import("glVertexAttribIPointer");
+    attr_iptr(3, 2, GL_UNSIGNED_INT, 24, (const void *)16);
+    assert(!attr(3)->norm && vfmt_of(attr(3)) == MTLVertexFormatUInt2); FETCH(3, b[1], 16, 24, 0);
+    attr_ptr(3, 0x80e1, GL_UNSIGNED_BYTE, 1, 0, NULL);
     // glVertexAttribDivisor: binding i's divisor, which a new pointer keeps
     attr_div(2, 4); FETCH(2, b[0], 16, 12, 4); FETCH(3, b[1], 0, 4, 0);
     attr_div(2, 1000); FETCH(2, b[0], 16, 12, 255);   // as far as the layer counts
@@ -149,7 +153,7 @@ static void test_literal_stride_fetch(void) {
         pkey_t k; memset(&k, 0, sizeof k);
         vkey_set(&k, 0, attr(0), vb_of(cur_vao(), 0));
         assert(k.stride[0] == cases[c].stride && k.div[0] == (cases[c].stride ? cases[c].div : 0));   // a constant fetch has no divisor, so one pipeline serves both
-        k.cpf = MTLPixelFormatRGBA8Unorm; k.mask = 15;
+        k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.mask[0] = 15;
         id<MTLRenderPipelineState> pso = pso_get(&p, &k);
         assert(pso);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:1 mipmapped:NO];
@@ -375,8 +379,8 @@ static void test_doom3(void) {
     pr = h_glCreateProgram(); vs = h_glCreateShader(GL_VERTEX_SHADER); shader_of(vs)->si = &vonly; shader_of(vs)->fn = [lib newFunctionWithName:@"vmain"];
     h_glAttachShader(pr, vs); h_glLinkProgram(pr); p = prog_of(pr);
     assert(p->linked && p->fn[0] && !p->fn[1] && p->si[1]->frag && !p->si[1]->nu && !p->si[1]->nt && !p->si[1]->nb && p->si[1]->ub_slot < 0);
-    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask = 15;
-    k.cpf = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
+    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask[0] = 15;
+    k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
     assert(pso_get(p, &k));
     h_glDeleteProgram(pr); h_glDeleteShader(vs);
 
@@ -1086,6 +1090,75 @@ static int test_framebuffer_srgb(void) {
     printf("GL framebuffer sRGB: %d pixel checks passed\n", checks); return 0;
 }
 
+static void test_image_copies(void) {
+    const uint8_t block[16] = {255, 255, 0, 0, 0, 0, 0, 0, 0, 0xf8};   // one red BC3 block
+    GLuint tex[3]; h_glGenTextures(3, tex);
+    h_glBindTexture(GL_TEXTURE_2D, tex[0]);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 1, 1, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, block);
+    h_glBindTexture(GL_TEXTURE_2D, tex[1]);
+    h_glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5, 4, 4, 0, sizeof block, NULL);
+    h_glCopyImageSubData(tex[0], GL_TEXTURE_2D, 0, 0, 0, 0, tex[1], GL_TEXTURE_2D, 0, 0, 0, 0, 1, 1, 1);
+    GLint size = 0; h_glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x86a0, &size); assert(size == sizeof block);
+    uint8_t got[16] = {0}; h_glGetCompressedTexImage(GL_TEXTURE_2D, 0, got); assert(!memcmp(block, got, sizeof got));
+    uint32_t decoded[16] = {0}; h_glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, decoded);
+    for (unsigned i = 0; i < 16; i++) assert(decoded[i] == 0xff0000ff);
+    h_glBindTexture(GL_TEXTURE_2D, tex[2]);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 1, 1, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, NULL);
+    h_glCopyImageSubData(tex[1], GL_TEXTURE_2D, 0, 0, 0, 0, tex[2], GL_TEXTURE_2D, 0, 0, 0, 0, 4, 4, 1);
+    memset(got, 0, sizeof got); h_glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, got);
+    assert(!memcmp(block, got, sizeof got) && h_glGetError() == GL_NO_ERROR);
+    h_glDeleteTextures(3, tex);
+}
+
+static void test_multiple_draw_buffers(void) {
+    typeof(S) saved = S;
+    h_glColorMask(1, 1, 1, 1); h_glDisable(GL_SCISSOR_TEST);
+    GLuint tex[2], fb; h_glGenTextures(2, tex); h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    for (int i = 0; i < 2; i++) {
+        h_glBindTexture(GL_TEXTURE_2D, tex[i]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex[i], 0);
+    }
+    const GLenum reverse[] = {GL_COLOR_ATTACHMENT0 + 1, GL_COLOR_ATTACHMENT0};
+    const GLfloat red[] = {1, 0, 0, 1}, green[] = {0, 1, 0, 1};
+    h_glDrawBuffers(2, reverse);
+    h_glClearBufferfv(GL_COLOR, 0, red); h_glClearBufferfv(GL_COLOR, 1, green);
+    h_glColorMaski(0, 0, 1, 0, 0); h_glColorMaski(1, 0, 0, 0, 0);
+    h_glEnable(GL_SCISSOR_TEST); h_glScissor(0, 0, 1, 1);
+    h_glClearColor(0, 1, 1, 0); h_glClear(GL_COLOR_BUFFER_BIT);
+    uint32_t pixels[4] = {0};
+    h_glReadBuffer(GL_COLOR_ATTACHMENT0 + 1); h_glReadPixels(0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    assert(pixels[0] == 0xff00ffff && pixels[1] == 0xff0000ff && pixels[2] == 0xff0000ff && pixels[3] == 0xff0000ff);
+    h_glReadBuffer(GL_COLOR_ATTACHMENT0); h_glReadPixels(0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    for (unsigned i = 0; i < 4; i++) assert(pixels[i] == 0xff00ff00);
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(2, tex); S = saved;
+}
+
+static void test_texture_buffer_storage(void) {
+    GLuint buf, tex; h_glGenBuffers(1, &buf); h_glGenTextures(1, &tex);
+    const float data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    h_glBindBuffer(GL_TEXTURE_BUFFER, buf); h_glBufferData(GL_TEXTURE_BUFFER, sizeof data, data, 0);
+    h_glBindTexture(GL_TEXTURE_BUFFER, tex); h_glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, buf);
+    id<MTLTexture> before = texture_buffer(tex_of(tex));
+    assert(before.buffer == buf_of(buf)->mb && before.width == 2);
+    h_glBufferData(GL_TEXTURE_BUFFER, sizeof data / 2, data, 0);
+    id<MTLTexture> after = texture_buffer(tex_of(tex));
+    assert(after.buffer == buf_of(buf)->mb && after.width == 1 && before != after);
+    h_glDeleteBuffers(1, &buf); assert(texture_buffer(tex_of(tex)) == g_tbuf0);
+    h_glDeleteTextures(1, &tex); assert(h_glGetError() == GL_NO_ERROR);
+}
+
+static void test_timestamps(void) {
+    GLuint query[2]; h_glGenQueries(2, query);
+    h_glQueryCounter(query[0], GL_TIMESTAMP); h_glQueryCounter(query[1], GL_TIMESTAMP); h_glFinish();
+    int64_t t0 = 0, t1 = 0, available = 0;
+    h_glGetQueryObjecti64v(query[1], GL_QUERY_RESULT_AVAILABLE, &available); assert(available == 1);
+    h_glGetQueryObjecti64v(query[0], GL_QUERY_RESULT, &t0); h_glGetQueryObjecti64v(query[1], GL_QUERY_RESULT, &t1);
+    assert(t0 > 0 && t1 >= t0 && h_glGetError() == GL_NO_ERROR);
+    h_glDeleteQueries(2, query);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--srgb")) return test_framebuffer_srgb();
     if (argc == 2 && !strcmp(argv[1], "--capture")) return test_capture_shaders();
@@ -1229,6 +1302,7 @@ int main(int argc, char **argv) {
     test_active_attributes();
     test_fate_calls();
     test_fixed_function(!cpu);
+    if (!cpu) { test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); }
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;

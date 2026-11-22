@@ -2630,7 +2630,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 ### GL textures, swizzles and uploads
 
 - Textures are made on first use from the levels given so far (Digimon's loader defines them level by level). An upload into a texture a pending command buffer may still read is a blit in command order; any other is a CPU write. Metal reads a channel a format lacks as 0 (alpha 1) as GL does, so only luminance / alpha formats get a swizzle: Metal refuses a swizzle on a texture that can be a render target (`Texture swizzling is not compatable with MTLTextureUsageRenderTarget`, Digimon's first story scene).
-- `glTexStorage2D` makes every level up front (mipmaps filled by `glGenerateMipmap` as a blit), `glTexStorage3D` 3D and 2D array textures; the layer's units hold all four targets (96 of them, as `GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS` says). A `GL_TEXTURE_SWIZZLE_*` is applied when the texture is made (a swizzled texture cannot be a render target).
+- `glTexStorage2D` makes every level up front (mipmaps filled by `glGenerateMipmap` as a blit). `glTexStorage3D` makes 3D and 2D array textures. A `GL_TEXTURE_SWIZZLE_*` is applied when the texture is made (a swizzled texture cannot be a render target).
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md); [Balatro](../../dm/games/0100CD801CE5E000/README.md): the game's images are mipmapped; LÖVE makes a 1x1 default texture of each type, 3D and 2D array among them; font glyphs are RG8 with a swizzle of R, R, R, G.
 
 ### GL buffers orphaned, clears as load actions
@@ -2656,6 +2656,34 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - Batched quads share one 16-bit index buffer through `glDrawElementsBaseVertex`; canvases bind GL_FRAMEBUFFER (read and draw), check completeness, discard depth and stencil after use (`glInvalidateFramebuffer`) and clear with `glClearBufferfv`. `glBlitFramebuffer` (colour, same size) and `glReadPixels` (RGBA8) are there for multisample resolves and `Canvas:newImageData`, which the game does not use.
 - **Found on:** [Balatro](../../dm/games/0100CD801CE5E000/README.md).
+
+### GL integer vertex inputs and timestamp queries
+
+- **Symptom:** the GL loader returns null for `glVertexAttribIPointer`. A diagnostic run past that call also reaches missing `glQueryCounter` and `glGetQueryObjecti64v`.
+- **Cause:** the host registered only the floating-point attribute pointer entry point and the occlusion-query entry points.
+- **Fix:** `glVertexAttribIPointer` uses the existing unnormalized integer Metal formats and vertex-array bindings. `glQueryCounter(GL_TIMESTAMP)` ends the current Metal command buffer so its GPU completion time marks all work issued before the call. The 64-bit query read returns the result in nanoseconds.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). Its first integer attribute call jumps to address 0 from `main+0x9a89a8` in the old host.
+
+### GL framebuffer draw and read buffers
+
+- **Symptom:** `framebuffer attachment 0x8ce1 not implemented`, `glDrawBuffers of 2 buffers`, then `INVALID_VALUE` from `glColorMaski` on draw buffer 1.
+- **Cause:** the host held one color image per framebuffer and conflated shader output location 0 with attachment 0.
+- **Fix:** each framebuffer maps draw locations and its read buffer to up to eight attachments. Metal render passes and pipelines use the draw mapping and per-output write masks. Reads and copies use the selected read attachment. Whole clears use load actions, and masked or scissored clears keep their channel masks and rectangles.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). The validation test reverses two color attachments and reads each after a masked clear.
+
+### GL sprite-atlas copies and readback
+
+- **Symptom:** the game crashes at `main+0x9aa448` in atlas loading, then on missing compressed-image queries and readback. The new-game route also calls `glCopyTexSubImage3D`.
+- **Cause:** the host lacked named image copies and compressed texture readback. The renderer stores one packed BC block in each texel of an integer color target. A copy into a compressed image must reinterpret those bytes and scale the destination region to blocks.
+- **Fix:** the host maps unsigned integer image formats and blits matching images directly. For an integer texel and a same-size compressed block, it copies their raw bytes through a Metal buffer in command order. Compressed readback returns the blocks or samples the texture for RGBA8. Framebuffer copies can also write a 3D slice or an array layer.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). A synthetic Metal check copies a BC3 block in both directions and reads the compressed bytes and decoded pixels.
+
+### GL texel buffer views
+
+- **Symptom:** binding `GL_TEXTURE_BUFFER` logs an unsupported target and jumps to address 0 at `glTexBuffer`. After adding the view, tile transitions still render as black gaps.
+- **Cause:** the host lacks a typed view of the bound buffer. SPIRV-Cross generates a two-dimensional texture and `spvTexelBufferCoord` by default, while the view is a native Metal texture buffer.
+- **Fix:** bind a typed Metal view of the GL buffer's current storage. Request native texture buffers in `gl_shaders.py` so `samplerBuffer` reads the same resource type the host binds.
+- **Found on:** [Factorio 2.0.76](../../dm/games/01004200189F4000/README.md). The translated tile vertex shader now indexes the coordinate table directly and the shoreline renders across tile boundaries.
 
 ### GL orientation through the lower-left origin
 

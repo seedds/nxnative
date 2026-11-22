@@ -119,6 +119,17 @@ class Sources(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
+    def test_sampler_buffer_uses_metal_texture_buffer(self):
+        src = (b'#version 330\nuniform samplerBuffer lookup;\n'
+               b'void main() { gl_Position = texelFetch(lookup, gl_VertexID); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'vert', 'b' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:lookup=0:-1:samplerBuffer', r[1])
+            msl = Path(r[0]).read_text()
+            self.assertIn('texture_buffer<float>', msl)
+            self.assertNotIn('spvTexelBufferCoord', msl)
+
     def test_many_samplers_and_uniforms_have_independent_argument_ids(self):
         for count in (16, 17, 32):
             src = ('#version 320 es\nprecision highp float;\n'

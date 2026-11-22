@@ -318,6 +318,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 ## Found on this game
 
 - [Autoreleased temporaries collect during background pipeline builds](../../../docs/reference/memory.md#autoreleased-temporaries-collect-during-background-pipeline-builds). The audit finding is resolved in the host.
+- [The display link started before fullscreen's mode switch](../../../docs/reference/frame-rate.md#the-display-link-started-before-fullscreens-mode-switch): startup silences and rescues on a variable-refresh screen, and repeated fullscreen mode switches / stale variable-refresh flags ([Fullscreen switches the screen to a rate the frame rate divides](../../../docs/reference/frame-rate.md#fullscreen-switches-the-screen-to-a-rate-the-frame-rate-divides)).
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.
 - [Going to the background while graphics do not drain](../../../docs/reference/nvn-objects.md#going-to-the-background-while-graphics-do-not-drain): NX18's iPhone 18 Pro Max run froze before the background transition. The host now bounds the transition's graphics wait and starts persistence independently. The cause of the initial freeze and the revised iOS behavior are open.
 

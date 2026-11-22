@@ -19848,6 +19848,7 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 // 55 Hz, and a game paced by the link runs at 55 fps (27.5 at 30). There the link runs at the screen's rate and only the refreshes nearest a steady clock of the wanted rate count as
 // ticks (g_link_vperiod, NvMetalDisplayLinkDelegate): 60 a second on average, each frame shown on the refreshes nearest its 1/60 s slot. DM_LINK_VTICK=0 keeps the system's choice.
 // In fullscreen the Mac front end switches such a screen to a rate that is a multiple where it has one (front_screen_match), and the range is set again for it (link_sync)
+__attribute__((weak)) int front_screen_settling(void) { return 0; }   // front_mac.m: startup fullscreen not entered yet, fullscreen match pending, or mode switched under 1 s ago
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m, front_ios.m; some graphics unit tests supply their own
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
@@ -19943,6 +19944,11 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (!g_link_started) {
         if (!want) { applied = 0; return; }
         if (!front_metal_layer()) return;
+        // Not while the screen settles (front_screen_settling): startup fullscreen and the screen match's mode switch come first, so the link starts on the final mode and not
+        // mid-switch. The present thread shows frames meanwhile
+        static int waited;
+        if (front_screen_settling()) { if (!waited++) MLOG("display link: waits for fullscreen and the screen's mode to settle (frame %llu)", (unsigned long long)atomic_load(&g_cur_frame)); return; }
+        if (waited) { MLOG("display link: the screen settled after %d frames", waited); waited = 0; }
         g_link_started = 1; pthread_t th; if (pthread_create(&th, NULL, link_main, NULL)) MDIE("cannot start the display link thread"); pthread_detach(th);
         return;   // The display link object is created on a new thread; align again next frame
     }

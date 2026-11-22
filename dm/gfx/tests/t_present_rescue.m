@@ -40,8 +40,10 @@ int test_variable_refresh;
 int test_game_fps = 60;
 int test_screen_hz;   // the screen's maximumFramesPerSecond (front_screen_max_fps); 0 = not known, as the graphics layer's weak default
 int test_match_fps;   // the last rate link_sync asked the screen for (front_screen_match)
+int test_settling;
+static void *test_layer;
 uint64_t test_focus_since;
-void *front_metal_layer(void) { return NULL; }
+void *front_metal_layer(void) { return test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
@@ -208,6 +210,23 @@ static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh scree
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link in a window", g_link_mode == 2 && test_match_fps == 120);
     g_dm_present_link = 1; test_screen_hz = 0; test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
+static void settling(void) {
+    reset(); g_link = nil; g_link_started = 0; g_link_owns_layer = 0; g_dm_present_link = 0; link_sync();
+    NSObject *dummy_layer = [NSObject new]; test_layer = (__bridge void *)dummy_layer; test_settling = 1; g_dm_present_link = 1;
+    link_sync();
+    CHECK("display link does not start while the screen is settling", !g_link_started && !g_link_owns_layer);
+    link_sync();
+    CHECK("repeated presents while settling keep waiting", !g_link_started);
+    test_settling = 0;
+    link_sync();
+    CHECK("display link starts once the screen settles", g_link_started == 1);
+    for (int i = 0; i < 1000 && !g_link; i++) usleep(1000);
+    CHECK("started display link thread publishes the link", g_link != nil && g_link_owns_layer);
+    g_dm_present_link = 0; link_sync();
+    for (int i = 0; i < 1000 && g_link_started; i++) usleep(1000);
+    CHECK("invalidating the started display link stops its thread cleanly", !g_link_started && !g_link && !g_link_owns_layer);
+    test_layer = NULL; test_settling = 0;
+}
 static void metal_lifecycle(void) {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     CHECK("Metal device available", device != nil); if (!device) return;
@@ -226,7 +245,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120(); settling();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

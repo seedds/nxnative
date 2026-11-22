@@ -2502,7 +2502,9 @@ __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine 
 static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for graphics unit tests (t_nvn sets it)
 __attribute__((weak)) int dm_fps_lock_engine(void) { return g_engine_stub; }   // hle_fpslock.c: the host writes fps_target into an engine limiter of this main
 __attribute__((weak)) void dm_ue_cvar_tick(void) {}   // hle_uecvar.c: Unreal's texture streaming pool (profile ue_texture_pool)
+#ifndef dm_movie_hz
 __attribute__((weak)) int dm_movie_hz(void) { return 0; }   // hle_movie.c: the picture rate of the movie playing, 0 when none; graphics unit tests have no movie decoder
+#endif
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
 // then took 17-26 ms a frame and dropped a frame in most windows; a steady 30 instead also lets the device cool. DM_THERMAL_CAP=0 turns it off; the Mac reports no thermal state
@@ -2550,8 +2552,9 @@ static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the f
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
     if (win < 0) { win = mtl_display_hz() != 0; link_env = getenv("DM_PRESENT_LINK") != NULL; }
-    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), cap = ok && !movie && !thermal_capped() ? 120 : 60;
-    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : !ok ? "the screen is below 120 Hz" : movie ? "movie playing" : "thermal state serious"); was = cap; }
+    int ok = !win || front_screen_max_fps() >= 120, movie = dm_movie_hz(), thermal = thermal_capped();
+    int cap = movie ? (movie >= 50 && !thermal ? 60 : 30) : (ok && !thermal ? 120 : 60);
+    static int was; if (cap != was) { LOG("[nvn] 120 fps: cap %d → %d fps (%s)", was, cap, cap == 120 ? "the screen shows it" : thermal ? "thermal state serious" : movie ? "movie playing" : "the screen is below 120 Hz"); was = cap; }
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
@@ -2597,7 +2600,7 @@ static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force
+int nvn_fps_high_now(void) { int m = dm_movie_hz(); return m ? (m >= 50 && !thermal_capped() ? 60 : 30) : (fps_high() && atomic_load(&g_fs_k) == 1 ? 120 : 60); }   // hle_fpslock.c: the target of the next game frame, from the hold in force or active movie rate
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
@@ -2617,7 +2620,15 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) {   // vsyncs per frame that presentation follows
+    int movie = dm_movie_hz(), c = fps_present_cap(), k = atomic_load(&g_fs_k);
+    if (movie && (fps_high() || (DM_GAME_MOVIE_PACING && c == 60))) {
+        int mcap = movie >= 50 && !thermal_capped() ? 60 : 30;
+        int itv = fstep_hz() / mcap;
+        return itv > 0 ? itv : 1;
+    }
+    return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1;
+}
 // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
 // vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
 // tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the
@@ -2700,10 +2711,16 @@ static int fstep_hold(void) {
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
 static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
+    static uint64_t drain_before;   // a drain in a later acquire of the previous frame: in this frame's time since that start, not in its pacing wait
+    if (fps_high() && c < 60) {
+        // 30 fps movie / thermal cap under a 120 Hz step: FSTEP_MAX is 3, while 30 fps needs 4 ticks of 1/120 s; pause adaptive stepping without polluting its history.
+        prev = 0; drain_before = 0; g_fs_start = g_fs_wait = g_fs_drain = g_fs_drain_late = 0;
+        atomic_store(&g_fs_k, fstep_hz() / c);
+        return;
+    }
     const double v = 1e9 / fstep_hz();
     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
     // A drain of standing frames (g_fs_drain) comes out of the frame's time as far as it made the frame longer than its hold (nvn_fstep_drain_cut)
-    static uint64_t drain_before;   // a drain in a later acquire of the previous frame: in this frame's time since that start, not in its pacing wait
     static uint64_t drain_n, drain_cut;   // frames a drain shortened and the time cut (ns), for the 1800-present line
     uint64_t span = prev && st > prev ? st - prev : 0, raw = span;
     span = nvn_fstep_drain_cut(span, (uint64_t)((g_fs.k ? g_fs.k : fstep_hz() / c) * v), g_fs_drain, drain_before, &pw);

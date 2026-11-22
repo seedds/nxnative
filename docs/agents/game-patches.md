@@ -38,6 +38,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
 | `build` → `engine` | Criterion's 60 fps mode, frame ticks and game step at fixed addresses | frame rate | blocked: one game on that engine here | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | Frostbite's frame regulator at a fixed pointer | frame rate | blocked: one Frostbite game here | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | engine code other Frostbite games ship (the simulation's own rate is already set by name) |
+| `build` → `engine` | MT Framework's render frame limit at a fixed pointer | frame rate | blocked: one MT Framework row in k_locks here | judgement | 1 | [Resident Evil 0](../../dm/games/010097000BC10000/README.md) | engine code other MT Framework games ship |
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
@@ -80,6 +81,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pikmin 4](#pikmin-4) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
+| [Resident Evil 0](#resident-evil-0) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -427,7 +429,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:73](../../dm/host/hle_fpslock.c#L73): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -446,7 +448,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:74](../../dm/host/hle_fpslock.c#L74): frame interval and dynamic-resolution floor
 
 ### Ori and the Will of the Wisps
 
@@ -500,6 +502,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`game`**, runtime, at goal, checked: function-matched on 1.1.1, the only build on hand: exactly one match, a boot to the field setup, and the patched function run on the module's own bytes in a small interpreter for both null paths. Issue #712's reporters ran the earlier cuts for about 7 hours with no crash; the path itself has not been reached with these cuts: capture demo: the empty result when the weak reference at +0x88 is unset or dead. The game's own function dereferences its own weak reference; no host service is on the path, so no host or engine rule can hold it. Whether another Game Freak game shares the function is unchecked
 
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
+
+### Resident Evil 0
+
+[Resident Evil 0](../../dm/games/010097000BC10000/README.md), `010097000BC10000`.
+
+- **`build` → `engine`**, frame rate, blocked: one MT Framework row in k_locks here, judgement: MT Framework's render frame limit at a fixed pointer. Engine code other MT Framework games ship
+
+- **1.0.0 `main`** `fb4239aa…`
+  - host [hle_fpslock.c:56](../../dm/host/hle_fpslock.c#L56): engine frame limit set to fps_target: Resident Evil 0 MT Framework render frame limit
 
 ### South Park: The Fractured But Whole
 

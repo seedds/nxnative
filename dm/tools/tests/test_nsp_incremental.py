@@ -1158,4 +1158,27 @@ class BuildSources(unittest.TestCase):   # profile_guess.py build_sources reads 
         self.assertFalse((self.game / 'RomFS.img.sources').exists())
 
 
+class EmptyShaderTableDerivation(SplitShaders):
+    """Registered NVN profiles with empty placeholder shader_map.tsv trigger shader-only derivation without losing game.tsv settings."""
+    def test_empty_shader_map_triggers_derivation_and_preserves_profile(self):
+        (self.src / 'shader_map.tsv').write_text('# placeholder\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n')
+        (self.src / 'patches.py').write_text(f'CUTS = {{"{BID}": []}}\n')
+        g = game.Game(self.src)
+        self.assertTrue(nsp.needs_shader_table_derivation(g))
+        nsp.derive_profile(g, self.pdir, 'v0', self.ex, ['main'], shader_only=True)
+        derived = game.Game(self.pdir)
+        self.go(derived, own=True)
+        self.assertEqual(derived.rows, g.rows)
+        self.assertEqual((self.pdir / 'patches.py').resolve(), (self.src / 'patches.py').resolve())
+        self.assertFalse(nsp.needs_shader_table_derivation(derived))
+
+    def test_nonempty_shader_map_never_skips_verification(self):
+        (self.src / 'shader_facts.tsv').write_text('# facts\n')
+        (self.src / 'shader_pairs.tsv').write_text('# pairs\n')
+        g = game.Game(self.src)
+        self.assertFalse(nsp.needs_shader_table_derivation(g))
+        with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'):
+            self.go(g, own=False)
+
+
 if __name__ == '__main__': unittest.main()

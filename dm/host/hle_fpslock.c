@@ -52,6 +52,8 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Resident Evil 0 1.0.0: write only the MT Framework render limiter (+0x4c). +0x48 remains the native simulation-time scale.
+    { "fb4239aa962b429b3d1776af92d93e79", "Resident Evil 0 MT Framework render frame limit", 0x1baac60, 0x4c, FPS_F32, 1, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 #define MAX_LOCKS (NLOCKS + 7)   // target, Monolith, four Unreal rows, Unity targetFrameRate
@@ -301,16 +303,20 @@ void dm_fps_lock_tick(void) {
     if (uq.base) unity_vsync_tick(target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
+        // Clamp engine limiters with movie_pacing on to the active movie rate (and thermal cap via nvn_fps_high_now) under 60/120 targets.
+        int movie_hz = dm_movie_hz();
+        int mcap = DM_GAME_MOVIE_PACING && movie_hz > 0 ? nvn_fps_high_now() : 0;
+        int row_target = mcap > 0 && target > mcap ? mcap : target;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
-                uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = target;
+                uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = row_target;
                 if (!rd(a, &cur, sizeof cur)) break;
                 if (cur == want || !(cur >= 10 && cur <= 120)) continue;   // already set, or not set yet
                 double *p = (double *)(uintptr_t)a;
                 dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint64_t *)p, *(uint64_t *)&want, __ATOMIC_RELAXED);
-                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, target, src); }
+                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, row_target, src); }
             }
             continue;
         }
@@ -318,15 +324,15 @@ void dm_fps_lock_tick(void) {
             uint64_t a = obj + L->field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
             if (!rd(a, &cur, sizeof cur)) break;
             if (L->kind == FPS_F32 || L->kind == MS_F32) {
-                int ms = L->kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                int ms = L->kind == MS_F32; float f, w = ms ? ms_want(row_target) : (float)row_target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
                 if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
             } else if (L->kind == SECS_F32) {
-                float f, w = 1.0f / (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                float f, w = 1.0f / (float)row_target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
                 if (cur == want || !(f >= 1.0f / 120 && f <= 0.1f)) continue;   // not set yet (0 before the game's first frame)
                 snprintf(was, sizeof was, "%.5f s", f);
             } else if (L->kind == TICKS_U32) {
-                want = L->scale / (uint32_t)target;
+                want = L->scale / (uint32_t)row_target;
                 if (cur == want || cur < L->scale / 120 || cur > L->scale / 10) continue;
                 snprintf(was, sizeof was, "%u", cur);
             } else if (L->kind == MODE_U32) {
@@ -335,7 +341,7 @@ void dm_fps_lock_tick(void) {
                 snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = L->kind == FPS_I32;
-                want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
+                want = fps ? (uint32_t)row_target : row_target > 60 ? 1 : 60 / (uint32_t)row_target;   // above 60 the display link paces it: a vsync count stays 1
                 uint32_t value = !cur && L->kind == VSYNCS_DEFAULT2_I32 ? 2 : cur;   // Monolith's zero means its native two-vsync default
                 if (value == want || value < (fps ? 10u : 1u) || value > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
@@ -343,11 +349,11 @@ void dm_fps_lock_tick(void) {
             uint32_t *p = (uint32_t *)(uintptr_t)a;
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[r] < 8) { nlog[r]++; char now[24];
-                if (L->kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
-                else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
-                else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
-                else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);
-                else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
+                if (L->kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(row_target), row_target);
+                else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / row_target, row_target);
+                else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, row_target);
+                else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", row_target);
+                else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)row_target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }
     }

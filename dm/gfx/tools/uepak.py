@@ -375,7 +375,7 @@ class Pak:
         off = r.take('<I' if v >> 31 & 1 else '<Q'); raw = r.take('<I' if v >> 30 & 1 else '<Q')
         size = r.take('<I' if v >> 29 & 1 else '<Q') if meth else raw
         cur, blocks = 53 + (4 + 16 * nblk if meth else 0), []
-        if nblk == 1 and not bsz: bsz = raw   # FINAL FANTASY RESONANCE's pak (UE 5.6) stores block size 0 for a file of one block
+        if nblk == 1: bsz = raw   # a single-block entry always holds raw bytes: UE 4.26 stores (raw >> 11) & 0x3f (truncated to 2 KB, e.g. 0x3800 for a ~15 KB file), UE 5.6 stores 0
         if nblk == 1 and not enc: blocks = [(cur, size)]
         else:
             for _ in range(nblk): s = r.take('<I'); blocks.append((cur, s)); cur += (s + 15) & ~15 if enc else s
@@ -394,13 +394,17 @@ class Pak:
             decode = zstd_block; bad = (zstd.ZstdError,)
         elif e['method'] == 'LZ4': import lz4.block; decode = lambda b, k: lz4.block.decompress(b, uncompressed_size=lz4_raw(b, k, path)); bad = (lz4.block.LZ4BlockError,)
         elif not decode: raise ValueError(f'{path} is {e["method"]}-compressed in the pak')
-        out, left = [], e['raw']
+        raw = cast(int, e['raw']); out, left = [], raw
+        if left < 0: raise ValueError(f'{self.path}: {path} has negative raw size {left:#x}')
+        bsz = left if len(e['blocks']) == 1 else cast(int, e['block_size'])
+        if len(e['blocks']) > 1 and bsz <= 0: raise ValueError(f'{self.path}: {path} has non-positive block size {bsz:#x}')
         for i, (s, n) in enumerate(e['blocks']):
-            k = min(left, e['block_size'])
+            k = min(left, bsz)
             try: b = decode(self.read_at(e['off'] + s, n, e['encrypted']), k)
             except bad as x: raise ValueError(f'{self.path}: {path} block {i} does not decode ({x})') from None
             if len(b) != k: raise ValueError(f'{self.path}: {path} block {i} decodes to {len(b):#x} bytes, not {k:#x}')
             out.append(b); left -= k
+        if left: raise ValueError(f'{self.path}: {path} decoded {raw - left:#x} bytes, not {raw:#x}')
         return b''.join(out)
 
 _ZSTD = None

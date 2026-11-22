@@ -131,6 +131,51 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(2, NULL, NULL); mtl_reg_tex(3, NULL, NULL); mtl_reg_tex(4, NULL, NULL);
     h_nvnTextureFinalize(&tm);
 
+    // An identical registration revives an ID pruned from the sparse scan while it was gone.
+    mtl_reg_tex_gone(1);
+    CHECK(map(&virt, &phys, past, 0x50000, 0x1000), "a mapping beside the gone descriptor's texture");
+    next_sub();
+    CHECK(g_treg[1].gone && !g_treg[1].sp, "the scan removes the gone descriptor");
+    mtl_reg_tex(1, (const tex_t *)&tx, NULL);
+    CHECK(!g_treg[1].gone && g_treg[1].sp, "an identical registration restores sparse tracking");
+    pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
+    CHECK(gpu_read(table, 1) == C, "the revived descriptor reads the current page");
+    sg = g_ser_gen;
+    CHECK(map(&virt, &phys, 0, 0x10000, 0x1000), "remap the revived descriptor's page");
+    next_sub();
+    CHECK(g_ser_gen == sg + 1, "the next submission notes the revived descriptor's serial");
+    pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
+    CHECK(gpu_read(table, 1) == B, "the revived descriptor reads the newly mapped page");
+
+    // A scene change finalizes a pool while its descriptor stays registered.
+    // Make the freed pool object's page inaccessible, then map the live pool:
+    // the next submission must retire the old sparse-scan entry without reading it.
+    const size_t page = (size_t)getpagesize();
+    pool_t *dead = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    CHECK(dead != MAP_FAILED, "pool object page allocated");
+    pb = (pool_builder_t){.size = 0x20000, .flags = NVN_MEMORY_POOL_FLAGS_VIRTUAL};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)dead, (NVNmemoryPoolBuilder *)&pb), "temporary virtual pool");
+    CHECK(map(dead, &phys, 0, 0x30000, 0x1000), "temporary pool mapped sparsely");
+    h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D);
+    h_nvnTextureBuilderSetWidth(&tb, 32); h_nvnTextureBuilderSetHeight(&tb, 32);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)dead, 0);
+    NVNtexture td;
+    CHECK(h_nvnTextureInitialize(&td, &tb), "temporary sparse texture");
+    mtl_reg_tex(5, (const tex_t *)&td, NULL);
+    CHECK(g_treg[5].sp, "temporary descriptor belongs to sparse scan");
+    h_nvnTextureFinalize(&td);
+    CHECK(!g_treg[5].gone, "texture finalization keeps the registered descriptor live until its pool ends");
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)dead);
+    CHECK(g_treg[5].gone, "finalization marks the descriptor gone");
+    CHECK(!mprotect(dead, page, PROT_NONE), "freed pool object is inaccessible");
+    CHECK(map(&virt, &phys, past, 0x40000, 0x1000), "another pool's mapping triggers sparse notes");
+    next_sub();
+    CHECK(!g_treg[5].sp, "gone descriptor removed without reading freed pool object");
+    CHECK(!munmap(dead, page), "temporary object page released");
+
     h_nvnTextureFinalize(&tx);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     mtl_sub_commit(); mtl_drain(); free(mem);

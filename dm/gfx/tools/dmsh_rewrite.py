@@ -76,7 +76,7 @@ def bit0_mask(msl):
     return out if out != msl else msl
 
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
-TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')   # tg_fence looks for the name 'dmsh_tg_fence' before it runs this: a change of the name here is one there too
 def tg_fence(src):
     """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
     at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
@@ -85,6 +85,7 @@ def tg_fence(src):
     threadgroup-scope fence on every memory (MSL 3.2); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
     an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
     fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    if 'dmsh_tg_fence' not in src: return src   # every helper match needs its name; let the pattern check its declaration
     m = TG_FENCE_FN.search(src)
     if not m: return src
     return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
@@ -124,17 +125,95 @@ def mul_extended(msl):
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
+# A read of a game uniform slot at a computed offset, as the translator bounds it (TranslationFlags.MetalUniformBounds, GitHub issue #1860): the value when the slot's bound size
+# (the size table, bank DMSH_CBSIZE_BANK) holds its index, else 0, and out of bounds the read's index is row 0, so it stays inside the binding
+# (bool _5 = word < size; _5 ? c[_5 ? _3 : 0][_4] : 0.0). Reads at fixed offsets are not bounded in the shader: the host gives a binding shorter than they reach zeros up to there
+# (the reflection's "fixed", nvn_mtl.m ub_padded; GitHub issue #2066).
+# The translator's bounded read is a load and a choice (OpLoad, then OpSelect: the word is read wherever the size says, and only its value is chosen), but spirv-cross writes OpSelect
+# on a scalar as a conditional expression and forwards the load into it, cond ? read : 0, which reads only when the condition holds: Metal's compiler makes a branch, a load inside it
+# and a phi of every bounded read (seen in its LLVM IR at -O1 and -O2), where select(0, read, cond) is one load and a select. select_guards writes every bounded read as that select,
+# the translator's own meaning.
+# The branches are also what an M1's compiler gets wrong (GitHub PR #2127, macOS 26 on an M1 Pro, when reads at fixed offsets were bounded so too): OCTOPATH TRAVELER's tree material
+# (pixel shader 040208cd98c2ac2f) wrote a wrong volumetric lightmap word to G-buffer target 5 whenever a tree dither-faded, with every guard true; the lighting made NaN of it and
+# depth of field spread that into blue, green and white blocks. Which compiler step fails is not known (the same source was right at -O0, without the guards and with select; not
+# seen on newer Macs or an iPhone).
+# A bounded read select_guards cannot write as a select is an error (ValueError), so a change in what spirv-cross writes cannot bring the branches back unseen
+_GSIZE = r'\(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> (?:2|4)u\)' % abi.CBSIZE_BANK   # a slot's size in words or vec4 rows
+_GZERO = r'0(?:\.0|u)?'
+def _gchoice(cond, read):   # cond ? read : 0 as spirv-cross writes it, in parentheses (those after a name or > are a call's) or not as the expression around it needs
+    return re.compile('|'.join(form % (n, cond, n, read % n, n, _GZERO) for n, form in
+                               ((1, r'(?<![\w>])\((?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)\)'), (2, r'(?P<q%d>%s) \? (?P<r%d>%s) : (?P<z%d>%s)(?![\w.])'))))
+# The comparisons start with the text "bool ", which re skips to: with \b first it tried them at every character of every source. The lookbehind takes that text in and is the \b
+# (no word character before it), so the matches are the same (test_shader_rewrites.py GuardScans)
+_GBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = [^;\n]* < %s;' % _GSIZE)   # the condition, a value of its own: the read's index and its choice both use it
+_GROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\](?:\[[^\]\n]+\]|\.[xyzw])')
+_GLEFT = re.compile(r'%s\) \?' % _GSIZE)
+# A bounded storage buffer's read (TranslationFlags.MetalStorageBounds, GitHub issue #2618): the same choice, the word when it lies in the memory the host bound there (the length table,
+# bank DMSH_SBLEN_BANK: bool _5 = (uint(idx) + before) < total) else 0, and out of bounds the index is word 0, inside the binding (_5 ? buf[_5 ? idx : 0] : 0u). Written as a select too:
+# the load needs no branch, and its words stay plain for wide_loads (dmsh_wide.py)
+_STABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
+_SBOOL = re.compile(r'bool (?<!\wbool )(_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (_STABLE, _STABLE))
+_SROW = _gchoice(r'_\d+', r'\(\*spvDescriptorSet0\.[a-z]+_s\d+\)\._m0\[(?P<i%s>_\d+) \? [^\]\n]+ : 0\]')
+_GNAME = re.compile(r'(?<!\[)\b(_\d+) \?')   # a choice on a name; a read's index has its own, after the bracket
+# _GROW, _SROW and _GNAME have no text to skip to (an alternation, a lookbehind), and re tried them at every character of a source with bounded reads. Each is tried only where
+# one of its matches can start, found from text every match holds, and the pattern itself decides there: the matches, their order and the result are those of sub and finditer
+# (GuardScans)
+_GREAD = ' ? (*spvDescriptorSet0.'   # follows the condition of every choice of a read
+
+def _gsub(pat, repl, msl):
+    """pat.sub(repl, msl) for a _gchoice pattern: a match starts at its condition, the last _ before a _GREAD, or at the parenthesis before that"""
+    k = msl.find(_GREAD)
+    if k < 0: return msl
+    out, pos, low = [], 0, 0   # copied up to pos; no match starts before low (the end of the last match, or past a _GREAD that began none)
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = (pat.match(msl, s - 1) if s > pos and msl[s - 1] == '(' else None) or (pat.match(msl, s) if s >= 0 else None)
+        if m: out += (msl[pos:m.start()], repl(m)); pos = low = m.end()
+        else: low = k + 1
+        k = msl.find(_GREAD, low)
+    out.append(msl[pos:])
+    return ''.join(out)
+
+def _gleft(msl, conds):
+    """The first match of _GNAME whose name is in conds, or None: a match ends with a " ?" and starts at the last _ before it"""
+    k, low = msl.find(' ?'), 0
+    while k >= 0:
+        s = msl.rfind('_', low, k)
+        m = _GNAME.match(msl, s) if s >= 0 else None
+        if m and m.group(1) in conds: return m
+        low = k + 2; k = msl.find(' ?', low)
+    return None
+
+def select_guards(msl):
+    if 'spvDescriptorSet0' not in msl: return msl
+    bools, sbools = set(_GBOOL.findall(msl)), set(_SBOOL.findall(msl))
+    def select(m, conds):
+        n = '1' if m.group('q1') else '2'; c = m.group('q' + n)
+        if c not in conds or m.group('i' + n) != c: return m.group(0)
+        return 'select(%s, %s, %s)' % (m.group('z' + n), m.group('r' + n), c)
+    if bools: msl = _gsub(_GROW, lambda m: select(m, bools), msl)
+    if sbools: msl = _gsub(_SROW, lambda m: select(m, sbools), msl)
+    left = _GLEFT.search(msl)
+    conds = bools | sbools   # no condition names: no choice can be left over from one, so only the scan below is skipped (the size test above always runs)
+    if not left and conds: left = _gleft(msl, conds)
+    if left: raise ValueError('a bounded uniform or storage read is not written as a select: ' + msl[msl.rfind('\n', 0, left.start()) + 1:left.end() + 100].split('\n')[0].strip()[:160])
+    return msl
+
 # A game uniform word tested against integer constants, as the translator writes a GLSL switch (Ryujinx's structurizer: one test of the word per case, flags for the fall-throughs,
 # the cases nested in each other): bool _5 = as_type<int>((*spvDescriptorSet0.fp_c5)._m0[16].w) != 102. The Metal front end's SimplifyCFG (at -O1 too) folds a chain of blocks
 # that each hold only such a test of one value into a switch, whose cases jump into the nested blocks past their joins. Apple's GPU compiler then takes a pixel shader with dozens of
 # such switches for hours and tens of gigabytes (applegpu-nt, metal-tt 32023.922): Nintendo Switch Sports Resort's material pixel shader 692008b305ce264f (42 switches) ran past
 # 10 minutes and 13 GB alone where it had taken 7 s, and the Mac app's pipeline archive spent 15 hours on four pipelines. The reads were plain since the host pads a short binding
-# (dmsh_fetch.select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
+# (select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
 # (dm_uword), which the front end can neither merge with the next test's nor move out of its block, so no chain is folded; a uniform load per test is less than the bounds test
 # each read had then. Only words of the game's uniform slots (c3 and up) tested against a constant more than once: a single test is no chain, and the driver's banks (c0 to c2)
 # are left as written, since later rewrites look for their reads (dmsh_entry.vs_base_instance) and the host fills them. Returns the shader unchanged when there are none
-_UTEST_READ = r'as_type<(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # game slots c3 and up, not the driver's banks
-_UTEST = re.compile(r'(?<![\w.])%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= )%s' % (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
+_UTEST_READ = r'(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # after as_type<: game slots c3 and up, not the driver's banks
+# A literal start lets re skip to casts. The lookbehinds include that consumed prefix, so they still check the characters before the cast; spans and groups stay the same.
+# The prefix is written three times, at the start and in both lookbehinds: a change to one is a change to all three (test_shader_rewrites.py UniformMatchScan holds this
+# pattern to the one it replaced, match by match)
+_UTEST = re.compile(r'as_type<(?:(?<![\w.]as_type<)%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= as_type<)%s)' %
+                   (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
 _UTEST_LEFT = re.compile(r'(?<![\w.])-?\d+u? [!=]= $')
 UWORD = ('#ifndef DM_UWORD\n#define DM_UWORD\ntemplate<typename T, int N> static inline __attribute__((always_inline)) T dm_uword(const constant vec<T, N>& v, int i) '
          '{ return ((const volatile constant T*)&v)[i]; }\n#endif\n')
@@ -659,9 +738,21 @@ def raw_noinline(msl, stage='cs'):
     attr = 'inline __attribute__((always_inline))' if stage == 'ms' else '__attribute__((noinline))'
     return RAW_FIND.sub(lambda m: '\nstatic ' + attr + '\n' + m.group(1), msl) if 'dmsh_raw_find' in msl else msl
 
+# Work around SIGBUS in Apple's mesh backend at the macOS 26.6 minimum (issue #2825).
+# Keep SPIRV-Cross helpers with subgroup inputs out of line. Ordinary inlining can still crash on these helpers.
+# SPIRV-Cross hands those inputs to helpers by reference (thread uint& gl_SubgroupInvocationID). Once out of line, Apple's backend (-O1 and up, 26.6 and 27.0 minimums)
+# reads gl_SubgroupInvocationID through that reference as one value for the whole SIMD group when one noinline helper passes it on to another: Ocarina of Time's
+# scan helpers then gave every lane the same exclusive prefix sum, its mesh shaders wrote out of their groups and the GPU hung or faulted after loading a save.
+# Pass them by value: they are SPIR-V Input builtins, never written, so a copy has the same meaning.
+MESH_SUBGROUP_HELPER = re.compile(r'(?m)^static inline __attribute__\(\(always_inline\)\)(?=\n\w+ \w+\([^\n]*\bgl_Subgroup\w*\b)')
+MESH_SUBGROUP_REF = re.compile(r'\bthread (\w+)& (gl_Subgroup\w+)\b')
+def mesh_subgroup_noinline(msl):
+    return MESH_SUBGROUP_REF.sub(r'\1 \2', MESH_SUBGROUP_HELPER.sub('static __attribute__((noinline))', msl))
+
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 
 def gather_offsets(msl):
+    if 'spvGather' not in msl: return msl   # both gather helper names need this prefix
     if not re.search(r'\bspvGather(Compare)?ConstOffsets\(spvDesc|= spvGather(Compare)?ConstOffsets\(', msl): return msl
     arrays = {}
     for m in re.finditer(r'\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);', msl):

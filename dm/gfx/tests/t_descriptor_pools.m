@@ -27,6 +27,82 @@ static unsigned pixel(tex_t *t) {
     [bl endEncoding]; [cb commit]; [cb waitUntilCompleted]; CHECK(cb.status == MTLCommandBufferStatusCompleted, "image readback completes");
     return ((const uint8_t *)b.contents)[0];
 }
+static uint64_t sampler_argument(NvShader *sh) {
+    CHECK(encode_args(nil, sh, 5, 0), "sampler argument encodes");
+    return *(const uint64_t *)((const uint8_t *)sh->ab_buf.contents + sh->ab_off);
+}
+static void sampler_zero(const NVNsamplerPool sp[2], uint32_t *word) {
+    NSError *error = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct A { sampler s [[id(0)]]; };\n"
+        "kernel void k(constant A&a [[buffer(0)]], texture2d<float> t [[texture(0)]], device float *out [[buffer(1)]]) {"
+        "out[0] = t.sample(a.s, float2(0.5), level(0)).r;"
+        "out[1] = t.sample(a.s, float2(-0.25, 0.5), level(0)).r; }" options:nil error:&error];
+    CHECK(lib != nil, "sampler argument shader compiles"); if (!lib) return;
+    NvShader *sh = [NvShader new]; sh->stage = 5; sh->fn = [lib newFunctionWithName:@"k"];
+    sh->ae = [sh->fn newArgumentEncoderWithBufferIndex:0]; sh->arg_len = sh->ae.encodedLength;
+    sh->rf.nb = 1; sh->rf.b[0] = (nvn_rbind){.kind = NVN_RB_SAMPT, .reg = 0, .aid = 0};
+    uint64_t zero = 0, dummy = dummy_samp_rid();
+    mtl_sub_begin();
+    for (int i = 0; i < 2; i++) {
+        p_set_pool p = {.pool = (const dpool_t *)&sp[i]};
+        state_op(OP_SET_SAMP_POOL, &p);
+        const uint32_t handles[] = {3, 0, 0xffffffffu, 255u << 20 | 3u};
+        for (size_t k = 0; k < sizeof handles / sizeof *handles; k++) {
+            p_bind_tex1 t = {.stage = 5, .slot = 0, .h = handles[k]};
+            state_op(OP_BIND_TEX1, &t);
+            uint64_t rid = sampler_argument(sh);
+            if (!k) {
+                CHECK(rid && rid != dummy, "slot zero on a populated handle has its own Metal sampler");
+                CHECK(!i || rid == zero, "both pools provide the same slot-zero descriptor");
+                zero = rid;
+            } else CHECK(rid == dummy, "unbound and invalid handles keep the dummy");
+        }
+        __unsafe_unretained id<MTLBuffer> pool = nil;
+        os_unfair_lock_lock(&g_rmu);
+        pool_gpu(1, 0, 0, S.samp_base, &pool);
+        os_unfair_lock_unlock(&g_rmu);
+        const uint8_t *pbytes = pool.contents;
+        const uint64_t *entries = (const uint64_t *)(pbytes + DMSH_POOL_HEAD);
+        CHECK(entries[0] == zero, "both shader-indexed pools contain the reserved sampler");
+        CHECK(entries[*(const uint32_t *)pbytes] == dummy, "pool table's out-of-range entry stays the dummy");
+    }
+    S.ubo[5][0] = (p_bind_buf){.addr = (uintptr_t)word, .size = sizeof *word};
+    sh->rf.b[0].kind = NVN_RB_SAMPU;
+    *word = 3;
+    CHECK(sampler_argument(sh) == zero, "a combined uniform handle selects slot zero");
+    *word = 0;
+    CHECK(sampler_argument(sh) == dummy, "an empty uniform handle keeps the dummy");
+    sh->rf.b[0].raw_id = 1;
+    CHECK(sampler_argument(sh) == zero, "a readable sampler ID of zero selects slot zero");
+    *word = 4096;
+    CHECK(sampler_argument(sh) == dummy, "a raw sampler ID outside the handle field keeps the dummy");
+    *word = 0;
+    S.ubo[5][0].size = 0;
+    CHECK(sampler_argument(sh) == dummy, "an unreadable sampler ID keeps the dummy");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "sampler argument submission completes");
+
+    id<MTLComputePipelineState> pipe = [g_dev newComputePipelineStateWithFunction:sh->fn error:&error];
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:2 height:1 mipmapped:NO];
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [g_dev newTextureWithDescriptor:td];
+    id<MTLBuffer> args = [g_dev newBufferWithLength:sh->arg_len options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out = [g_dev newBufferWithLength:2 * sizeof(float) options:MTLResourceStorageModeShared];
+    CHECK(pipe && tex && args && out, "sampler readback resources allocated"); if (!pipe || !tex || !args || !out) return;
+    const uint8_t pixels[2] = {0, 255};
+    [tex replaceRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0 withBytes:pixels bytesPerRow:2];
+    memcpy(args.contents, &zero, sizeof zero);
+    id<MTLCommandBuffer> cb = q_cb();
+    id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
+    [en setComputePipelineState:pipe]; [en setTexture:tex atIndex:0];
+    [en setBuffer:args offset:0 atIndex:0]; [en setBuffer:out offset:0 atIndex:1];
+    [en dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    CHECK(cb.status == MTLCommandBufferStatusCompleted, "slot-zero sample completes on the GPU");
+    const float *sample = out.contents;
+    CHECK(fabsf(sample[0] - 0.5f) < 0.01f && sample[1] == 0, "slot zero interpolates texels and clamps outside the texture");
+}
 int main(void) { @autoreleasepool {
     alarm(30); mtl_init();
     NVNtexturePool tp[2]; NVNsamplerPool sp[2];
@@ -70,5 +146,6 @@ int main(void) { @autoreleasepool {
     unsigned a = pixel(&tex[0]), b = pixel(&tex[1]);
     if (a != 64 || b != 191) fprintf(stderr, "image pixels: %u, %u\n", a, b);
     CHECK(a == 64 && b == 191, "the same image slot writes distinct 3D images after a pool change");
+    sampler_zero(sp, (uint32_t *)(images + 32768));
     mtl_pool_del(images); h_nvnCommandBufferFinalize(&cb); printf("t_descriptor_pools: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

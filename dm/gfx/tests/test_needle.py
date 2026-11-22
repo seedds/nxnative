@@ -138,6 +138,22 @@ class NeedleTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'lie outside'):
             split.pacx4_parts(d[:-1], 'cut.pac')   # the root's last chunk cut short
 
+    def test_pacx403_truncated_header_and_root_chunk_table(self):
+        deps = 0x18
+        d = pacx403([], deps=deps)
+        for length, section in ((0x24, 'header'), (0x30 + deps + 3, 'root chunk table'), (0x34 + deps + 7, 'root chunk table')):
+            with self.subTest(length=length), self.assertRaisesRegex(SystemExit, f'PACx 403 {section}: .*lie outside'):
+                split.scan_blob(d[:length], 'cut.pac', [])
+
+    def test_pacx403_truncated_shader_root_header(self):
+        root = b'PACx402LShader'
+        d = bytearray(0x3c)
+        d[:8] = b'PACx403L'
+        struct.pack_into('<III4xII', d, 0x10, len(d), len(root), len(root), 0, 12)
+        struct.pack_into('<III', d, 0x30, 1, len(root), len(root))
+        with self.assertRaisesRegex(SystemExit, 'PACx 402 root header: .*lie outside'):
+            split.scan_blob(d + root, 'cut.pac', [])
+
     def test_embedded_variants_and_headerless_compute(self):
         data = b'prefix\0' + container('vs', 'ps', 'cs') + b'suffix'
         found = []

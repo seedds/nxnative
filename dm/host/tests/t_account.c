@@ -89,6 +89,7 @@ int main(int argc, char **argv) {
     assert(h_acc_OpenUser(&h, &u2) == RES_FAIL);
     assert(h_acc_OpenUser(&h, &u3) == RES_OK && h_acc_OpenUser(&other, &u3) == RES_OK);
     assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &u3, 16));
+    assert(h_acc_EnsureNsa(&h) == 0x27c); // ResultCancelledByUser for an open local account
     h_acc_CloseUser(&h); h_acc_CloseUser(&h);
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 1 && dm_uid_user(list) == 2);
     memset(settings, 0, sizeof settings); choice = 2;

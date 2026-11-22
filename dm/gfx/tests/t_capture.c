@@ -81,6 +81,7 @@ int main(void) {
     for (int i = 0; i < 65536; i += 64) pool_a[i] = (uint8_t)i;
     game_pool = (pool_t){MAGIC('P', 'O', 'O', 'L'), 0x8, pool_a, 65536, NULL, 0};
     game_tex = (tex_t){.magic = MAGIC('T', 'E', 'X', 0), .mem = pool_a + 0x2000, .pool = &game_pool, .off = 0x2000, .serial = 77}; game_tex.L.size = 0x1000;
+    game_tex.d.pkg_layout = 0x404; game_tex.d.gob_order = 1;
     game_prog = (prog_t){.magic = MAGIC('P', 'R', 'O', 'G'), .nstage = 2, .serial = 5};
     game_dpool = (dpool_t){&game_pool, 0x8000, 256};
     seg s0 = {{0}, 0}, s1 = {{0}, 0}, s2 = {{0}, 0}; segs_by_addr[0] = &s0; segs_by_addr[1] = &s1; segs_by_addr[2] = &s2;
@@ -130,8 +131,14 @@ int main(void) {
     const char *lay = cap_layout();
     const char *legacy = "format 1\nops 54\n";
     CHECK(!cap_layout_matches(legacy, strlen(legacy)), "old absolute descriptor handles require a new capture");
+    uint8_t bounds[16] = {0}; CHECK(cap_rec_fields(OP_DEPTH_BOUNDS, bounds, 8 + sizeof(p_depth_bounds), &enc, NULL), "a depth bounds record has no pointer to walk");
     const char *origin_layout = strstr(lay, "p_viewports 392");
-    CHECK(origin_layout && cap_layout_matches(lay, (size_t)(origin_layout - lay)), "format-2 captures before recorded viewport origins remain readable");
+    CHECK(origin_layout && cap_layout_matches(lay, (size_t)(origin_layout - lay)), "captures before the viewport-origin extension remain readable");
+    const char *gob_layout = strstr(lay, "nvn_texdesc 40");
+    CHECK(gob_layout && cap_layout_matches(lay, (size_t)(gob_layout - lay)), "captures before the texture-order extension remain readable");
+    nvn_texdesc legacy_desc = {0}; uint32_t legacy_pkg = 0x1000;
+    memcpy((uint8_t *)&legacy_desc + offsetof(nvn_texdesc, pkg_layout), &legacy_pkg, sizeof legacy_pkg);
+    CHECK(legacy_desc.pkg_layout == legacy_pkg && legacy_desc.gob_order == 0, "old descriptors retain packaged layout and X1 replay order");
     const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
     CHECK(multi_layout && !cap_layout_matches(lay, (size_t)(multi_layout - lay)), "an incomplete format-2 layout remains rejected");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
@@ -170,6 +177,7 @@ int main(void) {
     CHECK(rt->n == 2 && rt->color[1] == &new_tex, "a texture object pointer → the rebuilt object");
     CHECK((const uint8_t *)rt->color[0] > segbuf[0] && (const uint8_t *)rt->color[0] < segbuf[0] + seglen[0], "a snapshot inside the record → the same place in the copy");
     CHECK(rt->color[0]->mem == new_base[0] + 0x2000 && rt->color[0]->pool == &new_pool && rt->color[0]->serial == 78, "the snapshot's storage relocated");
+    CHECK(rt->color[0]->d.pkg_layout == 0x404 && rt->color[0]->d.gob_order == 1, "the snapshot retains packaged dimensions and its captured GOB order");
     CHECK(rt->depth->mem == new_base[0] + 0x4000 && rt->depth->serial == 79, "the depth snapshot relocated");
     CHECK(AT(0, bp, p_bind_program).prog == &new_prog && AT(0, bp, p_bind_program).stages == 3, "program pointer");
     CHECK(AT(0, sp, p_set_pool).pool == &new_dp, "descriptor pool pointer");

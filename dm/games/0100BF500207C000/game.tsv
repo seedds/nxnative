@@ -1,0 +1,43 @@
+# Bloodstained: Ritual of the Night, 1.60 (v851968), SDK 7.6.0
+# Unreal Engine on NVN, with CRIWARE audio and NintendoSDK_movie
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100BF500207C000
+program_id	0100BF500207C000
+
+# ---- App ----
+name	Bloodstained: Ritual of the Night
+ipa	BloodstainedRitualOfTheNight.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v851968	1.60	main=461b14e505ab955525dc93e0e908c0bc	subsdk0=52a5831df9f2ed1d165ea12db45389ad	sdk=6f2805ddeb172a6508922d734bc064e3
+package	v851968
+shader_versions	v851968
+
+# ---- Files ----
+# subsdk0 supplies NintendoSDK_movie imports
+modules	main subsdk0 sdk
+romfs_marker	BloodstainedRotN/Content/Paks/pakchunk0-Switch_0_P.pak
+zip_store	.avi:.mp4:.pak:.png:.ttf:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 70 MiB of system resource. Main maps memory in the alias region without setting a heap.
+# On the Mac the host reserves 64 GiB of alias space. The game reaches beyond 40 GiB during startup.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x4600000
+
+# ---- Frame rate ----
+# Unreal's rhi.SyncInterval is found by its registered name. One vsync per frame yields 60 fps.
+fps_target	60
+
+# ---- Shader split ----
+# Two shared v1 shader archives supply the engine's global shaders and the game's material shaders.
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Bloodstained: Ritual of the Night shaders
+# The startup run calls nvnDeviceSetDepthMode with a near plane of zero.
+depth_mode	zero

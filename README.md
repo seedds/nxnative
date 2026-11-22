@@ -94,6 +94,8 @@ Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore,
 
 Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
 
+If a sideloading tool fails to extract a large IPA, try `--prepare-xcode` and [install from Xcode](docs/development.md#build-and-run-on-a-device-with-xcode).
+
 Controls, saves and settings: [Playing](docs/playing.md).
 
 ### Switch 2 games

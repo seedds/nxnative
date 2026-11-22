@@ -178,6 +178,12 @@ Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <l
 
 From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. From `save_ref`: at about 58 s `A~0.2`, 5 s later `A~0.2` (Load), 30 s later three `A~0.1` 3 s apart, then 12 s to the bridge outside Link's house. There `LUp~3.5`, `A~0.2` (Climb Down) and `LDown~4` three or four times reach the village floor.
 
+## Reported iPhone 18 Pro install and gameplay
+
+On iPhone 18 Pro (iOS 27.2.1), Sideloadly 0.72 under Rosetta returned `PackageExtractionFailed (Could not extract archive)` for both the 3.6 GB default IPA and the 6.2 GB `--shader-files` IPA. The latter passed `unzip -tq`. The reporter installed the same v131072 game with `--prepare-xcode` and **Run** in Xcode 27.2 (Release), using a free Apple ID without Increased Memory Limit. [Issue #2794](https://github.com/seedds/nxnative/issues/2794) · [Xcode install steps](../../../docs/development.md#build-and-run-on-a-device-with-xcode)
+
+On host `bee218d97844`, chain `66eab9c9a6b4`, a save synced from the Mac reached Zora's Domain from Zora's River. The log reported 7.96–7.97 GB to the memory limit at startup and a peak footprint of 4.83 GB. The cold run logged first-use pipeline builds and dropped 8,094 of 21,859 frames. One window advanced 75.28 seconds of game time in 123.37 seconds (61% of real speed). The warm run dropped 171 of 20,945 frames and held 30 fps in 69 of 70 report windows. Both sessions ended when the reporter put the app in the background. A matched cold comparison with the [offline pipeline bundle](#offline-pipeline-bundle) on this phone remains open.
+
 ## Offline pipeline bundle
 
 The IPA packaging connection uses the host's existing descriptor export and bundle reader for every NVN profile ([mechanism and cache/fallback rules](../../../docs/reference/rendering.md#an-iphone-builds-its-prewarm-lists-pipelines-again-after-an-ios-update), PR #2674). Its seed list includes the iPhone's rows through 2026-11-14 06:00: 10,415 added rows, including 4,447 render rows.

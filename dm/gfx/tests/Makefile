@@ -178,6 +178,13 @@ t_link_latch_cb: t_link_latch_cb.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_latch_cb.m $(MTL_T_SRC) $(FW)
 t_link_latch: t_link_latch.c ../nvn/nvn_link_latch.h
 	clang -O1 -Wall -o $@ t_link_latch.c
+t_present_history: t_present_history.c ../nvn/nvn_present_history.h
+	clang -O2 -Wall -Wextra -Werror -o $@ t_present_history.c
+t_present_history_tsan: t_present_history.c ../nvn/nvn_present_history.h
+	clang -O1 -g -fsanitize=thread -Wall -Wextra -Werror -o $@ t_present_history.c
+.PHONY: present-history-tsan
+present-history-tsan: t_present_history_tsan
+	./t_present_history_tsan
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)

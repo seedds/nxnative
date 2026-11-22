@@ -12,7 +12,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
+import atexit, errno, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -192,7 +192,9 @@ def commit(key='', names=None):
 
 def publish_library(label):
     """The library's image <dir>.img from the staged outputs and the files left on disk (these win), and for a partial build the image it builds on, less the outputs of the keys it built
-    (and its stamp, when the profile's inputs changed). Then the folder and the staged entries go. When the image cannot be written, the staged outputs go back into the folder, which works as it is"""
+    (and its stamp, when the profile's inputs changed). Then the folder and the staged entries go. When the image cannot be written, a full build whose drive is out of space stops at once
+    without unpacking loose files back onto the full drive; otherwise the staged outputs go back into the folder, which works as it is, and a folder restore that fails too removes what it
+    wrote and stops the build"""
     d = label_dir(label); image = shader_lib.image_of(d); prefix = f'{STAGE}/{label}/'
     files = {}
     old = OLD_IMAGE.get(label)
@@ -201,13 +203,34 @@ def publish_library(label):
             m = OUT_KEY.match(p.name)
             if (m and owned_output(m.group(1))) or (p.name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
             files[p.name] = str(p)
-    for n in STORE.names(prefix): files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
+    staged = STORE.names(prefix)
+    for n in staged: files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
     for n in os.listdir(d):
         if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)): files[n] = os.path.join(d, n)
     try: shader_lib.write(files, image)
     except (OSError, ValueError) as e:
+        cache_full = getattr(STORE, 'full', False)
+        def stop(why, err2=None):
+            if not want:
+                try: os.unlink(os.path.join(d, dmsh_chain.STAMP))
+                except OSError: pass
+            hint = ('The shader cache filled up earlier in this build, so only the shaders cached before that will be reused' if cache_full
+                    else 'The shaders compiled so far are in the shader cache, and a build again in this work folder takes them from there')
+            action = 'free space on the drive and build again' if errno.ENOSPC in (getattr(e, 'errno', None), getattr(err2, 'errno', None)) else 'fix the error and build again'
+            sys.exit(f'[RED] {why}. {hint}: {action}')
+        if isinstance(e, OSError) and e.errno == errno.ENOSPC and old is None and not cache_full and staged:
+            stop(f'could not write {image}: {e}')
+        written = []
+        try:
+            for n in staged:
+                dst = os.path.join(d, n[len(prefix):])
+                if not os.path.exists(dst) and STORE.to_file(n, dst): written.append(dst)
+        except OSError as e2:   # a drive that cannot take the loose files either: give back what this restore wrote and stop with one red line
+            for p in written:
+                try: os.unlink(p)
+                except OSError: pass
+            stop(f'could not write {image} ({e}) or restore the shaders into {d} ({e2})', e2)
         print(f'[RED] could not write {image}, the library stays the folder {d}: {e}', flush=True)
-        for n in STORE.names(prefix): STORE.to_file(n, os.path.join(d, n[len(prefix):]))
         return
     STORE.delete_prefix(prefix)
     shutil.rmtree(d, ignore_errors=True)
@@ -1296,11 +1319,13 @@ if not want:   # a full build: the stamp, then the c1 guard and uniform read ext
     # every full build writes them, and the iOS folder goes whole into the IPA. Before the stamp, so a stamped folder always has its list
     with open(os.path.join(out, CAS_USED + '.tmp'), 'w') as _f: _f.write(''.join(d + '\n' for d in sorted(set(digests.values()))))
     os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
-    for _d in [out] + ([IOSOUT] if IOSOUT else []): dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
-    print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
 # The libraries' images, from what this build staged (and for a partial build the images it builds on): the folders go, and what reads a library from here on reads the image
 for _label in ('mac', 'ios'):
-    if label_dir(_label): publish_library(_label)
+    _d = label_dir(_label)
+    if not _d: continue
+    if not want: dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
+    publish_library(_label)
+if not want: print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
 if PROGRESS:
     try: os.unlink(PROGRESS)
     except FileNotFoundError: pass

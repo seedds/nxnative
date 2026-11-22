@@ -74,10 +74,10 @@ struct SaveSyncReport {
             + "a new game saved a minute later is newer. The one you don't pick is kept in the save's backups folder."
     }
     static let missingTitle = "No cloud save found"
+    /// Short: on a landscape iPhone the dialog is a popover, and a longer text pushed the buttons out of view
     func missingMessage(here: String) -> String {
-        "This \(here) synced this game's save to the chosen folder before, but iCloud shows no save there now. iCloud may not have listed it yet "
-            + "(often right after the folder is chosen again, as after a reinstall), or it was removed. Sending this \(here)'s save "
-            + "(\(Self.when(localSaved)), \(Self.size(localSize))) replaces any save iCloud has not shown yet. To be safe, try again in a minute, or play without sending."
+        "This \(here) synced a save here before, but iCloud shows none now: not listed yet (often after choosing the folder again), or removed. "
+            + "Sending replaces any save iCloud has not shown yet."
     }
     func sendLabel(here: String) -> String { "Send This \(here)'s Save" }
     static let unreadableTitle = "The cloud save didn't come"

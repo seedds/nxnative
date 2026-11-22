@@ -21,17 +21,41 @@ def screen_shape(ctx):
         for w in (load, 0x34000050, 0xb3607e00 | reg): emit(w)         # ldr w16,[x16,#off]; cbz w16,+8; bfi xN,x16,#32,#32
         emit(B(here(), site + 4))
         fs_put(site, [B(site, start)], why)
+    # The output sizes (1920x1080) also take the render scale (state +0x10 below 1.0): width and height x scale, multiples of 8, so in handheld the game's picture, its
+    # crop and its 3D views follow the docked getters below. s16 / s17 free as well (a call or a return follows each site)
+    OUT_SCALED = (0x90000010, 0xB9405610, 'tbz', 0x90000010, 0xB9404A11, 0x34000271, 'bfi_h', 0xBD401210, 0x1E2E1011, 0x1E312200, 0x540001CA, 0x1E202208, 0x5400018D,
+                  0x1E230231, 0x1E300A31, 0x1E390231, 0x121D7231, 'bfi_h', 0x5280F011, 0x1E230231, 0x1E300A31, 0x1E390231, 0x121D7231, 'bfi_w')
+    def out_scaled(site, reg, bit, why):
+        orig = 0xf2c00000 | 0x438 << 5 | reg
+        fs_site(site, struct.pack('<I', orig).hex())
+        start = here(); emit(orig)
+        for w in OUT_SCALED:
+            if w == 0x90000010: emit(ADRP(16, here(), FS_STATE_OFF))
+            elif w == 'tbz': emit(0x360002D0 | bit << 19)
+            elif w == 'bfi_h': emit(0xB3607E20 | reg)
+            elif w == 'bfi_w': emit(0xB3407E20 | reg)
+            else: emit(w)
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], why)
     for bit, (site, reg, load) in enumerate(((0x20b750, 8, OUT), (0x486f54, 8, OUT), (0x5399b4, 8, OUT), (0x5494a0, 9, OUT), (0x549a44, 9, OUT), (0x804384, 9, OUT),
                                              (0x45f0e4, 10, LAY), (0x479c48, 9, LAY), (0x47fbc0, 8, LAY), (0x5399cc, 8, LAY), (0x539cb4, 10, LAY), (0x544b20, 8, LAY),
                                              (0x71114c, 10, LAY), (0x1639d94, 23, LAY), (0x163a064, 8, LAY), (0x194ca1c, 8, LAY))):
-        taller_bit(site, reg, bit, load, f'screen shape site {bit}: {"1920x1080" if load == OUT else "1280x720"} → the host\'s height')
-    # The docked screen size: main+0x5bf770 / +0x5bf780 return 2880 / 1620 (leaf getters; six callers, among them the display setup at main+0x5399a4 beside output site 2):
-    # the height takes the screen's shape, 1.5 x the host's 1920-wide height (2016 at 1.43). Assembled with clang; a leaf ending in ret, x16 / x17 free
-    site = 0x5bf780
-    fs_site(site, '80ca8052')   # mov w0,#0x654
-    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9404a11, 0x34000071, 0x0b510620, 0xd65f03c0, 0x5280ca80, 0xd65f03c0): emit(w)   # ldr w17,[x16,#0x48]; cbz w17,+3; add w0,w17,w17,lsr #1; ret; mov w0,#1620; ret
-    fs_put(site, [B(site, start)], 'screen shape: the docked screen height (1620) takes the screen\'s shape')
+        if load == OUT: out_scaled(site, reg, bit, f'screen shape site {bit}: 1920x1080 → the host\'s height, both x the render scale')
+        else: taller_bit(site, reg, bit, load, f'screen shape site {bit}: 1280x720 → the host\'s height')
+    # The docked screen size: main+0x5bf770 / +0x5bf780 return 2880 / 1620 (leaf getters; six callers, among them the display setup at main+0x5399a4 beside output site 2;
+    # the renderer sizes its targets from them, the 3D views at half: 1440x1008 at 1.43). The height takes the screen's shape, 1.5 x the host's 1920-wide height (2016 at
+    # 1.43), and both take the render scale (state +0x10, DM_RENDER_SCALE 0.5 to 1.0, multiples of 8), so the 3D draws fewer pixels and the picture is scaled up when shown
+    # (the open world needed 29-33 ms of GPU a frame on an A20 Pro at thermal state 2, past the game's 30 fps there). Assembled with clang; leaves ending in ret, x16 / x17 free
+    ctx.render_scale = 1
+    for site, orig, words, why in (
+            (0x5bf770, '00688152', (0x52816800, 0xBD401200, 0x1E2E1001, 0x1E212000, 0x540000EA, 0x1E202008, 0x540000AD, 0x1E230001, 0x1E210800, 0x1E390000, 0x121D7000,
+                                    0xD65F03C0), 'the docked screen width (2880) takes the render scale'),
+            (0x5bf780, '80ca8052', (0x5280CA80, 0xB9404A11, 0x34000051, 0x0B510620, 0xBD401200, 0x1E2E1001, 0x1E212000, 0x540000EA, 0x1E202008, 0x540000AD, 0x1E230001,
+                                    0x1E210800, 0x1E390000, 0x121D7000, 0xD65F03C0), 'the docked screen height (1620) takes the screen\'s shape and the render scale')):
+        fs_site(site, orig)
+        start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in words: emit(w)
+        fs_put(site, [B(site, start)], 'screen shape: ' + why)
     # The window crop (main+0x204368: nvnWindowSetCrop's x, y, width, height from the frame object's +0xac, Mario Kart World's code byte for byte): a 16:9 crop takes the
     # screen's shape, width x (host height / 1920). Mario Kart World's stub; x16 / x17 free up to the blr, whose callee needs no flags
     CROP = (0x29569283, 'adrp', 0xB9404A11, 0x34000171, 0x52800130, 0x1B107C70, 0x531C6C91, 0x6B11021F, 0x540000C1, 'adrp', 0xB9404A11, 0x1B117C70, 0x5280F011, 0x1AD10A04, 'back')

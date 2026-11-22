@@ -34,8 +34,9 @@ _file = fuzzlib.InputFile('control.nacp')
 
 def check(data):
     p = _file.write(data)
-    n, v, langs = nacp.name(p), nacp.version(p), nacp.languages(p)
-    if not isinstance(n, str) or not isinstance(v, str) or not isinstance(langs, list): raise fuzzlib.broken('nacp.py', f'unexpected result types {n!r} {v!r} {langs!r}')
+    n, v, dv, langs = nacp.name(p), nacp.version(p), nacp.display_version(p), nacp.languages(p)
+    if not isinstance(n, str) or not isinstance(v, str) or not isinstance(dv, str) or not isinstance(langs, list):
+        raise fuzzlib.broken('nacp.py', f'unexpected result types {n!r} {v!r} {dv!r} {langs!r}')
 
 
 if __name__ == '__main__':

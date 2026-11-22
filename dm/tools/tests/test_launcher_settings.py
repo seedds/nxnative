@@ -93,6 +93,18 @@ class LauncherSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):
             build(WONDER, 'nvn', 'mca')
 
+    def test_picture_shape_requires_the_rewriter_capability(self):
+        games = ('0400486024DEC000', BOTW, '01006F8002326000')
+        for gid in games:
+            self.assertNotIn('DM_SCREEN_ASPECT', build(gid, 'nvn'))
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'ios'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# SCREEN_ASPECT\t1\n', encoding='utf-8')
+            for gid in games:
+                with self.subTest(gid=gid):
+                    rows = settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']
+                    shape = next(row for row in rows if row['env'] == 'DM_SCREEN_ASPECT')
+                    self.assertEqual(shape['default'], 'auto')
+
     def test_malformed_platform_defaults_are_rejected(self):
         for default in ('1|', '|0', '1|0|1'):
             with self.subTest(default=default), tempfile.TemporaryDirectory() as tmp:

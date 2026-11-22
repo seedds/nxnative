@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include "../nvn/dmsh_abi.h"
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -17,6 +18,18 @@ static void check(const char *what, long want, long got) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   // Pointer discovery is metadata on the existing pool-table binding; there is no new GPU argument.
+        NSMutableDictionary *b = [@{@"kind": @"gmem_map", @"arg_id": @0, @"msl_name": @"cp_s0", @"pointers": @[@[@1, @8], @[@0, @0]]} mutableCopy];
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[b]};
+        check("raw pointers: conversion", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("raw pointers: existing table kind", NVN_RB_GMEM, r.b[0].kind); check("raw pointers: count", 2, r.ngptr);
+        check("raw pointers: slot", 1, r.gptr[0].reg); check("raw pointers: byte", 8, r.gptr[0].off);
+        for (id invalid in @[@[@[@16, @0]], @[@[@0, @65529]], @[@[@0]], @[@[@"bad", @0]], @"bad"]) {
+            b[@"pointers"] = invalid; check("raw pointers: malformed source rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+        }
+        NSMutableArray *many = [NSMutableArray array]; for (int i = 0; i <= DMSH_GPTR_MAX; i++) [many addObject:@[@0, @(8 * i)]];
+        b[@"pointers"] = many; check("raw pointers: too many rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+    }
     {   // A row-wrapped BUFFER binding has a lead group followed by logical widths.
         NSArray *forms = @[
             @{@"kind": @"tex", @"reg": @0, @"msl_name": @"cp_t_tcb_8", @"msl_type": @"texture2d<uint>"},

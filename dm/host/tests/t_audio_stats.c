@@ -76,8 +76,113 @@ static int render(void *out, int count, int with_pcm) {
     return 1;
 }
 static void *drain_stats(void *unused) { (void)unused; stats_drain(); return NULL; }
+static void render_frames(aout *a, unsigned frames, int16_t *pcm) {
+    unsigned channels = (unsigned)a->dev_ch;
+    AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{channels, frames * channels * sizeof *pcm, pcm}}};
+    in_callback = 1;
+    au_render(a, NULL, NULL, 0, frames, &bl);
+    in_callback = 0;
+}
+// A two-block, 256-frame queue reproduces the timing seen in Need for Speed.
+// A 44.1 kHz route requesting 256 device frames pulls 278 or 279 at 48 kHz.
+static int16_t replay_sample(uint64_t frame) { return (int16_t)(1 + frame % 30000); }
+static void replay_block(aout_buf *buffer, uint64_t start) {
+    int16_t *pcm = buffer->ptr;
+    for (int i = 0; i < 256; i++) {
+        pcm[i * 6] = replay_sample(start + i);
+        pcm[i * 6 + 1] = -pcm[i * 6];
+    }
+}
+static void replay_device_callbacks(int bluetooth) {
+    uint32_t out[16] = {0};
+    uint8_t prm[8] = {0};
+    prm[4] = 6;
+    CHECK(!h_au_OpenDef0(out, prm), "open six-channel guest audio");
+    aout *a = ao(out);
+    a->dev_ch = 2;  // The mocked stereo route is normally set by au_create.
+    CHECK(a->ch == 6, "use the same guest format as the game");
+    atomic_store(&a->state, STATE_STARTED);
+    int16_t pcm[2][256 * 6] = {{0}};
+    aout_buf buffers[2] = {
+        {.ptr = pcm[0], .cap = sizeof pcm[0], .size = sizeof pcm[0]},
+        {.ptr = pcm[1], .cap = sizeof pcm[1], .size = sizeof pcm[1]},
+    };
+    for (int i = 0; i < 2; i++) {
+        replay_block(&buffers[i], i * 256);
+        CHECK(h_au_Append(out, &buffers[i]), "queue both game buffers");
+    }
+    uint64_t submitted = 512, consumed = 0, mismatches = 0, count_mismatches = 0;
+    for (unsigned i = 0; i < 8000; i++) {
+        unsigned frames = bluetooth ? ((i + 1) * 40960 / 147 - i * 40960 / 147) : 240;
+        int16_t played[279 * 2];
+        render_frames(a, frames, played);
+        atomic_store(&a->st_pending, 0);
+        for (unsigned j = 0; j < frames; j++) {
+            int16_t expected = replay_sample(consumed + j);
+            mismatches += played[2 * j] != expected || played[2 * j + 1] != -expected;
+        }
+        consumed += frames;
+        count_mismatches += h_au_BufCount(out) != (submitted / 256) - (consumed / 256);
+        aout_buf *released;
+        while ((released = h_au_Released(out))) {
+            replay_block(released, submitted);
+            submitted += 256;
+            if (!h_au_Append(out, released)) { CHECK(0, "requeue a returned game buffer"); break; }
+        }
+    }
+    uint64_t underruns = atomic_load(&a->under_n);
+    printf("%s: 8,000 callbacks, %llu underruns\n", bluetooth ? "Bluetooth" : "Speaker", (unsigned long long)underruns);
+    CHECK(!underruns, "callback requests fit without zero padding");
+    CHECK(!mismatches, "all samples are played exactly once and in order");
+    CHECK(!count_mismatches, "buffer count includes every unplayed block after each callback");
+    if (bluetooth) {
+        h_au_Stop(out);
+        CHECK(!h_au_BufCount(out), "stop clears the count of both staged and queued audio");
+        CHECK(h_au_Released(out) && h_au_Released(out) && !h_au_Released(out), "stop returns the newly queued guest buffers");
+        replay_block(&buffers[0], 42);
+        CHECK(h_au_Append(out, &buffers[0]), "queue fresh audio before restarting");
+        atomic_store(&a->state, STATE_STARTED);
+        int16_t played[240 * 2];
+        render_frames(a, 240, played);
+        CHECK(played[0] == replay_sample(42), "restart begins with fresh PCM");
+    }
+    h_au_Close(out);
+}
+static void check_staging_limit(unsigned channels) {
+    enum { CALLBACK_FRAMES = 241, TAIL_FRAMES = 480 };
+    uint32_t out[16] = {0};
+    uint8_t prm[8] = {0};
+    prm[4] = (uint8_t)channels;
+    CHECK(!h_au_OpenDef0(out, prm), "open a guest output for the staging boundary");
+    aout *a = ao(out);
+    atomic_store(&a->state, STATE_STARTED);
+    atomic_store(&a->q_head, UINT32_MAX);
+    atomic_store(&a->q_tail, UINT32_MAX);
+    atomic_store(&a->q_played, UINT32_MAX);
+    int16_t pcm[(CALLBACK_FRAMES + TAIL_FRAMES + 1) * 2] = {0}, played[CALLBACK_FRAMES * 2];
+    aout_buf buffer = {.ptr = pcm, .cap = sizeof pcm, .size = (CALLBACK_FRAMES + TAIL_FRAMES) * channels * sizeof(int16_t)};
+    CHECK(h_au_Append(out, &buffer), "queue a block with exactly 10 ms left after one callback");
+    render_frames(a, CALLBACK_FRAMES, played);
+    CHECK(h_au_Released(out) == &buffer && h_au_BufCount(out) == 1, "480-frame tail is released early and still counts across queue wrap");
+    render_frames(a, TAIL_FRAMES / 2, played);
+    CHECK(h_au_BufCount(out) == 1, "partly consumed staged audio still counts");
+    render_frames(a, TAIL_FRAMES / 2, played);
+    CHECK(!h_au_BufCount(out) && !h_au_Released(out), "draining a staged tail clears its count without releasing it twice");
+
+    buffer.size += channels * sizeof(int16_t);
+    CHECK(h_au_Append(out, &buffer), "queue a block with one frame more than 10 ms left");
+    render_frames(a, CALLBACK_FRAMES, played);
+    CHECK(!h_au_Released(out) && h_au_BufCount(out) == 1, "481-frame tail stays in the guest queue");
+    h_au_Stop(out);
+    CHECK(h_au_Released(out) == &buffer && !h_au_BufCount(out), "stop returns the unstaged block and clears the count");
+    h_au_Close(out);
+}
 int main(void) {
     setenv("DM_AUDIO", "0", 1); setenv("DM_AUDIO_MUTE", "0", 1);
+    check_staging_limit(1);
+    check_staging_limit(2);
+    replay_device_callbacks(0);
+    replay_device_callbacks(1);
     report_entered = dispatch_semaphore_create(0); report_allow = dispatch_semaphore_create(0);
     report_done = dispatch_semaphore_create(0); released_event = dispatch_semaphore_create(0);
     uint32_t out[16] = {0}; uint8_t prm[8] = {0}, ev[64] = {0};
@@ -129,3 +234,5 @@ int main(void) {
     printf("audio callback statistics: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

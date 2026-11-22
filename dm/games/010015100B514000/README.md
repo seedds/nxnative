@@ -40,6 +40,12 @@ No game-specific executable cuts. `dm/tools/sdk_patches.py`'s SDK-wide rules cut
 - The precise `SleepThread` (`sleep_precise`, found on Metroid Dread) took Mario's frame-time p95 from 19.7 to 18.4 ms.
 - The spin-wait rewrite finds 175 loops in `main`; the store rule added one more in each build.
 
+### Display-link rescue at fullscreen startup
+
+**Resolved in [PR #3004](https://github.com/seedds/nxnative/pull/3004).** Wonder 1.2.1 froze in 5 of 5 cold fullscreen starts on an M4 Mac mini (macOS 27.2.1) with a fixed 144 Hz external display. Each run logged rescue before the initial `present pacing mode 0 → 1` and before the screen's switch to 120 Hz. The test app was built on `0b5fd602` with a local change that made `pl::IsRunningOnOunce` return 1 and included the Switch 2 Edition add-on's shaders.
+
+The author alternated starts of two app copies that differed only in the host and its signature. The patched copy froze in 0 of 5 starts (one-sided Fisher p = 0.004). Three patched starts entered rescue before the first mode change, returned the layer to the present thread, and reached mode 1 at frames 199–206. Comparing only runs with that ordering, selected after testing, gives p = 0.018. With `DM_SCREEN_MATCH=0`, 0 of 3 baseline starts entered rescue. The stock 1.2.1 build was outside this comparison.
+
 ## Rendering
 
 Game-specific findings; the general host changes they led to are listed under [Found on this game](#found-on-this-game).
@@ -61,13 +67,13 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Shaders
 
-- **Open: duplicate representative labels (2026-11-17, [issue #2924](https://github.com/seedds/nxnative/issues/2924)).** Packing reports 36 differing rows after the shared splitter switched `main` to checked first-copy selection. The retained 1.2.1 executable (`ff773e90…`) has the same 40 embedded keys and byte-identical duplicate controls/code, but its BNSH offsets are `0x33ef000` / `0x33f7000`; the registered union map takes its sources from the base executable at `0x326c000` / `0x3274000`. The base executable is unavailable locally, so this map has not been refreshed from the update's different source addresses or assumed variation order. Re-split the registered union and verify its representatives before refreshing it. Shared mechanism: [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
-- 12,811 shaders in v0 and 16,268 across both versions; 16,266 compile. In v0 the main `bfsha` held only 4,888 of the 12,811.
+- **Resolved: duplicate representative labels (2026-11-18, [issue #2924](https://github.com/seedds/nxnative/issues/2924)).** On macOS, the registered 1.0.0 and 1.2.1 union reproduced the old map with last-copy selection. All 192 embedded occurrences reduce to 40 keys with byte-identical complete controls and code within each key. Checked first-copy selection changes 36 rows from the base executable's BNSH blocks at `0x326c000` and `0x3274000` (22 source labels, plus 14 rows with only a package index change). The two splits have identical package records by key for all 16,268 shaders and identical facts, shader pairs and 3,698 supplemental pairs. A full Mac shader build and host rebuild on macOS 27.2.1 with Xcode 27.2 pass on chain `cf3be507e0eb`. The library stamp matches the refreshed profile. Gameplay and iPhone verification remain open for this refresh.
+- 12,811 shaders in v0 and 16,268 across both versions. All 16,268 compile on the chain above. In v0 the main `bfsha` held only 4,888 of the 12,811.
 - Containers: `Shader/*.bfsha` (BNSH), `Lib/agl/*.sarc` + `Shader/Secred.sarc` (agl BAHS `sharcb`), `Effect/*.esetb` (BNSH), `Layout/*.blarc` (BNSH) and two BNSH inside `main`. Groups in `game.tsv` (`SecredUber`, `agl`, `effect`, `layout`).
 - Texture handles at `0x20 + 8 × slot` (the docs call it "Mario's binding layout"). 38% of texture reads go through handles stored in the game's uniform buffers (`fp_t_cb7_2A`: word 0x2A of c[7] = uniform slot 4), the binding kinds `tex_ubo` / `samp_ubo`.
 - Many shaders share a control section and differ in code, so keys hash both.
 - All 71 compute shaders have a header (magic `0x12345679`) and zero padding, instructions at +0x100. Fed from +0x30 at first, 12 compute shaders (particles, post effects) translated into an endless loop that hung the GPU at the first gameplay scene.
-- 2 agl post-effect compute shaders still produce SPIR-V that SPIRV-Cross cannot parse (7 before the compute start-offset fix).
+- **Resolved on chain `cf3be507e0eb`.** Older chains left two agl post-effect compute shaders with SPIR-V that SPIRV-Cross could not parse (seven before the compute start-offset fix).
 - Integer vertex inputs: 529 of 4,854 vertex shaders are re-translated with `uint` inputs (skinned models read bone indices as integer bits; without it every character was stretched into streaks).
 - Pairs: 331 of 9,043 vertex / pixel pairs failed to link before `vs_pad` (the opening course used none of them; later levels did, about 11,500 failed builds in one 11-minute session). The offline link check: 8,712 linked / 331 failed before, 9,043 / 0 after, 14,603 / 0 for the v0 + 1.2.1 tables.
 - Vertex format `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`.
@@ -101,13 +107,15 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
-- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the base/update union's duplicate representatives remain open above.
-- **Its Switch 2 Edition's program:** [A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"](../../../docs/reference/packing.md#a-switch-2-edition-nup-stops-at-2-base-packages-or-is-not-a-base-title-id): the Switch 2 program (`040015100B514001`, no profile) mounts this program's RomFS by program index and the upgrade add-on itself; the NUP packer packs this RomFS beside it.
+- [Display-link rescue during startup can leave the present queue without a consumer](../../../docs/reference/frame-rate.md#display-link-rescue-during-startup-can-leave-the-present-queue-without-a-consumer). See the [fullscreen startup results](#display-link-rescue-at-fullscreen-startup).
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
+- **Its Switch 2 Edition's program:** [A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"](../../../docs/reference/packing.md#a-switch-2-edition-nup-stops-at-2-base-packages-or-is-not-a-base-title-id): the Switch 2 program ([`040015100B514001`](../040015100B514001/README.md)) mounts this program's RomFS by program index and the upgrade add-on itself; the NUP packer packs this RomFS beside it.
 - **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): choosing two players splits a Joy-Con 2 pair through the controller applet, one sideways Joy-Con each.
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 
 - **Resolved: `Ver. ?` on the title screen of a build packed from an update-only NUP**: [A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers](../../../docs/reference/packing.md#a-game-packed-from-a-nup-or-a-dump-shows-ver--for-a-build-its-profile-registers). One Mac boot before and after.
+- **Resolved: Polish and Thai can be chosen**: [Polish and Thai, and a Switch 2 SDK's own language list](../../../docs/reference/services.md#polish-and-thai-and-a-switch-2-sdks-own-language-list). 1.2.1 ships both (`Mals/EUpl`, `Mals/THth`, `Font/Font_THth`); the tools did not know their codes. One Mac boot each to the title screen.
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - **zstd files inside a RomFS image** (`shader_split.py` `unzs`): [The zstd command given a path inside the image](../../../docs/reference/packing.md#the-zstd-command-given-a-path-inside-the-image).
@@ -126,4 +134,3 @@ General host changes first needed here; each applies to every game:
 - On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone), per development.md's known gaps.
 - dm/games/README.md says the heap check turns "Wonder's 1.44 GB" request into a 0xc0000000 alias region; 03 says it asks for 1.47 GB, and the profile's alias region is 0xB8000000.
 - Several addresses in 02 and 03 (`main+0x1070910`, `main+0x107dbc0`, `main+0x4da5c`, `main+0xb8dec`, `main+0xcfd24`, `main+0x36ceff0`) do not name their build; the present-interval ones are from 1.2.1.
-- 2 agl post-effect compute shaders do not translate.

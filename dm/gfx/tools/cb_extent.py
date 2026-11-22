@@ -13,12 +13,30 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from c1_guard import Interval, definitions_of, known, memo_answer, memo_map, memo_reflection, outputs, read_bytes, text_of   # noqa: E402  (memo_map: DMSH_TABLE_MEMO, see c1_guard.py)
+from c1_guard import Definitions, Interval, known, memo_answer, memo_map, memo_reflection, outputs, read_bytes, text_of   # noqa: E402  (memo_map: DMSH_TABLE_MEMO, see c1_guard.py)
 import dmsh_abi as abi   # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import shader_lib   # noqa: E402
 
 MAX = 65536
+DECLARED = re.compile(r"\s*\[\[id\(")
+
+
+def word(c): return c.isalnum() or c == "_"   # \w
+
+
+def uses_of(source, name):
+    r"""(how often name stands in source as a word, how often of those as the argument buffer's member `name [[id(`): the counts of \bname\b and \bname\s*\[\[id\(, found with
+    str.find. A pattern that starts with \b is tried at every character, and each of a shader's bindings took two such scans: nearly half of this tool's time"""
+    if not name or not word(name[0]) or not word(name[-1]):
+        return len(re.findall(r"\b" + re.escape(name) + r"\b", source)), len(re.findall(r"\b" + re.escape(name) + r"\s*\[\[id\(", source))
+    uses = declared = 0; i = source.find(name)
+    while i >= 0:
+        j = i + len(name)
+        if not (i and word(source[i - 1])) and not (j < len(source) and word(source[j])):
+            uses += 1; declared += bool(DECLARED.match(source, j))
+        i = source.find(name, i + 1)
+    return uses, declared
 
 
 def extents(source, bindings):
@@ -27,13 +45,12 @@ def extents(source, bindings):
     for b in bindings:
         if b.get("kind") != abi.KIND_CBUF or "reg" not in b: continue
         name = b["msl_name"]
-        uses = len(re.findall(r"\b" + re.escape(name) + r"\b", source))
+        uses, declared = uses_of(source, name)   # declared: the argument buffer member
         reads = re.findall(r"\(\*spvDescriptorSet0\." + re.escape(name) + r"\)\._m0\[([^\]]+)\]", source)
-        declared = len(re.findall(r"\b" + re.escape(name) + r"\s*\[\[id\(", source))   # the argument buffer member
         if uses != len(reads) + declared: continue
         high = -1
         for index in set(reads):
-            if definitions is None: definitions = definitions_of(source)
+            if definitions is None: definitions = Definitions(source)
             low, top = Interval(definitions).expression(index)
             if not known(low, top) or low < 0: high = None; break
             high = max(high, top)

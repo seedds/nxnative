@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """One copy of a raw global memory lookup's search (dmsh_rewrite.py raw_noinline): the translator's dmsh_raw_find (GlobalToStorage GetRawFindFunction), as spirv-cross writes it, is
-marked noinline; the access helpers that check the last entry and call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with
-xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the translator's own lookups on the GPU in both forms."""
+marked noinline outside mesh stages; final mesh code keeps it inline, including composed code whose inputs were already rewritten. The access helpers that check the last entry and
+call it stay inline, and so does a function of the same shape without the name. The pass is idempotent, and with xcrun the rewritten shader compiles. test_dmsh_raw_last.py runs the
+translator's own lookups on the GPU in both forms. Final mesh code keeps nested subgroup helpers out of line and passes their read-only subgroup inputs by value."""
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +13,7 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
-from dmsh_rewrite import raw_noinline   # noqa: E402
+from dmsh_rewrite import mesh_subgroup_noinline, raw_noinline   # noqa: E402
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -66,12 +67,39 @@ kernel void main0(const device _29& cp_s2 [[buffer(0)]], device uint* out [[buff
 '''
 SRC = HEAD + FIND + OTHER + helper('_63', 'dmsh_raw_find') + helper('_64', 'dmsh_raw_find') + helper('_71', '_70') + MAIN
 
+SUBGROUP_HELPERS = f'''
+{INLINE}
+int subgroup_leaf(thread uint& gl_SubgroupInvocationID, thread int& result)
+{{
+    result = int(gl_SubgroupInvocationID);
+    return result;
+}}
+
+{INLINE}
+int subgroup_caller(thread uint& gl_SubgroupInvocationID, thread uint4& gl_SubgroupLtMask, thread int& result)
+{{
+    return subgroup_leaf(gl_SubgroupInvocationID, result) + int(gl_SubgroupLtMask.x);
+}}
+'''
+
 
 def attribute(src, name):
     return re.search(r'\n([^\n]*)\nint %s\(' % name, src).group(1)
 
 
 class RawNoinline(unittest.TestCase):
+    def test_mesh_keeps_the_search_inline(self):
+        for source in (SRC, raw_noinline(SRC)):
+            with self.subTest(already_noinline=source != SRC):
+                out = raw_noinline(source, stage='ms')
+                self.assertEqual(out, SRC)
+                self.assertEqual(raw_noinline(out, stage='ms'), out)
+
+    def test_other_stages_keep_one_search(self):
+        for stage in ('ts', 'vs', 'ps', 'cs', 'rt'):
+            with self.subTest(stage=stage):
+                self.assertEqual(raw_noinline(SRC, stage=stage), raw_noinline(SRC))
+
     def test_marks(self):
         out = raw_noinline(SRC)
         self.assertEqual(attribute(out, 'dmsh_raw_find'), NOINLINE)
@@ -84,6 +112,20 @@ class RawNoinline(unittest.TestCase):
         plain = HEAD + OTHER + helper('_71', '_70') + MAIN
         self.assertEqual(raw_noinline(plain), plain)
         self.assertEqual(raw_noinline(raw_noinline(SRC)), raw_noinline(SRC))
+
+    def test_mesh_subgroup_noinline(self):
+        one_line = '\nstatic inline __attribute__((always_inline)) float dm_zsnap(float z) { return z; }\n'
+        body = '\nstatic inline __attribute__((always_inline)) void dm_stage_body(uint gl_SubgroupInvocationID) {}\n'
+        unchanged = raw_noinline(SRC, stage='ms') + one_line + body
+        by_value = SUBGROUP_HELPERS.replace('thread uint& gl_SubgroupInvocationID', 'uint gl_SubgroupInvocationID')
+        by_value = by_value.replace('thread uint4& gl_SubgroupLtMask', 'uint4 gl_SubgroupLtMask')
+        src = unchanged + SUBGROUP_HELPERS
+        expected = unchanged + by_value.replace(INLINE, NOINLINE)
+
+        out = mesh_subgroup_noinline(src)
+        self.assertEqual(out, expected)
+        self.assertEqual(mesh_subgroup_noinline(out), out)
+        self.assertEqual(mesh_subgroup_noinline(unchanged + SUBGROUP_HELPERS.replace(INLINE, NOINLINE)), expected)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'no xcrun')
     def test_compiles(self):

@@ -167,7 +167,8 @@ int main(void) {
     while (got2 < 6 && now_ns() - t0 < 10000000000ull) {
         uint64_t ms = (now_ns() - t0) / 1000000;
         if (!susp && ms >= 150) { dm_audio_suspend(1); susp = 1; }
-        if (susp && !resumed && ms >= 350) { dm_audio_suspend(0); resumed = 1; }
+        // Stopping the AudioUnit can take past the resume deadline while buffers finish.
+        if (susp && !resumed && (now_ns() - t0) / 1000000 >= 350) { dm_audio_suspend(0); resumed = 1; }
         order_ok = drain_signaled(out2, b2, 6, &got2, &seen2);
         if (!order_ok) break;
         if (got2 < 6) usleep(1000);
@@ -213,3 +214,5 @@ int main(void) {
     printf("device stall: released %d/20 in order=%d in %.0f ms (expected 1900-5000), AudioUnit restarted and calling back again=%d (silent sink stood in %d times, %.0f ms) %s\n", got3, order3, total3, back, standins, waited3, ok3 ? "✓" : "✗");
     return !ok3;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

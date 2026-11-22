@@ -63,6 +63,50 @@ static void expect_abort(int duplicate) {
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
 }
 
+static void check_language_bindings(void) {
+    uint8_t image[0x100] = {0};
+    char names[sizeof k_language_list + sizeof k_language_count];
+    memcpy(names, k_language_list, sizeof k_language_list);
+    memcpy(names + sizeof k_language_list, k_language_count, sizeof k_language_count);
+    Elf64_Sym symbols[] = {
+        {0}, {.st_name = 0, .st_shndx = 1, .st_value = 4},
+        {.st_name = sizeof k_language_list, .st_shndx = 1, .st_value = 8},
+    };
+    module_t sdk = {.name = "sdk", .base = image, .size = sizeof image, .ro_off = 16,
+                    .symtab = symbols, .strtab = names, .nsym = 3};
+    module_t *loaded[] = {&sdk};
+    g_mod = &sdk; g_nmod = 1; g_loaded = loaded; g_nloaded = 1;
+    int list_fallback, count_fallback;
+    hle_force_ent hooks[] = {
+        {k_language_list, &list_fallback, "test"}, {k_language_count, &count_fallback, "test"},
+    };
+    force_sec = hooks; force_sec_n = 2;
+    const struct { const char *stamp; unsigned symbols; size_t data_off; int native; } cases[] = {
+        {"FS_ACCESS: { sdk_version: 20.5.25, spec: Ounce }", 3, sizeof image, 1},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }\n", 3, sizeof image, 1},
+        {"FS_ACCESS: { sdk_version: 22.2.11, spec: Ounce }", 3, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: NX }", 3, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }", 2, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }", 3, 0, 0},
+        {"", 3, sizeof image, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        strcpy((char *)image + sdk.ro_off, cases[i].stamp);
+        sdk.nsym = cases[i].symbols;
+        sdk.data_off = cases[i].data_off;
+        force_init();
+        int other, weak0;
+        Elf64_Sym list_import = {.st_name = symbols[1].st_name};
+        Elf64_Sym count_import = {.st_name = symbols[2].st_name};
+        assert(bind_sym(&sdk, &list_import, &other, &weak0) == (uint64_t)(cases[i].native ? (void *)(image + 4) : &list_fallback));
+        assert(bind_sym(&sdk, &count_import, &other, &weak0) == (uint64_t)(cases[i].native ? (void *)(image + 8) : &count_fallback));
+        force_check();
+        reset_sections();
+    }
+    g_mod = NULL; g_nmod = 0; g_loaded = NULL; g_nloaded = 0;
+    force_sec = forces; force_sec_n = 3;
+}
+
 int main(void) {
     // Empty/missing sections must still give misses after lazy initialization.
     assert(!hle_implements("absent")); assert(!hle_implements("absent"));
@@ -133,6 +177,8 @@ int main(void) {
     expect_abort(2);
     g_loaded = NULL; g_nloaded = 0; force_sec = forces; force_sec_n = 3;
     reset_sections();
+    check_language_bindings();
+    puts("Language list and count: verified SDK exports and paired host fallback: OK");
     puts("Guest aliases: bound to the loaded definition over the module's own, orphan left as bound, alias to a taken-over name rejected: OK");
     puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");
     return 0;

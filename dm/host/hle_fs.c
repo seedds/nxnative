@@ -842,17 +842,8 @@ HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data siz
 // The application's control data (control.nacp: nn::ns::ApplicationControlProperty, 0x4000 bytes, little-endian), which Horizon serves the SDK from the installed title: DM_CONTROL_NACP, else
 // control.nacp beside the RomFS (the NSP script's extraction folder <version>/{RomFS,control.nacp}, the Mac app's Resources). 0 = len bytes read at off
 static int control_read(off_t off, void *out, size_t len) {
-    char p[1100], b[1024]; const char *e = getenv("DM_CONTROL_NACP");
-    if (e && *e) snprintf(p, sizeof p, "%s", e);
-    else {
-        snprintf(p, sizeof p, "%s", envdir("DM_ROMFS", "romfs", b, sizeof b));
-        size_t k = strlen(p); while (k > 1 && p[k - 1] == '/') p[--k] = 0;
-        char *sl = strrchr(p, '/'); if (sl) sl[1] = 0; else p[0] = 0;
-        strlcat(p, "control.nacp", sizeof p);
-    }
-    int fd = open(p, O_RDONLY); ssize_t r = fd < 0 ? -1 : pread(fd, out, len, off);
-    if (fd >= 0) close(fd);
-    if (r != (ssize_t)len) { LOG("[RED] control data: %s %s", p, fd < 0 ? "is missing" : "is too short"); return -1; }
+    char p[1100]; int r = dm_control_read(off, out, len, p, sizeof p);
+    if (r) { LOG("[RED] control data: %s %s", p, r == -1 ? "is missing" : "is too short"); return -1; }
     return 0;
 }
 // The cache storage limits the application declares: CacheStorageDataAndJournalSizeMax (s64 at 0x3180) and CacheStorageIndexMax (u16 at 0x3188). Without the SDK's service the call read a null

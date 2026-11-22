@@ -10,6 +10,7 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "hle_movie_vt.h"
 #include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
@@ -86,6 +87,7 @@ typedef struct {
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
+    movie_vt_control vt;
     int avc_due;                                 // H.264: a picture that is next in presentation order waits for a free slot (md_pump); a released slot pumps again
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     int vpx_cs, vpx_full;   // the colour matrix (vpx_color_space_t) and range of the last VP8 / VP9 picture, for md_format
@@ -111,6 +113,7 @@ static struct {
     int (*find_buf)(const void *md, const char *k, void **buf);
     size_t (*size)(const void *buf);
     void *(*nvn_sync)(const void *buf);   // used only by the native texture mode; Engage's subsdk0 has it too, but it is not required
+    int native_color_keys;
 } G;
 
 // The movie signal of the frame step (hle_nvn.c fps_step_cap and high_cap_tick). The players of the games it steps take one picture per game frame rather than by the picture's time,
@@ -128,6 +131,31 @@ static struct {
 typedef struct { const void *dec; const char *lib; uint64_t ns, base_ns; int64_t ts, base_ts, win[MD_RATE_PICS]; int hz, unknown_hz, logged_hz, nwin; uint32_t n, pace_n; } md_slot;
 static md_slot g_md_slots[MD_SLOTS];
 static pthread_mutex_t g_md_slots_mu = PTHREAD_MUTEX_INITIALIZER;
+// iOS can refuse hardware decoders while inactive. Keep the current packet on
+// its worker until activation; never consume the stream waiting for hardware.
+static pthread_mutex_t g_vt_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_vt_cv = PTHREAD_COND_INITIALIZER;
+static int g_vt_active = 1;
+void dm_movie_active(int active) {
+    pthread_mutex_lock(&g_vt_mu); g_vt_active = active; pthread_cond_broadcast(&g_vt_cv); pthread_mutex_unlock(&g_vt_mu);
+}
+void movie_vt_cancel(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu); control->cancelled = 1; pthread_cond_broadcast(&g_vt_cv); pthread_mutex_unlock(&g_vt_mu);
+}
+void movie_vt_continue(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu); control->cancelled = 0; pthread_mutex_unlock(&g_vt_mu);
+}
+int movie_vt_wait(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu);
+    while (!g_vt_active && !(control && control->cancelled)) pthread_cond_wait(&g_vt_cv, &g_vt_mu);
+    int ready = !(control && control->cancelled); pthread_mutex_unlock(&g_vt_mu); return ready;
+}
+int movie_vt_wait_unavailable(movie_vt_control *control) {
+    pthread_mutex_lock(&g_vt_mu);
+    int waited = !g_vt_active;
+    while (!g_vt_active && !(control && control->cancelled)) pthread_cond_wait(&g_vt_cv, &g_vt_mu);
+    int result = control && control->cancelled ? -1 : waited; pthread_mutex_unlock(&g_vt_mu); return result;
+}
 static int md_slot_hz(const md_slot *s, uint64_t now) { return !s->dec || now - s->ns >= MD_PLAYING_NS ? 0 : s->hz ? s->hz : s->n >= MD_RATE_AFTER ? s->unknown_hz : 0; }
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz) {
     uint64_t now = now_ns();
@@ -186,6 +214,9 @@ static void md_syms(void) {
     G.find_i32 = msym("_ZNK5movie9MediaData9FindInt32EPKcPi");
     G.find_buf = msym("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
     G.size = buffer_getter("_ZNK5movie6Buffer4SizeEv", "_ZN5movie6Buffer4SizeEv");
+    const void *converter = guest_sym("_ZN5movie25convertMessageToMediaDataERKN7android2spINS0_8AMessageEEEPNS_9MediaDataE");
+    const module_t *movie = converter ? module_of(converter) : NULL;
+    G.native_color_keys = movie && movie->movie_native_color_keys;
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
@@ -213,7 +244,6 @@ static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
 // g_dfmu and each decoder's dmu are held while guest code signals events, so guest threads take them with dm_host_lock: a thread waiting for one counts as blocked, and the
 // signaller's handoff does not wait for it (Kirby and the Forgotten Land froze at its first guide movie: the handoff waited for the input thread, which waited for dmu)
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
-void dm_host_lock(pthread_mutex_t *m);   // hle_thread.c
 static pthread_mutex_t g_dfmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_dfcv = PTHREAD_COND_INITIALIZER;
 static struct { void *d; int ev; uint64_t due; } g_dfq[64]; static int g_ndfq, g_dfthr;
 static void md_defer_body(void *arg);
@@ -241,7 +271,12 @@ static void md_defer_body(void *arg) {
         if (k >= 0) {
             mdec_t *d = g_dfq[k].d; int e = g_dfq[k].ev;
             memmove(g_dfq + k, g_dfq + k + 1, (size_t)(--g_ndfq - k) * sizeof *g_dfq);
-            if (d->started) md_event(d, e);   // not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down)
+            // Stop takes these locks in the same order. An acquisition can
+            // re-arm video output after Flush has already emptied the queue.
+            dm_host_mutex_lock(&d->mu);
+            int ready = d->started && (e != 1 || d->noutq);
+            pthread_mutex_unlock(&d->mu);
+            if (ready) md_event(d, e);
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
@@ -473,7 +508,7 @@ static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
 }
 // The H.264 decoder, made by Configure (when the stream's parameter sets come with it) or by the first packet; RGBA pictures in the native texture mode either way.
 // Absolum's movies bring csd-0 / csd-1 to Configure, and a decoder made there used to stay NV12: the frames' bytes went into the RGBA texture as they were
-static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
+static void md_avc_open(mdec_t *d) { if (!d->avc) { d->avc = mavc_new(&d->vt); if (d->fmt == MD_FMT_ABGR) mavc_set_rgba(d->avc); } }
 // H.264: decode the packet (if any) and hand out the next picture in presentation order (with jflush every queued one in turn); 1 = a picture is in the slot, its time in jpts_out
 static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     md_avc_open(d);
@@ -665,6 +700,7 @@ HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
           void **self, int type, int fmt) { h_movie_Decoder3(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
+    movie_vt_cancel(&d->vt);
     // The pump thread first, before its pending signals are dropped, the decoder thread is told to quit and any buffer is freed: a pump still running queues signals for
     // this decoder (md_defer_at), and one queued after the drop would reach the deferred thread after free(d)
     if (d->pk_on) { pthread_mutex_lock(&d->pkm); d->pk_quit = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm); pthread_join(d->pk, NULL); }
@@ -730,6 +766,7 @@ HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, n
 }
 // clear the queues and slots; with close, the libvpx decoder is closed too (rebuilt at the next packet)
 static void md_reset(mdec_t *d, int close) {
+    movie_vt_cancel(&d->vt);
     dm_host_lock(&d->dmu);   // wait for the packet being decoded
     if (close) md_job(d, MDJ_CLOSE);
     else {
@@ -757,6 +794,7 @@ static void md_reset(mdec_t *d, int close) {
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
+    movie_vt_continue(&d->vt);
     pthread_mutex_unlock(&d->dmu);
 }
 HLE_FORCE("_ZN5movie7Decoder4StopEv", "movie decoder stop", int, h_movie_Stop, void **self) {
@@ -776,6 +814,12 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
+    if (!MD_AUDIO(d)) {
+        // A deferred video signal admitted after the initial drop can still be
+        // running. Wait with both decoder locks released and keep new events.
+        dm_host_lock(&g_dfmu);
+        pthread_mutex_unlock(&g_dfmu);
+    }
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: acquire a free input index", int, h_movie_AcqIn, void **self, int *idx, int *left) {
@@ -862,7 +906,11 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
+    if (!r && !MD_AUDIO(d)) {
+        dm_movie_picture(d, "nn::movie", *pts * 1000, 30);   // its times are in µs
+        // Deferred notifications coalesce. A client taking one output per event still needs a wake for the rest of the batch.
+        if (*left) md_pump_ev(d, 1);
+    }
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }
@@ -878,13 +926,14 @@ static void md_format(mdec_t *d, void *md) {
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
     G.set_i32(md, "nv12-uv-stride", stride); G.set_i32(md, "nv12-width", w); G.set_i32(md, "nv12-height", h);
-    // The picture's colour space, as DecoderImpl::GetOutputBufferFormatFromDecoder (SDK 4 subsdk0+0x2d8c60) sets it: the hardware decoder's hw-buf-ColorSpace / 32 + 1, 1 to 5. Kirby Star Allies' player
-    // (main+0x1529f8) indexes its YUV → RGB matrices with it: 1 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, 5 BT.601 limited; anything else, an unset key too, selects an
-    // all-zero matrix, which drew its movies black. By the rule md_rgba uses: what the stream declares, undeclared BT.709 from 720 lines up. VideoToolbox's H.264 pictures are always video range (open_session)
+    // SDK 7.3.2 uses the hardware colour indices directly. SDK 4.4.1 adds one and also uses 1 for limited BT.601.
+    // Keep the established mapping for unrecognized implementations and old rewrite outputs. H.264 planes from VideoToolbox are video range.
     int b709, full = 0;
     if (d->avc) b709 = mavc_bt709(d->avc, h);
     else { b709 = d->vpx_cs == VPX_CS_BT_709 || (d->vpx_cs == VPX_CS_UNKNOWN && h >= 720); full = d->vpx_full; }
-    G.set_i32(md, "nv12-colorspace", (b709 ? 3 : 1) + full);
+    int key = (b709 ? 3 : 1) + full;
+    if (G.native_color_keys) key = b709 ? 2 + full : full ? 1 : 4;
+    G.set_i32(md, "nv12-colorspace", key);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;

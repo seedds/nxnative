@@ -119,6 +119,15 @@ static void case_cross_queue(void) {
     P(nvnSyncFinalize)(&consumed); P(nvnSyncFinalize)(&produced);
 }
 // ---- DM_NVN_MTLQ2 (E2 v2, notes/.specs/e2v2.md) ----
+// q2_wait_stuck (the stuck-wait check of q2_watch): a wait stamped after the watcher's clock read never counts, however the subtraction would wrap
+static void case_q2_wait_age(void) {
+    printf("CASE second Metal queue: a cross-queue wait's age\n");
+    uint64_t now=10000000000ull;
+    CHECK(!q2_wait_stuck(now+1000,now),"q2 wait: stamped after the clock read: not stuck (no wrap to 18446744073.7 s)");
+    CHECK(!q2_wait_stuck(now-1999999999ull,now),"q2 wait: just under 2 s: not stuck");
+    CHECK(q2_wait_stuck(now-2000000000ull,now),"q2 wait: 2 s: stuck");
+    CHECK(q2_wait_stuck(now-3000000000ull,now),"q2 wait: 3 s: stuck");
+}
 // Out-of-order completion: g_done advances only through consecutive done fences (q2_done_through)
 static void case_q2_through(void) {
     printf("CASE second Metal queue: completion out of order\n");
@@ -619,6 +628,7 @@ int main(void) { @autoreleasepool {
     case_wait("wrap accepts half-range minus one",1,0x7fffffff,0,1);
     case_wait("wrap rejects exactly half-range",1,0x80000000,0,0);
     case_cross_queue();
+    case_q2_wait_age();
     if(!g_q4b) case_q2_through();   // the ring is the live one with the switch on
     const char *as=getenv("DM_NVN_MTLQ2_ASYNC"); int all=as && !strcmp(as,"all");
     if(g_q4b) { case_q2_queue_done(); if(all) { case_q2_scan_release(); case_q2_chain(0); case_q2_chain(1); case_q2_chain(2); case_q2_upload(); } }

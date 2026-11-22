@@ -2790,11 +2790,16 @@ void mtl_q2_frame(uint64_t f, double frame_ms) {
     q2_ring_to("slow-commits.txt"); q2_sample_to("slow1.sample", 3);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ q2_sample_to("slow2.sample", 3); });
 }
+// A recorded cross-queue wait has waited 2 s or more at now. q2_commit stamps t under g_q2w_mu, so a clock read before taking the lock can be older than an entry the encode
+// thread adds meanwhile: now - t then wrapped to ~1.8e19 ns, passed the 2 s test and reported a wait just encoded as stuck for 18446744073.7 s (t152ab run 6, t161tb1 run 6,
+// where the hang guard stopped the job on it). q2_watch now reads the clock under the lock; a t past now still never counts (the clock is shared with the GPU feedback)
+static int q2_wait_stuck(uint64_t t, uint64_t now) { return now >= t && now - t >= 2000000000ull; }
 static void q2_watch(void) {
-    static int said, sampled; int dump = 0; uint64_t now = q2_now();
+    static int said, sampled; int dump = 0;
     pthread_mutex_lock(&g_q2w_mu);
+    uint64_t now = q2_now();   // after the lock: every entry's t is at most now
     for (int i = 0; i < Q2W_N; i++) {
-        q2_wait_t *w = &g_q2w[i]; if (!w->fence || mtl_fence_done(w->fence) || now - w->t < 2000000000ull) continue;
+        q2_wait_t *w = &g_q2w[i]; if (!w->fence || mtl_fence_done(w->fence) || !q2_wait_stuck(w->t, now)) continue;
         uint64_t sv = g_evq[w->k].signaledValue;
         if (sv >= w->v) { w->fence = 0; continue; }
         if (said < 4) { said++; dump = 1;

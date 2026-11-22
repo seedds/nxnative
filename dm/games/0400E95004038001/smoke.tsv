@@ -1,0 +1,11 @@
+# Boot smoke route for scripts/regress.py (docs/development.md, The regression harness): key <TAB> value
+# An empty save: the title ignores short presses, so A~0.5 four seconds apart (title, New Game, Normal), then the opening
+# Measured 2026-11-21 (full mode, M6): a cold first start hit GPU timeouts (9 fps, then a Metal abort); a warm one ran 60 fps, 7,000 frames by 120 s
+save	new
+keys	40:A~0.5*6/4,70:A*8/5
+secs	120
+quick	75
+reach	2400@110
+window	90	25
+shots	80,115
+hang	30

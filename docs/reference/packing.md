@@ -790,3 +790,11 @@
 - **Fix:** `uepak.py` tries 20-byte hashes first and switches to 8 only if the tables fail to parse with matching counts and consume the whole chunk. The version 2 archive stores each 8-byte hash with 12 zero bytes appended. Version 12 follows version 11's footer rules. For untagged Switch records, `raw_record` looks for a unique control section with matching code lengths and a `0x880`-byte control length. `shader_split.ue_shaders` takes the stage from the archive's frequency for those records.
 - **Check:** `test_uepak_iostore.py` covers both hash widths, a wrong-width parse that reaches the chunk's end, valid and legacy-position version 12 footers, and untagged records with code or control length mismatches or a copy of the control magic inside shader code. The [PR author](https://github.com/seedds/nxnative/pull/3022) built 6,878 Mac shaders for update 131072.
 - **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`).
+
+### Zstandard-compressed Unreal pak entries sent to Oodle
+
+- **Symptom:** shader splitting reports no shaders after every Zstd-compressed pak entry fails with `main has no "OodleLZ_Decompress" name and no streaming decoder to find`.
+- **Cause:** the pak footer names `Zstd`, but `Pak.read` delegated every method except Zlib and LZ4 to the game's decoder. A game with Zstandard packages need not contain Oodle at all.
+- **Fix:** decode Zstd blocks directly with Python's `compression.zstd` or `backports.zstd`. Limit output to the block's declared raw size plus one byte and require a complete frame, no trailing bytes and the exact raw size. Keep genuine decompression failures visible.
+- **Found on:** BRAVELY DEFAULT II 1.0.0, title `01006DC010326000`, main build `05de5a7f20bd1532d139c16c0b3e8920`, during bring-up with a provisional profile. Its version 8 pak has 155,207 Zstd entries. The fixed split found 33,335 shaders; one monster texture block failed two independent Zstandard decoders. This does not establish gameplay support or repair the package's integrity mismatch.
+- **Check:** `test_uepak_v8.py` covers a synthetic Zstd pak without calling the guest decoder, wrong raw sizes, truncated frames and trailing bytes.

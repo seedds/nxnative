@@ -124,6 +124,7 @@ void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 const char *front_ios_boot_message(void) { return NULL; }
 const char *front_ios_device_check(void) { return NULL; }   // a supported GPU
+bool front_ios_hud_enabled_from_saved_choice(void) { return false; }
 void dm_cloud_saves_env(void) {}
 int save_sync_flush(int timeout_ms) { (void)timeout_ms; return 1; }
 int front_web_touch(void) { return 0; }

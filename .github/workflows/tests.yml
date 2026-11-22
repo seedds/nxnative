@@ -130,6 +130,10 @@ jobs:
           cache-dependency-path: .github/requirements/coverage.txt
       - name: Install coverage.py and the packages the tools import
         run: python -m pip install -r .github/requirements/coverage.txt
+      - name: Install SPIRV-Tools for the Vulkan shader tests
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: brew install spirv-tools
       - name: Host unit tests (dm/host/tests), llvm-cov
         continue-on-error: true
         run: |

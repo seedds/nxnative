@@ -130,7 +130,7 @@ It verifies build IDs and original instructions, relocates vtables, then checks 
 
 ## Memory growth
 
-1. The host's memory report line (`memory up to frame …`) every few hundred frames; `footprint -p <pid>` from outside. On a phone, a crash with no log usually means `headroom to the system memory limit` reached 0.
+1. `memory up to frame` logs every 3,000 frames, with extra samples until report 400. `footprint -p <pid>` measures process memory. On iOS, zero `headroom to the system memory limit` usually precedes a memory kill.
 2. `vmmap -summary <pid>` twice a few seconds apart: which region grows. "owned unmapped (graphics)" = private Metal resources.
 3. `DM_NVN_ALLOCPROF=1`: growth per replayed op type and per function (`tex_mtl` / pass begin / pipelines / argument buffers), command allocator sizes, and a log of new textures with serial, size, format and storage. A stream of new serials with the same sizes = objects re-created every frame.
 4. GPU allocated climbing while the residency set, `shared textures` and the upload counts stay flat: retired objects kept alive by an autorelease pool that never drains. Any objc call on the guest submit thread outside `g_sub_pool` leaks what it autoreleases (Metroid Dread; Breath of the Wild, GitHub issue #9). Build the host with the suspect wrapped in `@autoreleasepool` and compare.

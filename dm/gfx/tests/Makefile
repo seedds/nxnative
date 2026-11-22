@@ -822,6 +822,9 @@ check_t_float_pad: RUN_ENV = MTL_DEBUG_LAYER=1
 # Kept vertex conversions: kept from the second submission, equal to vconv_elem, dropped by a write to the source (game, host or GPU), left by a write beside it.
 t_vconv_keep: t_vconv_keep.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vconv_keep.m $(MTL_T_SRC) $(FW)
+# Index-range cache GPU-write reverse index (ix_range / vc_gpu_write): exact half-open byte overlap, 4 KB / 1 MB boundaries, wide writes, re-protection, unlinking, and IR_MAX clear.
+t_ir_gpu_write: t_ir_gpu_write.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ir_gpu_write.m $(MTL_T_SRC) $(FW)
 # The alpha test through the replay (t_alpha.m), with its shaders from test_dmsh_alpha.py
 t_alpha: t_alpha.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alpha.m $(MTL_T_SRC) $(FW)

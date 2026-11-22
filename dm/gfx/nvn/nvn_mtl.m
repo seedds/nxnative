@@ -9054,20 +9054,96 @@ static void vconv_fill(int f, uint64_t src, uint32_t stride, uint64_t nv, float 
 // vertices before its start as the range starts at. The indices' range is kept while their pages stay unwritten (write-protected as packaged textures, nvn_dirty_protect),
 // and never trusted again once a GPU copy, update or fill is queued on them (pend_add). Keeping the conversions too did not pay: the soldiers' attributes change every frame.
 // DM_NVN_VCONV_CHECK=1 scans the indices again at every reuse and reports differences. DM_NVN_VCONV_RANGE=0 / 1 overrides the profile
-enum { VC_RGN = 1 << 16 };   // bits of the region filter
+enum { IR_MAX = 1 << 16, IR_SPAN = 8 };   // IR_MAX: cap before clear; IR_SPAN: <= 8 4 KB pages go in level 0 (4 KB), wider ranges in level 1 (1 MB)
 typedef struct { uint64_t ibuf; int32_t count, itype; } ir_key;
 typedef struct { uint32_t mn, mx; uint64_t stamp, seen, lo, n; const void *span; int gpuw; } ir_ent;   // gpuw: a GPU write was queued on the indices: never trusted again
+typedef struct { ir_ent *e; uint32_t next; } ir_node;   // 1-based next into g_ir_nodes (0 = end)
+typedef struct { nvn_hmap map; uint64_t *order; uint32_t order_n, order_cap; } ir_level;   // exact region id → 1-based head in g_ir_nodes; order: sorted keys for wide writes
 static nvn_hmap g_ir = {.klen = sizeof(ir_key)};
-static uint64_t g_vc_rgn[VC_RGN / 64], g_vc_stat, g_vc_conv, g_vc_whole, g_vc_checks, g_vc_bad;   // g_vc_rgn: 1 MB regions holding a kept index range (hashed); g_vc_conv / g_vc_whole: vertices converted / in the bound ranges
+static ir_level g_ir_lv[2] = { {.map = {.klen = 8}}, {.map = {.klen = 8}} };
+static const unsigned g_ir_shift[2] = { 12, 20 };   // level 0: 4 KB pages, level 1: 1 MB regions
+static ir_node *g_ir_nodes; static uint32_t g_ir_node_n, g_ir_node_cap, g_ir_live;
+static uint64_t g_ir_cand, g_vc_stat, g_vc_conv, g_vc_whole, g_vc_checks, g_vc_bad;   // g_ir_cand: candidate checks in vc_gpu_write; g_vc_conv / g_vc_whole: vertices converted / in the bound ranges
 static int vc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VCONV_RANGE"); v = e && *e ? atoi(e) != 0 : DM_GAME_VCONV_RANGE; MLOG("vertex conversion of the draw's vertices only: %s", v ? "on" : "off"); } return v; }
 static int vc_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VCONV_CHECK"); v = e && *e && atoi(e); } return v; }
-static inline uint32_t vc_rgn(uint64_t r) { return (uint32_t)((r * 0x9E3779B97F4A7C15ull) >> 48) & (VC_RGN - 1); }
-static void vc_rgn_mark(uint64_t lo, uint64_t n) { for (uint64_t r = lo >> 20; r <= (lo + n - 1) >> 20; r++) { uint32_t b = vc_rgn(r); g_vc_rgn[b >> 6] |= 1ull << (b & 63); } }
-static int vc_rgn_hit(uint64_t lo, uint64_t n) { for (uint64_t r = lo >> 20; r <= (lo + n - 1) >> 20; r++) { uint32_t b = vc_rgn(r); if (g_vc_rgn[b >> 6] >> (b & 63) & 1) return 1; } return 0; }
+static uint32_t ir_node_push(ir_ent *e, uint32_t next) {
+    if (g_ir_node_n == g_ir_node_cap) {
+        if (g_ir_node_cap > UINT32_MAX / 2) MDIE("index-range reverse index node limit reached");
+        uint32_t cap = g_ir_node_cap ? g_ir_node_cap * 2 : 1024;
+        ir_node *p = realloc(g_ir_nodes, (size_t)cap * sizeof *p);
+        if (!p) MDIE("no memory for the index-range reverse index");
+        g_ir_nodes = p; g_ir_node_cap = cap;
+    }
+    g_ir_nodes[g_ir_node_n] = (ir_node){e, next};
+    return ++g_ir_node_n;   // 1-based handle (0 means empty in nvn_hmap)
+}
+static uint32_t ir_order_lower(const ir_level *lv, uint64_t key) {
+    uint32_t lo = 0, hi = lv->order_n;
+    while (lo < hi) { uint32_t mid = lo + (hi - lo) / 2; if (lv->order[mid] < key) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+static void ir_order_add(ir_level *lv, uint64_t key) {
+    uint32_t at = ir_order_lower(lv, key);
+    if (at < lv->order_n && lv->order[at] == key) return;
+    if (lv->order_n == lv->order_cap) {
+        if (lv->order_cap > UINT32_MAX / 2) MDIE("index-range region order limit reached");
+        uint32_t cap = lv->order_cap ? lv->order_cap * 2 : 64;
+        uint64_t *p = realloc(lv->order, (size_t)cap * sizeof *p);
+        if (!p) MDIE("no memory for the index-range region order");
+        lv->order = p; lv->order_cap = cap;
+    }
+    memmove(lv->order + at + 1, lv->order + at, (lv->order_n - at) * sizeof *lv->order);
+    lv->order[at] = key; lv->order_n++;
+}
+static void ir_clear(void) {
+    nvn_hm_clear(&g_ir, free);
+    for (int l = 0; l < 2; l++) { nvn_hm_clear(&g_ir_lv[l].map, NULL); g_ir_lv[l].order_n = 0; }
+    g_ir_node_n = 0; g_ir_live = 0;
+}
+static void ir_index_add(ir_ent *e) {   // brand-new entry e (e->n > 0, e->lo + e->n does not wrap)
+    uint64_t last = e->lo + e->n - 1;
+    int l = (last >> g_ir_shift[0]) - (e->lo >> g_ir_shift[0]) < IR_SPAN ? 0 : 1;
+    ir_level *lv = &g_ir_lv[l]; unsigned sh = g_ir_shift[l];
+    for (uint64_t r = e->lo >> sh, r1 = last >> sh; r <= r1; r++) {
+        uint32_t head = (uint32_t)(uintptr_t)nvn_hm_get(&lv->map, &r);
+        if (!head) ir_order_add(lv, r);
+        nvn_hm_put(&lv->map, &r, (void *)(uintptr_t)ir_node_push(e, head));
+    }
+    g_ir_live++;
+}
+static void ir_visit_bucket(ir_level *lv, uint64_t r, uint64_t dst, uint64_t last) {
+    uint32_t head = (uint32_t)(uintptr_t)nvn_hm_get(&lv->map, &r);
+    if (!head) return;
+    uint32_t new_head = head, prev = 0, cur = head;
+    while (cur) {
+        ir_node *nd = &g_ir_nodes[cur - 1];
+        uint32_t nxt = nd->next; ir_ent *e = nd->e;
+        g_ir_cand++;
+        if (!e->gpuw && dst <= e->lo + e->n - 1 && last >= e->lo) { e->gpuw = 1; g_ir_live--; }
+        if (e->gpuw) { if (prev) g_ir_nodes[prev - 1].next = nxt; else new_head = nxt; }
+        else prev = cur;
+        cur = nxt;
+    }
+    if (new_head != head) {
+        if (new_head) nvn_hm_put(&lv->map, &r, (void *)(uintptr_t)new_head);
+        else nvn_hm_del(&lv->map, &r);
+    }
+}
 static void vc_gpu_write(uint64_t dst, uint64_t n) {   // pend_add: a GPU write queued on [dst, dst + n)
     vk_gpu_write(dst, n ? n : 1);
-    if (!n || !g_ir.n || !vc_rgn_hit(dst, n)) return;
-    for (uint32_t i = 0; i < g_ir.cap; i++) { ir_ent *e = g_ir.vals[i]; if (e && dst < e->lo + e->n && dst + n > e->lo) e->gpuw = 1; }
+    if (!n || !g_ir_live) return;
+    uint64_t last = n > UINT64_MAX - dst ? UINT64_MAX : dst + n - 1;
+    for (int l = 0; l < 2 && g_ir_live; l++) {
+        ir_level *lv = &g_ir_lv[l];
+        if (!lv->map.n) continue;
+        uint64_t r0 = dst >> g_ir_shift[l], r1 = last >> g_ir_shift[l];
+        if (r1 - r0 >= IR_SPAN) {
+            for (uint32_t i = ir_order_lower(lv, r0); i < lv->order_n && lv->order[i] <= r1 && g_ir_live; i++)
+                ir_visit_bucket(lv, lv->order[i], dst, last);
+        } else {
+            for (uint64_t r = r0; r <= r1 && g_ir_live; r++) ir_visit_bucket(lv, r, dst, last);
+        }
+    }
 }
 static void ix_minmax(const void *p, int isz, int32_t count, uint32_t *mn, uint32_t *mx) {
     uint32_t a = UINT32_MAX, b = 0;
@@ -9079,7 +9155,7 @@ static void ix_minmax(const void *p, int isz, int32_t count, uint32_t *mn, uint3
 // Smallest and largest index of a direct indexed draw whose indices no GPU write queued in this submission covers; 0 = not known (the whole bound range is converted)
 static int ix_range(const p_draw_idx *di, uint32_t *mn, uint32_t *mx) {
     int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4; uint64_t n = (uint64_t)di->count * (uint64_t)isz;
-    if (di->ind || di->mdi_cnt || di->count <= 0 || !di->ibuf || pend_hits(di->ibuf, n)) return 0;
+    if (di->ind || di->mdi_cnt || di->count <= 0 || !di->ibuf || n > UINT64_MAX - di->ibuf || pend_hits(di->ibuf, n)) return 0;
     const void *p = (const void *)(uintptr_t)di->ibuf;
     ir_key k = {di->ibuf, di->count, di->itype}; ir_ent *e = nvn_hm_get(&g_ir, &k); uint64_t now = nvn_dirty_now();
     if (e && e->gpuw) return 0;
@@ -9091,8 +9167,15 @@ static int ix_range(const p_draw_idx *di, uint32_t *mn, uint32_t *mx) {
     }
     const void *span = nvn_dirty_span(p, (size_t)n);
     if (!span) return 0;   // not in a tracked memory pool
-    if (!e) { if (g_ir.n >= 1 << 16) { nvn_hm_clear(&g_ir, free); memset(g_vc_rgn, 0, sizeof g_vc_rgn); } e = calloc(1, sizeof *e); nvn_hm_put(&g_ir, &k, e); }
-    e->stamp = e->seen = nvn_dirty_now(); nvn_dirty_protect(p, (size_t)n); e->span = span; e->lo = di->ibuf; e->n = n; vc_rgn_mark(e->lo, e->n);   // take the stamp, protect, then read (as pkg_upload)
+    if (!e) {
+        if (g_ir.n >= IR_MAX) ir_clear();
+        e = calloc(1, sizeof *e);
+        if (!e) MDIE("no memory for the index-range cache");
+        e->lo = di->ibuf; e->n = n;
+        nvn_hm_put(&g_ir, &k, e);
+        ir_index_add(e);
+    }
+    e->stamp = e->seen = nvn_dirty_now(); nvn_dirty_protect(p, (size_t)n); e->span = span;   // take the stamp, protect, then read (as pkg_upload)
     ix_minmax(p, isz, di->count, &e->mn, &e->mx); *mn = e->mn; *mx = e->mx;
     return 1;
 }

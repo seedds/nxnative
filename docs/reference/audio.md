@@ -63,6 +63,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** a thread-local flag (`t_in_open`) hands the inner call straight to the SDK with the host's CPU / manual copy of the parameter, and only the outer call starts the thread (`hle_audren.c`).
 - **Found on:** [ROMANCE OF THE THREE KINGDOMS 8 REMAKE](../../dm/games/0100C2A01A730000/README.md) (SDK 17.5.3).
 
+### Explicit CPU / manual renderer
+
+- **Symptom:** choppy, crackling audio with thousands of catch-up renders (`catch-up renders so far` in the tens of thousands), heavy `AudioOut` underruns, and `[RED] audren: no DeviceSink (ID 0x14) in the command list`, alongside `audren: OpenAudioRenderer … (original device 1 mode 1 → CPU / manual)`.
+- **Cause:** a game may open `nn::audio::AudioRenderer` explicitly in CPU + manual mode (`renderingDevice = 1`, `executionMode = 1`) with a `CircularBufferSink` and drive `ExecuteAudioRendererRendering` itself from its own audio thread, feeding a direct `AudioOut`. The host already kept the SDK's work buffer and event contract for `device != 0`, but still spawned `render_main` (opening a second unused `AudioOut` and rendering every 5 ms alongside the game's thread), ran `capture()` looking for a `DeviceSink` (consuming the one-shot sink discovery), and ran catch-up renders and 50 ms `cq_cv` waits inside `AudioRenderSystem::Update`.
+- **Fix:** `hle_audren.c` records `manual = (device == 1 && mode == 1)` on `ar_t`: `h_ar_WorkSize` and `ar_open` keep the game's parameter unchanged and skip spawning `render_main`, `h_ars_Update` forwards straight to the SDK without catch-up frames, and `h_ar_ImplExec` / `h_ars_Exec` forward straight to the SDK originals (resolving unbound manual slots separately from host-driven DSP renderers so a manual and a DSP renderer can coexist cleanly). `t_audren_work` checks work size, event/buffer ownership, no thread spawn/join, direct SDK forwarding for update/exec and coexistence with an unbound DSP renderer.
+- **Found on:** METAL GEAR SOLID: Peace Walker – Master Collection Version (`0100C6F01C4F8000` / program 1 `0100C6F01C4F8001`, 1.3.0, SDK 19.3.11, not in the [games table](../../dm/games/README.md#games); [issue #3212](https://github.com/seedds/nxnative/issues/3212)). Reported on M1 Max (no game files here).
+
 ### The renderer event as the service gives it: a kernel event
 
 - **Symptom:** the frame loop stops for good as a level loads while audio keeps rendering. The main thread waits in `os::WaitSystemEvent` under `CAudioMemoryPool::Shutdown`, and a sound thread of higher priority waits on the same condition variable.

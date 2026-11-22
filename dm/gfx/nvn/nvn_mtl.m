@@ -97,6 +97,9 @@ static void shmap_load(void);
 static int prepare_on(void);
 static int g_warm_started;
 static void warm_claim(void);
+#ifndef guest_clock_freeze_for
+void guest_clock_freeze_for(int reason, int on);
+#endif
 
 static id<MTLDevice> g_dev;
 static void ser_compile_begin(void), ser_compile_end(void), plain_compile_begin(void), plain_compile_end(void);
@@ -1863,9 +1866,15 @@ static void treg_finish_submission(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
 static int g_pkg_kept;   // a texture written during this submission kept its texture (tex_mtl_): the next submission starts a write generation, as a write would
-// The first submission: the prepare step (warm_start), before anything of it is encoded. No GPU work: the submit entry (hle_nvn.c) calls it outside the graphics gate
+// The first submission: the prepare step (warm_start), before anything of it is encoded. No GPU work: the submit entry (hle_nvn.c) calls it outside the graphics gate.
+// Freeze the guest clock and park guest clock reads across it (reason 3, hle_os.c): the step can stall the render thread for seconds or minutes, and without this a game
+// whose main thread bounds its render-thread wait skips hundreds of frames and tears down frame 1's resources while frame 1 is still waiting here (13 Sentinels: Aegis Rim)
 void mtl_prepare(void) {
-    if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
+    if (!g_warm_started && prepare_on()) {
+        guest_clock_freeze_for(3, 1);
+        mtl_init(); shmap_load();
+        guest_clock_freeze_for(3, 0);
+    }
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void tu_tick(void);
@@ -6057,6 +6066,9 @@ __attribute__((weak)) int dm_detclock_enabled(void) { return 0; }   // Same as a
 // failed in about half the runs)
 __attribute__((weak)) uint64_t guest_ns(void) { return now_ns(); }
 __attribute__((weak)) uint64_t guest_ns_at_host_time(uint64_t host_ns) { return host_ns; }
+#ifndef guest_clock_freeze_for
+__attribute__((weak)) void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
+#endif
 static uint64_t att_bytes(id<MTLTexture> t, NSUInteger level) {
     if (!t) return 0;
     NSUInteger w = MAX(t.width >> level, 1), h = MAX(t.height >> level, 1);
@@ -10994,9 +11006,7 @@ static id arch_read_mapped(id self, SEL cmd, NSString *path, NSUInteger options,
 static Method arch_read_method(void) { return class_getInstanceMethod([NSData class], sel_registerName("initWithContentsOfFile:options:maxLength:error:")); }
 static void arch_open_begin(void) { Method m = arch_read_method(); if (m) g_ns_read = (ns_read_fn)method_setImplementation(m, (IMP)arch_read_mapped); }
 static void arch_open_end(void) { Method m = arch_read_method(); if (m && g_ns_read) method_setImplementation(m, (IMP)g_ns_read); }
-static void pso4_init(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
+static void pso4_init_once(void) {
         if (!pso4_on() || ![(id)g_dev respondsToSelector:@selector(newCompilerWithDescriptor:error:)]) return;   // no Metal 4 compiler (t_pso_pending's fake device): the MTLDevice path
         const char *e = getenv("DM_PSO_ARCHIVE"); NSString *user = pso_user_path();
         g_arch_dir = e && !strcmp(e, "off") ? nil : e && *e ? @(e) : user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
@@ -11094,6 +11104,15 @@ static void pso4_init(void) {
                 atomic_store(&g_arch_cap, 1);
             } else MLOG("[RED] pipeline archive: Metal made no pipeline serializer: nothing is captured into %s", g_arch_dir.UTF8String);
         }
+}
+static void pso4_init(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Opening the pipeline archives can take seconds on a slow external disk even with DM_PSO_PREPARE=0 or no prewarm list: hold guest clock reads (reason 4, hle_os.c)
+        int freeze = !g_pre_tool;
+        if (freeze) guest_clock_freeze_for(4, 1);
+        pso4_init_once();
+        if (freeze) guest_clock_freeze_for(4, 0);
     });
 }
 static int pso4_compiler(void) { pso4_init(); return g_comp4 != nil; }   // render pipelines go through the Metal 4 compiler (fn_spec)

@@ -24,8 +24,9 @@ static void work_free(void *p) {
 #undef free
 
 enum { SDK_WORK = 0x760000, SERVICE_WORK = 0x61d000 };
-static int opens, starts, joins, closes, fail_open, nested;
+static int opens, starts, joins, closes, fail_open, nested, multi_open, expect_game_event;
 static int event_destroys, event_binds, attaches, event_in_handle;
+static int sdk_updates, sdk_impl_execs, sdk_ars_execs;
 static void *sdk_event, *game_event;
 static void *sdk_work;
 static int acquire_during_destroy;
@@ -52,12 +53,21 @@ static Result sdk_open(void **handle, const uint8_t *param, void *work, size_t s
     return RES_OK;
 }
 static Result sdk_open_ev(void **handle, void *ev, const uint8_t *param, void *work, size_t size) {
-    assert(ev && ev != game_event);   // the SDK's CPU / manual open keeps this object and signals it on every render: the renderer's, never the game's
+    if (expect_game_event)
+        assert(ev == game_event);   // explicit CPU + manual keeps the game's own event, as on Horizon
+    else
+        assert(ev && ev != game_event);   // the SDK's CPU / manual open keeps this object and signals it on every render: the renderer's, never the game's
     sdk_event = ev;
     Result r = nested ? h_ar_Open0(handle, param, work, size) : sdk_open(handle, param, work, size);
     if (!r && event_in_handle) handle[1] = ev;   // SDK 3 to 12 keep the event in the handle (SDK 3 sdk+0x17dffc, SDK 12 sdk+0x4d274); SDK 18 keeps it at *handle[1]
     return r;
 }
+static Result sdk_update(void *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
+    (void)sys; (void)o; (void)on; (void)p; (void)pn; (void)in; (void)inn;
+    sdk_updates++; return RES_OK;
+}
+static Result sdk_impl_exec(void *impl) { (void)impl; sdk_impl_execs++; return RES_OK; }
+static Result sdk_ars_exec(void *sys) { (void)sys; sdk_ars_execs++; return RES_OK; }
 static void sdk_destroy_event(void *ev) {
     if (ev == notify_event) {
         if (acquire_during_destroy) assert(h_ad_Notify21(notify_event) == 0x499);
@@ -71,7 +81,7 @@ static void sdk_attach(void *ev, uint32_t h, int managed, int clear) {   // the 
     attaches++;
 }
 static void sdk_close(void *obj, void *state) {
-    assert(obj == sdk_work && state == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
+    if (!multi_open) assert(obj == sdk_work && state == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
     assert(((uint8_t *)obj)[SDK_WORK - 1] == 0x5a);   // storage is alive through SDK teardown
     closes++;
 }
@@ -80,6 +90,9 @@ void *guest_sym(const char *name) {
     if (!strcmp(name, hle_force_h_ar_Open.name)) return sdk_open_ev;
     if (!strcmp(name, hle_force_h_ar_Open0.name)) return sdk_open;
     if (!strcmp(name, hle_force_h_ar_Close.name)) return sdk_close;
+    if (!strcmp(name, hle_force_h_ars_Update.name)) return sdk_update;
+    if (!strcmp(name, hle_force_h_ar_ImplExec.name)) return sdk_impl_exec;
+    if (!strcmp(name, hle_force_h_ars_Exec.name)) return sdk_ars_exec;
     if (!strcmp(name, "_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE")) return sdk_close;   // an SDK with the renderer in the process (from SDK 3); never called here
     if (!strcmp(name, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE")) return sdk_destroy_event;
     if (!strcmp(name, "_ZN2nn2os30GetReadableHandleOfSystemEventEPKNS0_15SystemEventTypeE")) return sdk_readable;
@@ -93,11 +106,12 @@ void *objmap_del(const void *key) {
     void *value = map_value; map_key = map_value = NULL; return value;
 }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) {
-    (void)fn; (void)arg; (void)prio; (void)stack; starts++; return (void *)1;
+    (void)fn; (void)prio; (void)stack; starts++; return arg;
 }
 void dm_guest_thread_join(void *tt) {
-    assert(tt == (void *)1 && !atomic_load(&g_ar[0].open));
-    assert(((uint8_t *)sdk_work)[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
+    ar_t *a = tt;
+    assert(a >= g_ar && a < g_ar + AR_MAX && !atomic_load(&a->open));
+    assert(((uint8_t *)a->handle[0])[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
     joins++;
 }
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
@@ -200,6 +214,45 @@ int main(void) {
         assert(handle[0] == work && allocations == a && !map_key);
         h_ar_Close(handle[0], handle[1]);
     }
+    // Explicit CPU + manual renderer (device 1, mode 1): driven by the game — no host render thread, no event replacement,
+    // no DeviceSink capture, no catch-up renders in Update, and ExecuteAudioRendererRendering forwards straight to the SDK.
+    *(int32_t *)(param + P_DEVICE) = 1; *(int32_t *)(param + P_MODE) = 1;
+    assert(h_ar_WorkSize(param) == SDK_WORK);
+    int s_before = starts, j_before = joins, d_before = event_destroys, b_before = event_binds, at_before = attaches;
+    expect_game_event = 1;
+    assert(!h_ar_Open(handle, event, param, work, SDK_WORK));
+    expect_game_event = 0;
+    assert(handle[0] == work && allocations == a && !map_key);
+    assert(starts == s_before && !g_ar[0].render_tt && g_ar[0].manual);
+    assert(event_destroys == d_before && event_binds == b_before && attaches == at_before && !rev_find(handle[0]));
+    uint8_t manual_impl[0x1100] = {0};   // impl_sys_off() decodes a 12-bit imm (<= 0xfff); keep manual_impl + offset in bounds under sanitizers
+    uint8_t *manual_sys = manual_impl + impl_sys_off();
+    for (int i = 0; i < 6; i++) assert(h_ars_Update(manual_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK);
+    assert(sdk_updates == 6 && atomic_load(&g_ar[0].catchups) == 0 && atomic_load(&g_ar[0].renders) == 0);
+    assert(h_ar_ImplExec(manual_impl) == RES_OK && sdk_impl_execs == 1);
+    assert(h_ars_Exec(manual_sys) == RES_OK && sdk_ars_execs == 1);
+    assert(atomic_load(&g_ar[0].renders) == 0);
+    h_ar_Close(handle[0], handle[1]);
+    assert(joins == j_before && !g_ar[0].handle[0] && !g_ar[0].manual && event_destroys == d_before);
+    // Coexistence: explicit CPU+manual renderer opened beside an unbound DSP renderer still binds and forwards cleanly.
+    void *work2; assert(!posix_memalign(&work2, WORK_PAGE, SDK_WORK));
+    void *handle2[2];
+    multi_open = 1;
+    assert(!h_ar_Open0(handle, param, work, SDK_WORK));   // slot 0: manual, no render thread
+    assert(starts == s_before && g_ar[0].manual && !g_ar[0].sys);
+    *(int32_t *)(param + P_DEVICE) = 0; *(int32_t *)(param + P_MODE) = 0;
+    assert(!h_ar_Open0(handle2, param, work2, SDK_WORK));   // slot 1: DSP, starts render thread
+    assert(starts == s_before + 1 && !g_ar[1].manual && !g_ar[1].sys);
+    assert(h_ars_Exec(manual_sys) == RES_OK && sdk_ars_execs == 2);
+    assert(g_ar[0].sys == manual_sys && !g_ar[1].sys);
+    assert(h_ars_Update(manual_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK && sdk_updates == 7);
+    assert(atomic_load(&g_ar[0].catchups) == 0 && atomic_load(&g_ar[1].catchups) == 0);
+    h_ar_Close(handle[0], handle[1]);
+    assert(joins == j_before && !g_ar[0].handle[0] && !g_ar[0].manual);
+    h_ar_Close(handle2[0], handle2[1]);
+    assert(joins == j_before + 1 && !g_ar[1].handle[0]);
+    multi_open = 0;
+    free(work2);
     free(work);
     // The output device notification: a second acquire is refused until a release, which destroys the event as the SDK's does (Nintendo Switch Sports Resort, main+0x3af119c)
     h_ad_NotifyRelease21(notify_event);   // never acquired: nothing to destroy

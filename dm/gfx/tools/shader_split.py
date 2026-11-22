@@ -312,7 +312,7 @@ def nxsh_shader(d, base, label, strict=True):
     where = f'{label} {d[base:base + 4].decode("latin1")}@{base:#x}'
     fail = (lambda msg: red(f'{where}: {msg}')) if strict else (lambda _: None)
     if base + 0x1c > len(d): return fail('truncated header')
-    magic = d[base:base + 4]
+    magic = bytes(d[base:base + 4])
     if magic not in NXSH_STAGES: return fail('unknown shader magic')
     total, reserved, coff, clen, koff, klen = struct.unpack_from('<6I', d, base + 4)
     if strict:
@@ -3963,7 +3963,7 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
     if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
-    if d[:4] in NXSH_STAGES: out.append(nxsh_shader(d, 0, label, strict=True)); return
+    if bytes(d[:4]) in NXSH_STAGES: out.append(nxsh_shader(d, 0, label, strict=True)); return
     if d[:8] == CIVBSF: out.extend(civbsf_shaders(d, label)); return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))

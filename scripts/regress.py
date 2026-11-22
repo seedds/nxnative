@@ -356,7 +356,9 @@ def chain_key(tree, g, tools):
         sources = digest(sorted(p for p in pkg.rglob('*') if p.is_file()), root=pkg)
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
         if not pairs.is_file(): pairs = g.build / 'shader/pso_pairs.tsv'
-        side += digest([pairs])
+        geo = g.profile_dir(tree) / 'geo_pairs.tsv'   # the vertex / geometry pairs that get mesh libraries (dmsh_chain.mesh_pairs), the split's copy for a profile without one
+        if not geo.is_file(): geo = g.build / 'shader/geo_pairs.tsv'
+        side += digest([pairs] + ([geo] if geo.is_file() else []))
     elif g.kind == 'vk':
         v, inp = digest([tree.path / 'dm/gfx/tools/vk_shaders.py'])[:12], g.ver
         side = ''

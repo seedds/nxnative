@@ -712,6 +712,10 @@ check_t_rt_recycle: t_rt_recycle
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+t_pkg_spare: t_pkg_spare.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_spare.m $(MTL_T_SRC) $(FW)
+t_pkg_evict: t_pkg_evict.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_evict.m $(MTL_T_SRC) $(FW)
 t_storage_pair: t_storage_pair.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_pair.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_storage_pair

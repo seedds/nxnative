@@ -643,19 +643,80 @@ static void tu_register(id<MTLTexture> t, uint64_t serial) {
     if (g_tu_gone.n && nvn_hm_del(&g_tu_gone, &serial)) g_tu_remade++;
     os_unfair_lock_unlock(&g_tu_lk);
 }
-// When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past RH_CAP bytes, leave the residency set and are freed
-static void rh_trim(void) {
-    if (!g_rh_n) return;
-    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); void *drop[64]; unsigned nd = 0;
-    os_unfair_lock_lock(&g_rh_lk);
-    while (g_rh_n && nd < 64) {
-        unsigned old = 0; for (unsigned i = 1; i < g_rh_n; i++) if (g_rh[i].t < g_rh[old].t) old = i;
-        if (now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= RH_CAP) break;
-        drop[nd++] = g_rh[old].heap; g_rh_bytes -= g_rh[old].size; g_rh[old] = g_rh[--g_rh_n];
+// When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past RH_CAP bytes, leave the residency set and are freed; all of them when memory is short (mem_trim). → bytes freed
+static uint64_t rh_trim_n(int all, unsigned *n_out) {
+    if (!g_rh_n) { if (n_out) *n_out = 0; return 0; }
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), bytes = 0; unsigned n = 0;
+    for (;;) {
+        void *drop[64]; unsigned nd = 0;
+        os_unfair_lock_lock(&g_rh_lk);
+        while (g_rh_n && nd < 64) {
+            unsigned old = 0; for (unsigned i = 1; i < g_rh_n; i++) if (g_rh[i].t < g_rh[old].t) old = i;
+            if (!all && now - g_rh[old].t < RH_IDLE_NS && g_rh_bytes <= RH_CAP) break;
+            drop[nd++] = g_rh[old].heap; bytes += g_rh[old].size; g_rh_bytes -= g_rh[old].size; g_rh[old] = g_rh[--g_rh_n];
+        }
+        int more = all && g_rh_n;
+        os_unfair_lock_unlock(&g_rh_lk);
+        for (unsigned i = 0; i < nd; i++) { id<MTLHeap> h = CFBridgingRelease(drop[i]); res_remove(h); }
+        n += nd;
+        if (!more || !nd) break;
     }
-    os_unfair_lock_unlock(&g_rh_lk);
-    for (unsigned i = 0; i < nd; i++) { id<MTLHeap> h = CFBridgingRelease(drop[i]); res_remove(h); }
-    if (nd) atomic_fetch_add(&g_rh_trimmed, nd);
+    if (n) atomic_fetch_add(&g_rh_trimmed, n);
+    if (n_out) *n_out = n;
+    return bytes;
+}
+static void rh_trim(void) { rh_trim_n(0, NULL); }
+// The whole system's memory (host_statistics64), in MB: what the per-app headroom misses. An iPhone 17 ended the app for proc-thrashing in Ocarina of Time with 67 MB free and 5.56 GB of its
+// 8 GB wired while os_proc_available_memory still read 2.7 GB (docs/reference/memory.md). file: file-backed pages in memory (the guest's files among them, DM_GUEST_FILE)
+typedef struct { uint64_t total, free, wired, compressed, file, purgeable; int ok; } sys_mem_t;
+static sys_mem_t sys_mem(void) {
+    sys_mem_t m = {0}; vm_statistics64_data_t v; mach_msg_type_number_t n = HOST_VM_INFO64_COUNT; uint64_t total = 0; size_t tl = sizeof total;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&v, &n) != KERN_SUCCESS) return m;
+    sysctlbyname("hw.memsize", &total, &tl, NULL, 0);
+    uint64_t pg = vm_kernel_page_size;
+    m.total = total >> 20; m.free = ((uint64_t)v.free_count + v.speculative_count) * pg >> 20; m.wired = (uint64_t)v.wire_count * pg >> 20;
+    m.compressed = (uint64_t)v.compressor_page_count * pg >> 20; m.file = (uint64_t)v.external_page_count * pg >> 20; m.purgeable = (uint64_t)v.purgeable_count * pg >> 20; m.ok = 1;
+    return m;
+}
+// Memory pressure (DISPATCH_SOURCE_TYPE_MEMORYPRESSURE): the system says when its free memory runs low, warn then critical, before it ends processes. Each event is logged with the
+// system's figures, and asks the submit thread for a trim at the next submission's start (mem_trim): what no frame needs any more goes, and nothing waits on the GPU there.
+// On iOS warn and critical trim, on the Mac critical only (it can swap). DM_NVN_MEM_PRESSURE=0 logs only, 1 trims at warn, 2 at critical
+static _Atomic int g_mp_want;   // the level a trim was asked at (1 warn, 2 critical), taken by mem_trim
+static _Atomic uint64_t g_mp_n[3], g_mp_trims, g_mp_freed;   // events by level (0 back to normal), trims made, bytes they gave back
+static _Atomic uint64_t g_sweep_n, g_sweep_bytes;   // idle uploaded textures freed without memory pressure (pkg_sweep)
+static int mp_act_level(void) {
+    static int lv = -1;
+    if (lv < 0) { const char *e = getenv("DM_NVN_MEM_PRESSURE"); lv = e && *e ? atoi(e) : (TARGET_OS_IPHONE ? 1 : 2); if (lv < 0 || lv > 2) lv = 2; }
+    return lv;
+}
+static void mem_pressure_said(char *b, size_t n) {
+    snprintf(b, n, "memory pressure events warn %llu, critical %llu, back to normal %llu; trims %llu, %llu MB given back; idle uploaded textures freed without pressure %llu, %llu MB",
+             (unsigned long long)atomic_load(&g_mp_n[1]), (unsigned long long)atomic_load(&g_mp_n[2]), (unsigned long long)atomic_load(&g_mp_n[0]),
+             (unsigned long long)atomic_load(&g_mp_trims), (unsigned long long)(atomic_load(&g_mp_freed) >> 20),
+             (unsigned long long)atomic_load(&g_sweep_n), (unsigned long long)(atomic_load(&g_sweep_bytes) >> 20));
+}
+static void mem_pressure_event(int lv) {   // lv: 0 normal, 1 warn, 2 critical (the source's handler; a test calls it directly)
+    atomic_fetch_add(&g_mp_n[lv], 1);
+    sys_mem_t m = sys_mem(); char room[32] = "none";
+#if TARGET_OS_IPHONE
+    snprintf(room, sizeof room, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
+#endif
+    int act = lv && mp_act_level() && lv >= mp_act_level();
+    MLOG("[mem] memory pressure %s: system free %llu MB, wired %llu MB, compressed %llu MB, file-backed %llu MB; residency set %llu MB; headroom %s; %s", lv == 2 ? "critical" : lv ? "warn" : "back to normal",
+         (unsigned long long)m.free, (unsigned long long)m.wired, (unsigned long long)m.compressed, (unsigned long long)m.file, (unsigned long long)(g_res ? g_res.allocatedSize >> 20 : 0), room,
+         act ? "trimming at the next submission" : lv ? "no trim at this level here" : "");
+    if (act) { int cur = atomic_load(&g_mp_want); while (lv > cur && !atomic_compare_exchange_weak(&g_mp_want, &cur, lv)) {} }
+}
+static void mem_pressure_start(void) {
+    static dispatch_source_t src;
+    src = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+                                 dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!src) { MLOG("[RED] memory pressure: no dispatch source; memory is not trimmed on pressure"); return; }
+    dispatch_source_set_event_handler(src, ^{ @autoreleasepool {
+        unsigned long d = dispatch_source_get_data(src);
+        mem_pressure_event(d & DISPATCH_MEMORYPRESSURE_CRITICAL ? 2 : d & DISPATCH_MEMORYPRESSURE_WARN ? 1 : 0);
+    } });
+    dispatch_resume(src);
 }
 // The R32 storage under a 32-bit colour texture that takes image atomics (tex_upgrade): resident as long as the colour view over it lives, which is what the game's names hold
 @interface NvAtomicRaw : NSObject { @public id<MTLTexture> raw; } @end
@@ -745,6 +806,7 @@ static void res_top(const char *why) { @autoreleasepool {
 } }
 void mem_census(const char *why);
 void dm_gfx_restop(void) { res_top("DM_CTL restop"); mem_census("DM_CTL restop"); }
+void dm_gfx_memtrim(void) { int cur = atomic_load(&g_mp_want); while (cur < 1 && !atomic_compare_exchange_weak(&g_mp_want, &cur, 1)) {} MLOG("DM_CTL memtrim: a memory pressure trim at the next submission's start"); }
 // Going on helps nobody once command buffers keep failing: no frame reaches the window, and each attempt asks the driver to wire more. A host left running like that on a 16 GB Mac took the whole
 // system down, hung for hours and then a kernel panic in IOGPUGroupMemory at 14.7 GB wired. So 32 failures within a minute end the game
 static void res_top_once(NSError *err) {
@@ -952,6 +1014,7 @@ static void mtl_init_once(void) {
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
+    mem_pressure_start();
     g_q = [g_dev newCommandQueue];
     g_present_readbacks = dispatch_group_create();
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
@@ -1810,6 +1873,10 @@ static void treg_sparse_notes(void);
 static void pass_split_try(void);
 static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
 static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
+static void mem_trim(void);
+static void pkg_sweep(void);
+static uint64_t spare_trim(int all, unsigned *n_out);
+static unsigned g_evict_why[5];   // the last trim's packages (pkg_evict_idle): considered, used within PKG_IDLE_DS, of a kind not freed (sparse, placed, a view), GPU-written, held (pin, sharing table, takeover)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
     treg_sparse_notes();   // the mappings made before this submission
@@ -1818,6 +1885,9 @@ void mtl_sub_begin(void) {
     defer_drain();
     rh_trim();
     tu_tick();   // the render targets drawn over since their last use go, once a second
+    spare_trim(0, NULL);   // packaged textures' spares no re-upload took
+    mem_trim();   // memory pressure asked for one (mem_pressure_event)
+    pkg_sweep();   // small devices: uploaded textures idle for PKG_IDLE_DS
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
     warm_claim();
     if (g_cb) MDIE("submit re-entered");
@@ -3198,7 +3268,8 @@ void mtl_tex_init(const tex_t *t) {
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub, own, lost_gen; const void *span; int sparse, vbase, part; uint8_t *edge[2]; uint32_t edge_n[2], stored; id ps; id<MTLBuffer> eb; uint64_t *ph, up_frame, up_sub; uint32_t nph, missed; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+// used_tu: g_tu_now at its last resolution outside a pool walk (tex_mtl_); mem / size: its storage (pkg_evict_idle). spare_t: when the spare became one (spare_trim)
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, spare_t, vgen, vseen, sub, own, lost_gen, size; uintptr_t mem; uint32_t used_tu; const void *span; int sparse, vbase, part; uint8_t *edge[2]; uint32_t edge_n[2], stored; id ps; id<MTLBuffer> eb; uint64_t *ph, up_frame, up_sub; uint32_t nph, missed; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 // ps: its placement sparse texture (NvSparse, sparse_make), which tex is: mapped and uploaded tile by tile (sparse_sync)
 // edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take); in eb from the first GPU store into its storage on (pkg_edges_gpu),
@@ -3211,6 +3282,30 @@ void mtl_tex_init(const tex_t *t) {
 @implementation NvPkg
 - (void)dealloc { defer_obj_release(tex); defer_obj_release(spare); if (eb) defer_obj_release(eb); else { free(edge[0]); free(edge[1]); } free(ph); }
 @end
+// Spares that waited for good. A spare pays only for a texture the CPU rewrites again soon (a movie frame); one re-upload of a streamed texture left its old texture resident until the
+// texture object was finalized, held by nothing but its NvPkg (on the iPhone 17 up to 168 spares, 123 MB in Ocarina of Time). The packages that have one are listed here (weak), and at a
+// submission's start a spare older than g_spare_idle_ns (3 s) is retired through defer_obj_release (after the submissions that used it complete, and only once no serial entry holds it).
+// At memory pressure (mem_trim) every spare goes. Submit thread only, as are re-uploads
+static uint64_t g_spare_idle_ns = 3000000000ull;
+static NSHashTable *g_spare_pkgs; static uint64_t g_spare_last; static _Atomic uint64_t g_spare_trimmed, g_spare_trimmed_bytes, g_spare_held;   // held: spares left after the last walk (the report)
+static void spare_note(NvPkg *pk) { if (!g_spare_pkgs) g_spare_pkgs = [NSHashTable weakObjectsHashTable]; pk->spare_t = clock_gettime_nsec_np(CLOCK_MONOTONIC); [g_spare_pkgs addObject:pk]; }
+static uint64_t spare_trim(int all, unsigned *n_out) { @autoreleasepool {
+    unsigned n = 0; uint64_t b = 0, now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if (!g_spare_pkgs.count || (!all && now - g_spare_last < 250000000ull)) { if (n_out) *n_out = 0; return 0; }
+    g_spare_last = now;
+    NSMutableArray *gone = nil;
+    uint64_t held = 0;
+    for (NvPkg *pk in g_spare_pkgs) {
+        if (pk->spare && !all && now - pk->spare_t < g_spare_idle_ns) { held++; continue; }
+        if (pk->spare) { n++; b += pk->spare.heap ? 0 : pk->spare.allocatedSize; defer_obj_release(pk->spare); pk->spare = nil; }
+        if (!gone) gone = [NSMutableArray array];
+        [gone addObject:pk];
+    }
+    for (NvPkg *pk in gone) [g_spare_pkgs removeObject:pk];
+    atomic_fetch_add(&g_spare_trimmed, n); atomic_fetch_add(&g_spare_trimmed_bytes, b); atomic_store(&g_spare_held, held);
+    if (n_out) *n_out = n;
+    return b;
+} }
 // Packaged textures by pool, storage and description. Engines make many texture objects over one texture's bytes, each with a serial of its own: Ocarina of Time's 32,768 registered IDs name 3,607 storages,
 // 2.0 GB, and an upload per serial took 6 GB, past what a 16 GB Mac can keep wired once the pools are added. A new serial with the same storage and description takes the same NvPkg, so its
 // dirty-page checks and re-uploads are one. Weak: the serials' entries own it, and a table entry never keeps one alive. Partitioned by pool so a pool's Finalize (mtl_alias_drop_pool) drops
@@ -3873,6 +3968,35 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
     *off = g_up_block_off;
     g_up_block_off += need;
     return g_up_block;
+}
+// Memory pressure asked for a trim (mem_pressure_event): at a submission's start, on the submit thread, which owns the upload slots, before anything of the submission is encoded. What goes
+// is what no frame needs and nothing waits for: the recycled render-target heaps waiting for a target (rh_trim_n), every packaged texture's spare (spare_trim), uploaded textures unused for
+// 30 s (pkg_evict_idle), the staging blocks of upload slots with no batch open or in flight, and completed deferred releases. Each trim is logged with what it freed and the system's free memory after it
+static uint64_t pkg_evict_idle(unsigned *n_out);
+static void mem_trim(void) {
+    int lv = atomic_exchange(&g_mp_want, 0);
+    if (!lv) return;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    unsigned rn = 0; uint64_t rb = rh_trim_n(1, &rn);
+    unsigned sn = 0; uint64_t sb = spare_trim(1, &sn);   // every packaged texture's spare (NvPkg)
+    unsigned en = 0; uint64_t eb = pkg_evict_idle(&en);   // uploaded textures nothing used for 30 s
+    unsigned un = 0; uint64_t ub = 0;
+    for (unsigned s = 0; s < 3; s++) {
+        if ((g_up_cb && s == g_up_cur_slot) || atomic_load(&g_up_alloc_busy[s])) continue;   // a batch open in this slot or still on the GPU
+        __strong id<MTLBuffer> *bs[2] = {&g_up_slot_blk[s], &g_up_slot_over[s]};
+        int dropped = 0;
+        for (int k = 0; k < 2; k++) if (*bs[k] && *bs[k] != g_up_block) { un++; ub += (*bs[k]).length; defer_obj_release(*bs[k]); *bs[k] = nil; dropped = 1; }
+        if (dropped) { g_up_slot_want[s] = 0; g_up_idle_slot[s] = (up_idle_slot){0}; }
+    }
+    pthread_mutex_lock(&g_deferred_mu); unsigned long d0 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
+    defer_drain();
+    pthread_mutex_lock(&g_deferred_mu); unsigned long d1 = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
+    res_commit();
+    atomic_fetch_add(&g_mp_trims, 1); atomic_fetch_add(&g_mp_freed, rb + sb + eb + ub);
+    sys_mem_t m = sys_mem();
+    MLOG("[mem] memory pressure trim (%s): recycled render-target heaps %u, %llu MB; packaged textures' spares %u, %llu MB; uploaded textures idle 30 s %u, %llu MB (of %u packages: used lately %u, sparse / placed / a view %u, GPU-written %u, held %u); upload staging blocks %u, %llu MB (freed when their submission completes); deferred releases drained %lu, still waiting for the GPU %lu; %.1f ms; system free %llu MB, wired %llu MB, residency set %llu MB",
+         lv == 2 ? "critical" : "warn", rn, (unsigned long long)(rb >> 20), sn, (unsigned long long)(sb >> 20), en, (unsigned long long)(eb >> 20), g_evict_why[0], g_evict_why[1], g_evict_why[2], g_evict_why[3], g_evict_why[4], un, (unsigned long long)(ub >> 20), d0 > d1 ? d0 - d1 : 0, d1, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6,
+         (unsigned long long)m.free, (unsigned long long)m.wired, (unsigned long long)(g_res ? g_res.allocatedSize >> 20 : 0));
 }
 
 // Deswizzle parameter blocks: 64 bytes per cell, cut sequentially from a 64 KB shared-storage block; a full block is replaced by a new one, and the old block is released lazily by fence
@@ -5559,6 +5683,7 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
         if (!pk) { id<MTLTexture> made = nil; NvSparse *ps = sparse_make(t, 0, &made);
             if (ps) { pk = [NvPkg new]; pk->ps = ps; pk->tex = made; pk->sparse = 1; sparse_sync(ps, t, 1); tex_put(t->serial, pk); return tex_mtl_result(pk->tex, owned); } }
         if (pk) {   // Already uploaded: check the covered pages only if there has been a guest write since the last check
+            if (!g_pool_walk) pk->used_tu = g_tu_now;   // a walk's lookup is not a use (pkg_evict_idle)
             if (gsb_held(t->mem, t->L.size)) return tex_mtl_result(pk->view ? pk->view : pk->tex, owned);   // its storage lacks a GPU write this command buffer stores through any texture over those bytes (gsb_store): uploaded at its next use if the CPU wrote it
             uint64_t now = nvn_dirty_now(), own = nvn_dirty_own_writes();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
@@ -5602,12 +5727,12 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
-                pk->spare = old; pk->spare_fence = g_fence + 1; own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; pkg_hash_take(pk, t); pkg_edges_take(pk, t); }
+                pk->spare = old; pk->spare_fence = g_fence + 1; spare_note(pk); own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; pkg_hash_take(pk, t); pkg_edges_take(pk, t); }
             if (nt && !pk->sparse) bcp_up_follow(t, nt);   // the CPU's bytes reach the other side of a compressed-alias pair too
             return tex_mtl_result(pk->view ? pk->view : pk->tex, owned);
         }
         pk = [NvPkg new];
-        pk->sparse = t->pool && nvn_sparse_pool(t->pool); pk->vgen = pk->vseen = nvn_sparse_gen();
+        pk->sparse = t->pool && nvn_sparse_pool(t->pool); pk->vgen = pk->vseen = nvn_sparse_gen(); pk->used_tu = g_tu_now; pk->mem = (uintptr_t)t->mem; pk->size = t->L.size;
         pk->lost_gen = atomic_load(&g_up_lost_gen);
         pk->sub = g_sub_serial; pk->own = nvn_dirty_own_writes();
         pk->tex = pkg_upload(t, &pk->stamp, nil, 0, nil, NULL, 0, NULL);
@@ -5715,12 +5840,15 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
 // All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting).
 static _Atomic uint64_t g_gptr_bindings, g_gptr_reads, g_gptr_added, g_gptr_bytes;   // gmem_discover: bindings with sources, readable words, newly addressed logical pool/run ranges and bytes
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
-    static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
-    unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
+    static unsigned long long last_rss, last_gpu, last_frame, last_wired; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
+    sys_mem_t sm = sys_mem();
+    unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu, dw = sm.wired > last_wired ? sm.wired - last_wired : last_wired - sm.wired;
+    // Also when the system's wired memory moved by 256 MB or a memory pressure event came (not on low free memory alone: the Mac keeps little free, which would print every time)
+    static uint64_t last_ev; uint64_t ev = atomic_load(&g_mp_n[0]) + atomic_load(&g_mp_n[1]) + atomic_load(&g_mp_n[2]);
     int sparse = lines >= 400;
-    if (lines && frame - last_frame < 3000 && (sparse || (dr < 64 && dg < 64))) return;
+    if (lines && frame - last_frame < 3000 && (sparse || (dr < 64 && dg < 64 && dw < 256 && ev == last_ev))) return;
     if (!sparse) lines++;
-    last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
+    last_rss = rss_mb; last_gpu = gpu; last_frame = frame; last_wired = sm.wired; last_ev = ev;
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
@@ -5738,6 +5866,10 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u kept by the sharing table alone, %llu MB, %llu MB of it drawn into or shader-written, the oldest idle %llu submissions; evicted with pools %llu (serial entries that went with them %llu), on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (alive %llu, %llu MB; released when idle %llu, %llu MB in total), finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, au.entries, (unsigned long long)(au.bytes >> 20), (unsigned long long)(au.writable_bytes >> 20), (unsigned long long)au.oldest_idle, (unsigned long long)as.evicted, (unsigned long long)as.pool_entries, (unsigned long long)as.taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)g_arena_live, (unsigned long long)(g_arena_live_bytes >> 20), (unsigned long long)g_arena_freed, (unsigned long long)(g_arena_freed_bytes >> 20), nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
+    if (sm.ok) { char pl[220]; mem_pressure_said(pl, sizeof pl);
+        MLOG("system memory at frame %llu: free %llu MB, wired %llu MB, compressed %llu MB, file-backed %llu MB, purgeable %llu MB, of %llu MB; residency set %llu MB; %s", frame,
+             (unsigned long long)sm.free, (unsigned long long)sm.wired, (unsigned long long)sm.compressed, (unsigned long long)sm.file, (unsigned long long)sm.purgeable, (unsigned long long)sm.total,
+             (unsigned long long)(g_res ? g_res.allocatedSize >> 20 : 0), pl); }
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by Metal texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
@@ -5768,6 +5900,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
                             (unsigned long long)g_gptr_bindings, (unsigned long long)g_gptr_reads, (unsigned long long)g_gptr_added, (unsigned long long)(g_gptr_bytes >> 20));
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
+void mtl_spare_stats(uint64_t *held, uint64_t *trimmed, uint64_t *trimmed_mb) { *held = atomic_load(&g_spare_held); *trimmed = atomic_load(&g_spare_trimmed); *trimmed_mb = atomic_load(&g_spare_trimmed_bytes) >> 20; }
 uint64_t mtl_pkg_edge_skips(void) { return g_pkg_edge_skips; }
 uint64_t mtl_pkg_miss(void) { return g_pkg_miss; }
 static void treg_retire_serial(uint64_t ser);
@@ -7546,7 +7679,7 @@ typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view
                  void *palt[4], *palt_of[4]; uint64_t palt_rid[4];   // palt[k]: the view a texture pool table of layered type k (pool_lk) holds for the ID (pool_fit), apart from alt so slot binds and tables do not take turns
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
-                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1, sp;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views); sp: in g_treg_sp
+                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1, sp, evicted;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views); sp: in g_treg_sp; evicted: idle package freed (pkg_evict_idle)
                  void *stand; uint64_t stand_rid, stand_sum, reg_frame; uint8_t stand_tt1, stand_no;
                  uint32_t used; } treg_t;   // stand: what its pool table entries hold while its texture is not made (pool_stand; retained), stand_tt1 its texture type + 1, stand_no: it can have none (STAND_NO), or none until a mapping notes its pages (STAND_WAIT); reg_frame: the frame of the registration
 enum { STAND_NO = 1, STAND_WAIT = 2 };   // treg_t.stand_no: no stand-in while the registration stands; none until a mapping over its pages notes it (treg_sparse_notes)
@@ -7926,7 +8059,7 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
         if (rr->ok) bcp_idx(id_, &rr->t, 0);
         rr->ok = t != NULL; if (t) rr->t = *t; rr->has_v = v != NULL; if (v) rr->v = *v;
         if (t) bcp_idx(id_, t, 1);   // a side of a compressed-alias pair, found by its storage
-        rr->retired = 0; rr->transient_sub = 0;
+        rr->retired = 0; rr->transient_sub = 0; rr->evicted = 0; rr->used = 0;
         if (t && t->serial) {
             rr->retired = !own_tex_live(t->serial);
             rr->next = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &t->serial);
@@ -12864,6 +12997,7 @@ static void pool_seen_scan(void) {
             if (!g) continue;
             typed_new |= g & ~g_seen_typed[s_][i]; g_seen_typed[s_][i] |= g; got |= g;
         }
+        for (uint32_t bits = got; bits; bits &= bits - 1) { int id_ = (int)i * 32 + __builtin_ctz(bits); if (id_ < g_ntreg) g_treg[id_].used = g_tu_now; }
         g_seen_todo[i] |= typed_new & g_seen_done[i];   // already read through another type: the tables of the new type take it in place
         uint32_t fresh = got & ~g_seen_done[i];
         if (fresh) { g_seen_done[i] |= fresh; g_seen_todo[i] |= fresh; for (uint32_t bits = fresh; bits; bits &= bits - 1) { pool_ds_note((int)i * 32 + __builtin_ctz(bits)); pool_first_read((int)i * 32 + __builtin_ctz(bits), f); } }
@@ -12962,6 +13096,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (r->gone) { ++*gone; return 0; }
     if (!r->view && !tex_storage_live(&r->t)) { ++*gone; *dead = 1; return 0; }
     if (!r->view && pool_unwritten_target(&r->t)) return 0;   // dummy until a pass writes it (its new texture is noted: own_note)
+    if (r->evicted && !r->view && !pool_seen(id_) && !tex_get(r->t.serial) && !pkg_shared(&r->t)) return pool_stand(id_, dtt);   // freed idle or at memory pressure: made again when a shader reads it, not up front
     if (!r->view && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER && pool_tex_size(&r->t) > limit && !pkg_shared(&r->t) && !tex_get(r->t.serial) && !(pool_seen(id_) && g_walk_req < POOL_REQ_BYTES)) { ++*left; *left_req += pool_seen(id_); return pool_stand(id_, dtt); }   // BUFFER is a live view, with no upload for this budget to defer
     if (r->tt1 && r->tt1 - 1 != dtt && !(pool_bridge_pair(r->tt1 - 1, dtt) && pool_seen_t(id_, dtt))) { pool_type_note(id_, r->tt1 - 1, dtt); return 0; }   // an ID of another texture type, seen before (the table holds only its own type, or a view of an ID read through it: pool_fit): nothing to look up or charge (the idea is from PR 1428)
     if (!r->view && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
@@ -12976,6 +13111,107 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (lead && got == MTLTextureTypeTextureBuffer) *lead = tbuf_lead(id_, (__bridge id<MTLTexture>)tv);
     if (g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial) *transient = 1;
     return tr;
+}
+// Fold shader reads from g_seen_buf onto g_treg[id_].used on the g_tu_now clock (caller holds g_rmu). With clear=1 (tu_pass / tu_tick, once a second), clears the marks already folded
+// into g_seen_done / g_seen_typed so the next pass sees only new reads; with clear=0 (pkg_evict_idle), records any unread shader marks right before judging idleness without stealing them from tu_pass
+static void seen_stamp_used(uint32_t now, int clear) {
+    if (!g_seen_buf) return;
+    uint32_t *w = (uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
+    for (unsigned s_ = 0; s_ < POOL_SEEN_TYPES; s_++) for (unsigned i = 0; i < words; i++) {
+        uint32_t g = w[s_ * POOL_SEEN_WORDS + i]; if (!g) continue;
+        for (uint32_t b = g; b; b &= b - 1) { int id_ = (int)i * 32 + __builtin_ctz(b); if (id_ < g_ntreg) g_treg[id_].used = now; }
+        if (clear) {
+            uint32_t clr = g & g_seen_done[i] & g_seen_typed[s_][i];
+            if (clr) atomic_fetch_and((_Atomic uint32_t *)w + s_ * POOL_SEEN_WORDS + i, ~clr);
+        }
+    }
+}
+// Memory pressure and small-device periodic sweep: the Metal copies of uploaded textures nothing has used for PKG_IDLE_DS (30 s, on the g_tu_now decisecond clock). On NVN such a texture
+// costs nothing beyond its pool; here it is a Metal copy, and a game keeps the texture objects of an area it has left (0.6-1.0 GB of Ocarina of Time's residency set on an 8 GB iPhone 17).
+// A package (NvPkg) goes when no texture ID naming one of its serials was used for PKG_IDLE_DS (g_treg[i].used: binds, UBO handles, shader pool reads) and nothing resolved it outside a pool
+// walk either (used_tu), when it is not sparse, placed or bound as a view, the GPU never wrote its storage (gws_owned) nor stored writes into it (stored), and no pin, sharing-table entry or
+// serial that took its texture over holds it. Everything naming the copy lets go together: its serials' entries (live and ghost via own_drop_where_locked), its g_pkg_share entry, each texture
+// ID's views, the view cache, and the pool-table entries (marked evicted so a pool walk leaves the ID its stand-in or dummy until a shader reads it; a bind makes it again at once). Submit thread
+enum { PKG_IDLE_DS = 300, PKG_SWEEP_DS = 100 };   // deciseconds: 30 s idle threshold, 10 s periodic sweep on small devices
+static _Atomic uint64_t g_evict_n, g_evict_bytes;
+static uint64_t pkg_evict_idle(unsigned *n_out) { @autoreleasepool {
+    unsigned n = 0; uint64_t bytes = 0; uint32_t now = g_tu_now;
+    if (n_out) *n_out = 0;
+    NSMutableArray<NvPkg *> *pkgs = [NSMutableArray array]; NSHashTable *seen = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    nvn_hmap last = {.klen = sizeof(uintptr_t)};   // package address → newest use + 1
+    nvn_hmap byser_m = {.klen = 8}, *byser = &byser_m, *lastp = &last;   // serial → its package (live before ghost), not retained: tables hold them under g_smu
+    os_unfair_lock_lock(&g_rmu); pthread_mutex_lock(&g_smu);
+    seen_stamp_used(now, 0);
+    own_each_locked(^(uint64_t serial, id o, int ghost) {
+        if (![o isKindOfClass:[NvPkg class]]) return;
+        if (!ghost || !nvn_hm_get(byser, &serial)) nvn_hm_put(byser, &serial, (__bridge void *)o);
+        if ([seen containsObject:o]) return;
+        [seen addObject:o]; [pkgs addObject:o]; uintptr_t k = (uintptr_t)(__bridge void *)o; nvn_hm_put(lastp, &k, (void *)(uintptr_t)(((NvPkg *)o)->used_tu + 1ull)); });
+    for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok || !r->t.serial) continue;
+        id o = (__bridge id)nvn_hm_get(byser, &r->t.serial);
+        if (!o) continue;
+        uintptr_t k = (uintptr_t)(__bridge void *)o, u = (uintptr_t)nvn_hm_get(&last, &k);
+        if (u && r->used + 1ull > u) nvn_hm_put(&last, &k, (void *)(uintptr_t)(r->used + 1ull)); }
+    pthread_mutex_unlock(&g_smu); os_unfair_lock_unlock(&g_rmu);
+    free(byser_m.keys); free(byser_m.vals);
+    NSHashTable *victims = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    memset(g_evict_why, 0, sizeof g_evict_why); g_evict_why[0] = (unsigned)pkgs.count;
+    for (NvPkg *pk in pkgs) { uintptr_t k = (uintptr_t)(__bridge void *)pk, u = (uintptr_t)nvn_hm_get(&last, &k);
+        uint32_t last_use = u ? (uint32_t)(u - 1) : 0;
+        if (!u || now < last_use || now - last_use < PKG_IDLE_DS) { g_evict_why[1]++; continue; }
+        if (pk->sparse || pk->ps || pk->view || !pk->tex || pk->tex.heap || !pk->mem || !pk->size) { g_evict_why[2]++; continue; }
+        if (pk->stored || gws_owned(pk->mem, pk->mem + pk->size)) { g_evict_why[3]++; continue; }
+        [victims addObject:pk]; }
+    free(last.keys); free(last.vals);
+    if (!victims.count) return 0;
+    // Let go of them together. g_rmu before g_smu, as everywhere
+    nvn_hmap gone_ser = {.klen = 8};
+    os_unfair_lock_lock(&g_rmu); pthread_mutex_lock(&g_smu);
+    { NSUInteger was = victims.count;   // a pin, the sharing table or a serial that took its texture over (cpu_unc_drop) holds it (nvn_owner.m)
+      for (NvPkg *pk in victims.allObjects) if (tex_object_pinned(pk) || own_shared_locked(pk->tex) || entry_holds((__bridge void *)pk->tex)) [victims removeObject:pk];
+      g_evict_why[4] = (unsigned)(was - victims.count); }
+    if (!victims.count) { pthread_mutex_unlock(&g_smu); os_unfair_lock_unlock(&g_rmu); return 0; }
+    nvn_hmap *gs = &gone_ser;
+    own_drop_where_locked(^int(id o) { return [victims containsObject:o]; }, ^(uint64_t serial) { nvn_hm_put(gs, &serial, (void *)1); });
+    for (uint32_t i = 0; i < g_pkg_share.cap; i++) {
+        nvn_hmap *pm = g_pkg_share.vals[i]; if (!pm) continue;
+        uint32_t ns = 0; alias_key *ks = NULL;
+        for (uint32_t j = 0; j < pm->cap; j++) {
+            NvPkgRef *r = (__bridge NvPkgRef *)pm->vals[j]; if (!r) continue;
+            NvPkg *p = r->pkg; if (!p || ![victims containsObject:p]) continue;
+            alias_key *nk = realloc(ks, (ns + 1) * sizeof *ks); if (!nk) break;
+            ks = nk; memcpy(&ks[ns++], pm->keys + (size_t)j * pm->klen, sizeof *ks);
+        }
+        for (uint32_t j = 0; j < ns; j++) hm_del_id(pm, &ks[j]);
+        free(ks);
+    }
+    for (NvPkg *pk in victims) { n++; bytes += pk->tex.allocatedSize + (pk->spare && !pk->spare.heap ? pk->spare.allocatedSize : 0); }
+    pthread_mutex_unlock(&g_smu);
+    for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok || !r->t.serial || !nvn_hm_get(&gone_ser, &r->t.serial)) continue;
+        treg_drop_views(r); r->evicted = 1; reg_bump(i, 0); pool_seen_clear(i); }
+    for (uint32_t i = 0; i < gone_ser.cap; i++) if (gone_ser.vals[i]) { uint64_t ser; memcpy(&ser, gone_ser.keys + (size_t)i * 8, 8); vc_set *v = nvn_hm_del(&g_vc, &ser); if (v) vc_set_free(v); }
+    os_unfair_lock_unlock(&g_rmu);
+    free(gone_ser.keys); free(gone_ser.vals);
+    atomic_fetch_add(&g_evict_n, n); atomic_fetch_add(&g_evict_bytes, bytes);
+    if (n_out) *n_out = n;
+    return bytes;
+} }
+// Small devices (Metal recommended working set under 6 GB: 8 GB iPhones, M1 iPads, 8 GB Macs): sweep idle uploaded textures every PKG_SWEEP_DS without waiting for OS memory pressure so
+// an area's copies leave once the game has left it (docs/reference/memory.md). Elsewhere memory pressure alone frees them. DM_NVN_TEX_EVICT_IDLE=0 / 1 forces it
+static int small_working_set(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+static int g_sweep_on = -1; static uint32_t g_sweep_last;
+static void pkg_sweep(void) {
+    if (g_sweep_on < 0) {
+        const char *e = getenv("DM_NVN_TEX_EVICT_IDLE"); g_sweep_on = e && *e ? atoi(e) > 0 : small_working_set(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
+        if (g_sweep_on) MLOG("uploaded textures nothing used for %d s are freed every %d s, not only at memory pressure (%s)", PKG_IDLE_DS / 10, PKG_SWEEP_DS / 10, e && *e ? "DM_NVN_TEX_EVICT_IDLE" : "Metal's working set under 6 GB");
+    }
+    if (!g_sweep_on || (g_sweep_last && g_tu_now >= g_sweep_last && g_tu_now - g_sweep_last < PKG_SWEEP_DS)) return;
+    g_sweep_last = g_tu_now;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); unsigned n = 0; uint64_t b = pkg_evict_idle(&n);
+    if (!n) return;
+    atomic_fetch_add(&g_sweep_n, n); atomic_fetch_add(&g_sweep_bytes, b);
+    static int nl; if (nl++ < 8) MLOG("[mem] idle uploaded textures freed: %u, %llu MB, %.1f ms (in all %llu, %llu MB)", n, (unsigned long long)(b >> 20), (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6,
+                                     (unsigned long long)atomic_load(&g_sweep_n), (unsigned long long)(atomic_load(&g_sweep_bytes) >> 20));
 }
 static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretained id<MTLBuffer> *out);
 static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretained id<MTLBuffer> *out) {   // what it resolves is not a use (g_pool_walk)
@@ -13121,15 +13357,7 @@ static void tu_pass(void) { @autoreleasepool {
     // The reads by texture ID since the last pass: those the shaders marked in a pool (the marks pool_seen_scan has folded into g_seen_done go from the bitmap, so the next pass
     // sees only new ones; the others it folds first) and the bindings (tex_fast_rid), onto their textures' records
     os_unfair_lock_lock(&g_rmu);
-    if (g_seen_buf) {
-        uint32_t *w = (uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
-        for (unsigned s_ = 0; s_ < POOL_SEEN_TYPES; s_++) for (unsigned i = 0; i < words; i++) {
-            uint32_t g = w[s_ * POOL_SEEN_WORDS + i]; if (!g) continue;
-            for (uint32_t b = g; b; b &= b - 1) { int id_ = (int)i * 32 + __builtin_ctz(b); if (id_ < g_ntreg) g_treg[id_].used = now; }
-            uint32_t clr = g & g_seen_done[i] & g_seen_typed[s_][i];
-            if (clr) atomic_fetch_and((_Atomic uint32_t *)w + s_ * POOL_SEEN_WORDS + i, ~clr);
-        }
-    }
+    seen_stamp_used(now, 1);
     if (g_tu.n) {
         os_unfair_lock_lock(&g_tu_lk);
         for (int i = 1; i < g_ntreg; i++) { const treg_t *r = &g_treg[i];
@@ -13173,7 +13401,10 @@ static void tu_tick(void) {   // when a submission begins; DM_NVN_RT_DEAD=0 keep
     if (g_tu_manual) return;
     static uint64_t t0; uint64_t ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (!t0) t0 = ns;
     g_tu_now = (uint32_t)((ns - t0) / 100000000ull) + 1;
-    if (g_tu_now - g_tu_last >= 10 && sw_on(tu_mode())) tu_pass();
+    if (g_tu_now - g_tu_last >= 10) {
+        if (sw_on(tu_mode())) tu_pass();
+        else { g_tu_last = g_tu_now; os_unfair_lock_lock(&g_rmu); seen_stamp_used(g_tu_now, 1); os_unfair_lock_unlock(&g_rmu); }
+    }
 }
 static id<MTLBuffer> dummy_buf(void) { static id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t dummy_buf_gpu(void) { static uint64_t gpu; if (!gpu) gpu = dummy_buf().gpuAddress; return gpu; }

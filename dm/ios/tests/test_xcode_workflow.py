@@ -131,6 +131,41 @@ class BuildEnvFileTests(unittest.TestCase):
 
 
 class ResourceStagingTests(unittest.TestCase):
+    def test_external_dlc_updates_even_when_size_and_mtime_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            ios, romfs, shader, aoc = [root / name for name in ('xcode', 'romfs', 'gl', 'aoc')]
+            for folder in (ios / 'Gen', romfs, shader, aoc): folder.mkdir(parents=True)
+            (ios / 'Gen/dm.xcconfig').touch()
+            (romfs / 'marker').touch()
+            (shader / 'k.metallib').touch()
+            image = aoc / '1.img'; image.write_bytes(b'original')
+            retired = aoc / '2.img'; retired.write_bytes(b'remove')
+            app = root / 'products/Game.app'
+            environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent),
+                               UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')
+
+            def stage(source):
+                argv = ['gen_resources.py', str(ios), str(romfs), 'marker', str(shader), 'gl', source, str(root / 'dd'), 'unused']
+                with patch.object(sys, 'argv', argv), patch.dict(os.environ, {'DM_RESOURCE_AOC_CHECKSUM': 'YES'}):
+                    gen_resources.main()
+                result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')],
+                                        env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            stage(str(aoc))
+            self.assertEqual((app / 'aoc/1.img').read_bytes(), b'original')
+            self.assertTrue((app / 'aoc/2.img').is_file())
+            previous = image.stat()
+            image.write_bytes(b'replaced')
+            os.utime(image, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            retired.unlink()
+            stage(str(aoc))
+            self.assertEqual((app / 'aoc/1.img').read_bytes(), b'replaced')
+            self.assertFalse((app / 'aoc/2.img').exists())
+            stage('')
+            self.assertFalse((app / 'aoc').exists())
+
     def test_nvn_vulkan_gl_and_incremental_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve() / "Game's $ literal `ticks`"

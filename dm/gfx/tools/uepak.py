@@ -178,11 +178,11 @@ def frozen_index(f, ver):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if ver in (4, 11) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c or (ver == 9) != (back == 0xcd): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if ver in (4, 11, 12) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c or (ver == 9) != (back == 0xcd): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
     if ver == 4:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver not in (8, 9, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    elif ver not in (8, 9, 11, 12): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))}, 11 and 12 are read')
     else:
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
@@ -569,23 +569,39 @@ def io_library_name(toc, i, names):
         if city64(n[len('ShaderArchive-'):].lower().encode('utf-16-le')).to_bytes(8, 'little') == h: return n
     return f'ShaderArchive-IoStore-{h.hex()}'
 
+def _io_library_tables(r: R, hash_size: int):
+    maph = r.raw(hash_size * r.take('<I'))
+    nsh = r.take('<I'); shh = r.raw(hash_size * nsh)
+    gids = [r.raw(12) for _ in range(cast(int, r.take('<I')))]
+    maps = [r.take('<II') for _ in range(cast(int, r.take('<I')))]
+    n = r.take('<I'); ents = r.array('Q', n)
+    groups = [r.take('<IIII') for _ in range(cast(int, r.take('<I')))]
+    idx = r.array('I', r.take('<I'))
+    if r.o != len(r.b) or n != nsh or len(gids) != len(groups): raise ValueError(f'{r.what} does not parse with {hash_size}-byte hashes')
+    return maph, shh, gids, maps, ents, groups, idx
+
+def _widen_io_hashes(hashes):
+    """Append 12 zero bytes to each xxHash64 for the version 2 archive."""
+    return b''.join(hashes[k:k + 8] + bytes(12) for k in range(0, len(hashes), 8))
+
 def io_archive(toc, i, decode, chunk=None):
-    """An IoStore shader library (Unreal Engine 5: FIoStoreShaderCodeArchive) as a version 2 shader code archive with every shader decoded, the form the shader tools read.
-    The library chunk: u32 version (1), shader map hashes (20 bytes each), shader hashes (20 each), the shader groups' chunk IDs (12 each), shader map entries {u32 first index, u32 shader count},
+    """An IoStore shader library (FIoStoreShaderCodeArchive) as a version 2 shader code archive with every shader decoded, the form the shader tools read.
+    The library chunk: u32 version (1), shader map hashes, shader hashes (20-byte SHA-1 in FINAL FANTASY RESONANCE, 8-byte xxHash64 in Godzilla), the shader groups' chunk IDs (12 each),
+    shader map entries {u32 first index, u32 shader count},
     shader entries (u64: frequency in bits 0-3, group in 4-33, offset in the group's decoded bytes from bit 34), group entries {u32 first index, u32 shader count, u32 raw size, u32 stored size},
     shader indices (u32): each a u32 count and its elements. Each group is one ShaderCode chunk holding its shaders end to end, Oodle-compressed as a whole when its stored size is below its raw
     size (FINAL FANTASY RESONANCE: 5,919 groups of 74,244 shaders); a shader runs to the next shader's offset in its group, or to the group's end. chunk(chunk ID) → (container, index) looks a
     group up in every container under the RomFS: a patch container's library lists the groups it did not change from the base container's"""
     r = R(toc.read(i, decode), what=f'{toc.path}: shader library chunk {i}')
     if r.take('<I') != 1: raise ValueError(f'{toc.path}: shader library chunk {i} is not version 1')
-    maph = r.raw(20 * r.take('<I')); nsh = r.take('<I'); shh = r.raw(20 * nsh)
-    gids = [r.raw(12) for _ in range(r.take('<I'))]
-    maps = [r.take('<II') for _ in range(r.take('<I'))]
-    n = r.take('<I'); ents = r.array('Q', n)
-    groups = [r.take('<IIII') for _ in range(r.take('<I'))]
-    idx = r.array('I', r.take('<I'))
-    if r.o != len(r.b) or n != nsh or len(gids) != len(groups): raise ValueError(f'{toc.path}: shader library chunk {i} does not parse')
-    code = [None] * n
+    try:
+        maph, shh, gids, maps, ents, groups, idx = _io_library_tables(r, 20)
+    except ValueError:
+        r.o = 4   # The version is shared by both layouts.
+        maph, shh, gids, maps, ents, groups, idx = _io_library_tables(r, 8)
+        maph, shh = _widen_io_hashes(maph), _widen_io_hashes(shh)
+    n = len(ents)
+    code: list[bytes | None] = [None] * n
     for g, (gid, (first, cnt, raw, stored)) in enumerate(zip(gids, groups)):
         owner = chunk(gid) if chunk else (toc, toc.index.get(gid))
         if not owner or owner[1] is None: raise ValueError(f'{toc.path}: shader group {g} ({gid.hex()}) is in no container under the RomFS')
@@ -597,12 +613,13 @@ def io_archive(toc, i, decode, chunk=None):
             if (ents[s] >> 4) & 0x3FFFFFFF != g: raise ValueError(f'{toc.path}: shader {s} is listed in group {g} but names another')
             code[s] = d[at:nxt]
     if any(c is None for c in code): raise ValueError(f'{toc.path}: {sum(c is None for c in code)} shaders in no group')
+    shaders = cast(list[bytes], code)
     out, off = bytearray(struct.pack('<II', ARCHIVE_VERSION, len(maph) // 20) + maph + struct.pack('<I', n) + shh + struct.pack('<I', len(maps))), 0
     for a, c in maps: out += struct.pack('<IIII', a, c, 0, 0)
     out += struct.pack('<I', n)
-    for e, c in zip(ents, code): out += struct.pack('<QIIB', off, len(c), len(c), e & 0xF); off += len(c)
+    for e, c in zip(ents, shaders): out += struct.pack('<QIIB', off, len(c), len(c), e & 0xF); off += len(c)
     out += struct.pack('<I', 0) + struct.pack(f'<I{len(idx)}I', len(idx), *idx)
-    return bytes(out) + b''.join(code)
+    return bytes(out) + b''.join(shaders)
 
 def mount_order(path):
     """A container's place in the mount stack: the game's container first, then the numbered patch chunks in order. A chunk ID that two containers both have resolves to the later container, as in
@@ -754,18 +771,39 @@ def finish(work, out):
         tmp = os.path.join(out, x['name'] + '.partial'); open(tmp, 'wb').write(decoded_archive(src, raws)); os.replace(tmp, os.path.join(out, x['name']))
     return [x['name'] for x in meta['archives']]
 
+CTL_MAGIC = b'\x34\x12\x76\x98'
+CTL_NVN2 = CTL_MAGIC + b'\xc9\0\0\0'
+
+def _maxwell_sections(s, k, control_size=None):
+    if k < 8 or k + 0x708 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
+    if control_size is not None and nctl != control_size: return None
+    c = k - 4 - ncode
+    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
+    return s[k:k + nctl], s[c:c + ncode]
+
 def lslg(s):
     """A decoded Switch shader (LSLG): 'LSLG', a stage tag (SV vertex, SP pixel, SC compute, ...), a header with the shader's source name, then u32 code length, the code area,
     u32 control length and the control section (0x880 bytes), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
     if s[:4] != b'LSLG': return None
-    k = s.find(b'\x34\x12\x76\x98')
-    if k < 8 or k + 0x708 > len(s): return None
-    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
-    c = k - 4 - ncode
-    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
-    return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+    sections = _maxwell_sections(s, s.find(CTL_MAGIC))
+    if sections is None: return None
+    return s[4:6].decode('latin1'), *sections
 
-CTL_NVN2 = b'\x34\x12\x76\x98\xc9\0\0\0'
+def raw_record(s):
+    """A decoded Switch shader in the untagged layout (Godzilla's Unreal 4.27 IoStore libraries). Code and control use the same length fields as LSLG, with 0x880 control bytes before the tail.
+    The stage comes from the archive's frequency. → (control section, code area), or None without a unique valid layout."""
+    if s[:4] == b'LSLG': return None
+    found = None
+    for marker in re.finditer(CTL_MAGIC, s):
+        k = marker.start()
+        if s[k:k + 8] == CTL_NVN2: continue
+        sections = _maxwell_sections(s, k, control_size=0x880)
+        if sections is None: continue
+        if found is not None: return None
+        found = sections
+    return found
+
 def sage_record(s):
     """A decoded Switch 2 shader (Unreal Engine 5.4's SP_GLSL_SAGE, Yoshi and the Mysterious Book): a 0x3e-byte header with no magic, u32 name length, the name ("Global/<type>/0:/Engine/Private/<file>.usf|<entry>"),
     u32 code length, the code area (Ampere), u32 control length, the control section (an NVN2 one, version 0xc9) and a tail of 12 bytes. → (name, control section, code area), or None if the layout differs"""

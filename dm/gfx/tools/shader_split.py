@@ -51,6 +51,7 @@
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
+#   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -58,8 +59,8 @@
 #   (SecredUber's 16600 stage shaders have only 3079 distinct control sections, with 6367 cases of same control, different code), so hashing the control alone picks the wrong library.
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
-#   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
+#   map rows have the same columns as D2R's shader_map.tsv (column 5 names the source chosen for the key); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated> [<play capture file list, JSON>]]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
@@ -257,6 +258,47 @@ def shn_shaders(d, label):
                 why = check(label, st, ctl, code) if st else 'unknown shader stage'
                 if why: red(f'{label} SHDROUNC variant {v} slot {slot}: {why}')
                 out.append((f'{label}#SHN@{h:#x}#var{v}', st, ctl, code))
+    return out
+
+def nxsd_shaders(d, label):
+    """NXSD v0x100, from ralph303's reader in issue #743: 24-byte descriptors reference 0x880-byte controls and variable-sized code areas in separate regions."""
+    where = f'{label} NXSD'
+    if len(d) < 0x40: red(f'{where}: truncated header')
+    version, size, code32, _, count, ctl_bytes, code_bytes = field(d, '<7I', 4, where)
+    table, ctl_start, code_start = field(d, '<3Q', 0x28, where)
+    if version != 0x100: red(f'{where}: unsupported version {version:#x}')
+    if size != len(d) or code32 != code_start: red(f'{where}: inconsistent file size or code offsets')
+    if not count or ctl_bytes != count * 0x880: red(f'{where}: invalid control count or stride')
+    if table < 0x40 or table + count * 0x18 != ctl_start: red(f'{where}: invalid descriptor table')
+    if ctl_start + ctl_bytes != code_start or code_start + code_bytes != len(d): red(f'{where}: invalid control or code region')
+    controls, ranges = set(), []
+    for i in range(count):
+        entry = f'{where} entry {i}'
+        ctl_rel, _, code_rel, _, _, _ = field(d, '<6I', table + i * 0x18, entry)
+        if ctl_rel % 0x880 or ctl_rel + 0x880 > ctl_bytes or ctl_rel in controls: red(f'{entry}: invalid or duplicate control offset')
+        controls.add(ctl_rel)
+        ctl_at = ctl_start + ctl_rel
+        ncode = field(d, '<I', ctl_at + 0x704, entry)[0]
+        code_end = code_rel + ncode
+        if code_end > code_bytes: red(f'{entry}: code section lies outside the code region')
+        ranges.append((code_rel, code_end, ctl_at))
+    # Validate coverage before copying code: overlapping descriptors can reference the same bytes repeatedly.
+    cursor = 0
+    for start, end, _ in sorted(ranges):
+        if start != cursor: red(f'{where}: code sections overlap or have gaps')
+        cursor = end
+    if cursor != code_bytes: red(f'{where}: code sections do not cover the code region')
+    out = []
+    for i, (start, end, ctl_at) in enumerate(ranges):
+        entry = f'{where} entry {i}'
+        ctl = span(d, ctl_at, 0x880, entry)
+        code = span(d, code_start + start, end - start, entry)
+        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
+        if not st: red(f'{entry}: unknown shader stage')
+        if len(code) < (0x30 if st == 'cs' else 0x80): red(f'{entry}: truncated code header or SPH')
+        why = check(entry, st, ctl, code)
+        if why: red(f'{entry}: {why}')
+        out.append((f'{label}#NXSD@{i}', st, ctl, code))
     return out
 
 def bahs_shaders(d, label):
@@ -585,6 +627,52 @@ def snowdrop_wrapped(d, label):
         yield h, pos - len(dec.unused_data), b''.join(parts)
 
 
+def snowdrop_objects(raw, where):
+    """The shader objects of one decoded Snowdrop cache record: each GLSLC control section sits immediately before its code area; control +0x20 and +0x704 give their lengths"""
+    out = []
+    for cm in re.finditer(re.escape(CTL_MAGIC), raw):
+        c = cm.start()
+        if c + 0x708 > len(raw): continue
+        nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
+        if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
+        ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
+        st = glslc_stage(ctl, code)
+        if st and not check(where, st, ctl, code): out.append((f'{where}:{c:#x}', st, ctl, code))
+    return out
+
+
+SNOWDROP_CACHE = b'\xd4\x00\xcd\xab'   # 0xabcd00d4: the decoded head of a bare cache record (.mcache), then its kind, 0 and twice the length of what follows its 20-byte header
+ZLIB_HEADERS = re.compile(b'|'.join(re.escape(bytes((cmf, flg))) for cmf in range(8, 0x79, 16)
+                                   for flg in range(256) if not flg & 32 and (cmf * 256 + flg) % 31 == 0))
+
+
+def snowdrop_zlib(d, label):
+    """Older SDF data slices (South Park: The Fractured But Whole, SDF version 22) store each shader cache file (camel/shadercache/nx/*.mcache) as a bare zlib stream,
+    without the 20-byte c5 / c6 record header: the data slice holds only the stream, at the offset its table of contents gives. Its decoded head is a 0xabcd00d4 record, and the shader objects
+    inside have the same layout as in the c5 / c6 records. Find each stream by its zlib header (CMF / FLG check) and a peek at the first decoded bytes, then decode it in full: the
+    base game's slice sdf-A-0200 holds 1,994 of them, matching the game's own _DataPartList.txt. A file over 64 KB is a run of 64 KB streams, decoded one after another up to the length in its head. A cheap peek rejects the other assets; bytes inside a decoded record are skipped by position"""
+    out, mv, end = [], memoryview(d), 0
+    for m in ZLIB_HEADERS.finditer(d):
+        h = m.start()
+        if h < end or h + 26 > len(d): continue
+        dec = zlib.decompressobj()
+        try: head = dec.decompress(mv[h:h + 256], 20)
+        except zlib.error: continue
+        if len(head) < 20 or head[:4] != SNOWDROP_CACHE or head[8:12] != bytes(4) or head[12:16] != head[16:20]: continue   # +4: the record's kind (0x13c, 0x65, ...)
+        nraw = struct.unpack_from('<I', head, 12)[0] + 20   # the length after the 20-byte header
+        parts, got, pos = [], 0, h
+        while got < nraw:   # a file over 64 KB is stored as consecutive zlib streams of 64 KB each (the list's Block column)
+            size = min(nraw - got, 0x10000)
+            dec, lim = zlib.decompressobj(), min(pos + size + 0x500, len(d))
+            try: part = dec.decompress(mv[pos:lim], size + 1)
+            except zlib.error as e: red(f'{label} Snowdrop zlib record @{h:#x}, block @{pos:#x}: {e}')
+            if len(part) != size or not dec.eof: red(f'{label} Snowdrop zlib record @{h:#x}: block @{pos:#x} did not finish at {size} raw bytes')
+            parts.append(part); got += size; pos = lim - len(dec.unused_data)
+        end = pos
+        out += snowdrop_objects(b''.join(parts), f'{label}#SDFZLIB@{h:#x}')
+    return out
+
+
 def snowdrop_shaders(d, label, wrapped=True):
     """Snowdrop's BERG data slices (SDF version 22): compressed shader records have a 20-byte header {0xabcd00c5 / 0xabcd00c6, flags, 0, raw length, stored length}, then zlib / zstd data.
     Kingdom Battle uses c5 with zlib (0x838-byte controls, including headerless compute), sometimes inside another zstd chunk; Sparks of Hope uses c6 with zstd. Their shader section layout is the same.
@@ -593,7 +681,7 @@ def snowdrop_shaders(d, label, wrapped=True):
     uncompressed data without this header. Some cache records are wrapped in zstd chunks; only decoded frames starting with the cache header are shader assets. Shader programs hold one stage; pairs are selected at draw time.
     Scan by the record header and peek at decoded chunk headers, not by slice names: compressed bytes can contain a coincidental frame header, which is not another asset."""
     chunks = list(snowdrop_wrapped(d, label)) if wrapped else []
-    out = []; ci = 0
+    out = [] if not wrapped else snowdrop_zlib(d, label); ci = 0
     for m in re.finditer(SNOWDROP_RECORD, d):
         h = m.start()
         while ci < len(chunks) and h >= chunks[ci][1]: ci += 1
@@ -608,14 +696,7 @@ def snowdrop_shaders(d, label, wrapped=True):
         stored = d[h + 20:h + 20 + nstored]
         raw = zstd_mod().decompress(stored) if zstd else zlib.decompress(stored)
         if len(raw) != nraw: red(f'{label} Snowdrop record @{h:#x}: expected {nraw} raw bytes, got {len(raw)}')
-        for cm in re.finditer(re.escape(CTL_MAGIC), raw):
-            c = cm.start()
-            if c + 0x708 > len(raw): continue
-            nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
-            if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
-            ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
-            st = glslc_stage(ctl, code)
-            if st and not check(label, st, ctl, code): out.append((f'{label}#SNOWDROP@{h:#x}:{c:#x}', st, ctl, code))
+        out += snowdrop_objects(raw, f'{label}#SNOWDROP@{h:#x}')
     for h, _, raw in chunks:
         out += snowdrop_shaders(raw, f'{label}#SDFZSTD@{h:#x}', wrapped=False)
     return out
@@ -3739,21 +3820,32 @@ def scan_blob(d, label, out, depth=0, left=None):
     if NEEDLE in d: out.extend(needle_shaders(d, label))
     if SUMO_NX in d or NVNSH in d: out.extend(sumo_shaders(d, label))
 
-def merge_keys(results):
-    """The shaders of every scanned file, one row per key: (where, stage, control, code), the pairs, and the rows per source group. A key found more than once keeps its first copy,
-    except that the game's own copy (base or update) takes the place of an add-on's (/aoc/<index>/): the game's rows are then the same with or without any DLC, so a registered build
-    packed with another DLC set changes only the DLC rows (build_ipa_from_nsp.py dlc_only_shader_change). PRAGMATA's re_dlc_000.pak holds 45 of the game's shaders, and with the DLC
-    installed the path order (aoc/ before re_chunk_000.pak) gave them to the DLC, so a profile split with it did not build without it (issue #2439)"""
-    keys, pairs, per_src = {}, set(), collections.Counter()
-    for rel, uniq, pr, _ in results:
+def merge_keys(results, registered: dict[tuple[str, str], str] | None = None):
+    """Merge checked copies, keeping a verified registered source when available.
+
+    The game's copy takes precedence over DLC, and play captures cannot take an existing key.
+    Otherwise keep the first copy unless the registered key, stage and source occur in the scan.
+    """
+    keys, preferred, pairs = {}, {}, set()
+    for _, uniq, pr, _ in results:
         pairs |= pr
         for key, v in uniq.items():
-            if key in keys:
-                old = keys[key]
-                if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
-                if old[0].startswith('/aoc/') and not v[0].startswith('/aoc/'): per_src[group(old[0])] -= 1; keys[key] = v; per_src[group(v[0])] += 1
+            if key not in keys:
+                keys[key] = v
                 continue
-            keys[key] = v; per_src[group(v[0])] += 1
+            old = keys[key]
+            if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
+            if old[0].startswith('/aoc/') and not v[0].startswith(('/aoc/', '/glslc_play/')):
+                keys[key] = v
+            elif registered and v[0] != old[0] and registered.get((key, STAGE_NAME[v[1]])) == v[0]:
+                preferred.setdefault(key, v)
+    # Choose after checking all copies and resolving ownership, so a preferred
+    # occurrence cannot mask a conflicting copy or override game/DLC precedence.
+    for key, v in preferred.items():
+        old = keys[key]
+        if v[1] == old[1] and not v[0].startswith('/glslc_play/') and v[0].startswith('/aoc/') == old[0].startswith('/aoc/'):
+            keys[key] = v
+    per_src = collections.Counter(group(shader[0]) for shader in keys.values())
     return keys, pairs, per_src
 
 def group(label):
@@ -3775,7 +3867,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -3943,26 +4035,29 @@ def ue_shaders(d, label):
     on the Mac with the game's own Oodle, uepak.py): each shader is an LSLG record holding one stage's code area and control section (uepak.lslg); the stage is the record's tag (SV vertex,
     SP pixel, SC compute), checked against the archive entry's frequency. The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs).
     Unreal Engine 5.6 for the Switch 2 (Orbitals: SF_GLSL_SWITCH2 / SP_GLSL_SWITCH2) keeps NVN2 records with no LSLG in the archives, as 5.4's cooked packages do (uepak.sage_record): the stage is
-    then the record's own (nvn2_stage), checked against the frequency in Unreal Engine 5's numbering, where 1 and 2 are mesh and amplification (task) instead of hull and domain"""
+    then the record's own (nvn2_stage), checked against the frequency in Unreal Engine 5's numbering, where 1 and 2 are mesh and amplification (task) instead of hull and domain.
+    Untagged Switch records (uepak.raw_record) take their stage directly from the archive's frequency using the Unreal 4 numbering."""
     a, out = uepak.archive(d), []
     for i, (off, size, raw, fr) in enumerate(a['shaders']):
         if size != raw: red(f'{label}: shader {i} is still compressed (an archive the NSP script has not decoded)')
         s = d[a['code'] + off:a['code'] + off + size]
         rec = uepak.lslg(s)
-        if not rec:
+        if rec:
+            tag, ctl, code = rec; st = UE_TAG.get(tag)
+            if not st or uepak.FREQ.get(fr) != st: red(f'{label}: shader {i} has tag {tag} but frequency {fr}')
+        else:
             sage = uepak.sage_record(s)
-            if not sage: red(f'{label}: shader {i} is neither an LSLG record nor an NVN2 one')
-            _, ctl, code = sage; st = nvn2_stage(ctl, code)
-            if st not in {0: ('vs',), 1: ('ms',), 2: ('ts',), 3: ('ps',), 4: ('gs',), 5: ('cs',)}.get(fr, ()): red(f'{label}: shader {i} is a {st} shader but has frequency {fr}')
-            why = check(label, st, ctl, code)
-            if why: red(f'{label}: shader {i} ({st}): {why}')
-            out.append((f'{label}#UE{i}', st, bytes(ctl), bytes(code)))
-            continue
-        tag, ctl, code = rec; st = UE_TAG.get(tag)
-        if not st or uepak.FREQ.get(fr) != st: red(f'{label}: shader {i} has tag {tag} but frequency {fr}')
+            if sage:
+                _, ctl, code = sage; st = nvn2_stage(ctl, code)
+                if st not in {0: ('vs',), 1: ('ms',), 2: ('ts',), 3: ('ps',), 4: ('gs',), 5: ('cs',)}.get(fr, ()): red(f'{label}: shader {i} is a {st} shader but has frequency {fr}')
+            else:
+                sections = uepak.raw_record(s)
+                if sections is None: red(f'{label}: shader {i} has no recognized Unreal shader record layout')
+                ctl, code = sections; st = uepak.FREQ.get(fr)
+                if not st: red(f'{label}: shader {i} has frequency {fr}')
         why = check(label, st, ctl, code)
         if why: red(f'{label}: shader {i} ({st}): {why}')
-        out.append((f'{label}#UE{i}', st, ctl, code))
+        out.append((f'{label}#UE{i}', st, bytes(ctl), bytes(code)))
     return out
 
 def var_pairs(found):
@@ -4046,8 +4141,13 @@ def fzlc_shaders(path, label):
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
+    with open(path, 'rb') as f:
+        head = f.read(16)
+        if head[:4] == b'NXSD':
+            f.seek(0)
+            found = nxsd_shaders(f.read(), '/' + rel)
+            return rel, uniq_keys(found), var_pairs(found), {}
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
-    with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
     if len(args) > 2 and args[2][0] == EA_ARCHIVE:
         from easf import reader
@@ -4256,13 +4356,57 @@ def nxcx_shaders(f, label):
     with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         return sead_prim_shaders(d, label) or glslc_shaders(d, label, need=False, offsets=offsets)
 
-def uniq_keys(found):
-    uniq = {}
-    for where, st, ctl, code in found:
+def read_registered_sources(path: str) -> dict[tuple[str, str], str]:
+    if not path: return {}
+    sources = {}
+    try:
+        with open(path, encoding='utf-8') as table:
+            for line in table:
+                fields = line.rstrip('\n').split('\t', 4)
+                if len(fields) == 5:
+                    _, _, stage, key, source = fields
+                    sources[key, stage] = source
+    except FileNotFoundError: pass   # the packer checks that registered tables exist
+    return sources
+
+def uniq_keys(found, registered: dict[tuple[str, str], str] | None = None):
+    """Keep the first checked copy, or an equivalent occurrence from the registered map.
+
+    Source labels order package records. A registered label can be kept only
+    if that exact key, stage and source occur in this scan. Check every copy
+    against the first before selecting one for the package.
+    """
+    uniq, preferred = {}, {}
+    for shader in found:
+        where, st, ctl, code = shader
         key = skey(ctl, code)
-        if key in uniq and not same_shader(uniq[key][2:4], (ctl, code)): red(f'key {key} is the same but the control section or code area differs ({where})')
-        uniq.setdefault(key, (where, st, ctl, code))
+        first = uniq.setdefault(key, shader)
+        if first is shader: continue
+        if not same_shader(first[2:4], (ctl, code)): red(f'key {key} is the same but the control section or code area differs ({where})')
+        if registered and st == first[1] and where != first[0] and registered.get((key, STAGE_NAME[st])) == where:
+            preferred.setdefault(key, shader)
+    uniq.update(preferred)
     return uniq
+
+def glslc_play(manifest):
+    """Read whole outputs of the existing host capture. Keep pairs within each file even when just one of their stages needs a new map row."""
+    with open(manifest, encoding='utf-8') as f: paths = json.load(f)
+    played, pairs = [], set()
+    for path in paths:
+        label = f'/glslc_play/{os.path.basename(path)}'
+        try:
+            with open(path, 'rb') as f: data = f.read()
+            whole = data.startswith(GLSLC_MAGIC) and glslc_layout(data, 0)[0] == len(data)
+            found = glslc_shaders(data, label, need=False, offsets=(0,)) if whole else []
+        except (OSError, struct.error) as e:
+            print(f'[RED] {path}: could not read GLSLC capture: {e}', flush=True)
+            continue
+        if not found:
+            print(f'[RED] {path}: no complete GLSLC shader output', flush=True)
+            continue
+        played.extend(found)
+        pairs.update(var_pairs(found))
+    return uniq_keys(played), pairs
 
 def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueError) on a damaged file
     import nso
@@ -4329,6 +4473,7 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
+    registered = read_registered_sources(os.environ.get('DM_SPLIT_REGISTERED_MAP', ''))
     files, results, common = [], [], None
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
@@ -4360,7 +4505,7 @@ def main():
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
         if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
-        results.append(('main', uniq_keys(found), var_pairs(found), {}))
+        results.append(('main', uniq_keys(found, registered), var_pairs(found), {}))
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
@@ -4392,7 +4537,12 @@ def main():
         results = [r for r in results if r[3] != 'defer'] + again
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
-    keys, pairs, per_src = merge_keys(results)
+    play_pairs = set()
+    if len(sys.argv) > 9:
+        played, play_pairs = glslc_play(sys.argv[9])
+        results.append(('glslc_play', played, set(), {}))   # game files, boot captures and DLC retain ownership of any keys they share with play captures
+    keys, pairs, per_src = merge_keys(results, registered)
+    pairs.update(pair for pair in play_pairs if any(keys[k][0].startswith('/glslc_play/') for k in pair[:2]))
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
@@ -4427,7 +4577,7 @@ def main():
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)),
                                             ('Telltale effect packs', any('#TTFX@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
-        f.write('# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
+        f.write('# column 5 names the chosen source of each key, a copy in the game before one in an add-on; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')
     # Hand-written facts the machine code cannot give (the profile's shader_facts_manual.tsv, same row format) are merged over the generated ones, so the table stays reproducible

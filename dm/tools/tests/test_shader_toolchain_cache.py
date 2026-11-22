@@ -190,7 +190,7 @@ class ShaderCache(unittest.TestCase):
         # Execute the real selection and cleanup block, stopping before temporary jobs or tools start.
         start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'keys' for t in n.targets))
         end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.FunctionDef) and n.name == 'sweep_work')   # not the sweep of the working folders
-        self.ns.update(want={vertex}, loc=locations, PAIRS=pairs, INPUTS='inputs')
+        self.ns.update(want={vertex}, loc=locations, PAIRS=pairs, INPUTS='inputs', SOURCE_ONLY=False)
         exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         self.assertEqual(self.ns['want'], {vertex, pixel})
         self.assertFalse((out / (vertex + '_b.metal')).exists())
@@ -333,7 +333,7 @@ class TargetSelection(unittest.TestCase):
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'IOSOUT' for t in n.targets))
         end = next(i for i, n in enumerate(tree.body) if i > start and isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == 'IOSOUT')
-        ns = dict(os=os, sys=sys)
+        ns = dict(os=os, sys=sys, SOURCE_ONLY=False)
         with mock.patch.dict(os.environ, env, clear=True):
             exec(compile(ast.Module(body=tree.body[start:end], type_ignores=[]), '<target selection>', 'exec'), ns)
         return ns['TARGETS'], ns['IOSOUT']

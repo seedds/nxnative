@@ -89,6 +89,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_friends`, then `dm/host/tests/build/t_friends`, resolves both overloads by their actual registered names and checks the failure result and untouched output for both local flags, including guest bool arguments with upper bits set.
 - **Found on:** [Super Nintendo Entertainment System – Nintendo Classics](../../dm/games/01008D300C50C000/README.md) (`01008D300C50C000`, 6.0.0, SDK 20.5.21, `main+0xc608`). [PR #2162](https://github.com/seedds/nxnative/pull/2162) reports the original abort and a Mac boot past it with separate mission-events and profile changes.
 
+### Friend-ID lists and network error Results on SDK 7
+
+- **Symptom:** `friends::GetFriendList` or `err::ShowNetworkServiceError` enters the SDK's service path despite the host's offline replacements.
+- **Cause:** the account-ID list overloads (with and without `Uid`) and the error overload taking `nn::Result` were not registered. The existing hooks cover `Friend` objects and an `ErrorCode` pair, which have different exported names and argument layouts.
+- **Fix:** both account-ID list overloads follow the host's offline policy. They return `RES_FAIL`, set the count to zero, and leave the ID array untouched. The Result overload logs the module and description and sends the usual applet enter and leave notifications.
+- **Found on:** Super Kirby Clash 1.0.1, SDK 7.4.0, in [PikaMan80's patch for issue #987](https://github.com/seedds/nxnative/issues/987).
+
 ### SDK 6's `account::OpenPreselectedUser` returns a Result
 
 - **Symptom:** the first loading screen never ends; `DM_FS=1` shows `save:/system` "not found" and no `fs mount save`.
@@ -271,7 +278,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** a save transaction clones the committed folder into its work folder with `clonefile` and publishes a commit with `renamex_np(RENAME_SWAP)`. Both need APFS: on HFS+ and exFAT disk images both fail with `ENOTSUP` (45), and neither format advertises `VOL_CAP_INT_CLONE` or `VOL_CAP_INT_RENAME_SWAP`, so copying the files instead of cloning them would still leave no atomic commit. The host already failed safely (the committed save mounted read-only, the iOS front end told); the line did not say why. The apps' own save folders are on APFS (the Mac app's `~/Library/Application Support/nxnative/<title ID>/save`, the iOS app's `Documents/save`); only a `DM_SAVE` set by hand or a development run's work folder can be elsewhere.
 - **Fix:** `hle_fs.c` names the cause when `clonefile` returns `ENOTSUP`: set `DM_SAVE` to a folder on an APFS volume (the RomFS and shader libraries may stay on the other drive). Recursive deletes (`rm_tree`, `CleanDirectoryRecursively`) now take each entry's type from `lstat`, not `d_type` (which a filesystem may report as unknown), unlink a symlink without entering it, and refuse a symlink given as the tree itself; a commit whose leftover `.new` cannot be cleared is refused with its own red line instead of failing in the clone.
 - **Check:** `dm/host/tests/t_fs.c` section 8 makes `clonefile` fail with `ENOTSUP` (read-only mount, one front-end notice, committed save unchanged, writable again once cloning works) and deletes save folders holding a symlink to a folder outside the save (the target keeps its files).
-- **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table): a development Mac run with its save folder on a Journaled HFS+ external drive.
+- **Found on:** [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) 1.05 during a Mac run with its save folder on a Journaled HFS+ external drive. [PR #662](https://github.com/seedds/nxnative/pull/662).
 
 ### Save data size queries
 
@@ -498,11 +505,12 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### A controller in a style the game does not support
 
-- **Symptom:** docked, the game opens the controller applet again every frame and never leaves the screen behind it. The log repeats `oe library applet: controller support`, `hid controller applet: 1 to 1 players wanted, 1 connected` and focus 2, then 1, thousands of times (7,162 in 3 minutes), after `hid supported controller styles 0x6`.
+- **Symptom:** docked, the game ignores keyboard input that works in handheld mode, or opens the controller applet again every frame. In the applet loop, the log repeats `oe library applet: controller support`, `hid controller applet: 1 to 1 players wanted, 1 connected` and focus 2, then 1, thousands of times (7,162 in 3 minutes), after `hid supported controller styles 0x6`.
 - **Cause:** the host showed every whole controller (the keyboard, a Pro-like pad, a Joy-Con pair the game supports no Joy-Con style for) as full-key on No1..No8, whatever styles the game supports. The hid service connects a controller only in a supported style, so a game may take any connected npad as one of its own. Nintendo Switch Sports Resort sets Handheld | JoyDual (0x6) for its Tennis lobby (`main+0xa9e940`); its player check (`main+0x58d0f0`) found no usable player 1 on a full-key No1, so its caller (`main+0x3f9d120`) opened `ShowControllerSupport` again, and the applet's answer (one player, No1) could not change that.
-- **Fix:** on No1..No8, a whole controller is shown as a JoyDual pair when the game supports JoyDual but not full-key (`pad_style`, `hle_hid.c`): JoyDual is the only other style with all its buttons and both sticks. Its JoyDual state, two six-axis sensors, type 5 vibration handles and the applet's selected npad follow; full-key handles taken earlier still reach its motors. A change of supported styles that changes an npad's style signals that npad's style update event. This holds in both modes: in handheld mode players 2..8 (No2..No8) are shown as JoyDual too, and only player 1's Handheld npad stays Handheld. A game that supports full-key, or neither style, is unchanged.
-- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536), on the Mac with the keyboard and `DM_KEYS`: after the fix the applet is not opened once in 220 s, and Play leads to its one-controller screen ("press the button") and into a doubles Tennis match at its serve prompt.
-- **Check:** `t_hid` (`t_unsupported_style`).
+- **Fix:** on No1..No8, `pad_style` (`hle_hid.c`) prefers FullKey, then JoyDual, then JoyRight or JoyLeft. JoyDual carries both sticks and all buttons. For one Joy-Con, `single_joy_fold` puts the more deflected stick on that side and maps the opposite half's buttons to the same positions on the chosen Joy-Con. The reported side has one sensor and one vibration handle. A cached FullKey vibration handle can still reach its exposed motor, as it can for a real Joy-Con. A change into or out of the single-Joy-Con mapping clears vibration on the affected pads before signalling their style events. The Handheld npad stays Handheld. If the game takes none of the four styles on No1..No8, the host keeps FullKey.
+- **Open:** the merged motion stream for a lone physical Joy-Con uses the sideways frame. An upright game can see that motion a quarter turn off. The docked keyboard test covers buttons and sticks.
+- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536), on the Mac with the keyboard and `DM_KEYS`: after the fix the applet is not opened once in 220 s, and Play leads to its one-controller screen ("press the button") and into a doubles Tennis match at its serve prompt. Pokémon: Let's Go, Eevee! (`0100187003A36000`, v131072, provisional profile) reports Handheld | JoyLeft | JoyRight | Palma (`0x5a`, `main+0x1400bc`). The PR author checked docked keyboard input on the Mac with the single-Joy-Con fallback.
+- **Check:** `t_hid` (`t_unsupported_style`, `t_single_joy_fallback`, `t_style_read_snapshot`).
 
 ### Live controller motion
 
@@ -622,6 +630,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_pad_hid_mac` drives the real discovery, value callbacks and handoff with fake IOKit devices and GameController controllers. It checks the mapped face button, triggers and right stick for the matching Xbox layout, dedicated triggers on a different layout with the same ID, and Nintendo's right-stick axes when report `0x3F` takes precedence. Unlisted virtual devices of all three trusted vendors and another vendor deliver button presses and releases through HID after the wait. Already listed and promptly published usable controllers stay with GameController. A matching controller without `extendedGamepad` cannot suppress HID or take it back, but a usable late controller does. Removal during the wait, the synthetic exclusion, physical-device trust with missing or false virtual flags, and the identical-pad and Nintendo-protocol cases are checked too.
 - **Open:** live Steam Link verification of the buttons and triggers is pending. The reporter's local Steam-specific repair restored input. The button map comes from one-at-a-time presses of a GameSir G8 through Steam Link on an iPhone, captured on the Mac, and `t_pad_hid` checks each. Both sticks worked in Donkey Kong Bananza with an earlier local version. Rumble and multiple remote players remain untested.
 - **Found on:** [Cult of the Lamb](../../dm/games/01002E7016C46000/README.md) 1.5.28 with four DLCs through Steam Link, built with engine `ccd834e0` (NX2Apple 1.4.0), reported in issue #2465.
+
+### A HORI Taiko Drum gets 8BitDo's button map
+
+- **Symptom:** on the Mac, a HORI Taiko Drum for Nintendo Switch (USB, `0f0d:00f0`, "Taiko Controller") is read as a raw HID pad, and the log says `buttons use 8BitDo's numbering`. Its buttons reach the game in the wrong places: A and R do nothing, Y acts as A, L as Y, ZL / ZR as L / R, and minus / plus as ZL / ZR.
+- **Cause:** GameController does not list the drum, so it reaches the raw HID fallback after the two-second wait. The fallback uses 8BitDo's D-input numbering by default. The drum uses HID usages 1 Y, 2 B, 3 A, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home and 14 Capture.
+- **Fix:** `pad_hid_layout_for` selects the Taiko Drum map for USB ID `0f0d:00f0`. The PS4-mode HORI Fighting Stick Alpha (`0f0d:011c`) also declares 14 button usages, so the count cannot identify the drum's map. Nintendo's report `0x3F` and the Xbox 360 layout take precedence. `DM_HID_MAP` still replaces button entries. [Fighting Stick descriptor capture](https://www.dreamcast-talk.com/forum/viewtopic.php?p=193790#p193790)
+- **Check:** `t_pad_hid` checks the drum's 14 usages and the layout selection. `t_pad_hid_mac` exercises discovery and value callbacks for the drum and a fixture based on the PS4-mode Fighting Stick descriptor. The reporter identified the drum in an IOKit probe and played Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, 6.2.0) with `DM_HID_MAP=Y=1,B=2,A=3,X=4,L=5,R=6,ZL=7,ZR=8,MINUS=9,PLUS=10,LS=11,RS=12`, which supplies the same map.
+- **Open:** a gameplay run with the physical drum and the revised host is pending.
+- **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, no profile in this repository) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
 
 ### A keyboard receiver that declares a gamepad takes player 1
 
@@ -841,9 +858,9 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** in fullscreen, the menu bar shows at the top of the game's screen whenever the game is the active app (a click on it, a controller in use), and goes away when another app on another screen is active. The system setting is "In Full Screen Only".
 - **Cause:** AppKit's default fullscreen presentation on the reported two-display setup showed the bar on the primary display when the game became active. AppKit's decision to reveal it on focus remains open.
-- **Fix:** PR #2850 works around the AppKit behavior by returning `FullScreen | HideDock | HideMenuBar` from `DmWinDelegate`. It applies at launch and when entering fullscreen later (⌃⌘F or the green button). It disables pointer access to the menu bar, including the Cheats menu. The author verified ⌘Q and ⌃⌘F with the bar hidden.
+- **Workaround tried and reverted:** [PR #2850](https://github.com/seedds/nxnative/pull/2850) (`18a96b32`) returned `FullScreen | HideDock | HideMenuBar` from `DmWinDelegate` (`front_mac.m`) for every game window. That stopped the focus reveal on the author's two-display setup, but on a single-display setup (M5 Max, macOS 27.2, external 4K screen, default menu bar setting) it made the menu bar completely unreachable from the top edge—blocking both app menus (Cheats, Window) and system controls (volume) without leaving fullscreen or switching Spaces. The override was reverted back to AppKit's default fullscreen auto-hide.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (M5, macOS 27.0.1, a 27-inch main screen and the built-in one); every game on the Mac (general).
-- **Open:** on an M4 Pro with one display (macOS 27.2.1), UnMetal logged `0x405` both as AppKit's proposal and as the explicit auto-hide return value (`FullScreen | AutoHideDock | AutoHideMenuBar`). The focus and Cheats comparison still needs the affected two-display setup.
+- **Open:** on an M4 Pro with one display (macOS 27.2.1), UnMetal logged `0x405` both as AppKit's proposal and as the explicit auto-hide return value (`FullScreen | AutoHideDock | AutoHideMenuBar`). The two-display comparison (`proposed` value, explicit auto-hide vs stock, and Cheats menu access) still needs the affected two-display setup before choosing a replacement fix.
 
 ### Mouse, keyboard and key code maps
 
@@ -1054,6 +1071,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_oe` calls both hooks without an SDK proxy and verifies that they produce no applet notifications or focus changes. The matching SDK instruction trace confirms the null interface and command 90; the rebuilt game passes startup on the Mac (identities and offsets are in its note).
 - **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), [PR #1696](https://github.com/seedds/nxnative/pull/1696). The IPC contract is documented in [Applet Manager services](https://switchbrew.org/wiki/Applet_Manager_services#EnableApplicationCrashReport).
 
+### `nn::oe::GetDisplayVersion` reads the exact NACP string
+
+- **Symptom:** saved games commit cleanly to disk, yet every slot in Entrance renders as an empty `START` tile; the game's version parser extracts `2` instead of `723` and fails its `>= 438` (`0x1b6`) savedata version filter.
+- **Cause:** Horizon's `nn::oe::GetDisplayVersion` returns the raw 16-byte `DisplayVersion` field from `control.nacp` (`+0x3060`), which in Fate/hollow ataraxia REMASTERED 1.0.2 is `"1.0.2 b723"`. Both the packing script (`re.search(r'display version (\S+)', ...)` and `nacp.version()`, which strips non-numeric suffixes for Apple's `CFBundleShortVersionString`) and `h_oe_DispVer` (which read only the profile's `DM_GAME_DISPLAY_VERSIONS` table instead of `control.nacp`) truncated `"1.0.2 b723"` to `"1.0.2"`. `smash::fw::frame::MainFrame::makeVersionString` turns runs of non-digits into `.` (`"1.0.2 b723"` → `"1.0.2.723"`), and `GameDataContext` / `FsnThumbnail::setHollowData` parse the integer after the last `.` (`723`, vs `2` when truncated).
+- **Fix:** `h_oe_DispVer` (`dm/host/hle_sdk16.c`) reads the 16-byte `DisplayVersion` directly from `control.nacp` (`+0x3060`) via `dm_control_read` (`dm/host/hle.h`, shared with `hle_fs.c`), falling back to `DM_GAME_DISPLAY_VERSIONS` / `"1.0.0"` only when no `control.nacp` is present (dumps / NUPs). `dm/tools/nacp.py` adds `display_version()` for the raw NACP string used in surveys and derived `build` rows (`scripts/build_ipa_from_nsp.py`), while `nacp.version()` / `bundle_version()` continues to format Apple's bundle version.
+- **Check:** `t_language` (`dm/host/tests/t_language.c`, under ASan+UBSan) checks `h_oe_DispVer` with `"1.0.2 b723"` beside `DM_ROMFS`, a 16-byte non-NUL field via `DM_CONTROL_NACP`, and missing-NACP fallbacks; `dm/tools/tests/test_nsp_alias.py` checks `derive_profile` vs `app_version_of` on `"1.0.2 b723"`. Probed live on Fate/hollow ataraxia REMASTERED 1.0.2 on Mac (`main+0x80ae2c` returns `"1.0.2 b723"`, `main+0xd2839c` stores `0x2d3` = 723 with zero patches).
+- **Found on:** [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md), [issue #2930](https://github.com/seedds/nxnative/issues/2930).
+
 ### The graphics scale does not follow the operation mode
 
 - **Symptom:** a Switch 2 game renders smaller docked than handheld, or smaller than console footage: Star Fox's scene was 768x432 docked (DLSS network resized to it at boot, its window 1920x1080) and 960x540 handheld; Ocarina of Time drew 2048x1152 docked, its 3D at no more than 1536x864; Donkey Kong Bananza's docked frame buffer was 2304x1296 on a 2880x1620 swap chain.
@@ -1254,6 +1279,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** play report calls met entering the save select (3D World); undefined `nn::ldn::` / `nn::socket::` imports with no hook, found from the import list before they were met (Big Brain Academy).
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
+
+### Play report upload status
+
+- **Symptom:** a won Chambara match ends in `nn::diag` abort Result `0xe15`, after `[RED] sf: the game connects to service prepo:u itself`.
+- **Cause:** the SDK's `nn::prepo::GetTransmissionStatus` opens `prepo:u` through `sm`. The host has no play report service process, and `sm` returns ResultNotRegistered.
+- **Fix:** `hle_offline.c` answers success with status 0 (idle). The offline host discards reports, so the upload queue is always empty.
+- **Found on:** Nintendo Switch Sports 1.5.0 (SDK 13.3.4), with a won match replayed after the fix in [PR #2908](https://github.com/seedds/nxnative/pull/2908).
 
 ### SDK 21 socket initialization and overloads
 
@@ -1589,6 +1621,13 @@ Most service calls can be found before they crash, before the first boot or the 
 ### `ro::ProtectRelro` runs natively
 
 - `nn::ro::ProtectRelro` (called from `main`'s DSO init), a new import of SDK 20, needs nothing: it runs natively on the host's no-op `SetMemoryPermission` / `SetMemoryAttribute`. Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### The SDK rejects a module that `svcQueryMemory` finds
+
+- **Symptom:** `Failed to get our const data section!` before `nnMain`. The SDK's `GetRequiredBufferSizeForGetAllModuleInfo` finds the game's code mapping but returns zero.
+- **Cause:** `nn::ro::GetModuleAddressRange` and `LookupModuleSymbol` by base consult the guest rtld lists. The host runs its own loader, so the SDK's automatic-load list is empty. The native range lookup rejects the game's code address, and the native symbol lookup returns `0xa16` for its own `nndetailRoGetRoDataStart` export.
+- **Fix:** answer both `nn::ro` lookups from the host's loaded modules. The module size ends at the 4 KiB-aligned MOD0 bss end, as rtld computes it. The symbol lookup takes the exact module base and searches that module. The SDK keeps its own module list and calls the game's exports for the exact read-only data range. See also [whole-process memory walks](memory.md#svcquerymemory-walks-the-whole-guest-process).
+- **Found on:** [Hitman Absolution, PR #3023](https://github.com/seedds/nxnative/pull/3023) (v131072, SDK 22.2.0). The native walk lists all four modules and both boundary exports resolve before `nnMain` on the Mac.
 
 ### Loading NROs with `ro::LoadModule`
 

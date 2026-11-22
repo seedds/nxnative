@@ -169,14 +169,15 @@ static int unit_channels(const aout *a, int route) { return a->sink_pcm || a->ch
 static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
     if (a->sink_pcm) {
         enum { BLOCK = 128 };
+        const unsigned channels = a->dev_ch == 6 ? 6 : 2;   // DeviceSink follows a stereo or 5.1 route
         int16_t scratch[BLOCK * DM_AUDIO_SINK_CHANNELS], *out = (int16_t *)dst;
-        uint64_t frames = bytes / (sizeof *out * (unsigned)a->dev_ch);
+        uint64_t frames = bytes / (sizeof *out * channels);
         while (frames) {
             unsigned n = frames < BLOCK ? (unsigned)frames : BLOCK;
             pull(a, (uint8_t *)scratch, (uint64_t)n * sizeof scratch[0] * DM_AUDIO_SINK_CHANNELS);
             for (unsigned i = 0; i < n; i++) {
-                const int16_t *src = scratch + i * DM_AUDIO_SINK_CHANNELS + (a->dev_ch == 6 ? 0 : 6);
-                for (int j = 0; j < a->dev_ch; j++) *out++ = src[j];
+                const int16_t *src = scratch + i * DM_AUDIO_SINK_CHANNELS + (channels == 6 ? 0 : 6);
+                for (unsigned j = 0; j < channels; j++) *out++ = src[j];
             }
             frames -= n;
         }

@@ -24,7 +24,7 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 
 ## Shaders
 
-- 11,059 shaders (`Nin_Ounce_NVN2` BNSH) in [`shader_map.tsv`](shader_map.tsv); a full Mac build takes about 9 minutes on the M6, 4:46 for a second one.
+- 11,057 shaders (`Nin_Ounce_NVN2` BNSH and BAHS) in [`shader_map.tsv`](shader_map.tsv). A full Mac build takes about 9 minutes on the M6 and 4:46 for a second one.
 - 6 are refused (4 task, 2 mesh shaders of the sea, agl `AnnaSea`): their task payloads (21-28 KB) are past Metal's 16 KB ([issue #1753](https://github.com/seedds/nxnative/issues/1753); FifteenPen's [PR #2264](https://github.com/seedds/nxnative/pull/2264) passes them through a device buffer). No draw has been seen to use them.
 - 612 pixel shaders read the fragment's shading-rate size; until it read 1 x 1 the sea and the avatars' hair and clothes were black ([The fragment's shading-rate size reads 1 x 1](../../../docs/reference/shaders.md#the-fragments-shading-rate-size-reads-1-x-1)).
 - [`pso_manifest.tsv`](pso_manifest.tsv) is this Mac's own list (3,474 shaders, 1,868 render, 41 compute and 22 task / mesh pipelines): a first start, the menus and a doubles match. The pull requests' lists were recorded by an older host: none of their render or mesh pipeline keys matches the current one's.
@@ -93,3 +93,5 @@ Raw-pointer discovery validation (2026-11-17, Apple M6, macOS 27.2): main `2925d
 - [Tests of one uniform word folded into switches](../../../docs/reference/shaders.md#tests-of-one-uniform-word-folded-into-switches) and [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive)
 - [A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data): its Mii heads come from the Switch 2's own archive, `0400000000000849`.
 - [An original Joy-Con's sensors are read by the host](../../../docs/reference/services.md#an-original-joy-cons-sensors-are-read-by-the-host)
+- The record-based BAHS split from PR #2943 drops two stray candidates in `agl_technique_pfx.sharcb` (`16d1e80284e796bd` at `0x1c78d4` and `1c90215ef8a46302` at `0x23a21c`). [BAHS record slots](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry)
+- The earlier change to select the first copy of a duplicate shader changes 22 BNSH source labels in `main` and updates the affected package indices. With both changes in the refreshed map, all four v65536 tables match the split. [Duplicate selection](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles) · [PR #3081](https://github.com/seedds/nxnative/pull/3081)

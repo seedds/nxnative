@@ -322,7 +322,8 @@ static void test_same_channel_route(void) {
     a.wd_t = deadline - WD_ROUTE_SETTLE_MS * 1000000ull;
     au_watchdog_output(&a, deadline - 1, WD_TICK_MS * 1000000ull);
     assert(a.backend == BK_AU && a.start_phase == AU_IDLE && atomic_load(&a.q_head) == 0);
-    int16_t samples[2];
+    assert(!a.sink_pcm && a.ch == 2 && a.dev_ch == 2);
+    int16_t samples[2] = {-1, -1};
     AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof samples, samples}}};
     au_render(&a, NULL, NULL, 0, 1, &bl);
     assert(samples[0] == 1234 && samples[1] == 1234);

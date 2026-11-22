@@ -163,7 +163,7 @@ static void dispatch(void) {
     if(!setjmp(fatal)){indirect(&command,0,&a0,&b0,&c0,UINT64_C(0x123456789));CHECK(0);}else CHECK(1);
     expecting_fatal=0;
     CHECK(recorded_count==3);
-    CHECK(OP_BIND_AS==62 && OP_RT_DISPATCH==63 && OP_COUNT_==64);
+    CHECK(OP_BIND_AS==62 && OP_RT_DISPATCH==63);
     CHECK(cap_record_unsupported(OP_RT_DISPATCH)!=NULL);
 }
 

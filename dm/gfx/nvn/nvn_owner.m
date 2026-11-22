@@ -165,7 +165,7 @@ static void alias_index(const alias_key *k, int add) {
         if (add) {
             if (v && i < v->n) continue;
             if (!v || v->n == v->cap) {
-                uint32_t cap = v ? v->cap * 2 : 4; alias_cell *nv = realloc(v, sizeof *nv + cap * sizeof nv->e[0]); if (!nv) abort();
+                uint32_t cap = v ? v->cap * 2 : 4; alias_cell *nv = realloc(v, sizeof *nv + cap * sizeof nv->e[0]); if (!nv) ODIE("no memory for the texture sharing cells (%zu bytes)", sizeof *nv + cap * sizeof nv->e[0]);
                 if (!v) nv->n = 0; nv->cap = cap; v = nv; nvn_hm_put(&g_alias_cells, ck, v);
             }
             v->e[v->n].k = *k; v->e[v->n++].end = end;

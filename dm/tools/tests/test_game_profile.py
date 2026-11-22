@@ -121,3 +121,21 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class OcarinaMemoryRegion(unittest.TestCase):
+    def test_16gb_alias_layout_keeps_8gb_heap(self):
+        sys.path.insert(0, str(REPO / 'dm/games'))
+        import game
+        g = game.load('0400486024DEC000')
+        self.assertEqual(g.int('mem_reserve'), 0x620000000)
+        self.assertEqual(g.int('mem_alias'), 0x400000000)
+        self.assertEqual(g.int('mem_reserve') - g.int('mem_alias') - g.int('mem_stack') - 0x10000000, 0x200000000)
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'game.h'
+            r = subprocess.run([sys.executable, str(GAME), 'header', '0400486024DEC000', str(out)],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = out.read_text()
+            self.assertIn('#define DM_GAME_MEM_RESERVE 0x620000000ull', text)
+            self.assertIn('#define DM_GAME_MEM_ALIAS 0x400000000ull', text)

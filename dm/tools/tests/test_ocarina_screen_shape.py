@@ -143,5 +143,50 @@ class PaneGuard(Arm64ScreenShape):
         self.assertEqual(self.run_load_window(active=False), 1984.0)
 
 
+@unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
+class ProjectionFields(Arm64ScreenShape):
+    # 16:10 (oh 1200): r = 1.6
+    R = 1920 / 1200
+
+    def set_fovy(self, proj, fovy, aspect):
+        # sead's setFovy and its inlined copies write the angle, sin, cos and tan of its half together
+        import math
+        h = fovy / 2
+        self.u.mem_write(proj + 0xa0, struct.pack('<5f', fovy, math.sin(h), math.cos(h), math.tan(h), aspect))
+        return struct.unpack('<5f', self.u.mem_read(proj + 0xa0, 20))
+
+    def update(self, key, *, oh=1200):
+        proj = self.frame + 0x200
+        self.u.mem_write(self.state + 0x48, struct.pack('<I', oh))
+        self.u.mem_write(self.state + 0x58, struct.pack('<f', self.R))
+        off, reg, loads = {'perspective proj': (0x000, 'X0', ('S0', 'S1')), 'camera update': (0xf6c, 'X2', ('S0', 'S1')),
+                           'device proj': (0x098, 'X0', ('S0', 'S3'))}[key]
+        self.u.reg_write(getattr(self.arm, 'UC_ARM64_REG_' + reg), proj)
+        site = self.base + FUNCTIONS[key] + off
+        self.u.emu_start(site, site + 4, count=100)
+        self.assertEqual(self.u.reg_read(self.arm.UC_ARM64_REG_PC), site + 4)
+        stored = struct.unpack('<5f', self.u.mem_read(proj + 0xa0, 20))
+        loaded = tuple(struct.unpack('<f', struct.pack('<I', self.u.reg_read(getattr(self.arm, 'UC_ARM64_REG_' + r)) & 0xffffffff))[0] for r in loads)
+        self.assertEqual(loaded, (stored[3], stored[4]))   # the original load reads the object's tan and (new) aspect
+        return stored
+
+    def test_16_9_projection_takes_the_screen_ratio_in_the_object(self):
+        proj = self.frame + 0x200
+        for key in ('perspective proj', 'camera update', 'device proj'):
+            with self.subTest(key=key):
+                game = self.set_fovy(proj, 0.8, 16 / 9)
+                stored = self.update(key)
+                self.assertEqual(stored[:4], game[:4])                  # the angle, sin, cos and tan stay the game's: the culler takes tan(angle / 2) again
+                self.assertAlmostEqual(stored[4], self.R, places=6)     # and the aspect it multiplies by is the picture's
+                self.assertEqual(self.update(key), stored)              # a later update keeps it
+
+    def test_shape_off_and_other_projections_stay(self):
+        proj = self.frame + 0x200
+        game = self.set_fovy(proj, 0.8, 16 / 9)
+        self.assertEqual(self.update('perspective proj', oh=0), game)   # 16:9 picture: the game's own
+        game = self.set_fovy(proj, 0.8, 1.0)
+        self.assertEqual(self.update('perspective proj'), game)         # a square projection (cubemaps, shadows) stays
+
+
 if __name__ == '__main__':
     unittest.main()

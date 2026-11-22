@@ -210,48 +210,34 @@ def screen_shape(ctx):
     emit(B(here(), vo_site + 4))
     fs_put(vo_site, [B(vo_site, start)], 'Layout view ortho height scaled by (16/9) / aspect when screen aspect is active')
 
-    # sead::PerspectiveProjection::doUpdateMatrixImpl_ (main+0x3485cc0): for ~16:9 projections (|aspect - 16/9| <= 0.01), divides aspect by k (to host r = 1920/oh) and widens fovyTan by k (when <= state +0x60 tol) for true Vert+ 3D.
-    proj_fn = ctx.others['perspective proj']
-    proj_site = proj_fn
-    fs_site(proj_site, '0084552d')   # ldp s0, s1, [x0, #0xac]
-    start = here()
-    emit(0x2d558400)
-    emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9404a11, 0x34000231, 0xbd405e03, 0xbd406204, 0x5291c731, 0x72a7fc71, 0x1e270225, 0x1e253825,
-              0x1e20c0a5, 0x529ae151, 0x72a78471, 0x1e270226, 0x1e2620a0, 0x540000ac, 0x1e231821, 0x1e2420a0,
-              0x5400004c, 0x1e230800):
-        emit(w)
-    emit(B(here(), proj_site + 4))
-    fs_put(proj_site, [B(proj_site, start)], 'PerspectiveProjection aspect and Vert+ fovyTan scaled by (16/9) / aspect when screen aspect is active')
-    # Camera projection update (main+0x33a8c0): inlined sead::PerspectiveProjection update at +0xf6c (main+0x33b82c, orig ldp s0, s1, [x2, #0xac]).
-    # Scales aspect and fovyTan for ~16:9 projections (|aspect - 16/9| <= 0.01) so gameplay 3D view maintains 1:1 circular aspect on any screen ratio.
-    cam_fn = ctx.others['camera update']
-    cam_site = cam_fn + 0xf6c
-    fs_site(cam_site, '4084552d')   # ldp s0, s1, [x2, #0xac]
-    start = here()
-    emit(0x2d558440)
-    emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9404a11, 0x34000231, 0xbd405e03, 0xbd406204, 0x5291c731, 0x72a7fc71, 0x1e270225, 0x1e253825,
-              0x1e20c0a5, 0x529ae151, 0x72a78471, 0x1e270226, 0x1e2620a0, 0x540000ac, 0x1e231821, 0x1e2420a0,
-              0x5400004c, 0x1e230800):
-        emit(w)
-    emit(B(here(), cam_site + 4))
-    fs_put(cam_site, [B(cam_site, start)], 'Camera update projection aspect and Vert+ fovyTan scaled by (16/9) / aspect when screen aspect is active')
-
-    # Device projection matrix (main+0x23b910): inlined sead::PerspectiveProjection update at +0x98 (main+0x23b9a8, orig ldp s0, s3, [x0, #0xac]).
-    # Scales aspect (s3) and fovyTan (s0) for ~16:9 projections.
-    dev_fn = ctx.others['device proj']
-    dev_site = dev_fn + 0x98
-    fs_site(dev_site, '008c552d')   # ldp s0, s3, [x0, #0xac]
-    start = here()
-    emit(0x2d558c00)
-    emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9404a11, 0x34000231, 0xbd405e07, 0xbd406206, 0x5291c731, 0x72a7fc71, 0x1e270222, 0x1e223862,
-              0x1e20c042, 0x529ae151, 0x72a78471, 0x1e270221, 0x1e212040, 0x540000ac, 0x1e271863, 0x1e262040,
-              0x5400004c, 0x1e270800):
-        emit(w)
-    emit(B(here(), dev_site + 4))
-    fs_put(dev_site, [B(dev_site, start)], 'Device projection aspect and Vert+ fovyTan scaled by (16/9) / aspect when screen aspect is active')
+    # The 3D projections (sead::PerspectiveProjection: fovy +0xa0, its half-angle's sin / cos / tan +0xa4..+0xac, aspect +0xb0). On a taller screen a ~16:9
+    # projection (|aspect - 16/9| <= 0.01) takes the screen's ratio r (state +0x58), written into the projection itself before the matrix is made from it, and
+    # keeps the game's vertical angle: the picture shows the game's height and a little less at the sides. Until 2026-11-22 the stubs changed only the values
+    # the matrix was made from and widened the vertical angle (Vert+), but the game's scene view (main+0x235be0) takes the tan of the stored angle again and
+    # culls and fits the sun's shadow with it and the stored aspect: past the 16:9 view objects popped at the top and bottom edges and the ground was drawn
+    # in shadow (issue #3202). Writing a widened angle back would compound with the game's own updates of it. craftycorvid/oot-mod's 16:10 patch does the same.
+    def proj_fields(base):   # assembled with clang; base: the projection's register (x16 the state page; x17, s0-s2 and nzcv are free at each site)
+        words = [0xb9404a11, 0x340001b1,               # ldr w17, [x16, #0x48]; cbz w17, out    oh (0 = 16:9)
+                 0xbd40b000,                           # ldr s0, [P, #0xb0]                      aspect
+                 0x5291c731, 0x72a7fc71, 0x1e270221,   # s1 = 16/9
+                 0x7ea1d401,                           # fabd s1, s0, s1
+                 0x529ae151, 0x72a78471, 0x1e270222,   # s2 = 0.01
+                 0x1e222020, 0x5400006c,               # fcmp s1, s2; b.gt out                   not a 16:9 projection
+                 0xbd405a00, 0xbd00b000]               # ldr s0, [x16, #0x58]; str s0, [P, #0xb0]   aspect = r
+        for i in (2, 13): words[i] |= base << 5
+        return words
+    for key, off, orig_hex, base, what in (
+            ('perspective proj', 0x000, '0084552d', 0, 'sead::PerspectiveProjection::doUpdateMatrixImpl_ (ldp s0, s1, [x0, #0xac])'),
+            ('camera update',    0xf6c, '4084552d', 2, 'the camera update\'s inlined projection update (main+0x33b82c, ldp s0, s1, [x2, #0xac])'),
+            ('device proj',      0x098, '008c552d', 0, 'the device projection\'s inlined update (main+0x23b9a8, ldp s0, s3, [x0, #0xac])')):
+        site = ctx.others[key] + off
+        fs_site(site, orig_hex)
+        start = here()
+        emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in proj_fields(base): emit(w)
+        emit(int.from_bytes(bytes.fromhex(orig_hex), 'little'))   # the original load, now of the projection's own taller values
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], what + ': a ~16:9 projection takes the screen\'s ratio in the object itself when screen aspect is active (the game\'s vertical angle stays)')
 
     # The movie's draw (main+0x3b5c710, the title screen's background and the opening): its sead::Viewport at x29 - 0x28 (min x, y at +0x8, +0xc, max x, y at +0x10, +0x14) is
     # the whole frame buffer, so the 16:9 movie (1920x1080, 2560x1440 after the upscale) filled a 2560x1920 frame at 4:3, 1.33x taller (an oval moon). At +0x64, after the viewport

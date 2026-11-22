@@ -532,6 +532,13 @@ To enroll a cut for any game's own module:
 
 ## Relocations and module layout
 
+### Gate tables grow with the loaded modules
+
+- **Symptom:** `FATAL gate overflow` while loading rewritten modules, before the game starts.
+- **Cause:** the host used one fixed 32,768-slot hash table for every NSO and preloaded NRO, and stopped once their combined gate count exceeded 8,192. A module can fit by itself while the collection does not. The limit is in the host's dispatch index, not the rewriter's patch area.
+- **Fix:** `hle.c` grows and rehashes the index during `load_modules`, keeping its load factor at most one quarter. All NRO gates are registered during preload too; runtime NRO load/unload only relocates the already mapped modules. Guest dispatch reads the completed table without locks or allocations. Duplicate-address and unknown-gate checks remain in place.
+- **Found on:** [Assassin's Creed III Remastered startup report, issue #3118](https://github.com/seedds/nxnative/issues/3118). The capacity failure is reproduced with synthetic gates; the game's boot and rendering remain unvalidated.
+
 ### Packed relative relocations (DT_RELR)
 
 - **Symptom:** every pointer in `.data` / the GOT is a module offset, crashes everywhere.

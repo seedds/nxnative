@@ -1,0 +1,121 @@
+From e44c218471866f6e7ff49972cf88d572e4208308 Mon Sep 17 00:00:00 2001
+From: Hermes <hermes@local>
+Date: Fri, 20 Nov 2026 21:54:25 -0700
+Subject: [PATCH] nvn: the present-snapshot ring is off while nro1 (Years 1-4)
+ is loaded
+
+nro1 has no frame limit of its own; the ring frees its texture at once, so the
+swapchain's release no longer paces it. The host-gate slept in AcquireTexture to
+imitate that release on the guest's thread, which the user reports as slight
+stutter. This turns the ring off for nro1 instead: no copy, no early free, no
+ring-capacity wait, and the acquire takes its ordinary branch (display link, else
+the texture's own slot). Years 5-7 (nro0) keeps the ring unchanged.
+
+mtl_snap_active() (nvn_mtl.m) = mtl_snap_on() && !dm_nvn_years14_loaded()
+(hle_nvn.c); used at the present copy, the acquire's ring wait, the acquire's
+pacing branch and fstep_tick's snapshot-only screen judgment.
+---
+ dm/gfx/nvn/hle_nvn.c | 18 ++++++++++++++++--
+ dm/gfx/nvn/nvn_mtl.m | 15 +++++++++++++--
+ dm/gfx/nvn/nvn_obj.h |  2 ++
+ 3 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 8933cf26..6d82da47 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -1357,6 +1357,20 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait
+ static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
+ uint64_t dm_nvn_frame_count(void) { return g_frame; }
+ extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
++// Years 1-4 (libharry1.nro, nro1, build 2ac11df4c46d710f4ee2dfe6668e7da7) is the one module in this collection with no frame limit of its own: it never waits for the
++// screen, so the swapchain's own release of a texture is what paces it on the device (a frame cannot be drawn until a texture comes back, once per display period).
++// Present snapshots (DM_PRESENT_SNAP) copy each present into a host ring and free the guest's texture at once ("the game's texture is free at once"), so that release
++// disappears and the module runs 2 to 4 guest frames per displayed one -- measured 149.5 guest frames/s against 52.4 presents/s with the 4-deep ring (141.6/s over a whole
++// run), and 59.1 with the ring off. The acquire's own sleep (the host-gate patch) imitated the missing release on the guest's thread instead, and the user reports
++// Years 1-4 slightly stuttery with it. So while nro1 is loaded the ring is not used at all: nvn_mtl.m's mtl_snap_active() turns the present copy and the early free off
++// (the ordinary swapchain path, exactly the app before the ring), and the acquire below takes its ordinary branch again -- the display link paces it, and o->avail
++// (display time + one period) holds a texture until its slot. Years 5-7 (nro0) limits its own frame rate and keeps the ring unchanged.
++int dm_nvn_years14_loaded(void) {
++    for (int i = 0; i < g_nmod; i++)
++        if (g_mod[i].nro && atomic_load(&g_mod[i].loaded) && !strcmp(g_mod[i].name, "nro1") &&
++            !strcmp(g_mod[i].build_id, "2ac11df4c46d710f4ee2dfe6668e7da7")) return 1;
++    return 0;
++}
+ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+     win_t *o = (win_t *)w;
+     *idx = o->ntex ? o->next++ % o->ntex : 0;
+@@ -1366,7 +1380,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
+         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
+         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
+         rt_comp_tick(rtp);
+-        uint64_t p0 = now_ns(); int snap = mtl_snap_on();
++        uint64_t p0 = now_ns(); int snap = mtl_snap_active();
+         if (snap && mtl_link_active()) { if (wait && mtl_link_stalled()) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m): the acquire's wait for a free ring slot below paces it.
+             // While the display link is silent (the window in the background or covered) frames are dropped as fast as they come and
+             // nothing frees a slot later, so the texture's slot time paces the game as without snapshots: unpaced, Breath of the Wild ran 3 to 4.5 times real time there
+@@ -1791,7 +1805,7 @@ static void fstep_tick(const win_t *o, int c) {
+     // Lateness is then what the screen shows: the on-screen interval of the frame 8 presents back against its hold (pres_expect_ms), late by a quarter or dropped
+     // A game that is slower than its hold frame after frame (not a few long frames: 12 of the last 16 started late) is late too, though the screen misses only every few frames:
+     // 18.9 ms frames at hold 1 missed one refresh in 7, never three in a row, and ran at a jittering 53 fps with a payback every few frames instead of a steady 30
+-    if (mtl_snap_on() && mtl_link_active() && !mtl_link_stalled() && o->presents > 9) {   // (frames the stall fallback drops say nothing about the game: judged by cost then)
++    if (mtl_snap_active() && mtl_link_active() && !mtl_link_stalled() && o->presents > 9) {   // (frames the stall fallback drops say nothing about the game: judged by cost then)
+         uint64_t pn = o->presents - 8; double a = mtl_presented_time(pn), b = mtl_presented_time(pn - 1);
+         if (a < 0) g_fs.screen = 2; else if (a > 0 && b > 0) g_fs.screen = (a - b) * 1e3 > 1.25 * pres_expect_ms(pn) ? 2 : 1;
+         static uint16_t slow_bits; static int slow_k; int k = g_fs.k ? g_fs.k : kmin;
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 18614238..d6cb0ab4 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -14152,6 +14152,17 @@ int mtl_snap_on(void) {
+     if (v) MLOG("present snapshots (%s=%d): each present is copied into a ring of %d host textures and the game's texture is free at once", e && *e ? "DM_PRESENT_SNAP" : "profile key present_snap", n, g_snap_n);
+     return v;
+ }
++// Whether this present is taken into the ring. Years 1-4 (libharry1.nro, nro1) has no frame limit of its own and is paced on the device by the swapchain returning a
++// texture once per display period; a snapshot frees that texture at once, so the module runs 2 to 4 frames per displayed one. While nro1 is loaded the ring is therefore
++// off: the present keeps the game's texture (no copy, no early free) and the acquire takes its ordinary display-link/slot wait, exactly the app before the ring.
++// Years 5-7 (nro0) limits its own frame rate and keeps the ring unchanged. (hle_nvn.c: dm_nvn_years14_loaded)
++int mtl_snap_active(void) {
++    if (!mtl_snap_on()) return 0;
++    if (!dm_nvn_years14_loaded()) return 1;
++    static _Atomic int once;
++    if (!atomic_exchange(&once, 1)) MLOG("present snapshots: ring off for nro1 (Years 1-4) -- the present is not copied into the host ring and the game's texture is not freed early: the ordinary swapchain path, paced by the display link and the texture's own slot; Years 5-7 keeps the ring");
++    return 0;
++}
+ static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
+ static void snap_drain(void) {
+     // Display tickets may have been dropped during suspend, but their copies still belong to the Metal 4 queue.
+@@ -14160,7 +14171,7 @@ static void snap_drain(void) {
+     if (![g_snap_ev waitUntilSignaledValue:v timeoutMS:10000]) MDIE("present snapshots: GPU did not drain within 10 s");
+ }
+ uint64_t mtl_snap_acquire_wait(void) {
+-    if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
++    if (!mtl_snap_active() || atomic_load(&g_present_discard)) return 0;
+     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
+     uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev), w0 = ws_t0();
+     pthread_mutex_lock(&g_pq_mu); int blocked = ticket > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
+@@ -14249,7 +14260,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
+     }
+     if (ws_on()) { static uint64_t f0; uint64_t f = atomic_load(&g_cur_frame); if (!f0) f0 = f; else if (f >= f0 + 300) { ws_report(f, f - f0); f0 = f; } }
+     tex_t snap; uint64_t ss = 0; int slot = 0;
+-    if (t && !ev_val && mtl_snap_on()) {
++    if (t && !ev_val && mtl_snap_active()) {
+         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
+         if ((ss = snap_take(t))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
+     }
+diff --git a/dm/gfx/nvn/nvn_obj.h b/dm/gfx/nvn/nvn_obj.h
+index aa5dfbe2..1622d9c8 100644
+--- a/dm/gfx/nvn/nvn_obj.h
++++ b/dm/gfx/nvn/nvn_obj.h
+@@ -219,6 +219,8 @@ double mtl_presented_time(uint64_t n);
+ int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
+ int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
+ int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapshots (DM_PRESENT_SNAP): on, and acquire's wait for ring capacity (returns ns spent pacing)
++int mtl_snap_active(void);   // ... and taken for this present: off while nro1 (Years 1-4) is loaded, so the present keeps the ordinary swapchain path
++int dm_nvn_years14_loaded(void);   // libharry1.nro (nro1, Years 1-4, build 2ac11df4...) is loaded right now (hle_nvn.c)
+    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped
+ // Texture release (at Finalize)
+ void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
+-- 
+2.54.0 (Apple Git-157)
+

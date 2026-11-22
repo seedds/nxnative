@@ -6,7 +6,7 @@ Update 1.0.2 (`v131072`), SDK 5.4.0, NVN. TT Games' own renderer — the Windows
 
 | file | what it is | sha256 |
 |---|---|---|
-| `Contents/MacOS/dmhost` | the pinned host (series + `host-gate.patch`; not rebuilt here — [`host/README.md`](host/README.md)) | `52e08030da37f3fcffbb2c116acf4e5dff7e7075af21b5b919a807163d948bd7` |
+| `Contents/MacOS/dmhost` | the pinned host (series + `host-ringoff-y14.patch`; not rebuilt here — [`host/README.md`](host/README.md)) | `1c78fd0d9f2c454afa556673bccc948aa3f9936122adb82507d2b5c661aa10a5` |
 | `Contents/Resources/dm/nro0.patched.bin` | `libharry2.nro` rewritten with this profile's two stubs — `publish_record` and **`blit_guard`** | `6729d1b3c0857fbb93ed6d94ceb4f4a5105f4fc112f376dcab18527d7c1a2496`, 18,762,448 B |
 | `Contents/Resources/dm/env.txt` | [`env.txt`](env.txt): only `DM_PRESENT_SNAP=4`; Fullscreen and Upscaling are left to the settings window | `f9ea3a16fe0dd9b908d2000293debdf892eea7978089bd96559b83e5019c33c8` |
 
@@ -105,8 +105,8 @@ Reproducibility of the recipe itself (no host launch, hashes only):
 ```
 patches.py + patch_nso.py + stock nro0   ->  6729d1b3…  == GLYPHFIX's nro0.patched.bin, byte for byte
 git am host series on a662f29            ->  32 commits, tree 6147769164def6b1c311f99d343a7cc50d27908a
-make -C dm/host GAME=010052A00B5D2000    ->  builds (series + host-gate.patch: 52e08030…; the pin is an artifact)
-make_lego_hp_app.sh on the original app  ->  dmhost 52e08030…, module 6729d1b3…, env.txt f9ea3a16…
+make -C dm/host GAME=010052A00B5D2000    ->  builds (series + host-ringoff-y14.patch: 1c78fd0d…; the pin is an artifact)
+make_lego_hp_app.sh on the original app  ->  dmhost 1c78fd0d…, module 6729d1b3…, env.txt f9ea3a16…
                                              the other 6,499 files sha256-identical; romfs.img same size and mtime (clonefile)
 ```
 
@@ -131,7 +131,7 @@ The improvement the user called "really really improved" is the **presentation**
 * **`ui_republish` stays 0.** It is inert at this configuration (its flagged population is identical to OFF: OFF 1.70 / 1.60, ON 1.66 / 1.66) and harmful with 2 submissions in flight: it writes one 5 MB pool block three times a frame with no ordering against the GPU, and put the wall back at 8.90 per 100 in one of two ON runs.
 * **MetalFX is off.** Its 0.00 was a measurement, not an absence: the spatial scaler anti-aliases the glyph edges, so the *residual* lattice reads `nbrh ~39.5` with white under the 0.06 companion line, it hid the residual from the detector, and it costs GPU time every frame.
 
-These values are in [`game.tsv`](game.tsv) and the snapshot depth again in [`env.txt`](env.txt). Fullscreen and upscaling are deliberately **not** pinned in `env.txt` any more: the settings window owns them. The pinned host is built from this branch's `game.tsv` plus [`host-gate.patch`](host-gate.patch) (the Years 1-4 pacing gate) and is not byte-identical to a rebuild (see [`host/README.md`](host/README.md)).
+These values are in [`game.tsv`](game.tsv) and the snapshot depth again in [`env.txt`](env.txt). Fullscreen and upscaling are deliberately **not** pinned in `env.txt` any more: the settings window owns them. The pinned host is built from this branch's `game.tsv` plus [`host-ringoff-y14.patch`](host-ringoff-y14.patch) (ring off for Years 1-4, Years 5-7 unchanged) and is not byte-identical to a rebuild (see [`host/README.md`](host/README.md)).
 
 ## Shaders
 

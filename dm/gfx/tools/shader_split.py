@@ -3820,21 +3820,32 @@ def scan_blob(d, label, out, depth=0, left=None):
     if NEEDLE in d: out.extend(needle_shaders(d, label))
     if SUMO_NX in d or NVNSH in d: out.extend(sumo_shaders(d, label))
 
-def merge_keys(results):
-    """The shaders of every scanned file, one row per key: (where, stage, control, code), the pairs, and the rows per source group. A key found more than once keeps its first copy,
-    except that the game's own copy (base or update) takes the place of an add-on's (/aoc/<index>/): the game's rows are then the same with or without any DLC, so a registered build
-    packed with another DLC set changes only the DLC rows (build_ipa_from_nsp.py optional_shader_change). PRAGMATA's re_dlc_000.pak holds 45 of the game's shaders, and with the DLC
-    installed the path order (aoc/ before re_chunk_000.pak) gave them to the DLC, so a profile split with it did not build without it (issue #2439)"""
-    keys, pairs, per_src = {}, set(), collections.Counter()
-    for rel, uniq, pr, _ in results:
+def merge_keys(results, registered: dict[tuple[str, str], str] | None = None):
+    """Merge checked copies, keeping a verified registered source when available.
+
+    The game's copy takes precedence over DLC, and play captures cannot take an existing key.
+    Otherwise keep the first copy unless the registered key, stage and source occur in the scan.
+    """
+    keys, preferred, pairs = {}, {}, set()
+    for _, uniq, pr, _ in results:
         pairs |= pr
         for key, v in uniq.items():
-            if key in keys:
-                old = keys[key]
-                if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
-                if old[0].startswith('/aoc/') and not v[0].startswith(('/aoc/', '/glslc_play/')): per_src[group(old[0])] -= 1; keys[key] = v; per_src[group(v[0])] += 1
+            if key not in keys:
+                keys[key] = v
                 continue
-            keys[key] = v; per_src[group(v[0])] += 1
+            old = keys[key]
+            if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
+            if old[0].startswith('/aoc/') and not v[0].startswith(('/aoc/', '/glslc_play/')):
+                keys[key] = v
+            elif registered and v[0] != old[0] and registered.get((key, STAGE_NAME[v[1]])) == v[0]:
+                preferred.setdefault(key, v)
+    # Choose after checking all copies and resolving ownership, so a preferred
+    # occurrence cannot mask a conflicting copy or override game/DLC precedence.
+    for key, v in preferred.items():
+        old = keys[key]
+        if v[1] == old[1] and not v[0].startswith('/glslc_play/') and v[0].startswith('/aoc/') == old[0].startswith('/aoc/'):
+            keys[key] = v
+    per_src = collections.Counter(group(shader[0]) for shader in keys.values())
     return keys, pairs, per_src
 
 def group(label):
@@ -4345,32 +4356,36 @@ def nxcx_shaders(f, label):
     with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         return sead_prim_shaders(d, label) or glslc_shaders(d, label, need=False, offsets=offsets)
 
-def uniq_keys(found, registered_map: str = ''):
+def read_registered_sources(path: str) -> dict[tuple[str, str], str]:
+    if not path: return {}
+    sources = {}
+    try:
+        with open(path, encoding='utf-8') as table:
+            for line in table:
+                fields = line.rstrip('\n').split('\t', 4)
+                if len(fields) == 5:
+                    _, _, stage, key, source = fields
+                    sources[key, stage] = source
+    except FileNotFoundError: pass   # the packer checks that registered tables exist
+    return sources
+
+def uniq_keys(found, registered: dict[tuple[str, str], str] | None = None):
     """Keep the first checked copy, or an equivalent occurrence from the registered map.
 
     Source labels order package records. A registered label can be kept only
     if that exact key, stage and source occur in this scan. Check every copy
     against the first before selecting one for the package.
     """
-    uniq, alternatives = {}, {}
+    uniq, preferred = {}, {}
     for shader in found:
         where, st, ctl, code = shader
         key = skey(ctl, code)
         first = uniq.setdefault(key, shader)
         if first is shader: continue
         if not same_shader(first[2:4], (ctl, code)): red(f'key {key} is the same but the control section or code area differs ({where})')
-        if registered_map and st == first[1] and where != first[0]:
-            alternatives.setdefault((key, STAGE_NAME[st]), {}).setdefault(where, shader)
-    if alternatives:
-        try:
-            with open(registered_map, encoding='utf-8') as table:
-                for line in table:
-                    fields = line.rstrip('\n').split('\t', 4)
-                    if len(fields) != 5: continue
-                    _, _, stage, key, source = fields
-                    by_source = alternatives.get((key, stage))
-                    if by_source is not None and source in by_source: uniq[key] = by_source[source]
-        except FileNotFoundError: pass   # the packer checks that registered tables exist
+        if registered and st == first[1] and where != first[0] and registered.get((key, STAGE_NAME[st])) == where:
+            preferred.setdefault(key, shader)
+    uniq.update(preferred)
     return uniq
 
 def glslc_play(manifest):
@@ -4458,7 +4473,7 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
-    registered_map = os.environ.get('DM_SPLIT_REGISTERED_MAP', '')
+    registered = read_registered_sources(os.environ.get('DM_SPLIT_REGISTERED_MAP', ''))
     files, results, common = [], [], None
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
@@ -4490,7 +4505,7 @@ def main():
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
         if not names and uepak.unreal_paks(romfs, inline=False, mains=[mainnso]): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
-        results.append(('main', uniq_keys(found, registered_map), var_pairs(found), {}))
+        results.append(('main', uniq_keys(found, registered), var_pairs(found), {}))
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
@@ -4526,7 +4541,7 @@ def main():
     if len(sys.argv) > 9:
         played, play_pairs = glslc_play(sys.argv[9])
         results.append(('glslc_play', played, set(), {}))   # game files, boot captures and DLC retain ownership of any keys they share with play captures
-    keys, pairs, per_src = merge_keys(results)
+    keys, pairs, per_src = merge_keys(results, registered)
     pairs.update(pair for pair in play_pairs if any(keys[k][0].startswith('/glslc_play/') for k in pair[:2]))
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp

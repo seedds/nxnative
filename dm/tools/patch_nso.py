@@ -23,7 +23,7 @@ if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_A
     sys.exit(f'[RED] Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {shlex.join([sys.executable, "-m", "pip", "install", "capstone>=5,<6"])}')
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
-import nso, nso_asm, nso_syms
+import mod_layout, nso, nso_asm, nso_syms
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
 # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
@@ -36,6 +36,11 @@ src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 # An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
 # against its header before anything is allocated (a damaged module stops here with a [RED] line)
 MOD = nso.cli_read(src)
+ORIG_TEXT = bytes(MOD.image[:MOD.text_end])   # the text as the file has it, before any relayout, cut or site: <name>.changed.tsv compares against it
+# Horizon maps modules at 4 KB, Apple hosts at 16 KB (W^X / signed __TEXT): move ro and data up by whole 4 KB pages when data would share the code's 16 KB page (mod_layout.py)
+try: MOD, _relayout_D, _relayout_notes = mod_layout.relayout_module(MOD)
+except mod_layout.Error as e: sys.exit(f'[RED] {NAME}: {e}')
+if _relayout_D: print(f'{NAME}: ' + '; '.join(_relayout_notes))
 bss = MOD.bss
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
@@ -63,7 +68,6 @@ if TWO:
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
 SPLIT = (0x8000000 - FRONT - 0x100000 if GAP else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
 IMG = MOD.image
-ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
 TEXT_END = MOD.text_end
 RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]

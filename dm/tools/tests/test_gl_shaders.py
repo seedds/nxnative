@@ -119,6 +119,17 @@ class Sources(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
+    def test_sampler_buffer_uses_metal_texture_buffer(self):
+        src = (b'#version 330\nuniform samplerBuffer lookup;\n'
+               b'void main() { gl_Position = texelFetch(lookup, gl_VertexID); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'vert', 'b' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:lookup=0:-1:samplerBuffer', r[1])
+            msl = Path(r[0]).read_text()
+            self.assertIn('texture_buffer<float>', msl)
+            self.assertNotIn('spvTexelBufferCoord', msl)
+
     def test_many_samplers_and_uniforms_have_independent_argument_ids(self):
         for count in (16, 17, 32):
             src = ('#version 320 es\nprecision highp float;\n'
@@ -180,6 +191,31 @@ class Translate(unittest.TestCase):
             r = gl_shaders.translate(src, 'frag', 'a' * 16, tmp)
             self.assertIsInstance(r, tuple, r)
             self.assertEqual([x for x in r[1] if x.startswith('t:')], ['t:T0=0:1:sampler2D'])
+
+    def test_default_uniforms_expose_only_active_members_at_their_original_offsets(self):
+        src = b'''#version 320 es
+precision highp float;
+struct Light { vec4 unused; vec4 color[4]; };
+in vec4 position;
+uniform vec4 inactive;
+uniform vec4 uncalled;
+uniform vec4 palette[4];
+uniform Light light;
+uniform int index;
+uniform Materials { vec4 value; };
+vec4 unusedHelper() { return uncalled; }
+vec4 lighting() { return light.color[2]; }
+void main() { gl_Position = position + value + palette[index] + lighting(); }
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            result = gl_shaders.translate(src, 'vert', 'a' * 16, tmp)
+            self.assertIsInstance(result, tuple, result)
+            rows = result[1]
+            self.assertEqual({row for row in rows if row.startswith('u:')}, {
+                'u:palette=32:vec4:4:16', 'u:light.color=112:vec4:4:16', 'u:index=176:int:0:0',
+            })
+            self.assertTrue(any(row.startswith('b:') and row.endswith(':180') for row in rows), rows)
+            self.assertTrue(any(row.startswith('n:Materials=') and row.endswith(':16') for row in rows), rows)
 
     def test_texture_query_keeps_its_resource_arguments(self):
         src = b'#version 320 es\nprecision highp float;\nuniform sampler2D tex;\nout vec4 c;\nvoid main() { c = vec4(textureSize(tex, 0), 0, 1); }\n'

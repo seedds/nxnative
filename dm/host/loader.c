@@ -363,6 +363,10 @@ static void read_layout(module_t *m, const char *dir) {
     if ((m->back_off || m->back_len) && (m->patch_off >= 0 || !m->back_len || m->back_off % 0x4000 || m->back_len % 0x4000 || m->back_off < m->key_page_off + m->key_page_size
                                          || m->back_off + m->back_len != m->image_size))
         die("%s: back patch area, but BACK_OFF / BACK_LEN missing or wrong", path);
+    // map_image seals [0, text_end rounded up to 16 KB) read + execute (and gen_embed.py puts it in __TEXT on iOS): data below that would be read-only and SIGBUS in relocate()
+    // (FINAL FANTASY VIII Remastered's Math.nro and Platform.nro). patch_nso.py moves ro and data up (mod_layout.py); stop here on a copy rewritten before that
+    if (m->data_off < ((m->text_end + 0x3FFF) & ~0x3FFFull))
+        die("%s: data at %#llx shares a 16 KB page with code (text ends at %#llx): rewrite the module again with dm/tools/patch_nso.py", m->name, (unsigned long long)m->data_off, (unsigned long long)m->text_end);
 }
 
 // Frame step state (the page after the key page, read-write; layout in patch_nso.py FRAME_STEP): the rewriter's stubs step the game by the host's whole vsyncs capped at this
@@ -384,9 +388,9 @@ void dm_fps_state_apply(void) {
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
-    // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
-    // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,
-    // Hades II's 3.0). Independent of the frame step: written at target 0 too
+    // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size, Ocarina of Time's view-size
+    // update): 1.0 keeps the game's own size and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or
+    // above for a stub that also raises it, Hades II's 3.0). Independent of the frame step: written at target 0 too
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);

@@ -547,6 +547,119 @@ int main(void) {
         pw = 3; check(nvn_fstep_drain_cut(40, 17, 9, 0, &pw) == 37 && pw == 0, "a drain counted no larger than the pacing wait it was part of");
         pw = 0; check(nvn_fstep_drain_cut(0, 17, 0, 5, &pw) == 0, "the first frame (no previous start): nothing to cut");
     }
+    {   // Idle-GPU late frames (#1942): a warm-start progress screen (GPU 0.02 vsyncs) with 10 late frames does not step up, while FSTEP_RUN (30) late frames in a row still step up
+        sim m = {0}; run(&m, 60, 0.5, 1, 3, 0);
+        for (int i = 0; i < 10; i++) { m.s.gpu_on = 1; m.s.gpu = 0.02; run(&m, 1, 2.5, 1, 3, 0); }
+        check(m.s.k == 1 && m.s.ups == 0, "idle GPU (0.02 vsyncs): 10 late frames on a progress screen keep hold 1");
+        for (int i = 0; i < FSTEP_RUN; i++) { m.s.gpu_on = 1; m.s.gpu = 0.02; run(&m, 1, 2.5, 1, 3, 0); }
+        check(m.s.k > 1 && m.s.ups == 1 && m.s.up_idle == 1, "idle GPU: FSTEP_RUN late frames in a row still step up (CPU-heavy scene)");
+    }
+    {   // Unpaced hold probe (#1942): a game that waits outside acquire shows cost == shown == hold at hold 3 while GPU fits k - 1 (0.75 vsyncs); probe brings it back to hold 1
+        sim m = {0}; run(&m, 60, 0.5, 1, 3, 0);
+        for (int i = 0; i < 10; i++) { m.s.gpu_on = 1; m.s.gpu = 2.5; run(&m, 1, 2.5, 1, 3, 0); }
+        int at3 = m.s.k == 3;
+        for (int i = 0; i < 300; i++) {
+            double k = m.s.k; double w = k == 1 ? 0.75 : k;   // at hold 3, game's own wait makes cost == shown == 3, GPU 0.75
+            m.s.gpu_on = 1; m.s.gpu = 0.75; run(&m, 1, w, 1, 3, 0);
+        }
+        check(at3 && m.s.k == 1 && m.s.probes >= 1 && m.s.failed == 0, "unpaced hold at hold 3 with GPU 0.75: unpaced probe returns to hold 1");
+    }
+    {   // Unpaced hold probe on a genuinely CPU-bound game (CPU needs hold 2 even when probed): uhold backs off up to FSTEP_UHOLD_MAX (60 s)
+        sim m = {0}; run(&m, 60, 0.5, 1, 3, 0);
+        for (int i = 0; i < 10; i++) { m.s.gpu_on = 1; m.s.gpu = 0.5; run(&m, 1, 1.8, 1, 3, 0); }
+        int at2 = m.s.k == 2;
+        for (int i = 0; i < 6000; i++) {
+            double w = m.s.k == 1 ? 1.8 : 2.0;   // CPU really needs 1.8 vsyncs, GPU is only 0.5
+            m.s.gpu_on = 1; m.s.gpu = 0.5; run(&m, 1, w, 1, 3, 0);
+        }
+        check(at2 && m.s.k == 2 && m.s.failed >= 2 && m.s.uhold > FSTEP_HOLD_MAX, "unpaced probe when CPU really needs hold 2: uhold doubles past 8 s toward 60 s");
+    }
+    {   // Late frames at a 30 fps cap's hold 2 (kmin == kmax == 2): 3 late frames set fine (60 Hz link at next vsync); 8 s on time clears it; fixed step or cap rise clears it
+        sim m = {0}; run(&m, 60, 1.5, 2, 2, 0);
+        check(m.s.k == 2 && !m.s.fine && m.s.fines == 0, "30 fps cap on time: fine stays off");
+        for (int i = 0; i < 3; i++) { m.s.gpu_on = 1; m.s.gpu = 2.0; run(&m, 1, 2.2, 2, 2, 0); }
+        check(m.s.k == 2 && m.s.fine == 1 && m.s.fines == 1, "30 fps cap, 3 late frames at hold 2: fine turns on");
+        // An idle-GPU late frame does not reset fine_ok; 8 s (480 vsyncs = 240 frames at hold 2) on time ends fine
+        for (int i = 0; i < 250; i++) { m.s.gpu_on = 1; m.s.gpu = 1.5; run(&m, 1, 1.5, 2, 2, 0); }
+        check(m.s.fine == 0 && m.s.fines == 1, "30 fps cap, 8 s with no late frame: fine turns off");
+        // Re-enter fine, then fixed step clears it
+        for (int i = 0; i < 3; i++) { m.s.gpu_on = 1; m.s.gpu = 2.0; run(&m, 1, 2.2, 2, 2, 0); }
+        int was_fine = m.s.fine == 1 && m.s.fines == 2;
+        run(&m, 1, 1.5, 2, 2, 2);
+        check(was_fine && m.s.fine == 0, "30 fps cap: a game-fixed step clears fine");
+        // Re-enter fine, then raising the cap (kmax > k) clears it
+        for (int i = 0; i < 3; i++) { m.s.gpu_on = 1; m.s.gpu = 2.0; run(&m, 1, 2.2, 2, 2, 0); }
+        int was_fine2 = m.s.fine == 1;
+        run(&m, 1, 1.5, 1, 3, 0);
+        check(was_fine2 && m.s.fine == 0, "30 fps cap: raising the cap clears fine");
+    }
+    {   // Stalls (FSTEP_STALL) and host-named pauses / window changes (settle):
+        // A pause followed by severe cold-GPU / link-recovery frames (which cross over_sum - omax > 3.0 on main) keeps hold 1
+        sim m = {0}; run(&m, 600, 0.9, 1, 3, 0); uint64_t late0 = m.s.late;
+        run(&m, 1, 114, 1, 3, 0); run(&m, 1, 3.0, 1, 3, 0); run(&m, 1, 2.5, 1, 3, 0); run(&m, 1, 2.0, 1, 3, 0); run(&m, 60, 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "stall: a pause and severe late frames keep hold 1 (k %d, ups %llu, stalls %llu)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.stalls);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.stalls == 1 && m.s.late == late0 + 3, b);
+        check(m.s.crun < 0.95, "  the stall's time stays out of the cost that held hold 1");
+        // Fullscreen switch: two display-link stalls (10 and 17 vsyncs) with late frames around them keep hold 1
+        run(&m, 2, 1.3, 1, 3, 0); run(&m, 1, 10, 1, 3, 0); run(&m, 3, 1.4, 1, 3, 0); run(&m, 1, 17, 1, 3, 0); run(&m, 6, 1.3, 1, 3, 0); run(&m, 120, 0.9, 1, 3, 0);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.stalls == 3, "  a fullscreen switch (two stalls, late frames around them) keeps hold 1");
+        // A scene that really is heavier after a stall steps up once stall grace is over
+        sim h = {0}; run(&h, 600, 0.9, 1, 3, 0); run(&h, 1, 114, 1, 3, 0);
+        int n = 0; while (h.s.k == 1 && n < 600) { run(&h, 1, 1.32, 1, 3, 0); n++; }
+        snprintf(b, sizeof b, "  22 ms frames after a stall step up once its grace is over (%d frames)", n);
+        check(h.s.k == 2 && n == FSTEP_GRACE + 3, b);
+        // Long frames below FSTEP_STALL still step up as before
+        sim l = {0}; run(&l, 600, 0.9, 1, 3, 0); run(&l, 3, 5.0, 1, 3, 0);
+        check(l.s.k == 3 && l.s.ups == 1 && l.s.stalls == 0, "  three 83 ms frames in a row are not stalls: they step up as before");
+        // 120 fps (per_vsync = 2, no_payback = 1): same 133 ms real-time threshold
+        sim f = {0}; f.s.per_vsync = 2; f.s.no_payback = 1; run(&f, 240, 0.7, 1, 2, 0); run(&f, 3, 10, 1, 2, 0);
+        check(f.s.k == 2 && f.s.stalls == 0, "  120 fps: 83 ms frames are not stalls");
+        sim g = {0}; g.s.per_vsync = 2; g.s.no_payback = 1; run(&g, 240, 0.7, 1, 2, 0); run(&g, 1, 200, 1, 2, 0); run(&g, 3, 1.5, 1, 2, 0); run(&g, 60, 0.7, 1, 2, 0);
+        check(g.s.k == 1 && g.s.ups == 0 && g.s.stalls == 1, "  120 fps: a pause and three late frames keep 120");
+        // Host-named pause (settle): not paid back; unnamed stall still pays back FSTEP_DEBT_MAX (15)
+        sim p = {0}; run(&p, 600, 0.9, 1, 3, 0); uint64_t paid0 = p.s.paid;
+        p.s.settle = 1; run(&p, 1, 114, 1, 3, 0); run(&p, 60, 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "  a host-named pause is not paid back (paid %llu, debt %.2f)", (unsigned long long)(p.s.paid - paid0), p.s.debt);
+        check(p.s.paid == paid0 && p.s.debt < 1 && p.s.k == 1 && p.s.settle == 0, b);
+        // Named pause on a frame already stepping 2 to pay back prior jitter: accounts for that step without double-paying
+        sim pb = {0}; run(&pb, 60, 0.9, 1, 3, 0); run(&pb, 1, 2.2, 1, 3, 0); uint64_t paid_b = pb.s.paid;
+        pb.s.settle = 1; run(&pb, 1, 114, 1, 3, 0); run(&pb, 30, 0.9, 1, 3, 0);
+        check(pb.s.paid == paid_b && pb.s.debt < 1, "  named pause on a payback frame drops only the pause, no double-pay");
+        sim q = {0}; run(&q, 600, 0.9, 1, 3, 0); paid0 = q.s.paid; run(&q, 1, 114, 1, 3, 0); run(&q, 60, 0.9, 1, 3, 0);
+        check(q.s.paid - paid0 == 15, "  an unnamed stall pays back 15 vsyncs as before");
+        // Named window change: mildly late animation frames keep hold 1; unnamed they step up
+        sim w = {0}; run(&w, 600, 0.9, 1, 3, 0);
+        w.s.settle = 1; run(&w, 20, 1.34, 1, 3, 0); w.s.settle = 1; run(&w, 20, 1.34, 1, 3, 0); run(&w, 120, 0.9, 1, 3, 0);
+        check(w.s.k == 1 && w.s.ups == 0, "  a host-named window change: 40 mildly late frames keep hold 1");
+        sim x = {0}; run(&x, 600, 0.9, 1, 3, 0); run(&x, 20, 1.34, 1, 3, 0);
+        check(x.s.k == 2 && x.s.ups == 1, "  the same frames with no window change step up as before");
+        // 30 fps cap (fine mode): a pause + 3 late frames do not turn fine on; a 10 s pause while fine is on does not clear fine
+        sim fn = {0}; run(&fn, 60, 1.5, 2, 2, 0);
+        fn.s.settle = 1; run(&fn, 1, 114, 2, 2, 0); run(&fn, 3, 2.5, 2, 2, 0); run(&fn, 60, 1.5, 2, 2, 0);
+        check(fn.s.fine == 0 && fn.s.fines == 0, "  30 fps cap: pause + 3 late frames do not flip fine on");
+        for (int i = 0; i < 3; i++) { fn.s.gpu_on = 1; fn.s.gpu = 2.0; run(&fn, 1, 2.2, 2, 2, 0); }
+        int fine_on = fn.s.fine == 1;
+        fn.s.settle = 1; run(&fn, 1, 600, 2, 2, 0); run(&fn, 5, 1.5, 2, 2, 0);
+        check(fine_on && fn.s.fine == 1, "  30 fps cap: a 10 s pause does not clear fine early");
+        // Pause duration does not inflate run / tsince, and a stall during a trial does not let late frames pass the trial
+        sim ti = {0}; run(&ti, 5, 0.9, 1, 3, 0); ti.s.settle = 1; run(&ti, 1, 600, 1, 3, 0);
+        check(ti.s.run < 20 && ti.s.cref == 0, "  a 10 s pause does not inflate run into an 8 s proven hold");
+        sim tr = {0}; run(&tr, 60, 0.5, 1, 3, 0); run(&tr, 300, 1.3, 1, 3, 0); run(&tr, FSTEP_RUN, 0.6, 1, 3, 0);
+        int in_trial = tr.s.k == 1 && tr.s.trial == FSTEP_RUN;
+        tr.s.settle = 1; run(&tr, 1, 600, 1, 3, 0); run(&tr, FSTEP_GRACE, 1.5, 1, 3, 0);
+        check(in_trial && tr.s.trial == FSTEP_RUN && !tr.s.tpend, "  a stall during a trial pauses trial countdown across stall grace");
+        // Idle-GPU late frames during stall grace do not accumulate ilate_run
+        sim ig = {0}; run(&ig, 60, 0.5, 1, 3, 0); ig.s.settle = 1; run(&ig, 1, 114, 1, 3, 0);
+        for (int i = 0; i < FSTEP_GRACE; i++) { ig.s.gpu_on = 1; ig.s.gpu = 0.02; run(&ig, 1, 2.5, 1, 3, 0); }
+        check(ig.s.k == 1 && ig.s.ilate_run == 0, "  idle-GPU late frames during stall grace do not advance ilate_run");
+        // Early returns (!s->k, fixed > 0) clear settle so it does not leak onto a later frame
+        sim er = {0}; er.s.settle = 1; nvn_fstep_next(&er.s, 0, 0, 1, 3, 0, 0);
+        int clr1 = er.s.settle == 0;
+        er.s.settle = 1; nvn_fstep_next(&er.s, 1, 0.5, 1, 3, 2, 0);
+        int clr2 = er.s.settle == 0;
+        nvn_fstep_next(&er.s, 1, 0.5, 1, 3, 0, 0);
+        check(clr1 && clr2 && er.s.stalls == 0, "  settle is cleared on first-frame and fixed-step early returns");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

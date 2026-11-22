@@ -186,6 +186,34 @@ class Representatives(unittest.TestCase):
                     with self.assertRaisesRegex(nsp.BuildError, 'the split shader tables differ'):
                         nsp.split_shaders(*args)
 
+    def test_packing_keeps_a_registered_source_across_romfs_files(self):
+        ctl, code = fz.VS
+        other = ctl, code[:-1] + bytes([code[-1] ^ 1])
+        registered, _ = bnsh([[(8, ctl + b'padding', code)]])
+        duplicate, _ = bnsh([[(8, ctl, code)]])
+        middle, _ = bnsh([[(8, *other)]])
+        (self.rom / 'middle.asset').write_bytes(middle)
+        registered_file = self.rom / 'z.asset'
+        registered_file.write_bytes(registered)
+        _, snapshot = self.split()
+        profile = self.root / 'registered-profile'
+        profile.mkdir()
+        (profile / 'game.tsv').write_text('modules\tmain\n')
+        for table, name in (('map', 'shader_map'), ('facts', 'shader_facts'), ('pairs', 'shader_pairs'), ('pso', 'pso_pairs')):
+            (profile / f'{name}.tsv').write_bytes(snapshot[f'{table}.tsv'])
+
+        (self.rom / 'a.asset').write_bytes(duplicate)
+        standalone, _ = self.split()
+        self.assertEqual(standalone[0][3:], [ss.skey(ctl, code), '/a.asset#BNSH@0x0#var0'])
+        pkg = self.root / 'pkg'
+        with mock.patch.object(nsp, 'PROG'):
+            args = (sys.executable, REPO, [self.rom], [self.main], pkg, self.split_env(), self.root / 'logs', game.Game(profile))
+            self.assertEqual(nsp.split_shaders(*args), nsp.package_key(pkg))
+            self.assertEqual((pkg / 'vs_other.bin').read_bytes(), snapshot['vs_other.bin'])
+            registered_file.unlink()
+            with self.assertRaisesRegex(nsp.BuildError, 'the split shader tables differ'):
+                nsp.split_shaders(*args)
+
     def test_registered_representative_cannot_hide_a_conflicting_rt_copy(self):
         a, _ = record()
         b, _ = record(entries=((('begin', 'continue'), 0, 64),))
@@ -195,8 +223,12 @@ class Representatives(unittest.TestCase):
         key = ss.skey(*first[2:])
         shader_map = self.root / 'registered.tsv'
         shader_map.write_text(f'rt_main.bin\t0\traytracing\t{key}\t{registered[0]}\n')
+        sources = ss.read_registered_sources(str(shader_map))
         with self.assertRaisesRegex(SystemExit, 'control section or code area differs'):
-            ss.uniq_keys([first, registered, conflict], str(shader_map))
+            ss.uniq_keys([first, registered, conflict], sources)
+        results = [(copy[0], {key: copy}, set(), {}) for copy in (first, registered, conflict)]
+        with self.assertRaisesRegex(SystemExit, 'control section or code area differs'):
+            ss.merge_keys(results, sources)
 
 
 if __name__ == '__main__':

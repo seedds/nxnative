@@ -162,6 +162,12 @@ private struct LauncherView: View {
             Button("Try Again") { DispatchQueue.main.async { start() } }
             Button("Cancel", role: .cancel) {}
         } message: { r in Text(r.unreadableMessage(here: "iPhone")) }
+        .confirmationDialog(SaveSyncReport.missingTitle, isPresented: isAsking(.missing), titleVisibility: .visible, presenting: report) { r in
+            Button("Try Again") { DispatchQueue.main.async { start() } }
+            Button("Play Without Sending") { go("offline") }   // this iPhone's save, not sent: the next start compares again
+            Button(r.sendLabel(here: "iPhone"), role: .destructive) { go(r.localChoice) }   // local:none
+            Button("Cancel", role: .cancel) {}
+        } message: { r in Text(r.missingMessage(here: "iPhone")) }
         .task {
             while !Task.isCancelled {
                 memory = os_proc_available_memory()

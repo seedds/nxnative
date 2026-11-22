@@ -8,6 +8,7 @@ def screen_shape(ctx):
     frame interval stub, so with the profile's fps_target 0 the game keeps its own pacing. State +0x48 / +0x4c output / layout height, +0x54 size-site mask
     (DM_SCREEN_ASPECT_SITES), +0x58 the screen's ratio (0 = off), +0x5c k = (16/9) / ratio, +0x60 tolerance, +0xfc / +0x100 the last widened fovys; +0x120 / +0x124 counters"""
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    ctx.capabilities.add('SCREEN_ASPECT')   # the launcher's Picture shape (settings.tsv fixups:SCREEN_ASPECT)
     # Output and layout sizes: the 1920x1080 / 1280x720 pairs (mov xN,#1920 or #1280; movk xN,#1080 or #720,lsl #32) take the host's height while their bit of +0x54 is set.
     # x16 / x17 and the flags free after each site (to the next call or return: checked by disassembly)
     OUT, LAY = 0xb9404a10, 0xb9404e10

@@ -139,6 +139,19 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 - **Character and kart shadows.** A dark, stair-stepped box appeared under the characters and karts on the title screen. The fix restored generated levels 1 and 2 of the mask array in every tested layer, and the boxes disappeared. [Image views of the type a shader declares](../../../docs/reference/rendering.md#image-views-of-the-type-a-shader-declares)
 - **Night glows.** Headlight and lamp glows shone through buildings when depth pyramid `3738806f0474308c` used the wrong fragment depth register. The reporter verified the corrected occlusion in a night race on Mac with chain `cce725ceabda`. [A pixel shader's depth after a partly written target](../../../docs/reference/shaders.md#a-pixel-shaders-depth-after-a-partly-written-target)
 
+### Frame pacing on iPhone Duo
+
+On 2026-11-22, two runs of 1.8.0 (v917504) on an iPhone Duo (`iPhone19,4`, iOS 27.3) completed all three laps of Mario Bros. Circuit at 50cc. The builds used NX2Apple 1.5.0, nxnative `99224562186a` with the fork's patches, shader chain `df1800562702`, and Xcode 27.2. The second framework set Handheld mode (`DM_OPMODE=0`) and Metal 4 pipelines (`DM_PSO_MTL4=1`) and carried an 865 MiB A20 Pro archive built with `--gpu g19p`.
+
+Each sample covers 60 seconds of driving after the course intro, with screenshots taken outside the sample. Both runs reported serious thermal state during the race. FPS counts rendered frames. Display gaps come from `@presented_ms` in the NVN trace.
+
+| Build | Mean fps | Display interval p99 | Longest display gap | Gaps over 100 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Docked, `MTLDevice` pipelines | 28.8 | 66.67 ms | 466.70 ms | 13 |
+| Handheld, Metal 4, `g19p` archive | 30.0 | 33.34 ms | 66.67 ms | 0 |
+
+With the same 7,329-entry learned prewarm list, the Metal 4 prepare stage took 32.14 s without the bundled archive and 0.44 s with it. The archived launch loaded 1,815 bases and compiled zero in that stage. The race comparison measures the combined settings and archive changes, with a pipeline list learned from earlier runs.
+
 ## Open
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).

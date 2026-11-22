@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/file.h>   // flock: the lock beside Metal's build folders (ga_claim)
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
@@ -6638,7 +6639,9 @@ static int clear_rect_zero(int i) {
 static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
-static NSString *g_shmap_path, *g_msl_dir;
+static NSString *g_shmap_path, *g_msl_dir, *g_msl_fd_path;
+static int g_msl_fd = -1;
+static _Atomic int g_msl_moved_told;
 #include "nvn_live.inc"
 // The library may be one file beside its folder, b-<chain>.img (dm/tools/shader_lib.py, msl_image.h), read in place. Each file comes from the folder first: what a partial dmsh_build.py run rebuilt goes
 // over the image, a build folder from before the image works as it did, and a host running from a folder goes on when a build packs it (the image is whole before the folder goes). So the image is
@@ -6659,9 +6662,27 @@ static const img_ent *msl_image_file(NSString *path, romfs_img **img) {
     *img = m;
     return m ? msl_image_find(m, path.lastPathComponent.UTF8String) : NULL;
 }
+// Keep an open fd on the shader library directory so moving the app or renaming its folder during play resolves to the new path via F_GETPATH.
+static NSString *msl_moved(NSString *path) {
+    NSString *dir = g_msl_dir, *orig = g_msl_fd_path;
+    int fd = g_msl_fd;
+    if (fd < 0 || !dir || path.length <= dir.length + 1 || ![path hasPrefix:dir] || [path characterAtIndex:dir.length] != '/') return nil;
+    char now[PATH_MAX] = {0};
+    if (fcntl(fd, F_GETPATH, now) < 0 || !now[0]) return nil;
+    NSString *nd = @(now);
+    if ([nd isEqual:dir] || (orig && [nd isEqual:orig])) return nil;
+    if (!atomic_exchange(&g_msl_moved_told, 1))
+        MLOG("shader library directory moved while running: %s -> %s, loading from the new location", dir.UTF8String ?: "", now);
+    return [nd stringByAppendingString:[path substringFromIndex:dir.length]];
+}
 static NSData *msl_data(NSString *path) {   // a file of the library, nil when it has none
     NSData *d = [NSData dataWithContentsOfFile:path];
     if (d) return d;
+    NSString *np = msl_moved(path);
+    if (np) {
+        d = [NSData dataWithContentsOfFile:np];
+        if (d) return d;
+    }
     romfs_img *m; const img_ent *x = msl_image_file(path, &m);
     if (!x) {
         NSString *live = live_artifact(path.lastPathComponent);
@@ -6700,6 +6721,14 @@ static void shmap_read(void) {
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
+    if (g_msl_fd >= 0) { close(g_msl_fd); g_msl_fd = -1; }
+    g_msl_fd_path = nil;
+    atomic_store(&g_msl_moved_told, 0);
+    g_msl_fd = open(g_msl_dir.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (g_msl_fd >= 0) {
+        char open_path[PATH_MAX] = {0};
+        if (fcntl(g_msl_fd, F_GETPATH, open_path) == 0 && open_path[0]) g_msl_fd_path = @(open_path);
+    }
     if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) {
         NSString *image = [g_msl_dir stringByAppendingString:@".img"];
         if ([NSFileManager.defaultManager fileExistsAtPath:image]) MLOG("shader libraries: one file, %s", image.UTF8String);
@@ -6907,7 +6936,18 @@ static id<MTLLibrary> lib_from_map(msl_map f, NSError **err) {
     return lib_tag([g_dev newLibraryWithData:d error:err], tag);
 }
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
-    int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
+    NSString *open_path = path;
+    int fd = open(open_path.fileSystemRepresentation, O_RDONLY); struct stat st;
+    if (fd < 0) {
+        int open_errno = errno;
+        NSString *np = msl_moved(path);
+        if (np) {
+            fd = open(np.fileSystemRepresentation, O_RDONLY);
+            if (fd >= 0) open_path = np;
+            else open_errno = errno;
+        }
+        if (fd < 0) errno = open_errno;
+    }
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
         int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
         if (x && msl_image_map(img, x, &f)) return lib_from_map(f, err);
@@ -6931,9 +6971,9 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
         }
         else if (!x) errno = open_errno;
     }
-    if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
+    if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", open_path]}]; return nil; }
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); int map_errno = errno; close(fd);
-    if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:map_errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
+    if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:map_errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", open_path]}]; return nil; }
     return lib_from_map((msl_map){.data = m, .size = len, .base = m, .base_len = len}, err);
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_entry.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
@@ -11480,7 +11520,13 @@ static int pre_later_take(PreLater *l, int wait) {
 // run, a name in the library, under g_pre_fail_lock
 static _Atomic int g_pre_nolib; static NSString *g_pre_nolib_file;
 // Whether the library has the file: in its folder or in its image (msl_image_file), as msl_data and lib_from_file read it
-static int msl_has(NSString *path) { romfs_img *m; return !access(path.fileSystemRepresentation, F_OK) || msl_image_file(path, &m) != NULL; }
+static int msl_has(NSString *path) {
+    romfs_img *m;
+    if (!access(path.fileSystemRepresentation, F_OK)) return 1;
+    NSString *np = msl_moved(path);
+    if (np && !access(np.fileSystemRepresentation, F_OK)) return 1;
+    return msl_image_file(path, &m) != NULL;
+}
 // 1 (and the file noted) when the library lacks <key><suffix>
 static int pre_lib_absent(NSString *key, NSString *suffix) {
     NSString *name = [key stringByAppendingString:suffix];

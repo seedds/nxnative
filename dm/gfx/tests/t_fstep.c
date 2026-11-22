@@ -593,6 +593,73 @@ int main(void) {
         run(&m, 1, 1.5, 1, 3, 0);
         check(was_fine2 && m.s.fine == 0, "30 fps cap: raising the cap clears fine");
     }
+    {   // Stalls (FSTEP_STALL) and host-named pauses / window changes (settle):
+        // A pause followed by severe cold-GPU / link-recovery frames (which cross over_sum - omax > 3.0 on main) keeps hold 1
+        sim m = {0}; run(&m, 600, 0.9, 1, 3, 0); uint64_t late0 = m.s.late;
+        run(&m, 1, 114, 1, 3, 0); run(&m, 1, 3.0, 1, 3, 0); run(&m, 1, 2.5, 1, 3, 0); run(&m, 1, 2.0, 1, 3, 0); run(&m, 60, 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "stall: a pause and severe late frames keep hold 1 (k %d, ups %llu, stalls %llu)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.stalls);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.stalls == 1 && m.s.late == late0 + 3, b);
+        check(m.s.crun < 0.95, "  the stall's time stays out of the cost that held hold 1");
+        // Fullscreen switch: two display-link stalls (10 and 17 vsyncs) with late frames around them keep hold 1
+        run(&m, 2, 1.3, 1, 3, 0); run(&m, 1, 10, 1, 3, 0); run(&m, 3, 1.4, 1, 3, 0); run(&m, 1, 17, 1, 3, 0); run(&m, 6, 1.3, 1, 3, 0); run(&m, 120, 0.9, 1, 3, 0);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.stalls == 3, "  a fullscreen switch (two stalls, late frames around them) keeps hold 1");
+        // A scene that really is heavier after a stall steps up once stall grace is over
+        sim h = {0}; run(&h, 600, 0.9, 1, 3, 0); run(&h, 1, 114, 1, 3, 0);
+        int n = 0; while (h.s.k == 1 && n < 600) { run(&h, 1, 1.32, 1, 3, 0); n++; }
+        snprintf(b, sizeof b, "  22 ms frames after a stall step up once its grace is over (%d frames)", n);
+        check(h.s.k == 2 && n == FSTEP_GRACE + 3, b);
+        // Long frames below FSTEP_STALL still step up as before
+        sim l = {0}; run(&l, 600, 0.9, 1, 3, 0); run(&l, 3, 5.0, 1, 3, 0);
+        check(l.s.k == 3 && l.s.ups == 1 && l.s.stalls == 0, "  three 83 ms frames in a row are not stalls: they step up as before");
+        // 120 fps (per_vsync = 2, no_payback = 1): same 133 ms real-time threshold
+        sim f = {0}; f.s.per_vsync = 2; f.s.no_payback = 1; run(&f, 240, 0.7, 1, 2, 0); run(&f, 3, 10, 1, 2, 0);
+        check(f.s.k == 2 && f.s.stalls == 0, "  120 fps: 83 ms frames are not stalls");
+        sim g = {0}; g.s.per_vsync = 2; g.s.no_payback = 1; run(&g, 240, 0.7, 1, 2, 0); run(&g, 1, 200, 1, 2, 0); run(&g, 3, 1.5, 1, 2, 0); run(&g, 60, 0.7, 1, 2, 0);
+        check(g.s.k == 1 && g.s.ups == 0 && g.s.stalls == 1, "  120 fps: a pause and three late frames keep 120");
+        // Host-named pause (settle): not paid back; unnamed stall still pays back FSTEP_DEBT_MAX (15)
+        sim p = {0}; run(&p, 600, 0.9, 1, 3, 0); uint64_t paid0 = p.s.paid;
+        p.s.settle = 1; run(&p, 1, 114, 1, 3, 0); run(&p, 60, 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "  a host-named pause is not paid back (paid %llu, debt %.2f)", (unsigned long long)(p.s.paid - paid0), p.s.debt);
+        check(p.s.paid == paid0 && p.s.debt < 1 && p.s.k == 1 && p.s.settle == 0, b);
+        // Named pause on a frame already stepping 2 to pay back prior jitter: accounts for that step without double-paying
+        sim pb = {0}; run(&pb, 60, 0.9, 1, 3, 0); run(&pb, 1, 2.2, 1, 3, 0); uint64_t paid_b = pb.s.paid;
+        pb.s.settle = 1; run(&pb, 1, 114, 1, 3, 0); run(&pb, 30, 0.9, 1, 3, 0);
+        check(pb.s.paid == paid_b && pb.s.debt < 1, "  named pause on a payback frame drops only the pause, no double-pay");
+        sim q = {0}; run(&q, 600, 0.9, 1, 3, 0); paid0 = q.s.paid; run(&q, 1, 114, 1, 3, 0); run(&q, 60, 0.9, 1, 3, 0);
+        check(q.s.paid - paid0 == 15, "  an unnamed stall pays back 15 vsyncs as before");
+        // Named window change: mildly late animation frames keep hold 1; unnamed they step up
+        sim w = {0}; run(&w, 600, 0.9, 1, 3, 0);
+        w.s.settle = 1; run(&w, 20, 1.34, 1, 3, 0); w.s.settle = 1; run(&w, 20, 1.34, 1, 3, 0); run(&w, 120, 0.9, 1, 3, 0);
+        check(w.s.k == 1 && w.s.ups == 0, "  a host-named window change: 40 mildly late frames keep hold 1");
+        sim x = {0}; run(&x, 600, 0.9, 1, 3, 0); run(&x, 20, 1.34, 1, 3, 0);
+        check(x.s.k == 2 && x.s.ups == 1, "  the same frames with no window change step up as before");
+        // 30 fps cap (fine mode): a pause + 3 late frames do not turn fine on; a 10 s pause while fine is on does not clear fine
+        sim fn = {0}; run(&fn, 60, 1.5, 2, 2, 0);
+        fn.s.settle = 1; run(&fn, 1, 114, 2, 2, 0); run(&fn, 3, 2.5, 2, 2, 0); run(&fn, 60, 1.5, 2, 2, 0);
+        check(fn.s.fine == 0 && fn.s.fines == 0, "  30 fps cap: pause + 3 late frames do not flip fine on");
+        for (int i = 0; i < 3; i++) { fn.s.gpu_on = 1; fn.s.gpu = 2.0; run(&fn, 1, 2.2, 2, 2, 0); }
+        int fine_on = fn.s.fine == 1;
+        fn.s.settle = 1; run(&fn, 1, 600, 2, 2, 0); run(&fn, 5, 1.5, 2, 2, 0);
+        check(fine_on && fn.s.fine == 1, "  30 fps cap: a 10 s pause does not clear fine early");
+        // Pause duration does not inflate run / tsince, and a stall during a trial does not let late frames pass the trial
+        sim ti = {0}; run(&ti, 5, 0.9, 1, 3, 0); ti.s.settle = 1; run(&ti, 1, 600, 1, 3, 0);
+        check(ti.s.run < 20 && ti.s.cref == 0, "  a 10 s pause does not inflate run into an 8 s proven hold");
+        sim tr = {0}; run(&tr, 60, 0.5, 1, 3, 0); run(&tr, 300, 1.3, 1, 3, 0); run(&tr, FSTEP_RUN, 0.6, 1, 3, 0);
+        int in_trial = tr.s.k == 1 && tr.s.trial == FSTEP_RUN;
+        tr.s.settle = 1; run(&tr, 1, 600, 1, 3, 0); run(&tr, FSTEP_GRACE, 1.5, 1, 3, 0);
+        check(in_trial && tr.s.trial == FSTEP_RUN && !tr.s.tpend, "  a stall during a trial pauses trial countdown across stall grace");
+        // Idle-GPU late frames during stall grace do not accumulate ilate_run
+        sim ig = {0}; run(&ig, 60, 0.5, 1, 3, 0); ig.s.settle = 1; run(&ig, 1, 114, 1, 3, 0);
+        for (int i = 0; i < FSTEP_GRACE; i++) { ig.s.gpu_on = 1; ig.s.gpu = 0.02; run(&ig, 1, 2.5, 1, 3, 0); }
+        check(ig.s.k == 1 && ig.s.ilate_run == 0, "  idle-GPU late frames during stall grace do not advance ilate_run");
+        // Early returns (!s->k, fixed > 0) clear settle so it does not leak onto a later frame
+        sim er = {0}; er.s.settle = 1; nvn_fstep_next(&er.s, 0, 0, 1, 3, 0, 0);
+        int clr1 = er.s.settle == 0;
+        er.s.settle = 1; nvn_fstep_next(&er.s, 1, 0.5, 1, 3, 2, 0);
+        int clr2 = er.s.settle == 0;
+        nvn_fstep_next(&er.s, 1, 0.5, 1, 3, 0, 0);
+        check(clr1 && clr2 && er.s.stalls == 0, "  settle is cleared on first-frame and fixed-step early returns");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

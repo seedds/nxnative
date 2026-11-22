@@ -20,6 +20,9 @@ int front_screen_capable_fps(void);
 // The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).
 // Returns 0 and leaves w, h alone when not known (no front end: graphics unit tests). Any thread
 int front_display_pixels(int *w, int *h);
+// DM_SCREEN_ASPECT=auto resolved to the shape of the screen the game opens on, before main.c writes the state page (front_mac.m; front_ios.m resolves it in its view controller,
+// before the game starts, so its own is empty). Main thread
+void front_screen_aspect_auto(void);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread
 int front_screen_variable_refresh(void);
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,

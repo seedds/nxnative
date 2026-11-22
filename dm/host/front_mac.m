@@ -57,6 +57,18 @@ int front_display_pixels(int *w, int *h) {
     if (a <= 0 || b <= 0) return 0;
     *w = a; *h = b; return 1;
 }
+// Picture shape "auto" (Match screen) on the Mac: the shape of the main screen, below its camera housing, which fullscreen
+// leaves black (frame less safeAreaInsets.top: a 14" MacBook Pro's 1512x950 points, 1.592:1), when it is taller than 16:9, else 16:9. Resolved before the host writes the
+// state page (main.c, loader.c dm_fps_state_apply): the game sizes its swapchain once at start, so a move to a screen of another shape takes a restart
+void front_screen_aspect_auto(void) {
+    const char *a = getenv("DM_SCREEN_ASPECT"); if (!a || strcmp(a, "auto")) return;
+    NSScreen *on = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    NSSize sz = on ? on.frame.size : NSZeroSize;
+    if (@available(macOS 12.0, *)) if (on) sz.height -= on.safeAreaInsets.top;
+    double r = sz.height > 0 ? sz.width / sz.height : 0;
+    char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+    setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: screen '%s' %.0fx%.0f points below the camera housing (%.3f:1) → DM_SCREEN_ASPECT=%s", on ? on.localizedName.UTF8String : "?", sz.width, sz.height, r, v);
+}
 static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh

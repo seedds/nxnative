@@ -180,6 +180,7 @@ int main(int argc, char **argv) {
         void crash_thread_init(void); crash_thread_init();   // The signal alternate stack is per thread: loading installed it on another thread, so add it for this thread
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
+    { void front_screen_aspect_auto(void); front_screen_aspect_auto(); }   // DM_SCREEN_ASPECT=auto: the Mac's screen shape, before the state page takes it (front_mac.m)
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     front_run(guest_main);
     return 0;

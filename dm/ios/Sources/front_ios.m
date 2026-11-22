@@ -293,6 +293,10 @@ bool dm_setting_live(const char *env, const char *value) {
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
+    // Upscaling in the present and the game's upscaler: at once on a GPU with MetalFX's spatial scaler (nvn_mtl.m dm_present_upscale_set from the next present, dm_upscaler_set from the
+    // next frame, the latter in a game whose shader map names upscaler shaders)
+    if (!strcmp(env, "DM_PRESENT_UPSCALE")) { if (dm_present_upscale_live() < 0) return false; if (value && dm_present_upscale_set(value)) LOG("front end: upscaling %s (in-game menu)", value); return true; }
+    if (!strcmp(env, "DM_UPSCALER")) { if (dm_upscaler_live() < 0) return false; if (value && dm_upscaler_set(value)) LOG("front end: game's upscaler %s (in-game menu)", value); return true; }
     return false;
 }
 @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>

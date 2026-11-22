@@ -764,6 +764,21 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
                   && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL));
     XCTAssertFalse(dm_setting_live("DM_LANG", NULL), @"A setting the game reads once at start is not offered");
     XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL));
+    // Upscaling and the game's upscaler: at once on a GPU with MetalFX's spatial scaler (nvn_mtl.m dm_present_upscale_set / dm_upscaler_set); the game's upscaler only in a game that has one
+    duo_harness_upscale(-1, -1);
+    XCTAssertFalse(dm_setting_live("DM_PRESENT_UPSCALE", NULL) || dm_setting_live("DM_UPSCALER", NULL), @"Without MetalFX neither is offered");
+    XCTAssertFalse(dm_setting_live("DM_PRESENT_UPSCALE", "metalfx"), @"and a pick is not applied");
+    duo_harness_upscale(0, -1);
+    XCTAssertTrue(dm_setting_live("DM_PRESENT_UPSCALE", NULL), @"With MetalFX upscaling is offered");
+    XCTAssertFalse(dm_setting_live("DM_UPSCALER", NULL), @"the game's upscaler only in a game that has one");
+    dm_setting_live("DM_PRESENT_UPSCALE", "metalfx"); XCTAssertEqual(duo_harness_present_upscale(), 1, @"MetalFX applies at once");
+    dm_setting_live("DM_PRESENT_UPSCALE", "bilinear"); XCTAssertEqual(duo_harness_present_upscale(), 1, @"a value the setting does not have is refused");
+    dm_setting_live("DM_PRESENT_UPSCALE", "off"); XCTAssertEqual(duo_harness_present_upscale(), 0, @"and Standard (bilinear) again");
+    duo_harness_upscale(0, 0);
+    XCTAssertTrue(dm_setting_live("DM_UPSCALER", NULL), @"In a game with an upscaler of its own it is offered");
+    dm_setting_live("DM_UPSCALER", "metalfx"); XCTAssertEqual(duo_harness_game_upscaler(), 1, @"MetalFX applies at once");
+    dm_setting_live("DM_UPSCALER", "game"); XCTAssertEqual(duo_harness_game_upscaler(), 0, @"and the game's own again");
+    duo_harness_upscale(-1, -1);
 
     CGRect b = root.view.bounds;
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;

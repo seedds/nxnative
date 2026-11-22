@@ -249,6 +249,31 @@ int main(int argc, char **argv) { @autoreleasepool {
         g_present_n=32;
         EXPECT("same size reuses its scaler",PRESENT_METALFX,check_present_resize(big,192,96));
         EXPECT("reuse makes no new scaler",2,g_fx_present.made);
+        // DM_PRESENT_UPSCALE changed while the game runs (dm_present_upscale_set: the in-game menu, the Mac's Performance menu): the next present takes it, both ways, and the way back
+        // to MetalFX takes the scaler it kept for that size
+        g_present_n=33;
+        EXPECT("live: off is taken",1,dm_present_upscale_set("off"));
+        EXPECT("live: the next present scales bilinearly",PRESENT_STANDARD,check_present_resize(big,192,96));
+        EXPECT("live: off in force",0,dm_present_upscale_live());
+        g_present_n=34;
+        EXPECT("live: metalfx is taken",1,dm_present_upscale_set("metalfx"));
+        EXPECT("live: the next present goes through MetalFX again",PRESENT_METALFX,check_present_resize(big,192,96));
+        EXPECT("live: metalfx in force",1,dm_present_upscale_live());
+        EXPECT("live: the kept scaler draws it, none made",2,g_fx_present.made);
+        EXPECT("live: a value the setting does not have is refused",0,dm_present_upscale_set("bilinear"));
+        EXPECT("live: and so is none",0,dm_present_upscale_set(NULL));
+        // DM_PRESENT_UPSCALE=ab: alternated with the DM_AB phases (here 2 frames each, phase 0 bilinear) until a choice ends it; the [ab] line names it while it alternates
+        long ab_was=g_ab_len;g_ab_len=2;setenv("DM_PRESENT_UPSCALE","ab",1);atomic_store(&g_fx_mode,-1);
+        int abk=-1,alt=0;
+        for(uint64_t f=2000;f<2008;f++){mtl_set_frame(f);g_present_n=35+f-2000;alt+=check_present_resize(big,192,96)==((f/2)&1?PRESENT_METALFX:PRESENT_STANDARD);}
+        for(int k=0;k<g_sw_n;k++)if(!strcmp(g_sw_name[k],"DM_PRESENT_UPSCALE"))abk=k;
+        EXPECT("ab: MetalFX in the odd phases, bilinear in the even ones (8 presents)",8,alt);
+        EXPECT("ab: the [ab] line names DM_PRESENT_UPSCALE",1,abk>=0&&g_sw_mode[abk]>=2);
+        EXPECT("ab: a choice is taken",1,dm_present_upscale_set("metalfx"));
+        alt=0;for(uint64_t f=2008;f<2012;f++){mtl_set_frame(f);g_present_n=43+f-2008;alt+=check_present_resize(big,192,96)==PRESENT_METALFX;}
+        EXPECT("ab: the choice ends the alternation (4 presents through MetalFX)",4,alt);
+        EXPECT("ab: and the [ab] line has it on",1,abk>=0&&g_sw_mode[abk]==1);
+        unsetenv("DM_PRESENT_UPSCALE");g_ab_len=ab_was;
         // DM_FX_INPLACE and DM_FX_DIRECT: the scaler reads a private window texture in place and writes a canvas it can write, while the frame that draws that texture is
         // still running on the queue (committed just before, as a present follows its frame). The scaler must still see the whole frame: the encoder before it orders it after
         // the queue's earlier work only around work of its own (an encoder of barriers alone ordered nothing, and the scaler read the frame before, in every round)

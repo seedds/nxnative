@@ -139,6 +139,10 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
 extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+int dm_present_upscale_live(void);   // nvn_mtl.m: the present's upscaling in force, 1 MetalFX / 0 bilinear (DM_PRESENT_UPSCALE); -1 when the GPU has no Metal 4 MetalFX spatial scaler
+int dm_present_upscale_set(const char *value);   // nvn_mtl.m: "metalfx" or "off" from the next present on, while the game runs; 1 = taken, 0 = refused (logged)
+int dm_upscaler_live(void);   // nvn_mtl.m: the game's upscaler chosen now, 1 MetalFX / 0 the game's own (DM_UPSCALER); -1 when the game has none or the GPU no Metal 4 MetalFX spatial scaler
+int dm_upscaler_set(const char *value);   // nvn_mtl.m: "metalfx" or "game" from the next frame on, while the game runs; 1 = taken, 0 = refused (logged)
 int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (the fastest video decoder that handed out a picture in the last half second), 0 when none: the frame step follows it
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
 void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now

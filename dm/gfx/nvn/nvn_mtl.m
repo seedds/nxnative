@@ -2733,7 +2733,8 @@ static void gpu_capture_frame(uint64_t f) {
         else MLOG("[RED] DM_GPU_CAPTURE: the capture did not start: %s", err.localizedDescription.UTF8String);
     } else if (g_cap_on && f >= (uint64_t)g_cap_f0 + (uint64_t)g_cap_n) { [m stopCapture]; g_cap_on = 0; g_cap_f0 = -1; gpu_thr = 0; MLOG("DM_GPU_CAPTURE: capture stopped at frame %llu (the trace is written in the background)", (unsigned long long)f); }
 }
-void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); if (ab_len()) ab_frame(f); gpu_capture_frame(f); }
+static void up_mfx_frame(uint64_t f);   // the game's upscaler for this frame (DM_UPSCALER, changed while the game runs)
+void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); if (ab_len()) ab_frame(f); up_mfx_frame(f); gpu_capture_frame(f); }
 // GPU timing registration: gpu_tag_begin(frame) before commit, gpu_tag_done(frame, GPU start, GPU end) on completion (seconds on the CACurrentMediaTime base).
 // Old-queue command buffers go through gpu_tag_f; the Metal 4 main submission backfills in the feedback of mtl_sub_commit (when switching to Metal 4 all the call sites were lost and the GPU column of the timing line became empty)
 static void gpu_tag_begin(uint64_t f) {
@@ -6021,8 +6022,15 @@ static int udc_on(void) {
 // (sw_mode) and asks sw_on at each use; one that must stay the same over a pass latches it when the pass begins
 static _Atomic long g_ab_phase; static long g_ab_len = -1;
 static long ab_len(void) { if (g_ab_len < 0) { const char *e = getenv("DM_AB"); g_ab_len = e ? atol(e) : 0; if (g_ab_len < 0) g_ab_len = 0; if (g_ab_len) MLOG("DM_AB: switches set to ab alternate every %ld frames (phase 0 with all of them off)", g_ab_len); } return g_ab_len; }
-enum { SW_MAX = 8 }; static const char *g_sw_name[SW_MAX]; static int g_sw_mode[SW_MAX], g_sw_n;
+enum { SW_MAX = 16 }; static const char *g_sw_name[SW_MAX]; static int g_sw_mode[SW_MAX], g_sw_n;
 static inline int sw_on_at(int m, long ph) { if (m < 2) return m; int n = (m - 2) & 15, mask = (m - 2) >> 4; return mask >> (ph % n) & 1; }
+// The [ab] line's record of switch <name> in mode m (sw_mode; a player's choice that ends an ab switch's alternation sets it again), once per name
+static void sw_note(const char *name, int m) {
+    static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&lk);
+    int k = 0; while (k < g_sw_n && strcmp(g_sw_name[k], name)) k++;
+    if (k < g_sw_n) g_sw_mode[k] = m; else if (g_sw_n < SW_MAX) { g_sw_name[g_sw_n] = name; g_sw_mode[g_sw_n] = m; g_sw_n++; }
+    os_unfair_lock_unlock(&lk);
+}
 // The mode of switch <name>: 0 off, 1 on, 2 + n + 16 * mask = on in the phases whose number modulo n is in mask; ab without DM_AB is off
 static int sw_mode(const char *name, int dflt) {
     const char *e = getenv(name); int m = dflt, mask = 2, n = 2;
@@ -6034,7 +6042,7 @@ static int sw_mode(const char *name, int dflt) {
         if (!ab_len()) MLOG("[RED] %s=%s needs DM_AB=<frames>: the switch is off", name, e); }
     else if (e) m = atoi(e) ? 1 : 0;
     if (m >= 2) MLOG("%s: on in the DM_AB phases whose number modulo %d is in the set %#x", name, n, mask);
-    if (m >= 2 && g_sw_n < SW_MAX) { g_sw_name[g_sw_n] = name; g_sw_mode[g_sw_n++] = m; }   // the [ab] lines name the switches that alternate: a table of every switch read filled up before the later ones
+    if (m >= 2) sw_note(name, m);   // the [ab] lines name the switches that alternate: a table of every switch read filled up before the later ones
     return m;
 }
 static inline int sw_on(int m) { return sw_on_at(m, atomic_load_explicit(&g_ab_phase, memory_order_relaxed)); }
@@ -6869,8 +6877,8 @@ static void shmap_read(void) {
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
-    uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
-    uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
+    uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX in frames that choose it (DM_UPSCALER, up_mfx_on), 2 not one or one its colour keeps (up_mfx_wanted)
+    uint8_t up_color;   // such a shader's colour, from its code at load on a GPU with MetalFX's spatial scaler, whatever DM_UPSCALER is now (up_mfx_color; UP_COLOR_UNREAD otherwise)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time, borrowed from its arena: valid only while ab_pass is the current pass. Keeping it here strongly would pin retired arenas for shaders no longer drawn.
@@ -19094,17 +19102,40 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at, in_place_n, direct_n; int made; NSUInteger refused[6]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
-static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
-static int fx_mode(void) {
-    if (g_fx_mode >= 0) return g_fx_mode;
-    const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
-    if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
-    else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
-    else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
-    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
-    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
-    return g_fx_mode = v;
+// The choice can change while the game runs (dm_present_upscale_set: the in-game menu, the Mac's Performance menu): each present reads it once (fx_encode), so the next present takes
+// it whole. The scaler holds no history: its state (made per size and format on first use) stays for the way back, and bilinear presents need none
+static _Atomic int g_fx_mode = -1;   // 1 = metalfx, 0 = off: the start value, then the player's choice (dm_present_upscale_set); 2 and up: a DM_AB switch mode (DM_PRESENT_UPSCALE=ab); -1 = not read yet
+static int mfx_spatial_able(void) {   // this GPU has Metal 4's MetalFX spatial scaler, which both MetalFX paths (the present's, the game's upscaler's) need; unknown before the device
+    static _Atomic int v = -1; int a = atomic_load(&v);
+    if (a < 0 && g_dev) { a = g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]; atomic_store(&v, a); }
+    return a > 0;
 }
+static int fx_mode(void) {
+    int m = atomic_load(&g_fx_mode);
+    if (m < 0) {
+        const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
+        if (e && !strncmp(e, "ab", 2)) v = sw_mode("DM_PRESENT_UPSCALE", 0);   // alternated with the DM_AB phases (measurement)
+        else if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
+        else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
+        else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx, off or ab; keeping off", e);
+        if (v && !mfx_spatial_able()) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
+        MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v >= 2 ? "metalfx in the DM_AB phases the switch is on in, bilinear in the others" : v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
+        int was = -1; m = atomic_compare_exchange_strong(&g_fx_mode, &was, v) ? v : was;   // a choice made meanwhile stands
+    }
+    return m >= 2 ? sw_on(m) : m;
+}
+// The present's upscaling while the game runs: "metalfx" or "off", from the next present on (it ends DM_PRESENT_UPSCALE=ab's alternation); 1 = taken, 0 = refused (logged)
+int dm_present_upscale_set(const char *value) {
+    int v = value && !strcmp(value, "metalfx") ? 1 : value && !strcmp(value, "off") ? 0 : -1;
+    if (v < 0) { MLOG("[RED] present upscaling %s refused: metalfx or off", value ? value : "(none)"); return 0; }
+    if (v && !mfx_spatial_able()) { MLOG("[RED] present upscaling metalfx refused: this GPU has no Metal 4 MetalFX spatial scaler"); return 0; }
+    (void)fx_mode();   // the start value read first, so it cannot replace the choice
+    if (atomic_exchange(&g_fx_mode, v) >= 2) sw_note("DM_PRESENT_UPSCALE", v);
+    MLOG("present upscaling: %s from the next present (changed while the game runs)", v ? "metalfx" : "off, bilinear");
+    return 1;
+}
+// 1 metalfx / 0 bilinear in force now, so a menu can offer the choice; -1 when this GPU has no Metal 4 MetalFX spatial scaler (nothing to choose)
+int dm_present_upscale_live(void) { return mfx_spatial_able() ? fx_mode() : -1; }
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
@@ -19183,15 +19214,46 @@ enum { UP_MFX_SCALERS = 8 };   // dynamic resolution moves the input, and a form
 static up_mfx_scaler g_up_mfx[UP_MFX_SCALERS]; static int g_up_mfx_next;
 static uint64_t g_up_mfx_n, g_up_mfx_kept, g_up_mfx_straight[2];   // dispatches drawn by MetalFX, dispatches of a named shader left to it, of the drawn: input and output that were the game's own textures
 void mtl_up_mfx_stats(uint64_t *n, uint64_t *kept) { *n = g_up_mfx_n; *kept = g_up_mfx_kept; }
-static int up_mfx_on(void) {
-    static int v = -1;
-    if (v >= 0) return v;
-    const char *e = getenv("DM_UPSCALER"); v = e && !strcmp(e, "metalfx");
-    if (e && *e && strcmp(e, "metalfx") && strcmp(e, "game")) MLOG("[RED] DM_UPSCALER=%s: metalfx or game; keeping the game's", e);
-    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("upscaler: this GPU has no Metal 4 MetalFX spatial scaler; the game's own upscaler draws"); v = 0; }
-    if (v) MLOG("upscaler (DM_UPSCALER): metalfx, the game's upscaler shaders (%d, from the shader map) are drawn by MetalFX's spatial scaler", DM_GAME_UPSCALER_N);
-    return v;
+// The choice can change while the game runs (dm_upscaler_set: the in-game menu, the Mac's Performance menu; DM_UPSCALER is the start value, or ab for the DM_AB phases). The replay
+// takes it as a frame begins (up_mfx_frame, from mtl_set_frame) and keeps it for the whole frame, so every dispatch of a frame sees one choice. Nothing keeps history to reset:
+// MetalFX's spatial scaler has none (its scalers, made on first use per size and format, stay for the way back), and the game's own shaders run as they always did
+static _Atomic int g_up_want = -1;   // 1 metalfx, 0 game: the start value, then the player's choice; 2 and up: a DM_AB switch mode (DM_UPSCALER=ab); -1 = not read yet
+static int g_up_cur = -1;            // replay thread: the choice in force for this frame
+static int up_mfx_want(void) {
+    int m = atomic_load(&g_up_want);
+    if (m < 0) {
+        const char *e = getenv("DM_UPSCALER"); int v = 0;
+        if (e && !strncmp(e, "ab", 2)) v = sw_mode("DM_UPSCALER", 0);   // alternated with the DM_AB phases (measurement)
+        else if (e && !strcmp(e, "metalfx")) v = 1;
+        else if (e && *e && strcmp(e, "game")) MLOG("[RED] DM_UPSCALER=%s: metalfx, game or ab; keeping the game's", e);
+        if (v && !mfx_spatial_able()) { MLOG("upscaler: this GPU has no Metal 4 MetalFX spatial scaler; the game's own upscaler draws"); v = 0; }
+        if (v) MLOG("upscaler (DM_UPSCALER): metalfx%s, the game's upscaler shaders (%d, from the shader map) are drawn by MetalFX's spatial scaler", v >= 2 ? " in the DM_AB phases the switch is on in" : "", DM_GAME_UPSCALER_N);
+        int was = -1; m = atomic_compare_exchange_strong(&g_up_want, &was, v) ? v : was;   // a choice made meanwhile stands
+    }
+    return m >= 2 ? sw_on(m) : m;
 }
+static int up_mfx_on(void) { if (g_up_cur < 0) g_up_cur = up_mfx_want(); return g_up_cur; }
+static void up_mfx_frame(uint64_t f) {   // frame f begins (mtl_set_frame, the replay thread): the choice for this frame
+    if (!DM_GAME_UPSCALER_N || !g_dev) return;   // no device yet: MetalFX's support unknown, the start value not settled
+    int w = up_mfx_want();
+    if (g_up_cur < 0) { g_up_cur = w; return; }
+    if (w == g_up_cur) return;
+    g_up_cur = w;
+    MLOG("upscaler: %s from frame %llu", w ? "MetalFX draws the game's upscaler" : "the game's own upscaler draws", (unsigned long long)f);
+}
+// The game's upscaler while the game runs: "metalfx" or "game", from the next frame on (it ends DM_UPSCALER=ab's alternation); 1 = taken, 0 = refused (logged)
+int dm_upscaler_set(const char *value) {
+    int v = value && !strcmp(value, "metalfx") ? 1 : value && !strcmp(value, "game") ? 0 : -1;
+    if (v < 0) { MLOG("[RED] upscaler %s refused: metalfx or game", value ? value : "(none)"); return 0; }
+    if (!DM_GAME_UPSCALER_N) { MLOG("[RED] upscaler %s refused: the game's shader map names no upscaler shaders", value); return 0; }
+    if (v && !mfx_spatial_able()) { MLOG("[RED] upscaler metalfx refused: this GPU has no Metal 4 MetalFX spatial scaler"); return 0; }
+    (void)up_mfx_want();   // the start value read first, so it cannot replace the choice
+    if (atomic_exchange(&g_up_want, v) >= 2) sw_note("DM_UPSCALER", v);
+    MLOG("upscaler: %s from the next frame (changed while the game runs)", v ? "MetalFX draws the game's upscaler" : "the game's own upscaler draws");
+    return 1;
+}
+// 1 metalfx / 0 game chosen now, so a menu can offer the choice; -1 when there is none (no upscaler shaders in the game's shader map, or no Metal 4 MetalFX spatial scaler)
+int dm_upscaler_live(void) { return DM_GAME_UPSCALER_N && mfx_spatial_able() ? up_mfx_want() : -1; }
 // The colour a variant of the network takes and writes, from the sRGB curves in its code (their constants are immediates, whole bytes in the code). The variants differ inside a pack, so this is the shader's and not the game's:
 // Bananza's all encode linear input (0.0031308, 1 / 2.4 as floats) and come in threes: no decode at the end (the output stays encoded), a decode clamped to 0-1, a decode up to 128. Splatoon Raiders' all read colour that is encoded
 // already and come in twos: no decode, a decode clamped to 0-1 (as half floats: 0.04045, 2.4 and 1 / 12.92 rounded to 0.0404358, 2.3984375 and 0.0774536). Only the variants with linear output are drawn, in these two shapes; a variant
@@ -19248,20 +19310,17 @@ static int up_mfx_named(NvShader *cs) {
     for (const char *k = DM_GAME_UPSCALER_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
     return 0;
 }
-static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
-    if (cs->up_color || !DM_GAME_UPSCALER_N || !up_mfx_on() || !up_mfx_named(cs)) return;
+static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {   // whatever the choice now: it can change to MetalFX while the game runs
+    if (cs->up_color || !DM_GAME_UPSCALER_N || !mfx_spatial_able() || !up_mfx_named(cs)) return;
     uint32_t nctl, ncode = 0; if (sd->control) nvn_ctl_lens(sd->control, &nctl, &ncode);
     cs->up_color = sd->data && ncode && ncode < (1u << 24) ? up_mfx_color((const void *)(uintptr_t)sd->data, ncode) : UP_COLOR_KEEP;
     MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "linear input and output, MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" :
                             cs->up_color == UP_COLOR_ROOT ? "square-rooted input, linear output (the shader squares): squared into linear, then MetalFX in HDR mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
 }
-// Whether cs is one of the game's upscaler shaders, the player chose MetalFX and its colour is one MetalFX draws
+// Whether cs is one of the game's upscaler shaders whose colour is one MetalFX draws (decided once) and MetalFX draws the game's upscaler in this frame (up_mfx_on)
 static int up_mfx_wanted(NvShader *cs) {
-    if (cs->up_mfx) return cs->up_mfx == 1;
-    cs->up_mfx = 2;
-    if (!DM_GAME_UPSCALER_N || !up_mfx_on()) return 0;
-    if (up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB || cs->up_color == UP_COLOR_ROOT)) cs->up_mfx = 1;
-    return cs->up_mfx == 1;
+    if (!cs->up_mfx) cs->up_mfx = DM_GAME_UPSCALER_N && up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB || cs->up_color == UP_COLOR_ROOT) ? 1 : 2;
+    return cs->up_mfx == 1 && up_mfx_on();
 }
 // The scaler for these sizes, colour (sRGB input: perceptual mode) and formats: cf, the colour texture's, and of, the output's; NULL when MetalFX made none (remembered)
 static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, int srgb, MTLPixelFormat cf, MTLPixelFormat of) {

@@ -100,6 +100,7 @@ def screen_shape(ctx):
     # are set here every frame. At the half angle (main+0x39bca4, fmul s8,s2,s0) a 16:9 aspect in s9 widens it (atan(tan x k)) and takes the screen's ratio, so the fovy,
     # sin, cos, tan and aspect the code goes on to store agree. Assembled with clang; s2 / s8 / s9 are what the code after uses (s2 stored next, s9 only by the aspect
     # store), it calls sinf next so nothing else call-clobbered is live, x9 / x10 / x16 / x17 free; the frame keeps x30 (the function calls)
+    # With DM_SCREEN_FOV=off (state +0x60 negative) only the aspect takes the ratio: 16:9's vertical angle, the sides cut (Mario Kart World's "closer" view)
     def inlined_set(site, words, where):
         fs_site(site, struct.pack('<I', words[0]).hex())
         start = here()
@@ -110,13 +111,11 @@ def screen_shape(ctx):
             elif w == 'back': emit(B(here(), site + 4))
             else: emit(w)
         fs_put(site, [B(site, start)], f'screen shape: an inlined sead::PerspectiveProjection set() of a 16:9 aspect is widened and takes the screen\'s ratio ({where})')
-    inlined_set(0x39bca4, (0x1E200848, 'adrp', 0xB9405A11, 0x34000291, 0x1E260129, 0x5289C72A, 0x72A7FC4A, 0x4B0A0129, 0x53127D29, 0x350001C9, 0x1E204100, 'tanf', 'adrp',
-                           0xBD405E01, 0x1E210800, 'atanf', 0x1E204008, 0x1E202802, 'adrp', 0xBD405A09, 0xB9412611, 0x11000631, 0xB9012611, 'back'),
+    inlined_set(0x39bca4, (0x1E200848, 'adrp', 0xB9405A11, 0x340002D1, 0x1E260129, 0x5289C72A, 0x72A7FC4A, 0x4B0A0129, 0x53127D29, 0x35000209, 0xB9406209, 0x37F80149, 0x1E204100, 'tanf', 'adrp', 0xBD405E01, 0x1E210800, 'atanf', 0x1E204008, 0x1E202802, 'adrp', 0xBD405A09, 0xB9412611, 0x11000631, 0xB9012611, 'back'),
                 'fovy s2, half s8, aspect s9')
     # The second (main+0x4db8b4, fmul s8,s10,s13: fovy s10 from [x20,#0xb4] x the scale, half s8, aspect s12 from [x19,#0x100]; stored at +0xa0..+0xb0 and again at +0x1d8 /
     # +0x1e0): the view the frame is drawn with (its aspect stayed 16/9 with the first one widened, DM_PROBE_WATCH). s8 / s10 / s12 are what the code after uses; sinf next
-    inlined_set(0x4db8b4, (0x1E2D0948, 'adrp', 0xB9405A11, 0x34000291, 0x1E260189, 0x5289C72A, 0x72A7FC4A, 0x4B0A0129, 0x53127D29, 0x350001C9, 0x1E204100, 'tanf', 'adrp',
-                           0xBD405E01, 0x1E210800, 'atanf', 0x1E204008, 0x1E20280A, 'adrp', 0xBD405A0C, 0xB9412611, 0x11000631, 0xB9012611, 'back'),
+    inlined_set(0x4db8b4, (0x1E2D0948, 'adrp', 0xB9405A11, 0x340002D1, 0x1E260189, 0x5289C72A, 0x72A7FC4A, 0x4B0A0129, 0x53127D29, 0x35000209, 0xB9406209, 0x37F80149, 0x1E204100, 'tanf', 'adrp', 0xBD405E01, 0x1E210800, 'atanf', 0x1E204008, 0x1E20280A, 'adrp', 0xBD405A0C, 0xB9412611, 0x11000631, 0xB9012611, 'back'),
                 'fovy s10, half s8, aspect s12')
 
     # The 2D layer: drawn with a 16:9 projection over the taller picture, stretched 1.244 tall (the hearts 207x45 at 16:9, 207x56 at 1.43, with the layout sites on or off).

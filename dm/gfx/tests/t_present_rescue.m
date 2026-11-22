@@ -192,7 +192,10 @@ static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh scree
     test_screen_hz = 240; link_sync(); CHECK("a variable-refresh screen at 240 Hz takes the 120 Hz link", g_link_mode == 2);
     test_screen_hz = 120; g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link in fullscreen", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     g_present_link_env = 0; link_sync(); CHECK("without DM_PRESENT_LINK the 120 Hz link again", g_link_mode == 2);
-    test_game_fps = 30; link_sync(); CHECK("30 fps in variable-refresh fullscreen keeps the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
+    test_game_fps = 30; link_sync(); CHECK("30 fps in variable-refresh fullscreen defaults to the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
+    g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link at 30 fps", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && test_match_fps == 60);
+    g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link at 30 fps", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 120);
+    g_dm_present_link = 1; g_present_link_env = 0; link_sync(); CHECK("unset DM_PRESENT_LINK restores the 30 Hz power-saving link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
     test_game_fps = 60; link_sync(); CHECK("back at 60 fps: the 120 Hz link", g_link_mode == 2);
     test_fullscreen = 0; link_sync(); CHECK("leaving fullscreen: the 60 Hz link again", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link in a window", g_link_mode == 2 && test_match_fps == 120);

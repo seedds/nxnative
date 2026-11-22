@@ -12,8 +12,14 @@
 
 // ---------- oe ----------
 HLE_FORCE("_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE", "CPU boost mode; the host does not scale clocks", void, h_oe_CpuBoost, int m) { (void)m; }
-// DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID (the game profile's build rows); unknown builds get 1.0.0
-HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "display version (by the main build ID)", void, h_oe_DispVer, char *v) {
+// DisplayVersion = char[16] (the application's display version): the 16-byte string from control.nacp (+0x3060), as Horizon serves it (Fate/hollow ataraxia REMASTERED 1.0.2 ships
+// "1.0.2 b723" and parses the trailing build number 723 for its savedata version check); without control data (dumps / NUPs), falls back to the profile's build rows by main's build ID, else 1.0.0
+HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "display version (from control.nacp, else the main build ID)", void, h_oe_DispVer, char *v) {
+    char nacp[16];
+    if (!dm_control_read(0x3060, nacp, sizeof nacp, NULL, 0) && nacp[0]) {
+        size_t n = strnlen(nacp, 15);
+        memset(v, 0, 16); memcpy(v, nacp, n); return;
+    }
     const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
     const char *ver = "1.0.0";
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))

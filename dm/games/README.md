@@ -103,7 +103,9 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [DRAGON QUEST VII Reimagined](0100A9D01C446000/README.md) | `0100A9D01C446000` | 1.2.0 | 19.3.1 | Unreal Engine 4.27 | NVN |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](01006C300E9F0000/README.md) | `01006C300E9F0000` | 1.0.4 | 7.3.2 | Unreal Engine 4.18 | NVN |
 | [EA SPORTS FC 27](0100C49025D3E000/README.md) | `0100C49025D3E000` | 1.8d.310c | 22.2.0 | Frostbite 2025.1.2 (its NVN renderer in an NRO) | NVN |
+| [Factorio](01004200189F4000/README.md) | `01004200189F4000` | 2.0.76 | 21.4.2 | Wube Software's engine, SDL | OpenGL |
 | [Farming Simulator 26: Nintendo Switch Edition](0100D440269E8000/README.md) | `0100D440269E8000` | 1.0.1.0 | 20.5.4 | GIANTS Engine | NVN |
+| [Fate/hollow ataraxia REMASTERED](010070E022546000/README.md) | `010070E022546000` | 1.0.2 | 16.2.6 | TYPE-MOON's Fuzz engine (`smash::fw`) | OpenGL |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](0100CE4010AAC000/README.md) | `0100CE4010AAC000` | 1.0.3 | 8.2.1 | Unity 2018.4.2f1 IL2CPP, FMOD | NVN |
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
@@ -202,6 +204,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Slay the Spire](010026300BA4A000/README.md) | `010026300BA4A000` | 1.0 (base) | 7.3.2 | libGDX on MonoGame.Switch (BRUTE) | OpenGL |
 | [Sonic Frontiers Definitive Edition](0400921025B32000/README.md) | `0400921025B32000` | v65536 (Switch 2) | 21.4.1 (Ounce) | Hedgehog Engine 2, CRIWARE | NVN2 |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
+| [South Park: The Fractured But Whole](01008F2005154000/README.md) | `01008F2005154000` | 1.05 | 3.5.1 | Ubisoft Snowdrop | NVN |
 | [South Park: The Stick of Truth](010095300B6A4000/README.md) | `010095300B6A4000` | 1.01 | 4.5.0 | Obsidian's Onyx engine, Bink | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN |
@@ -321,6 +324,8 @@ These are not profile keys: the tools read them from the game files each time, b
 - **NVN driver tables.** The driver's constant segments have one layout in every game (`dmsh_build.py`, filled by `nvn_mtl.m`): c2 holds the handles bound with `nvnCommandBufferBindTexture` at `0x20 + 8 × slot`, images at `0x120 + 8 × slot`, separate textures at `0x168 + 8 × slot` and separate samplers at `0x568 + 8 × slot`; c0 the storage buffer tables (vertex 0x110, compute 0x310, pixel 0x510). Separate texture binds are texture slots 128 + n of the host's table (`NVN_SEPTEX_SLOT0`), so a game may bind both kinds in one frame (Monster Hunter Rise: combined slot 0 beside separate slots 0-4), and a combined slot past 31 (Hades II binds slot 34) lies in the image table, where a bound texture wins over an unbound image. The translator (`dmsh_xlate/Program.cs`) numbers slots the same way when it looks up per-slot texture / image types in `shader_facts.tsv`.
 
 ## Adding a game
+
+The packer can apply a title's native defaults from `feral_defaults.tsv` in its repository directory, including when it uses a provisional profile. See [Hitman: Absolution](010037C022390000/README.md#frame-rate).
 
 1. **Survey.** Run `scripts/build_ipa_from_nsp.py` on the game's NSP folder. Without a profile it extracts only the code modules and a RomFS list, then writes `<NSP folder>/<title ID>_survey/survey.md`. The survey covers modules and build IDs, SDK, engine and graphics API markers, RomFS containers, the rewrite-site census, and imports compared with the host hooks.
    Unless told `--survey-only`, the script then writes a **provisional profile** to `<NSP folder>/<title ID>_build/profile/<title ID>/` (outside the repository) and carries on to a best-effort IPA. `dm/games/profile_guess.py` fills its `game.tsv` from the game files, each key under the reason for it (the survey lists them too):

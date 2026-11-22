@@ -4,7 +4,28 @@
 #pragma once
 #include "dm.h"
 #include "registration.h"
+#include <fcntl.h>
 #include <stddef.h>
+#include <unistd.h>
+
+// Read len bytes at off from the application's control.nacp (nn::ns::ApplicationControlProperty, 0x4000 bytes): DM_CONTROL_NACP, else control.nacp beside DM_ROMFS
+// (the NSP script's extraction folder <version>/{RomFS,control.nacp}, the Mac app's Resources). Returns 0 on success, -1 if missing, -2 if too short.
+static inline int dm_control_read(off_t off, void *out, size_t len, char *path_out, size_t path_cap) {
+    char p[1100]; const char *e = getenv("DM_CONTROL_NACP");
+    if (e && *e) snprintf(p, sizeof p, "%s", e);
+    else {
+        const char *rom = getenv("DM_ROMFS");
+        if (rom) snprintf(p, sizeof p, "%s", rom);
+        else snprintf(p, sizeof p, "%s%s/romfs", getenv("DM_ROOT") ?: (getenv("HOME") ?: ""), getenv("DM_ROOT") ? "" : "/dm-work");
+        size_t k = strlen(p); while (k > 1 && p[k - 1] == '/') p[--k] = 0;
+        char *sl = strrchr(p, '/'); if (sl) sl[1] = 0; else p[0] = 0;
+        strlcat(p, "control.nacp", sizeof p);
+    }
+    if (path_out && path_cap) strlcpy(path_out, p, path_cap);
+    int fd = open(p, O_RDONLY); ssize_t r = fd < 0 ? -1 : pread(fd, out, len, off);
+    if (fd >= 0) close(fd);
+    return r == (ssize_t)len ? 0 : (fd < 0 ? -1 : -2);
+}
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \

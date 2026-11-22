@@ -51,6 +51,7 @@
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
+#   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -257,6 +258,47 @@ def shn_shaders(d, label):
                 why = check(label, st, ctl, code) if st else 'unknown shader stage'
                 if why: red(f'{label} SHDROUNC variant {v} slot {slot}: {why}')
                 out.append((f'{label}#SHN@{h:#x}#var{v}', st, ctl, code))
+    return out
+
+def nxsd_shaders(d, label):
+    """NXSD v0x100, from ralph303's reader in issue #743: 24-byte descriptors reference 0x880-byte controls and variable-sized code areas in separate regions."""
+    where = f'{label} NXSD'
+    if len(d) < 0x40: red(f'{where}: truncated header')
+    version, size, code32, _, count, ctl_bytes, code_bytes = field(d, '<7I', 4, where)
+    table, ctl_start, code_start = field(d, '<3Q', 0x28, where)
+    if version != 0x100: red(f'{where}: unsupported version {version:#x}')
+    if size != len(d) or code32 != code_start: red(f'{where}: inconsistent file size or code offsets')
+    if not count or ctl_bytes != count * 0x880: red(f'{where}: invalid control count or stride')
+    if table < 0x40 or table + count * 0x18 != ctl_start: red(f'{where}: invalid descriptor table')
+    if ctl_start + ctl_bytes != code_start or code_start + code_bytes != len(d): red(f'{where}: invalid control or code region')
+    controls, ranges = set(), []
+    for i in range(count):
+        entry = f'{where} entry {i}'
+        ctl_rel, _, code_rel, _, _, _ = field(d, '<6I', table + i * 0x18, entry)
+        if ctl_rel % 0x880 or ctl_rel + 0x880 > ctl_bytes or ctl_rel in controls: red(f'{entry}: invalid or duplicate control offset')
+        controls.add(ctl_rel)
+        ctl_at = ctl_start + ctl_rel
+        ncode = field(d, '<I', ctl_at + 0x704, entry)[0]
+        code_end = code_rel + ncode
+        if code_end > code_bytes: red(f'{entry}: code section lies outside the code region')
+        ranges.append((code_rel, code_end, ctl_at))
+    # Validate coverage before copying code: overlapping descriptors can reference the same bytes repeatedly.
+    cursor = 0
+    for start, end, _ in sorted(ranges):
+        if start != cursor: red(f'{where}: code sections overlap or have gaps')
+        cursor = end
+    if cursor != code_bytes: red(f'{where}: code sections do not cover the code region')
+    out = []
+    for i, (start, end, ctl_at) in enumerate(ranges):
+        entry = f'{where} entry {i}'
+        ctl = span(d, ctl_at, 0x880, entry)
+        code = span(d, code_start + start, end - start, entry)
+        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
+        if not st: red(f'{entry}: unknown shader stage')
+        if len(code) < (0x30 if st == 'cs' else 0x80): red(f'{entry}: truncated code header or SPH')
+        why = check(entry, st, ctl, code)
+        if why: red(f'{entry}: {why}')
+        out.append((f'{label}#NXSD@{i}', st, ctl, code))
     return out
 
 def bahs_shaders(d, label):
@@ -585,6 +627,52 @@ def snowdrop_wrapped(d, label):
         yield h, pos - len(dec.unused_data), b''.join(parts)
 
 
+def snowdrop_objects(raw, where):
+    """The shader objects of one decoded Snowdrop cache record: each GLSLC control section sits immediately before its code area; control +0x20 and +0x704 give their lengths"""
+    out = []
+    for cm in re.finditer(re.escape(CTL_MAGIC), raw):
+        c = cm.start()
+        if c + 0x708 > len(raw): continue
+        nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
+        if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
+        ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
+        st = glslc_stage(ctl, code)
+        if st and not check(where, st, ctl, code): out.append((f'{where}:{c:#x}', st, ctl, code))
+    return out
+
+
+SNOWDROP_CACHE = b'\xd4\x00\xcd\xab'   # 0xabcd00d4: the decoded head of a bare cache record (.mcache), then its kind, 0 and twice the length of what follows its 20-byte header
+ZLIB_HEADERS = re.compile(b'|'.join(re.escape(bytes((cmf, flg))) for cmf in range(8, 0x79, 16)
+                                   for flg in range(256) if not flg & 32 and (cmf * 256 + flg) % 31 == 0))
+
+
+def snowdrop_zlib(d, label):
+    """Older SDF data slices (South Park: The Fractured But Whole, SDF version 22) store each shader cache file (camel/shadercache/nx/*.mcache) as a bare zlib stream,
+    without the 20-byte c5 / c6 record header: the data slice holds only the stream, at the offset its table of contents gives. Its decoded head is a 0xabcd00d4 record, and the shader objects
+    inside have the same layout as in the c5 / c6 records. Find each stream by its zlib header (CMF / FLG check) and a peek at the first decoded bytes, then decode it in full: the
+    base game's slice sdf-A-0200 holds 1,994 of them, matching the game's own _DataPartList.txt. A file over 64 KB is a run of 64 KB streams, decoded one after another up to the length in its head. A cheap peek rejects the other assets; bytes inside a decoded record are skipped by position"""
+    out, mv, end = [], memoryview(d), 0
+    for m in ZLIB_HEADERS.finditer(d):
+        h = m.start()
+        if h < end or h + 26 > len(d): continue
+        dec = zlib.decompressobj()
+        try: head = dec.decompress(mv[h:h + 256], 20)
+        except zlib.error: continue
+        if len(head) < 20 or head[:4] != SNOWDROP_CACHE or head[8:12] != bytes(4) or head[12:16] != head[16:20]: continue   # +4: the record's kind (0x13c, 0x65, ...)
+        nraw = struct.unpack_from('<I', head, 12)[0] + 20   # the length after the 20-byte header
+        parts, got, pos = [], 0, h
+        while got < nraw:   # a file over 64 KB is stored as consecutive zlib streams of 64 KB each (the list's Block column)
+            size = min(nraw - got, 0x10000)
+            dec, lim = zlib.decompressobj(), min(pos + size + 0x500, len(d))
+            try: part = dec.decompress(mv[pos:lim], size + 1)
+            except zlib.error as e: red(f'{label} Snowdrop zlib record @{h:#x}, block @{pos:#x}: {e}')
+            if len(part) != size or not dec.eof: red(f'{label} Snowdrop zlib record @{h:#x}: block @{pos:#x} did not finish at {size} raw bytes')
+            parts.append(part); got += size; pos = lim - len(dec.unused_data)
+        end = pos
+        out += snowdrop_objects(b''.join(parts), f'{label}#SDFZLIB@{h:#x}')
+    return out
+
+
 def snowdrop_shaders(d, label, wrapped=True):
     """Snowdrop's BERG data slices (SDF version 22): compressed shader records have a 20-byte header {0xabcd00c5 / 0xabcd00c6, flags, 0, raw length, stored length}, then zlib / zstd data.
     Kingdom Battle uses c5 with zlib (0x838-byte controls, including headerless compute), sometimes inside another zstd chunk; Sparks of Hope uses c6 with zstd. Their shader section layout is the same.
@@ -593,7 +681,7 @@ def snowdrop_shaders(d, label, wrapped=True):
     uncompressed data without this header. Some cache records are wrapped in zstd chunks; only decoded frames starting with the cache header are shader assets. Shader programs hold one stage; pairs are selected at draw time.
     Scan by the record header and peek at decoded chunk headers, not by slice names: compressed bytes can contain a coincidental frame header, which is not another asset."""
     chunks = list(snowdrop_wrapped(d, label)) if wrapped else []
-    out = []; ci = 0
+    out = [] if not wrapped else snowdrop_zlib(d, label); ci = 0
     for m in re.finditer(SNOWDROP_RECORD, d):
         h = m.start()
         while ci < len(chunks) and h >= chunks[ci][1]: ci += 1
@@ -608,14 +696,7 @@ def snowdrop_shaders(d, label, wrapped=True):
         stored = d[h + 20:h + 20 + nstored]
         raw = zstd_mod().decompress(stored) if zstd else zlib.decompress(stored)
         if len(raw) != nraw: red(f'{label} Snowdrop record @{h:#x}: expected {nraw} raw bytes, got {len(raw)}')
-        for cm in re.finditer(re.escape(CTL_MAGIC), raw):
-            c = cm.start()
-            if c + 0x708 > len(raw): continue
-            nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
-            if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
-            ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
-            st = glslc_stage(ctl, code)
-            if st and not check(label, st, ctl, code): out.append((f'{label}#SNOWDROP@{h:#x}:{c:#x}', st, ctl, code))
+        out += snowdrop_objects(raw, f'{label}#SNOWDROP@{h:#x}')
     for h, _, raw in chunks:
         out += snowdrop_shaders(raw, f'{label}#SDFZSTD@{h:#x}', wrapped=False)
     return out
@@ -3775,7 +3856,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -4049,8 +4130,13 @@ def fzlc_shaders(path, label):
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
+    with open(path, 'rb') as f:
+        head = f.read(16)
+        if head[:4] == b'NXSD':
+            f.seek(0)
+            found = nxsd_shaders(f.read(), '/' + rel)
+            return rel, uniq_keys(found), var_pairs(found), {}
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
-    with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
     if len(args) > 2 and args[2][0] == EA_ARCHIVE:
         from easf import reader

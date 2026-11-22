@@ -14337,7 +14337,7 @@ static void pso_predict_rest_(void) {
         if (hy && d && bk_ok) {
             if (hm_get_id(&g_pp_looked, &bk)) continue;   // its base is being looked up, or was: found it is made by now, missing its build was admitted or its draw waits
             hm_put_id(&g_pp_looked, &bk, NSNull.null);
-            pso_bg_look(qk, d, qv->has_pull ? pso_desc_pull(qk, qv, qf) : nil, !qk->border, i < na ? 2 : 1, budget);
+            pso_bg_look(qk, d, qv->has_pull ? pso_desc_pull(qk, qv, qf) : nil, pso_off(qk), i < na ? 2 : 1, budget);
             continue;
         }
         if (hy && hybrid_get(qk, qv, qf) != nil) continue;   // a whole pipeline (no base to look up): its stand-in, as before

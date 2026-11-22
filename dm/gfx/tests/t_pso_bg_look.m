@@ -70,7 +70,7 @@ int main(void) { @autoreleasepool {
     //    is then a specialization of that base, with no compile
     {   NvProg *p = program(library(.25f), "pull", 1); static prog_t pg = {.serial = 990100}; serial_put(pg.serial, p);
         pso_key k; state_reset(); S.prog = &pg; pso_key_fill(&k, p->sh[0], p->sh[1], (uint32_t[8]){70}, 0, 0, 1, 0);
-        NSError *e = nil; CHECK(pso_build(pso_desc_pull(&k, p->sh[0], p->sh[1]), !k.border, &e) != nil, "the pulling base builds (the prebuild's part)");
+        NSError *e = nil; CHECK(pso_build(pso_desc_pull(&k, p->sh[0], p->sh[1]), pso_off(&k), &e) != nil, "the pulling base builds (the prebuild's part)");
         uint64_t made = g_hy_made, n0 = g_bgl_n, found = g_bgl_found, admit = g_pp_admit, kicked = g_pp_kicked;
         predict(&pg);
         CHECK(hm_get_id(&g_pso_hy, &k) == nil && g_hy_made == made, "the prediction makes no stand-in on the submit thread");

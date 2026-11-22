@@ -762,6 +762,35 @@ class SplitShaders(Base):
         self.go(g, glslc_play=[folder]); self.assertEqual(self.splits, 3)
         self.go(g); self.assertEqual(self.splits, 4)
 
+    def test_retry_keeps_registered_sources_and_gameplay_captures(self):
+        romfs = self.ex / 'RomFS'
+        (romfs / 'stale.shader').write_bytes(b'old shader')
+        folder = self.tmp / 'gameplay'; folder.mkdir()
+        capture = folder / ('a' * 16 + '.glslc'); capture.write_bytes(b'captured shader')
+        base = 'vs.bin\t0\tvertex\tbase\t/base.shader\n'
+        captured = f'vs.bin\t1\tvertex\tcapture\t/glslc_play/{capture.name}\n'
+        stale = 'vs.bin\t2\tvertex\tstale\t/stale.shader\n'
+        registered = {'shader_map.tsv': base + captured, 'shader_facts.tsv': '# no facts\n',
+                      'shader_pairs.tsv': '# no pairs\n', 'pso_pairs.tsv': '# none\n'}
+        for name, content in registered.items():
+            (self.src / name).write_text(content)
+        g = game.Game(self.src)
+
+        def split(cmd, log, *, env, **kwargs):
+            self.assertEqual(env['DM_SPLIT_REGISTERED_MAP'], str(g.table('shader_map.tsv')))
+            self.assertEqual(json.loads(Path(cmd[-1]).read_text()), [str(capture)])
+            self.tables = dict(registered)
+            if self.splits == 0:
+                self.assertFalse(env['DM_SPLIT_SKIP'])
+                self.tables['shader_map.tsv'] += stale
+            else:
+                self.assertEqual(Path(env['DM_SPLIT_SKIP']).read_text(), '/stale.shader\n')
+            self.split(cmd, log, env=env, **kwargs)
+
+        with mock.patch.object(nsp, 'run', split):
+            self.assertEqual(self.go(g, own=False, glslc_play=[folder]), nsp.package_key(self.pkg))
+        self.assertEqual(self.splits, 2)
+
     def own(self):   # a derived profile with the empty tables, as main makes it
         self.derive(); g = game.Game(self.pdir); nsp.provisional_prep(sys.executable, self.repo, {}, self.logs, g); return g
 

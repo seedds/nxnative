@@ -131,7 +131,11 @@ From the same Kakariko save, walk into Hyrule Field and continue towards Castle 
 
 ## Saves
 
-The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.sav`. The Load screen lists them and reloading works. A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
+In the reported 2.1-hour run from Hyrule Field to Ganon's Castle on host `92aa1222`, the game used six slots (`slot_00` through `slot_05`) alongside `option.sav` and `account.sav`. The Load screen listed all six and reloading worked. The host logged 184 save transactions, each swapping `save.work` atomically into `save`. The six slots at the end held three saves from Inside Ganon's Castle, two from Ganon's Castle and one from the Market.
+
+A save's `caption.sav` contains a 543×306 JPEG thumbnail made from a texture copied to a buffer. In all six samples, bytes 0–1395 held the header and key table. The JPEG started at byte 1396 and ended with `FF D9`. The file also held `C_LOCATION` (`0xF74E0E8E`, a string such as `HyruleField`), `C_STAGE_PATH` (`0x0CCCC6CD`), `C_AUTOSAVE` (`0x25F03CAA`), and the year, month, day, hour and minute in the `C_TIME_*` fields (`0x9811A3F7`, `0xDFD840D3`, `0xBD46F485`, `0x23F3D75E`, `0x27853BF7`). The Load screen reads the place and time from this record.
+
+All six thumbnails from `92aa1222` showed a picture (31.8–42.1 KB). An earlier manual save (Menu, System, Save) also showed a picture in slot 02, with mean RGB 138 / 123 / 86. Other autosaves made on older chains had black thumbnails. Autosave thumbnails on current `main` still need checking.
 
 ## Driving it on the Mac
 
@@ -259,6 +263,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [An app packed without control data says version 1.0](../../../docs/reference/packing.md#an-app-packed-without-control-data-says-version-10). The local NUP has no NACP or display label. The registered v131072 build row supplies 1.1.1 to the packer and the host. On an Apple M6 with macOS 27.2.1, the rebuilt host reached the title menu and the game called `GetDisplayVersion` during boot.
 - [Inlining mesh helpers with subgroup inputs can crash the Metal compiler](../../../docs/reference/shaders.md#inlining-mesh-helpers-with-subgroup-inputs-can-crash-the-metal-compiler). The subgroup helper workaround clears the isolated foliage pipeline and the 164-row offline matrix at the supported deployment minimums.
 - [Missing required functions at the render pipeline API](../../../docs/reference/rendering.md#missing-required-functions-at-the-render-pipeline-api). The device API now returns an error for missing functions. The abort inside a bundled archive lookup remains open.
+- [Draw passes without fragment order read unfinished attachments, and the damage persists](../../../docs/reference/rendering.md#draw-passes-without-fragment-order-read-unfinished-attachments-and-the-damage-persists). A diagnostic build showed a growing patch in Castle Town and Zora's Domain. The corruption carried into the baseline phases of an in-run A/B.
 
 - [Masked color targets store back during depth-only draws](../../../docs/reference/rendering.md#masked-color-targets-store-back-during-depth-only-draws). The depth prepass loaded a 1440×810 RG11B10F color target in eight passes per frame with all channels masked off. The author reported 35.5 MB/frame less attachment-store volume in the first A/B and 29.5 MB/frame less in the follow-up on an M2 MacBook Air. GPU and frame-time results were inconclusive. [PR #2771](https://github.com/seedds/nxnative/pull/2771)
 

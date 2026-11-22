@@ -69,6 +69,18 @@ int main(void) { @autoreleasepool {
     CHECK(g_cb_miss_n == 4, "nothing is reported with both slots bound");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "third submission completed"); mtl_drain();
     CHECK(out[1] == 8, "control: the guarded read takes the bound slot's value");
+    // a slot the game bound empty itself (address 0, size 0; S.ubo_set keeps that a bind set it) is noted apart, without [RED]: it is not one of these cases, and the same slot never bound is
+    NvShader *c = shader(lib, @"fb", "7200000000000003_b"); out[3] = 0xdead0003u;
+    mtl_sub_begin(); en = enc_c_begin(NULL); args_dirty_all();
+    S.ubo[5][3] = (p_bind_buf){.stage = 5, .index = 3}; S.ubo_set[5] |= (uint16_t)(1u << 3);
+    CHECK(encode_args((id<MTLCommandEncoder>)en, c, 5, 0), "C encoded with slot 3 bound empty");
+    enc_c_pso(en, pb); enc_c_dispatch(en, MTLSizeMake(1,1,1), MTLSizeMake(1,1,1));
+    CHECK(g_cb_miss_n == 4, "a slot the game bound empty is not reported as unbound");
+    S.ubo_set[5] &= (uint16_t)~(1u << 3); args_dirty(5);
+    CHECK(encode_args((id<MTLCommandEncoder>)en, c, 5, 0), "C encoded with slot 3 never bound"); enc_c_end(en);
+    CHECK(g_cb_miss_n == 5, "the same slot never bound is reported");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "fourth submission completed"); mtl_drain();
+    CHECK(out[3] == 1, "a slot bound empty reads 0 from the zero bank");
     // the key: shader, stage, slot and reason each make a new case; the list is bounded, with one closing line
     CHECK(!cb_miss_first("7200000000000001_b", 5, 3, 0), "known case");
     CHECK(cb_miss_first("7200000000000001_b", 5, 3, 1), "the same slot unmapped is another case");
@@ -76,7 +88,7 @@ int main(void) { @autoreleasepool {
     CHECK(cb_miss_first("7200000000000001_b", 5, 4, 0), "another slot is another case");
     int added = 0; char name[24];
     for (int i = 0; i < 2 * CB_MISS_MAX; i++) { snprintf(name, sizeof name, "%016x_b", 0x73000000 + i); added += cb_miss_first(name, 0, 0, 0); }
-    CHECK(g_cb_miss_n == CB_MISS_MAX && added == CB_MISS_MAX - 7, "the list stops at its limit");
+    CHECK(g_cb_miss_n == CB_MISS_MAX && added == CB_MISS_MAX - 8, "the list stops at its limit");
     CHECK(g_cb_miss_over == 2 * CB_MISS_MAX - added, "cases past the limit are counted, with one closing line");
     CHECK(!cb_miss_first("7200000000000002_b", 5, 0, 0), "a listed case stays known past the limit");
     printf("t_cb_unbound: %d checks, %d failed\n", checks, failed); return failed != 0;

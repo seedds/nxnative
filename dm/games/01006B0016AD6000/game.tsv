@@ -1,0 +1,46 @@
+# Game profile of Taiko no Tatsujin: Rhythm Festival, US release (Switch, base game v0 + update 6.2.0 = v2031616). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2020.3.26f1 (IL2CPP), SDK 13, NVN; modules main + subsdk0 (NintendoSDK_movie) + sdk. RomFS: Data/data.unity3d (the scenes and shaders, 557 MB), StreamingAssets
+# (CRI ADX2 .acb sound, .usm movies, the song bundles). Started from the NSP script's provisional profile (profile_guess.py); the shader tables are its outputs
+
+# ---- Identity ----
+title_id	01006B0016AD6000
+program_id	01006B0016AD6000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Taiko no Tatsujin: Rhythm Festival
+ipa	TaikoNoTatsujinRhythmFestival.ipa
+app_category	public.app-category.music-games
+
+# ---- Versions ----
+# only the merged 6.2.0 copy is extracted
+build	v2031616	6.2.0	main=7150d78c454e7c55b3deba8b86386c8e	subsdk0=a8cb97803f7f442a3b6cce1c7cd4ee4a	sdk=357efc198e728cb5d55265aff304f03c
+package	v2031616
+shader_versions	v2031616
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/data.unity3d
+zip_store	.acb:.dat:.usm:.usme:.metallib
+
+# ---- Memory ----
+# The NPDM declares 128 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region (profile_guess.py's; the NSP script's
+# check boot found the game's regions at alias +4.10 GB in its first 15 s in nnMain, within the 4.38 GB alias region)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x8000000
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+shader_groups	/Data/=data
+shader_note	Taiko no Tatsujin: Rhythm Festival shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+# Screen shape (patches.py, shared with the JP profile): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, a 16:10 MacBook's as 1920x1200 (handheld 1280x800), the orthographic
+# cameras of the 2D scenes keeping 16:9's sides with more above and below; the launcher offers it (auto: the screen's shape)
+screen_aspect	on

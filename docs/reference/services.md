@@ -690,7 +690,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `pad_hid_layout_for` selects the Taiko Drum map for USB ID `0f0d:00f0`. The PS4-mode HORI Fighting Stick Alpha (`0f0d:011c`) also declares 14 button usages, so the count cannot identify the drum's map. Nintendo's report `0x3F` and the Xbox 360 layout take precedence. `DM_HID_MAP` still replaces button entries. [Fighting Stick descriptor capture](https://www.dreamcast-talk.com/forum/viewtopic.php?p=193790#p193790)
 - **Check:** `t_pad_hid` checks the drum's 14 usages and the layout selection. `t_pad_hid_mac` exercises discovery and value callbacks for the drum and a fixture based on the PS4-mode Fighting Stick descriptor. The reporter identified the drum in an IOKit probe and played Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, 6.2.0) with `DM_HID_MAP=Y=1,B=2,A=3,X=4,L=5,R=6,ZL=7,ZR=8,MINUS=9,PLUS=10,LS=11,RS=12`, which supplies the same map.
 - **Open:** a gameplay run with the physical drum and the revised host is pending.
-- **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, no profile in this repository) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
+- **Found on:** [Taiko no Tatsujin: Rhythm Festival](../../dm/games/01006B0016AD6000/README.md) (`01006B0016AD6000`) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
 
 ### A keyboard receiver that declares a gamepad takes player 1
 

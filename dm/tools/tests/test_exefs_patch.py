@@ -68,6 +68,7 @@ class CodeWords(unittest.TestCase):
         written = set()
         for off, b in patch.items():
             img[off:off + len(b)] = b; written.update(range(off, off + len(b)))
+        assert Cs is not None
         code, data = ep.code_words(img, bytes(orig), written, len(img), Cs(CS_ARCH_ARM64, CS_MODE_ARM))
         self.assertEqual(sorted(code), [0x0, 0x20, 0x24])
         self.assertEqual(sorted(data), [0x30, 0x34])
@@ -78,6 +79,7 @@ class CodeWords(unittest.TestCase):
         orig = bytearray(0x20)
         img = bytearray(orig); body = w(0xD503237F, 0x11000652, 0xD65F0BFF)   # pacibsp; add w18, w18, #1; retab
         img[0x10:0x1C] = body
+        assert Cs is not None
         code, data = ep.code_words(img, bytes(orig), set(range(0x10, 0x1C)), len(img), Cs(CS_ARCH_ARM64, CS_MODE_ARM))
         self.assertEqual(sorted(code), [0x10, 0x14, 0x18]); self.assertEqual(data, set())
 

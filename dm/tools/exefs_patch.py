@@ -46,11 +46,11 @@ def parse_pchtxt(text):
     shift, le, on, bid, out = 0, False, False, '', []
     for raw in text.split('\n'):
         l = raw.strip(' \t\r')
-        if not l or l.startswith('//') or l.startswith('#'): continue
+        if not l or l.startswith(('//', '#')): continue
         if l.startswith('@'):
             low = l.lower()
             if low.startswith('@stop'): break
-            if low.startswith('@nsobid-'): bid = re.match(r'[0-9A-Fa-f]*', l[8:]).group(0)
+            if low.startswith('@nsobid-'): bid = re.findall(r'[0-9A-Fa-f]*', l[8:])[0]
             elif low.startswith('@flag'):
                 p = l[5:].split()
                 if len(p) >= 2 and p[0].lower() == 'offset_shift':
@@ -106,12 +106,12 @@ def files_for(dirs, module_bid):
         if mod: skipped.append((d, f'holds a module ({mod}): the mod adds code this host does not load')); continue
         for n in names:
             p = os.path.join(d, n); low = n.lower()
-            if not (low.endswith('.pchtxt') or low.endswith('.ips')): continue
+            if not low.endswith(('.pchtxt', '.ips')): continue
             with open(p, 'rb') as f: data = f.read()
             if low.endswith('.pchtxt'):
                 bid, recs = parse_pchtxt(data.decode('utf-8', 'replace'))
             else:
-                bid, recs = re.match(r'[0-9A-Fa-f]*', n[:-4]).group(0), parse_ips(data)
+                bid, recs = re.findall(r'[0-9A-Fa-f]*', n[:-4])[0], parse_ips(data)
             if not bid_match(bid, module_bid): continue
             if recs is None: skipped.append((p, 'not a valid patch file')); continue
             found.append((p, fnv64(data), recs))

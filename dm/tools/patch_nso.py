@@ -193,6 +193,27 @@ if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FA
     PATCH_OFF += 0x10000
 ALIAS_APPLIED = [c for c in cuts if c[0] in ALIAS_OFFS]
 assert len(ALIAS_APPLIED) <= 32, f'too many ALIAS_CUTS ({len(ALIAS_APPLIED)} > 32)'
+# ---- Code patches of mods (DM_EXEFS_PATCHES; exefs_patch.py, docs/reference/rewriter.md "Code patches of mods rewritten with the module") ----
+# Applied to the module before anything is rewritten, so the code a mod adds is rewritten like the module's own (x18, system calls, timers, exclusive accesses).
+# The text with them is the module's text from here on (ORIG_TEXT: changed.tsv and the hop holes compare against it). The words a patch wrote that its code does
+# not reach are data and join DATA_BLOCKS below. <name>.exefs.tsv lists what was baked in, for the host (hle_exefs.c skips those files at load) and Cartridge
+import exefs_patch
+EXEFS_BAKED, EXEFS_DATA = [], set()
+if os.environ.get('DM_EXEFS_PATCHES'):
+    _ex_files, _ex_skipped = exefs_patch.files_for([d for d in os.environ['DM_EXEFS_PATCHES'].split(':') if d], MOD.build_id.hex())
+    if _ex_files:
+        _ex_before = bytes(IMG)
+        EXEFS_BAKED, _ex_more, _ex_written = exefs_patch.apply(IMG, TEXT_END, len(IMG), _ex_files, [(o, len(bytes.fromhex(ob))) for o, ob, nb, why in cuts])
+        _ex_skipped += _ex_more
+        if EXEFS_BAKED:
+            _ex_code, EXEFS_DATA = exefs_patch.code_words(IMG, _ex_before, _ex_written, TEXT_END, Cs(CS_ARCH_ARM64, CS_MODE_ARM))
+            ORIG_TEXT = bytes(IMG[:TEXT_END])
+            print(f'{NAME}: code patches of mods baked in: {len(EXEFS_BAKED)} file(s), {len(_ex_written)} bytes; in the text {len(_ex_code)} code words, {len(EXEFS_DATA)} data words left as they are')
+    for p_, why_ in _ex_skipped: print(f'[RED] {NAME}: code patch {p_} not baked in: {why_}')
+os.makedirs(outdir, exist_ok=True)   # written for every module, empty without patches: Cartridge reads it to tell whether the code mods that are on are the ones baked in
+with open(os.path.join(outdir, NAME + '.exefs.tsv'), 'w') as f:
+    f.write(f'# {NAME} {MOD.build_id.hex()[:32]}: code patches of mods baked in by patch_nso.py (exefs_patch.py): fnv64 of the file, its name, its path\n')
+    for p_, h_, _r in EXEFS_BAKED: f.write(f'{h_}\t{os.path.basename(p_)}\t{p_}\n')
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -831,6 +852,13 @@ starts = sorted(x for x in starts if x < TEXT_END)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
+if EXEFS_DATA:   # the data a mod keeps between functions (exefs_patch.code_words), merged in address order
+    _db = sorted([list(r) for r in DATA_BLOCKS] + [list(r) for r in exefs_patch.data_ranges(EXEFS_DATA)])
+    DATA_BLOCKS = []
+    for s_, e_ in _db:
+        if DATA_BLOCKS and s_ <= DATA_BLOCKS[-1][1]: DATA_BLOCKS[-1][1] = max(DATA_BLOCKS[-1][1], e_)
+        else: DATA_BLOCKS.append([s_, e_])
+    DATA_BLOCKS = [tuple(r) for r in DATA_BLOCKS]
 CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
 
 # ---- Hops: branches beyond a b's reach (GAP above) ----

@@ -268,6 +268,40 @@ static int apply_file(int i, const char *path, const uint8_t *d, size_t n, int t
     return 1;
 }
 
+// Patch files baked into the modules when they were rewritten (dm/tools/exefs_patch.py, patch_nso.py: <module>.exefs.tsv beside the module, the FNV-1a 64 of each
+// file): the rewriter rewrote the code they add like the module's own (x18, system calls, timers), which a write here at load cannot. Such a file is not applied again;
+// one whose mod is no longer on stays in the code until the game is rebuilt, and says so
+typedef struct { char hash[17]; char name[200]; int mod, seen; } exefs_baked_t;
+static exefs_baked_t *g_baked; static int g_nbaked, g_nbaked_on;
+static void baked_read(void) {
+    for (int i = 0; i < g_nmod; i++) {
+        if (g_mod[i].nro) continue;
+        char p[1100], line[2400]; snprintf(p, sizeof p, "%s/%s.exefs.tsv", dm_module_dir(), g_mod[i].name);
+        FILE *f = fopen(p, "r"); if (!f) continue;
+        while (fgets(line, sizeof line, f)) {
+            if (line[0] == '#') continue;
+            char *tab = strchr(line, '\t'); if (!tab || tab - line != 16) continue;
+            exefs_baked_t *g = realloc(g_baked, (size_t)(g_nbaked + 1) * sizeof *g_baked); if (!g) break;
+            g_baked = g; exefs_baked_t *b = &g_baked[g_nbaked++]; memset(b, 0, sizeof *b);
+            memcpy(b->hash, line, 16); b->mod = i;
+            char *nm = tab + 1, *e = strchr(nm, '\t'); if (!e) e = nm + strcspn(nm, "\n");
+            snprintf(b->name, sizeof b->name, "%.*s", (int)(e - nm), nm);
+        }
+        fclose(f);
+    }
+}
+static void fnv64_hex(const uint8_t *d, size_t n, char out[17]) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t k = 0; k < n; k++) h = (h ^ d[k]) * 0x100000001b3ull;
+    snprintf(out, 17, "%016llx", (unsigned long long)h);
+}
+static exefs_baked_t *baked_find(int i, const uint8_t *d, size_t n) {
+    if (!g_nbaked) return NULL;
+    char h[17]; fnv64_hex(d, n, h);
+    for (int k = 0; k < g_nbaked; k++) if (g_baked[k].mod == i && !strcmp(g_baked[k].hash, h)) return &g_baked[k];
+    return NULL;
+}
+
 // A file in the folder that makes the mod one this host cannot run: a module or the program's metadata
 static int is_module_file(const char *name) {
     static const char *const fixed[] = { "main", "main.npdm", "sdk", "rtld" };
@@ -307,7 +341,13 @@ static void apply_dir(const char *dir) {
         int hit = 0;
         for (int i = 0; i < g_nmod; i++) {
             if (g_mod[i].nro || !g_mod[i].build_id[0] || !exefs_bid_match(bid, strlen(bid), g_mod[i].build_id)) continue;
-            hit = 1; g_napplied += apply_file(i, path, d, n, text);
+            hit = 1;
+            exefs_baked_t *b = baked_find(i, d, n);
+            if (b) { b->seen = 1; g_nbaked_on++; LOG("exefs: %s is baked into %s (rewritten with the module when the game was built)", path, g_mod[i].name); }
+            else {
+                g_napplied += apply_file(i, path, d, n, text);
+                LOG("exefs: %s was applied at load, not rewritten with %s: code it adds is not rewritten (x18, system calls, timers); rebuild the game to bake it in", path, g_mod[i].name);
+            }
             break;
         }
         if (!hit) LOG("exefs: %s is for build %s, which no module of this game has: not applied", path, bid[0] ? bid : "(none named)");
@@ -351,14 +391,19 @@ static void redirect_cb(void *ctx, const char *name, void *fn, const char *why) 
 // After load_modules (the images are in place and relocated), before the game's first instruction (main.c)
 void dm_exefs_init(void) {
     const char *list = getenv("DM_EXEFS_PATCHES");
-    if (!list || !*list) return;
+    baked_read();
+    if ((!list || !*list) && !g_nbaked) return;
     g_em = calloc((size_t)g_nmod, sizeof *g_em); g_claimed = calloc((size_t)g_nmod, sizeof *g_claimed);
     if (!g_em || !g_claimed) die("exefs: allocation failed");
-    char *dirs = strdup(list), *save = NULL;
-    for (char *d = strtok_r(dirs, ":", &save); d; d = strtok_r(NULL, ":", &save)) if (*d) apply_dir(d);
-    free(dirs);
-    LOG("exefs: %d patch file%s applied", g_napplied, g_napplied == 1 ? "" : "s");
-    if (g_napplied) {
+    if (list && *list) {
+        char *dirs = strdup(list), *save = NULL;
+        for (char *d = strtok_r(dirs, ":", &save); d; d = strtok_r(NULL, ":", &save)) if (*d) apply_dir(d);
+        free(dirs);
+    }
+    for (int k = 0; k < g_nbaked; k++)
+        if (!g_baked[k].seen) LOG("[RED] exefs: %s is baked into %s, but its mod is not on: its code stays until the game is rebuilt", g_baked[k].name, g_mod[g_baked[k].mod].name);
+    LOG("exefs: %d patch file%s applied at load, %d baked in", g_napplied, g_napplied == 1 ? "" : "s", g_nbaked);
+    if (g_napplied || g_nbaked) {
         void dm_force_unbound(void (*cb)(void *, const char *, void *, const char *), void *ctx);
         redirect_t r = {0}; dm_force_unbound(redirect_cb, &r);
         if (r.n) LOG("exefs: %d SDK file system function%s the game does not import now run%s in the host, for the mods' own calls", r.n, r.n == 1 ? "" : "s", r.n == 1 ? "s" : "");

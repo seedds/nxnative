@@ -1,6 +1,6 @@
 // nn::friends (friends / presence / invitations, out of scope): every interface that connects to the friends service is cut to "unavailable".
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
-// Unless stated otherwise, Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
+// Unless stated otherwise (presence and the notification queue are local and succeed), Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
 
 // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
@@ -53,12 +53,15 @@ HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegis
 // Notification queue
 HLE_FORCE("_ZN2nn7friends17NotificationQueueC1Ev", "notification queue creates no session (cut)", void, h_fr_NqCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueueD1Ev", "notification queue has no session to close (cut)", void, h_fr_NqDtor, void *self) { (void)self; }
-HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeERKNS_7account3UidE", "notification queue init fails (cut)", Result, h_fr_NqInit, void *self, const void *uid) { (void)self; (void)uid; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeEv", "notification queue init fails (cut)", Result, h_fr_NqInitNoUid, void *self) { (void)self; return RES_FAIL; }
+// Notification queue: a console without a connection opens one too (friend:u's notification service is local; it only queues what the friends daemon receives), and it stays empty.
+// Initialize succeeds, Pop finds nothing, Clear succeeds, the event never fires. Beach Buggy Racing 2 takes a failed Initialize as a failed start-up ("Unable to init game.",
+// then exit(-1): VuGameServices init at main+0x584); see services.md, "The friends notification queue opens offline"
+HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeERKNS_7account3UidE", "notification queue opens, stays empty (cut)", Result, h_fr_NqInit, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeEv", "notification queue opens, stays empty (cut)", Result, h_fr_NqInitNoUid, void *self) { (void)self; return RES_OK; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueue8FinalizeEv", "notification queue has no session to close (cut)", void, h_fr_NqFini, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueue14GetSystemEventEv", "notification event never fires (cut)", void *, h_fr_NqGetEv, void *self) { (void)self; return quiet_event(g_ev_notify); }
 HLE_FORCE("_ZN2nn7friends17NotificationQueue3PopEPNS0_16NotificationInfoE", "notification queue is always empty (cut)", Result, h_fr_NqPop, void *self, void *info) { (void)self; (void)info; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends17NotificationQueue5ClearEv", "notification queue has no session (cut)", Result, h_fr_NqClear, void *self) { (void)self; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends17NotificationQueue5ClearEv", "notification queue is already empty (cut)", Result, h_fr_NqClear, void *self) { (void)self; return RES_OK; }
 // Invitations
 HLE_FORCE("_ZN2nn7friends36GetFriendInvitationNotificationEventEv", "invitation notification event never fires (cut)", void *, h_fr_InvEv, void) { return quiet_event(g_ev_invite); }
 HLE_FORCE("_ZN2nn7friends38TryPopFriendInvitationNotificationInfoEPNS_7account3UidEPmPvm", "no invitations (cut)", int, h_fr_InvPop, void *uid, uint64_t *sz, void *buf, size_t n) {

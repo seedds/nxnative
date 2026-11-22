@@ -207,3 +207,5 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 - [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy): enabling album-image notifications dereferenced the absent SelfController.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - [Block-compressed storage the CPU wrote before first use](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use): uncompressed 3D particle steering fields, taken from their storage too (GitHub issue #1011).
+
+- [Build anyway with matching shader tables](../../../docs/reference/packing.md#build-anyway-stops-on-an-unreadable-archive-despite-matching-shader-tables): an explicit damaged-package build still checks every registered shader table.

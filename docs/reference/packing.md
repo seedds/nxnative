@@ -790,3 +790,11 @@
 - **Fix:** `uepak.py` tries 20-byte hashes first and switches to 8 only if the tables fail to parse with matching counts and consume the whole chunk. The version 2 archive stores each 8-byte hash with 12 zero bytes appended. Version 12 follows version 11's footer rules. For untagged Switch records, `raw_record` looks for a unique control section with matching code lengths and a `0x880`-byte control length. `shader_split.ue_shaders` takes the stage from the archive's frequency for those records.
 - **Check:** `test_uepak_iostore.py` covers both hash widths, a wrong-width parse that reaches the chunk's end, valid and legacy-position version 12 footers, and untagged records with code or control length mismatches or a copy of the control magic inside shader code. The [PR author](https://github.com/seedds/nxnative/pull/3022) built 6,878 Mac shaders for update 131072.
 - **Found on:** Godzilla: Destroy All Monsters Melee Remastered (`0100A00026D70000`).
+
+### Build anyway stops on an unreadable archive despite matching shader tables
+
+- **Symptom:** a registered game's extraction succeeds with `--allow-damaged`, but shader splitting stops with `file(s) could not be read; the profile's tables hold every file's shaders`, even when every generated shader table matches its registered table.
+- **Cause:** the shader step rejected unreadable archive data before comparing the tables, independently of the explicit extraction override. A corrupt non-shader resource can produce that warning without losing any required shader.
+- **Fix:** allow the explicit override past the unreadable-file guard, retaining the warning and all registered shader-table comparisons. Missing or changed shaders still stop the build, and a normal build still rejects unreadable files. This does not repair corrupted game assets.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md), 2.2.1: `bf3.ard` failed its NCA integrity check and one zlib stream failed decompression, while all 27,055 shader keys and all generated profile tables matched.
+- **Check:** `test_nsp_incremental.py` covers matching tables, reuse, a mismatched table under the override and refusal without the override.

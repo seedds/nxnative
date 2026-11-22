@@ -680,6 +680,8 @@ t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_alias_takeover: t_alias_takeover.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_takeover.m $(MTL_T_SRC) $(FW)
+t_pkg_share: t_pkg_share.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_share.m $(MTL_T_SRC) $(FW)
 t_dead_targets: t_dead_targets.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dead_targets.m $(MTL_T_SRC) $(FW)
 check_t_dead_targets: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -62,7 +62,7 @@ jobs:
           make GAME="$GAME" -j3 perf-order-tsan 2>&1 | tee ../../../logs/t_perf_order-tsan.log
           make GAME="$GAME" -j3 tsan-dirty-init tsan-dirty-reuse 2>&1 | tee ../../../logs/t_dirty-tsan.log
           # Each name is a test target in dm/gfx/tests/Makefile that runs without a GPU, listed by hand: a test removed there is removed here too
-          tests="t_gfx_suspend t_capture t_dirty_slots t_dirty_race t_dirty_retire_race t_dirty_init t_dirty_reuse t_tex_layout t_pace t_fstep t_link_drain t_link_latch t_link_ticks t_cpu_tex t_hmap t_pso_skey t_refl t_present_rescue t_gpuprof t_sparse_layout t_timestamp t_counter_clock t_ub t_pso_pending t_vk_desc t_rec_draws t_ubc_wait t_thread_rt t_rt_comp t_pend_index t_bind_stages"
+          tests="t_gfx_suspend t_capture t_dirty_slots t_dirty_race t_dirty_retire_race t_dirty_init t_dirty_reuse t_tex_layout t_pace t_fstep t_link_drain t_link_latch t_link_ticks t_cpu_tex t_pkg_share t_hmap t_pso_skey t_refl t_present_rescue t_gpuprof t_sparse_layout t_timestamp t_counter_clock t_ub t_pso_pending t_vk_desc t_rec_draws t_ubc_wait t_thread_rt t_rt_comp t_pend_index t_bind_stages"
           make GAME="$GAME" -j3 $tests 2>&1 | tee ../../../logs/gfx-build.log
           failed=0
           for t in $tests; do

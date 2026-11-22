@@ -3096,8 +3096,8 @@ static void hm_rel(void *v) { CFRelease(v); }   // hm_get_id, hm_put_id and hm_d
 // The serial tables' change generation (g_ser_gen) and its notes are nvn_owner.m's: own_note, own_epoch, own_notes_take, own_note_at
 // The sharing table (textures shared by storage: pool + offset + description) is nvn_owner.m's: own_alias_take, own_alias_publish, own_view_put, own_upgrade,
 // own_alias_drop_pool_locked (nvn_owner.h), and so are retirement's waiting objects (own_retire_locked). What stays here under g_smu: the shared packaged textures
-// (g_pkg_share, weak, by the same key) and the image descriptions (g_image_desc)
-static nvn_hmap g_pkg_share = {.klen = sizeof(alias_key)};   // see NvPkgRef
+// (g_pkg_share, weak, partitioned by pool) and the image descriptions (g_image_desc)
+static nvn_hmap g_pkg_share = {.klen = 8};   // pool address → malloc'ed nvn_hmap (alias_key → NvPkgRef)
 // Live GPU-only image descriptions, including those not used yet. A dynamic-resolution family declares its largest image before any particular resolution is used.
 // Keeping only descriptions here lets its first allocation cover that family exactly, without allocating every resolution or rounding to a power of two.
 static nvn_hmap g_image_desc = {.klen = 8};   // serial → malloc'ed tex_t, under g_smu
@@ -3148,22 +3148,48 @@ void mtl_tex_init(const tex_t *t) {
 @implementation NvPkg
 - (void)dealloc { defer_obj_release(tex); defer_obj_release(spare); if (eb) defer_obj_release(eb); else { free(edge[0]); free(edge[1]); } free(ph); }
 @end
-// Packaged textures by storage and description. Engines make many texture objects over one texture's bytes, each with a serial of its own: Ocarina of Time's 32,768 registered IDs name 3,607 storages,
+// Packaged textures by pool, storage and description. Engines make many texture objects over one texture's bytes, each with a serial of its own: Ocarina of Time's 32,768 registered IDs name 3,607 storages,
 // 2.0 GB, and an upload per serial took 6 GB, past what a 16 GB Mac can keep wired once the pools are added. A new serial with the same storage and description takes the same NvPkg, so its
-// dirty-page checks and re-uploads are one. Weak: the serials' entries own it, and a table entry never keeps one alive. Under g_smu; a pool's entries go when it is finalized (mtl_alias_drop_pool)
+// dirty-page checks and re-uploads are one. Weak: the serials' entries own it, and a table entry never keeps one alive. Partitioned by pool so a pool's Finalize (mtl_alias_drop_pool) drops
+// only that pool's table in O(1) for unrelated pools and frees its memory; dead entries are swept and capacity resized before a pool's table grows (pkg_share_compact), so permanent pools
+// keep dead entries O(live) even when no pool is finalized. Under g_smu
 @interface NvPkgRef : NSObject { @public __weak NvPkg *pkg; } @end
 @implementation NvPkgRef @end
+static void pkg_share_compact(nvn_hmap *pm) {   // caller holds g_smu: drop dead NvPkgRef entries and resize to fit the live ones
+    nvn_hmap o = *pm;
+    uint32_t live = 0;
+    for (uint32_t i = 0; i < o.cap; i++) {
+        if (!o.vals[i]) continue;
+        NvPkg *pk = ((NvPkgRef *)(__bridge id)o.vals[i])->pkg;
+        if (!pk) { CFRelease(o.vals[i]); o.vals[i] = NULL; }
+        else live++;
+    }
+    uint64_t need = ((uint64_t)live + 1) * 2;
+    uint32_t ncap = 64;
+    while ((uint64_t)ncap < need && ncap < (1u << 30)) ncap *= 2;
+    pm->keys = malloc((size_t)ncap * o.klen);
+    pm->vals = calloc(ncap, sizeof *pm->vals);
+    if (!pm->keys || !pm->vals) MDIE("packaged-texture sharing table compaction");
+    pm->cap = ncap; pm->n = 0;
+    for (uint32_t i = 0; i < o.cap; i++) if (o.vals[i]) nvn_hm_put(pm, o.keys + (size_t)i * o.klen, o.vals[i]);
+    free(o.keys); free(o.vals);
+}
 void mtl_alias_drop_pool(const void *pool) {
     if (!pool) return;
     pthread_mutex_lock(&g_smu);
     image_desc_drop_pool(pool);
     NSMutableSet *pkgs = [NSMutableSet set];   // the pool's packaged textures still alive: finalized serials may hold them, and they end with the pool as its other textures do
-    { uint32_t ns = 0; alias_key *ks = NULL;   // a later pool at this address holds other bytes (g_pkg_share)
-        for (uint32_t i = 0; i < g_pkg_share.cap; i++) { if (!g_pkg_share.vals[i]) continue; alias_key k; memcpy(&k, g_pkg_share.keys + (size_t)i * g_pkg_share.klen, sizeof k);
-            if (k.pool == (uint64_t)(uintptr_t)pool) { alias_key *nk = realloc(ks, (ns + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[ns++] = k;
-                NvPkg *pk = ((NvPkgRef *)(__bridge id)g_pkg_share.vals[i])->pkg; if (pk) [pkgs addObject:pk]; } }
-        for (uint32_t i = 0; i < ns; i++) hm_del_id(&g_pkg_share, &ks[i]);
-        free(ks); }
+    { uint64_t pkey = (uint64_t)(uintptr_t)pool;   // a later pool at this address holds other bytes (g_pkg_share)
+      nvn_hmap *pm = nvn_hm_del(&g_pkg_share, &pkey);
+      if (pm) {
+          for (uint32_t i = 0; i < pm->cap; i++) {
+              if (!pm->vals[i]) continue;
+              NvPkg *pk = ((NvPkgRef *)(__bridge id)pm->vals[i])->pkg;
+              if (pk) [pkgs addObject:pk];
+              CFRelease(pm->vals[i]);
+          }
+          free(pm->keys); free(pm->vals); free(pm);
+      } }
     own_pool_finalize_locked(pool, (__bridge CFSetRef)pkgs);   // the pool's textures and every serial entry that names one (nvn_owner.m; a new epoch: every texture ID takes the slow path once)
     pthread_mutex_unlock(&g_smu);
     // The pool's texture IDs are marked gone before their CPU-written classification goes: a pool walk (pool_gpu, holding g_rmu) reaching an ID in between found it not gone, the
@@ -3183,13 +3209,32 @@ static alias_key tex_alias_key(const tex_t *t) {
     return k;
 }
 static NvPkg *pkg_shared(const tex_t *t) {
-    alias_key k = tex_alias_key(t); NvPkg *pk = nil;
-    pthread_mutex_lock(&g_smu); NvPkgRef *r = hm_get_id(&g_pkg_share, &k); if (r) pk = r->pkg; pthread_mutex_unlock(&g_smu);
+    uint64_t pkey = (uint64_t)(uintptr_t)t->pool; NvPkg *pk = nil;
+    pthread_mutex_lock(&g_smu);
+    nvn_hmap *pm = nvn_hm_get(&g_pkg_share, &pkey);
+    if (pm) {
+        alias_key k = tex_alias_key(t);
+        NvPkgRef *r = hm_get_id(pm, &k);
+        if (r) { pk = r->pkg; if (!pk) hm_del_id(pm, &k); }   // a dead entry reads as a missing one
+    }
+    pthread_mutex_unlock(&g_smu);
     return pk;
 }
 static void pkg_share_put(const tex_t *t, NvPkg *pk) {
     alias_key k = tex_alias_key(t); NvPkgRef *r = [NvPkgRef new]; r->pkg = pk;
-    pthread_mutex_lock(&g_smu); hm_put_id(&g_pkg_share, &k, r); pthread_mutex_unlock(&g_smu);
+    uint64_t pkey = (uint64_t)(uintptr_t)t->pool;
+    pthread_mutex_lock(&g_smu);
+    nvn_hmap *pm = nvn_hm_get(&g_pkg_share, &pkey);
+    if (!pm) {
+        pm = calloc(1, sizeof *pm);
+        if (!pm) MDIE("packaged-texture sharing table");
+        pm->klen = sizeof(alias_key);
+        nvn_hm_put(&g_pkg_share, &pkey, pm);
+    } else if (pm->cap && (pm->n + 1) * 4 > pm->cap * 3) {
+        pkg_share_compact(pm);
+    }
+    hm_put_id(pm, &k, r);
+    pthread_mutex_unlock(&g_smu);
 }
 // A sparse texture's CPU-write check walks its page table (nvn_sparse_since). A submission sees the CPU writes and the mappings made before it (as NVN's: a map is a CPU call,
 // not a command), so the replay checks each one once a submission (sub: the submission, g_sub_serial, of its last check). Games remap streamed pages all the time, so the
@@ -4716,32 +4761,37 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
 // Every texture resolve asks about CPU writes. Mix serial keys: consecutive serials in a callback-free CFSet made misses probe long bucket runs (see reference/frame-rate.md).
 // Finalize removes live membership, but command records and registered descriptors can still resolve the serial. Keep their classification until the storage pool is finalized;
 // a copied flag would miss writes made after recording. Retired metadata can grow while a pool lives: expiring it earlier requires tracking ownership of all snapshots.
+// Partitioned by pool so a memory pool Finalize (cpu_tex_drop_pool) drops only that pool's tables in O(1) for unrelated pools and frees their memory, instead of walking every pool's
+// retired entries under g_cpu_tex_mu (Ocarina of Time: 2.3 million retired entries in permanent texture heaps after 160 loads from the pause menu). Under g_cpu_tex_mu
+typedef struct { uintptr_t lo, hi; } cpu_unc;
+typedef struct { nvn_hmap live, retired, unc; } cpu_pool;
 static pthread_mutex_t g_cpu_tex_mu = PTHREAD_MUTEX_INITIALIZER;
-static nvn_hmap g_cpu_tex = {.klen = 8}, g_cpu_tex_retired = {.klen = 8};   // serial → pool (or (void *)1 for a live test texture without a pool)
-// The uncompressed 2D textures tex_cpu_content took from their storage, which leave the CPU-written set once the GPU writes that storage (cpu_unc_drop)
-typedef struct { const void *pool; uintptr_t lo, hi; } cpu_unc;
-static nvn_hmap g_cpu_unc = {.klen = 8};   // serial → malloc'ed cpu_unc
-static void hm_drop_pool(nvn_hmap *m, const void *pool, int owned) {   // owned: the values are malloc'ed cpu_unc records; g_cpu_tex_mu held
-    for (uint32_t i = 0; i < m->cap;) {
-        const void *v = m->vals[i];
-        const void *of = owned && v ? ((const cpu_unc *)v)->pool : v;
-        if (!v || of != pool) {
-            i++;
-            continue;
-        }
-
-        uint64_t serial; memcpy(&serial, m->keys + (size_t)i * 8, 8);
-        nvn_hm_del(m, &serial);   // deletion shifts entries: examine this slot again
-        if (owned) {
-            free((void *)v);
-        }
-    }
+static nvn_hmap g_cpu_pools = {.klen = 8};   // pool key (t->pool, or (void *)1 for a pool-less test texture) → malloc'ed cpu_pool
+static unsigned g_cpu_tex_n;                 // total live entries across all pools (mtl_cpu_tex_count)
+static inline uint64_t cpu_pool_key(const void *pool) { return (uint64_t)(uintptr_t)(pool ? pool : (const void *)1); }
+static cpu_pool *cpu_pool_get(const void *pool, int make) {   // g_cpu_tex_mu held
+    uint64_t k = cpu_pool_key(pool);
+    cpu_pool *cp = nvn_hm_get(&g_cpu_pools, &k);
+    if (cp || !make) return cp;
+    cp = calloc(1, sizeof *cp);
+    if (!cp) MDIE("cpu_pool_get: out of memory");
+    cp->live.klen = cp->retired.klen = cp->unc.klen = 8;
+    nvn_hm_put(&g_cpu_pools, &k, cp);
+    return cp;
 }
 static void cpu_tex_drop_pool(const void *pool) {
+    if (!pool) return;
     pthread_mutex_lock(&g_cpu_tex_mu);
-    hm_drop_pool(&g_cpu_tex, pool, 0);
-    hm_drop_pool(&g_cpu_tex_retired, pool, 0);
-    hm_drop_pool(&g_cpu_unc, pool, 1);
+    uint64_t k = cpu_pool_key(pool);
+    cpu_pool *cp = nvn_hm_del(&g_cpu_pools, &k);
+    if (cp) {
+        g_cpu_tex_n -= cp->live.n;
+        for (uint32_t i = 0; i < cp->unc.cap; i++) free(cp->unc.vals[i]);
+        free(cp->live.keys); free(cp->live.vals);
+        free(cp->retired.keys); free(cp->retired.vals);
+        free(cp->unc.keys); free(cp->unc.vals);
+        free(cp);
+    }
     pthread_mutex_unlock(&g_cpu_tex_mu);
 }
 // Storage the GPU writes, by address range: a render target, a texture clear, a copy into a texture or a shader image recorded over it (mtl_tex_gpu_written). tex_cpu_content takes an
@@ -4933,18 +4983,25 @@ void mtl_tex_cpu_written(const tex_t *t) {
     pthread_mutex_lock(&g_smu);
     pthread_mutex_lock(&g_cpu_tex_mu);
     int live = own_tex_live_locked(serial);
-    if ((live || (t->pool && t->mem)) && !nvn_hm_get(&g_cpu_tex, &serial) && !nvn_hm_get(&g_cpu_tex_retired, &serial)) {
-        nvn_hm_put(live ? &g_cpu_tex : &g_cpu_tex_retired, &serial, t->pool ? (void *)t->pool : (void *)1);
-        own_note(serial);   // its texture IDs resolve again through the packaged path (tex_by_id view_pkg)
-        static int n; if (n++ < 16) MLOG("CPU-written texture ser=%llu %ux%ux%u format %#x target %d levels %u: uploaded / re-uploaded like a swizzled texture", (unsigned long long)serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels);
+    if (live || (t->pool && t->mem)) {
+        cpu_pool *cp = cpu_pool_get(t->pool, 1);
+        if (!nvn_hm_get(&cp->live, &serial) && !nvn_hm_get(&cp->retired, &serial)) {
+            nvn_hm_put(live ? &cp->live : &cp->retired, &serial, t->pool ? (void *)t->pool : (void *)1);
+            if (live) g_cpu_tex_n++;
+            own_note(serial);   // its texture IDs resolve again through the packaged path (tex_by_id view_pkg)
+            static int n; if (n++ < 16) MLOG("CPU-written texture ser=%llu %ux%ux%u format %#x target %d levels %u: uploaded / re-uploaded like a swizzled texture", (unsigned long long)serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels);
+        }
     }
     pthread_mutex_unlock(&g_cpu_tex_mu);
     pthread_mutex_unlock(&g_smu);
 }
-unsigned mtl_cpu_tex_count(void) { pthread_mutex_lock(&g_cpu_tex_mu); unsigned n = g_cpu_tex.n; pthread_mutex_unlock(&g_cpu_tex_mu); return n; }
-static int tex_cpu_written(uint64_t serial) {
+unsigned mtl_cpu_tex_count(void) { pthread_mutex_lock(&g_cpu_tex_mu); unsigned n = g_cpu_tex_n; pthread_mutex_unlock(&g_cpu_tex_mu); return n; }
+static int tex_cpu_written(const tex_t *t) {
+    if (!t || !t->serial) return 0;
+    uint64_t serial = t->serial;
     pthread_mutex_lock(&g_cpu_tex_mu);
-    int r = nvn_hm_get(&g_cpu_tex, &serial) != NULL || nvn_hm_get(&g_cpu_tex_retired, &serial) != NULL;
+    const cpu_pool *cp = cpu_pool_get(t->pool, 0);
+    int r = cp && (nvn_hm_get(&cp->live, &serial) != NULL || nvn_hm_get(&cp->retired, &serial) != NULL);
     pthread_mutex_unlock(&g_cpu_tex_mu);
     return r;
 }
@@ -4954,7 +5011,7 @@ static int tex_cpu_written(uint64_t serial) {
 // its buffer can take (linear_storage_ok, made CPU-written by tex_mtl_). mtl_read_texels reads these from the storage too, on whatever thread asks
 static int tex_from_storage(const tex_t *t) {
     if (!t->mem) return 0;
-    if (t->has_layout || tex_cpu_written(t->serial)) return 1;
+    if (t->has_layout || tex_cpu_written(t)) return 1;
     if (!t->pool || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET |
         NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))) return 0;
     if (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)
@@ -4997,11 +5054,12 @@ static void cpu_unc_take(const tex_t *t) {   // an uncompressed texture is taken
     if (!u) {
         MDIE("cpu_unc_take: out of memory");
     }
-    *u = (cpu_unc){t->pool, lo, hi};
+    *u = (cpu_unc){lo, hi};
 
     uint64_t s = t->serial;
     pthread_mutex_lock(&g_cpu_tex_mu);
-    free(nvn_hm_put(&g_cpu_unc, &s, u));
+    cpu_pool *cp = cpu_pool_get(t->pool, 1);
+    free(nvn_hm_put(&cp->unc, &s, u));
     pthread_mutex_unlock(&g_cpu_tex_mu);
     gws_take(lo, hi);
 }
@@ -5056,17 +5114,23 @@ static void cpu_unc_drop(void) {
     if (!atomic_load_explicit(&g_gws_new, memory_order_relaxed) || !atomic_exchange(&g_gws_new, 0)) return;
     uint64_t *ser = NULL; uint32_t n = 0, cap = 0;
     pthread_mutex_lock(&g_cpu_tex_mu);
-    for (uint32_t i = 0; i < g_cpu_unc.cap;) {
-        cpu_unc *u = g_cpu_unc.vals[i];
-        if (!u || !gws_owned(u->lo, u->hi)) {
-            i++;
-            continue;
-        }
+    for (uint32_t p = 0; p < g_cpu_pools.cap; p++) {
+        cpu_pool *cp = g_cpu_pools.vals[p];
+        if (!cp || !cp->unc.n) continue;
+        for (uint32_t i = 0; i < cp->unc.cap;) {
+            cpu_unc *u = cp->unc.vals[i];
+            if (!u || !gws_owned(u->lo, u->hi)) {
+                i++;
+                continue;
+            }
 
-        if (n == cap) { uint64_t *grown = realloc(ser, (cap = cap ? cap * 2 : 64) * sizeof *ser); if (!grown) MDIE("cpu_unc_drop: out of memory"); ser = grown; }
-        uint64_t s; memcpy(&s, g_cpu_unc.keys + (size_t)i * 8, 8);
-        ser[n++] = s; nvn_hm_del(&g_cpu_unc, &s); nvn_hm_del(&g_cpu_tex, &s); nvn_hm_del(&g_cpu_tex_retired, &s);   // deletion shifts entries: examine this slot again
-        free(u);
+            if (n == cap) { uint64_t *grown = realloc(ser, (cap = cap ? cap * 2 : 64) * sizeof *ser); if (!grown) MDIE("cpu_unc_drop: out of memory"); ser = grown; }
+            uint64_t s; memcpy(&s, cp->unc.keys + (size_t)i * 8, 8);
+            ser[n++] = s; nvn_hm_del(&cp->unc, &s);
+            if (nvn_hm_del(&cp->live, &s)) g_cpu_tex_n--;
+            nvn_hm_del(&cp->retired, &s);   // deletion shifts entries: examine this slot again
+            free(u);
+        }
     }
     pthread_mutex_unlock(&g_cpu_tex_mu);
     for (uint32_t i = 0; i < n; i++) {
@@ -5650,8 +5714,14 @@ void mtl_tex_release(tex_t *t) {
     if (was_live < 0) { pthread_mutex_unlock(&g_smu); return; }
     free(nvn_hm_del(&g_image_desc, &t->serial));
     pthread_mutex_lock(&g_cpu_tex_mu);
-    void *pool = nvn_hm_del(&g_cpu_tex, &t->serial);
-    if (pool && t->pool && t->mem) nvn_hm_put(&g_cpu_tex_retired, &t->serial, pool);
+    cpu_pool *cp = cpu_pool_get(t->pool, 0);
+    if (cp) {
+        void *pool = nvn_hm_del(&cp->live, &t->serial);
+        if (pool) {
+            g_cpu_tex_n--;
+            if (t->pool && t->mem) nvn_hm_put(&cp->retired, &t->serial, pool);
+        }
+    }
     pthread_mutex_unlock(&g_cpu_tex_mu);
     pthread_mutex_unlock(&g_smu);
     serial_del(t->serial);
@@ -6059,7 +6129,7 @@ static int gsb_on(void) { static int on = -1; if (on < 0) { const char *e = gete
 static int gsb_target(const tex_t *t) {
     if (!t || !gsb_on() || !t->mem || !t->pool || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY) return 0;
     if (tex_storage_dst(t)) return 1;
-    return tex_storage_ok(t, !fmt_compressed(t->d.format)) && !tex_cpu_written(t->serial);
+    return tex_storage_ok(t, !fmt_compressed(t->d.format)) && !tex_cpu_written(t);
 }
 // Whether the host texture holds the storage's bytes (not a format the host widens, a depth or multisample texture, or an uncompressed stand-in of a block-compressed format)
 static int gsb_host_ok(const tex_t *t, id<MTLTexture> mt) {
@@ -7915,7 +7985,7 @@ static void *tex_by_id_ref(int tid) {
     id<MTLTexture> v = (__bridge id<MTLTexture>)rp->view;
     // Guest writes (nvn_dirty_now) matter only to CPU-written textures: a texture that becomes CPU-written later bumps g_ser_gen once (mtl_tex_cpu_written), which sends its ID through here again.
     // Before, every guest write to any protected page sent every texture ID, render targets included, down this path
-    rp->view_pkg = (rp->t.has_layout || tex_cpu_written(rp->t.serial)) && rp->t.mem;
+    rp->view_pkg = (rp->t.has_layout || tex_cpu_written(&rp->t)) && rp->t.mem;
     if (v) {   // The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
         id<MTLTexture> cur = treg_tex(rp);
         // cur is nil when the ID has no texture now (a gone texture not made again, a texture that could not be made): a cached base texture has no parent either, so nil == nil
@@ -17146,7 +17216,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     // make an unresolved one a private texture the CPU's later writes never reach, and an uploaded one whose pages changed would be uploaded on this thread (up_owner_check). One the
     // GPU may render or store into counts while it is CPU-written, or before its first use while the GPU has not written its storage; once resolved as a GPU texture (cpu_unc_drop, or
     // the GPU wrote first) it is read back from that
-    int lin_cpu = (linear_gpu_may_write(t) ? tex_cpu_written(t->serial) || (!tex_get(t->serial) && linear_storage_ok(t)) : linear_storage_ok(t))
+    int lin_cpu = (linear_gpu_may_write(t) ? tex_cpu_written(t) || (!tex_get(t->serial) && linear_storage_ok(t)) : linear_storage_ok(t))
                   && t->pool && !nvn_sparse_pool(t->pool) && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->d.samples <= 1 && bw == 1 && bh == 1;
     if (lin_cpu) {
         size_t srow = tex_linear_row(t);
@@ -17197,8 +17267,8 @@ static int tex_storage_dst(const tex_t *t) {
         // tex_cpu_content uploading it, so GPU copies must update that storage
         // as well; otherwise a subsequent storage read sees the old bytes.
         || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))
-        || ((t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && !tex_cpu_written(t->serial))) return 0;
-    if (t->has_layout || tex_cpu_written(t->serial) || nvn_ft_tracked(t->serial)) return !mtl_tex_gpu_owned(t->serial);
+        || ((t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && !tex_cpu_written(t))) return 0;
+    if (t->has_layout || tex_cpu_written(t) || nvn_ft_tracked(t->serial)) return !mtl_tex_gpu_owned(t->serial);
     return [tex_get(t->serial) isKindOfClass:[NvPkg class]];
 }
 static size_t mtl_pf_block_bytes(MTLPixelFormat pf) {   // bytes per texel, or per block of a compressed format; 0 when not known

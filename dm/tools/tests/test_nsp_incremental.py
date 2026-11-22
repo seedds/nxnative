@@ -994,6 +994,14 @@ class LayerShaders(Base):
                             self.assertEqual(len(runs), before + int(own))
                             go(); self.assertEqual(len(runs), before + int(own))
 
+    def test_gl_table_only_main_detects_missing_romfs_shaders(self):
+        tsv = self.tmp / 'gl_shaders.tsv'
+        self.assertFalse(nsp.gl_table_only_main(tsv))
+        tsv.write_text('# GL shader ABI 2\n0123456789abcdef\tfrag\tr:-1:0\tmain#0\n')
+        self.assertTrue(nsp.gl_table_only_main(tsv))
+        tsv.write_text('# GL shader ABI 2\n0123456789abcdef\tfrag\tr:-1:0\tmain#0\nfedcba9876543210\tfrag\tr:-1:0\t/shaders/sprite.glsl\n')
+        self.assertFalse(nsp.gl_table_only_main(tsv))
+
 
 class MacApp(Base):
     def test_packer_reports_reuse_and_first_pack_steps(self):

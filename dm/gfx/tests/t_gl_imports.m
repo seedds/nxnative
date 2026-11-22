@@ -596,6 +596,31 @@ static void test_program_validation(void) {
     h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len == 0 && !log[0]);
     h_glLinkProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // relinking invalidates validation
     h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
+
+    // Explicit layout(binding = N) on samplers initializes u->unit at link time; unqualified samplers stay at unit 0.
+    char row_ok[] = "0123456789abcdef\tfrag\tr:0:4 t:u_y=0:1:sampler2D t:u_uv=2:3:sampler2D:1\tmain#0";
+    shinfo parsed = {0};
+    assert(sh_read_row(row_ok, &parsed) && parsed.nt == 2 && parsed.t[0].unit == 0 && parsed.t[1].unit == 1);
+    sh_free(&parsed);
+    char row_bad[] = "0123456789abcdef\tfrag\tr:0:2 t:u_uv=0:1:sampler2D:999\tmain#0";
+    assert(!sh_read_row(row_bad, &parsed));
+    char row_junk[] = "0123456789abcdef\tfrag\tr:0:2 t:u_uv=0:1:sampler2D:bad\tmain#0";
+    assert(sh_read_row(row_junk, &parsed) && parsed.nt == 0);
+    sh_free(&parsed);
+
+    // GL_TEXTURE_SWIZZLE_RGBA sets all four channels via glTexParameteriv and glTexParameterfv.
+    GLuint swz_tex = 0;
+    h_glGenTextures(1, &swz_tex);
+    h_glBindTexture(GL_TEXTURE_2D, swz_tex);
+    const GLint swz_i[4] = {GL_BLUE, GL_GREEN, GL_RED, GL_ONE};
+    h_glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swz_i);
+    tex_t *st = tex_of(swz_tex);
+    assert(st && st->swz[0] == GL_BLUE && st->swz[1] == GL_GREEN && st->swz[2] == GL_RED && st->swz[3] == GL_ONE);
+    const GLfloat swz_f[4] = {GL_ALPHA, GL_ZERO, GL_RED, GL_GREEN};
+    h_glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swz_f);
+    assert(st->swz[0] == GL_ALPHA && st->swz[1] == GL_ZERO && st->swz[2] == GL_RED && st->swz[3] == GL_GREEN);
+    h_glDeleteTextures(1, &swz_tex);
+    assert(h_glGetError() == GL_NO_ERROR);
 }
 
 static void test_fixed_function_caps(void) {
@@ -966,6 +991,68 @@ static int test_capture_shaders(void) {
     assert(!memcmp(pixel, green, sizeof green) && h_glGetError() == GL_NO_ERROR);
     h_glUseProgram(0); h_glDeleteProgram(pr);
     h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(1, &target); h_glDeleteBuffers(1, &vb); h_glDeleteVertexArrays(1, &vao);
+
+    // Desktop GLSL 1.20 with implicit int->float conversion, sampler3D + texture3D, and GL_TEXTURE_SWIZZLE_RGBA on a 3D LUT.
+    const GLchar *vert3d = "#version 120\nattribute vec2 position;\nvoid main() { gl_Position = vec4(position, 0, 1); }";
+    const GLchar *frag3d = "#version 120\nuniform sampler3D lut;\nvoid main() { float scale = 1; gl_FragColor = texture3D(lut, vec3(0.5)) * scale; }";
+    GLuint vs3 = h_glCreateShader(GL_VERTEX_SHADER), fs3 = h_glCreateShader(GL_FRAGMENT_SHADER), pr3 = h_glCreateProgram();
+    h_glShaderSource(vs3, 1, &vert3d, NULL); h_glCompileShader(vs3);
+    h_glShaderSource(fs3, 1, &frag3d, NULL); h_glCompileShader(fs3);
+    h_glAttachShader(pr3, vs3); h_glAttachShader(pr3, fs3); h_glLinkProgram(pr3);
+    h_glGetProgramiv(pr3, GL_LINK_STATUS, &status); assert(status);
+    GLuint vao2, vb2, fb2, rt2, lut3d;
+    h_glGenVertexArrays(1, &vao2); h_glBindVertexArray(vao2); h_glGenBuffers(1, &vb2); h_glBindBuffer(GL_ARRAY_BUFFER, vb2);
+    h_glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, 0);
+    GLuint pos3 = h_glGetAttribLocation(pr3, "position"); assert(pos3 < 16);
+    h_glVertexAttribPointer(pos3, 2, GL_FLOAT, 0, 0, NULL); h_glEnableVertexAttribArray(pos3);
+    h_glGenTextures(1, &rt2); h_glBindTexture(GL_TEXTURE_2D, rt2);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glGenFramebuffers(1, &fb2); h_glBindFramebuffer(GL_FRAMEBUFFER, fb2);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt2, 0);
+    h_glActiveTexture(GL_TEXTURE0);
+    h_glGenTextures(1, &lut3d); h_glBindTexture(GL_TEXTURE_3D, lut3d);
+    const GLint swz[4] = {GL_BLUE, GL_RED, GL_GREEN, GL_ONE};
+    h_glTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_SWIZZLE_RGBA, swz);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const uint8_t lut_px[4] = {10, 20, 200, 50};
+    h_glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, lut_px);
+    h_glUseProgram(pr3); h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    const uint8_t want_swz[4] = {200, 10, 20, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    assert(!memcmp(pixel, want_swz, sizeof want_swz) && h_glGetError() == GL_NO_ERROR);
+
+    // Explicit layout(binding = 1) sampler reads from texture unit 1 without glUniform1i.
+    const GLchar *vertb = "#version 450 core\nlayout(location = 0) in vec2 position;\nvoid main() { gl_Position = vec4(position, 0.0, 1.0); }";
+    const GLchar *fragb = "#version 450 core\nlayout(binding = 0) uniform sampler2D t0;\nlayout(binding = 1) uniform sampler2D t1;\n"
+                          "out vec4 outColor;\nvoid main() { outColor = vec4(texture(t0, vec2(0.5)).r, texture(t1, vec2(0.5)).g, 0.0, 1.0); }";
+    GLuint vsb = h_glCreateShader(GL_VERTEX_SHADER), fsb = h_glCreateShader(GL_FRAGMENT_SHADER), prb = h_glCreateProgram();
+    h_glShaderSource(vsb, 1, &vertb, NULL); h_glCompileShader(vsb);
+    h_glShaderSource(fsb, 1, &fragb, NULL); h_glCompileShader(fsb);
+    h_glAttachShader(prb, vsb); h_glAttachShader(prb, fsb); h_glLinkProgram(prb);
+    h_glGetProgramiv(prb, GL_LINK_STATUS, &status); assert(status);
+    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1"), v0 = -1, v1 = -1;
+    assert(u0 > 0 && u1 > 0);
+    h_glGetUniformiv(prb, u0, &v0); h_glGetUniformiv(prb, u1, &v1);
+    assert(v0 == 0 && v1 == 1);
+    GLuint bt[2]; h_glGenTextures(2, bt);
+    const uint8_t red_px[4] = {220, 0, 0, 255}, grn_px[4] = {0, 180, 0, 255};
+    h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, bt[0]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red_px);
+    h_glActiveTexture(GL_TEXTURE0 + 1); h_glBindTexture(GL_TEXTURE_2D, bt[1]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, grn_px);
+    h_glActiveTexture(GL_TEXTURE0);
+    h_glUseProgram(prb); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    const uint8_t want_bind[4] = {220, 180, 0, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    assert(!memcmp(pixel, want_bind, sizeof want_bind) && h_glGetError() == GL_NO_ERROR);
+
+    h_glUseProgram(0); h_glDeleteProgram(prb); h_glDeleteShader(vsb); h_glDeleteShader(fsb);
+    h_glDeleteProgram(pr3); h_glDeleteShader(vs3); h_glDeleteShader(fs3);
+    h_glDeleteTextures(2, bt); h_glDeleteTextures(1, &lut3d);
+    h_glDeleteFramebuffers(1, &fb2); h_glDeleteTextures(1, &rt2); h_glDeleteBuffers(1, &vb2); h_glDeleteVertexArrays(1, &vao2);
     puts("GL fresh capture: compile failure, legacy link, cache reuse, uniform writes and GPU readback: OK");
     return 0;
 }
@@ -1168,6 +1255,84 @@ static void test_timestamps(void) {
     h_glDeleteQueries(2, query);
 }
 
+static void test_swizzle_and_layout_binding(void) {
+    typeof(S) saved = S;
+    const char *msl =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct A2 { texture2d<float> t0 [[id(0)]]; sampler s0 [[id(1)]]; texture2d<float> t1 [[id(2)]]; sampler s1 [[id(3)]]; };\n"
+        "struct A3 { texture3d<float> lut [[id(0)]]; sampler s0 [[id(1)]]; };\n"
+        "vertex float4 vs(uint vid [[vertex_id]]) { float2 p[3] = {{-1,-1},{3,-1},{-1,3}}; return float4(p[vid], 0, 1); }\n"
+        "fragment float4 fs_bind(constant A2 &a [[buffer(0)]]) { return float4(a.t0.sample(a.s0, float2(0.5)).r, a.t1.sample(a.s1, float2(0.5)).g, 0, 1); }\n"
+        "fragment float4 fs_lut(constant A3 &a [[buffer(0)]]) { return a.lut.sample(a.s0, float3(0.5)); }\n";
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(msl) options:nil error:&err]; assert(lib);
+    id<MTLFunction> fvs = [lib newFunctionWithName:@"vs"], fbind = [lib newFunctionWithName:@"fs_bind"], flut = [lib newFunctionWithName:@"fs_lut"];
+    assert(fvs && fbind && flut);
+
+    char vrow[] = "1111111111111111\tvert\tr:-1:0\tmain#0";
+    char brow[] = "2222222222222222\tfrag\tr:0:4 t:t0=0:1:sampler2D t:t1=2:3:sampler2D:1\tmain#0";
+    char lrow[] = "3333333333333333\tfrag\tr:0:2 t:lut=0:1:sampler3D\tmain#0";
+    shinfo vsi = {0}, bsi = {0}, lsi = {0};
+    assert(sh_read_row(vrow, &vsi) && sh_read_row(brow, &bsi) && sh_read_row(lrow, &lsi));
+
+    GLuint vs = h_glCreateShader(GL_VERTEX_SHADER), fsb = h_glCreateShader(GL_FRAGMENT_SHADER), fsl = h_glCreateShader(GL_FRAGMENT_SHADER);
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = fvs;
+    shader_of(fsb)->si = &bsi; shader_of(fsb)->fn = fbind;
+    shader_of(fsl)->si = &lsi; shader_of(fsl)->fn = flut;
+    GLuint prb = h_glCreateProgram(), prl = h_glCreateProgram();
+    h_glAttachShader(prb, vs); h_glAttachShader(prb, fsb); h_glLinkProgram(prb);
+    h_glAttachShader(prl, vs); h_glAttachShader(prl, fsl); h_glLinkProgram(prl);
+    assert(prog_of(prb)->linked && prog_of(prl)->linked);
+    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1"), v0 = -1, v1 = -1;
+    h_glGetUniformiv(prb, u0, &v0); h_glGetUniformiv(prb, u1, &v1);
+    assert(v0 == 0 && v1 == 1);
+
+    GLuint rt, fb, vao, bt[2], lut;
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    h_glGenTextures(1, &rt); h_glBindTexture(GL_TEXTURE_2D, rt);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao);
+    h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST);
+    h_glColorMask(1, 1, 1, 1); h_glViewport(0, 0, 1, 1);
+
+    // Explicit layout(binding = 1) samples unit 1 without glUniform1i.
+    h_glGenTextures(2, bt);
+    const uint8_t red[4] = {220, 0, 0, 255}, green[4] = {0, 180, 0, 255};
+    h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, bt[0]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    h_glActiveTexture(GL_TEXTURE0 + 1); h_glBindTexture(GL_TEXTURE_2D, bt[1]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+    h_glActiveTexture(GL_TEXTURE0);
+    h_glUseProgram(prb); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint8_t px[4] = {0}; const uint8_t want_bind[4] = {220, 180, 0, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    assert(!memcmp(px, want_bind, sizeof want_bind));
+
+    // GL_TEXTURE_SWIZZLE_RGBA on a 3D LUT texture swaps channels on GPU sampling.
+    h_glGenTextures(1, &lut); h_glBindTexture(GL_TEXTURE_3D, lut);
+    const GLint swz[4] = {GL_BLUE, GL_RED, GL_GREEN, GL_ONE};
+    h_glTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_SWIZZLE_RGBA, swz);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const uint8_t lut_px[4] = {10, 20, 200, 50};
+    h_glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, lut_px);
+    h_glUseProgram(prl); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    const uint8_t want_swz[4] = {200, 10, 20, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    assert(!memcmp(px, want_swz, sizeof want_swz) && h_glGetError() == GL_NO_ERROR);
+
+    h_glUseProgram(0); h_glDeleteProgram(prb); h_glDeleteProgram(prl);
+    h_glDeleteShader(vs); h_glDeleteShader(fsb); h_glDeleteShader(fsl);
+    h_glDeleteTextures(2, bt); h_glDeleteTextures(1, &lut); h_glDeleteTextures(1, &rt);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteVertexArrays(1, &vao);
+    sh_free(&vsi); sh_free(&bsi); sh_free(&lsi);
+    S = saved;
+    puts("GL layout(binding) and GL_TEXTURE_SWIZZLE_RGBA GPU readback: OK");
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--srgb")) return test_framebuffer_srgb();
     if (argc == 2 && !strcmp(argv[1], "--capture")) return test_capture_shaders();
@@ -1311,7 +1476,7 @@ int main(int argc, char **argv) {
     test_active_attributes();
     test_fate_calls();
     test_fixed_function(!cpu);
-    if (!cpu) { test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); }
+    if (!cpu) { test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); test_swizzle_and_layout_binding(); }
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;

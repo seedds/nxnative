@@ -165,10 +165,15 @@ static int rx_merge_on(void) {
     return sw_on(v);
 }
 static void rx_mark_locked(void) {   // after a commit on g_q4, under g_res_commit_mu
-    if (!g_rx_ev) g_rx_ev = [g_dev newSharedEvent];
+    id<MTLSharedEvent> ev = g_rx_ev;
+    if (!ev) {
+        ev = [g_dev newSharedEvent];
+        if (!ev) MDIE("failed to create the Metal 4 queue progress event");
+        g_rx_ev = ev;
+    }
     uint64_t s = atomic_load_explicit(&g_rx_seq, memory_order_relaxed) + 1;
     atomic_store_explicit(&g_rx_seq, s, memory_order_release);
-    [g_q4 signalEvent:g_rx_ev value:s];
+    [g_q4 signalEvent:ev value:s];
 }
 static void rx_mark(void) {
     pthread_mutex_lock(&g_res_commit_mu);
@@ -183,7 +188,7 @@ static uint64_t rx_inflight(void) {   // commits on g_q4 not yet completed by th
         return hold + (fly > 0 ? (uint64_t)fly : 0);
     }
     uint64_t seq = atomic_load_explicit(&g_rx_seq, memory_order_acquire);
-    if (!g_rx_ev || !seq) return hold;
+    if (!seq) return hold;   // rx_mark_locked publishes the event with the first sequence number
     uint64_t done = g_rx_ev.signaledValue;
     return hold + (seq > done ? seq - done : 0);
 }

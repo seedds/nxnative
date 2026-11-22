@@ -62,6 +62,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Catherine: Full Body](#catherine-full-body) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
+| [Digimon Story Time Stranger](#digimon-story-time-stranger) | 0 | 0 | 0 | 2 | 0 | `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -293,6 +294,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1979bc`: offline allowed (last online within 30 days): cset w8,lt → mov w8,#1
   - cut `+0x1979c4`: offline allowed (no "User Last Online" setting): mov w8,wzr → mov w8,#1
 - **function-matched** (`main` of builds without CUTS): offline allowed without a recent Battle.net login: 1 function, 2 cuts
+
+### Digimon Story Time Stranger
+
+[Digimon Story Time Stranger](../../dm/games/010062E01FE0C000/README.md), `010062E01FE0C000`, [patches.py](../../dm/games/010062E01FE0C000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: both startup callers and the engine limiter verified by disassembly on v0 and 1.2.2. Cyber Sleuth 1.0.3 shares neither caller nor the limiter fingerprint: Time Stranger 60 fps startup. The game selects 30 fps through MVGL's engine setter. The host already respects its one-refresh present interval
+
+- **function-matched** (`main` of builds without CUTS): Time Stranger 60 fps startup: 2 functions, 2 cuts
+- **function-matched** (`main` of builds without CUTS): Time Stranger 60 fps startup: 2 functions, 2 cuts
 
 ### EA SPORTS FC 27
 

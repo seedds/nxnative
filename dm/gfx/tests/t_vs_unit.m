@@ -6,8 +6,13 @@
 //     and every covered pixel must pass (the hybrid swaps a pair's pipelines between passes, t_pull_inv.m; the body is inlined in all of them);
 //   · each of the six against the entry point it replaces: the same depth, both ways round, and the same colour image bit for bit;
 //   · the wide-line entries main0_wl / main0_z_wl, which run the body's out-of-line copy: the same depth and colour as the pulling library's own;
-//   · the capture entry main0_gs, which stays a whole copy: the same captured words as the plain source's.
-// Control: a unit whose depth line multiplies by 0.50000006 must fail the comparison, so a pass means equal positions
+//   · the capture entry main0_gs, which calls the out-of-line copy and writes its capture epilogue once: every word of every record written, and each the plain source's to
+//     within 16 units in the last place (a capture entry is not invariant: in a game's shader a few words of a few vertices may differ in their low bits,
+//     docs/reference/shaders.md, One compile for a vertex shader's libraries);
+//   · main0_gs again with the plain source and the unit compiled in Metal's safe math mode without contraction (-fmetal-math-mode=safe -ffp-contract=off): every captured
+//     word the plain source's. The two hold the same arithmetic, so only the compiler's freedom to fuse a multiply and an add may tell them apart.
+// Controls: a unit whose depth line multiplies by 0.50000006 must fail the comparison, so a pass means equal positions; a strict unit whose main0_gs scales x by 1 + 2^-23 after
+// the call must capture other words
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 static int checks, failed;
@@ -31,16 +36,20 @@ static NSString *k_py =
 "unit, pn, vn = dmsh_side.vs_unit(full, pv, vv)\n"
 "assert pn == {'entry': 'main0_p', 'entry_z': 'main0_zp', 'entry_wl': 'main0_wl', 'entry_z_wl': 'main0_z_wl'} and vn == {'entry': 'main0_v', 'entry_z': 'main0_zv'}, (pn, vn)\n"
 "assert shadows == [{'location': 2, 'float': 16, 'sint': 17}], shadows\n"
-"def lib(name, text):\n"
+"strict = [f for f in dmsh_chain.MAC_METAL if not f.startswith('-fmetal-math-mode=')] + ['-fmetal-math-mode=safe', '-ffp-contract=off']\n"
+"def lib(name, text, flags=dmsh_chain.MAC_METAL):\n"
 "    p = os.path.join(d, name); open(p + '.metal', 'w').write(text)\n"
-"    for cmd in ([*dmsh_chain.MAC_METAL, p + '.metal', '-o', p + '.air'], ['xcrun', '-sdk', 'macosx', 'metallib', p + '.air', '-o', p + '.metallib']):\n"
+"    for cmd in ([*flags, p + '.metal', '-o', p + '.air'], ['xcrun', '-sdk', 'macosx', 'metallib', p + '.air', '-o', p + '.metallib']):\n"
 "        r = subprocess.run(cmd, capture_output=True, text=True)\n"
 "        if r.returncode: sys.exit(name + ': ' + r.stderr)\n"
 "    return open(p + '.metallib', 'rb').read()\n"
 "for name, text in (('a_b', full), ('a_bp', pv), ('a_bv', vv)): lib(name, text)\n"
 "other = unit.replace('fma(out.gl_Position.z, 0.5, ', 'fma(out.gl_Position.z, 0.50000006, '); assert other != unit\n"
-"for stem, text in (('u', unit), ('c', other)):\n"
-"    for name, data in zip(('_b', '_bp', '_bv'), dmsh_side.cut(lib(stem, text), set(pn.values()), set(vn.values()))): open(os.path.join(d, stem + name + '.metallib'), 'wb').write(data)\n";
+"call = '    main0_out out = dm_vs_body_o('; i = unit.index(call); j = unit.index('\\n', i) + 1\n"
+"moved = unit[:j] + '    out.gl_Position.x = out.gl_Position.x * 1.00000012f;\\n' + unit[j:]\n"
+"lib('s_a_b', full, strict)\n"
+"for stem, text, flags in (('u', unit, dmsh_chain.MAC_METAL), ('c', other, dmsh_chain.MAC_METAL), ('s_u', unit, strict), ('s_x', moved, strict)):\n"
+"    for name, data in zip(('_b', '_bp', '_bv'), dmsh_side.cut(lib(stem, text, flags), set(pn.values()), set(vn.values()))): open(os.path.join(d, stem + name + '.metallib'), 'wb').write(data)\n";
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
 typedef struct { dm_vstream_c s[16]; uint32_t attr[32]; } dm_vlayout_c;   // dmsh_pull.metal dm_vlayout
 typedef struct { uint64_t ib; float vp[2]; float width; uint32_t prim, count; int32_t base; uint32_t isz, restart, ri, zclip, rect, pad; } wl_block;   // dmsh_pull.py dm_wline
@@ -131,7 +140,8 @@ int main(void) { @autoreleasepool {
     if (![task launchAndReturnError:&e]) { fprintf(stderr, "the libraries' script: %s\n", e.localizedDescription.UTF8String); return 1; }
     [task waitUntilExit];
     if (task.terminationStatus) { fprintf(stderr, "the libraries' script failed\n"); return 1; }
-    id<MTLLibrary> ab = load(dir, @"a_b"), abp = load(dir, @"a_bp"), abv = load(dir, @"a_bv"), ub = load(dir, @"u_b"), ubp = load(dir, @"u_bp"), ubv = load(dir, @"u_bv"), cbl = load(dir, @"c_b");
+    id<MTLLibrary> ab = load(dir, @"a_b"), abp = load(dir, @"a_bp"), abv = load(dir, @"a_bv"), ub = load(dir, @"u_b"), ubp = load(dir, @"u_bp"), ubv = load(dir, @"u_bv"), cbl = load(dir, @"c_b"),
+                 sab = load(dir, @"s_a_b"), sub = load(dir, @"s_u_b"), sxb = load(dir, @"s_x_b");
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     id<MTLLibrary> lf = [dev newLibraryWithSource:k_fs options:nil error:&e];
     if (!lf) { fprintf(stderr, "fragment: %s\n", e.localizedDescription.UTF8String); return 1; }
@@ -178,9 +188,20 @@ int main(void) { @autoreleasepool {
     pair(pipe_of(ab, @"main0", PLAIN), pipe_of(cbl, @"main0", PLAIN), &covered, &passed, &same);   // the control: another depth
     checks++; if (covered - passed < covered / 20 || same) { fprintf(stderr, "control: %d of %d pixels pass with another depth line (same image: %d): the comparison does not tell depths apart\n", passed, covered, same); failed++; }   // a unit in the last place of 0.5 moves the depth of about four pixels in ten
     id<MTLBuffer> ca = capture(ab), cu = capture(ub);
-    EXPECT("main0_gs: the captured words are the plain source's", 0, memcmp(ca.contents, cu.contents, ca.length) != 0);
-    size_t written = 0; for (size_t i = 0; i < ca.length / 4; i++) written += ((uint32_t *)ca.contents)[i] != 0xa5a5a5a5u;
+    const uint32_t *wa = ca.contents, *wu = cu.contents; size_t written = 0, differ = 0, far = 0;
+    for (size_t i = 0; i < ca.length / 4; i++) {
+        written += wu[i] != 0xa5a5a5a5u; differ += wa[i] != wu[i];
+        uint32_t d = (wa[i] ^ wu[i]) >> 31 ? UINT32_MAX : wa[i] > wu[i] ? wa[i] - wu[i] : wu[i] - wa[i];   // the distance between two floats of one sign, in units in the last place
+        far += d > 16; }
     EXPECT("main0_gs: every word of every record written", ca.length / 4, written);
+    EXPECT("main0_gs: captured words more than 16 units in the last place from the plain source's", 0, far);
+    printf("main0_gs: %zu of %zu captured words differ from the plain source's\n", differ, (size_t)(ca.length / 4));
+    id<MTLBuffer> sa = capture(sab), su = capture(sub), sx = capture(sxb);   // compiled strict: the same words, and the control's other ones
+    const uint32_t *ws = sa.contents, *wt = su.contents, *wx = sx.contents; size_t sdiffer = 0, xdiffer = 0;
+    for (size_t i = 0; i < sa.length / 4; i++) { sdiffer += ws[i] != wt[i]; xdiffer += ws[i] != wx[i]; }
+    EXPECT("main0_gs compiled strict: captured words that differ from the plain source's", 0, sdiffer);
+    checks++; if (xdiffer < NV / 2) { fprintf(stderr, "control: x one unit in the last place larger changed %zu captured words, fewer than half the %d vertices: the comparison does not tell positions apart\n", xdiffer, NV); failed++; }
+    printf("main0_gs compiled strict: %zu of %zu captured words differ from the plain source's; the control changes %zu\n", sdiffer, (size_t)(sa.length / 4), xdiffer);
     printf("t_vs_unit: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

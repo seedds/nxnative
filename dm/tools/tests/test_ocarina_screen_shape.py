@@ -43,14 +43,16 @@ class Placement(unittest.TestCase):
         self.assertEqual(OTHERS['movie draw']['size'], 0x158)
         sites, capabilities = record_hooks(FUNCTIONS)
         self.assertEqual(sites[FUNCTIONS['movie draw'] + 0x64], '69a241a9')
-        self.assertEqual(len(sites), 21)   # frame step, DRS, and 19 aspect hooks
+        self.assertEqual(len(sites), 23)   # frame step, DRS, two render-scale hooks, and 19 aspect hooks
         self.assertEqual(capabilities, {'DYNAMIC_RESOLUTION', 'SCREEN_ASPECT'})
 
     def test_any_missing_aspect_match_leaves_all_aspect_hooks_out(self):
+        render_scale = FUNCTIONS['render scale']
+        other_sites = {0xe4, FUNCTIONS['dynamic resolution'], render_scale + 0xce4, render_scale + 0xd48}
         for name in patch.screen_shape_functions:
             with self.subTest(name=name):
                 sites, capabilities = record_hooks(FUNCTIONS | {name: None})
-                self.assertEqual(set(sites), {0xe4, FUNCTIONS['dynamic resolution']})
+                self.assertEqual(set(sites), other_sites)
                 self.assertEqual(capabilities, {'DYNAMIC_RESOLUTION'})
 
     def test_aspect_does_not_need_dynamic_resolution(self):

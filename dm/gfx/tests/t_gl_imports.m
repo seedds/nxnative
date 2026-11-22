@@ -1031,10 +1031,11 @@ static int test_capture_shaders(void) {
     h_glShaderSource(fsb, 1, &fragb, NULL); h_glCompileShader(fsb);
     h_glAttachShader(prb, vsb); h_glAttachShader(prb, fsb); h_glLinkProgram(prb);
     h_glGetProgramiv(prb, GL_LINK_STATUS, &status); assert(status);
-    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1"), v0 = -1, v1 = -1;
+    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1");
+    GLint v0[16] = {-1}, v1[16] = {-1};   // allow a full matrix if reflection reports the wrong type
     assert(u0 > 0 && u1 > 0);
-    h_glGetUniformiv(prb, u0, &v0); h_glGetUniformiv(prb, u1, &v1);
-    assert(v0 == 0 && v1 == 1);
+    h_glGetUniformiv(prb, u0, v0); h_glGetUniformiv(prb, u1, v1);
+    assert(v0[0] == 0 && v1[0] == 1);
     GLuint bt[2]; h_glGenTextures(2, bt);
     const uint8_t red_px[4] = {220, 0, 0, 255}, grn_px[4] = {0, 180, 0, 255};
     h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, bt[0]);
@@ -1283,9 +1284,10 @@ static void test_swizzle_and_layout_binding(void) {
     h_glAttachShader(prb, vs); h_glAttachShader(prb, fsb); h_glLinkProgram(prb);
     h_glAttachShader(prl, vs); h_glAttachShader(prl, fsl); h_glLinkProgram(prl);
     assert(prog_of(prb)->linked && prog_of(prl)->linked);
-    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1"), v0 = -1, v1 = -1;
-    h_glGetUniformiv(prb, u0, &v0); h_glGetUniformiv(prb, u1, &v1);
-    assert(v0 == 0 && v1 == 1);
+    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1");
+    GLint v0[16] = {-1}, v1[16] = {-1};   // allow a full matrix if reflection reports the wrong type
+    h_glGetUniformiv(prb, u0, v0); h_glGetUniformiv(prb, u1, v1);
+    assert(v0[0] == 0 && v1[0] == 1);
 
     GLuint rt, fb, vao, bt[2], lut;
     h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);

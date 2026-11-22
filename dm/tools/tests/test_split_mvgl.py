@@ -115,7 +115,7 @@ class NxshContainers(unittest.TestCase):
         vs = program('vs', 1); ps = program('ps', 2); cs = program('cs', 3)
         found = []
         for magic, pair, name in ((b'NXVS', vs, 'a_vp.shad'), (b'NXFS', ps, 'a_fp.shad'), (b'NXCS', cs, 'c.shad')):
-            ss.scan_blob(nxsh(magic, *pair, tail=bytes(0x20)), '/' + name, found)
+            ss.scan_blob(bytearray(nxsh(magic, *pair, tail=bytes(0x20))), '/' + name, found)
         keys = ss.uniq_keys(found)
         self.assertEqual(list(keys), [ss.skey(*vs), ss.skey(*ps), ss.skey(*cs)])
         self.assertTrue(all('#NXSH@' in row[0] for row in keys.values()))

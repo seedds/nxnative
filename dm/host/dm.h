@@ -60,6 +60,7 @@ typedef struct {
     char name[16];
     uint8_t *base;             // Start address of the image (including the patch area) in the host address space
     size_t size;
+    size_t guest_size;         // Horizon module span through MOD0's page-aligned bss end, excluding rewriter pages
     uint64_t text_end, ro_off, data_off, key_page_off, key_page_size;   // From the rewriter fixups header
     uint64_t ue_malloc_vt;     // Unreal's FMallocBinned3 vtable, found by the rewriter (patch_nso.py, ue_malloc.py; hle_uemalloc.c); 0 = none
     unsigned ue_malloc_slot;   // the slot of its name getter, which names the slot layout
@@ -78,6 +79,7 @@ typedef struct {
     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
     uint32_t step_max;         // the largest step the frame step stubs give the game (the fixups table's STEP_MAX, patch_nso.py ctx.step_max); 0 = FSTEP_MAX
     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
+    int movie_native_color_keys; // the movie SDK's MediaData uses the native buffer's colour index directly (MOVIE_NATIVE_COLOR_KEYS)
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
@@ -126,6 +128,7 @@ int dm_sdk_nvn2_item(unsigned item, int *out);   // a constant NVN2's own nvnDev
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
 int dm_game_imports(const char *prefix);   // main or an NRO imports a symbol whose name starts with prefix (loader.c)
 void *guest_sym(const char *name);
+void *guest_module_sym(uintptr_t base, const char *name);
 module_t *module_of(const void *p);
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
@@ -146,8 +149,8 @@ uint64_t guest_ns_at_host_time(uint64_t host_ns);  // Host Mach-absolute ns proj
 int guest_clock_pinned(void);  // the guest clock is frozen or DM_DETCLOCK's: guest_ns_at_host_time maps every host time to one
 uint64_t guest_ticks(void);           // The guest's system counter on that clock: 19.2 MHz, or 31.25 MHz for the Switch 2 (hle_os.c)
 int dm_detclock_enabled(void);
-void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
+void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation; Stop / Flush / Finalize cancel the wait
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
@@ -171,7 +174,22 @@ int hle_signal_bound_system_event(void *g);   // hle_thread.c: signal a service-
 uint64_t hle_system_event_binding(void *g);   // Opaque lifetime ID of a binding, 0 if unbound; a rebind gets a new ID even if its address and handle are reused
 int hle_signal_system_event_binding(uint64_t binding);   // Signal only this binding lifetime (any thread); 0 after its write handle closes
 uint32_t hle_new_event(uint32_t *write_end);   // hle_thread.c: a new kernel event's read end (a service's handle copied to its client); its write end in *write_end, none when NULL (never signaled)
+typedef struct { const void *bytes; size_t size; } hle_readonly_shmem;
+uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory);   // immutable, process-lifetime backing; each returned handle closes independently
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle);
+typedef struct { uintptr_t address; size_t size; uint32_t owner_perm; } hle_transfer_memory;
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory);
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory);   // snapshot under the kernel handle lock
+typedef struct hle_transfer_mapping {
+    uintptr_t address;
+    size_t size;
+    struct hle_transfer_mapping *next;
+} hle_transfer_mapping;
+// A service owns the in-place mapping independently of the guest's handle. Start with a zeroed record, kept at a stable address until unmapped.
+int hle_map_transfer_memory(hle_transfer_mapping *mapping, uint32_t handle, uint64_t size, uint32_t owner_perm);
+void hle_unmap_transfer_memory(hle_transfer_mapping *mapping);
 uint32_t hle_dup_readable_handle(uint32_t h);   // hle_thread.c: a second read end of a kernel event (the copy a service hands its client), 0 if h is no read end
+int hle_signal_event_handle(uint32_t write_end);   // hle_thread.c: signal a host-made kernel event by its write end (any thread); 0 once that end is closed
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc));
 void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
@@ -222,7 +240,7 @@ const char *dm_cheats_skipped_why(int i);
 int dm_cheats_nsources(void);         // anchored sources (*.cheats.toml) in the cheats folder
 const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
-// Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
+// Graphics lifecycle (hle_nvn.c): on=1 closes submission and waits up to three seconds for the drain, on=0 requests reopening once the drain completes.
 void dm_gfx_suspend(int on);
 void dm_gfx_quit(int wait_ms);   // hle_nvn.c: the process is ending (the graceful exit): what the pipeline archive has not written yet, written, waiting up to wait_ms
 void dm_gfx_quit_begin(void);   // hle_nvn.c: the process is about to end (the graceful exit, oe::ExecuteProgram's hand-over): the pipeline prewarm stops and the archive starts writing what it holds, without waiting

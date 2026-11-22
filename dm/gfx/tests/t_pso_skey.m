@@ -89,6 +89,9 @@ int main(void) {
         assert(pso_mesh_skey_parse(hex, &parsed) == 0);
         pso_skey_hex(&parsed, roundtrip);
         assert(!strcmp(hex, roundtrip));
+        stable.vs_stage = 7; pso_skey_hex(&stable, hex);
+        assert(pso_mesh_skey_parse(hex, &parsed) == 0 && parsed.vs_stage == 4);
+        stable.vs_stage = 4;
         stable.k.attr_hi[0].fmt = 7; pso_skey_hex(&stable, hex);
         assert(pso_mesh_skey_parse(hex, &parsed) == 0 && !parsed.k.attr_hi[0].fmt);
         stable.k.attr_hi[0].fmt = 0;

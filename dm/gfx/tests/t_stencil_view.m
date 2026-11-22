@@ -59,9 +59,18 @@ int main(void) { @autoreleasepool {
         CHECK(tex_get(s.serial) == base, "the depth-stencil texture is not replaced");
 
         // The depth-stencil copy draw reads the source's stencil through its own X32_Stencil8 view and writes it with the depth
+        // A registered source can already be a view, including nonzero mip and
+        // layer offsets. The copy's own views must name the resident root.
+        MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:base.pixelFormat width:2*W height:2*H mipmapped:YES];
+        rd.textureType = MTLTextureType2DArray; rd.arrayLength = 2;
+        rd.storageMode = MTLStorageModePrivate; rd.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        id<MTLTexture> root = [g_dev newTextureWithDescriptor:rd]; res_add(root);
+        id<MTLTexture> source_view = [root newTextureViewWithPixelFormat:root.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(1, 1) slices:NSMakeRange(1, 1)];
+        CHECK(source_view && source_view.width == W && source_view.height == H, "the source view selects mip 1, layer 1");
+        plane_io(source_view, 0, 1, dz); plane_io(source_view, 1, 1, st);
         mtl_sub_begin();
         NVNcopyRegion r = {.width=W, .height=H, .depth=1};
-        CHECK(copy_t2t_draw(base, dst, 0, 0, 0, 0, &r, &r, 0, 0), "the depth-stencil copy is drawn");
+        CHECK(copy_t2t_draw(source_view, dst, 0, 0, 0, 0, &r, &r, 0, 0), "the depth-stencil copy is drawn");
         mtl_sub_commit(); mtl_drain();
         float dz2[W * H]; uint8_t st2[W * H];
         plane_io(dst, 0, 0, dz2); plane_io(dst, 1, 0, st2);

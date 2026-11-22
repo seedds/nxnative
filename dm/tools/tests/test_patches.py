@@ -159,17 +159,60 @@ class Registry(unittest.TestCase):
         self.assertIn(0x52800048, words)   # mov w8,#2: the cap
         self.assertEqual(ctx.step_max, 2)
 
+    def test_ocarina_movie_player_takes_two_pictures_a_frame(self):
+        # its movie player advances at most the pictures a frame its constructor sets (1 for the game's one caller), so a frame of two vsyncs left the picture behind the sound for
+        # good. One cut of one word in the constructor: cinc w8, w28, ge (1, or 2 for an argument of 2 or more) → mov w8, #2, into the register both stores take (the limit, and
+        # twice it for the queue). Not 3: no value of the constructor's, and the game stopped at the movie's start with it
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rules = m.MATCH_CUTS['main']
+        self.assertEqual(len(rules), 3)
+        (delta, old, new, why), = rules[0]['cuts']
+        self.assertEqual((old, new), ('88b79c1a', '48008052'), why)
+        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # the same destination register
+        self.assertLess(delta, rules[0]['size'])
+        self.assertTrue(any(e['what'].startswith('movie pictures a frame') for e in m.BINDING))
+
+    def test_ocarina_movie_update_caps_at_three(self):
+        # the update's cap is its one read of the limit (ldr w9, [x0, #0x20]); 3 goes there into the same register, so a frame of three vsyncs can take three pictures while the
+        # constructor's limit (2) keeps sizing the pool and the inputs
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rule, = [r for r in m.MATCH_CUTS['main'] if r['name'] == m.movie_cap]
+        (delta, old, new, why), = rule['cuts']
+        self.assertEqual((old, new), ('092040b9', '69008052'), why)
+        self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)   # w9 both
+        self.assertLess(delta, rule['size'])
+        self.assertTrue(any(e['what'].startswith('movie update cap') for e in m.BINDING))
+
+    def test_ocarina_movie_frame_counts_pictures(self):
+        # the movie's frame, which its event's timeline (subtitles, voice, logo) follows, gained 1 per frame drawn, half the pictures once the player takes two a frame. Both draws
+        # replace ldr w8, [x20, #0x2f8]; add w8, w8, #1 with ldr x8, [x20, #0x10]; ldr w8, [x8, #0xc] (the player's pictures taken), keeping the store after them
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        rule, = [r for r in m.MATCH_CUTS['main'] if r['name'] == m.movie_frame]
+        self.assertEqual(len(rule['functions']), 2)
+        for fn in rule['functions']:
+            (delta, old, new, why), = fn['cuts']
+            self.assertEqual((old, new), ('88fa42b908050011', '880a40f9080d40b9'), why)
+            self.assertLess(delta + 8, fn['size'])
+        self.assertTrue(any(e['what'].startswith('movie frame') for e in m.BINDING))
+
     def test_sdk_wide_rules_change_what_their_names_say(self):
-        # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
-        # area; 0x400000, 0x2000000 and 0x40000000, the alignments of the 4 MB, 32 MB and 1 GB classes; as movz or orr from wzr) with the reviewed one (62 MB; SDK 20's 2 MB) in the same register
+        # The modern rules replace the node area with 62 MB and the three large-region alignments with 2 MB, keeping the destination register.
+        # The older VammManager rules patch the reservation and alignment together. Check the exact replacements in each function.
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
         words = {m.node_area: ({'08fca752', '09fca752', 'e8230b32', 'e9230b32'}, {'087ca052', '097ca052'}),
                  m.alignment: ({'0808a052', 'e8030a32', '0b40a052', 'eb030732', '0a00a852', 'ea030232'}, {'0804a052', '0b04a052', '0a04a052'})}
         for rule in m.MATCH_CUTS['sdk']:
-            old_words, new_words = words[rule['name']]
-            for delta, old, new, why in rule['cuts']:
-                self.assertIn(old, old_words, why); self.assertIn(new, new_words, why)
-                self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)
+            with self.subTest(rule=rule['name']):
+                if rule['name'] == m.old_vamm:
+                    self.assertEqual(
+                        [[(old, new) for _, old, new, _ in fn['cuts']] for fn in rule['functions']],
+                        [[('e9030232', '0980a052'), ('ea030232', '0a80a052')], [('ea030232', '0a40a052')]],
+                    )
+                    continue
+                old_words, new_words = words[rule['name']]
+                for _, old, new, why in rule['cuts']:
+                    self.assertIn(old, old_words, why); self.assertIn(new, new_words, why)
+                    self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)
 
     def test_game_files_name_their_own_builds(self):
         for p, m in MODS.items():
@@ -184,7 +227,7 @@ class Registry(unittest.TestCase):
         sdk = {bid for g in game.all_games() for bid, m in builds_of(g).items() if m == 'sdk'}
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
         self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}) or getattr(m, 'STUBS', {}))
-        for bid in m.CUTS: self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
+        for bid in getattr(m, 'CUTS', {}): self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
 
 
 class ExternalRegistry(unittest.TestCase):

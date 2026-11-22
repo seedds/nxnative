@@ -15,7 +15,7 @@ static NSString *k_vs =
 "    out.gl_Position = p;\n    out.out_c = in.m_1;\n    return out;\n}\n";
 static NSString *k_fs = @"#include <metal_stdlib>\nusing namespace metal;\nstruct I { float4 c [[user(locn0)]]; };\nfragment float4 fs(I in [[stage_in]]) { return in.c * 0.5 + 0.5; }\n";
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
-typedef struct { dm_vstream_c s[16]; uint32_t attr[16]; } dm_vlayout_c;
+typedef struct { dm_vstream_c s[16]; uint32_t attr[32]; } dm_vlayout_c;
 int main(void) { @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); id<MTLCommandQueue> q = [dev newCommandQueue]; NSError *e = nil;
     char dir[] = "/tmp/t_pull_inv.XXXXXX"; if (!mkdtemp(dir)) return 1;

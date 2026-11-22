@@ -5,6 +5,7 @@ import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 EXIT = (0x000fea0003800000, 0x000000000000794d)   # hi, lo: EXIT
 # SUATOM.ADD.U32 R12, [R3], R12 on the 1D image whose handle is word 12 of c0 (AMapC0: image slot 1), as the game encodes it but unpredicated (PT)
 SUATOM = (0x002ea200001ee000, 0x00000c0c030c7593)
@@ -27,11 +28,8 @@ class Translated(unittest.TestCase):
             self.res = json.loads((work / 'k.res.json').read_text())   # the translator's own report of the shader
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            xc = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
-            if atomics:   # as dmsh_build runs it for image atomics: MSL 3.1 and the native-atomic checks and rewrites (dmsh_atomic.py)
-                import dmsh_atomic
-                xc = dmsh_atomic.cross_args(xc, str(work / 'k.spv'))
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *xc, str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *dmsh_chain.CROSS_MSL, str(work / 'k.spv')], capture_output=True, text=True)
+            import dmsh_atomic   # with image atomics: the native-atomic checks and rewrites, as dmsh_build makes them (dmsh_atomic.py)
             self.assertEqual(r.returncode, 0, r.stderr)
             return dmsh_atomic.check_msl(r.stdout) if atomics else r.stdout
 
@@ -134,6 +132,27 @@ class GuardedWrites(Translated):
         self.assertIn('cp_t_cb262147_10068006', msl)
 
 
+class GatherOffsets(Translated):
+    def test_runtime_per_texel_offsets_move_the_coordinates(self):
+        # MOV R16, c4[0]; MOV R17, c4[4]; TLD4.PTP R24, R6, R16. The atomic keeps a gather result live.
+        load0 = (0x000fe20000000f00, 0x0100000000107a02)
+        load1 = (0x000fe20000000f00, 0x0100010000117a02)
+        gather = (0x000f4600001e2f0e, 0x3000041006189b63)
+        # The depth-compare form has a third source in its second block, R18.
+        reference = (0x000fe20000000f00, 0x3f00000000127802)
+        gather_compare = (0x000f4600001e6f0e, 0x2000041006189b63)
+        use = (0x020ea200001ee000, 0x00000c18030c7593)
+        for call, body in (('.gather(', (gather,)), ('.gather_compare(', (reference, gather_compare))):
+            with self.subTest(call=call):
+                msl = self.translate(b''.join(inst(*op) for op in (load0, load1, *body, use, EXIT)))
+                self.assertIn('.get_width()', msl)
+                self.assertIn('.get_height()', msl)
+                self.assertEqual(msl.count(call), 4)
+                for line in msl.splitlines():
+                    if call in line:
+                        self.assertNotRegex(line, r', int2\((?!0\))')
+
+
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
         msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))
@@ -221,7 +240,7 @@ class PixelCovered(unittest.TestCase):
             if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(m.returncode, 0, m.stderr)
             return m.stdout, r.stdout + r.stderr
 
@@ -639,13 +658,13 @@ class Pokopia(Translated):
         msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_NH1)
         negated = re.search(rf'float (_\d+) = -{b_hi};', msl)
         self.assertTrue(negated, msl)
-        self.assertIn(f'fma({a_lo}, {negated.group(1)}, 0.0)', msl)   # low lane: A.lo * -B.hi
-        self.assertIn(f'fma({a_hi}, {b_lo}, 0.0)', msl)               # high lane: A.hi * B.lo
+        self.assertIn(f'fma(half({a_lo}), half({negated.group(1)}), half(0.0))', msl)   # low lane: A.lo * -B.hi
+        self.assertIn(f'fma(half({a_hi}), half({b_lo}), half(0.0))', msl)               # high lane: A.hi * B.lo
 
     def test_hfma2_without_nh1_keeps_the_lanes(self):
         msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_PLAIN)
-        self.assertIn(f'fma({a_lo}, {b_lo}, 0.0)', msl)
-        self.assertIn(f'fma({a_hi}, {b_hi}, 0.0)', msl)
+        self.assertIn(f'fma(half({a_lo}), half({b_lo}), half(0.0))', msl)
+        self.assertIn(f'fma(half({a_hi}), half({b_hi}), half(0.0))', msl)
 
     # FSEL keeps each operand's modifiers (161,748 of the game's register forms negate B): "x or -x" from one register is how its character and prop lighting picks a sign
     FSEL_NEG_B = (0x000fe40000000000, 0x8000000c0c0c7208)   # FSEL R12, P0, R12, -R12

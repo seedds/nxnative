@@ -1,6 +1,7 @@
 // Compute dispatches ordered by the game's own barriers (nvn_mtl.m dispatch_enc_cs, the default): a barrier where the game issued one, where a copy's
-// range meets the dispatch's, and around a dispatch whose reach is no range; none between dispatches the game did not order. Run in both modes (DM_NVN_DISPATCH_BARRIER=full / game):
-// the results are the same, the barriers differ.
+// range meets the dispatch's, and between a dispatch whose reach is no range and the copies on either side of it; none between dispatches the game did not order. Run in both modes
+// (DM_NVN_DISPATCH_BARRIER=full / game) and with DM_NVN_DISPATCH_RANGELESS=0 / 1 (a dispatch with no range in the full order on both sides, or by the game's barriers; the profile key
+// dispatch_rangeless sets the default): the results are the same, the barriers differ.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -80,16 +81,36 @@ int main(void) { @autoreleasepool {
       EXPECT("a barrier between a dispatch and the copy that reads what it wrote", 1, mtl_blit_barriers() - b0);
       end("the dispatch and its copy complete"); EXPECT("the copy sees the dispatch", 2 * 3 + 1, word[512]); }
 
-    // 5. A binding whose reach is no range (no size): the full order on both sides, in both modes
-    { word[0] = 1;
+    // 5. A binding whose reach is no range (no size). With the game's barriers between them, a chain runs in order in every mode; the full order (full mode, or
+    // DM_NVN_DISPATCH_RANGELESS=0) puts a barrier between each, dispatch_enc_cs only where the game asked
+    int unk = game && dbar_unknown_game();
+    { word[0] = 1; int32_t bits = NVN_BARRIER_ORDER_PRIMITIVES_BIT;
+      EMIT(OP_DISPATCH, one); EMIT(OP_BARRIER, bits); EMIT(OP_DISPATCH, one); EMIT(OP_BARRIER, bits); EMIT(OP_DISPATCH, one);
       begin(); S.cprog = &pc; S.ssbo[5][0] = (p_bind_buf){.addr=(uint64_t)mem, .size=0};
-      uint64_t b0 = mtl_blit_barriers(), u0 = g_dbar_unknown;
-      dispatch(&one); dispatch(&one); S.ssbo[5][0].size = 64; dispatch(&one);
-      EXPECT("barriers around dispatches with no range", 2, mtl_blit_barriers() - b0);
-      if (game) EXPECT("counted as no range", 2, g_dbar_unknown - u0);
-      end("the rangeless dispatches complete"); EXPECT("they run in order", ((1 * 3 + 1) * 3 + 1) * 3 + 1, word[0]); }
+      uint64_t b0 = mtl_blit_barriers(); RUN();
+      EXPECT("a barrier before each rangeless dispatch the game ordered", 2, mtl_blit_barriers() - b0);
+      end("the rangeless chain completes"); EXPECT("the chain runs in order", ((1 * 3 + 1) * 3 + 1) * 3 + 1, word[0]); }
 
-    // 6. What a dispatch wrote orders nothing in the next copy encoder, which starts behind a full barrier of its own: two fills there, the second over the dispatch's range, get no barrier
+    // 6. Rangeless dispatches into slots of their own, with no game barrier, then a dispatch with a range: none between them unless in the full order
+    { for (int i = 0; i < 8; i++) { word[16 * i] = 0; word[16 * i + 1] = (uint32_t)i; }
+      begin(); S.cprog = &ps; uint64_t b0 = mtl_blit_barriers(), f0 = g_dbar_ufree;
+      for (int i = 0; i < 8; i++) { S.ssbo[5][0] = (p_bind_buf){.addr=(uint64_t)(mem + 64 * i), .size=i < 7 ? 0 : 64}; dispatch(&one); }
+      EXPECT("barriers between rangeless dispatches the game did not order", unk ? 0 : 7, mtl_blit_barriers() - b0);
+      if (unk) EXPECT("counted as none", 7, g_dbar_ufree - f0);
+      end("the rangeless slots complete"); int ok = 1; for (int i = 0; i < 8; i++) ok &= word[16 * i] == (uint32_t)i + 1;
+      CHECK(ok, "every rangeless slot's dispatch ran"); }
+
+    // 7. A fill, then a rangeless dispatch that reads it, then a copy of what it wrote: both ordered in every mode
+    { word[0] = 0; word[512] = 0;
+      struct { uint64_t source, destination, bytes; } copy = {(uint64_t)mem, (uint64_t)(mem + 2048), 4};
+      begin(); S.cprog = &pc; S.ssbo[5][0] = (p_bind_buf){.addr=(uint64_t)mem, .size=0};
+      uint64_t b0 = mtl_blit_barriers();
+      mtl_sub_fill((uint64_t)mem, 4, 4); dispatch(&one);
+      EMIT(OP_COPY_B2B, copy); RUN();
+      EXPECT("a barrier between a fill and the rangeless dispatch, and between it and the copy", 2, mtl_blit_barriers() - b0);
+      end("the fill, the rangeless dispatch and the copy complete"); EXPECT("the dispatch sees the fill", 4 * 3 + 1, word[0]); EXPECT("the copy sees the dispatch", 4 * 3 + 1, word[512]); }
+
+    // 8. What a dispatch wrote orders nothing in the next copy encoder, which starts behind a full barrier of its own: two fills there, the second over the dispatch's range, get no barrier
     { word[0] = 0;
       begin(); S.cprog = &pc; S.ssbo[5][0] = (p_bind_buf){.addr=(uint64_t)mem, .size=64}; dispatch(&one); end("the dispatch completes");
       begin(); uint64_t b0 = mtl_blit_barriers();
@@ -98,5 +119,5 @@ int main(void) { @autoreleasepool {
       end("the fills complete"); EXPECT("the second fill lands", 9, word[0]); }
 
     mtl_pool_del(mem); mtl_pool_del(commands); mtl_drain();
-    printf("t_dispatch_barrier (%s): %d checks, %d failed\n", game ? "game" : "full", checks, failed); return failed != 0;
+    printf("t_dispatch_barrier (%s%s): %d checks, %d failed\n", game ? "game" : "full", game && !unk ? ", rangeless in the full order" : "", checks, failed); return failed != 0;
 } }

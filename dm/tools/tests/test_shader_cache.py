@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import concurrent.futures as cf, hashlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -135,6 +135,89 @@ class Entries(Base):
         self.assertTrue(self.store.to_file('f', dst)); self.assertEqual(dst.read_bytes(), b'data')
         self.assertFalse(self.store.to_file('absent', self.root / 'none')); self.assertFalse((self.root / 'none').exists())
 
+    def test_other_threads_read_on_connections_of_their_own(self):
+        # one connection gives an entry's bytes at 190 MB/s; the library image is written from 300,000 entries (shader_lib.py write), read by a few threads at once
+        for i in range(50): self.store.put(f's/{i}', bytes([i]) * 40000)
+        self.assertEqual(self.store.get('s/7'), bytes([7]) * 40000); self.assertEqual(self.store.readers, {})   # the thread that opened it: the one connection, as before
+        with cf.ThreadPoolExecutor(4) as pool: got = list(pool.map(lambda i: self.store.get(f's/{i}'), range(50)))
+        self.assertEqual(got, [bytes([i]) * 40000 for i in range(50)])
+        self.assertTrue(0 < len(self.store.readers) <= 4)
+        self.store.put('s/new', b'written since'); self.store.delete_prefix('s/1')   # what was written since is read, what was removed is gone
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(lambda: [self.store.get(n) for n in ('s/new', 's/1', 's/2', 'absent')]).result(), [b'written since', None, bytes([2]) * 40000, None])
+        self.store.close()
+        self.assertEqual(os.listdir(self.root), ['cas.db']); self.assertEqual(self.store.readers, {})   # their connections closed with it: one file is left
+
+    def test_a_read_in_another_thread_waits_for_a_batch_and_a_batch_reads_what_it_wrote(self):
+        started, read = threading.Event(), []
+        def reader(): started.wait(20); t = time.time(); read.append((self.store.get('in/batch'), time.time() - t))
+        def writer():
+            with self.store.batch():
+                self.store.put('in/batch', b'whole'); self.assertEqual(self.store.get('in/batch'), b'whole')   # its own write, on the one connection
+                started.set(); time.sleep(0.3)
+        with cf.ThreadPoolExecutor(2) as pool: a, b = pool.submit(reader), pool.submit(writer); b.result(); a.result()
+        self.assertEqual(read[0][0], b'whole'); self.assertGreater(read[0][1], 0.2)   # not "absent": the read came after the batch, as on one connection
+
+    def test_recovery_waits_for_readers_being_opened_or_queried(self):
+        # A reader's connection belongs to this database until its query finishes. Recovery used to clear the registry between registration and lookup (KeyError), close a
+        # connection during fetchall, or replace the database while a connection to the old file was still being opened. Pause real SQLite readers at both lifetime boundaries.
+        for stage in ('open', 'fetch', 'failed_fetch'):
+            with self.subTest(stage=stage): self.reader_recovery(stage)
+
+    def reader_recovery(self, stage):
+        connect = sqlite3.connect
+        entered, release, recovering, recovered = (threading.Event() for _ in range(4))
+        store = shader_cache.Store(self.root / f'{stage}.db', self.said.append); self.addCleanup(store.close)
+        store.put('entry', b'before recovery')
+        def pause():
+            entered.set()
+            if not release.wait(10): raise TimeoutError('the reader was not released')
+        class Cursor(sqlite3.Cursor):
+            def fetchall(self):
+                if stage != 'open': pause()
+                if stage == 'failed_fetch': raise sqlite3.DatabaseError('database disk image is malformed')
+                return super().fetchall()
+        class Reader(sqlite3.Connection):
+            def execute(self, sql, args=()): return self.cursor(factory=Cursor).execute(sql, args)
+            def close(self):
+                if entered.is_set() and not release.is_set(): raise AssertionError('closed an active reader')
+                super().close()
+        def opening(*args, **kwargs):
+            if kwargs.get('uri'):
+                db = connect(*args, factory=Reader, **kwargs)
+                if stage == 'open': pause()
+                return db
+            return connect(*args, **kwargs)
+        def recover():
+            recovering.set()
+            with store.lock: store._damage(sqlite3.DatabaseError('database disk image is malformed'))
+            recovered.set()
+        with mock.patch.object(shader_cache.sqlite3, 'connect', opening), cf.ThreadPoolExecutor(2) as pool:
+            read = pool.submit(store.get, 'entry')
+            try:
+                self.assertTrue(entered.wait(10))
+                recovery = pool.submit(recover)
+                self.assertTrue(recovering.wait(10))
+                self.assertFalse(recovered.wait(0.1), 'recovery replaced a database with an active reader')
+            finally: release.set()
+            self.assertEqual(read.result(10), None if stage == 'failed_fetch' else b'before recovery')
+            recovery.result(10)
+        self.assertTrue(recovered.is_set()); self.assertEqual(store.readers, {})
+        store.put('entry', b'after recovery')
+        with cf.ThreadPoolExecutor(1) as pool: self.assertEqual(pool.submit(store.get, 'entry').result(10), b'after recovery')
+
+    def test_parallel_queries_keep_independent_reader_lifetimes(self):
+        # The lifetime guard must not serialize unrelated readers: both queries need to enter SQLite before either one finishes.
+        self.store.put('entry', b'parallel'); together = threading.Barrier(2)
+        connect = sqlite3.connect
+        class Reader(sqlite3.Connection):
+            def execute(self, sql, args=()):
+                together.wait(10)
+                return super().execute(sql, args)
+        def opening(*args, **kwargs): return connect(*args, factory=Reader, **kwargs)
+        with mock.patch.object(shader_cache.sqlite3, 'connect', opening), cf.ThreadPoolExecutor(2) as pool:
+            reads = [pool.submit(self.store.get, 'entry') for _ in range(2)]
+            self.assertEqual([r.result(10) for r in reads], [b'parallel', b'parallel'])
+
     def test_one_file_is_left(self):
         self.store.put('x', b'1'); self.store.close()
         self.assertEqual(os.listdir(self.root), ['cas.db'])
@@ -164,8 +247,8 @@ class ReadOnly(Base):
         self.assertEqual(s.get('metallib/mac/a.metallib'), b'local')
         self.assertEqual(s.names('metallib/mac/'), {'metallib/mac/a.metallib', 'metallib/mac/new.metallib'})
         s.delete_prefix('variant/'); self.assertEqual(s.get('variant/v/mac.metallib'), b'variant')
-        assert s.readonly is not None and s.readonly.db is not None   # the store opened over a read-only one, open
-        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.db.execute('DELETE FROM entry')
+        assert s.readonly is not None and len(s.readonly.dbs) == 1   # the store opened over a read-only one, open
+        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.dbs[0][1].execute('DELETE FROM entry')
         s.close()
         self.assertEqual(self.path.read_bytes(), before); self.assertEqual(self.path.stat().st_mtime_ns, stamp)
 
@@ -412,6 +495,56 @@ class Prune(Base):
         self.assertEqual(self.store.prune_shaders(set(), now)[0], 40)
         self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         self.assertLess(self.path.stat().st_size, big // 4)
+
+
+class Generations(unittest.TestCase):   # one file per chain: a build writes its own, copies the Metal compiles it reads from older ones, and the older ones go whole after it
+    A, B, C = '0123456789ab', 'bbbbbbbbbbbb', 'cccccccccccc'
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.d = Path(t.name); self.said = []
+
+    def file(self, name, entries, when):   # a generation holding entries, last written at when
+        s = shader_cache.Store(self.d / name)
+        for n, data in entries.items(): s.put(n, data)
+        s.close(); os.utime(self.d / name, (when, when))
+
+    def names(self, path):
+        s = shader_cache.Store(path); self.addCleanup(s.close)
+        return set(s.names(''))
+
+    def test_older_compiles_are_copied_on_read(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/mac/old.metallib': b'legacy', f'shader/{D1}/mac/k_b.metal': b'old chain'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B', 'metallib/mac/old.metallib': b'newer'}, now - 100)
+        self.assertEqual([Path(p).name for p in shader_cache.generations(self.d)], [f'cas-{self.B}.db', 'cas.db'])   # newest first, the one file last
+        s = shader_cache.for_chain(self.d, self.A)
+        self.assertEqual(s.path, str(self.d / f'cas-{self.A}.db'))
+        self.assertTrue(s.has('metallib/mac/m.metallib'))
+        self.assertEqual(s.get('metallib/mac/old.metallib'), b'newer')   # the newest generation answers
+        self.assertIsNone(s.get(f'shader/{D1}/mac/k_b.metal')); self.assertFalse(s.has(f'shader/{D1}/mac/k_b.metal'))   # another chain's shader never hits
+        s.close()
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/old.metallib'})   # what it read is its own now; what it only saw is not
+
+    def test_older_generations_go_after_a_build(self):
+        now = time.time()
+        self.file('cas.db', {'metallib/ios/i.metallib': b'ios', 'metallib/mac/x.metallib': b'old mac', f'shader/{D1}/mac/k_b.metal': b'm'}, now - 300)
+        self.file(f'cas-{self.B}.db', {'metallib/mac/b.metallib': b'B'}, now - 100)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])   # no file of its own: nothing goes
+        self.file(f'cas-{self.A}.db', {'metallib/mac/a.metallib': b'A', f'shader/{D2}/mac/k_b.metal': b'a'}, now)
+        open(self.d / 'cas.db.lock', 'w').close()
+        self.assertEqual(sorted(shader_cache.drop_generations(self.d, self.A, self.said.append)), [f'cas-{self.B}.db', 'cas.db'])
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), [f'cas-{self.A}.db'])
+        self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/a.metallib', 'metallib/ios/i.metallib', f'shader/{D2}/mac/k_b.metal'})   # iOS, which it compiled none of, kept
+        self.assertIn('kept 1 ios Metal compiles of cas.db: this build compiled none for ios', self.said)
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])
+
+    def test_a_folder_as_the_read_only_cache(self):   # regress.py's fallback reads the player's generations, never copying them
+        now = time.time()
+        self.file(f'cas-{self.B}.db', {'metallib/mac/m.metallib': b'B'}, now - 100); self.file('cas.db', {'variant/v/x': b'v'}, now - 300)
+        s = shader_cache.Store(self.d / 'regress/cas.db', readonly=self.d); self.addCleanup(s.close)
+        self.assertEqual((s.get('metallib/mac/m.metallib'), s.get('variant/v/x')), (b'B', b'v'))
+        self.assertEqual(s._run('SELECT count(*) FROM entry')[0][0], 0)
 
 
 class Adopt(unittest.TestCase):

@@ -1,0 +1,35 @@
+# TSUKIHIME A piece of blue glass moon 1.0.2 (v131072), SDK 17.5.4, NVN.
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	010057A01E4D4000
+program_id	010057A01E4D4000
+
+# ---- App ----
+name	TSUKIHIME A piece of blue glass moon
+ipa	TsukihimeAPieceOfBlueGlassMoon.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=625fc1d9d9485debdd407d7259722ed5	subsdk0=46f74e1a8d0dace12740c1f58025a9ac	subsdk1=d0c48eef6dc2f1e7ac8b8dd5b5b03a60	sdk=1ea0b9fe6cd6867b18e374a5d53d7950
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# subsdk0 exports GLSLC, subsdk1 serves NintendoSDK_movie.
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	w_allpac.mrg
+zip_store	.bfsar:.mp4:.mrg:.otf:.ttf:.metallib
+
+# ---- Memory ----
+# Standard 4 GB partition for a title without a system resource.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# main.npdm declares no system resource, so virtual address memory is disabled.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/shader/=shader
+shader_note	TSUKIHIME A piece of blue glass moon shaders

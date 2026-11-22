@@ -17,7 +17,7 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 
 - Built from a dump folder (`base/`, `updates/65536/`). The display version `v65536` is a placeholder: no control data gave a better one.
 - Update RomFS: 46,354 files, 13 GB.
-- Shaders: 27,192 in [`shader_map.tsv`](shader_map.tsv), from `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, `Sample.Nin_Ounce_NVN2.release.sarc.zs` and `Lib/agl/*`. A full build takes about 34 minutes from scratch, 13 with the Metal cache. 22,147 pipeline pairs prebuild with none failing, in about 200 s.
+- Shaders: 27,190 in [`shader_map.tsv`](shader_map.tsv), from `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, `Sample.Nin_Ounce_NVN2.release.sarc.zs` and `Lib/agl/*`. A full build takes about 34 minutes from scratch, 13 with the Metal cache. 22,147 pipeline pairs prebuild with none failing, in about 200 s.
 
 ## Shaders
 
@@ -46,18 +46,23 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Open
 
-- A GPU address fault after 4-6 minutes of the tutorial on an M5, Metal 4, then a frozen picture while the game runs on ([issue #1289](https://github.com/seedds/nxnative/issues/1289)); not seen in the M4 Pro's sessions, the longest about 4.5 minutes. Cause unknown. It is not the cube in a cube array slot below: those 180 binds all come at frame 0. It did not reproduce on the M4 Pro to frame 31,200, played only as far as the ramp and moat wall near the first fort, so the stage the reporter names was not reached. `DM_RES_CHECK=1` to frame 13,500 reported no `released too early` line. The next log from a machine that faults has the `[RED] game shaders …` lines ([Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault)).
+- A GPU address fault after 4-6 minutes of the tutorial on an M5, Metal 4, then a frozen picture while the game runs on ([issue #1289](https://github.com/seedds/nxnative/issues/1289)), and after 12 minutes on an M5 Max (3 failed of 357,641 command buffers). Never on the M4 Pro (to frame 31,200, as far as the first fort) or the M6. Cause unknown. All 18 of the M5's macOS reports are reads at address 0 (one at 0x40), in data master 2 (the fragment stage on the M6): a binding whose base address is 0, not a freed or evicted object, which faults at its own address, nor an overrun ([A GPU fault at address 0](../../../docs/reference/rendering.md#a-gpu-fault-at-address-0)). `DM_RES_CHECK=1` cannot see it and reported nothing. Not the cube in a cube array slot below: those 180 binds all come at frame 0. No game shader is in every failed command buffer. The next log from an M5 has `[RED] zero GPU address` lines, and after each failure the zero addresses its command buffer was handed, or none.
 - An IPA: the 16 GB alias region is over iOS's limit until the SDK 21 cuts are ported.
 - A crash dump once hung in `flockfile` under `shader_load`, with the log contended.
 - `dm/games/profile_guess.py` does not recognise `Generic_21_4_4`. `pl::IsRunningOnOunce` answers false.
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
+- [Optional stage byte in short NVN2 control sections](../../../docs/reference/shaders.md#optional-stage-byte-in-short-nvn2-control-sections): the offline build's `IndexError` on a short agl vertex record is resolved, 2026-11-17.
+
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution that never moved, then held low by the GPU's idle gaps
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
+- [A GPU fault at address 0](../../../docs/reference/rendering.md#a-gpu-fault-at-address-0): open, the address fault above; the host names the zero addresses it hands Metal.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): resolved, 2026-11-10. Three rows of `agl_resource.Nin_Ounce_NVN2.debug.sarc.zs` were no shaders (`cs_other` `68bbe98b3bfd9876` in `agl_common`, `ps_other` `18be578dfdaaffa0` in `agl_technique`, `vs_other` `7a4936fccf82094e` in `agl_technique_pfx`), and every NSP build stopped at the table check after 04df08d4 ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). The tables were split again from the update: those rows and one fact went, the later rows of each package moved down one index, and nothing else changed.
+- The v65536 shader split stopped at the table check once PR #2943 began rejecting BAHS descriptors outside validated record entry slots. A fresh split drops `22fff9012db5acaa` from `agl_common.sharcb` and `16d1e80284e796bd` from `agl_technique_pfx.sharcb`, renumbers the following `vs_other.bin` rows, and reproduces the facts and both pair tables byte for byte. The reporter built the Mac app from the refreshed map and played for about 28 minutes without missing shaders. [Issue #3089](https://github.com/seedds/nxnative/issues/3089)
 - [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
 - [A command memory grant over a list whose tail is lent](../../../docs/reference/nvn-objects.md#a-command-memory-grant-over-a-list-whose-tail-is-lent): the game grants more command memory than it writes; this host lends Raiders no command memory, so the bug never showed here.
 - [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.

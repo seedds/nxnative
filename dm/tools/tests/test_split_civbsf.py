@@ -16,6 +16,7 @@ ss = fz.ss
 def library(stages):
     """Indexed single stages; the first pointer is unrelated metadata, the second a descriptor. Unaligned data includes control trailing bytes and nonzero payload flags."""
     data = bytearray(0x90 + len(stages) * 0x50); data[:8] = ss.CIVBSF
+    struct.pack_into('<I', data, 8, 0x1218)
     struct.pack_into('<Q', data, 0x20, 0x90)
     struct.pack_into('<I', data, 0x68, len(stages))
     for i, (ctl, code) in enumerate(stages):
@@ -26,6 +27,26 @@ def library(stages):
         struct.pack_into('<QQ', data, entry, 0xffffffffffffffff, descriptor)
         struct.pack_into('<QQ', data, descriptor, offset, len(payload))
         data += payload
+    struct.pack_into('<I', data, 0xc, len(data))
+    return bytes(data)
+
+
+def nvbc_library(stages):
+    """Revision 0x1118: four platform descriptors, NVBC wrapping GLSLC and reflection. Saved pointers are not file offsets."""
+    data = bytearray(0x90 + len(stages) * 0x48); data[:8] = ss.CIVBSF
+    struct.pack_into('<I', data, 8, 0x1118)
+    struct.pack_into('<Q', data, 0x20, 0x90)
+    struct.pack_into('<I', data, 0x68, len(stages))
+    for i, stage in enumerate(stages):
+        descriptor = len(data); data += bytes(0x40)
+        struct.pack_into('<QQ', data, 0x90 + i * 0x48, 0xffffffffffffffff, descriptor)
+        # A different platform and the reflection both hold valid GLSLC bytes: neither is an NVN program to extract.
+        other = fz.glslc([fz.PS]); offset = len(data); data += other
+        for platform in range(3):
+            struct.pack_into('<QII', data, descriptor + 16 * platform, offset, len(other) if platform == 1 else 0, platform)
+        output = fz.glslc([stage]); offset = len(data)
+        data += b'NVBC\0\0\0\0' + struct.pack('<4Q', len(output), len(other), 0xffffffffffffffff, 0x123456789abcdef0) + output + other
+        struct.pack_into('<QII', data, descriptor + 0x30, offset, len(data) - offset, 3)
     struct.pack_into('<I', data, 0xc, len(data))
     return bytes(data)
 
@@ -61,12 +82,39 @@ class CivbsfShaders(unittest.TestCase):
         pairs, cover = ss.separable_pairs(ss.uniq_keys(found))
         self.assertEqual((pairs, cover), ({(ss.skey(*fz.VS), ss.skey(*pixel))}, [ss.skey(*pixel)]))
 
+    def test_nvbc_platform_descriptors_preserve_only_nvn_programs(self):
+        control = bytearray(fz.VS[0]); struct.pack_into('<3I', control, 0x748, 8, 1, 1)
+        stages = [fz.VS, fz.PS, (bytes(control), ss.CS_MAGIC + fz.VS[1][4:])]
+        data = nvbc_library(stages)
+        found = ss.civbsf_shaders(data, '/fixture')
+        self.assertEqual([s for _, s, _, _ in found], ['vs', 'ps', 'cs'])
+        self.assertEqual([ss.skey(c, k) for _, _, c, k in found], [ss.skey(c, k) for c, k in stages])
+        (rel, keys, pairs, extra), log = self.scan(data)
+        self.assertEqual((rel, pairs, extra, log), ('opaque.bin', set(), {}, ''))
+        self.assertEqual(set(keys), {ss.skey(c, k) for c, k in stages})
+
+    def test_nvbc_descriptors_and_payload_are_bounded(self):
+        data = nvbc_library([fz.VS]); descriptor, = struct.unpack_from('<Q', data, 0x98)
+        offset, = struct.unpack_from('<Q', data, descriptor + 0x30)
+        for at, fmt, value, reason in ((0x98, '<Q', len(data) - 8, 'outside'),
+                                      (descriptor + 0x3c, '<I', 2, 'platform descriptor'),
+                                      (descriptor + 0x10, '<Q', len(data), 'outside'),
+                                      (descriptor + 0x38, '<I', 8, 'outside'),
+                                      (offset, '<I', 0, 'NVBC tag'),
+                                      (offset + 8, '<Q', 0xffffffffffffffff, 'lengths'),
+                                      (offset + 0x28, '<I', 0, 'GLSLC output'),
+                                      (offset + 0x28 + 0x44, '<I', 0, 'GLSLC output')):
+            changed = bytearray(data); struct.pack_into(fmt, changed, at, value)
+            with self.subTest(at=at, reason=reason): self.rejected(changed, reason)
+
     def test_nested_archive_uses_the_same_reader(self):
         found = []; ss.scan_blob(fz.sarc([(b'opaque.bin', library([fz.VS]))]), '/pack', found)
         self.assertEqual([ss.skey(c, k) for _, _, c, k in found], [ss.skey(*fz.VS)])
 
     def test_header_and_table_are_bounded(self):
         data = library([fz.VS])
+        changed = bytearray(data); struct.pack_into('<I', changed, 8, 0x1318)
+        self.rejected(changed, 'unknown revision')
         self.rejected(data[:0x80], 'outside')
         self.rejected(data[:-1], 'file size')
         for offset, fmt, value in ((0x20, '<Q', 0), (0x20, '<Q', len(data)), (0x68, '<I', 0xffffffff)):

@@ -13,12 +13,13 @@ HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "telemetry report save; nothing is 
 // own default context has: GetCompletionEvent makes a signaled event (sdk+0x5a9298), GetResult answers 0 and the destructor does nothing, so only this call is taken over. Naked because x8 is the
 // hidden result pointer, 8 bytes on the caller's stack, which no C return type can name
 __attribute__((naked)) static void h_prepo_Send(void) { __asm__("str xzr, [x8]\n    ret"); }
-__attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_h_prepo_Send = {"_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE", (void *)h_prepo_Send, "telemetry report send; nothing is sent, a default context completes at once with success"};
+DM_REGISTER("swforce", hle_force_ent, hle_force_h_prepo_Send, {"_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE", (void *)h_prepo_Send, "telemetry report send; nothing is sent, a default context completes at once with success"});
 HLE_FORCE("_ZN2nn5prepo10InitializeEv", "telemetry init: the original connects to the prepo service (through sm), the host has no service process; no-op (Engage calls it explicitly)", Result, h_prepo_Init, void) { return RES_OK; }
 // Add the session ID / connection status to a report: on hardware these first connect to the prepo service for the session (Super Mario 3D World + Bowser's Fury calls them entering the save select); the host adds nothing and reports success
 HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "telemetry session ID: no service connection, nothing added, reports success", Result, h_prepo_AddSess, void *rep, const char *key) { (void)rep; (void)key; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "telemetry internet connection status: no service connection, nothing added, reports success", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "telemetry immediate upload; nothing is sent, reports success", Result, h_prepo_Tx, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn5prepo21GetTransmissionStatusEPNS0_18TransmissionStatusE", "telemetry upload status: idle (nothing is queued)", Result, h_prepo_TxStatus, uint32_t *st) { if (st) *st = 0; return RES_OK; }
 
 // ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
 HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless (cut): initialization fails", Result, h_ldn_Init, void) { return RES_FAIL; }
@@ -142,10 +143,20 @@ HLE_FORCE("_ZN2nn4nifm18GetCurrentIpConfigEPNS0_10Ipv4ConfigEPiPNS0_10Ipv6Config
           void *v4, int *n4, void *v6, int *n6, int c4, int c6) { (void)v4; (void)v6; (void)c4; (void)c6; if (n4) *n4 = 0; if (n6) *n6 = 0; return RES_FAIL; }
 // EnvironmentIdentifier = char[8]: retail environment "lp1"
 HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "server environment name: retail lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
+// nsd::GetApplicationServerEnvironmentType returns oe::ServerEnvironmentType (0 dd1, 1 lp1, 2 sd1, 3 sp1, 4 dp1: Hogwarts Legacy's table at main+0x42e6c50) and asks nsd:a / nsd:u for it;
+// the host serves neither, so the SDK aborts on the failed request (Result 0xe8d). oe::GetServerEnvironmentType is a branch through the sdk's PLT to this function in every sdk module on hand
+// (18, Switch 1 and Switch 2 titles), so this one takeover answers both
+HLE_FORCE("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv", "server environment type: retail lp1 (1), as GetEnvironmentIdentifier; nsd is not served", int, h_nsd_AppSrvEnv, void) { return 1; }
 
 // ---------- friends: newer SDK overloads ----------
 HLE_FORCE("_ZN2nn7friends12SetAllocatorEPFPvmEPFvS1_mE", "friends library allocator; no session is created, ignored", void, h_fr_SetAlloc, void *a, void *f) { (void)a; (void)f; }
 HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", "friend list is empty (cut)", Result, h_fr_List2,
+          int *count, void *out, const void *uid, int off, int n, const void *filt) { (void)out; (void)uid; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
+// Super Kirby Clash (SDK 7.4) requests account IDs rather than Friend objects. These
+// overloads need the same offline cut: no service connection, no entries, and failure.
+HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdEiiRKNS0_12FriendFilterE", "friend ID list is empty (cut)", Result, h_fr_IdList,
+          int *count, void *out, int off, int n, const void *filt) { (void)out; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE", "friend ID list is empty (cut)", Result, h_fr_IdList2,
           int *count, void *out, const void *uid, int off, int n, const void *filt) { (void)out; (void)uid; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends27CheckFriendListAvailabilityEPbRKNS_7account3UidE", "friend list unavailable (cut)", Result, h_fr_ListAvail, uint8_t *out, const void *uid) { (void)uid; *out = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", "friend list (cut): the request fails at once", Result, h_fr_ListEnsure, void *ctx, const void *uid) { (void)ctx; (void)uid; return RES_FAIL; }
@@ -166,11 +177,22 @@ HLE_FORCE("_ZN2nn3ngc46MaskProfanityWordsInTextForPlatformRegionChinaEPc", "Chin
 HLE_FORCE("_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", "error display applet; the host only logs it", void, h_err_ShowCode, uint64_t code) { DM_APPLET("error"); LOG("game asks to show an error: %04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
 HLE_FORCE("_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE", "error display applet; the host only logs it", void, h_err_ShowVar, const void *v) { DM_APPLET("error"); (void)v; LOG("game asks to show an error (ErrorResultVariant)"); }
 HLE_FORCE("_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", "add-on content version mismatch error applet; the host only logs it", void, h_err_AocVer, void) { DM_APPLET("error"); LOG("game asks to show an error: add-on content version mismatch"); }
+// A Switch 2 Edition's program asks it when its upgrade add-on is older than it needs: Super Mario Bros. Wonder's Switch 2 program 1.2.1 reads aocup:/System/AocUpgradeVersion.txt and stops
+// below 3 (main+0x132b9b4); the console then asks the player to update the add-on. Unhooked, the SDK's applet call crashed on a null handle (sdk StartLibraryAppletImmediately)
+HLE_FORCE("_ZN2nn3err50ShowUnacceptableAddOnContentForUpgradeVersionErrorEv", "upgrade add-on too old error applet; the host only logs it", void, h_err_AocUpgVer, void) {
+    DM_APPLET("error"); LOG("[RED] game asks to show an error: its upgrade add-on content is older than this program needs (pack the add-on of the same version as the game)");
+}
 HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "game version mismatch error applet; the host only logs it", void, h_err_AppVer, void) { DM_APPLET("error"); LOG("game asks to show an error: game version mismatch"); }
 // Pokémon Legends: Z-A (SDK 19): the application's own error screen (an error code number and two messages in the argument) goes through the error applet as well
 HLE_FORCE("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "application error applet; the host only logs it", void, h_err_ShowApp, const void *arg) { DM_APPLET("error"); (void)arg; LOG("game asks to show an application error (ApplicationErrorArg)"); }
 // Pokémon Sword (SDK 7.3.2): the error applet's network service form, after a failed online call
 HLE_FORCE("_ZN2nn3err23ShowNetworkServiceErrorENS0_9ErrorCodeE", "network service error applet; the host only logs it", void, h_err_ShowNet, uint64_t code) { DM_APPLET("error"); LOG("game asks to show a network service error: %04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
+
+// SDK 7.4 also takes a Result here, not the separate ErrorCode pair. Keep the
+// host's log-only network error behavior rather than entering the absent applet service.
+HLE_FORCE("_ZN2nn3err23ShowNetworkServiceErrorENS_6ResultE", "network service error applet (Result); the host only logs it", void, h_err_ShowNetRes, Result r) {
+    DM_APPLET("error"); LOG("err::ShowNetworkServiceError Result=%#x (module %u, description %u)", r, r & 0x1ff, (r >> 9) & 0x1fff);
+}
 
 // ---------- pdm: the system's play log ----------
 // Pokémon Sword asks at boot how often this user has launched two other games (main+0xc88074, one ID each call, 0x18 bytes {application ID, play time, launch count} per entry; the result is
@@ -179,6 +201,13 @@ HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStat
           Result, h_pdm_QueryStats, uint64_t *out, const void *uid, const uint64_t *ids, int n) {
     (void)uid; for (int i = 0; out && ids && i < n; i++) { out[3 * i] = ids[i]; out[3 * i + 1] = 0; out[3 * i + 2] = 0; }
     return RES_OK;
+}
+// The overload without a Uid returns the number of records written. In SDK 8 it gets that count through the applet proxy, which is null on the host.
+// With no system play log there are zero records (Persona 5 Strikers checks the count at main+0x10e78c before reading the array).
+HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStatisticsEPKNS_13ApplicationIdEi", "play statistics: empty system play log",
+          int, h_pdm_QueryStatsAll, void *out, const uint64_t *ids, int n) {
+    (void)out; (void)ids; (void)n;
+    return 0;
 }
 
 // ---------- web: web page applet (online lobby). Unavailable ----------

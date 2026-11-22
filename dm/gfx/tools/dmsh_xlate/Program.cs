@@ -36,15 +36,17 @@ static class SwshXlate
     {
         readonly byte[] _code; readonly JsonObject _job; int _binding = 1; public readonly List<string> Notes = new();
         readonly byte[] _c1;
-        public Accessor(byte[] code, JsonObject job, Dictionary<int, SamplerType> imageTypes = null, Dictionary<int, SamplerType> textureTypes = null) { if (job["geometry_topology"] != null) _binding = 40; _code = code; _job = job; _c1 = job["c1"] is JsonNode h ? Convert.FromHexString((string)h) : Array.Empty<byte>(); _imageTypes = imageTypes; _textureTypes = textureTypes; }
+        public Accessor(byte[] code, JsonObject job, Dictionary<int, SamplerType> imageTypes = null, Dictionary<int, SamplerType> textureTypes = null) { if (job["rt"] != null) _binding = RayTracingProgram.ReservedBindings; else if (job["geometry_topology"] != null) _binding = 40; _code = code; _job = job; _c1 = job["c1"] is JsonNode h ? Convert.FromHexString((string)h) : Array.Empty<byte>(); _imageTypes = imageTypes; _textureTypes = textureTypes; }
+        public bool QueryRawGlobalMemory() => _job["rt"] != null;
+        public bool QueryHostSupportsImageLoadFormatted() => _job["rt"] == null;
         // A texture query on an image handle (TXQ on c2 0x120 + 8 r: Unreal's GetDimensions on the RWTexture3D a compute shader writes) asks the type of that handle, which a table built
         // without the game's PC shaders does not answer, and the 2D default took a 3D image's depth from its width. The shader's own surface instructions give the image's type: the
         // first translation records that a query went unanswered (ImageQueryGuessed), and Main translates again with the types of the images it found, by c2 handle (ImageTypesOf)
         readonly Dictionary<int, SamplerType> _imageTypes; public bool ImageQueryGuessed;
-        public static Dictionary<int, SamplerType> ImageTypesOf(ShaderProgram p)
+        public Dictionary<int, SamplerType> ImageTypesOf(ShaderProgram p)
         {
             var types = new Dictionary<int, SamplerType>();
-            foreach (var im in p.Info.Images) if (im.CbufSlot == 2 || im.CbufSlot < 0) types[im.HandleIndex] = im.Type & (SamplerType.Mask | SamplerType.Array);
+            foreach (var im in p.Info.Images) if (im.CbufSlot == (_job["rt"] != null ? 3 : 2) || im.CbufSlot < 0) types[im.HandleIndex] = im.Type & (SamplerType.Mask | SamplerType.Array);
             return types;
         }
         // The same for a texture (Princess Peach: Showtime!'s size query on a volume it also samples, 1,463 of its shaders). A handle ORs a texture word and a sampler word, and the query's has
@@ -94,13 +96,14 @@ static class SwshXlate
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;
         // A handle's texture or image slot, numbered as dmsh_build.py decode_tex numbers the reflection's (so an answer table row names the slot the reflection shows): the handle ORs two
         // c[2] words in no fixed order, so both are tried (only the first for a combined handle or a constant sampler); -1 when neither is in the table
-        static int Slot(int handle, int cbufSlot, bool image)
+        int Slot(int handle, int cbufSlot, bool image)
         {
-            if (cbufSlot >= 0 && (cbufSlot & 0xffff) != 2) return -1;
+            bool rt = _job["rt"] != null;
+            if (cbufSlot >= 0 && (cbufSlot & 0xffff) != (rt ? 3 : 2)) return -1;
             (int w0, int w1, TextureHandleType ty) = TextureHandle.UnpackOffsets(handle);
             foreach (int w in ty == TextureHandleType.CombinedSampler || ty == TextureHandleType.SeparateConstantSamplerHandle ? new[] { w0 } : new[] { w0, w1 })
             {
-                int b = w * 4;
+                int b = w * 4 - (rt ? (int)_job["rt"]["descriptor_offset"] + 0x430 : 0);
                 if (b % 8 != 0) continue;
                 if (image && b >= ImgBase && b < ImgBase + 8 * ImgSlots) return (b - ImgBase) / 8;
                 if (!image && b >= TexBase && b < SepTexBase) return (b - TexBase) / 8;
@@ -140,6 +143,8 @@ static class SwshXlate
         {
             int slot = Slot(handle, cbufSlot, true);
             string f = _job["img"] is JsonObject t && slot >= 0 && t[slot.ToString()] is JsonObject o ? (string)o["fmt"] : null;
+            if (_job["rt"] != null && (f == null || !Enum.TryParse(f, true, out TextureFormat _)))
+                throw new InvalidOperationException($"RT image handle {handle:X} in bank {cbufSlot} has no verified format answer");
             if (f == null) { Notes.Add($"image handle {handle:X} slot {slot} has no format in the answer table, using R8G8B8A8Unorm"); return TextureFormat.R8G8B8A8Unorm; }
             return Enum.TryParse(f, true, out TextureFormat tf) ? tf : TextureFormat.R8G8B8A8Unorm;
         }
@@ -163,6 +168,8 @@ static class SwshXlate
                 false, false, false, false /* depth not rewritten: dmsh_build.py adds the GL entry point (see the file header) */, false, 1f, AlphaTestOp.Always, 0f, attr, false, fout, false,
                 false /* no Y flip */, true /* origin upper-left */, false);
         }
+        // Metal gather offsets have a signed four-bit range, smaller than the offsets encoded by TLD4.PTP.
+        public bool QueryHostSupportsNonConstantTextureGatherOffsets() => false;
         public bool QueryHostSupportsTextureShadowLod() => true;
         public bool QueryHostSupportsDepthClipControl() => false;   // Metal has no -1..1 clip control; the depth convention is not left to the translator, the rewrite is added per entry point in the MSL (see the file header)
         // Job reduced = true: relaxed precision - the translator marks NoContraction only on operations that must be exact (the default marks all: keeps the bit-exact results of Maxwell's separate rounding, at the cost of many optimization-disabled spvFMul etc. in the MSL)
@@ -184,6 +191,16 @@ static class SwshXlate
         return false;
     }
 
+    static RayTracingProgram ReadRayTracingProgram(JsonObject spec)
+    {
+        if (spec == null) return null;
+        var entries = spec["entries"].AsArray().Select(node => new RayTracingEntry(
+            (ulong)node["address"], (int)node["id"], (int)node["owner"], (RayTracingStage)(int)node["kind"], (int)node["frame"])).ToArray();
+        var modules = spec["modules"].AsArray().Select(node => new RayTracingModuleRange((ulong)node["address"], (int)node["length"])).ToArray();
+        var moves = spec["moves"].AsArray().Select(node => new RayTracingLogicalMove((ulong)node["address"], (ulong)node["template"], (int)node["id"])).ToArray();
+        return new RayTracingProgram(entries, modules, moves, (int)spec["core_offset"], (int)spec["descriptor_offset"]);
+    }
+
     static int Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--source-sha")   // first 16 digits of the sha256 of the embedded Program.cs + csproj (same convention as dmsh_chain.py)
@@ -203,23 +220,31 @@ static class SwshXlate
                 byte[] code = File.ReadAllBytes((string)job["code"]);
                 var acc = new Accessor(code, job);
                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
-                var flags = TranslationFlags.MetalImageAtomics | TranslationFlags.MetalUniformBounds | TranslationFlags.MetalBufferImageBias | TranslationFlags.MetalStorageBounds | (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0) | ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
-                var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                var flags = TranslationFlags.MetalImageAtomics |
+                    (job["rt"] != null ? 0 : TranslationFlags.MetalUniformBounds | TranslationFlags.MetalBufferImageBias | TranslationFlags.MetalStorageBounds) |
+                    (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) |
+                    ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0) |
+                    ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
+                RayTracingProgram rt = ReadRayTracingProgram(job["rt"] as JsonObject);
+                TranslatorContext Context(Accessor accessor) => rt == null
+                    ? Translator.CreateContext(0, accessor, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags))
+                    : Translator.CreateRayTracingContext(accessor, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags), rt);
+                var ctx = Context(acc);
                 bool geometry = job["geometry_topology"] != null;
                 ShaderProgram p = ctx.Translate(geometry);
                 Dictionary<int, SamplerType> imageTypes = null, textureTypes = null;
-                if (acc.ImageQueryGuessed && (imageTypes = Accessor.ImageTypesOf(p)).Count == 0) imageTypes = null;   // a query on an image handle went unanswered: again with the images' types (see Accessor)
+                if (acc.ImageQueryGuessed && (imageTypes = acc.ImageTypesOf(p)).Count == 0) imageTypes = null;   // a query on an image handle went unanswered: again with the images' types (see Accessor)
                 if ((textureTypes = acc.TextureTypesOf(p)).Count == 0) textureTypes = null;   // and on a texture word: again with the types its other instructions gave it
                 if (imageTypes != null || textureTypes != null)
                 {
                     acc = new Accessor(code, job, imageTypes, textureTypes);
-                    ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                    ctx = Context(acc);
                     p = ctx.Translate(geometry);
                 }
                 if (UsesFloat64(p.BinaryCode))   // Tears of the Kingdom 1.4.3: 30 shaders used double and failed in the Metal compiler
                 {
                     job["softfloat64"] = true; acc = new Accessor(code, job, imageTypes, textureTypes);
-                    ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                    ctx = Context(acc);
                     p = ctx.Translate(geometry); acc.Notes.Add("FP64 lowered to FP32 (DoubleToFloat)");
                 }
                 if (geometry)
@@ -236,13 +261,32 @@ static class SwshXlate
                     ["geometry_stride"] = geometry ? ctx.GetResourceReservations().OutputSizePerInvocation : 0,
                     ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap,
                 };
+                if (rt != null) res["rt"] = new JsonObject
+                {
+                    ["version"] = 1, ["scene_binding"] = RayTracingProgram.SceneBinding,
+                    ["parameters_binding"] = RayTracingProgram.ParametersBinding, ["errors_binding"] = RayTracingProgram.ErrorsBinding,
+                    ["instance_sbt_binding"] = RayTracingProgram.InstanceSbtBinding,
+                    ["parameter_words"] = (RayTracingProgram.MembershipBase + (rt.Entries.Max(e => e.LogicalId) / 32 + 1) + 3) & ~3,
+                    ["image_class_base"] = RayTracingProgram.ImageClassBase, ["membership_base"] = RayTracingProgram.MembershipBase,
+                    ["local_bytes"] = rt.LocalMemoryBytes, ["local_bias"] = rt.LocalMemoryBias,
+                    ["core_offset"] = rt.CoreOffset, ["descriptor_offset"] = rt.DescriptorOffset,
+                    ["entries"] = job["rt"]["entries"].DeepClone(),
+                };
+                if (rt != null)
+                {
+                    var slots = new JsonObject();
+                    foreach (var pair in ctx.GetRayTracingAccelerationSlots())
+                        slots[pair.Key.ToString()] = new JsonArray(pair.Value.Select(slot => (JsonNode)JsonValue.Create(slot)).ToArray());
+                    res["rt"]["as_slots_by_module"] = slots;
+                }
                 foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["fixed"] = b.FixedSize });   // fixed: a game uniform slot's bytes read at fixed offsets (TranslationFlags.MetalUniformBounds), which the host makes readable
                 foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });   // flags: 1 written, 2 bounded by the length table (TranslationFlags.MetalStorageBounds; dmsh_reflect.py gives the binding its "sbx")
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
                     foreach (var t in list)
                     {
                         var o = new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags };
-                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
+                        if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;
+                        if (t.BufferBias >= 0 && (t.Type & SamplerType.Mask) == SamplerType.Texture2D) o["row_bias"] = true;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
                         res[name].AsArray().Add((JsonNode)o);
                     }
                 if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add((JsonNode)JsonValue.Create(h)); res["fetch1d"] = f1; }

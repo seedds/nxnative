@@ -92,6 +92,13 @@ To enroll a cut for any game's own module:
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_exefs`: IPS, IPS32 and pchtxt parsing (runs, offset shifts, endianness, `@enabled`/`@disabled` groups, build ID names).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game): Fast Travel's 17,183 pchtxt records and Bunny Hood Speed Boost's IPS32 file touch no word the rewriter changed; Fast Travel and L3 Sprint Toggle put code in the same padding between functions.
 
+### A mod's code that calls an SDK function it does not import
+
+- **Symptom:** a game with a code patch on aborts when the mod's feature runs: `[RED] sf: the game connects to service fsp-srv itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` with `sdk+…` frames under the mod's code.
+- **Cause:** the host takes SDK functions over by binding the imports that name them (`HLE_FORCE`, `loader.c`). A mod's code can find an SDK function at run time and call its address without any import, so the call runs the SDK's own definition. For `nn::fs` functions that definition opens `fsp-srv`, which the host never serves, and aborts. Ocarina of Time's Fast Travel mod calls `nn::fs::MountSdCard` (`sdk+0x10F0C0` on its build) this way, for its pictures folder; `main` does not import it. The host also had no SD card mount.
+- **Fix:** `hle_fs.c` mounts the SD card (`MountSdCard`, `MountSdCardForDebug`) on `$DM_SDCARD` (default `$DM_ROOT/sdmc`, the iOS app's `Documents/sdmc`), and `IsSdCardInserted` is true. When patches are applied, `hle_exefs.c` also replaces the first 16 bytes of each SDK definition the host takes over for `fsp-srv` (its reason starts `fsp-srv`) and that no import bound with a jump to the host's function (`ldr x16, #8; br x16`), written through the module's alias like a patch: those definitions could only abort here. A definition the rewriter changed there (a `[RED]` line) or a mod patched itself is left alone. Only with code patches on, on the Mac. The log line is `exefs: N SDK file system functions the game does not import now run in the host`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game): Fast Travel's menu (L3 + R3) aborted on opening; it now opens and warps (Hyrule Field to Kokiri Forest), 38 definitions redirected.
+
 ## Thread registers
 
 ### System register accesses through x18

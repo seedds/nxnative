@@ -2,6 +2,7 @@
 //   rom   → $DM_ROMFS (default $DM_ROOT/romfs, read-only; the game parses the storage blocks in it itself)
 //   save  → $DM_SAVE (must be set, pointing to this run's copy of the standard save save_ref; if unset, report a failure and abort)
 //   temp  → $DM_TEMP (default $DM_ROOT/run/platform/temp)
+//   sdmc (any name MountSdCard is given) → $DM_SDCARD (default $DM_ROOT/sdmc; a mod's own code reads its files from the SD card)
 // Paths look like "rom:/data/x". FileHandle / DirectoryHandle are 8 bytes passed by value, here they store the host fd (FH_OUT) / DIR*.
 // Struct layout follows the public Horizon ABI: DirectoryEntry = {char name[0x301], pad[3], s8 type, pad[3], s64 size} (0x310 bytes).
 #include "hle.h"
@@ -755,6 +756,15 @@ HLE_FORCE("_ZN2nn2fs26GetUtf16EntryNameLengthMaxEPbPmPKc", "fsp-srv; host mounts
 HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv; temporary storage → host directory", Result, h_fs_MountTemp, const char *name) {
     char b[1024]; return mount(name, envdir("DM_TEMP", "run/platform/temp", b, sizeof b), 0);
 }
+// The SD card (a mod's own code that reads its files from the card, as emulators give it one: Ocarina of Time's Fast Travel mod reads fast-travel/pictures/; a retail
+// game does not mount it): the host folder $DM_SDCARD (default $DM_ROOT/sdmc, made at the first mount). Not served, the SDK opens fsp-srv itself and aborts (0xE15)
+HLE_FORCE("_ZN2nn2fs11MountSdCardEPKc", "fsp-srv; SD card → host directory", Result, h_fs_MountSdCard, const char *name) {
+    char b[1024]; return mount(name, envdir("DM_SDCARD", "sdmc", b, sizeof b), 0);
+}
+HLE_FORCE("_ZN2nn2fs19MountSdCardForDebugEPKc", "fsp-srv; SD card → host directory", Result, h_fs_MountSdCardDebug, const char *name) {
+    char b[1024]; return mount(name, envdir("DM_SDCARD", "sdmc", b, sizeof b), 0);
+}
+HLE_FORCE("_ZN2nn2fs16IsSdCardInsertedEv", "fsp-srv; the SD card is the host directory, always there", int, h_fs_IsSdCardInserted, void) { return 1; }   // bool in w0
 // Cache storage (Tears of the Kingdom; its first list call opened fsp-srv and aborted in sm::Initialize): storage <index> is the host folder <temporary storage>_cache<index>,
 // created when it is created or mounted; creating an existing one succeeds
 static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }

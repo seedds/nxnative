@@ -318,6 +318,36 @@ out:
     free(names);
 }
 
+// A mod's code can reach an SDK function without importing it: Ocarina of Time's Fast Travel mod finds nn::fs::MountSdCard in the sdk module at run time and calls
+// its address, which main never imports. The host takes such functions over by binding the imports that name them (loader.c, HLE_FORCE), so that call ran the SDK's
+// own definition, which opened fsp-srv and aborted (Result 0xE15). When patches were applied, each take-over no import bound whose SDK definition goes through
+// fsp-srv (its reason starts "fsp-srv"; the host never serves that service, so the definition could only abort) gets its definition's first 16 bytes replaced with a
+// jump to the host's function (ldr x16, #8; br x16; the address), written through the alias as a patch. A definition the rewriter changed there, or that a mod
+// patched itself, is left as it is
+typedef struct { int n; } redirect_t;
+static void redirect_cb(void *ctx, const char *name, void *fn, const char *why) {
+    if (strncmp(why, "fsp-srv", 7)) return;
+    redirect_t *r = ctx;
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (m->nro) continue;
+        uint8_t *def = module_sym(m, name);
+        if (!def || def < m->base || (uint64_t)(def - m->base) + 16 > m->text_end) continue;
+        uint64_t off = (uint64_t)(def - m->base); uint32_t s, t;
+        if (!module_ready(i)) return;
+        changed_read(m, &g_em[i]);
+        if (g_em[i].state != 1 || changed_hit(&g_em[i], off, 16, &s, &t)) { LOG("[RED] exefs: %s+0x%llX %s: the rewriter changed its start, so a mod's call to it runs the SDK's own definition", m->name, (unsigned long long)off, name); continue; }
+        int mine = 0; for (int k = 0; k < 16; k++) mine |= g_claimed[i][off + k];
+        if (mine) continue;
+        uintptr_t to = (uintptr_t)fn;
+        uint32_t w[4] = { 0x58000050u, 0xD61F0200u, (uint32_t)to, (uint32_t)(to >> 32) };   // ldr x16, #8; br x16; .quad fn
+        dm_guest_write_prepare(m->base + off, 16);
+        memcpy(g_em[i].alias + off, w, 16);
+        sys_icache_invalidate(m->base + off, 16);
+        r->n++;
+    }
+}
+
 // After load_modules (the images are in place and relocated), before the game's first instruction (main.c)
 void dm_exefs_init(void) {
     const char *list = getenv("DM_EXEFS_PATCHES");
@@ -328,6 +358,11 @@ void dm_exefs_init(void) {
     for (char *d = strtok_r(dirs, ":", &save); d; d = strtok_r(NULL, ":", &save)) if (*d) apply_dir(d);
     free(dirs);
     LOG("exefs: %d patch file%s applied", g_napplied, g_napplied == 1 ? "" : "s");
+    if (g_napplied) {
+        void dm_force_unbound(void (*cb)(void *, const char *, void *, const char *), void *ctx);
+        redirect_t r = {0}; dm_force_unbound(redirect_cb, &r);
+        if (r.n) LOG("exefs: %d SDK file system function%s the game does not import now run%s in the host, for the mods' own calls", r.n, r.n == 1 ? "" : "s", r.n == 1 ? "s" : "");
+    }
     for (int i = 0; i < g_nmod; i++) { free(g_em[i].changed); free(g_claimed[i]); }   // the aliases stay mapped: nothing reads them again, and unmapping is not worth a code path
     free(g_em); free(g_claimed); g_em = NULL; g_claimed = NULL;
 }

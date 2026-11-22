@@ -182,6 +182,21 @@ int main(void) {
         const int64_t def[2] = {50 << 20, 1 << 20}; memcpy(nacp + 0x3170, def, sizeof def);
         f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_ROMFS", rom, 1);
         CHECK(h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 50 << 20 && journal == 1 << 20, "cache storage size: no record: the control data's default");
+        {   // one mount name for the cache storages in turn, unmounted in between (Taiko no Tatsujin: Rhythm Festival mounts index 1, unmounts, mounts index 2, all as "MyIndexCache")
+            char got[16], f1[1300], f2[1300]; int before = g_nmnt;
+            snprintf(c, sizeof c, "%s_cache11", temp); mkdir(c, 0755); snprintf(f1, sizeof f1, "%s/song", c); put(f1, "one");
+            snprintf(c, sizeof c, "%s_cache12", temp); mkdir(c, 0755); snprintf(f2, sizeof f2, "%s/song", c); put(f2, "two");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: the first index under a name");
+            CHECK(h_fs_MountCache("MyCache", 12) != RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: another index under a name still in use is refused, as on Horizon");
+            h_fs_Unmount("MyCache"); CHECK(!h_fs_IsMounted("MyCache"), "cache storage mount: Unmount releases the name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: the next index under that name shows its own files (got %s)", got);
+            h_fs_Unmount("MyCache");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one") && g_nmnt == before + 2,
+                  "cache storage mount: the first index again takes its entry back (%d entries for two storages)", g_nmnt - before);
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK, "cache storage mount: the same index again under a name in use is harmless");
+            h_fs_Unmount("MyCache"); h_fs_Unmount("MyCache");   // an unmount of a name not mounted is a no-op
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: and the second");
+        }
         unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
     }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];

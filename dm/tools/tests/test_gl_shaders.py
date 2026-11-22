@@ -112,9 +112,25 @@ class Sources(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'shaders').mkdir()
             (Path(d) / 'shaders/default_ps.glsl').write_bytes(b'#version 320 es\nvoid main() {}\0junk')
+            (Path(d) / 'shaders/helper.glsl').write_bytes(b'vec4 helper(vec4 c) { return c; }\n')   # snippet without main() is skipped
             (Path(d) / 'shaders/a.vert').write_bytes(b'#version 320 es\nvoid main() {}\n')
             got = sorted((w, st, s) for s, st, w in gl_shaders.sources([d]))
             self.assertEqual(got, [('/shaders/a.vert', 'vert', b'#version 320 es\nvoid main() {}\n'), ('/shaders/default_ps.glsl', None, b'#version 320 es\nvoid main() {}')])
+
+    def test_glsl_snippets_without_main_do_not_suppress_capture(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'ExeFS').mkdir(); (root / 'RomFS/shaders').mkdir(parents=True)
+            (root / 'RomFS/shaders/common.glsl').write_bytes(b'vec4 shade(vec4 c) { return c; }\n')
+            embedded = b'\0#version 320 es\nvoid main() {}\0glShaderSource\0'
+            imports = [('eglCreateWindowSurface', False, 1)]
+            with mock.patch.object(pg, 'nso', return_value=(embedded, '', [0, 0, 0], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', return_value=imports):
+                got = pg.build_sources(root / 'ExeFS', str(root / 'RomFS'), ['main'])
+                self.assertEqual(got['graphics'][0], 'gl')
+                self.assertTrue(got['gl_capture'][0])
+                (root / 'RomFS/shaders/sprite.glsl').write_bytes(b'#version 120\nvoid main() { gl_FragColor = vec4(1, 0, 0, 1); }\n')
+                got2 = pg.build_sources(root / 'ExeFS', str(root / 'RomFS'), ['main'])
+                self.assertFalse(got2['gl_capture'][0])
 
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
@@ -251,6 +267,28 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
                 self.assertIn('[[user(dm_LegacyColor)]]', msl)
                 self.assertIn('[[user(dm_LegacyTexCoord0)]]', msl)
                 if stage == 'frag': self.assertIn('[[color(0)]]', msl)
+
+    def test_desktop_glsl_120_implicit_conversions_and_texture3d(self):
+        frag = (b'#version 120\nvarying vec3 uvw;\nuniform sampler3D lut;\n'
+                b'void main() { float k = 1; gl_FragColor = texture3D(lut, uvw) * k + vec4(0, 0, 0, 1); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(frag, 'frag', '3021' + 'f' * 12, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:lut=0:1:sampler3D', r[1])
+            self.assertIn('texture3d<float>', Path(r[0]).read_text())
+
+    def test_explicit_sampler_layout_bindings_preserve_units_and_default_others_to_zero(self):
+        frag = (b'#version 450 core\nlayout(binding = 0) uniform sampler2D u_y;\nlayout(binding = 1) uniform sampler2D u_uv;\n'
+                b'uniform layout(binding = 3) sampler2D u_lut;\nuniform sampler2D u_plain;\nout vec4 c;\n'
+                b'void main() { c = texture(u_y, vec2(0)) + texture(u_uv, vec2(0)) + texture(u_lut, vec2(0)) + texture(u_plain, vec2(0)); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(frag, 'frag', '3021' + 'b' * 12, tmp)
+            self.assertIsInstance(r, tuple, r)
+            samplers = {x.split('=')[0]: x.split('=')[1] for x in r[1] if x.startswith('t:')}
+            self.assertEqual(samplers['t:u_y'].count(':'), 2)       # binding 0 omitted (defaults to 0)
+            self.assertEqual(samplers['t:u_plain'].count(':'), 2)   # no explicit binding: defaults to 0, NOT glslang's --amb slot
+            self.assertTrue(samplers['t:u_uv'].endswith(':sampler2D:1'), samplers['t:u_uv'])
+            self.assertTrue(samplers['t:u_lut'].endswith(':sampler2D:3'), samplers['t:u_lut'])
 
 
 class MainStrings(unittest.TestCase):

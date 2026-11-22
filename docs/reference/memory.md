@@ -501,7 +501,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Symptom:** Objective-C temporaries can accumulate across a burst of background pipeline builds.
 - **Cause:** the private utility queues inherit Dispatch's autorelease policy, and the global queues supply no pool for an individual work item. Worker-created autoreleased objects can live past the build that used them.
 - **Fix:** give each pending render, pulling-base, amplified, tile-reading and geometry mesh build its own `@autoreleasepool`. The worker publishes results to their owning slots or caches before the pool drains.
-- **Check:** a synthetic burst on an M4 Pro MacBook Pro (macOS 27.2.1) peaked at 256 live temporaries across 256 jobs on a serial utility queue, and one with a per-job pool. All five trials gave the same result. The peak in a game has not been measured.
+- **Check:** a synthetic burst on an M4 Pro MacBook Pro (macOS 27.2.1) peaked at 256 live temporaries across 256 jobs on a serial utility queue, and one with a per-job pool. All five trials gave the same result. See the matched Mac load in [Ocarina of Time's memory notes](../../dm/games/0400486024DEC000/README.md#memory).
 - **Found on:** Esteban Viera identified the missing pools while auditing memory ownership during profiling of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) in [PR #2714](https://github.com/seedds/nxnative/pull/2714).
 
 ### Retired pool buffers pile up while a game submits nothing

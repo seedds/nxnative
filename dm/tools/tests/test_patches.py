@@ -68,6 +68,9 @@ class Registry(unittest.TestCase):
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 for off, ob, nb, why in cuts:
                     self.assertTrue(isinstance(off, int) and HEX.match(ob) and HEX.match(nb) and len(ob) == len(nb) and len(ob) % 8 == 0 and why, f'{p} {bid} {off:#x}')
+            for bid, offs in getattr(m, 'ALIAS_CUTS', {}).items():   # cuts of the build's own CUTS, each once (patch_nso.py ALIAS_CUTS)
+                own = {c[0] for c in getattr(m, 'CUTS', {}).get(bid, [])}
+                self.assertTrue(offs and len(offs) == len(set(offs)) and set(offs) <= own, f'{p} ALIAS_CUTS {bid}: not offsets of its CUTS')
             for bid, gates in getattr(m, 'OBS', {}).items():
                 for off, oid, word, why in gates:
                     self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
@@ -78,7 +81,7 @@ class Registry(unittest.TestCase):
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 self.assertEqual(len(names), len(set(names)))
                 for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_STUBS', 'BINDING')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'ALIAS_CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_STUBS', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
             # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
             self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')

@@ -468,6 +468,7 @@ DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) a
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path
 DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that long (default 15 with `DM_WATCH`), logs a red line, dumps the threads and exits
 DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
+DM_WIDE_ALIAS	switch	`=1` at build time: an iPhone build for the profile's `mem_alias_wide` alias region; the NSP script's rewrite leaves the profile's `ALIAS_CUTS` out, `game.py` makes that the host's alias region and `build_ipa.sh`'s default entitlements add extended virtual addressing, which the signing team's provisioning profile must carry
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
 DM_WINDOWLESS_ROLE	switch	`0` keeps the existing task role for a windowless Mac run. By default the host requests the [default application task role](reference/audio.md#underruns-in-a-run-without-a-window) to enable interactive QoS
 DM_WINDOW_TOP	diagnostic	`1` (Mac, with `DM_WINDOW`) orders the game window in front without activating it and keeps it above other apps' windows, so a covered window does not slow the run; `regress.py` sets it

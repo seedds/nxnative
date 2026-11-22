@@ -312,6 +312,19 @@ static void guest_file_init(void) {
 
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
+// The alias region this run gets: the Switch's 64 GB on the Mac (or the profile's, when larger), the profile's on an iPhone (mem_alias_wide in a DM_WIDE_ALIAS build, game.py),
+// DM_ALIAS_SIZE when it is set. The loader asks before any guest memory is reserved, to know whether a module's ALIAS_CUTS can be undone (loader.c undo_alias_cuts)
+size_t svc_alias_size(void) {
+    size_t pg = (size_t)getpagesize();
+#if TARGET_OS_IPHONE
+    size_t alias = DM_GAME_MEM_ALIAS;
+#else
+    size_t alias = DM_GAME_MEM_ALIAS > SWITCH_ALIAS ? DM_GAME_MEM_ALIAS : SWITCH_ALIAS;
+#endif
+    const char *as = getenv("DM_ALIAS_SIZE");
+    if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
+    return alias;
+}
 static void mem_init_once(void) {
     size_t pg = (size_t)getpagesize();
     if (RESERVE < 0x10000000 || DM_GAME_MEM_ALIAS > RESERVE - 0x10000000 ||
@@ -321,15 +334,11 @@ static void mem_init_once(void) {
     // The alias region is the Switch's 64 GB on the Mac (or the profile's, when larger): games lay their regions out for that much, and what the profile can give an iPhone (one
     // reservation of at most 6 GB) crashed Trails in the Sky 1st Chapter at launch and Just Dance within a minute. It is address space, not memory: the application pool bounds
     // what is mapped. DM_ALIAS_SIZE=<bytes> sets another size, the heap and stacks as they are; the profile's value reproduces an iPhone's address space on the Mac (the NSP script's heap check)
-#if TARGET_OS_IPHONE
-    size_t alias = DM_GAME_MEM_ALIAS;
-#else
-    size_t alias = DM_GAME_MEM_ALIAS > SWITCH_ALIAS ? DM_GAME_MEM_ALIAS : SWITCH_ALIAS;
-#endif
-    const char *as = getenv("DM_ALIAS_SIZE");
-    if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
+    size_t alias = svc_alias_size();
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    // An iPhone gives a reservation over about 6 GB only to an app with the extended virtual addressing entitlement, and only up to a limit of its own (60.9 GB but not
+    // 64.6 GB on one iPhone): a DM_WIDE_ALIAS build asks for the profile's mem_alias_wide (docs/reference/memory.md, Cuts that only fit an iPhone's alias region)
     if (g_as == MAP_FAILED) {
 #if TARGET_OS_IPHONE
         if (g_reserve > ((size_t)6 << 30))

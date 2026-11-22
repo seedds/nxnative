@@ -87,6 +87,10 @@ else:
 # (a game's own modules: its profile's builds). Every file is loaded, whatever the game, so a module gets the patches of its build wherever it comes from; a build ID claimed twice stops the rewrite.
 # A file may define:
 #   CUTS = {build ID: [(offset, original bytes, new bytes, reason)]}: before rewriting, the original bytes are asserted one by one and any mismatch aborts (listed in <name>.cuts.tsv)
+#   ALIAS_CUTS = {build ID: [offset, ...]}: those of the build's CUTS that exist only because an iPhone's alias region is small (the profile's mem_alias). A build with
+#     DM_WIDE_ALIAS=1 (an iPhone app with the extended virtual addressing entitlement, whose alias region is the profile's mem_alias_wide) leaves them out and says so
+#     (WIDE_ALIAS in <name>.fixups.tsv); any other build lists them there (ALIAS_CUT rows), and a host whose alias region holds mem_alias_wide puts the original bytes
+#     back when it loads the module (the Mac's, loader.c undo_alias_cuts)
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
@@ -119,7 +123,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_STUBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'ALIAS_CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_STUBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -186,6 +190,12 @@ if STUB_RULES and BUILD_ID not in PATCHES['STUBS']:
 # every other module keeps its layout
 if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FAR and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
     PATCH_OFF += 0x10000
+# The cuts that only fit a small alias region (ALIAS_CUTS above): a wide build leaves them out, any other one names them in the fixups header
+ALIAS_OFFS = set(PATCHES['ALIAS_CUTS'].get(BUILD_ID, ()))
+assert ALIAS_OFFS <= {c[0] for c in PATCHES['CUTS'].get(BUILD_ID, [])}, f'ALIAS_CUTS of build {BUILD_ID} name offsets that are not among its CUTS: {sorted(ALIAS_OFFS - {c[0] for c in PATCHES["CUTS"].get(BUILD_ID, [])})}'
+WIDE_ALIAS = os.environ.get('DM_WIDE_ALIAS', '') not in ('', '0')
+if WIDE_ALIAS: cuts = [c for c in cuts if c[0] not in ALIAS_OFFS]
+ALIAS_APPLIED = [c for c in cuts if c[0] in ALIAS_OFFS]
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -1923,6 +1933,8 @@ with open(P('fixups.tsv'), 'w') as f:
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'
             f.write(f'# {capability}\t1\n')
+    if WIDE_ALIAS and ALIAS_OFFS: f.write('# WIDE_ALIAS\t1\n')   # this build left its ALIAS_CUTS out: its host needs an alias region of the profile's mem_alias_wide
+    for off, ob, nb, why in ALIAS_APPLIED: f.write(f'# ALIAS_CUT\t{off:#x}\t{ob}\t{nb}\n')   # a cut a host with a wide alias region undoes at load: offset, original bytes, new bytes
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')

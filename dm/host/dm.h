@@ -69,6 +69,9 @@ typedef struct {
     uint64_t fps_target_ptr;   // a target frame rate the game steps by, an int32 at [main + fps_target_ptr] + fps_target_field (patch_nso.py, fps_target.py; hle_fpslock.c); 0 = none
     uint32_t fps_target_field;
     uint64_t monolith_interval; // Monolith's native frame interval, an int32 at main + this (monolith_fps.py); 0 = not found
+    int wide_alias;            // rewritten with DM_WIDE_ALIAS=1: the profile's ALIAS_CUTS were left out, so the code needs an alias region of mem_alias_wide (patch_nso.py WIDE_ALIAS)
+    struct { uint64_t off; uint8_t len, orig[16], cut[16]; } alias_cut[16];   // the ALIAS_CUTS applied (patch_nso.py ALIAS_CUT rows), which a wide alias region undoes at load
+    int n_alias_cut;
     int native_fps_blocked;    // a required timing correction did not match: retain this main's own engine frame limits
     uint64_t ue_fixed_ptr;     // Unreal's GEngine (main's offset of the global) and UEngine::FixedFrameRate in it, a float (patch_nso.py, ue_fixed_rate.py; hle_fpslock.c); 0 = none
     uint32_t ue_fixed_field;

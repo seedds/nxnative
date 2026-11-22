@@ -76,6 +76,37 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class WideAlias(unittest.TestCase):
+    """mem_alias_wide (docs/reference/memory.md, Cuts that only fit an iPhone's alias region): a DM_WIDE_ALIAS=1 build makes it the alias region and grows the guest block by the
+    difference, so the heap and stacks keep their sizes; a build without the switch keeps the profile's layout"""
+    TSV = ('title_id\t' + ID + '\nname\tTest\nprogram_id\t' + ID + '\nmodules\tmain\nromfs_marker\tromfs.img\n'
+           'mem_reserve\t0x140000000\nmem_alias\t0x118000000\nmem_stack\t0x10000000\napp_pool\t0x100000\n')
+
+    def header(self, rows, wide):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(self.TSV + rows)
+            env = {**os.environ, 'DM_GAMES_DIR': d}; env.pop('DM_WIDE_ALIAS', None)
+            if wide: env['DM_WIDE_ALIAS'] = '1'
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, 'game.h'))], env=env, capture_output=True, text=True)
+            return r, Path(d, 'game.h').read_text() if Path(d, 'game.h').exists() else ''
+
+    def test_wide_build(self):
+        r, h = self.header('mem_alias_wide\t0xF10000000\n', True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for line in ('DM_GAME_MEM_RESERVE 0xf38000000ull', 'DM_GAME_MEM_ALIAS 0xf10000000ull', 'DM_GAME_MEM_ALIAS_WIDE 0xf10000000ull'): self.assertIn(line, h)
+
+    def test_ordinary_build(self):
+        r, h = self.header('mem_alias_wide\t0xF10000000\n', False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for line in ('DM_GAME_MEM_RESERVE 0x140000000ull', 'DM_GAME_MEM_ALIAS 0x118000000ull', 'DM_GAME_MEM_ALIAS_WIDE 0xf10000000ull'): self.assertIn(line, h)
+        r, h = self.header('', False)
+        self.assertIn('DM_GAME_MEM_ALIAS_WIDE 0x0ull', h)
+
+    def test_refused(self):
+        self.assertIn('no mem_alias_wide', self.header('', True)[0].stderr)
+        self.assertIn('smaller than mem_alias', self.header('mem_alias_wide\t0x100000000\n', False)[0].stderr)
+
+
 class BuildModules(unittest.TestCase):
     """Versions of a game with different modules (Mario Kart World: the base game has main subsdk0 sdk, 1.8.0 main subsdk0 subsdk1 sdk): each build row's own modules, in the load order
     of modules, go into the header for the host (main.c profile_modules picks the row of main's build), `game.py modules` gives the same list for a folder of rewritten modules, and a

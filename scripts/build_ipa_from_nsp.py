@@ -1690,7 +1690,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
     key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'jump_solver.py', 'nso.py', 'mod_layout.py', 'nso_code.py', 'nso_asm.py', 'nso_syms.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
-                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
+                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME', 'DM_WIDE_ALIAS')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
         return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
@@ -2211,6 +2211,10 @@ def chain_tables(py, repo, sh, env, logs, g, chain):
     return True
 
 
+def iphone_alias(g, env):   # the alias region of the iPhone build: the profile's mem_alias, or mem_alias_wide in a DM_WIDE_ALIAS build (game.py), whose code needs that much
+    return g.get('mem_alias_wide', '') if env.get('DM_WIDE_ALIAS', '') not in ('', '0') and int(g.get('mem_alias_wide', '0'), 0) else g.get('mem_alias')
+
+
 def heap_checked(g):   # the heap check's stamp in the profile ("# heap check: ..."): its result is kept, later runs skip it
     return any(l.startswith('# heap check: ') for l in (g.dir / 'game.tsv').read_text(encoding='utf-8').splitlines())
 
@@ -2231,7 +2235,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
         rmtree(rd)
         for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
         # a fresh save and temporary storage, no shader libraries (only the heap request matters), the profile's shader map, and the profile's alias region: the keys are for that layout, which is the iPhone's, not the Mac's 64 GB
-        henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=g.get('mem_alias'))
+        henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=iphone_alias(g, env))
         PROG.set(step='booting the game')
         seen = {}
         def done(seen=seen):   # the first heap request answered (or refused for good), or nnMain running for a while without one

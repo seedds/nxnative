@@ -333,6 +333,15 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
         else if (!strcmp(key, "FPS_TARGET_FIELD")) m->fps_target_field = (uint32_t)v;
         else if (!strcmp(key, "MONOLITH_INTERVAL")) m->monolith_interval = v;
+        else if (!strcmp(key, "WIDE_ALIAS")) m->wide_alias = v != 0;
+        else if (!strcmp(key, "ALIAS_CUT")) {
+            char ob[40], nb[40]; size_t n;
+            if (m->n_alias_cut == (int)(sizeof m->alias_cut / sizeof *m->alias_cut) || sscanf(line, "# %*s %*s %39s %39s", ob, nb) != 2 || (n = strlen(ob)) != strlen(nb) || !n || n % 2 || n > 32)
+                die("%s: bad ALIAS_CUT row: %s", path, line);
+            m->alias_cut[m->n_alias_cut].off = v; m->alias_cut[m->n_alias_cut].len = (uint8_t)(n / 2);
+            for (size_t k = 0; k < n / 2; k++) { sscanf(ob + 2 * k, "%2hhx", &m->alias_cut[m->n_alias_cut].orig[k]); sscanf(nb + 2 * k, "%2hhx", &m->alias_cut[m->n_alias_cut].cut[k]); }
+            m->n_alias_cut++;
+        }
         else if (!strcmp(key, "NATIVE_FPS_BLOCKED")) m->native_fps_blocked = v != 0;
         else if (!strcmp(key, "UE_FIXED_RATE_PTR")) m->ue_fixed_ptr = v;
         else if (!strcmp(key, "UE_FIXED_RATE_FIELD")) m->ue_fixed_field = (uint32_t)v;
@@ -358,6 +367,11 @@ static void read_layout(module_t *m, const char *dir) {
     fclose(f);
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
+    // A module rewritten for a wide alias region (DM_WIDE_ALIAS=1) runs only where the alias region holds the profile's mem_alias_wide: the code makes the reservations its ALIAS_CUTS shrink
+    { size_t svc_alias_size(void); size_t a = svc_alias_size();
+      if (m->wide_alias && (!DM_GAME_MEM_ALIAS_WIDE || a < DM_GAME_MEM_ALIAS_WIDE))
+          die("%s was rewritten for a wide alias region (DM_WIDE_ALIAS=1), which needs %#llx bytes; this host's alias region is %#zx. Build the host with DM_WIDE_ALIAS=1 too, or rewrite the modules without it",
+              m->name, (unsigned long long)DM_GAME_MEM_ALIAS_WIDE, a); }
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
         die("%s: patch area before the base, but IMAGE_SIZE / FILE_IMAGE_LEN missing or wrong", path);
     if ((m->back_off || m->back_len) && (m->patch_off >= 0 || !m->back_len || m->back_off % 0x4000 || m->back_len % 0x4000 || m->back_off < m->key_page_off + m->key_page_size
@@ -878,6 +892,26 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
+// The Mac's alias region holds the profile's mem_alias_wide, so a module's ALIAS_CUTS (patch_nso.py: cuts that only fit an iPhone's small alias region) get their original
+// bytes back here, while the code is still writable: Xenoblade Chronicles 3's cuts shrink Monolith's 60 GB reservation to 4 GB, and in 4 GB its later scenes found no room
+// and drew no characters or crashed (docs/reference/memory.md). An iPhone maps the signed code as it is and cannot do this: it gets the wide code from a DM_WIDE_ALIAS build.
+// A smaller alias region (DM_ALIAS_SIZE, as the NSP script's heap check sets it to reproduce an iPhone) keeps the cuts
+static void undo_alias_cuts(module_t *m) {
+    if (!m->n_alias_cut) return;
+    size_t svc_alias_size(void); size_t a = svc_alias_size();
+    if (!DM_GAME_MEM_ALIAS_WIDE || a < DM_GAME_MEM_ALIAS_WIDE) {
+        LOG("%s: %d cuts for a small alias region kept (alias region %#zx, the code needs %#llx without them)", m->name, m->n_alias_cut, a, (unsigned long long)DM_GAME_MEM_ALIAS_WIDE);
+        return;
+    }
+    for (int i = 0; i < m->n_alias_cut; i++) {
+        uint8_t *p = m->base + m->alias_cut[i].off;
+        if (m->alias_cut[i].off + m->alias_cut[i].len > m->text_end || memcmp(p, m->alias_cut[i].cut, m->alias_cut[i].len))
+            die("%s: the cut at %#llx does not hold the bytes its ALIAS_CUT row names", m->name, (unsigned long long)m->alias_cut[i].off);
+    }
+    for (int i = 0; i < m->n_alias_cut; i++) memcpy(m->base + m->alias_cut[i].off, m->alias_cut[i].orig, m->alias_cut[i].len);
+    LOG("%s: %d cuts for a small alias region undone (alias region %#zx)", m->name, m->n_alias_cut, a);
+}
+
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
@@ -895,7 +929,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m);
+        free(raw); install_key_page(m); undo_alias_cuts(m);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
@@ -907,7 +941,7 @@ static void map_image(module_t *m, const char *dir) {
     uint8_t *slot = jit_slot(m, m->size, 0);
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    memcpy(m->base, raw, sz); free(raw); install_key_page(m); undo_alias_cuts(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

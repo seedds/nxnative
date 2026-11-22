@@ -8,6 +8,8 @@
 #   DM_COPY_ROMFS=NO leaves the game files (RomFS) out of the IPA, as it does for the Xcode build phase: the package then stays small (a large game's full package can exceed what iOS extracts), and the app takes the files from Documents/romfs.img (scripts/push_romfs.sh); default: they are packed
 #   DM_SHADER_FILES=1 packs an NVN game's shader library as its separate files, msl/b-<chain>/, not as the one file b-<chain>.img, for install tools that cannot copy a large file (AltServer; pack_ipa.py --shader-files); default: off
 #   DM_ENTITLEMENTS=<plist> is the unsigned IPA's entitlements, signed ad-hoc into the executable (relative to the caller's directory; default: Increased Memory Limit; an empty string = none)
+#   DM_WIDE_ALIAS=1 builds for the alias region the profile's mem_alias_wide names: the host (game.py) and, when the NSP script rewrites the modules, the code without the profile's ALIAS_CUTS;
+#     the default entitlements then ask for extended virtual addressing too, which the signing team's provisioning profile must carry (an install signed without it stops at launch with a red line)
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
@@ -22,6 +24,10 @@
 #   its tables and launcher settings in dm/p<N>/, its RomFS and offline HTML pages in p<N>/, its shader libraries in msl/p<N>/, and the host is built over a table of their profiles
 #   (game.py header_multi, the first program's profile lists them); main.m picks the program the last oe::ExecuteProgram recorded (Documents/program.bin). With --prepare-xcode the project's build phase copies them so (stage_resources.sh)
 set -u
+# The default entitlements: the Increased Memory Limit, and with DM_WIDE_ALIAS=1 (a game whose code keeps the reservations an iPhone's small alias region needs cut, game.py mem_alias_wide)
+# extended virtual addressing, without which iOS refuses the larger guest block
+ENT_KEYS='<key>com.apple.developer.kernel.increased-memory-limit</key><true/>'
+case ${DM_WIDE_ALIAS:-0} in 0 | '') ;; *) ENT_KEYS="$ENT_KEYS<key>com.apple.developer.kernel.extended-virtual-addressing</key><true/>" ;; esac
 # Both output modes change directories before copying the caller's entitlements.
 case ${DM_ENTITLEMENTS-} in
   '' | /*) ;;
@@ -196,12 +202,12 @@ if [ -f "$ICON" ]; then
   echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
   t "app icon: $ICON"
 else t "no app icon ($ICON not found): the home-screen icon stays blank"; fi
-# A prepared Xcode project is signed in Xcode, so it asks for the Increased Memory Limit capability the bigger games need (see the README); DM_ENTITLEMENTS=another plist, or empty for none.
+# A prepared Xcode project is signed in Xcode, so it asks for the Increased Memory Limit capability the bigger games need (see the README), and a DM_WIDE_ALIAS build for extended virtual addressing; DM_ENTITLEMENTS=another plist, or empty for none.
 # The unsigned IPA carries the same request in its executable's ad-hoc signature below; the install tool replaces that signature.
 if [ "$PREPARE_XCODE" = YES ] && [ -n "${DM_ENTITLEMENTS-default}" ]; then
   if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" Gen/DmIOS.entitlements || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-    '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > Gen/DmIOS.entitlements || die "entitlements"; fi
+    "<plist version=\"1.0\"><dict>$ENT_KEYS</dict></plist>" > Gen/DmIOS.entitlements || die "entitlements"; fi
   echo "CODE_SIGN_ENTITLEMENTS = Gen/DmIOS.entitlements" >> Gen/dm.xcconfig
   t "entitlements: $(plutil -convert json -o - Gen/DmIOS.entitlements)"
 fi
@@ -248,7 +254,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   ENT=$O/DmIOS.entitlements
   if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" "$ENT" || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-    '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > "$ENT" || die "entitlements"; fi
+    "<plist version=\"1.0\"><dict>$ENT_KEYS</dict></plist>" > "$ENT" || die "entitlements"; fi
   EXE=$APP/DmIOS; [ ! -f "$APP/Info.plist" ] || EXE=$APP/$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist") || die "CFBundleExecutable of $APP"
   xattr -cr "$EXE" 2> /dev/null   # codesign refuses a file with a resource fork, Finder information or quarantine attributes
   codesign --force --sign - --entitlements "$ENT" "$EXE" || die "ad-hoc signature with the entitlements"

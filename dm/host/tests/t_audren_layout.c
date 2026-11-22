@@ -37,7 +37,9 @@ enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 enum { PACE_BLOCKS = 2000 };
 static struct {
     int rate, device_frames, callbacks, played, released, appended, rendered, bursts, waits;
-    uint64_t now, last_exec, min_spacing;
+    int nbuf;                                  // blocks the renderer keeps in flight (4 default, 8 for 256/512-frame callbacks)
+    int burst;                                 // device callbacks delivered together: 4 x 256 on Bluetooth A2DP, 1 otherwise
+    uint64_t now, last_exec, min_spacing, overshoot;   // overshoot: iOS timer/scheduler lateness added to each paced wait
     aout_buf *output[NBUF];
     pthread_t catchup;
 } pace;
@@ -75,7 +77,7 @@ int dm_pcmout_append(void *k, void *b) {
         int expected = pace.appended + 1;
         for (int i = 0; i < SAMPLES; i++, pcm += DM_AUDIO_SINK_CHANNELS)
             assert(pcm[0] == expected && pcm[1] == -expected && pcm[6] == expected && pcm[7] == -expected);
-        assert(pace.appended - pace.released < NBUF);
+        assert(pace.appended - pace.released <= NBUF);
         pace.output[pace.appended++ % NBUF] = b;
         if (pace.appended == PACE_BLOCKS) atomic_store(&t_ar->open, 0);
         return 1;
@@ -87,14 +89,20 @@ int dm_pcmout_append(void *k, void *b) {
 }
 // Advance by whole device callbacks. Fractional resampling is carried across callbacks,
 // so 44.1 kHz consumes alternating counts of 48 kHz samples as CoreAudio does.
-static uint64_t next_callback(void) { return (uint64_t)(pace.callbacks + 1) * pace.device_frames * 1000000000ull / pace.rate; }
+// A burst of callbacks shares one delivery time: Bluetooth A2DP hands over 4 x 256 frames together every 21.3 ms.
+static uint64_t callback_time(int n) {
+    int burst = pace.burst ? pace.burst : 1;
+    int group = (n + burst - 1) / burst;
+    return (uint64_t)group * burst * pace.device_frames * 1000000000ull / pace.rate;
+}
+static uint64_t next_callback(void) { return callback_time(pace.callbacks + 1); }
 static void pace_advance(uint64_t until) {
+    int before = pace.played / SAMPLES;
     while (next_callback() <= until) {
-        int before = pace.played / SAMPLES;
         pace.played = (int)((uint64_t)++pace.callbacks * pace.device_frames * 48000 / pace.rate);
         assert(pace.played <= pace.appended * SAMPLES);   // no zero-fill needed
-        if (pace.played / SAMPLES - before > 1) pace.bursts++;
     }
+    if (pace.played / SAMPLES - before > 1) pace.bursts++;
     pace.now = until;
 }
 void *dm_pcmout_released(void *k) {
@@ -109,6 +117,8 @@ void dm_pcmout_wait(void *k, int ms) {
         pace_advance(callback < timeout ? callback : timeout);
     }
 }
+int dm_pcmout_blocks(void *k) { (void)k; return pace.rate ? (pace.nbuf ? pace.nbuf : 4) : NBUF; }   // paced runs use the route's headroom; the block-capture test fills all NBUF slots
+int dm_pcmout_queued(void *k) { (void)k; return pace.appended - pace.played / SAMPLES; }   // blocks from the one playing now to the last appended
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
@@ -461,7 +471,8 @@ static Result pace_update(void *sys, void *o, size_t on, void *p, size_t pn, con
 }
 static void pace_exec(void *sys, void *state) {
     (void)state;
-    if (pace.appended >= NBUF) {
+    int nbuf = pace.nbuf ? pace.nbuf : 4, depth = pace.appended - pace.played / SAMPLES;
+    if (pace.appended >= nbuf && depth >= nbuf / 2) {   // a healthy queue keeps the 4.5 ms cadence; a drained one refills at once
         uint64_t gap = pace.now - pace.last_exec;
         assert(gap >= 4500000);
         if (gap < pace.min_spacing) pace.min_spacing = gap;
@@ -497,13 +508,14 @@ static int wait_for_render(pthread_cond_t *cv, pthread_mutex_t *mu, const struct
         while (a->cq_head == a->cq_tail) assert(!pthread_cond_timedwait_relative_np(cv, mu, &timeout));
         return 0;
     }
-    pace_advance(pace.now + (uint64_t)delay->tv_nsec);
+    pace_advance(pace.now + (uint64_t)delay->tv_nsec + pace.overshoot);
     return ETIMEDOUT;
 }
-static void test_render_cadence(int rate, int frames) {
+static void test_render_cadence(int rate, int frames, int burst, uint64_t overshoot) {
     ar_t *a = &g_ar[0];
     memset(a, 0, sizeof *a);
     pace.rate = rate; pace.device_frames = frames; pace.min_spacing = UINT64_MAX;
+    pace.nbuf = frames > 240 ? 8 : 4; pace.burst = burst; pace.overshoot = overshoot;
     *(int32_t *)(pace_sys + 0x48) = *(int32_t *)(pace_sys + 0x4c) = 1;
     a->sys = pace_sys; a->handle[0] = pace_sys;
     lock_plt_stub();
@@ -514,20 +526,25 @@ static void test_render_cadence(int rate, int frames) {
     pthread_mutex_init(&a->cq_mu, NULL); pthread_cond_init(&a->cq_cv, NULL);
     atomic_store(&a->open, 1);
     render_main(a);
-    assert(!pthread_join(pace.catchup, NULL));
-    assert(pace.waits > 1 && pace.bursts > 1);
-    assert(atomic_load(&a->catchups) == 1 && a->cq_head == a->cq_tail);
+    if (pace.catchup) assert(!pthread_join(pace.catchup, NULL));
+    if (burst > 1) {
+        assert(pace.waits > 1 && pace.bursts > 1);   // a burst release and the 4.5 ms cadence meet in the paced wait
+        assert(atomic_load(&a->catchups) == 1);
+    }
+    assert(a->cq_head == a->cq_tail);
     assert(pace.appended == PACE_BLOCKS && pace.rendered == PACE_BLOCKS);
-    printf("audren cadence: %d Hz/%d device frames, %d callbacks (%d burst releases), %d PCM blocks in order, min exec spacing %.2f ms, no underruns\n",
-           rate, frames, pace.callbacks, pace.bursts, pace.appended, pace.min_spacing / 1e6);
+    printf("audren cadence: %d Hz/%d device frames in %d-callback bursts, %d callbacks (%d burst releases), %d PCM blocks in order, min exec spacing %.2f ms, no underruns\n",
+           rate, frames, burst, pace.callbacks, pace.bursts, pace.appended, pace.min_spacing / 1e6);
     pthread_cond_destroy(&a->cq_cv); pthread_mutex_destroy(&a->cq_mu);
     memset(&pace, 0, sizeof pace);
 }
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--cadence")) {
-        test_render_cadence(44100, 256);
-        test_render_cadence(48000, 512);
+        test_render_cadence(48000, 240, 1, 0);            // speakers / wired: one callback per 5 ms, the latency path that must not change
+        test_render_cadence(48000, 256, 4, 600000);       // Bluetooth A2DP: four 256-frame callbacks together every 21.3 ms, 0.6 ms timer lateness
+        test_render_cadence(44100, 256, 4, 0);            // A2DP at 44.1 kHz: the resampler consumes alternating 48 kHz counts
+        test_render_cadence(48000, 512, 2, 0);            // a larger iOS callback: two 512-frame callbacks together
         return 0;
     }
     test_update_lock();
@@ -552,9 +569,11 @@ int main(int argc, char **argv) {
     if (!six) { test_six_channels(); fflush(stdout); _exit(0); }
     int status6; assert(waitpid(six, &status6, 0) == six && WIFEXITED(status6) && WEXITSTATUS(status6) == 0);
     test_histogram();
-    test_render_cadence(44100, 256);
-    test_render_cadence(48000, 512);
-    puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
+    test_render_cadence(48000, 240, 1, 0);
+    test_render_cadence(48000, 256, 4, 600000);
+    test_render_cadence(44100, 256, 4, 0);
+    test_render_cadence(48000, 512, 2, 0);
+    puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM, 240/256/512-frame callback cadence and empty/incomplete startup recovery passed");
     return 0;
 }
 

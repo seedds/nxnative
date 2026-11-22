@@ -551,8 +551,9 @@ void front_save_failed(int err) {
     });
 }
 
-// Audio session: the frames RemoteIO asks for in each callback follow the I/O buffer duration, about 21 ms by default on iOS (1024 frames at 48 kHz). The game keeps only 4 blocks × 5 ms = 20 ms in flight,
+// Audio session: the frames RemoteIO asks for in each callback follow the I/O buffer duration, about 21 ms by default on iOS (1024 frames at 48 kHz). The renderer then kept only 4 blocks × 5 ms = 20 ms in flight,
 // so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports;
+// Bluetooth A2DP still asks 256 frames (5.33 ms), so hle_audio.c gives that route eight blocks of headroom instead (dm_pcmout_blocks).
 // the category is Playback, as a game's or media app's: the ring / silent switch does not mute it (the default SoloAmbient follows the switch, which silenced the game whenever the phone was on silent) and it still interrupts other apps' audio.
 // Set once at boot and again on return to the foreground (the system may reset it after an interruption)
 static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
@@ -575,6 +576,12 @@ void front_ios_audio_session(void) {
 }
 // The channels the route takes now (hle_audio.c decides the output from it: six only when the session has six)
 int dm_ios_output_channels(void) { return (int)AVAudioSession.sharedInstance.outputNumberOfChannels; }
+// Frames per RemoteIO callback the session grants now: 240 on the speakers, 256 on Bluetooth (A2DP's packet size, which the
+// 5 ms preference cannot lower). hle_audio.c sizes the renderer's headroom from it.
+int dm_ios_audio_frames(void) {
+    AVAudioSession *s = AVAudioSession.sharedInstance;
+    return (int)(s.IOBufferDuration * s.sampleRate + 0.5);
+}
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
 // Without the interruption observer the AudioUnits stayed "started" while iOS no longer called them, and a game waiting for its buffers back lost its sound until restart.

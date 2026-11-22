@@ -11,6 +11,7 @@
 #include <unistd.h>
 #if TARGET_OS_IPHONE
 int dm_ios_output_channels(void);   // front_ios.m: the audio session's output channel count
+int dm_ios_audio_frames(void);      // front_ios.m: frames per RemoteIO callback the session grants (240 on the speakers, 256 on Bluetooth)
 #endif
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000, STAGED_FRAMES = RATE / 100 };
@@ -52,6 +53,7 @@ typedef struct {
     uint64_t st_calls, st_count, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax;   // callback-owned accumulators
     audio_stats st_report; _Atomic int st_pending; // one snapshot, consumed by the watchdog or Close under g_aos_lock
     _Atomic uint64_t cb_n;             // device callbacks of this output (the watchdog's evidence that the device still plays it)
+    _Atomic int dev_frames;            // frames per device callback, from the audio session at open and each callback: 240 on the speakers, 256 on iOS Bluetooth
     uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock)
     uint64_t route_until;              // allow the device switch to settle before intervening (under g_aos_lock)
     int stalled, retry_ms; uint64_t retry_at;   // the device stopped calling back (or would not start): the silent sink stands in and the watchdog retries the AudioUnit at retry_at, backing off
@@ -218,6 +220,7 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
+    atomic_store_explicit(&a->dev_frames, (int)frames, memory_order_relaxed);   // what the route really asks for (256 on iOS Bluetooth, not the 240 the session preferred)
     {
         // At each 2000-callback checkpoint publish a snapshot for the watchdog: LOG takes a stdio lock and must never run here or in the release-event notifier.
         // A busy logger leaves its mailbox full; keep accumulating then, rather than waiting, overwriting its snapshot or losing counts.
@@ -247,12 +250,13 @@ static void route_queue(void) { if (!atomic_exchange(&g_route_queued, 1)) dispat
 // Mac DefaultOutput's default 512 device frames can exceed the PCM a game has queued, producing zero-filled gaps.
 // Request about 5 ms of device frames, as front_ios.m asks of the iOS audio session; reapply on device or output-rate changes within the supported range.
 // DM_DBG_AU_FRAMES=N asks N frames instead (1024 = the iOS default, which reproduces the crackling)
-static void au_buffer(AudioUnit au, const char *why) {
+// Returns the frames the device takes per callback, 0 when it could not be read or set: the renderer sizes its headroom from it
+static UInt32 au_buffer(AudioUnit au, const char *why) {
     AudioDeviceID device = kAudioObjectUnknown; UInt32 sz = sizeof device;
-    if (AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &sz) || device == kAudioObjectUnknown) return;
+    if (AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &sz) || device == kAudioObjectUnknown) return 0;
     AudioStreamBasicDescription df; sz = sizeof df;
     OSStatus st = AudioUnitGetProperty(au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &df, &sz);
-    if (st || !(df.mSampleRate > 0)) { LOG("[RED] audio device buffer: cannot read the output sample rate (status %d)", (int)st); return; }
+    if (st || !(df.mSampleRate > 0)) { LOG("[RED] audio device buffer: cannot read the output sample rate (status %d)", (int)st); return 0; }
     const char *e = getenv("DM_DBG_AU_FRAMES");
     UInt32 fr = e ? (UInt32)atoi(e) : (UInt32)(df.mSampleRate / 200 + 0.5);
     AudioValueRange range; sz = sizeof range;
@@ -266,6 +270,7 @@ static void au_buffer(AudioUnit au, const char *why) {
     if (st || actual != fr) st = AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
     if (!st) { sz = sizeof actual; st = AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &actual, &sz); }
     LOG("%saudio device buffer: %u frames at %.0f Hz%s (requested %u, status %d)", st ? "[RED] " : "", actual, df.mSampleRate, why ? why : "", fr, (int)st);
+    return st ? 0 : actual;
 }
 static void au_device_changed(void *ctx, AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el) {
     (void)ctx;
@@ -419,7 +424,7 @@ static OSStatus au_create(aout *a, int route) {   // route: dm_audio_output_chan
         OSStatus st = AudioUnitAddPropertyListener(a->au, props[i], au_device_changed, NULL);
         if (st) LOG("[RED] audio: cannot listen for output property %u (status %d)", (unsigned)props[i], (int)st);
     }
-    au_buffer(a->au, NULL);
+    { UInt32 fr = au_buffer(a->au, NULL); if (fr) atomic_store_explicit(&a->dev_frames, (int)fr, memory_order_relaxed); }
 #endif
     OSStatus st = AudioUnitSetProperty(a->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
     if (!st && ch == 6) {
@@ -635,6 +640,13 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     atomic_init(&a->null_run, 0); atomic_init(&a->notify_run, 1);
     atomic_init(&a->notify_pending, 0); atomic_init(&a->notify_armed, 0);
     atomic_init(&a->st_pending, 0);
+#if TARGET_OS_IPHONE
+    // The session's granted buffer is known before the first callback, so the renderer starts with the right headroom
+    // instead of growing after a burst has already drained four blocks.
+    { int f = dm_ios_audio_frames(); atomic_init(&a->dev_frames, f > 0 ? f : 0); }
+#else
+    atomic_init(&a->dev_frames, 0);
+#endif
     a->notify_sem = dispatch_semaphore_create(0); a->id = atomic_fetch_add(&nopen, 1);
     pthread_create(&a->notify_th, NULL, event_notify, a);
     if (ev) hle_bind_system_event(ev, 1);   // Buffer release event: bind a kernel event on the guest thread (auto-clear), afterwards signaled by the audio thread
@@ -1001,6 +1013,21 @@ void dm_pcmout_start(void *k) { au_start_at(k, NULL); }
 void dm_pcmout_close(void *k) { au_close(k, NULL); free(k); }   // stop, take it out of the registry (frees its AOMAX slot), free it and its key
 int dm_pcmout_append(void *k, void *b) { return (int)h_au_Append(k, b); }
 void *dm_pcmout_released(void *k) { return h_au_Released(k); }
+// Blocks the in-process renderer keeps in flight. The renderer produces 240-frame blocks (5 ms); the device consumes whole
+// callbacks. Four blocks (20 ms) cover a 240-frame callback exactly, but iOS Bluetooth's 256-frame callbacks arrive in bursts:
+// four of them (1024 frames) exceed the 960 frames four blocks hold, and the renderer cannot add a fifth block until one is
+// released, so every burst ends 64 frames short and is zero-padded. Eight blocks (40 ms) cover the burst; the speaker's
+// 240-frame path keeps its 20 ms.
+int dm_pcmout_blocks(void *k) {
+    return atomic_load_explicit(&ao(k)->dev_frames, memory_order_relaxed) > 240 ? 8 : 4;
+}
+// Blocks the output has queued for the device now, including the one a callback is partway through.
+// render_main tells a healthy queue, where it keeps the 4.5 ms cadence, from one a burst has drained,
+// where another paced wait would leave the next callback short. Use the callback's own playback head,
+// so a staged tail still counts as playing instead of looking like a released block.
+int dm_pcmout_queued(void *k) {
+    return (int)queued_pcm_blocks(ao(k));
+}
 
 // Front-end lifecycle / audio session interruption: suspend real audio output, with the silent sink taking over real-time consumption meanwhile (pacing unbroken); switch back to the AudioUnit on resume.
 // The front end calls with 1 on going to background / interruption began, and with 0 on returning to foreground / interruption ended (shouldResume).

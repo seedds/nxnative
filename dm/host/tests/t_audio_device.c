@@ -407,6 +407,54 @@ static void test_sink_route(void) {
     dm_pcmout_close(key);
     assert(!object.key);
 }
+// The in-process renderer produces 240-frame blocks (5 ms) and keeps dm_pcmout_blocks() of them in flight: four (20 ms) for
+// 240-frame callbacks, eight (40 ms) when the route takes 256 or 512 frames per callback. A2DP hands the device 256-frame
+// callbacks in bursts; four back-to-back callbacks (1024 frames) do not fit four blocks (960), and the renderer cannot add a
+// fifth until a callback releases one, so every burst used to end 64 frames short and was zero-padded. The speaker's
+// 240-frame callbacks keep their 20 ms. This drives au_render as the device and one block per release as render_main does,
+// for 240 (the speaker), 256 (iOS Bluetooth) and 512 (the Mac's default device buffer, where two callbacks are 1024 frames).
+static void burst_route(int fr, int burst) {
+    enum { BLK = 240, MAXB = 8, BURSTS = 40 };
+    char sb[16]; snprintf(sb, sizeof sb, "%d", fr); setenv("DM_DBG_AU_FRAMES", sb, 1);
+    unit.route_ch = 2; unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
+    void *key = dm_pcmout_open_sink(); aout *a = ao(key);
+    assert(a->sink_pcm && a->dev_ch == 2);
+    int nbuf = dm_pcmout_blocks(key);
+    assert(nbuf == (fr > 240 ? 8 : 4));
+    static int16_t pcm[MAXB][BLK * DM_AUDIO_SINK_CHANNELS];
+    static aout_buf bufs[MAXB];
+    for (int i = 0; i < nbuf; i++) {
+        for (int f = 0; f < BLK; f++) for (int c = 0; c < DM_AUDIO_SINK_CHANNELS; c++) pcm[i][f * DM_AUDIO_SINK_CHANNELS + c] = 1000;
+        bufs[i] = (aout_buf){.ptr = pcm[i], .cap = sizeof pcm[i], .size = sizeof pcm[i]};
+        assert(dm_pcmout_append(key, &bufs[i]));   // the renderer's prefill
+    }
+    atomic_store(&a->state, STATE_STARTED);
+    static int16_t out[512 * 2];
+    AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, (UInt32)(fr * 2 * sizeof(int16_t)), out}}};
+    uint64_t under0 = atomic_load(&a->under_n), zero0 = atomic_load(&a->under_b);
+    int gaps = 0;
+    for (int b = 0; b < BURSTS; b++) {
+        for (int k = 0; k < burst; k++) {
+            au_render(a, NULL, NULL, 0, (UInt32)fr, &bl);
+            for (int f = 0; f < fr * 2; f++) if (!out[f]) gaps++;
+        }
+        aout_buf *r;
+        while ((r = dm_pcmout_released(key))) assert(dm_pcmout_append(key, r));   // one block back per released block
+    }
+    uint64_t under = atomic_load(&a->under_n) - under0, zero = atomic_load(&a->under_b) - zero0;
+    printf("callback bursts: %d bursts of %d x %d frames, %d blocks in flight, %llu underruns, %llu zero frames, %d silent samples\n",
+           BURSTS, burst, fr, nbuf, (unsigned long long)under,
+           (unsigned long long)(zero / (2 * DM_AUDIO_SINK_CHANNELS)), gaps);
+    assert(!under && !zero && !gaps);
+    dm_pcmout_close(key);
+    assert(!object.key);
+    unsetenv("DM_DBG_AU_FRAMES");
+}
+static void test_callback_bursts(void) {
+    burst_route(240, 4);   // the speaker: four 240-frame callbacks are exactly four blocks
+    burst_route(256, 4);   // iOS Bluetooth: A2DP's packet size
+    burst_route(512, 2);   // the Mac's default device buffer
+}
 int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
     test_route_without_output();
@@ -551,6 +599,7 @@ int main(void) {
     aout failed = {.ch = 2};
     assert(au_create(&failed, 2) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 13);
     unit.init_error = 0; test_sink_route();
+    test_callback_bursts();
     puts("audio device: buffer configuration, blocked start, callback handoff, retry and lifecycle passed");
     return 0;
 }

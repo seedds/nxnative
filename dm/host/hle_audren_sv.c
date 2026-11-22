@@ -27,10 +27,13 @@ void dm_pcmout_start(void *k);
 int dm_pcmout_append(void *k, void *b);
 void *dm_pcmout_released(void *k);
 void dm_pcmout_wait(void *k, int ms);
+int dm_pcmout_blocks(void *k);
 size_t dm_audren_work_size(const uint8_t *p, uint32_t revision);   // hle_audren.c: the service's work buffer budget
 
 enum { HDR = 0x40, BEH_IN = 0x10, BEH_OUT = 0xb0, MP_IN = 0x20, MP_OUT = 0x10, CR_IN = 0x70, V_IN = 0x170, V_OUT = 0x10, FX_IN = 0xc0, FX_OUT = 0x10, MIX_IN = 0x930,
-       SINK_IN = 0x140, SINK_OUT = 0x20, PERF_IO = 0x10, PARAM = 0x34, MIXBUF = 24, FRAME_MAX = 1024, OUT_RATE = 48000, NBUF = 4 };
+       SINK_IN = 0x140, SINK_OUT = 0x20, PERF_IO = 0x10, PARAM = 0x34, MIXBUF = 24, FRAME_MAX = 1024, OUT_RATE = 48000, NBUF = 8 };
+// NBUF is the most blocks the renderer can keep in flight; dm_pcmout_blocks() says how many this output's device callbacks
+// need (4 for 240-frame callbacks, 8 for iOS Bluetooth's 256-frame bursts).
 enum { UNUSED_MIX = 0x7fffffff };
 // Voice parameter (the client's VoiceInfo from +0x40): +0x08 new, +0x09 in use, +0x0a play state (0 started, 1 stopped, 2 paused), +0x0b sample format (1 PCM8, 2 PCM16, 6 ADPCM),
 // +0x0c sample rate, +0x18 channel count, +0x1c pitch, +0x20 volume, +0x24 two biquad filters (+0 enabled), +0x48 ADPCM coefficients (16 s16), +0x58 mix ID, +0x5c splitter ID,
@@ -356,15 +359,18 @@ static void sv_render_main(void *arg) {
     aout_buf *free_list[NBUF]; int nfree = NBUF, n = sv_out_frames(r);
     for (int i = 0; i < NBUF; i++) { r->bufs[i] = (aout_buf){.ptr = r->pcm[i], .cap = sizeof r->pcm[i], .size = 0}; free_list[i] = &r->bufs[i]; }
     dm_pcmout_start(out);
-    LOG("audren:u: render thread started (%d Hz, %d samples per frame, paced by the output)", r->rate, r->samples);
+    int nbuf = dm_pcmout_blocks(out), inflight = 0;   // 4 for 240-frame callbacks, 8 for iOS Bluetooth's 256-frame bursts
+    LOG("audren:u: render thread started (%d Hz, %d samples per frame, %d buffers in flight, paced by the output)", r->rate, r->samples, nbuf);
     while (atomic_load(&r->open)) {
-        while (!nfree) {
+        int want = dm_pcmout_blocks(out);
+        if (want > nbuf) nbuf = want;   // the route changed to one whose callbacks need more headroom
+        while (inflight >= nbuf) {
             aout_buf *b = dm_pcmout_released(out);
-            if (b) { free_list[nfree++] = b; break; }
+            if (b) { free_list[nfree++] = b; inflight--; break; }
             dm_pcmout_wait(out, 10);
             if (!atomic_load(&r->open)) break;
         }
-        if (!nfree) break;
+        if (inflight >= nbuf) break;
         aout_buf *b = free_list[--nfree];
         pthread_mutex_lock(&r->mu);
         int started = r->started;
@@ -376,6 +382,7 @@ static void sv_render_main(void *arg) {
         if (f == 200 || f == 2000 || f % 12000 == 0) LOG("audren:u: %llu frames rendered, %llu of them not silent", (unsigned long long)f, (unsigned long long)atomic_load(&r->loud));
         b->size = (uint64_t)n * 4;
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
+        else inflight++;
         if (started) hle_signal_event_handle(r->ev_w);
     }
     dm_pcmout_close(out);

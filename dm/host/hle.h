@@ -138,4 +138,6 @@ int dm_audio_route(void);             // cached route, initialized on the callin
 // Both representations stay queued together; a device route change selects one without losing the original mix.
 enum { DM_AUDIO_SINK_CHANNELS = 8 };
 void *dm_pcmout_open_sink(void);
+int dm_pcmout_blocks(void *k);   // blocks the in-process renderer keeps in flight for this output's device callbacks (hle_audio.c)
+int dm_pcmout_queued(void *k);   // blocks the output has queued for the device now (hle_audio.c)
 void dm_audio_device_changed(void);   // signal the game's bound output-device notifications (hle_audren.c)

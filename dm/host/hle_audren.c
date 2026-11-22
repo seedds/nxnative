@@ -33,7 +33,10 @@ void dm_pcmout_wait(void *k, int ms);
 
 // P_SIZE: bytes of the game's AudioRendererParameter copied before the two fields are changed. SDK 16's struct is 0x38 bytes; SDK 8's (Link's Awakening) has one more word,
 // its revision at +0x38: copying only 0x38 left the revision uninitialized and the SDK rejected it (CheckValidRevision, Result 0x499). The SDK reads only its own size of the copy
-enum { P_DEVICE = 0x2c, P_MODE = 0x30, P_SIZE = 0x40, WORK_PAGE = 0x1000, FRAME_MAX = 1024, NBUF = 4 };
+enum { P_DEVICE = 0x2c, P_MODE = 0x30, P_SIZE = 0x40, WORK_PAGE = 0x1000, FRAME_MAX = 1024, NBUF = 8 };
+// NBUF is the most blocks the renderer can keep in flight; dm_pcmout_blocks() says how many this output's device callbacks
+// need (4 for 240-frame callbacks, 8 for iOS Bluetooth's 256-frame bursts). Four blocks are 20 ms, exactly one 240-frame
+// callback; a 256-frame callback burst needs the 40 ms that eight give.
 static void *gsym(const char *n) { void *p = guest_sym(n); if (!p) die("audren: missing SDK symbol %s", n); return p; }
 static void cpu_manual(uint8_t *dst, const uint8_t *src) { memcpy(dst, src, P_SIZE); *(int32_t *)(dst + P_DEVICE) = 1; *(int32_t *)(dst + P_MODE) = 1; }
 
@@ -168,22 +171,30 @@ static void render_main(void *arg) {
     aout_buf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (aout_buf){.ptr = a->pcm[i], .cap = sizeof a->pcm[i], .size = 0}; free_list[i] = &a->bufs[i]; }
     dm_pcmout_start(out);
-    LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
+    int nbuf = dm_pcmout_blocks(out);   // 4 for 240-frame callbacks, 8 for iOS Bluetooth's 256-frame bursts
+    int inflight = 0;
+    LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), nbuf);
     uint64_t next_exec = 0;
-    int prefill = NBUF;
+    int prefill = nbuf;
     int rt = render_rt();
     while (atomic_load(&a->open)) {
-        while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
+        int want = dm_pcmout_blocks(out);
+        if (want > nbuf) nbuf = want;   // the route changed to one whose callbacks need more headroom
+        while (inflight >= nbuf) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             aout_buf *b = dm_pcmout_released(out);
-            if (b) { free_list[nfree++] = b; break; }
+            if (b) { free_list[nfree++] = b; inflight--; break; }
             dm_pcmout_wait(out, 10);
             if (!atomic_load(&a->open)) break;
         }
-        if (!nfree) break;
+        if (inflight >= nbuf) break;
+        // A healthy queue keeps the 4.5 ms cadence that stops a burst release from coalescing the game's
+        // renderer events. Once a burst has drained it below half, another paced wait would leave the next
+        // callback short: refill at once. The output's own in-flight limit still bounds how far ahead this runs.
+        int low = nbuf > 4 && dm_pcmout_queued(out) < nbuf / 2;
         dm_host_lock(&a->cq_mu);
         // Leave some slack below the 5 ms block duration. Device callbacks can return several blocks at once,
         // but back-to-back SDK renders can coalesce their events before the game can update.
-        while (!prefill && a->cq_head == a->cq_tail && atomic_load(&a->open)) {
+        while (!prefill && !low && a->cq_head == a->cq_tail && atomic_load(&a->open)) {
             uint64_t now = now_ns();
             if (now >= next_exec) break;
             struct timespec delay = { .tv_nsec = (long)(next_exec - now) };
@@ -210,7 +221,7 @@ static void render_main(void *arg) {
         if (queued) { a->cq_head++; pthread_cond_broadcast(&a->cq_cv); }   // the producer can reuse the slot after the copy
         pthread_mutex_unlock(&a->cq_mu);
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
-        else if (prefill) prefill--;
+        else { inflight++; if (prefill) prefill--; }
     }
     if (rt) render_rt_end();
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes

@@ -73,6 +73,7 @@ General host changes first needed here; each applies to every game:
 - **Jump tables checked on another register** (now the [jump solver](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow)): [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
 - **Racy crashes under CPU load and observation gates**: [05, Racy crashes](../../../docs/agents/05-debugging.md#racy-crashes-load-trace-gates).
 - **Saves from before backslash paths** (it names its files `save:\savedata0.bin`): [Saves named before backslash paths](../../../docs/reference/services.md#saves-named-before-backslash-paths).
+- **iOS Bluetooth A2DP underruns** (`dm_pcmout_blocks`, `render_main`, `hle_audren_sv.c`): [iOS Bluetooth A2DP underruns (256-frame callbacks)](../../../docs/reference/audio.md#ios-bluetooth-a2dp-underruns-256-frame-callbacks).
 
 ## Open
 

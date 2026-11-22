@@ -34,12 +34,18 @@ def meta(text, n):
 
 def render_base(g):
     """The profile's render_base ("<w>x<h> <w>x<h>": the 3D views' base size docked, then handheld, which DM_RENDER_SCALE scales) as
-    {"docked": [w, h], "handheld": [w, h]}, for a front end to show the render scale in pixels; None when the profile has none"""
+    {"docked": [w, h], "handheld": [w, h]} (plus optional "cap" from render_cap), for a front end to show the render scale in pixels; None when the profile has none"""
     v = g.get('render_base', '')
     if not v: return None
     m = re.fullmatch(r'\s*(\d+)x(\d+)\s+(\d+)x(\d+)\s*', v)
     if not m: sys.exit(f'{g.id}: render_base is "<w>x<h> <w>x<h>" (docked, then handheld): {v}')
-    return {'docked': [int(m[1]), int(m[2])], 'handheld': [int(m[3]), int(m[4])]}
+    out: dict[str, object] = {'docked': [int(m[1]), int(m[2])], 'handheld': [int(m[3]), int(m[4])]}
+    c = g.get('render_cap', '')   # the largest size the stub draws in each mode, when it only lowers the size the mode picks from a larger base (Pokemon Pokopia)
+    if c:
+        k = re.fullmatch(r'\s*(\d+)x(\d+)\s+(\d+)x(\d+)\s*', c)
+        if not k: sys.exit(f'{g.id}: render_cap is "<w>x<h> <w>x<h>" (docked, then handheld): {c}')
+        out['cap'] = {'docked': [int(k[1]), int(k[2])], 'handheld': [int(k[3]), int(k[4])]}
+    return out
 
 
 def rows():

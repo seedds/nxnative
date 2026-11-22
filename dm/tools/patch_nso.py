@@ -1467,6 +1467,8 @@ obs += region_obs
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = n marks a render-scale stub that takes scales up to n (1: it only lowers the game's size),
+# ctx.no_step = True says the stubs only read the page's settings (render scale, dynamic resolution) and step nothing: the loader then writes those settings while the host keeps its own
+# pacing (no frame step: present interval, frame-rate cap and thermal behaviour as without a state page; Pokemon Pokopia's render scale, whose game steps by the time that passed),
 # ctx.step_max = n says the stubs hand the game steps of at most n vsyncs (its own interval logic stops there; 0 = FSTEP_MAX, 3), so the host holds frames and pays back at most n,
 # ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.found what an anchored rule's find returned, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
 # text: the fingerprints mask those pages, so a matched stub reads the globals it needs from its functions), and ctx.capabilities.add(name) declares a launcher capability the
@@ -1474,6 +1476,7 @@ obs += region_obs
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 STEP_MAX = 0   # n = the stubs give the game steps of at most n vsyncs (ctx.step_max): the fixups table says so (STEP_MAX n), and the host holds frames at most n vsyncs (nvn_fstep.h smax)
+NO_STEP = False   # the stubs read only the settings in the state page (ctx.no_step): the fixups table says so (NO_FRAME_STEP), and the loader leaves the host's pacing as without a frame step
 RENDER_SCALE = 0   # n = the build has a render-scale stub (state +0x10) that takes scales up to n: the fixups table says so (RENDER_SCALE n), the loader holds DM_RENDER_SCALE to it and the launcher offers the setting up to it (dm/games/settings.tsv)
 FS_CAPABILITIES = set()   # capabilities the frame step stubs declare (ctx.capabilities)
 if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
@@ -1508,9 +1511,9 @@ def stub_address(off, what, lo_off=None):   # ADRP and its low instruction (adja
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
                                             put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
-                                            state=FS_STATE_OFF, render_scale=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
+                                            state=FS_STATE_OFF, render_scale=0, step_max=0, no_step=False, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
                                             found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off, lo_off=None: stub_address(off, 'frame step', lo_off))
-    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
+    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; STEP_MAX = fs.step_max; NO_STEP = bool(fs.no_step); FS_CAPABILITIES = fs.capabilities
 
 # ---- Stubs (the modules whose patch file has STUBS of their build) ----
 # A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from
@@ -1900,6 +1903,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if TWO: f.write(f'# BACK_OFF\t{BACK_OFF:#x}\n# BACK_LEN\t{BACK_LEN:#x}\n')   # the back patch area (TWO): its offset in the image, and its length, the last bytes of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
+    if FS_STATE_OFF and NO_STEP: f.write('# NO_FRAME_STEP\t1\n')   # its stubs only read the settings (ctx.no_step): no frame step, the host paces as without the page
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
     if MONOLITH_INTERVAL is not None: f.write(f'# MONOLITH_INTERVAL\t{MONOLITH_INTERVAL:#x}\n')   # native wait and simulation interval (monolith_fps.py)

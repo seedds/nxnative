@@ -78,6 +78,11 @@ import Foundation
         expect(mm.rangeLabel(macScale, 0.75) == "960 × 540 (75 %)", "handheld size in pixels")
         let plainScale = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_X","kind":"range","label":"X","note":"","default":"1.0","min":0.5,"max":1.0,"step":0.05,"level":"expert"}"#.utf8))
         expect(mm.rangeLabel(plainScale, 0.5) == "50 %" && !plainScale.basic, "no base size: the percentage; an unknown level decodes as Advanced")
+        let cappedScale = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_RENDER_SCALE","kind":"range","label":"Render scale","note":"","default":"1.0","min":0.5,"max":1.0,"step":0.05,"base":{"docked":[1920,1080],"handheld":[1920,1080],"cap":{"docked":[1920,1080],"handheld":[1600,900]}}}"#.utf8))
+        mm.values["DM_OPMODE"] = "1"
+        expect(mm.rangeLabel(cappedScale, 1) == "1920 × 1080 (100 %)" && mm.rangeLabel(cappedScale, 0.75) == "1440 × 810 (75 %)", "capped render scale keeps docked full range")
+        mm.values["DM_OPMODE"] = "0"
+        expect(mm.rangeLabel(cappedScale, 0.75) == "1440 × 810 (75 %)" && mm.rangeLabel(cappedScale, 0.85) == "1600 × 900 (85 %)" && mm.rangeLabel(cappedScale, 1) == "1600 × 900 (100 %)", "capped render scale clamps handheld above cap")
         d.set("1", forKey: "launcher.DM_OPMODE"); setenv("DM_ENV_LAUNCH_KEYS", "DM_OPMODE", 1); setenv("DM_OPMODE", "0", 1)   // a front end's launch override over a saved choice
         let launched = LauncherModel(mac.settings, defaults: d)
         expect(launched.values["DM_OPMODE"] == "0" && launched.fixed.contains("DM_OPMODE") && launched.fromLaunch.contains("DM_OPMODE"), "a variable set at launch is shown fixed, over the saved choice")

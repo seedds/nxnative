@@ -90,6 +90,33 @@ class EntitlementsTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.stage(False, kind)
 
+    def test_profile_app_entitlements_default_and_override(self):
+        pickup = SCRIPT[SCRIPT.index('# A profile\'s app.entitlements'):SCRIPT.index('gp() {')]
+        pokopia = REPO / 'dm/games/0400A3A01EE4C000/app.entitlements'
+        self.assertEqual(
+            plistlib.loads(pokopia.read_bytes()),
+            {'com.apple.developer.kernel.increased-memory-limit': True,
+             'com.apple.developer.kernel.extended-virtual-addressing': True},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            gd = root / 'profile'
+            gd.mkdir()
+            (gd / 'app.entitlements').write_bytes(pokopia.read_bytes())
+            for kind, extra, want in (
+                ('unset', {}, str(gd / 'app.entitlements')),
+                ('empty', {'DM_ENTITLEMENTS': ''}, ''),
+                ('override', {'DM_ENTITLEMENTS': '/custom.plist'}, '/custom.plist'),
+            ):
+                with self.subTest(kind=kind):
+                    env = {k: v for k, v in os.environ.items() if not k.startswith('DM_')}
+                    env.update(GD=str(gd), **extra)
+                    result = subprocess.run(
+                        ['/bin/bash', '-c', 'set -u\n' + pickup + 'printf "%s" "${DM_ENTITLEMENTS-__UNSET__}"\n'],
+                        env=env, capture_output=True, text=True, check=True,
+                    )
+                    self.assertEqual(result.stdout, want)
+
 
 if __name__ == '__main__':
     unittest.main()

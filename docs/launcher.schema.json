@@ -29,7 +29,9 @@
         "on": {"description": "toggle: the value the switch takes when on.", "type": "string"},
         "off": {"description": "toggle: the value the switch takes when off.", "type": "string"},
         "base": {"description": "Render scale only: the 3D views' size the scale multiplies, docked and handheld, from the game's profile; absent for most games.", "type": "object", "required": ["docked", "handheld"],
-                 "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"}}},
+                 "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"},
+                                "cap": {"description": "The largest size the stub draws in each mode (a stub that only lowers the size the mode picks, from a base above it): the size shown is the base times the scale, held to this.", "type": "object", "required": ["docked", "handheld"],
+                                        "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"}}}}},
         "level": {"description": "basic: a setting a front end shows first. Without it, the front end decides.", "const": "basic"},
         "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"}
       },

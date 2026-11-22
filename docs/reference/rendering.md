@@ -1964,6 +1964,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 285 ink queries a frame in its dialogue scene came before the conditional clears, and the lit scene was wiped: a black screen with only the text on it. The opening cutscene has no such queries, and the pier about 160.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw`.
 
+### Running-write hash collisions and page-set overflow taint conditional renders
+
+- **Symptom:** random or sustained black 3D frames while the 2D HUD keeps drawing in busy or wide-view scenes, with no `[RED]` lines; `DM_NVN_ENC_THREAD=1` turns flickering into multi-second black screens, and restarting the game can change whether a session hits it.
+- **Cause:** two limits in `nvn_mtl.m`'s GPU write-hazard tables gave false `gw_live` / `g_sbw_over` hits in `rc_source()` ([A condition on a word the GPU writes](#a-condition-on-a-word-the-gpu-writes)), making `OP_RENDER_COND` treat `agl`'s CPU-written conditional-render reference word (`rec + 16`) as unknown so its `ClearColor` wiped the 3D composite target before the upscaler read it: (1) the direct-mapped running-write tables (`g_gw`, `g_gwx`, `g_gwr`) collapsed a slot's page tag to `~0ull` on any 2-page hash collision, and any later write to a single hot page in that slot while `fence > done` kept `~0ull` latched permanently until a full GPU drain (continuous with the encode thread); (2) the per-submission page set (`g_sbwp`) was fixed at 16,384 slots (and 64 wide intervals), overflowing on high-draw scenes with thousands of writable storage buffers and setting `g_sbw_over` / `g_gw_all` (which also refused `ubp_get` partial uniform shadows).
+- **Fix:** replace the direct-mapped running-write tables with 128-byte-aligned 7-way set-associative tables with an independent per-set `over_fence` that later non-overflowing writes never extend, merge `g_gw` into `g_gwx` plus a `g_um` page check (`um_page_live`), size `g_gwr` as a compact 1,024-set filter for the 4,096-entry report ring, grow `g_sbwp` / `g_sbw_list` dynamically at ≤50% load from 16,384 slots (`sbw_grow`), and widen `SBW_WN` to 256.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([issue #2699](https://github.com/seedds/nxnative/issues/2699), [PR #3185](https://github.com/seedds/nxnative/pull/3185)): Freezer / Hilltop / Canyon layers, wide camera angles, and the 3D overview map (~7,500 terrain chunks binding ~15 KB writable SSBOs per submission).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw` (7-way collision without tainting an unrelated page, non-latching `over_fence` expiration, `g_um` live-page tracking outside `g_gwx`, and 24,000-page dynamic growth without `g_sbw_over` or `g_gw_all`).
+
 ### Query slots running out inside a pass
 
 - **Symptom:** `[RED] visibility slots exhausted`.

@@ -10,6 +10,9 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 | `mem_used 0x5600000` | `game.tsv` | the rewritten modules take 82 MB, more than the default 64 MB that `SetHeapSize` checks the game's request against |
 | `pad_layout full` | `game.tsv` | |
 | `depth_mode zero` | `game.tsv` | the game sets near = 0 (the log's `depth mode` line). Without the key the pipeline archive made offline holds the other entry point, and the host refuses it |
+| [`app.entitlements`](app.entitlements) | profile | requests `increased-memory-limit` and `extended-virtual-addressing` on iOS builds when `DM_ENTITLEMENTS` is unset |
+| `present_interval display`, `fps_target 60`, `op_mode handheld` | `game.tsv` | steps by elapsed frame time so display-mode pacing supports 30/60 fps without frame-step stubs, and defaults to handheld for iPhone memory headroom |
+| [`patches.py`](patches.py), `render_base`, `render_cap` | profile | KTGL dynamic-resolution ladder stub (`DM_RENDER_SCALE` 0.5 to 1.0, capped at 1600x900 handheld and 1920x1080 docked) with `NO_FRAME_STEP` |
 
 ## Files
 
@@ -59,3 +62,4 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 - [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [GameShare guest displays](../../../docs/reference/services.md#gameshare-guest-displays): boot aborts.
 - [Block-compressed storage the CPU wrote before first use](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use): its `IMAGE` BC1 / BC7 icons showed other items' pictures once their storage was reused (resolved).
 - [VOTEU writes the uniform predicate](../../../docs/reference/shaders.md#voteu-writes-the-uniform-predicate): 471 of its shaders change; in the first area only the full-screen `075fd7285c64b798` draws, its votes all false, so the picture is unchanged there.
+- [Settings-only state pages (NO_FRAME_STEP)](../../../docs/reference/rewriter.md#settings-only-state-pages-no_frame_step): its KTGL dynamic-resolution render-scale stub (`patches.py`) uses `NO_FRAME_STEP` with `present_interval display` and `fps_target 60`.

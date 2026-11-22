@@ -161,13 +161,17 @@ class LauncherSettingsTests(unittest.TestCase):
 
     def test_render_base_goes_into_the_render_scale_row(self):
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
-        for gid, base in [(BOTW, {'docked': [1600, 900], 'handheld': [1280, 720]}), (WONDER, None)]:   # Breath of the Wild's note; Wonder's profile has none
+        for gid, base in [(BOTW, {'docked': [1600, 900], 'handheld': [1280, 720]}),
+                          ('0400A3A01EE4C000', {'docked': [1920, 1080], 'handheld': [1920, 1080], 'cap': {'docked': [1920, 1080], 'handheld': [1600, 900]}}),
+                          (WONDER, None)]:   # Breath of the Wild, Pokemon Pokopia (with render_cap), Wonder (none)
             with self.subTest(gid=gid), tempfile.TemporaryDirectory() as tmp, \
                     patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
                 (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')   # the render scale row's condition
                 listed = settings.build(gid, tmp, Path(tmp) / 'control.nacp')
             self.assertEqual({s['env']: s for s in listed['settings']}['DM_RENDER_SCALE'].get('base'), base)
             self.assertEqual(conforms(listed, schema, schema), [])
+        bad_cap = type('Profile', (), {'id': 'P', 'get': lambda self, key, default='': {'render_base': '1920x1080 1920x1080', 'render_cap': '1600x900'}.get(key, default)})()
+        with self.assertRaises(SystemExit): settings.render_base(bad_cap)
         for bad in ('1600x900', '1600x900 1280', 'big small', '1600x900x3 1280x720', 'a1600x900 1280x720', '1600x900 1280x720 640x360'):
             with self.subTest(bad=bad):
                 profile = type('Profile', (), {'id': BOTW, 'get': lambda self, key, default='', bad=bad: bad})()

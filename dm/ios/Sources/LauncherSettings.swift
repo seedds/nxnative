@@ -8,7 +8,8 @@ struct Setting: Decodable, Identifiable {
     let needs: String?     // "<VAR>=<value>": a sub-setting, drawn only while that setting has that value
     let level: String?     // "basic": shown first (the Mac window's Basic settings); any other or none: Advanced settings. The iPhone keeps one list
     let base: Base?        // render scale: the 3D views' size at 1.0, docked and handheld, for the size in pixels (the Mac window)
-    struct Base: Decodable { let docked, handheld: [Int] }
+    struct Base: Decodable { let docked, handheld: [Int]; let cap: Cap? }
+    struct Cap: Decodable { let docked, handheld: [Int] }   // the largest size the stub draws in each mode (render_cap): the label holds the size to it
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
@@ -93,9 +94,12 @@ final class LauncherModel: ObservableObject {
     func rangeLabel(_ s: Setting, _ v: Double) -> String {
         let p = "\(Int((v * 100).rounded())) %"
         guard let b = s.base else { return p }
-        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        let handheld = (values["DM_OPMODE"] ?? "1") == "0"
+        let size = handheld ? b.handheld : b.docked
         guard size.count == 2 else { return p }
-        return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+        var w = Int((Double(size[0]) * v).rounded()), h = Int((Double(size[1]) * v).rounded())
+        if let c = b.cap.map({ handheld ? $0.handheld : $0.docked }), c.count == 2, w > c[0] || h > c[1] { w = c[0]; h = c[1] }   // the stub only lowers the mode's size
+        return "\(w) × \(h) (\(p))"
     }
     var changed: Bool { settings.contains { !fixed.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
 

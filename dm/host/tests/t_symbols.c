@@ -107,6 +107,41 @@ static void check_language_bindings(void) {
     force_sec = forces; force_sec_n = 3;
 }
 
+static void expect_fps_state_die(module_t *m) {
+    pid_t pid = fork(); assert(pid >= 0);
+    if (!pid) {
+        struct rlimit lim = {0, 0}; setrlimit(RLIMIT_CORE, &lim);
+        freopen("/dev/null", "w", stderr);
+        install_fps_state(m);
+        _exit(0);
+    }
+    int status; assert(waitpid(pid, &status, 0) == pid);
+    assert((WIFEXITED(status) && WEXITSTATUS(status) != 0) || WIFSIGNALED(status));
+}
+
+static void check_no_frame_step_state_page(void) {
+    uint8_t img[0x8000] = {0};
+    module_t bad_wrap = {.name = "main", .base = img, .size = sizeof img, .key_page_off = 0x1000, .key_page_size = 0x4000, .fps_state_off = UINT64_MAX - 0x10};
+    expect_fps_state_die(&bad_wrap);
+    module_t bad_short = {.name = "main", .base = img, .size = 0x5080, .key_page_off = 0x1000, .key_page_size = 0x4000, .fps_state_off = 0x5000};
+    expect_fps_state_die(&bad_short);
+
+    g_state_page = NULL; dm_fps_state = NULL; g_fps_mod = NULL; g_render_scale_max = 1.0f; dm_fps_step_max = 0;
+    module_t m = {.name = "main", .base = img, .size = sizeof img, .key_page_off = 0x1000, .key_page_size = 0x4000,
+                  .fps_state_off = 0x5000, .no_step = 1, .render_scale_max = 1};
+    install_fps_state(&m);
+    assert(g_state_page == img + 0x5000 && dm_fps_state == NULL);
+    setenv("DM_RENDER_SCALE", "0.75", 1);
+    unsetenv("DM_FPS_TARGET");
+    dm_fps_state_apply();
+    float fps = -1.f, sc = 0.f;
+    memcpy(&fps, img + 0x5000, sizeof fps);
+    memcpy(&sc, img + 0x5010, sizeof sc);
+    assert(fps == 0.f && sc == 0.75f && dm_fps_state == NULL);
+    unsetenv("DM_RENDER_SCALE");
+    g_state_page = NULL; dm_fps_state = NULL; g_fps_mod = NULL; g_render_scale_max = 1.0f; dm_fps_step_max = 0;
+}
+
 int main(void) {
     // Empty/missing sections must still give misses after lazy initialization.
     assert(!hle_implements("absent")); assert(!hle_implements("absent"));
@@ -178,6 +213,8 @@ int main(void) {
     g_loaded = NULL; g_nloaded = 0; force_sec = forces; force_sec_n = 3;
     reset_sections();
     check_language_bindings();
+    check_no_frame_step_state_page();
+    puts("NO_FRAME_STEP state page: settings applied with dm_fps_state NULL, bounds overflow/truncation rejected: OK");
     puts("Language list and count: verified SDK exports and paired host fallback: OK");
     puts("Guest aliases: bound to the loaded definition over the module's own, orphan left as bound, alias to a taken-over name rejected: OK");
     puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");

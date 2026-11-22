@@ -38,6 +38,22 @@ mem_used	0x5600000
 # the game sets near = 0 (the log's depth mode line): the pipeline bases made before it runs are made for that mode
 depth_mode	zero
 
+# ---- Frame rate ----
+# The game steps its time by how long each frame took (whole 1/60 s ticks, up to 50 ms), so a cap needs no frame step:
+# it is applied by the present interval alone (display mode). The launcher offers 30 / 60 fps, 60 by default.
+present_interval	display
+fps_target	60
+
+# ---- Render scale ----
+# The render-scale stub (patches.py) takes the scale as a fraction of 1920x1080 and caps it to the operation mode's
+# ladder size (handheld 1600x900, docked 1920x1080), so each 0.05 step maps to a whole 32x18 ladder step.
+render_base	1920x1080 1920x1080
+render_cap	1920x1080 1600x900
+
+# ---- Operation mode ----
+# Handheld starts at 1600x900 (vs 1920x1080 docked) for iPhone memory and thermal headroom
+op_mode	handheld
+
 # ---- Shader split (shader_split.py) ----
 shader_groups	/motor_asset_re/=rdb
 shader_note	Pokemon Pokopia shaders

@@ -70,6 +70,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Hades II](../../dm/games/0100A00019DE0000/README.md#rendering): its render size stub, the first state page of a main without a frame step, on v0 (issue [#772](https://github.com/seedds/nxnative/issues/772); padsiwono reported the assertion on update 1.0.131248).
 - **Check:** v0 and 1.0.141667 mains rewritten (2026-11-10): v0's patch area at `0x5920000`, its state page at `0x5910000`; 1.0.141667's layout unchanged (patch area `0x5b10000`, state page `0x5b08000`); both ran through the opening into Erebus with the render size stub at 1.5 (v0) and 0.5 to 3.0 (1.0.141667).
 
+### Settings-only state pages (NO_FRAME_STEP)
+
+- **Symptom:** a `FRAME_STEP` render-scale stub on a game that steps by elapsed time (so it uses `present_interval display` and no frame-step stubs) activates host frame-step pacing (`dm_fps_state != NULL`) and thermal frame-step capping.
+- **Cause:** any build with `FPS_STATE_OFF` in its fixups table populated `dm_fps_state` in `dm/host/loader.c`, which both wrote settings into the state page and told the NVN layer that the build carried frame-step stubs.
+- **Fix:** stubs that only read settings from the state page (such as render scale at `+0x10`) set `ctx.no_step = True`, which writes `# NO_FRAME_STEP\t1` in `fixups.tsv`. `dm/host/loader.c` tracks the state page in `g_state_page` (with an overflow-safe `>= 0x100` bounds check) and leaves `dm_fps_state` `NULL` when `NO_FRAME_STEP` is set, so `dm_fps_state_apply()` still writes `DM_RENDER_SCALE` and other state-page settings while the host keeps its normal pacing.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game): its KTGL dynamic-resolution render-scale stub (`patches.py`) uses `NO_FRAME_STEP` alongside `present_interval display` and `fps_target 60`.
+- **Check:** `t_symbols` exercises `NO_FRAME_STEP` (`dm_fps_state` stays `NULL` while `DM_RENDER_SCALE` writes `g_state_page + 0x10`) and rejects overflowing or truncated state-page bounds.
+
 ### Cheats carried across game updates
 
 - **Symptom:** after a game update, the Cheats menu lists only `Cheats for build … (another version of the game)`, and nothing runs. Or a cheat file converted to the new build by hand writes into the wrong place: a table instead of a variable, or code that moved.

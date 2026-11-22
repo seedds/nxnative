@@ -33,6 +33,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
+| `build` → `game` | render scale at the dynamic-resolution index store | rendering | gap | checked: v655360 main on the Mac: the controller runs every frame and holds index 20 (1600x900) handheld; DM_RENDER_SCALE runs (2026-11-15) | 1 | [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | KTGL's dynamic-resolution controller in the game's main; its function fingerprint (MATCH_FRAME_STEP) would carry it to later updates of this game, and possibly other KTGL games on the same engine version, which nobody has compared yet |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
@@ -79,6 +80,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pikmin 4](#pikmin-4) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Pokemon Pokopia](#pokemon-pokopia) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
@@ -492,6 +494,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.1.1 `main`** `060f827b…` ([patches.py:30](../../dm/games/0100B7C00933A000/patches.py#L30))
   - stub `+0x1ca4590`: cutscene fade scheduling uses the sequence frame rate
+
+### Pokemon Pokopia
+
+[Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), `0400A3A01EE4C000`, [patches.py](../../dm/games/0400A3A01EE4C000/patches.py).
+
+- **`build` → `game`**, rendering, gap, checked: v655360 main on the Mac: the controller runs every frame and holds index 20 (1600x900) handheld; DM_RENDER_SCALE runs (2026-11-15): render scale at the dynamic-resolution index store. KTGL's dynamic-resolution controller in the game's main; its function fingerprint (MATCH_FRAME_STEP) would carry it to later updates of this game, and possibly other KTGL games on the same engine version, which nobody has compared yet
+
+- **v655360 `main`** `76a489f3…` ([patches.py:52](../../dm/games/0400A3A01EE4C000/patches.py#L52))
+  - frame step `+0x22cf68`: dynamic resolution index: the step of the host render scale below 1.0 (else the game's own)
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### Pokémon Legends: Arceus
 

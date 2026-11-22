@@ -158,6 +158,13 @@ static void latency(void) {   // Only variable-refresh fullscreen needs the late
             CHECK("a clamped override does not rewrite the link every frame", link.latencyWrites == writes);
         }
     }
+    g_present_latency = 0; test_fullscreen = test_variable_refresh = 0; g_present_link_env = 0;
+    mtl_set_fstep_fine(1); link_sync();
+    CHECK("fine pacing at a 30 fps cap sets frame latency 2 when link rate is automatic", link.preferredFrameLatency == 2);
+    g_present_link_env = 1; link_sync();
+    CHECK("an explicit DM_PRESENT_LINK keeps frame latency 1 even while fine pacing is set", link.preferredFrameLatency == 1);
+    g_present_link_env = 0; mtl_set_fstep_fine(0); link_sync();
+    CHECK("clearing fine pacing restores frame latency 1", link.preferredFrameLatency == 1);
     g_present_latency = 0; test_fullscreen = test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
 static void thirty(void) {   // A 30 fps target runs the link at 30 Hz, except in fullscreen on a fixed-rate screen, where it stays at 60 Hz and the present interval paces the 30.

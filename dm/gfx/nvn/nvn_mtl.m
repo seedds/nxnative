@@ -434,6 +434,47 @@ static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOp
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
 #define res_add(r) res_add_at((r), __LINE__)
+// File pages under a shared buffer that joins the set are wired through the CPU's fault path (mlock) before the commit, and given back after it, when the commit holds them for the GPU.
+// The commit wires an added buffer's pages itself, and pages a file in from the GPU driver's wiring path (IOGPUResourceGroupUpdateResources → the VM → APFS pagein). With the guest's
+// memory in files (DM_GUEST_FILE) on the M1 iPad, that page-in waited for good on an APFS lock held for writing by a launchd thread (its background I/O queue), which itself had stopped
+// 4 ms after it and never ran again: the game froze with sound and no picture (memory.md, "The residency commit froze over the guest's files"). Anonymous memory and Metal's own buffers
+// are not file-backed and are left alone. mlock runs outside g_res_mu so disk page-ins do not stall concurrent res_add / res_remove callers.
+typedef struct { void *p; size_t n; } fwire_t; static fwire_t *g_fwire; static size_t g_nfwire, g_cfwire; static uint64_t g_fwire_n, g_fwire_bytes, g_fwire_ns; static _Atomic uint64_t g_fwire_fail;
+static int range_file_backed(const void *p, size_t n) {
+    vm_address_t a = (vm_address_t)p, e = a + n; natural_t depth = 0;   // vm_region_recurse_64: mach_vm.h is not in the iOS SDK
+    while (a < e) {
+        vm_address_t r = a; vm_size_t sz = 0; vm_region_submap_info_data_64_t info; mach_msg_type_number_t c = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &r, &sz, &depth, (vm_region_recurse_info_t)&info, &c) || !sz || r >= e) return 0;
+        if (info.is_submap) { depth++; continue; }
+        if (info.external_pager) return 1;
+        if (sz >= e - r) break;
+        a = r + sz;
+    }
+    return 0;
+}
+static fwire_t file_wire_prep(id<MTLAllocation> r, uint64_t *ns_out) {
+    id<MTLBuffer> b = (id<MTLBuffer>)r;
+    if (!b.contents) return (fwire_t){NULL, 0};
+    uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)b.contents & ~(pg - 1), hi = ((uintptr_t)b.contents + b.length + pg - 1) & ~(pg - 1);
+    if (!range_file_backed((void *)lo, hi - lo)) return (fwire_t){NULL, 0};
+    uint64_t t0 = commit_now();
+    if (mlock((void *)lo, hi - lo)) {   // the commit pages them in itself, as before
+        if (!atomic_fetch_add(&g_fwire_fail, 1)) MLOG("[RED] residency: file pages under a buffer of %.1f MB could not be wired before the commit (mlock errno %d); the commit pages them in itself", (hi - lo) / 1048576.0, errno);
+        return (fwire_t){NULL, 0};
+    }
+    *ns_out = commit_now() - t0;
+    return (fwire_t){(void *)lo, hi - lo};
+}
+static void file_wire_record(fwire_t fw, uint64_t dt) {   // Caller holds g_res_mu
+    g_fwire_ns += dt; g_fwire_n++; g_fwire_bytes += fw.n;
+    if (g_nfwire == g_cfwire) {   // the list file_unwire undoes; a range it cannot hold is unwired at once (the commit pages it in itself, as before)
+        size_t n = g_cfwire ? 2 * g_cfwire : 64; void *grown = realloc(g_fwire, n * sizeof *g_fwire);
+        if (!grown) { munlock(fw.p, fw.n); return; }
+        g_fwire = grown; g_cfwire = n;
+    }
+    g_fwire[g_nfwire++] = fw;
+}
+static void file_unwire(fwire_t *fw, size_t n) { for (size_t i = 0; i < n; i++) munlock(fw[i].p, fw[i].n); free(fw); }   // a range the game has mapped anew meanwhile fails, harmlessly
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
 static void res_q_put(id<MTLAllocation> r, int add) {   // Caller holds g_res_mu
@@ -448,10 +489,25 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     if ([(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap)
         res_add_at(((id<MTLResource>)allocation).heap, line);
     id<MTLAllocation> r = allocation;
+    int maybe_file = [(id)r conformsToProtocol:@protocol(MTLBuffer)]
+                  && ((id<MTLBuffer>)r).storageMode == MTLStorageModeShared
+                  && ((id<MTLBuffer>)r).length > 0;
+    fwire_t fw = {NULL, 0}; uint64_t fw_ns = 0;
     pthread_mutex_lock(&g_res_mu);
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
     if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
+    if (maybe_file) {
+        pthread_mutex_unlock(&g_res_mu);
+        fw = file_wire_prep(r, &fw_ns);   // before its change is queued: the commit that applies the change takes this range with it and gives it back after (res_commit_retiring)
+        pthread_mutex_lock(&g_res_mu);
+        if ([g_res_objects containsObject:r]) {
+            pthread_mutex_unlock(&g_res_mu);
+            if (fw.p) munlock(fw.p, fw.n);
+            return;
+        }
+    }
     { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
+    if (fw.p) file_wire_record(fw, fw_ns);
     res_q_put(r, 1);
     [g_res_objects addObject:r];
     pthread_mutex_unlock(&g_res_mu);
@@ -639,6 +695,7 @@ static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autorele
     if (staging) for (id<MTLAllocation> obj in staging) res_remove(obj);
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
+    fwire_t *fw = g_fwire; size_t nfw = g_nfwire; g_fwire = NULL; g_nfwire = g_cfwire = 0;   // the file pages wired for exactly these changes
     pthread_mutex_unlock(&g_res_mu);
     uint64_t dt = 0;
     if (n) {
@@ -648,6 +705,7 @@ static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autorele
         dt = commit_now() - t0;
         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
     }
+    file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
     pthread_mutex_unlock(&g_res_commit_mu);
     uint64_t slow = n && dt >= g_slow_commit_ns ? slow_commit_log_number(&g_slow_res_commits) : 0;
     uint64_t adds = 0, removes = 0, added_bytes = 0, removed_bytes = 0;
@@ -709,6 +767,9 @@ void mtl_res_stats(char *out, size_t n) {
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
     if (o < n) o += snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
     if (o < n) snprintf(out + o, n - o, ", named on %llu command buffers in %.2f ms, longest %.2f ms", (unsigned long long)atomic_exchange(&g_res_names, 0), atomic_exchange(&g_res_name_ns, 0) / 1e6, atomic_exchange(&g_res_name_max, 0) / 1e6);
+    { uint64_t ffail = atomic_load(&g_fwire_fail);
+      if (g_fwire_n + ffail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, (unsigned long long)ffail); }
+      g_fwire_n = g_fwire_bytes = g_fwire_ns = 0; }
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
     pthread_mutex_unlock(&g_res_mu);
 }
@@ -19033,17 +19094,20 @@ static MTLViewport present_viewport(double pw, double ph, double dw, double dh) 
 }
 // The shape the picture is shown in, whatever part of the texture it comes from. The Switch's compositor stretches a buffer's crop to the layer, so a crop only picks texels: Super
 // Mario Galaxy 2 draws its storybook cutscenes anamorphically into 1200x960 of a 1920x1080 swapchain (800x640 handheld). The layer fills the display, 16:9, unless the game sized it
-// (vi::CreateLayer with a size, hle_vi.c). A screen taller than 16:9 (DM_SCREEN_ASPECT, loader.c) counts only for a texture of its shape: only builds with screen-shape stubs render it.
+// (vi::CreateLayer with a size, hle_vi.c). A screen of another shape than 16:9 (DM_SCREEN_ASPECT, loader.c) counts only for a crop or a texture of its shape: only builds with
+// screen-shape stubs render it. Breath of the Wild presents a whole texture of the taller shape; a game that keeps larger window textures and moves its crop presents a crop of it.
 static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = none
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
-static void present_shape(id<MTLTexture> src, double *w, double *h) {
+static void present_shape(id<MTLTexture> src, const int crop[4], double *w, double *h) {
     uint64_t v = atomic_load(&g_screen_shape);
-    if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
+    double sr = v ? (double)(uint32_t)v / (double)(v >> 32) : 0;
+    if (v && crop && crop[2] > 0 && crop[3] > 0 && fabs(((double)crop[2] / crop[3]) / sr - 1) < 0.01) { *w = crop[2]; *h = crop[3]; return; }
+    if (v && fabs(((double)src.width / src.height) / sr - 1) < 0.01) { *w = src.width; *h = src.height; return; }
     v = atomic_load(&g_layer_shape);
     *w = v ? (double)(uint32_t)v : 1920; *h = v ? (double)(v >> 32) : 1080;
 }
-static MTLViewport present_fit(id<MTLTexture> src, double dw, double dh) { double w, h; present_shape(src, &w, &h); return present_viewport(w, h, dw, dh); }
+static MTLViewport present_fit(id<MTLTexture> src, const int crop[4], double dw, double dh) { double w, h; present_shape(src, crop, &w, &h); return present_viewport(w, h, dw, dh); }
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
     r[0] = 0; r[1] = 0; r[2] = src.width; r[3] = src.height;
@@ -19064,7 +19128,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     present_pipeline(dst.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_fit(src, dw, dh);
+    MTLViewport vp = present_fit(src, crop, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -19387,7 +19451,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_fit(src, dw, dh);
+    MTLViewport vp = present_fit(src, crop, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     int flipped = atomic_load_explicit(&g_origin_ll, memory_order_relaxed), wrote = 0;
     static int direct_ok = -1; if (direct_ok < 0) { const char *e = getenv("DM_FX_DIRECT"); direct_ok = !(e && !strcmp(e, "0")); }
@@ -19489,7 +19553,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
     // shape (1280x720 handheld, 1920x1080 docked)
-    { static double last; double w, h; present_shape(src, &w, &h); double a = w / h;
+    { static double last; double w, h; present_shape(src, crop, &w, &h); double a = w / h;
       if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %.0fx%.0f (%.3f:1) for the front end's layout", w, h, a); front_picture_shape((int)w, (int)h); } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
@@ -19804,9 +19868,16 @@ static CAFrameRateRange link_range(int mode) {
 // and why a fixed-rate screen still has about 20 ms more presentation delay with the link at either latency, remain open (docs/reference/frame-rate.md)
 __attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+// Latency 2 also while the automatic 60 Hz link shows the late frames of a 30 fps cap at the next vsync (hle_nvn.c fstep_tick, mtl_set_fstep_fine): at latency 1 it calls back
+// 16.5 ms before the target time and takes a frame whose GPU work is still running, so on a ProMotion screen the present lands one 120 Hz refresh late and the link skips its next
+// tick; the acquire, which counts ticks, then held each frame 50 ms (Ocarina of Time's title on an M1 iPad: 40 ms frames, 25 → 20 fps) or the screen showed them 33 / 38 / 42 ms
+// apart. Latency 2 is the 33 ms lead the 30 Hz link has at latency 1, so the input lag is that of the cap's own link. An explicit DM_PRESENT_LINK keeps its own latency policy.
+static _Atomic int g_fstep_fine;
+void mtl_set_fstep_fine(int on) { atomic_store(&g_fstep_fine, on != 0); }
+static int link_fine_lat(void) { return !g_present_link_env && atomic_load(&g_fstep_fine); }
 // CAMetalDisplayLink accepts only 1 or 2. Compare its readback with the supported request, or an oversized override rewrites and logs every frame.
-static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : front_fullscreen() && front_screen_variable_refresh() ? 2 : 1; }
-static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
+static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : (front_fullscreen() && front_screen_variable_refresh()) || link_fine_lat() ? 2 : 1; }
+static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : link_fine_lat() ? "late frames of a 30 fps cap at the next vsync" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
 // The 30 Hz link at a 30 fps target, except in fullscreen on a fixed-rate screen. There the link skipped ticks: Ocarina of Time at a 30 fps cap on a MacBook Air M4 (60 Hz) got
 // 16.5-25 callbacks a second over stretches of 300 frames, also on frames with under 1 ms of GPU, and each skipped tick kept a frame on screen 66.7 ms (a 180 s walk: 388 and 996
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it

@@ -11,3 +11,5 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+# Local Python venv for the build scripts (README: pip install lz4 capstone fonttools nsz zbic)
+.venv/

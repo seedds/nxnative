@@ -324,6 +324,8 @@ These are not profile keys: the tools read them from the game files each time, b
 
 ## Adding a game
 
+The packer can apply a title's native defaults from `feral_defaults.tsv` in its repository directory, including when it uses a provisional profile. See [Hitman: Absolution](010037C022390000/README.md#frame-rate).
+
 1. **Survey.** Run `scripts/build_ipa_from_nsp.py` on the game's NSP folder. Without a profile it extracts only the code modules and a RomFS list, then writes `<NSP folder>/<title ID>_survey/survey.md`. The survey covers modules and build IDs, SDK, engine and graphics API markers, RomFS containers, the rewrite-site census, and imports compared with the host hooks.
    Unless told `--survey-only`, the script then writes a **provisional profile** to `<NSP folder>/<title ID>_build/profile/<title ID>/` (outside the repository) and carries on to a best-effort IPA. `dm/games/profile_guess.py` fills its `game.tsv` from the game files, each key under the reason for it (the survey lists them too):
    - identity and name, the build row it found, the largest RomFS file as `romfs_marker`, big file types in `zip_store`, `shader_groups` by RomFS top-level folder;

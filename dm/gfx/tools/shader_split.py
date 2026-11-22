@@ -51,6 +51,7 @@
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
+#   · APF (Vector Unit, Beach Buggy Racing 2: Island Adventure): whole GLSLC outputs in the VuShaderAsset entries (LZ4 blocks) of Assets.apf, see apf_entries and apf_shaders
 #   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 #   · MVGL / NXSH (Media.Vision, Digimon Story Time Stranger): MDB1 archives (wide 64-bit LZ4 or legacy 32-bit doboz, mvgl.py) whose .shad entries and embedded main records are NXVS / NXFS / NXCS containers with control and code spans; see mvgl_jobs and nxsh_shader
@@ -1257,6 +1258,80 @@ def ipk_shaders(path, rel, out):
             scan_blob(b, f'{label}/{name}', found)
             if not found: found = glslc_shaders(b, f'{label}/{name}', need=False)
             out += found
+
+VU_APF = b'FPUV'   # Vector Unit's asset package ('.apf')
+APF_HEADER = 0x3c
+
+def fnv1a32(d):
+    """FNV-1a, 32 bits: what Vector Unit's APF packages check their header, directory and entries with"""
+    h = 0x811c9dc5
+    for c in d: h = (h ^ c) * 0x01000193 & 0xffffffff
+    return h
+
+def apf_decompress(raw, usz, comp, where):
+    """One APF entry's data: compression 0 = stored, 1 = zlib, 5 = one LZ4 block. None for another compression (the caller counts them in one [WARN] per package)"""
+    if comp == 0:
+        if len(raw) != usz: red(f'{where}: {len(raw):#x} stored bytes, the entry says {usz:#x}')
+        return raw
+    if comp == 1:
+        try: m = zlib.decompress(raw)
+        except zlib.error as e: red(f'{where}: invalid zlib stream ({e})')
+    elif comp == 5:
+        if usz > 255 * len(raw): red(f'{where}: {usz:#x} bytes from {len(raw):#x} stored is more than an LZ4 block can hold (255 to 1)')
+        import lz4.block
+        try: m = lz4.block.decompress(raw, uncompressed_size=usz)
+        except lz4.block.LZ4BlockError as e: red(f'{where}: its {len(raw):#x} stored bytes are not an LZ4 block ({e})')
+    else: return None
+    if len(m) != usz: red(f'{where}: {len(m):#x} bytes decoded, the entry says {usz:#x}')
+    return m
+
+def apf_entries(f, size, label):
+    """The directory of a Vector Unit APF package (Beach Buggy Racing 2: Island Adventure, 0100C43012344000: one 343 MB Assets.apf of 7,749 entries). Little-endian header of 0x3c bytes:
+    'FPUV', u32 version (7), u32 directory offset, u32 entry count, u32 directory length, u32 FNV-1a of the directory, the platform's name ('Switch', 32 bytes NUL-padded), u32 FNV-1a of
+    the 0x38 bytes before it; the entries' data follows, the directory comes last. Per entry: its name ('<asset type>/<asset path>', NUL-terminated), u32 offset, u32 length, u32 stored
+    length, u32 FNV-1a of the decoded data, u16 the asset type's version, u16 compression (apf_decompress). 'Assets/AssetData' (zlib) lists every asset by type, without offsets.
+    → [(name, offset, length, stored length, compression)], every entry checked to lie in the data before the directory"""
+    h = f.read(APF_HEADER)
+    if len(h) < APF_HEADER: red(f'{label}: {len(h)} bytes, shorter than a Vector Unit APF header ({APF_HEADER:#x})')
+    ver, at, n, dlen, dsum = struct.unpack_from('<5I', h, 4)
+    if ver != 7: red(f'{label}: Vector Unit APF version {ver} (only version 7 is read)')
+    if fnv1a32(h[:0x38]) != struct.unpack_from('<I', h, 0x38)[0]: red(f'{label}: the APF header does not match its FNV-1a sum')
+    if at < APF_HEADER or at > size or dlen > size - at: red(f'{label}: the APF directory ({dlen:#x} bytes at {at:#x}) lies outside the file ({size:#x} bytes)')
+    if n > dlen // 21: red(f'{label}: the APF directory lists {n} entries, more than fit in its {dlen:#x} bytes')
+    f.seek(at); t = f.read(dlen)
+    if len(t) != dlen or fnv1a32(t) != dsum: red(f'{label}: the APF directory does not match its FNV-1a sum')
+    p, es = 0, []
+    for i in range(n):
+        e = t.find(b'\0', p)
+        if e < 0 or e + 21 > len(t): red(f'{label}: entry {i} of {n} runs past the APF directory ({dlen:#x} bytes)')
+        name = t[p:e].decode('utf-8', 'replace')
+        off, usz, csz, _sum, _ver, comp = struct.unpack_from('<4I2H', t, e + 1)
+        if off < APF_HEADER or off > at or csz > at - off: red(f'{label}/{name}: its {csz:#x} stored bytes at {off:#x} lie outside the APF data ({APF_HEADER:#x}..{at:#x})')
+        es.append((name, off, usz, csz, comp)); p = e + 21
+    if p != len(t): red(f'{label}: {len(t) - p} bytes after the {n} entries of the APF directory')
+    return es
+
+def apf_shaders(path, rel, out):
+    """The entries of a Vector Unit APF package (apf_entries), each decoded and scanned like a file. Beach Buggy Racing 2's shaders are its 233 VuShaderAsset entries (LZ4): a small header,
+    then whole GLSLC outputs of a vertex and a pixel program each. No asset type is relied on; the package is read entry by entry, never whole"""
+    label = f'/{rel}'
+    other = collections.Counter()
+    with open(path, 'rb') as f:
+        size = f.seek(0, 2); f.seek(0)
+        for name, off, usz, csz, comp in apf_entries(f, size, label):
+            if not usz: continue
+            where = f'{label}/{name}'
+            f.seek(off); raw = f.read(csz)
+            if len(raw) != csz: red(f'{where}: short read ({len(raw):#x} of {csz:#x} bytes)')
+            m = apf_decompress(raw, usz, comp, where)
+            if m is None: other[comp] += 1; continue
+            found = []
+            scan_blob(m, where, found)
+            if not found and GLSLC_MAGIC in m: found = glslc_shaders(m, where, need=False)
+            out += found
+    if other:
+        print(f'[WARN] {label}: {sum(other.values())} entries not read, their compression (' + ', '.join(f'{c} × {k}' for c, k in sorted(other.items())) +
+              ') is not one this reader knows (0 = stored, 1 = zlib, 5 = LZ4)', flush=True)
 
 CPK = b'CPK '
 def cpk_jobs(files, parts=64):
@@ -4400,6 +4475,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == UBIART_IPK:   # a UbiArt IPK archive (ipk_shaders): its .fxb effect files, without reading the rest
         ipk_shaders(path, rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == VU_APF:   # a Vector Unit APF package (apf_shaders): every entry decoded and scanned, without reading the package whole
+        apf_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] in (IDRK, PDRK):
         idrk_shaders(path, '/' + rel, found)

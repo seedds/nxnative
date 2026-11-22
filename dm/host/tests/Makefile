@@ -75,6 +75,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_home_quit_mac
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
+	$(B)/t_pad_battery
 	$(B)/t_motion_pro_mac
 	$(B)/t_jc1
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
@@ -501,3 +502,6 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+run: $(B)/t_pad_battery
+$(B)/t_pad_battery: t_pad_battery.c ../pad_battery.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_pad_battery.c

@@ -32,6 +32,7 @@ static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where p
 static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
 #include "home_quit_mac.h"
+#include "pad_battery_mac.h"
 #include "ctrl_prompt.h"
 #include "user_select_mac.h"
 #include <signal.h>
@@ -549,6 +550,36 @@ static void hq_fade(NSView *v, int in) {
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.18; v.animator.alphaValue = in ? 1 : 0; }
                         completionHandler:^{ if (!in) [v removeFromSuperview]; }];
 }
+// Controller batteries (pad_battery_mac.h), read at start, on a connect and every 30 s: a log line at the first reading, and a notice over the game
+// with a log line at 20 % and at 10 % while discharging. Weak keys: a controller that goes away drops out
+static NSMapTable<GCController *, NSNumber *> *g_battery_mark;
+static void battery_poll(void) {
+    if (!g_battery_mark) g_battery_mark = [NSMapTable weakToStrongObjectsMapTable];
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad) {
+        NSNumber *seen = [g_battery_mark objectForKey:c];   // the last notice's threshold, and from bit 8 whether a level was logged yet
+        int charging, pct = pad_battery_read(c, &charging), logged = seen.intValue >> 8, mark = seen.intValue & 0xff;
+        if (!logged && (pct >= 0 || !seen)) { LOG("controller '%s': battery %s", pad_name(c), pad_battery_text(c).UTF8String); logged = pct >= 0; }
+        int t = pad_battery_notice(pct, charging, &mark);
+        [g_battery_mark setObject:@(mark | logged << 8) forKey:c];
+        if (!t) continue;
+        LOG("controller '%s': battery low, %d %%", pad_name(c), pct);
+        if (!g_win) continue;
+        NSView *v = pad_battery_view(g_win.contentView.bounds, [NSString stringWithFormat:@"%s: %d %%", pad_name(c), pct], t == PAD_BATTERY_VERY_LOW);
+        [g_win.contentView addSubview:v]; hq_fade(v, 1);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ hq_fade(v, 0); });
+    }
+}
+// The Controllers menu: each connected controller and its battery, rebuilt on every open
+@interface DmControllersMenu : NSObject <NSMenuDelegate> @end
+@implementation DmControllersMenu
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad)
+        [menu addItemWithTitle:[NSString stringWithFormat:@"%s: battery %@", pad_name(c), pad_battery_text(c)] action:nil keyEquivalent:@""].enabled = NO;
+    if (!menu.numberOfItems) [menu addItemWithTitle:@"No controller connected" action:nil keyEquivalent:@""].enabled = NO;
+}
+@end
+static DmControllersMenu *g_controllers_menu;
 static void hq_hide_hold(void) { [g_hq_timer invalidate]; g_hq_timer = nil; [g_hq_hold removeFromSuperview]; g_hq_hold = nil; g_hq_ring = nil; }
 static void hq_hide_prompt(void) { hq_fade(g_hq_prompt, 0); g_hq_prompt = nil; }
 static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
@@ -678,6 +709,7 @@ static void pads_start(void) {
     hq_start();
     pads_changed(nil);
     hq_log_setting();
+    battery_poll(); [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *t) { (void)t; battery_poll(); }];
     dm_motion_pro_start(pro_devices_changed);
     dm_jc1_start(g_merge);
     hidpad_start();
@@ -1641,6 +1673,9 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
+        g_controllers_menu = [DmControllersMenu new];
+        NSMenu *pm = [[NSMenu alloc] initWithTitle:@"Controllers"]; pm.delegate = g_controllers_menu; pm.autoenablesItems = NO;
+        [[bar addItemWithTitle:@"Controllers" action:nil keyEquivalent:@""] setSubmenu:pm];
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
@@ -1675,7 +1710,7 @@ void front_run(void (*guest)(void)) {
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 if (conn) hidpad_gc_connected(c);   // a HID pad of its name that only waited for it (pad_hid_mac.h)
                 pads_changed(conn ? nil : c);
-                if (conn) hq_log_setting(); }];
+                if (conn) { hq_log_setting(); battery_poll(); } }];
         dm_haptics_apple_init();
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {

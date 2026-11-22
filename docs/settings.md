@@ -17,7 +17,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
-A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
 
 ## Game
 
@@ -91,7 +91,7 @@ Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizo
 
 ### Frame-rate counter
 
-Shows the frames per second at the top left.
+Shows the frames per second at the top left: on the iPhone over the game, on the Mac at the game window's top left.
 
 ## Controls
 

@@ -542,6 +542,7 @@ def job_for(key, name, rec, w):
             mesh = dmsh_meshstage.info(rec[ci:], rec[0x38:ci])
             lay, size = dmsh_meshstage.memory(mesh)
             if dmsh_meshstage.own_shared(code[0x80:]) or size > dmsh_meshstage.METAL_MAX_SHARED: mesh['refused'] = 'shared memory of its own, or stage memory past Metal\'s limit'
+            if mesh['kind'] == 'ms' and mesh['task'] and dmsh_meshstage.payload_spill(mesh): extra['stage_input_words'] = dmsh_meshstage.payload_words(mesh)
             extra.update(mesh_stage=mesh, stage_memory=lay, local=[mesh['threads'], 1, 1], shared=size); code = code[0x80:]; stage = 'cs'
     else:
         c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)

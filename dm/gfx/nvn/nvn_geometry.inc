@@ -612,6 +612,10 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // equivalent fallback: the demanded pipeline must finish compiling before its first draw, so each one built at a draw is recorded as an M row (pso_user.tsv) and the prewarm builds
 // the rows before the game reaches them (docs/reference/shaders.md, Native mesh pipelines compiled at their first draw)
 static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_rec; } g_mtk;   // ind: an indirect draw's threadgroups (mdx_mask), ind_rec: its {count, first} record
+// A task shader's payload past Metal's object payload (DMSH_MESH_PAYLOAD_MAX) goes through a buffer at DMSH_MESH_SPILL_SLOT of both stages (dmsh_meshstage.py payload_spill):
+// the Metal payload carries the slice's word offset only. Word 0 holds the slice count, followed by one 16-byte-aligned slice per task workgroup of the draw
+static int mtk_spill(const NvShader *ts) { return ts && ts->mesh_payload > DMSH_MESH_PAYLOAD_MAX; }
+static NSUInteger mtk_payload_len(const NvShader *ts) { return !ts ? 16 : mtk_spill(ts) ? 16 : (ts->mesh_payload + 15u) & ~15u; }
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thread uses it: prewarm workers build pipelines (mtk_build) and the submit thread claims them (warm_claim)
@@ -630,7 +634,7 @@ static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *
     if (!mf || !of || !f4) return nil;
     MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
     m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunctionDescriptor = of; m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
+    m.objectFunctionDescriptor = of; m.payloadMemoryLength = mtk_payload_len(ts); m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
     for (int i = 0; i < 8; i++) pso_col4(m.colorAttachments[i], d.colorAttachments[i]);
     return m;
@@ -660,7 +664,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     }
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = fn_dev_b(ms->fn, !k->border); m.fragmentFunction = fn_dev_b(ff, !k->border); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunction = ts ? fn_dev_b(ts->fn, !k->border) : fn_dev(ms->mesh_obj); m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
+    m.objectFunction = ts ? fn_dev_b(ts->fn, !k->border) : fn_dev(ms->mesh_obj); m.payloadMemoryLength = mtk_payload_len(ts); m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
@@ -760,6 +764,17 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     za_check(draw_gpu, "object table slot", DMSH_MESH_DRAW_SLOT);
     if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, draw_gpu, DMSH_MESH_DRAW_SLOT); else [g_ot setAddress:draw_gpu atIndex:DMSH_MESH_DRAW_SLOT];
     args_dirty(4); encode_args(en, ms, 4, 1);
+    if (mtk_spill(ts)) {   // the task's payload slices: word 0 their count, the slices from word 4 (mesh_tasks_draw drained indirect draws, so g_mtk.count is exact)
+        uint64_t slice = ((uint64_t)ts->mesh_payload + 15u) & ~15ull;
+        uint32_t cap = g_mtk.count;
+        id<MTLBuffer> sb; size_t so = arena_alloc(16 + (size_t)MAX(cap, 1u) * (size_t)slice, &sb);
+        *(uint32_t *)((uint8_t *)sb.contents + so) = cap;
+        uint64_t sg = sb.gpuAddress + so;
+        za_check(sg, "object table slot", DMSH_MESH_SPILL_SLOT);
+        if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, sg, DMSH_MESH_SPILL_SLOT); else [g_ot setAddress:sg atIndex:DMSH_MESH_SPILL_SLOT];
+        enc_r_vbuf(en, DMSH_MESH_SPILL_SLOT, sg);   // tracks g_vt_addr[DMSH_MESH_SPILL_SLOT] so later vertex draws rebind slot 11
+        static int said; if (!said++) MLOG("task shader %s: its %u-byte payload goes through a buffer (%u workgroups, %llu-byte slices)", ts->key, ts->mesh_payload, cap, (unsigned long long)slice);
+    }
     // A task shader's threadgroups are the draw's workgroups; with no task, the object function's are blocks of DMSH_MESH_GRID of them (mdx_mask writes their count at +16)
     MTLSize to = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), tm = MTLSizeMake(ms->mesh_threads, 1, 1);
     if (g_mtk.ind) za_check(g_mtk.ind, "indirect mesh draw record", -1);
@@ -780,17 +795,31 @@ static void mesh_tasks_draw(const p_draw *dw) {
     if (ts && ts->mesh_kind != 1) ts = nil;
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ts ? !ts->fn : !ms->mesh_notask || !ms->mesh_obj)) {
         RED_ONCE(150, "DrawMeshTasks without its task and mesh shaders (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
+    if (ts && mtk_spill(ts) != (ms->mesh_payload > DMSH_MESH_PAYLOAD_MAX)) {
+        RED_ONCE(175, "DrawMeshTasks task %s (%u-byte payload) and mesh %s (%u-byte payload) disagree on payload spill: draw skipped", ts->key, ts->mesh_payload, ms->key, ms->mesh_payload); return; }
     image_prepare(pr, 1u << 3 | 1u << 4);
     if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
+    uint32_t first = (uint32_t)dw->first, count = (uint32_t)dw->count;
     uint64_t ind = 0, ind_rec = 0;
-    if (dw->ind) { void *mb; uint64_t mo;
+    if (mtk_spill(ts)) {
+        if (dw->ind) {   // size the spill buffer to the exact GPU-written count (as tg_spill does in nvn_mtl.m dispatch) and draw directly from {count, first}
+            mdi_wait();
+            if (!nvn_host_readable(dw->ind, 8)) { RED_ONCE(176, "indirect DrawMeshTasks of %s with payload in a device buffer: its record at %#llx is in an unmapped page of a sparse pool; skipped", ts->key, (unsigned long long)dw->ind); return; }
+            uint32_t rec[2]; memcpy(rec, (const void *)(uintptr_t)dw->ind, 8); count = rec[0]; first = rec[1];
+            static int once; if (!once++) MLOG("task shader %s: indirect draw with %u-byte payload in a device buffer; the replay waits for the GPU to read its %u workgroups", ts->key, ts->mesh_payload, count);
+            if (!count) return;
+        }
+        uint64_t slice = ((uint64_t)ts->mesh_payload + 15u) & ~15ull;
+        if ((uint64_t)count > (g_dev.maxBufferLength - (4u << 20)) / slice) {
+            RED_ONCE(177, "DrawMeshTasks of %s: %u workgroups of %llu-byte payload exceed Metal's largest buffer; skipped", ts->key, count, (unsigned long long)slice); return; }
+    } else if (dw->ind) { void *mb; uint64_t mo;
         if (!mdx_find(dw->ind, dw->ind, &ind)) { mdx_run(dw, NULL); if (!mdx_find(dw->ind, dw->ind, &ind)) ind = 0; }
         if (!ind || !mtl_gpu_addr(dw->ind, 8, &mb, &mo, &ind_rec)) { RED_ONCE(154, "DrawMeshTasksIndirect record at %#llx is in no memory pool: draw skipped", (unsigned long long)dw->ind); return; }
     }
-    PD("m %llu mesh tasks task=%s mesh=%s fs=%s first=%d count=%d indirect=%#llx", g_stat_pass + !g_enc, ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", dw->first, dw->count, (unsigned long long)dw->ind);   // the draw_ below is a stand-in triangle
-    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;
+    PD("m %llu mesh tasks task=%s mesh=%s fs=%s first=%d count=%d indirect=%#llx", g_stat_pass + !g_enc, ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", (int)first, (int)count, (unsigned long long)dw->ind);   // the draw_ below is a stand-in triangle
+    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = first; g_mtk.count = count;
     g_mtk.ind = ind; g_mtk.ind_rec = ind_rec;
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};

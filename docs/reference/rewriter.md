@@ -565,6 +565,15 @@ To enroll a cut for any game's own module:
 - **Found on:** the Python tool tests (`discover -s dm/tools/tests`), which hung for 2 hours in a test's small NRO; no game was seen to hang.
 - **Check:** `test_rewrite_parallel.py` checks that SIGTERM is blocked from the fork on and that a worker has the default action unblocked before any job, and sends SIGTERM during pool start and during teardown. The race itself is too rare and too slow to repeat in a test.
 
+## Mod code plugins
+
+### A mod's exefs plugin is left out, and its game files wait for it
+
+- **Symptom:** a mod with an Atmosphère `exefs/` (a `subsdk<N>` code plugin, usually built on [exlaunch](https://github.com/shadowninja108/exlaunch)) beside its `romfs/` boots to a black screen with `DM_ROMFS_OVERLAY` on its RomFS: the last file read (`DM_FSLOG`) is the mod's script (Pokémon Compass: `script/lua/bin/release/main_dynamic.blua`), then the main thread waits on a condition variable for good. The plugin registers the functions those scripts call.
+- **Cause:** the overlay only takes RomFS files; nothing loaded the plugin. Rewritten as it was, its start-up then stops on what exlaunch asks of Horizon: `patch_nso.py` found no `.eh_frame_hdr` (devkitA64 links none); its module walk (`FindModules`) asserts the first module is rtld, which the host does not load; it takes its process handle from `GetInfo` 65001 (Mesosphere) and writes hooks through `MapProcessMemory` views of module code; and it seeds `std::mt19937_64` from `svcGetSystemTick`, which answered 0 in x0, so `virtmemFindAslr` drew the same address for ever.
+- **Fix:** `dm/tools/prepare_mod_exefs.sh <mod>` rewrites the plugins once into `<mod>/exefs/nxnative/`; with the mod's RomFS in `DM_ROMFS_OVERLAY` the host loads them between main and sdk (`hle_exl.c`, modules mapped in load order). `patch_nso.py` reads function starts from `.eh_frame` when there is no `.eh_frame_hdr`. A plugin found by exlaunch's `FindModules` text gets a stand-in rtld below main; `GetInfo` 65001 answers the current-process handle; a `MapProcessMemory` view is a copy (16 KB host pages cannot alias its 4 KB-aligned address), and the words the plugin changed in it, against the view as it was mapped, go into the code through a writable alias on unmap and once after the DT_INITs. A word the rewriter changed is refused with a red line, as a cheat's is. `GetSystemTick` returns the tick in x0 as the kernel does. A mod's `exefs/main` is refused.
+- **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) 3.0.1 (`v720896`, a derived profile) with Pokémon Compass 2.1.1.1, on an M3, macOS 27.2: 12 hooks in main and none refused, the new game's character screen. Not checked: other exlaunch plugins, plugins that replace `main`, the iPhone (its code pages cannot be written).
+
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.

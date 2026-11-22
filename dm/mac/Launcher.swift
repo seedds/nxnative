@@ -58,6 +58,23 @@ enum SaveCheck {
             case .alertSecondButtonReturn: return .play(r.cloudChoice)
             default: return .cancel
             }
+        case .missing:
+            guard let r else { return .play(nil) }
+            let a = NSAlert()
+            a.messageText = SaveSyncReport.missingTitle
+            a.informativeText = r.missingMessage(here: "Mac")
+            a.alertStyle = .warning
+            a.addButton(withTitle: "Try Again")
+            a.addButton(withTitle: "Play Without Sending")
+            a.addButton(withTitle: r.sendLabel(here: "Mac"))
+            a.addButton(withTitle: cancel)
+            a.buttons[3].keyEquivalent = "\u{1b}"
+            switch a.runModal() {
+            case .alertFirstButtonReturn: return .retry
+            case .alertSecondButtonReturn: return .play("offline")   // this Mac's save, not sent: the next start compares again
+            case .alertThirdButtonReturn: return .play(r.localChoice)   // local:none
+            default: return .cancel
+            }
         case .unreadable:
             let a = NSAlert()
             a.messageText = SaveSyncReport.unreadableTitle

@@ -160,6 +160,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_save_sync.c` section 15: nothing anywhere, a save only here, in step, the game's own folder chosen, only in the cloud, both changed with the new save the newer and the smaller, the cloud unreadable, sync off, `DM_SAVE_SYNC` read when no folder is given, nothing left behind. The Mac launcher and the iPhone sources build; neither dialog has been run here.
 - **Found on:** Cadence of Hyrule (`01000B900D8B0000`, 1.5.0) on an iPhone (iPhone19,4) and a Mac mini M2 Pro ([PR #2180](https://github.com/seedds/nxnative/pull/2180)).
 
+### No save in the cloud is not an empty cloud for a device that synced one
+
+- **Symptom:** an iPhone app is reinstalled, the cloud-saves folder is chosen again, and Play replaces the cloud's newer save with the older one still on the phone. No dialog is shown, and no backup of the cloud's save is kept.
+- **Cause:** right after a folder is chosen again, iCloud on the phone may not have listed `<title>/save.dmsync` (nor its `.save.dmsync.icloud` placeholder) yet. `front_save_sync_fetch` reads that as no save in the cloud, and `ss_decide` sent this device's save whenever the cloud had none, even though `<save>.sync` holds a `base` that proves this device synced a save there. The report said `conflict=0`, so the launcher asked nothing.
+- **Fix:** `ss_decide` treats no cloud save plus a sync base as both changed. With a front end that asks, it returns `SS_ASK`, and the report says `conflict=1` with `cloud=0`. The launchers show "No cloud save found" (`SaveSyncReport.Step.missing`) with Try Again, Play Without Sending (`offline`) and Send This Device's Save (`local:none`). `send_save` never sends over a missing cloud save while a base is set. A start that chose to send (the player, or no front end) clears the base first. With no front end the start still sends, as before, with a red line.
+- **Limits:** the cause on the phone (iCloud listing the folder late) is inferred, not traced on a device. A cloud save removed on purpose now costs one question. `front_save_sync_fetch` does not yet ask iCloud for the folder's listing itself.
+- **Check:** `dm/host/tests/t_save_sync.c` section 2 (the table) and section 17: the report, a start that asks, a game played without sending, the Mac-style send after the host, the cloud's file listed again, `local:none`, no front end. The iPhone compile check and the Mac launcher's Swift typecheck pass. Neither dialog has been run here.
+- **Found on:** an iPhone after reinstalling the IPA ([issue #3196](https://github.com/seedds/nxnative/issues/3196)).
+
 ### The cloud's save is listed but not downloaded
 
 - **Symptom:** the first start after the other device saved plays this device's save; start it, quit, start again, and the cloud's save comes in. With no connection, the game's first save mount waits out its whole time limit.

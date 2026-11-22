@@ -508,20 +508,35 @@ static tex_t *bound_tex(GLenum target) { GLuint *s = unit_slot(S.unit, target); 
 // ---------- The window surface ----------
 #define NWIN 3
 enum { WIN_COLOR_BITS = 8, WIN_DEPTH_BITS = 24, WIN_STENCIL_BITS = 8 };
-static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], ds; uint64_t serial[NWIN], ticket[NWIN]; int cur; } g_win;
+static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], srgb_rt[NWIN], ds; uint64_t serial[NWIN], ticket[NWIN]; int cur; } g_win;
 static void win_make(uint32_t w, uint32_t h) {
     @autoreleasepool {
         for (int i = 0; i < NWIN; i++) if (g_win.ticket[i]) mtl_present_wait(g_win.ticket[i]);
         for (int i = 0; i < NWIN; i++) if (g_win.serial[i]) mtl_ext_tex_release(g_win.serial[i]);   // the surface it replaces (another size): let go once its presents complete
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
-        for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; }
+        for (int i = 0; i < NWIN; i++) {
+            g_win.srgb_rt[i] = nil;
+            g_win.col[i] = [g_dev newTextureWithDescriptor:td];
+            g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0;
+        }
         td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
         g_win.ds = [g_dev newTextureWithDescriptor:td];
         g_win.w = w; g_win.h = h; g_win.cur = 0; g_win.made = 1;
     }
     GLOG("window surface %ux%u (RGBA8, depth 32F + stencil 8, %d images)", w, h, NWIN);
+}
+// The Switch's desktop GL window can encode sRGB when GL_FRAMEBUFFER_SRGB is enabled.
+// Present and read back through the raw view so the stored display values are used directly.
+static id<MTLTexture> win_color_attachment(void) {
+    int i = g_win.cur;
+    if (!S.srgb) return g_win.col[i];
+    if (!g_win.srgb_rt[i]) {
+        g_win.srgb_rt[i] = [g_win.col[i] newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+        if (!g_win.srgb_rt[i]) die("[gl] cannot make the sRGB view of the window colour attachment");
+    }
+    return g_win.srgb_rt[i];
 }
 
 // ---------- Formats ----------
@@ -981,7 +996,7 @@ static void pass_begin(int only) {
         for (int i = 0; i < NGL_COLORS; i++) {
             if (only >= 0 && only != i) continue;
             const att_t *att = f && f->draw[i] ? &f->col[f->draw[i] - 1] : NULL;
-            id<MTLTexture> c = att ? color_attachment(att, att_tex(att, &gen)) : !S.fb && !i && S.default_draw ? g_win.col[g_win.cur] : nil;
+            id<MTLTexture> c = att ? color_attachment(att, att_tex(att, &gen)) : !S.fb && !i && S.default_draw ? win_color_attachment() : nil;
             if (!c) continue;
             int loc = only < 0 ? i : 0, cl = att ? att->level : 0, cs = att ? att->face : 0;
             MTLRenderPassColorAttachmentDescriptor *a = rp.colorAttachments[loc]; a.texture = c; a.level = cl; a.storeAction = MTLStoreActionStore;
@@ -2763,7 +2778,7 @@ GL(glGetFramebufferAttachmentParameteriv, void, GLenum target, GLenum attachment
     if (!fb) {
         kind = 0x8218;   // FRAMEBUFFER_DEFAULT
         if (attachment == GL_DEPTH || attachment == GL_STENCIL) format = F_D32FS8;
-        else if (attachment == GL_FRONT || attachment == GL_BACK || attachment == 0x400 || attachment == 0x402) format = F_RGBA8;
+        else if (attachment == GL_FRONT || attachment == GL_BACK || attachment == 0x400 || attachment == 0x402) format = F_SRGBA8;
         else { gl_error(GL_INVALID_ENUM); return; }
     } else {
         fb_t *f = fb_of(fb);

@@ -1002,12 +1002,15 @@ static int test_framebuffer_srgb(void) {
     const float color[4] = {0.25f, 0.5f, 0.75f, 0.5f};
     const float blend[4] = {0.375f, 0.375f, 0.375f, 0.5f};
     int checks = 0;
-    for (int kind = 0; kind < 6; kind++) {
+    for (int kind = 0; kind < 7; kind++) {
         int srgb = kind != 1 && kind != 3, rb = kind == 2 || kind == 3;
         GLenum fmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
-        GLuint tex = 0, renderbuffer = 0, fb;
-        h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
-        if (rb) {
+        GLuint tex = 0, renderbuffer = 0, fb = 0;
+        if (kind != 6) h_glGenFramebuffers(1, &fb);
+        h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        if (!fb) {
+            assert(h_eglCreateWindowSurface(NULL, NULL, NULL, NULL));
+        } else if (rb) {
             h_glGenRenderbuffers(1, &renderbuffer); h_glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
             h_glRenderbufferStorage(GL_RENDERBUFFER, fmt, 2, 1);
             h_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, renderbuffer);
@@ -1062,8 +1065,14 @@ static int test_framebuffer_srgb(void) {
             if (srgb_pixel(0, color, 0, rb ? "replacement renderbuffer storage" : "replacement texture storage")) return 1;
             checks++;
         }
-        h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
-        if (rb) h_glDeleteRenderbuffers(1, &renderbuffer); else h_glDeleteTextures(1, &tex);
+        if (fb) {
+            h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
+            if (rb) h_glDeleteRenderbuffers(1, &renderbuffer); else h_glDeleteTextures(1, &tex);
+        } else {
+            GLint encoding = 0;
+            h_glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK, 0x8210 /* COLOR_ENCODING */, &encoding);
+            assert(encoding == 0x8c40 /* SRGB */);
+        }
     }
     // Write sRGB bytes through the linear render view, then sample the same texture.
     GLuint sample[2], sample_fb; h_glGenTextures(2, sample);

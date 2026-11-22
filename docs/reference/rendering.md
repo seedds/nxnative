@@ -2647,10 +2647,11 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 ### GL framebuffer sRGB conversion
 
-- **Symptom:** `GL_FRAMEBUFFER_SRGB` produces a red warning, and switching it off still stores sRGB-encoded colours in an sRGB attachment. Blending also linearizes the destination when conversion is disabled.
-- **Cause:** the enable was recorded but never used. Metal always converted writes and destination blend reads through the attachment's sRGB pixel format.
-- **Fix:** draws and clears use a cached linear view of the same attachment storage while conversion is off, and the original sRGB image while it is on. Changing the enable finishes deferred clears and the active pass before changing formats. New storage invalidates the cached view. Texture sampling keeps its own sRGB decoding, and linear attachments and alpha are unaffected.
-- **Found on:** [Tomb Raider I–III Remastered report #2416](https://github.com/seedds/nxnative/issues/2416). The game's startup crash came from [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations).
+- **Symptom:** an sRGB framebuffer object still converts colour writes and blend reads with `GL_FRAMEBUFFER_SRGB` off, or the game's window stays dark with it on. In Tomb Raider's Remastered opening cave, nearly the entire image is black.
+- **Cause:** Metal applies sRGB conversion through the render attachment's pixel format. The framebuffer object always drew through its original sRGB format, and the window always drew through its raw RGBA8 format. Tomb Raider enables conversion for an ordinary RGBA8 window with no EGL surface attributes.
+- **Fix:** framebuffer objects with sRGB attachments use a linear view while conversion is off. The window uses an sRGB view while conversion is on and presents the stored bytes through its raw view. Changing the enable finishes deferred clears and the active pass before changing formats. New storage invalidates the cached views. Texture sampling keeps its own sRGB decoding, and alpha stays linear.
+- **Check:** `make -C dm/gfx/tests GAME=0100217023F6C000 gl-imports` reads pixels from framebuffer objects and the default window with conversion off and on, covering deferred and partial clears, draws, and destination blending.
+- **Found on:** [Tomb Raider I–III Remastered report #2416](https://github.com/seedds/nxnative/issues/2416), with the opening cave checked in Classic and Remastered modes. The game's startup crash came from [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations).
 
 ### GL draws and framebuffers
 

@@ -14,6 +14,8 @@ void nvn_present_config(int hz, int display_mode);
 #include <unistd.h>
 #include <sys/wait.h>
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
+static _Atomic uint64_t g_test_focus_in;
+uint64_t dm_focus_in_since(void) { return atomic_load(&g_test_focus_in); }   // overrides nvn_mtl.m's weak stub for fstep_tick settle-alignment tests
 
 static int g_fail, g_n;
 #define EXPECT(name, want, got) do { long long w_ = (long long)(want), g_ = (long long)(got); g_n++;                 \
@@ -401,6 +403,42 @@ int main(void) {
       nvn_present_config(-1,0);setenv("DM_PRESENT_INTERVAL","display",1);setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
       EXPECT("the cap asked for before the window's first interval: display mode from the environment",30,fps_present_cap());
       unsetenv("DM_PRESENT_INTERVAL");unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
+    }
+    // Frame step settle alignment in fstep_tick: startup focus/window events do not count as stalls, a pause between AcquireTexture and Present lands on the frame whose
+    // [prev, st] span actually crosses the pause (paying back 0 vsyncs), and back-to-back window events across Acquire/Present each land on their own frame
+    {
+      win_t w = {.interval = 1}; _Alignas(8) uint8_t state[64] = {0}; float cap = 60; memcpy(state, &cap, 4);
+      dm_fps_state = state; g_fs = (nvn_fstep){0}; g_fg = (nvn_fgpu){0}; atomic_store(&g_fs_k, 0);
+      const uint64_t vs = 16666667ull; uint64_t t = 1000000000ull;
+      // Startup events before frame 1's acquire are absorbed without triggering a stall
+      atomic_store(&g_test_focus_in, t - 5000000ull); dm_fstep_settle();
+      g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 1; fstep_tick(&w, 60);
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 2; fstep_tick(&w, 60);
+      EXPECT("fstep settle: startup events cause no stall", 0, g_fs.stalls);
+      // Pause between Acquire 3 (t + vs) and Present 3: focus returns before Present 3, while Frame 3's [prev, st] is only 1 vsync
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      atomic_store(&g_test_focus_in, t + 2000000000ull);   // focus returns after 2 s pause, before Present 3 calls fstep_tick
+      w.presents = 3; fstep_tick(&w, 60);
+      EXPECT("fstep settle: mid-frame pause not consumed on prior frame", 0, g_fs.stalls);
+      // Acquire 4 happens after the 2 s pause: Frame 4 spans the pause and drops 100% of its debt
+      t += 2000000000ull + vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 4; fstep_tick(&w, 60);
+      EXPECT("fstep settle: pause frame gets settle (stalls=1)", 1, g_fs.stalls);
+      EXPECT("fstep settle: pause frame pays nothing back", 0, g_fs.paid);
+      EXPECT("fstep settle: pause debt dropped (debt < 1)", 1, g_fs.debt < 1.0 && g_fs.dropped >= 119.0);
+      // Window event before Acquire 5 AND a second event between Acquire 5 and Present 5: both land on their own frames
+      dm_fstep_settle();
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      dm_fstep_settle();
+      w.presents = 5; fstep_tick(&w, 60);
+      EXPECT("fstep settle: event before acquire lands on frame 5", 2, g_fs.stalls);
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 6; fstep_tick(&w, 60);
+      EXPECT("fstep settle: event after acquire lands on frame 6", 3, g_fs.stalls);
+      dm_fps_state = NULL; g_fs = (nvn_fstep){0}; g_fg = (nvn_fgpu){0}; atomic_store(&g_fs_k, 0);
+      atomic_store(&g_test_focus_in, 0); g_fs_start = g_fs_wait = 0;
     }
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names

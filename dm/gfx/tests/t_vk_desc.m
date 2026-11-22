@@ -182,6 +182,44 @@ int main(void) {
         h_vkDestroyRenderPass(dev, rp, NULL);
     }
     CHECK(!wdss, "a destroyed pipeline releases its dynamic depth-stencil state");
+    // Pipeline depth bounds test (pipe_make, vkCmdSetDepthBounds, nvn_dbnd.h): static bounds resolved with the pipeline;
+    // with VK_DYNAMIC_STATE_DEPTH_BOUNDS Vulkan ignores the static bounds and pre_draw resolves the dynamic command's bounds.
+    @autoreleasepool {
+        NSError *error = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 v(uint i [[vertex_id]]) { return float4(float(i & 1), float(i >> 1), 0.5, 1); }\n" options:nil error:&error];
+        CHECK(lib != nil, "test vertex shader compiles");
+        shinfo vsi = {.key = "t_vk_dbnd"}; struct VkShaderModule_T vm = {.si = &vsi, .fn = [lib newFunctionWithName:@"v"]}; strcpy(vm.key, "t_vk_dbnd");
+        VkAttachmentDescription att = {.format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkAttachmentReference dref = {0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription sp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .pDepthStencilAttachment = &dref};
+        VkRenderPassCreateInfo rci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &att, .subpassCount = 1, .pSubpasses = &sp};
+        VkRenderPass rp; CHECK(h_vkCreateRenderPass(dev, &rci, NULL, &rp) == VK_SUCCESS, "depth-only render pass created");
+        VkPipelineShaderStageCreateInfo st = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = &vm, .pName = "main"};
+        VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_DEPTH_BOUNDS, VK_DYNAMIC_STATE_SCISSOR};
+        for (int dynamic = 0; dynamic < 2; dynamic++) {
+            VkPipelineDepthStencilStateCreateInfo dsi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = 1, .depthWriteEnable = 1,
+                                                         .depthCompareOp = VK_COMPARE_OP_LESS, .depthBoundsTestEnable = 1, .minDepthBounds = dynamic ? 0 : .25f, .maxDepthBounds = dynamic ? 0 : .75f};
+            VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = dynamic ? 3 : 1, .pDynamicStates = dyn};
+            VkGraphicsPipelineCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 1, .pStages = &st, .pDepthStencilState = &dsi,
+                                                .pDynamicState = &dy, .renderPass = rp};
+            VkPipeline p = pipe_make(&pci);
+            CHECK(p->pso != nil, "depth-only pipeline built");
+            if (!dynamic) CHECK(p->db_en && !p->dyn_db && p->dbk == DBND_TEST && p->db[0] == .25f && p->db[1] == .75f, "static depth bounds: the pipeline tests them");
+            else CHECK(p->db_en && p->dyn_db && p->dbk == DBND_OFF && p->db[0] == 0 && p->db[1] == 1, "dynamic depth bounds: static (0, 0) ignored, resolved at draw");
+            h_vkDestroyPipeline(dev, p, NULL);
+        }
+        VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        VkCommandPool cp; CHECK(h_vkCreateCommandPool(dev, &cpci, NULL, &cp) == VK_SUCCESS, "command pool created");
+        VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cp, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+        VkCommandBuffer cb; CHECK(h_vkAllocateCommandBuffers(dev, &cbai, &cb) == VK_SUCCESS, "command buffer allocated");
+        VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        CHECK(h_vkBeginCommandBuffer(cb, &bi) == VK_SUCCESS, "command buffer begun");
+        h_vkCmdSetDepthBounds(cb, .2f, .8f);
+        const chdr *hdr = (const chdr *)cb->buf; const c_dyn *cd = (const c_dyn *)(hdr + 1);
+        CHECK(cb->n >= sizeof *hdr + sizeof *cd && hdr->op == C_DYN && cd->what == 2 && cd->v[0] == .2f && cd->v[1] == .8f, "vkCmdSetDepthBounds records dynamic bounds");
+        h_vkDestroyCommandPool(dev, cp, NULL);
+        h_vkDestroyRenderPass(dev, rp, NULL);
+    }
     printf("Vulkan descriptors: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

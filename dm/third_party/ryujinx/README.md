@@ -22,5 +22,7 @@ Three projects from Ryujinx 1.3.2: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` a
 
 - `Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs` and `Instructions/InstEmitMove.cs` (`EmitSReg`): system register 0x84 (`SReg.VariableRate`, the fragment's size in pixels, X in bits 8..15 and Y in bits 16..23) reads 1 x 1, as the host shades every pixel. It read 0 as an unknown register, and Nintendo Switch Sports Resort's sea divided by the area: NaN, a black sea
 
+- `Ryujinx.Graphics.Shader/IGpuAccessor.cs` (`QueryAmpereStageInputWords`), `Instructions/InstEmitAmpereMem.cs` (`AIsberd`), `Instructions/InstEmitMemory.cs` (`EmitLoad`) and `Translation/ResourceManager.cs` (`GetStageInputMemoryId`): when the job specifies `stage_input_words`, a mesh shader's stage input (ISBERD modes 0x30 / 0x34 / 0x38) is a shared memory of its own, `dm_stage_in`, which `dm/gfx/tools/dmsh_meshstage.py` backs with the device buffer its task stored the payload in. Metal holds an object payload to 16 KB; Nintendo Switch Sports Resort's sea task shaders hand theirs 21-28 KB
+
 The shader translation tool in `dm/gfx/tools/dmsh_xlate` references them to translate the original Switch shaders to SPIR-V.
 License: MIT, see `LICENSE.txt`. Upstream: <https://github.com/Ryubing>.

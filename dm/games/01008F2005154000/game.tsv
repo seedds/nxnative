@@ -39,3 +39,8 @@ shader_note	South Park: The Fractured But Whole shaders
 # the game's NVN device sets near depth to zero; its handheld controller uses the full layout
 depth_mode	zero
 pad_layout	full
+
+# ---- Frame rate ----
+# Snowdrop's interval 2 limits presents to 30 fps. The opening plays correctly with display pacing at 60 fps.
+present_interval	display
+fps_target	60

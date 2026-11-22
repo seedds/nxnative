@@ -740,9 +740,14 @@ def raw_noinline(msl, stage='cs'):
 
 # Work around SIGBUS in Apple's mesh backend at the macOS 26.6 minimum (issue #2825).
 # Keep SPIRV-Cross helpers with subgroup inputs out of line. Ordinary inlining can still crash on these helpers.
+# SPIRV-Cross hands those inputs to helpers by reference (thread uint& gl_SubgroupInvocationID). Once out of line, Apple's backend (-O1 and up, 26.6 and 27.0 minimums)
+# reads gl_SubgroupInvocationID through that reference as one value for the whole SIMD group when one noinline helper passes it on to another: Ocarina of Time's
+# scan helpers then gave every lane the same exclusive prefix sum, its mesh shaders wrote out of their groups and the GPU hung or faulted after loading a save.
+# Pass them by value: they are SPIR-V Input builtins, never written, so a copy has the same meaning.
 MESH_SUBGROUP_HELPER = re.compile(r'(?m)^static inline __attribute__\(\(always_inline\)\)(?=\n\w+ \w+\([^\n]*\bgl_Subgroup\w*\b)')
+MESH_SUBGROUP_REF = re.compile(r'\bthread (\w+)& (gl_Subgroup\w+)\b')
 def mesh_subgroup_noinline(msl):
-    return MESH_SUBGROUP_HELPER.sub('static __attribute__((noinline))', msl)
+    return MESH_SUBGROUP_REF.sub(r'\1 \2', MESH_SUBGROUP_HELPER.sub('static __attribute__((noinline))', msl))
 
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 

@@ -652,32 +652,92 @@ static void reuse_tables_case(void) {
     pool_table_give(b, -1, 0); pool_table_give(c, -1, 0); pool_table_give(d, -1, 0);
     g_done = done0; g_fence = fence0;
 }
-// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
+// A cut with earlier work up to cut_busy_limit() stays a boundary for the game's timestamps and does not commit until the GPU has room (read from g_q4's shared event, not stale
+// commit feedback); a report after it takes that boundary's time. With the encode thread on, the segment is split on the submit thread and held on the encode thread until the GPU has room
 static void cut_boundary_case(void) {
     tex_t colour; target(&colour, 99810);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     CHECK(ts_on(), "segment mode has a timestamp heap");
-    // nothing of the cases before this one may still be on its way: a submission the encode thread kept open for the next one (merged submissions) reports back a moment later than
-    // one committed at once, and the case counts g_seg_inflight itself
-    rec_drain(); for (int i = 0; i < 20000 && atomic_load(&g_seg_inflight); i++) usleep(100);
+    rec_drain();
+    for (int i = 0; i < 20000 && (atomic_load(&g_seg_inflight) || atomic_load(&g_rx_fly)); i++) usleep(100);
+    for (int i = 0; i < 20000 && rx_inflight(); i++) usleep(100);
+    int lim = cut_busy_limit();
+    if (!rec_on() || !rx_merge_on()) {
+        state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+        R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
+        clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
+        id cb0 = g_cb;
+        mtl_sub_counter((uint64_t)rep.contents, 0x10);
+        if (lim > 0) {
+            atomic_fetch_add(&g_rx_busy_hold, lim);
+            g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+            CHECK(g_cb == cb0 && g_seg == 1, "at the busy limit: a boundary, no commit");
+            CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
+            clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+            mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+            atomic_fetch_sub(&g_rx_busy_hold, 1);   // now lim - 1 in flight: room for a commit
+            const char *fbm = getenv("DM_NVN_SUB_IDLE_FB");
+            int fb_only = fbm && !strcmp(fbm, "1");
+            if (!fb_only) atomic_fetch_add(&g_seg_inflight, 1);   // stale feedback must not block the shared-event check
+            g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+            if (!fb_only) atomic_fetch_sub(&g_seg_inflight, 1);
+            CHECK(g_cb != cb0 && g_seg == 2, "below the busy limit: a commit (shared event, not stale feedback)");
+            if (lim > 1) atomic_fetch_sub(&g_rx_busy_hold, lim - 1);
+        } else {
+            atomic_fetch_add(&g_rx_busy_hold, 1);
+            g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+            CHECK(g_cb != cb0 && g_seg == 1, "with DM_NVN_CUT_BUSY=0: a commit even while busy");
+            clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+            mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+            atomic_fetch_sub(&g_rx_busy_hold, 1);
+        }
+        clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
+        uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
+        CHECK(r0[1] && r1[1] > r0[1], "two reports across a boundary read two times");
+        return;
+    }
+    // Encode thread with submission merging: sub_cut splits the recorded CB and the encode thread holds it while rx_inflight() >= lim, flushing on RO_END once room opens
+    uint64_t cbs0 = g_rx_cbs;
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
     clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
-    id cb0 = g_cb;
     mtl_sub_counter((uint64_t)rep.contents, 0x10);
-    atomic_fetch_add(&g_seg_inflight, 1);
-    g_stat_draw += (uint64_t)cut_draws(); sub_cut();
-    CHECK(g_cb == cb0 && g_seg == 1, "with work running: a boundary, no commit");
-    CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
-    clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
-    mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
-    atomic_fetch_sub(&g_seg_inflight, 1);
-    g_stat_draw += (uint64_t)cut_draws(); sub_cut();
-    CHECK(g_cb != cb0 && g_seg == 2, "with nothing running: a commit");
-    clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
+    if (lim > 0) {
+        __block int held_after_cut = -1, held_after_end = -1;
+        __block uint64_t cbs_after_cut = ~0ull, cbs_after_end = ~0ull;
+        dispatch_semaphore_t gate = dispatch_semaphore_create(0);
+        atomic_fetch_add(&g_rx_busy_hold, lim);
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); });
+        g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; held_after_cut = atomic_load(&g_rx_held); cbs_after_cut = g_rx_cbs; atomic_fetch_sub(&g_rx_busy_hold, 1); });
+        clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; held_after_end = atomic_load(&g_rx_held); cbs_after_end = g_rx_cbs; });
+        mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+        clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+        uint64_t f = mtl_sub_commit();
+        dispatch_semaphore_signal(gate);
+        CHECK(mtl_wait(f, 5000000000ull), "the encode-thread segments completed");
+        rec_drain();
+        if (lim > 1) atomic_fetch_sub(&g_rx_busy_hold, lim - 1);
+        CHECK(held_after_cut == 1 && cbs_after_cut == cbs0, "encode thread: segment at busy limit is held, not committed");
+        CHECK(cbs_after_end == cbs0 + 1 && held_after_end == 0, "encode thread: held segment flushes at the next RO_END once GPU has room");
+    } else {
+        __block uint64_t cbs_after_cut = ~0ull;
+        atomic_fetch_add(&g_rx_busy_hold, 1);
+        g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; cbs_after_cut = g_rx_cbs; });
+        clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+        mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+        clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+        uint64_t f = mtl_sub_commit();
+        CHECK(mtl_wait(f, 5000000000ull), "the encode-thread segments completed");
+        rec_drain();
+        atomic_fetch_sub(&g_rx_busy_hold, 1);
+        CHECK(cbs_after_cut == cbs0 + 1, "encode thread with DM_NVN_CUT_BUSY=0: segment commits immediately");
+    }
     uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
-    CHECK(r0[1] && r1[1] > r0[1], "two reports in one command buffer read two times");
+    CHECK(r0[1] && r1[1] > r0[1], "encode thread: two reports across a segment boundary read two times");
 }
 
 // With Metal encoding on its own thread, submissions that reach it while the GPU still runs an earlier command buffer are held and go to the queue in one commit call (nvn_rec.h,
@@ -689,10 +749,11 @@ static void merge_case(void) {
     if (!rec_on()) return;
     tex_t colour; target(&colour, 99820);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
+    int hold_lim = (int)rx_hold_limit();
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
     uint64_t cbs0 = g_rx_cbs, merged0 = g_rx_merged;
     dispatch_semaphore_t gate = dispatch_semaphore_create(0);
-    atomic_fetch_add(&g_rx_busy_hold, 1);
+    atomic_fetch_add(&g_rx_busy_hold, hold_lim);
     rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
     uint64_t f[3];
     for (int k = 0; k < 3; k++) {
@@ -706,7 +767,7 @@ static void merge_case(void) {
     // (polled, not waited for: a waiter that wakes on the queue's signal completes the records itself, with its own clock for every report: post_early)
     for (int i = 0; i < 50000 && g_done < f[2]; i++) usleep(100);
     CHECK(g_done >= f[2], "three submissions behind running work complete");
-    atomic_fetch_sub(&g_rx_busy_hold, 1);
+    atomic_fetch_sub(&g_rx_busy_hold, hold_lim);
     rec_drain();
     CHECK(g_rx_merged - merged0 == 3 && g_rx_cbs - cbs0 == 1, "they went to the queue in one commit");
     CHECK(atomic_load(&g_sub_cmt) >= f[2], "their commit notes are passed");
@@ -716,30 +777,47 @@ static void merge_case(void) {
     // which holds the pass, after it (an upload batch flushed in the middle of a submission is committed before the draws it serves, wherever in the submission they were recorded)
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
     cbs0 = g_rx_cbs; merged0 = g_rx_merged; __block uint64_t held_at_block = ~0ull; __block int pend_at_block = -1, nb_at_block = -1;
-    atomic_fetch_add(&g_rx_busy_hold, 1);
+    atomic_fetch_add(&g_rx_busy_hold, hold_lim);
     rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 0, 1)); rp_end(); uint64_t fa = mtl_sub_commit();
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 1, 1, 1)); rp_end();
     rec_queue_block(^{ held_at_block = g_rx_cbs; pend_at_block = g_rx_npend; nb_at_block = g_rx_last_nb; }); rec_publish();
     clear(MTLClearColorMake(1, 0, 1, 1)); rp_end(); uint64_t fb2 = mtl_sub_commit();
     dispatch_semaphore_signal(gate);
-    atomic_fetch_sub(&g_rx_busy_hold, 1);
     CHECK(mtl_wait(fb2, 5000000000ull), "the submissions around a queue operation complete");
     rec_drain();
+    atomic_fetch_sub(&g_rx_busy_hold, hold_lim);
     CHECK(pend_at_block == 0 && held_at_block == cbs0 + 1 && g_rx_merged - merged0 >= 1 && fa < fb2, "the held submission was committed before the queue operation ran");
     CHECK(nb_at_block == 1, "and alone: the next submission's pass recorded before the queue operation was not in that commit");
     // the GPU has run out of work but the commit feedback has not reported it yet (its count held up here): the next submission is not held, as the GPU is read through the
     // encode thread's event (DM_NVN_SUB_IDLE_FB=1 reads that count and holds it)
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
-    for (int i = 0; i < 20000 && g_rx_ev && g_rx_ev.signaledValue < g_rx_seq; i++) usleep(100);
+    for (int i = 0; i < 20000 && rx_inflight(); i++) usleep(100);
     cbs0 = g_rx_cbs; merged0 = g_rx_merged;
-    atomic_fetch_add(&g_rx_fly, 1);
+    atomic_fetch_add(&g_rx_fly, hold_lim);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 0, 1, 1)); rp_end(); uint64_t fi = mtl_sub_commit();
     for (int i = 0; i < 50000 && g_done < fi; i++) usleep(100);   // (polled: a drain would send it at once either way)
     CHECK(g_done >= fi, "a submission after the GPU's work ended completes");
-    atomic_fetch_sub(&g_rx_fly, 1);
+    atomic_fetch_sub(&g_rx_fly, hold_lim);
     const char *fbm = getenv("DM_NVN_SUB_IDLE_FB");
     if (!(fbm && !strcmp(fbm, "1"))) CHECK(g_rx_merged == merged0 && g_rx_cbs == cbs0 + 1, "the GPU is idle before its feedback reports it: the submission went at once, not held");
+    // A blocking mtl_wait on a held final submission wakes the encode thread's idle wait (rec_wake_for_fence) instead of sitting 450 us while the waiter blocks,
+    // while still letting queued submissions before it merge into one commit
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    for (int i = 0; i < 20000 && rx_inflight(); i++) usleep(100);
+    cbs0 = g_rx_cbs; merged0 = g_rx_merged;
+    atomic_fetch_add(&g_rx_busy_hold, hold_lim);
+    rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();
+    mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 1, 1)); rp_end();
+    uint64_t fw = mtl_sub_commit();
+    rec_wake_for_fence(fw);
+    dispatch_semaphore_signal(gate);
+    CHECK(mtl_wait(fw, 5000000000ull), "blocking mtl_wait completes merged final submission behind busy GPU");
+    rec_drain();
+    atomic_fetch_sub(&g_rx_busy_hold, hold_lim);
+    CHECK(g_rx_merged - merged0 == 2 && g_rx_cbs == cbs0 + 1 && atomic_load(&g_rx_need_fence) >= fw, "blocking waiter keeps queued submissions merged in one commit and wakes flush");
 }
 
 // Output-mapping-only fixture (no rewritable sample): main0 writes magenta to color(0); main0_f remaps

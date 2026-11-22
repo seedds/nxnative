@@ -57,6 +57,10 @@ To the race:
 
 4. `CRASH pc=0` from `main+0x19e77a0` when the cup's opening movie starts: `nn::syncpt::sdk::TryWaitSyncPointEvent` went through the SDK's null table, as `CreateSyncPointEvent` did on Donkey Kong Bananza; the host answers it from the event's SystemEvent (`hle_codec_video.c`). The movie player is in `main` and takes SDK 19's decoder forms ([SDK 19's decoder forms](../../../docs/reference/movies.md#sdk-19s-decoder-forms)): VP9 at 2560x1440.
 
+After a race:
+
+5. `game called nn::diag abort` with Result 0x1c286f (nn::codec 3604) on `VideoDecoderThread`, about 1 time in 5 before the post-race picture: registered decoder buffers were pre-signalled at generation 0 instead of waiting for a decoded picture ([Registered decoder buffers signalled before a picture was decoded](../../../docs/reference/movies.md#registered-decoder-buffers-signalled-before-a-picture-was-decoded)).
+
 ## Frame rate
 
 The host handles [cube face splitting and pass merging](../../../docs/reference/rendering.md#a-draw-into-the-six-faces-of-a-cube-level-at-once-ran-short-of-threads) and [guest compute dispatch ordering](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other). The shader chain [compares bounded uniform reads by row where it can prove the component is in range](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size). The performance measurements are recorded with those mechanisms.
@@ -130,6 +134,11 @@ The 1.8.0 dump contained descriptor-shaped payload outside the BAHS binary recor
 
 Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both main `79f28b06` and the updated parser on chain `03a3ac831bfb` used the corrected split. All 11,601 shader manifests matched, all 9,591 pipeline interfaces passed, and both revisions completed the 200-second Grand Prix route past its 6,000-frame target.
 
+**Earlier M4 Max run, reported 2026-11-09.** On a 64 GB M4 Max, a derived 1.8.0 build packed with `--platform mac-app --gpu none` reached its first race about 195 s into a 380 s headless route. GPU time in the race was 8.1 ms p50 and 9.7 ms p90. With no bundled pipeline archive, 108 frames waited on first-use compiles, totaling 8.3 s. [PR #2064](https://github.com/seedds/nxnative/pull/2064)
+
+- **Character and kart shadows.** A dark, stair-stepped box appeared under the characters and karts on the title screen. The fix restored generated levels 1 and 2 of the mask array in every tested layer, and the boxes disappeared. [Image views of the type a shader declares](../../../docs/reference/rendering.md#image-views-of-the-type-a-shader-declares)
+- **Night glows.** Headlight and lamp glows shone through buildings when depth pyramid `3738806f0474308c` used the wrong fragment depth register. The reporter verified the corrected occlusion in a night race on Mac with chain `cce725ceabda`. [A pixel shader's depth after a partly written target](../../../docs/reference/shaders.md#a-pixel-shaders-depth-after-a-partly-written-target)
+
 ## Open
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).
@@ -137,6 +146,7 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
+- **iPhone freeze on 1.8.0:** the app froze twice during scene loads on the reported build, and one freeze ended in a phone restart. See [A residency commit stays blocked in the iPhone kernel](../../../docs/reference/rendering.md#a-residency-commit-stays-blocked-in-the-iphone-kernel).
 
 ## Audio route regression check
 
@@ -154,6 +164,7 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 
 ## Found on this game
 
+- [A residency commit stays blocked in the iPhone kernel](../../../docs/reference/rendering.md#a-residency-commit-stays-blocked-in-the-iphone-kernel) (open).
 - [A timed archive write stalls active presentation](../../../docs/reference/rendering.md#a-timed-archive-write-stalls-active-presentation).
 - [An unregistered NUP build loses its numeric version label](../../../docs/reference/packing.md#an-unregistered-nup-build-loses-its-numeric-version-label).
 - [CPU deswizzle copies use slice and row offsets](../../../docs/reference/nvn-objects.md#cpu-deswizzle-copies-use-slice-and-row-offsets): three sparse terrain textures decoded 12,392 tiles on the replay thread before the grid. With a warm pipeline archive on an M3 Max, the matching load frame took 432–468 ms on `087faba9` and 281–283 ms with the shared row copier (two launches each, reversed order, handheld at 60 fps). It compiled no new pipelines in any of the four launches. Pipeline first-use and other loading stalls remain open.
@@ -192,6 +203,7 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 - [Uniform references past the first kilobyte](../../../docs/reference/shaders.md#uniform-references-past-the-first-kilobyte)
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry) (resolved, [issue #1592](https://github.com/seedds/nxnative/issues/1592)): `cs_lib.bin` 74, `797e77c2ec4341c5` at `agl_common.sharcb#BAHS@0x5c778`, was no shader. Dropping it and its fact reduced the index of the next 69 `cs_lib.bin` rows (`agl_common`, `agl_ndsr`, `agl_technique_pfx`, gsys `common`) by one, as in the reporter's base-game split. The full [v0 split](#shaders) confirms the removal. [1.8.0](#180) also has false entries outside control sections.
 - [SDK 19's decoder forms](../../../docs/reference/movies.md#sdk-19s-decoder-forms)
+- [Registered decoder buffers signalled before a picture was decoded](../../../docs/reference/movies.md#registered-decoder-buffers-signalled-before-a-picture-was-decoded) (post-race 3604 abort in 1.0.0, [PR #3173](https://github.com/seedds/nxnative/pull/3173))
 - [A version without one of the profile's modules stops the host at boot](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)
 - [The controller applet waits for players](../../../docs/reference/services.md#the-controller-applet-waits-for-players) (1.8.0, pull request #1596; GitHub issue #1640: the player screen closed when the second controller had not pressed yet)
 - 1.8.0, by pull request #1116: [The camera through the graphics system](../../../docs/reference/services.md#the-camera-through-the-graphics-system), [Layer HDR metadata](../../../docs/reference/services.md#layer-hdr-metadata), the SDK 21 forms in [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [GameChat at boot](../../../docs/reference/services.md#gamechat-at-boot)

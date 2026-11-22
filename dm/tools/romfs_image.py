@@ -117,6 +117,20 @@ def copy_file(path, out):
     return n
 
 
+def replace_file(image, key, data):
+    """Replace a file in a private copy of a RomFS image. Keep every other file at its original offset."""
+    _, _, name, length, kind, flags = image.entry(key)
+    if not kind or flags:
+        raise ValueError('RomFS replacement needs an intact file')
+    index = bytearray(image.index)
+    end = image.stat.st_size - len(index)
+    # Relocate the entry so the header/index identity also differs from the stock image.
+    ENT.pack_into(index, key * ENT.size, end, len(data), name, length, kind, flags)
+    with open(image.path, 'r+b') as out:
+        out.seek(end); out.write(data); out.write(index)
+        out.seek(0); out.write(HEAD.pack(MAGIC, end + len(data), len(index), image.count))
+
+
 def pack(src, dst, reuse=False):
     src, dst = os.fspath(src), os.fspath(dst)
     ents = entries(src)

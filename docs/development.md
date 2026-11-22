@@ -164,7 +164,7 @@ It also runs the CPU texture layout/deswizzle test (`dm/gfx/tex/tests/t_tex`)
 and the host's `tsan` and `memory-tsan` targets for audio and memory races.
 The texture format test (`t_fmt_mtl`) creates Metal textures and stays local.
 All five macOS jobs, including the sanitizer job, run with the toolchain the
-project supports: Xcode 27.1 on GitHub's `xcode-27` image, named by path in
+project supports: Xcode 27.2 on GitHub's `xcode-27` image, named by path in
 `DEVELOPER_DIR` so a new default Xcode on the image does not change CI. The
 build check first compares the image's Metal compiler with `dmsh_chain.lock`
 (`own_compilers.py --check-metal`), and `dm/tools/tests/test_ci_toolchain.py`
@@ -270,6 +270,7 @@ supplies, nightly and by hand (never on pull requests): the RomFS image reader
 (`romfs.py`), the control data (`nacp.py`), the NSO loader, the shader
 containers of `shader_split.py` (BNSH, BAHS, MSHD, SARC / Yaz0, GLSLC, SDF,
 [NXSD](reference/shaders.md#nxsd-single-stage-shader-containers),
+[NXVS / NXFS](reference/shaders.md#mediavision-wide-mvgl-archives-and-nxvs--nxfs--nxcs-shader-containers),
 ARH1 and the others `scan_blob` recognizes) and the Unreal paks and shader
 archives of `uepak.py`. Each harness, `dm/tools/fuzz/fuzz_<parser>.py`, builds
 its seeds in code and mutates them for 60 s; nothing comes from a game. A

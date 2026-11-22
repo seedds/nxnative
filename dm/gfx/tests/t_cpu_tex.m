@@ -16,6 +16,19 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 
+static int cpu_pool_live_has(const tex_t *t) {
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    const cpu_pool *cp = cpu_pool_get(t->pool, 0);
+    int r = cp && nvn_hm_get(&cp->live, &t->serial) != NULL;
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+    return r;
+}
+static int cpu_pool_present(const void *pool) {
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    int r = cpu_pool_get(pool, 0) != NULL;
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+    return r;
+}
 static void retired_classification(void) {
     uint8_t mem[2]; pool_t pools[2] = {{.mem=&mem[0]}, {.mem=&mem[1]}};
     tex_t a = {.serial=nvn_new_serial(), .pool=&pools[0], .mem=&mem[0]};
@@ -23,20 +36,20 @@ static void retired_classification(void) {
     mtl_tex_init(&a); mtl_tex_init(&b);
     mtl_tex_cpu_written(&a); mtl_tex_cpu_written(&b);
     mtl_tex_release(&a);
-    CHECK(mtl_cpu_tex_count() == 1 && !nvn_hm_get(&g_cpu_tex,&a.serial), "release removes live membership");
-    CHECK(tex_cpu_written(a.serial), "recorded snapshots retain CPU classification");
+    CHECK(mtl_cpu_tex_count() == 1 && !cpu_pool_live_has(&a), "release removes live membership");
+    CHECK(tex_cpu_written(&a), "recorded snapshots retain CPU classification");
     uint64_t gen = g_ser_gen; mtl_tex_cpu_written(&a);
     CHECK(mtl_cpu_tex_count() == 1 && g_ser_gen == gen, "late repeated marking cannot resurrect a released texture");
     mtl_alias_drop_pool(&pools[0]);
-    CHECK(!tex_cpu_written(a.serial) && tex_cpu_written(b.serial), "pool cleanup preserves the other pool's live membership");
+    CHECK(!tex_cpu_written(&a) && tex_cpu_written(&b), "pool cleanup preserves the other pool's live membership");
     // A poll may first discover CPU writes after another thread finalized the texture.
     tex_t late = {.serial=nvn_new_serial(), .pool=&pools[1], .mem=&mem[1]};
     mtl_tex_init(&late); mtl_tex_release(&late); gen = g_ser_gen; mtl_tex_cpu_written(&late);
-    CHECK(tex_cpu_written(late.serial) && mtl_cpu_tex_count() == 1 && g_ser_gen == gen+1, "first marking after release records only retired classification");
+    CHECK(tex_cpu_written(&late) && mtl_cpu_tex_count() == 1 && g_ser_gen == gen+1, "first marking after release records only retired classification");
     mtl_tex_release(&b); mtl_tex_release(&b);
-    CHECK(mtl_cpu_tex_count() == 0 && tex_cpu_written(b.serial), "repeated release keeps retired snapshots classified");
+    CHECK(mtl_cpu_tex_count() == 0 && tex_cpu_written(&b), "repeated release keeps retired snapshots classified");
     mtl_alias_drop_pool(&pools[1]);
-    CHECK(!tex_cpu_written(b.serial) && !tex_cpu_written(late.serial) && !g_cpu_tex_retired.n, "pool cleanup removes all retired classifications");
+    CHECK(!tex_cpu_written(&b) && !tex_cpu_written(&late) && !cpu_pool_present(&pools[0]) && !cpu_pool_present(&pools[1]), "pool cleanup removes all retired classifications");
 }
 static void descriptor_replacement(void) {
     tex_t a = {.serial=nvn_new_serial()}, b = {.serial=nvn_new_serial()};
@@ -62,7 +75,7 @@ static void finalized_upload(int write_after_record) {
     h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
     h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
     CHECK(h_nvnTextureInitialize(&tex, &tb), "texture without packaged layout initialized");
-    uint64_t serial = ((tex_t *)&tex)->serial;
+    tex_t snap = *(const tex_t *)&tex;
     uint8_t pixels[64]; for (int i=0;i<64;i++) pixels[i]=(uint8_t)(i+32);
     NVNcopyRegion region = {0,0,0,4,4,1};
     if (!write_after_record) h_nvnTextureWriteTexels(&tex, NULL, &region, pixels);
@@ -100,7 +113,7 @@ static void finalized_upload(int write_after_record) {
     CHECK(!memcmp(mem+131072, pixels, sizeof pixels), "replayed retired snapshot keeps its CPU content");
     mtl_reg_tex(1,NULL,NULL); mtl_reg_tex(2,NULL,NULL); h_nvnCommandBufferFinalize(&cmd);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
-    CHECK(!tex_cpu_written(serial), "pool finalization drops retired CPU classification");
+    CHECK(!tex_cpu_written(&snap), "pool finalization drops retired CPU classification");
     defer_drain(); munmap(mem,len);
 }
 // nvnMemoryPoolFinalize on a game thread while the submit thread walks the texture IDs (pool_gpu, holding g_rmu): the finalize dropped the pool's CPU-written classification before it
@@ -129,12 +142,12 @@ static void finalize_during_walk(void) {
     CHECK([tex_get(serial) isKindOfClass:[NvPkg class]], "its table entry is an NvPkg");
     pthread_t th; pthread_create(&th, NULL, finalize_pool, &pool);
     usleep(100000);   // the finalize runs as far as it can while the walk holds g_rmu
-    CHECK(tex_cpu_written(serial), "the pool's classification stays while a walk can still find its IDs live");
+    CHECK(tex_cpu_written((const tex_t *)&tex), "the pool's classification stays while a walk can still find its IDs live");
     id again = tex_mtl((const tex_t *)&tex);
     CHECK(again && ![again isKindOfClass:[NvPkg class]], "tex_mtl does not hand out the NvPkg during the finalize");
     os_unfair_lock_unlock(&g_rmu);
     pthread_join(th, NULL);
-    CHECK(!tex_cpu_written(serial) && g_treg[1].gone, "after the finalize the ID is gone and the classification dropped");
+    CHECK(!tex_cpu_written((const tex_t *)&tex) && g_treg[1].gone, "after the finalize the ID is gone and the classification dropped");
     os_unfair_lock_lock(&g_rmu); id after = tex_by_id(1); os_unfair_lock_unlock(&g_rmu);
     CHECK(![after isKindOfClass:[NvPkg class]], "the gone ID does not hand out the NvPkg either");
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "submission completed");
@@ -158,10 +171,10 @@ static void poll_asks_again(void) {
     dm_guest_write_prepare(t->mem, t->L.size); memset(t->mem, 0x40, t->L.size);
     mtl_tex_gpu_written(t);
     nvn_ft_poll();
-    CHECK(!tex_cpu_written(t->serial) && nvn_ft_tracked(t->serial), "a rewrite the GPU wrote over afterwards is left to the GPU, and the texture stays registered");
+    CHECK(!tex_cpu_written(t) && nvn_ft_tracked(t->serial), "a rewrite the GPU wrote over afterwards is left to the GPU, and the texture stays registered");
     dm_guest_write_prepare(t->mem, t->L.size); memset(t->mem, 0x80, t->L.size);
     nvn_ft_poll();
-    CHECK(tex_cpu_written(t->serial) && !nvn_ft_tracked(t->serial), "the CPU's next rewrite is uploaded");
+    CHECK(tex_cpu_written(t) && !nvn_ft_tracked(t->serial), "the CPU's next rewrite is uploaded");
     h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     defer_drain(); munmap(mem, len);
 }
@@ -189,20 +202,20 @@ static void poll_beside(void) {
     dm_guest_write_prepare(before, 0x100); memset(before, 0x5a, 0x100);
     dm_guest_write_prepare(after, 0x40); memset(after, 0x5a, 0x40);
     nvn_ft_poll();
-    CHECK(!tex_cpu_written(ta->serial) && nvn_ft_tracked(ta->serial), "a write beside it, in the pages it shares, does not make it CPU-written (poll)");
+    CHECK(!tex_cpu_written(ta) && nvn_ft_tracked(ta->serial), "a write beside it, in the pages it shares, does not make it CPU-written (poll)");
     dm_guest_write_prepare(after, 0x40); memset(after, 0x33, 0x40);   // again, after the restamp
     nvn_ft_poll();
-    CHECK(!tex_cpu_written(ta->serial) && nvn_ft_tracked(ta->serial), "nor a second write beside it");
+    CHECK(!tex_cpu_written(ta) && nvn_ft_tracked(ta->serial), "nor a second write beside it");
     dm_guest_write_prepare(ta->mem + ta->L.size - 4, 4); ta->mem[ta->L.size - 1] ^= 0xff;
     nvn_ft_poll();
-    CHECK(tex_cpu_written(ta->serial) && !nvn_ft_tracked(ta->serial), "a write of its own bytes in its last page is uploaded");
+    CHECK(tex_cpu_written(ta) && !nvn_ft_tracked(ta->serial), "a write of its own bytes in its last page is uploaded");
     // b at first use: a write beside it, then one into a page wholly inside it
     uint8_t *bb = tb_->mem - 0x80;
     dm_guest_write_prepare(bb, 0x80); memset(bb, 0x11, 0x80);
-    CHECK(!nvn_ft_written(tb_) && nvn_ft_tracked(tb_->serial) && !tex_cpu_written(tb_->serial), "a write beside it does not make it CPU-written at first use");
+    CHECK(!nvn_ft_written(tb_) && nvn_ft_tracked(tb_->serial) && !tex_cpu_written(tb_), "a write beside it does not make it CPU-written at first use");
     uint8_t *mid = (uint8_t *)(((uintptr_t)tb_->mem + 2 * pg) & ~(uintptr_t)(pg - 1));
     dm_guest_write_prepare(mid, 1); mid[0] = 1;
-    CHECK(nvn_ft_written(tb_) && tex_cpu_written(tb_->serial), "a write of a page wholly inside it does");
+    CHECK(nvn_ft_written(tb_) && tex_cpu_written(tb_), "a write of a page wholly inside it does");
     // c: COMPRESSIBLE (out of the first-use rule, as GAAC's targets), resolved as a GPU texture that can be rendered into: a write beside it does not make it CPU-written
     size_t coff = (boff + tb_->L.size + 2 * pg) & ~(pg - 1); coff += 0x200;
     NVNtexture c = {0};
@@ -214,7 +227,7 @@ static void poll_beside(void) {
     uint8_t *cb = tc->mem - 0x80;
     dm_guest_write_prepare(cb, 0x80); memset(cb, 0x22, 0x80);
     nvn_ft_poll();
-    CHECK(!tex_cpu_written(tc->serial) && mtl_tex_gpu_owned(tc->serial), "a write beside a GPU texture leaves it the GPU's, not CPU-written");
+    CHECK(!tex_cpu_written(tc) && mtl_tex_gpu_owned(tc->serial), "a write beside a GPU texture leaves it the GPU's, not CPU-written");
     h_nvnTextureFinalize(&a); h_nvnTextureFinalize(&b); h_nvnTextureFinalize(&c); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     defer_drain(); munmap(mem, len);
 }
@@ -369,26 +382,56 @@ static void flushed_buffer_upload(int flush_kind) {
     CHECK(!nvn_flushed(mem + buffer_off + flush_off, 1), "pool finalization retires buffer flush ranges");
     defer_drain(); munmap(mem,len);
 }
+// Per-pool CPU-written tables: a pool that lives on collects retired classifications, and a Finalize of another pool drops only its own table without walking other pools' entries
+// (walking all three global tables under g_cpu_tex_mu grew Ocarina of Time pause-menu save loads from 80 to 640 ms over 200 loads)
+static void pool_index(void) {
+    enum { M = 200000, DROPS = 1000 };
+    static uint8_t mem[3]; pool_t pools[3] = {{.mem=&mem[0]}, {.mem=&mem[1]}, {.mem=&mem[2]}};
+    tex_t first = {0}, live0 = {.serial=nvn_new_serial(), .pool=&pools[0], .mem=&mem[0], .L={.size=4}};
+    mtl_tex_init(&live0); mtl_tex_cpu_written(&live0); cpu_unc_take(&live0);
+    for (int i = 0; i < M; i++) { tex_t a = {.serial=nvn_new_serial(), .pool=&pools[0], .mem=&mem[0]}; if (!i) first = a; mtl_tex_cpu_written(&a); }
+    tex_t b = {.serial=nvn_new_serial(), .pool=&pools[1], .mem=&mem[1]}; mtl_tex_cpu_written(&b);
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    cpu_pool *cp0 = cpu_pool_get(&pools[0], 0), *cp1 = cpu_pool_get(&pools[1], 0);
+    uint32_t ret0 = cp0 ? cp0->retired.n : 0, ret1 = cp1 ? cp1->retired.n : 0, unc0 = cp0 ? cp0->unc.n : 0;
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+    CHECK(ret0 == M && ret1 == 1 && unc0 == 1 && mtl_cpu_tex_count() == 1 && tex_cpu_written(&first) && tex_cpu_written(&b), "one pool collects retired classifications beside live and unc entries");
+    tex_t dropped = {0};
+    uint64_t t0 = bp_now();
+    for (int i = 0; i < DROPS; i++) { tex_t c = {.serial=nvn_new_serial(), .pool=&pools[2], .mem=&mem[2]}; dropped = c; mtl_tex_cpu_written(&c); mtl_alias_drop_pool(&pools[2]); }
+    double ms = (bp_now() - t0) / 1e6;
+    printf("%d Finalizes of a small pool beside %d entries of another: %.1f ms\n", DROPS, M, ms);
+    CHECK(!tex_cpu_written(&dropped) && !cpu_pool_present(&pools[2]) && tex_cpu_written(&first) && tex_cpu_written(&b), "a Finalize takes out its own pool's entries and no other pool's");
+    CHECK(ms < 40, "the Finalizes do not walk the other pool's entries");
+    mtl_alias_drop_pool(&pools[0]);
+    CHECK(!tex_cpu_written(&first) && !tex_cpu_written(&live0) && !cpu_pool_present(&pools[0]) && mtl_cpu_tex_count() == 0 && tex_cpu_written(&b), "the big pool's Finalize frees its live, retired and unc tables while the other pool's stay");
+    mtl_tex_release(&live0);
+    mtl_alias_drop_pool(&pools[1]);
+    CHECK(!tex_cpu_written(&b) && !cpu_pool_present(&pools[1]), "the last pool's Finalize removes its table");
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
     for (int i = 0; i < N; i++) { t[i].serial = BASE + i; t[i].d.width = t[i].d.height = 4; t[i].d.depth = 1; t[i].d.format = 0x25; mtl_tex_init(&t[i]); }
-    CHECK(mtl_cpu_tex_count() == 0 && !tex_cpu_written(BASE), "empty at start");
+    tex_t q = {0};
+    q.serial = BASE;
+    CHECK(mtl_cpu_tex_count() == 0 && !tex_cpu_written(&q), "empty at start");
     for (int i = 0; i < N; i++) mtl_tex_cpu_written(&t[i]);
     mtl_tex_cpu_written(&t[7]);   // again: no duplicate
     CHECK(mtl_cpu_tex_count() == N, "every CPU-written texture counted once");
-    int in = 0; for (int i = 0; i < N; i++) in += tex_cpu_written(BASE + i);
+    int in = 0; for (int i = 0; i < N; i++) in += tex_cpu_written(&t[i]);
     CHECK(in == N, "every one found");
-    CHECK(!tex_cpu_written(BASE - 1) && !tex_cpu_written(BASE + N) && !tex_cpu_written(0), "serials outside the set are not in it");
+    tex_t qlo = {.serial = BASE - 1}, qhi = {.serial = BASE + N}, qz = {.serial = 0};
+    CHECK(!tex_cpu_written(&qlo) && !tex_cpu_written(&qhi) && !tex_cpu_written(&qz), "serials outside the set are not in it");
     // Misses: a million lookups of serials past the set, as every resolve of a GPU-only texture asks. With the old set's probing this took seconds; with a mixed hash, far less
     uint64_t t0 = bp_now(); int hits = 0;
-    for (int i = 0; i < 1000000; i++) hits += tex_cpu_written(BASE + N + 1 + (uint64_t)i);
+    for (int i = 0; i < 1000000; i++) { q.serial = BASE + N + 1 + (uint64_t)i; hits += tex_cpu_written(&q); }
     double ms = (bp_now() - t0) / 1e6;
     printf("1,000,000 lookups of serials not in a set of %d consecutive ones: %.1f ms\n", N, ms);
     CHECK(hits == 0, "no miss is reported as a hit");
     CHECK(ms < 1000, "a million misses take well under a second");
     mtl_tex_release(&t[100]); mtl_tex_release(&t[101]);
-    CHECK(!tex_cpu_written(BASE + 100) && !tex_cpu_written(BASE + 101) && tex_cpu_written(BASE + 102), "a released texture leaves the set, the others stay");
+    CHECK(!tex_cpu_written(&t[100]) && !tex_cpu_written(&t[101]) && tex_cpu_written(&t[102]), "a released texture leaves the set, the others stay");
     CHECK(mtl_cpu_tex_count() == N - 2, "the count follows the releases");
     tex_t z = {0}; mtl_tex_cpu_written(&z);
     CHECK(mtl_cpu_tex_count() == N - 2, "a texture with no serial is not recorded");
@@ -397,12 +440,12 @@ int main(int argc, const char **argv) { @autoreleasepool {
     static tex_t own, cpy, moved;
     own.magic = MAGIC('T', 'E', 'X', 0); own.serial = 900001; own.d = t[0].d; mtl_tex_init(&own); mtl_tex_cpu_written(&own);
     cpy = own; mtl_tex_release(&cpy);
-    CHECK(tex_cpu_written(own.serial) == 1, "finalizing a copy leaves the texture live");
+    CHECK(tex_cpu_written(&own) == 1, "finalizing a copy leaves the texture live");
     mtl_tex_release(&own);
     CHECK(!own_tex_live(own.serial), "finalizing the object itself ends it");
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
-    retired_classification(); descriptor_replacement();
+    retired_classification(); pool_index(); descriptor_replacement();
     if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

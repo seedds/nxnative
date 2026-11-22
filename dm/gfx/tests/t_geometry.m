@@ -68,7 +68,7 @@ static void capture_indices(void) {
 static void cpu_read_proofs(void) {
     // Independent hazards from each production tracker, including its unknown
     // cases. Fake addresses are queried only; no CPU/GPU memory is dereferenced.
-    const uint64_t address=0x40000000;pend_reset();memset(g_gw,0,sizeof g_gw);g_gw_all=0;state_reset();
+    const uint64_t address=0x40000000;pend_reset();memset(g_gwx,0,sizeof g_gwx);g_gw_all=0;state_reset();
     EXPECT("clean CPU range",0,geo_cpu_hazard(address,64));
     for(int kind=1;kind<=3;kind++) {
         pend_reset();pend_add(address+16,16,kind);
@@ -85,7 +85,7 @@ static void cpu_read_proofs(void) {
     pend_reset();gw_put(address,address+64,g_done+1,g_done);
     EXPECT("previous submission live write",1,geo_cpu_hazard(address,64));
     EXPECT("unrelated previous live write",0,geo_cpu_hazard(address+4096,64));
-    memset(g_gw,0,sizeof g_gw);gw_put(address,address+64,g_done,g_done);
+    memset(g_gwx,0,sizeof g_gwx);gw_put(address,address+64,g_done,g_done);
     EXPECT("completed previous write",0,geo_cpu_hazard(address,64));
     g_gw_all=g_done+1;EXPECT("previous write overflow",1,geo_cpu_hazard(address,64));g_gw_all=0;
     EXPECT("CPU range overflow",1,geo_cpu_hazard(UINT64_MAX-3,8));
@@ -100,10 +100,10 @@ static void cpu_read_proofs(void) {
     sbw_note(address,64,SBW_GPU);EXPECT("converted stream current GPU write",1,geo_conversion_hazard(vs));
     pend_reset();gw_put(address,address+64,g_done+1,g_done);
     EXPECT("converted stream prior GPU write",1,geo_conversion_hazard(vs));
-    memset(g_gw,0,sizeof g_gw);S.attr[0].stream=1;S.vbuf[1]=(NVNbufferRange){address+4096,64};pend_add(address,64,2);
+    memset(g_gwx,0,sizeof g_gwx);S.attr[0].stream=1;S.vbuf[1]=(NVNbufferRange){address+4096,64};pend_add(address,64,2);
     EXPECT("conversion checks its actual stream",0,geo_conversion_hazard(vs));
     pend_reset();g_sbw_over=1;EXPECT("converted stream unknown GPU write",1,geo_conversion_hazard(vs));
-    pend_reset();memset(g_gw,0,sizeof g_gw);state_reset();
+    pend_reset();memset(g_gwx,0,sizeof g_gwx);state_reset();
 }
 static void index_cache_contract(void) {
     if(!geo_ix_on())return;

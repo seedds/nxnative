@@ -260,8 +260,7 @@ static void alias_lifecycle(void) {
     assert(pages(1, alias + g_alias_cap - P, 2 * P) == BAD);
 }
 
-// Device-shared memory (an NVN memory pool's storage, hle_nvn.c) is not given back: UnmapPhysicalMemory or a shrinking SetHeapSize over any page of it fails with InvalidCurrentMemory and
-// leaves every page and byte as it was, as on Horizon; once the pool is gone (each registration removed) both work again (PR #1616, Monster Jam Steel Titans 2)
+// Device-shared memory (an NVN memory pool's storage, hle_nvn.c) stays mapped until the last pool releases it.
 static void device_shared_refused(void) {
     assert(!pages(1, alias, 16 * P));
     memset((void *)alias, 0x6d, 16 * P);
@@ -285,6 +284,51 @@ static void device_shared_refused(void) {
     assert(resize(0) == BAD);
     dm_device_share((void *)(heap + 1024 * 1024), P, 0);
     assert(!resize(0));
+
+    size_t pg = memory_getpagesize(), size = 2 * pg - P;
+    uintptr_t dst = stack + P;
+    assert(!pages(1, alias, size));
+    memset((void *)alias, 0x43, size);
+    assert(!map(dst, alias, size));
+    *(uint8_t *)dst = 0x52;
+    // The first guest page can block the unmap even when it is outside the whole host pages being reclaimed.
+    dm_device_share((void *)dst, P, 1);
+    assert(unmap(dst, alias, size) == BAD);
+    expect(dst, dst, size, 0xb, 0, 3);
+    assert(*(uint8_t *)alias == 0x43 && *(uint8_t *)dst == 0x52);
+    dm_device_share((void *)dst, P, 0);
+    assert(!unmap(dst, alias, size) && *(uint8_t *)alias == 0x52);
+    assert(!pages(0, alias, size));
+}
+
+// Unmap the middle mapping while the 4 KiB neighbors on both sides are still live.
+static void stack_pages_released(void) {
+    size_t pg = memory_getpagesize(), last = 3 * pg - P, size = last - P;
+    uintptr_t dst = stack + P, src = alias + P;
+    assert(!pages(1, alias, 3 * pg));
+    memset((void *)src, 0x5a, size);
+    *(uint8_t *)alias = 0x18;
+    *(uint8_t *)(alias + last) = 0x29;
+    assert(!map(stack, alias, P) && !map(stack + last, alias + last, P));
+    assert(!map(dst, src, size));
+    memset((void *)dst, 0x6b, size);
+    assert(!unmap(dst, src, size));
+    assert(*(uint8_t *)src == 0x6b && *(uint8_t *)(src + size - 1) == 0x6b);
+    assert(*(uint8_t *)stack == 0x18 && *(uint8_t *)(stack + last) == 0x29);
+    if (g_gf_n) {
+        assert(*(uint8_t *)(stack + pg) == 0x6b);
+    } else {
+        size_t native_pg = (size_t)getpagesize();
+        for (uintptr_t p = stack + pg; p < stack + 2 * pg; p += native_pg) {
+            char resident;
+            assert(!mincore((void *)p, native_pg, &resident) && !(resident & MINCORE_INCORE));
+        }
+    }
+    memset((void *)src, 0x7c, size);
+    assert(!map(dst, src, size) && *(uint8_t *)dst == 0x7c && *(uint8_t *)(dst + size - 1) == 0x7c);
+    assert(!unmap(dst, src, size));
+    assert(!unmap(stack, alias, P) && !unmap(stack + last, alias + last, P));
+    assert(!pages(0, alias, 3 * pg));
 }
 
 static void ownership(void) {
@@ -718,7 +762,7 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order(); readonly_shared_memory(); transfer_memory_setup();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

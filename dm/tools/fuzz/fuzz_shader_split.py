@@ -128,10 +128,18 @@ def nxsd():
     return bytes(d) + VS[0] + PS[0] + VS[1] + PS[1]
 
 
+def nxsh(magic, pair):
+    """Media.Vision NXVS / NXFS container: 0x40-byte header with control and code spans."""
+    ctl, code = pair
+    d = bytearray(0x40); d[:4] = magic
+    struct.pack_into('<6I', d, 4, 0x40 + len(ctl) + len(code), 0, 0x40, len(ctl), 0x40 + len(ctl), len(code))
+    return bytes(d) + ctl + code
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS)}
 
 
 def check(data):

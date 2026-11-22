@@ -330,7 +330,13 @@ static void mem_init_once(void) {
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (g_as == MAP_FAILED) die("reserve guest AS");
+    if (g_as == MAP_FAILED) {
+#if TARGET_OS_IPHONE
+        if (g_reserve > ((size_t)6 << 30))
+            die("reserve guest AS (%.2f GiB, errno %d): on iOS this requires the com.apple.developer.kernel.extended-virtual-addressing entitlement", g_reserve / 1073741824.0, errno);
+#endif
+        die("reserve guest AS (%.2f GiB, errno %d)", g_reserve / 1073741824.0, errno);
+    }
     guest_file_init();
     // Fixed partition (all inside the reserved block): 256 MB in front, the heap, the stacks, then the alias region. Mario: a heap region of 1.625 GB, stack 256 MB, alias 2.875 GB.
     // The alias region is last because a Switch's addresses stay below 2^39 and a 64 GB alias region cannot: macOS 27 reserves 0x1000000000-0x7000000000, which leaves exactly 64 GB below
@@ -582,8 +588,8 @@ static int map_source_busy(uint64_t addr, uint64_t size) {
     return map_source_borrowed(addr, size);
 }
 // Device-shared memory. On Horizon, NVN gives a memory pool's storage to the GPU through nvmap, whose device mapping (svcMapDeviceAddressSpaceAligned, KPageTableBase::LockForMapDeviceAddressSpace)
-// sets KMemoryAttribute_DeviceShared on those pages and counts each mapping. UnmapPhysicalMemory and a SetHeapSize that shrinks refuse any page with an attribute set (ResultInvalidCurrentMemory,
-// 0xD401; Atmosphère's KPageTableBase::UnmapPhysicalMemory and SetHeapSize), so the pages stay mapped until the pool is finalized. Without this, the host gave such pages back (guest_release put
+// sets KMemoryAttribute_DeviceShared on those pages and counts each mapping. UnmapMemory, UnmapPhysicalMemory and a shrinking SetHeapSize refuse ranges with that attribute
+// (ResultInvalidCurrentMemory, 0xD401), so the pages stay mapped until the pool is finalized. Without this, the host gave such pages back (guest_release put
 // fresh pages under them) while the pool's zero-copy Metal buffer still held the old ones: the CPU then wrote one copy and the GPU read the other. PR #1616 found that on Monster Jam Steel Titans 2,
 // whose light-grid compute shaders read stale counts from the pool and hung the GPU. hle_nvn.c registers each pool's storage at nvnMemoryPoolInitialize and removes it at nvnMemoryPoolFinalize;
 // a range registered twice (two pools over the same storage) stays shared until both are gone
@@ -955,7 +961,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (g_flag.svc) LOG("MapMemory %#llx <- %#llx +%#llx", dst, src, size);
         regs[0] = 0; return 0;
     }
-    case 0x05: {  // UnmapMemory(dst, src, size): contents are moved back to the source region; a 16K page may be shared with an adjacent mapping, permissions are not revoked
+    case 0x05: {  // UnmapMemory(dst, src, size): copy the contents back to the source and discard eligible stack pages
         uint64_t dst = regs[0], src = regs[1], size = regs[2];
         uint32_t result = map_arguments(dst, src, size);
         if (result) { regs[0] = result; return 0; }
@@ -963,9 +969,17 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int k = map_find(dst, size);
         if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) {
             pthread_mutex_unlock(&g_map_lock); LOG("UnmapMemory does not match a mapping %#llx+%#llx", dst, size); regs[0] = 0xD401; return 0; }
+        if (device_shared(dst, size, "UnmapMemory")) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0; }
         dm_guest_write_prepare((void *)src, size);
         memcpy((void *)src, (void *)dst, size);
         map_del(k - 1);
+        // Random stack addresses leave dirty pages throughout the region. Reclaim whole anonymous host pages and preserve any 4 KiB neighbors
+        // sharing an edge page. MapMemory reopens reclaimed pages. File-backed stacks retain their backing.
+        if (!g_gf_n) {
+            uintptr_t mask = (size_t)getpagesize() - 1;
+            uintptr_t release_lo = (dst + mask) & ~mask, release_hi = (dst + size) & ~mask;
+            if (release_hi > release_lo) (void)guest_release(release_lo, release_hi, 0);
+        }
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = 0; return 0;
     }

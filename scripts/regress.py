@@ -77,7 +77,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
-def load_module(name, path):   # a module from a file (another script, or a tool of a revision's tree)
+def load_module(name, path):   # a module from a file (another script or tool of this checkout)
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None: raise ImportError(f'cannot load {path}')
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
@@ -97,7 +97,7 @@ rfs = shader_lib.romfs
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
 HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # as build_ipa_from_nsp.py: the host's sources and headers
-REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/jump_solver.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/monolith_fps.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
+REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/jump_solver.py', 'dm/tools/nso.py', 'dm/tools/mod_layout.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/monolith_fps.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
 HEAVY_EXE = {'clang', 'make', 'xcodebuild', 'ld', 'ld64', 'swift-frontend', 'dotnet', 'metal', 'metal-tt', 'air-tt', 'applegpu-nt', 'dmsh_xlate', 'spirv-cross'}   # jobs that skew a measurement
 HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso|vk_shaders)\.py'   # (the shared measuring rule)
 # Tolerances, from runs of one revision against itself (docs/development.md, The regression harness)
@@ -232,8 +232,8 @@ class Tree:
             for u in untracked:
                 (self.path / u).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(REPO / u, self.path / u)
 
-    def py(self, code, env):   # a Python snippet run in the tree (its own modules)
-        r = sh([sys.executable, '-c', code], cwd=self.path, env=env)
+    def py(self, code, env=None, stdin=None):   # a Python snippet run in the tree (its own modules)
+        r = sh([sys.executable, '-c', code], cwd=self.path, env=env, input=stdin)
         if r.returncode: raise HarnessError(f'{self.id}: {r.stderr.strip()[-400:]}')
         return r.stdout.strip()
 
@@ -671,8 +671,12 @@ def interface_check(tree, g, out):
     pairs = [prof / 'shader_pairs.tsv', prof / 'pso_pairs.tsv' if (prof / 'pso_pairs.tsv').is_file() else g.build / 'shader/pso_pairs.tsv']
     po = tree.path / 'dm/gfx/tools/pso_offline.py'
     if not po.is_file(): return {'checked': 0, 'note': 'no pso_offline.py in this revision', 'bad': []}
-    mod = load_module('pso_offline_' + tree.id.replace('-', '_'), po)
-    todo = mod.read_pairs(mod.pair_text([p for p in pairs if p.is_file()]))
+    env = g.env(tree)
+    # Run pso_offline in the tree's own Python process so baseline and candidate never share sys.modules (dmsh_abi, dmsh_side, romfs, ...)
+    todo = [tuple(pr) for pr in json.loads(tree.py(
+        "import json, sys; sys.path.insert(0, 'dm/gfx/tools'); import pso_offline as po; "
+        "print(json.dumps(po.read_pairs(po.pair_text(json.load(sys.stdin)))))",
+        env, stdin=json.dumps([str(p) for p in pairs if p.is_file()])))]
     zero = depth_zero(g, tree)
     keys = {k for pr in todo for k in pr}
     def load(k):
@@ -693,7 +697,11 @@ def interface_check(tree, g, out):
         miss = sorted((l for l in fi if l not in vo), key=lambda l: int(l[4:]))
         ty = [f'{l} {vo[l]}/{fi[l]}' for l in sorted(fi, key=lambda l: int(l[4:])) if l in vo and vo[l] != fi[l]]
         if miss or ty: suspects[vk, fk] = {'vs': vk, 'entry': ve, 'ps': fk, 'missing': miss, 'type': ty}
-    bases, _, _ = mod.plan(lib, chain, list(suspects), zero) if suspects else ([], [], {})
+    bases = json.loads(tree.py(
+        "import json, sys; sys.path.insert(0, 'dm/gfx/tools'); import pso_offline as po; "
+        "lib, chain, pairs, zero = json.load(sys.stdin); "
+        "print(json.dumps(po.plan(lib, chain, [tuple(p) for p in pairs], zero)[0]))",
+        env, stdin=json.dumps([str(lib), chain, [list(pr) for pr in suspects], zero]))) if suspects else []
     planned = {(vl[:16], fl[:16]) for vl, _, fl, _ in bases}
     return {'checked': checked, 'bad': [x for pr, x in suspects.items() if pr in planned], 'not_in_archive': len(suspects) - len(planned & suspects.keys())}
 

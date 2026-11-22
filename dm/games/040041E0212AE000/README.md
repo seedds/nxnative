@@ -56,6 +56,7 @@ Regression level: moderate, because shared shader extraction and translation cha
 
 ## Found on this game
 
+- [Registered shader sources across RomFS files](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles). In [#3130](https://github.com/seedds/nxnative/issues/3130), `_clock.w3d` supplied two keys registered under `blocker_full.w3d`, moving 94 map rows. The local v262144 NUP and a reconstruction with the extra source both pass the strict table check with the registered map.
 - [Directed rounding in FADD, FMUL and FFMA](../../../docs/reference/shaders.md#directed-rounding-in-fadd-fmul-and-ffma). The Ampere shader and menu-route comparison is in [Validation](#validation).
 - [FMNMX and HMNMX2 signed-zero ordering](../../../docs/reference/shaders.md#fmnmx-and-hmnmx2-signed-zero-ordering). Shader and menu-route regression results are in [Validation](#validation).
 - Two `default_shader.shdr` fragment variants (`2a5e0eefdce48f4b` and `e92d1bf7adaa6d31`) compile with their read-only storage slot in Metal's constant address space. Both appear in the shader prewarm list. The recorded render pipelines and traces of the standard menu route, the first race, the Ultra Quality menu and Fusion Shop gave no draw of either variant. Live coverage is open. [Device loads from read-only storage buffers](../../../docs/reference/shaders.md#device-loads-from-read-only-storage-buffers)

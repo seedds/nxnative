@@ -382,13 +382,16 @@ class Pak:
         if meth > len(self.methods) or meth and not self.methods[meth - 1]: raise ValueError(f'{self.path}: {path} names compression method {meth}, which the footer does not')
         return dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=enc, block_size=bsz, blocks=blocks)
     def read(self, path, decode=None):
-        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
+        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib, LZ4 and Zstd blocks are decoded here (OCTOPATH TRAVELER II: Zlib, BRAVELY DEFAULT II: Zstd); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
         if not e['method']: return self.read_at(cast(int, e['off']) + self.stored_header, e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
+        elif e['method'] == 'Zstd':
+            zstd = zstd_mod()
+            decode = zstd_block; bad = (zstd.ZstdError,)
         elif e['method'] == 'LZ4': import lz4.block; decode = lambda b, k: lz4.block.decompress(b, uncompressed_size=lz4_raw(b, k, path)); bad = (lz4.block.LZ4BlockError,)
         elif not decode: raise ValueError(f'{path} is {e["method"]}-compressed in the pak')
         out, left = [], e['raw']
@@ -399,6 +402,26 @@ class Pak:
             if len(b) != k: raise ValueError(f'{self.path}: {path} block {i} decodes to {len(b):#x} bytes, not {k:#x}')
             out.append(b); left -= k
         return b''.join(out)
+
+_ZSTD = None
+def zstd_mod():
+    global _ZSTD
+    if _ZSTD is None:
+        try: from compression import zstd
+        except ImportError:
+            import importlib
+            zstd = importlib.import_module('backports.zstd')
+        _ZSTD = zstd
+    return _ZSTD
+
+def zstd_block(b, k):
+    """One Zstandard frame bounded by the pak block's raw size, including frames without a content size."""
+    zstd = zstd_mod()
+    if k < 0: raise zstd.ZstdError(f'negative raw size {k:#x}')
+    z = zstd.ZstdDecompressor(); out = z.decompress(b, max_length=k + 1)
+    if not z.eof or z.unused_data or len(out) != k:
+        raise zstd.ZstdError(f'the frame does not end at its {k:#x} raw bytes')
+    return out
 
 def zlib_block(b, k):
     """A Zlib block of k raw bytes: inflated no further than k (a damaged stream could inflate about 1,000 times its size), short when the stream ends early"""

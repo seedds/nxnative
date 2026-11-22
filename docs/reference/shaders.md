@@ -698,6 +698,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ue_legacy_jobs` takes each pak's key from `uepak.Keys`, the key finder the shader code archives use too (`uepak.job`): for a pak whose footer says the index is encrypted it tries each `main` it is given (base game and update) with `uepak.find_key`, a key found once first. Each job carries the key, so `ue_legacy_shaders` decrypts the entries too. With no key in any main the pak is reported in red and skipped. Covered by `dm/tools/tests/test_uepak_legacy_key.py` (a synthetic encrypted version 4 pak and `main`, no game files).
 - **Found on:** Little Nightmares II (`010097100EDD6000`, 1.4, v262144; one version 8 pak): 20,170 shaders from 57 files in 9:38; it reaches the title screen and plays on the Mac.
 
+### Zstandard-compressed Unreal pak entries sent to Oodle
+
+- **Symptom:** shader splitting reports no shaders after every Zstd-compressed pak entry fails with `main has no "OodleLZ_Decompress" name and no streaming decoder to find`.
+- **Cause:** the pak footer names `Zstd`, but `Pak.read` delegated every method except Zlib and LZ4 to the game's decoder. A game with Zstandard packages need not contain Oodle at all.
+- **Fix:** decode Zstd blocks directly in `uepak.py` with Python's `compression.zstd` or `backports.zstd`. Reject negative block sizes, limit output to the block's declared raw size plus one byte, and require a complete frame, no trailing bytes and the exact raw size. Keep genuine decompression failures visible.
+- **Found on:** BRAVELY DEFAULT II 1.0.0, title `01006DC010326000`, main build `05de5a7f20bd1532d139c16c0b3e8920`, during bring-up with a provisional profile ([PR #3193](https://github.com/seedds/nxnative/pull/3193)). Its version 8 pak has 155,207 Zstd entries. The fixed split found 33,335 shaders; one monster texture block failed two independent Zstandard decoders. This does not establish gameplay support or repair the package's integrity mismatch.
+- **Check:** `test_uepak_v8.py` covers synthetic Zstd paks (with and without frame content sizes) without calling the guest decoder, wrong or negative raw sizes, empty frames, truncated frames, trailing bytes, and `Pak.read` error reporting.
+
 ### Unreal Engine 5.1 shaders inline in encrypted IoStore containers
 
 - **Symptom:** the NSP script stops at `[8/11] UE shader decode` with `[RED] …/pakchunk1-Switch.pak: the index is encrypted and no key in main (a 32-byte window or two 16-byte literals its code stores together) decrypts it`, although `pakchunk0-Switch.pak` opened with `main`'s key. Past that: `the RomFS has Unreal paks, but none … holds a shader code archive`, then `the shader record at … (frequency 5) is not a record of the known layout` for every package.

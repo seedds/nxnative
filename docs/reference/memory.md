@@ -495,6 +495,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): GitHub issue #9 (iPhone 16 Pro Max, handheld), killed in the first shrine. An 8 GB iPhone gives this app about 3.4 GB (resident plus `headroom to the system memory limit` stayed at 3,375 MB); resident memory grew from 2.6 GB at the shrine load until the kill. On the Mac a host without that pool grew 1 MB a frame in the shrine (GPU 3.0 → 4.4 GB in 2,400 frames); with it the shrine stays at 2.7–2.9 GB resident and 1.5–1.7 GB GPU, idle or walking (vmmap at 2.8 GB: about 1.6 GB guest memory, 0.75 GB private textures, 0.17 GB IOAccelerator).
 - **Note:** found on the way: dead texture serials and the fixed-size pool tracking table ([Dead texture serials kept in a ghost table](nvn-objects.md#dead-texture-serials-kept-in-a-ghost-table), [Memory-pool tracking table grows in blocks](nvn-objects.md#memory-pool-tracking-table-grows-in-blocks)).
 
+### Autoreleased temporaries collect during background pipeline builds
+
+- **Symptom:** Objective-C temporaries can accumulate across a burst of background pipeline builds.
+- **Cause:** the private utility queues inherit Dispatch's autorelease policy, and the global queues supply no pool for an individual work item. Worker-created autoreleased objects can live past the build that used them.
+- **Fix:** give each pending render, pulling-base, amplified, tile-reading and geometry mesh build its own `@autoreleasepool`. The worker publishes results to their owning slots or caches before the pool drains.
+- **Check:** a synthetic burst on an M4 Pro MacBook Pro (macOS 27.2.1) peaked at 256 live temporaries across 256 jobs on a serial utility queue, and one with a per-job pool. All five trials gave the same result. The peak in a game has not been measured.
+- **Found on:** Esteban Viera identified the missing pools while auditing memory ownership during profiling of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) in [PR #2714](https://github.com/seedds/nxnative/pull/2714).
+
 ### Retired pool buffers pile up while a game submits nothing
 
 - **Symptom:** out of focus, with the picture still and the sound on, GPU allocated climbs by hundreds of MB a second while the residency set stays flat, and swap follows it.

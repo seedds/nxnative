@@ -32,6 +32,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    render_scale(ctx)
     screen_shape(ctx)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
@@ -338,20 +339,115 @@ def screen_shape(ctx):
     ctx.capabilities.add('SCREEN_ASPECT')
 
 
+# Under a host render scale below 1.0 (state +0x10, float bits in 1..0x3f7fffff), return level 0 (the game's full size, which render_scale then multiplies) so
+# DM_DYNAMIC_RESOLUTION=1 does not fight DM_RENDER_SCALE. Self-contained (no jump into drs_controller), emitted only when render_scale also matches
+drs_render_scale_guard = (   # x16 the state page; w17, w2 free (same leaf contract as drs_controller)
+    0xb9401211,   # ldr w17, [x16, #0x10]   the host render scale's bits (1.0 = the game's own size)
+    0x340000d1,   # cbz w17, +6             unset (0): fall through to drs_controller
+    0x52a7f002,   # mov w2, #0x3f800000     1.0
+    0x6b02023f,   # cmp w17, w2
+    0x54000062,   # b.hs +3                 1.0 or more, negative, or NaN: fall through to drs_controller
+    0x2a1f03e0,   # mov w0, wzr             level 0
+    0xd65f03c0)   # ret
+
+
 def dynamic_resolution(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     site = ctx.others.get('dynamic resolution')
     if site is None or ctx.others.get('dynamic resolution update') is None: return   # not both found in this build (a red line from the locator): the game's own dynamic resolution
     fs_site(site, '017c40bd')   # ldr s1,[x0,#0x7c]
+    has_render_scale = ctx.others.get('render scale') is not None
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    if has_render_scale:
+        for w in drs_render_scale_guard: emit(w)
     for w in drs_controller: emit(w)
-    fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
+    why = ('dynamic resolution level: 0 (full resolution) also under a render scale below 1.0, or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level'
+           if has_render_scale else
+           'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
+    fs_put(site, [B(site, start)], why)
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
+
+
+# Render scale (DM_RENDER_SCALE, state +0x10, dm/host/loader.c): the 3D views at that fraction of the game's own size, the dynamic resolution held at its top level (as Tears of the
+# Kingdom's and Breath of the Wild's). The views' sizes come from the scale the engine stores at +0xd48 of its view-size update (str s0,[x20,#0xe5c]; v131072 main+0x31d3200, found by
+# its fingerprint; the only float store to #0xe5c in main): the level's ResolutionReduceScale (0.75 at the top level) normalized by [x20+0xe58]/[x20+0xe50]. That store and the size
+# loop after it (+0xdd8, which clears the "scale changed" bit 3 of [x20+0xe2c]) run only in a frame where the dynamic-resolution update (main+0x805aa0, which always returns the
+# level's float scale in w0) answers status 0, a new scale: at a steady frame rate it answers status 2, so a stub at the store alone changes nothing until the game comes under load.
+# Two stubs: at the update's answer (+0xce4, ubfx of its status byte) a host scale in (0.0, 1.0) whose last stored value (state +0x290, private area after drs_controller) does not
+# match [x20+0xe5c] makes any non-1 status 0 so that frame recomputes the sizes (and re-applies if [x20+0xe5c] is ever reset); at the store (+0xd48) the freshly computed s0 is
+# multiplied by the host's scale and recorded at state +0x290. The level stub above returns level 0 under such a scale, so the size is fixed; 1.0 (the loader's default) runs the
+# game's own code. Registers and flags are preserved except x8 (the status read next) and s0 (stored, dead after +0xd48: reloaded at +0xd84)
+def _bcond(frm, to, cond): return 0x54000000 | (((to - frm) >> 2) & 0x7ffff) << 5 | cond
+def _cbz_w(frm, to, rt): return 0x34000000 | (((to - frm) >> 2) & 0x7ffff) << 5 | rt
+
+
+def render_scale_status_body(state_adrp):   # 19 words; state_adrp is word 4 (ADRP x16, state) or MOV x16, x1 in unit tests
+    at = lambda k: 4 * k
+    return (
+        0xd3609c08,                       # ubfx x8,x0,#32,#8      the original
+        0xa9be47f0,                       # stp x16,x17,[sp,#-32]!
+        0xd53b4210,                       # mrs x16,nzcv
+        0xf9000bf0,                       # str x16,[sp,#16]
+        state_adrp,                       # x16 = state page
+        0xb9401211,                       # ldr w17,[x16,#0x10]    the host scale's bits
+        _cbz_w(at(6), at(16), 17),        # cbz w17,done           unset
+        0x53177e31,                       # lsr w17,w17,#23        sign + exponent (< 0x7f iff positive finite < 1.0)
+        0x7101fe3f,                       # cmp w17,#0x7f
+        _bcond(at(9), at(16), 0x2),       # b.hs done              1.0 or more, negative or NaN: the game's own
+        0xb9429210,                       # ldr w16,[x16,#0x290]   last scaled value stored to [x20,#0xe5c]
+        0xb94e5e91,                       # ldr w17,[x20,#0xe5c]   current view scale
+        0x6b11021f,                       # cmp w16,w17
+        _bcond(at(13), at(16), 0x0),      # b.eq done              already applied and intact
+        0x7100051f,                       # cmp w8,#1
+        0x1a9f0108,                       # csel w8,w8,wzr,eq      keep status 1; any other status -> 0 (recompute sizes)
+        0xf9400bf0,                       # done: ldr x16,[sp,#16]
+        0xd51b4210,                       # msr nzcv,x16
+        0xa8c247f0)                       # ldp x16,x17,[sp],#32
+
+
+def render_scale_store_body(state_adrp):   # 16 words; state_adrp is word 2 (ADRP x16, state) or MOV x16, x1 in unit tests
+    at = lambda k: 4 * k
+    return (
+        0xadbf7ffe,                       # stp q30,q31,[sp,#-32]!
+        0xa9bf47f0,                       # stp x16,x17,[sp,#-16]!
+        state_adrp,                       # x16 = state page
+        0xd53b4211,                       # mrs x17,nzcv
+        0xbd40121e,                       # ldr s30,[x16,#0x10]    the host scale
+        0x1e2023c8,                       # fcmp s30,#0.0
+        _bcond(at(6), at(12), 0xd),       # b.le original          unset, negative or NaN
+        0x1e2e101f,                       # fmov s31,#1.0
+        0x1e3f23c0,                       # fcmp s30,s31
+        _bcond(at(9), at(12), 0xa),       # b.ge original          1.0 or more
+        0x1e3e0800,                       # fmul s0,s0,s30         the game's scale x the host's
+        0xbd029200,                       # str s0,[x16,#0x290]    applied value (checked by the status stub)
+        0xbd0e5e80,                       # original: str s0,[x20,#0xe5c]
+        0xd51b4211,                       # msr nzcv,x17
+        0xa8c147f0,                       # ldp x16,x17,[sp],#16
+        0xacc17ffe)                       # ldp q30,q31,[sp],#32
+
+
+def render_scale(ctx):
+    here, emit = ctx.here, ctx.emit
+    fn = ctx.others.get('render scale')
+    if fn is None: return   # not found in this build (a red line from the locator): the game's own sizes
+    status, store = fn + 0xce4, fn + 0xd48
+    ctx.site(status, '089c60d3')   # ubfx x8,x0,#32,#8: the update's status byte
+    s = here()
+    for w in render_scale_status_body(ADRP(16, s + 4 * 4, ctx.state)): emit(w)
+    emit(B(here(), status + 4))
+    ctx.put(status, [B(status, s)], 'dynamic-resolution status: a host render scale not yet stored asks for new 3D sizes (state +0x10)')
+    ctx.site(store, '805e0ebd')    # str s0,[x20,#0xe5c]
+    s = here()
+    for w in render_scale_store_body(ADRP(16, s + 4 * 2, ctx.state)): emit(w)
+    emit(B(here(), store + 4))
+    ctx.put(store, [B(store, s)], 'final 3D view scale x the host render scale below 1.0 (1.0 = the game\'s own)')
+    ctx.render_scale = 1
 
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
                 'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']},   # main+0x805aa0
+                'render scale': {'size': 0xfc8, 'fingerprints': ['2c1804f08798ceee012ae30a1ba6b177a6b6a61ce732185bad28e9989d05e165']},   # main+0x31d3200, the 3D view size update
                 **screen_shape_functions}},
 ]}
 
@@ -411,6 +507,9 @@ BINDING = [
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09); 30 fps threshold scaling checked in test_ocarina_drs.py and in play at 30 fps on an M2 Air (PR #1954, 2026-11-16)'},
+    {'what': 'render scale: the 3D views at a fraction of the game\'s own size (DM_RENDER_SCALE)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's own view-size update (its test of the dynamic-resolution status and its scale store), found by its function's fingerprint on any build that keeps it; the level function's stub above holds level 0 under a scale",
+     'checked': 'v131072 main: one function with this fingerprint (main+0x31d3200, 0xfc8 bytes, one caller main+0x31c00cc); the status ubfx at +0xce4, the store at +0xd48 (the only float store to #0xe5c in main; s0 computed from the update\'s w0 at +0xd34, never reread from +0xe5c) and the size loop clearing bit 3 of +0xe2c read by disassembly (2026-11-09, 2026-11-23); guard, status and store stubs executed natively on ARM64 in test_ocarina_drs.py'},
     {'what': 'screen shape: taller render targets, cameras, Layout2 panes and a 16:9 movie viewport (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own display setup, camera, pane and movie code; installed together after every function matches. Indexed pane edits verify the authored name, class and dimensions they use",
      'checked': 'v131072 main: one function per fingerprint, free registers read at each site; indexed pane names, classes and dimensions checked against the UIL records. PR #3037 measured Vert+ framing and the movie aspect on Mac; final iPad title retest pending'},

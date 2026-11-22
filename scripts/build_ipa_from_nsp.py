@@ -1075,7 +1075,7 @@ def write_profile(pdir, app, f):
 
 
 # ---- Derived profile (a version the game's profile was not brought up on) ----
-DERIVED_SKIP = {'game.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'vk_capture.tsv', 'gl_capture.tsv', 'patches.py'}   # made again from the packed version's own files (patches.py: the rewriter's patches of the registered builds)
+DERIVED_SKIP = {'game.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'vk_capture.tsv', 'gl_capture.tsv', 'patches.py'}   # made again from the packed version's own files (patches.py: the rewriter's patches of the registered builds)
 
 
 def derived_key(profile_dir):
@@ -1251,7 +1251,7 @@ def chain_files(repo):   # what the iOS shaders run: not the split's readers (sh
     return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
 
 
-SPLIT_TABLES = ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')   # the profile tables the split reads or is checked against (derive_profile keys on them too)
+SPLIT_TABLES = ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv')   # the profile tables the split reads or is checked against (derive_profile keys on them too)
 
 
 def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables the packer checks or writes; renderer settings, notes and translation tables are not extraction inputs
@@ -1260,8 +1260,15 @@ def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables t
     return [g.id, settings, ('files', tables)]
 
 
+SPLIT_SIDE_TABLES = ('pso_pairs.tsv', 'geo_pairs.tsv')   # split tables a profile may leave out: the split's copy then stays beside the shader package, where dmsh_build.py reads it
+
+
+def side_table(g, pkg, name):   # the profile's table, else the split's copy beside the package
+    return g.table(name) if g.table(name).is_file() else pkg.with_name(name)
+
+
 def split_output_key(pkg, g):   # detect deleted/edited packages and supplemental pairs before reusing a successful split
-    return fingerprint(package_key(pkg), ('files', [pkg.with_name('pso_pairs.tsv')] if not g.table('pso_pairs.tsv').is_file() else []))
+    return fingerprint(package_key(pkg), ('files', [pkg.with_name(n) for n in SPLIT_SIDE_TABLES if not g.table(n).is_file()]))
 
 
 def package_key(pkg):   # the shader package's content (file names and bytes): what the iOS shaders are built from
@@ -2430,6 +2437,8 @@ def compute_reader_additions(g, tables, split_log):
                 if not line.strip(): continue
                 pair = line.decode().split('\t')
                 if len(pair) != 2 or old.get(pair[0], ('', '', ''))[1] != 'vertex' or old.get(pair[1], ('', '', ''))[1] != 'pixel': return False
+        geo = g.table('geo_pairs.tsv')   # a registered vertex / geometry pair (its mesh library, dmsh_chain.mesh_pairs) cannot disappear either
+        if geo.is_file() and not set(data_rows(geo.read_bytes())) <= set(data_rows((tables / 'geo_pairs.tsv').read_bytes())): return False
         return True
     except (OSError, UnicodeError, ValueError): return False
 
@@ -2484,7 +2493,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         if cskey and reused(cskf, cskey) is not None:
             promote(derive_compute, 'compute')
             key = fingerprint(*inputs, *split_profile_inputs(g))
-    have_pairs = g.table('pso_pairs.tsv').is_file() or pkg.with_name('pso_pairs.tsv').is_file()
+    have_pairs = all(side_table(g, pkg, n).is_file() for n in SPLIT_SIDE_TABLES)   # a split from before geo_pairs.tsv runs again once
     if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None and reused(outputkf, split_output_key(pkg, g)) is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return package_key(pkg)
     PROG.set(step='splitting')
@@ -2512,8 +2521,10 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         promote(derive_dlc, 'dlc')
     if not provisional and derive_compute and compute_reader_additions(g, tmp / 'tables', text):
         promote(derive_compute, 'compute')
-    if provisional or g.table('pso_pairs.tsv').is_file(): names += ('pso_pairs.tsv',)
-    else: shutil.copyfile(tmp / 'tables' / 'pso_pairs.tsv', pkg.with_name('pso_pairs.tsv'))
+    # geo_pairs.tsv (vertex / geometry pairs of shader variations, which get mesh libraries: dmsh_chain.mesh_pairs) the same way: shader_split.py writes it beside shader_pairs.tsv
+    for n in SPLIT_SIDE_TABLES:
+        if provisional or g.table(n).is_file(): names += (n,)
+        else: shutil.copyfile(tmp / 'tables' / n, pkg.with_name(n))
     if provisional:   # a provisional profile takes the tables as they come
         for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
     else:
@@ -2648,7 +2659,7 @@ def prune_shader_cache(sh, chain):
 
 
 def shader_profile_key(py, repo, env, g):
-    """The profile's part of the shader step's key: the game and the digest of its shader inputs (dmsh_chain.py --inputs: the shader tables, geo_mesh.tsv, bf_want.tsv, dual_want.tsv and the
+    """The profile's part of the shader step's key: the game and the digest of its shader inputs (dmsh_chain.py --inputs: the shader tables, geo_mesh.tsv, geo_pairs.tsv, bf_want.tsv, dual_want.tsv and the
     nvn_* / shader_* keys), which the libraries' stamp records and every per-shader cache key already assumes are all a shader build reads of the profile. Hashing every profile file
     instead restored every library from the cache and rewrote the image after an edit of the game's note or prewarm list. Without the digest: every file, as before"""
     r = subprocess.run([str(py), str(repo / 'dm/gfx/tools/dmsh_chain.py'), '--inputs'], env=env, capture_output=True, text=True)
@@ -2718,11 +2729,10 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     shader_cache.adopt(sh / 'cache/cas', shader_cache.chain_file(sh / 'cache', chain), say)
     out = sh / 'partial' if seen else sh / 'cache' if mac else ios
     libs, kf, kmac = out / f'b-{chain}', ios / f'b-{chain}.key', out / 'key' if seen else sh / f'mac-b-{chain}.key'
-    pso_pairs = g.table('pso_pairs.tsv')
-    if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
+    pso_pairs, geo_pairs = (side_table(g, sh / 'pkg', n) for n in SPLIT_SIDE_TABLES)   # the split's copies are shader inputs too (vs_pad, dmsh_chain.mesh_pairs)
     if pkg_key:
         PROG.set(step='checking the inputs')
-        key = fingerprint(pkg_key, ('files', chain_files(repo)), translator_key(xlate), shader_profile_key(py, repo, env, g), ('files', [pso_pairs]), *toolchain(repo, env),
+        key = fingerprint(pkg_key, ('files', chain_files(repo)), translator_key(xlate), shader_profile_key(py, repo, env, g), ('files', [pso_pairs, geo_pairs]), *toolchain(repo, env),
                           {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, *((seen,) if seen else ()), env=env)
         note = next((n for k in ((kmac,) if seen else (kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again

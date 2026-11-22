@@ -1,0 +1,11 @@
+# Boot smoke route for scripts/regress.py (docs/development.md, The regression harness): key <TAB> value
+# An empty save, no input: the title and the opening play by themselves, the same in every run (A presses every few seconds reached different screens: the store at 55 s in one run,
+# the avatar's "Go with this look?" in the next)
+# Measured 2026-11-21 (full mode, M6): first frame under 1 s, 60 fps, 4,690 frames by 80 s
+save	new
+secs	80
+quick	60
+reach	3000@60
+window	45	25
+shots	40,70
+hang	20

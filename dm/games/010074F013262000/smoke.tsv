@@ -1,0 +1,11 @@
+# Boot smoke route for scripts/regress.py (docs/development.md, The regression harness): key <TAB> value
+# An empty save (as bench.tsv's battle route): the title, New Game, the opening movies skipped (Plus, then a held X)
+# From "new" (an empty folder the harness makes) the game crashed at about frame 25 in both runs (sig 11, main+0x10141ac); bench/saves/empty is the empty save its bench routes start from
+save	bench/saves/empty
+keys	30:A*20/6,60:Plus~0.2*6/15,61:X~2*6/15
+secs	120
+quick	75
+reach	600@75
+window	90	25
+shots	80,115
+hang	30

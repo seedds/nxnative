@@ -26,6 +26,8 @@ zip_store	.ard:.arh:.pck:.webm:.metallib
 # the NPDM declares 32 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
 mem_reserve	0x140000000
 mem_alias	0x118000000
+# Monolith's own layout (its 60 GB reservation at alias +64 MB) fits in 60.25 GB: the Mac undoes the ALIAS_CUTS of patches.py, and an iPhone build with DM_WIDE_ALIAS=1 (extended virtual addressing) leaves them out
+mem_alias_wide	0xF10000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 # the NPDM declares 32 MB of system resource

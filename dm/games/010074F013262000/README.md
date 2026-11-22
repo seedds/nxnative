@@ -12,7 +12,9 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
-iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
+On an iPhone, a `DM_WIDE_ALIAS=1` build runs the intro with the full layout (2026-11-22).
+DLC gameplay and later-game allocation peaks remain open, and the compact layout
+misses some character models ([Profile and memory](#profile-and-memory)).
 The supplied four DLC packs are included; their additional shaders have not been
 integrated into the base/update shader census, so DLC rendering is unvalidated.
 
@@ -27,15 +29,37 @@ integrated into the base/update shader census, so DLC rendering is unvalidated.
 - **Address-space adaptation:** `nninitStartup` calls `main+0x128e58c`, reserving 60 GB.
   Its first arena reserves 4 GB + 128 KB (`main+0x1241860`), so reducing only the
   containing region cannot work. [patches.py](patches.py) changes that arena's
-  bump increment, subtraction and capacity together, to 512 MB + 128 KB, and its
+  bump increment, subtraction and capacity together, to 288 MB + 128 KB, and its
   containing region to 4 GB. All changes are gated by main build ID `82d187fe9ef9be921b8e1b1cddf7bd28`,
   also reported for 2.2.0 below.
   The SDK build takes the existing node-area and large-region alignment cuts.
+- **Current, the six cuts are for an iPhone only** ([ALIAS_CUTS](../../../docs/reference/memory.md#cuts-that-only-fit-an-iphones-alias-region)):
+  `mem_alias_wide 0xF10000000` (60.25 GB) holds Monolith's own layout, the 60 GB
+  reservation at alias +64 MB. The Mac's alias region is larger, so the loader puts
+  the original six instructions back. An iPhone build with `DM_WIDE_ALIAS=1` leaves
+  them out and asks for the extended virtual addressing entitlement.
+- **Resolved, the compact layout's limits:** measured with `DM_SVC=1` on an
+  Apple-silicon Mac (2026-11-22). With the original layout, the first arena peaks at
+  241–243 MB through the first chapter's cutscenes, while the windows after it take
+  3,924 MB (4,096–8,020 MB into the reservation) and a 64 MB block sits at its top.
+  In 4 GB that is about 4.23 GB even with an exact-size arena:
+  - With the 512 MB arena, the cutscene after the first chapter's mid-scene battle
+    crashed on a null allocation (`sig=11 addr=0x8` at `main+0x43060`, a constructor
+    on a null 0x217a0-byte allocation from `main+0xbdb8bc`).
+  - With 288 MB and `DM_ALIAS_SIZE=0x118000000` (an iPhone's region) that cutscene,
+    its battle and the intro pass (arena peak 239 MB), but in the cutscene after the
+    tutorial some character models are not drawn: a 193 MB block was placed directly
+    under the top block instead.
+  - The original layout draws them.
+- **Resolved, iPhone with the full layout** (iPhone19,4, 2026-11-22): with both the
+  Increased Memory Limit and extended virtual addressing, iOS refused a 64.6 GB guest
+  block (`FATAL reserve guest AS`) and gave a 60.9 GB one. The game ran the intro and
+  the scene above with every model for ten minutes, at 3.7 GB resident and 4.5 GB
+  headroom. That is over the roughly 3.3 GB of an app without the Increased Memory Limit.
 - A 40-second diagnostic run with the original arenas had 2,092.4 MB committed:
   about 203 MB in the first arena, about 1.8 GB in subsequent windows, and a 64 MB
   allocation near the end of the reservation. Original-layout opening battle
-  (`boot29wide`) commits 225.44 MB in the first arena. That leaves about 286 MB
-  of capacity in the compact first arena; later-game peaks remain unvalidated.
+  (`boot29wide`) commits 225.44 MB in the first arena.
 - Compact runs stayed at the title for over ten minutes without an allocator
   failure. This validates the title allocation pattern, not later gameplay peaks.
 - `pad_layout full` supplies both sticks and the D-pad.
@@ -205,5 +229,6 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 - [Transform feedback captured by a vertex entry point](../../../docs/reference/rendering.md#transform-feedback-captured-by-a-vertex-entry-point): interleaved outputs and geometry capture.
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.
 - [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy): enabling album-image notifications dereferenced the absent SelfController.
+- [Cuts that only fit an iPhone's alias region](../../../docs/reference/memory.md#cuts-that-only-fit-an-iphones-alias-region): the Mac undoes the allocator cuts, a wide iPhone build leaves them out.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - [Block-compressed storage the CPU wrote before first use](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use): uncompressed 3D particle steering fields, taken from their storage too (GitHub issue #1011).

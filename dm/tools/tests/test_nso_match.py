@@ -228,9 +228,10 @@ class Matching(unittest.TestCase):
         wait = [0x52800080, RET]
         original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: wait})
         parsed = Image(original, 0x2000)
+        caller_rule = dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12)
         rule = dict(
             name='wake', size=8, fingerprints=[parsed.fingerprint(0x500)], stub=lambda ctx: None,
-            called_by=dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12),
+            called_by=caller_rule,
             others={'wait': dict(size=8, fingerprints=[parsed.fingerprint(0x700)])},
         )
         moved = image({0x800: caller(0x800, 0x1200), 0x1200: leaf, 0x1400: leaf, 0x1600: wait})
@@ -242,7 +243,7 @@ class Matching(unittest.TestCase):
         messages = []
         self.assertIsNone(locate_stub(moved, 0x2000, [rule], messages.append))
         self.assertTrue(messages[0].startswith('[RED] '), messages)
-        for bad in (dict(rule, called_by=dict(size=28)), dict(rule, called_by=dict(rule['called_by'], call=28))):
+        for bad in (dict(rule, called_by=dict(size=28)), dict(rule, called_by=dict(caller_rule, call=28))):
             with self.assertRaises(ValueError): locate_stub(original, 0x2000, [bad], messages.append)
 
     def test_anchored_frame_step_finds_the_one_caller_or_nothing(self):

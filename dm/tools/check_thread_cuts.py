@@ -113,6 +113,8 @@ class Replay:
 
 def fft(path, patched):
     r = Replay(path, '010038B015560000', patched)
+    if r.matched is None:
+        raise ValueError(f'{path}: FFT replay requires a matched wake-up stub')
     vm = r.vm
     parsed = nso_match.Image(r.img, r.text_end)
     signal_fn, others = r.matched

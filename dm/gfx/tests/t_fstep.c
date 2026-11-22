@@ -17,6 +17,8 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
         m->next = nvn_fstep_next(&m->s, shown, w, kmin, kmax, fixed, m->slow);
     }
 }
+// The frame step's kmin for the target in a state page, as hle_nvn.c fstep_tick takes it from fps_step_cap (vsyncs of 1/60 s; no movie, no thermal cap)
+static int fstep_kmin(const uint8_t *page) { int c = nvn_fstep_cap(nvn_fstep_target(page), 0, 0); return c ? 60 / c : 0; }
 
 // A hitch that steps hold 1 up: seven frames of 1.6 vsyncs (pipeline compiles), 4.2 vsyncs behind in the last 30 frames and 3.6 without the longest, more than FSTEP_LATE a frame on average. Three such
 // frames among frames on time are paid back by the step and keep hold 1 (below)
@@ -546,6 +548,32 @@ int main(void) {
         pw = 2; check(nvn_fstep_drain_cut(33, 17, 0, 16, &pw) == 17 && pw == 2, "a drain in a later acquire of the previous frame: the time, not the pacing wait");
         pw = 3; check(nvn_fstep_drain_cut(40, 17, 9, 0, &pw) == 37 && pw == 0, "a drain counted no larger than the pacing wait it was part of");
         pw = 0; check(nvn_fstep_drain_cut(0, 17, 0, 5, &pw) == 0, "the first frame (no previous start): nothing to cut");
+    }
+    {   // The frame rate changed while the game runs (loader.c dm_fps_target_set, the in-game menus): the target in the state page goes 60 → 30 → 60, and the cap the frame step
+        // reads from it at the next frame (hle_nvn.c fps_step_cap) follows; the controller then holds what the cap allows, as at a movie's start and end
+        _Alignas(8) uint8_t page[64] = {0}; nvn_fstep_target_put(page, 60);
+        sim m = {0}; run(&m, 600, 0.5, fstep_kmin(page), 3, 0);
+        check(nvn_fstep_cap(nvn_fstep_target(page), 0, 0) == 60 && m.s.k == 1, "frame rate 60 in the state page: cap 60, hold 1");
+        check(nvn_fstep_target_change(page, 30) == 60 && nvn_fstep_target(page) == 30, "  a change to 30 while running: the page takes it and returns the 60 it replaced");
+        check(nvn_fstep_cap(nvn_fstep_target(page), 0, 0) == 30, "  the next frame's cap is 30");
+        run(&m, 1, 0.5, fstep_kmin(page), 2, 0);
+        check(m.s.k == 2 && m.next == 2, "  hold 2 and step 2 from the next frame");
+        run(&m, 600, 0.5, fstep_kmin(page), 2, 0);
+        check(m.s.k == 2 && m.game == m.real, "  it stays at 30, game time = real time");
+        check(nvn_fstep_target_change(page, 60) == 30 && nvn_fstep_cap(nvn_fstep_target(page), 0, 0) == 60, "  back to 60: the page takes it, cap 60");
+        uint64_t ups = m.s.ups; run(&m, 1, 0.5, fstep_kmin(page), 3, 0);
+        check(m.s.k == 1 && m.next == 1, "  hold 1 from the next frame");
+        run(&m, 600, 0.5, fstep_kmin(page), 3, 0);
+        snprintf(b, sizeof b, "  it stays at 60, no step up (k %d, ups %llu), game time %.0f against real time %.0f", m.s.k, (unsigned long long)(m.s.ups - ups), m.game, m.real);
+        check(m.s.k == 1 && m.s.ups == ups && m.game == m.real, b);
+        check(nvn_fstep_cap(nvn_fstep_target(page), 30, 0) == 30 && nvn_fstep_cap(nvn_fstep_target(page), 0, 1) == 30, "  at 60 a movie of 30 pictures a second and the thermal cap still hold 30");
+        check(nvn_fstep_cap(30, 60, 0) == 60 && nvn_fstep_cap(30, 60, 1) == 30, "  a movie of 60 pictures a second steps at 60 over a target of 30, the thermal cap aside");
+        check(!nvn_fstep_target_change(page, 120) && !nvn_fstep_target_change(page, 45) && !nvn_fstep_target_change(page, 0) && nvn_fstep_target(page) == 60,
+              "  120, 45 and 0 are refused, the page keeps 60");
+        nvn_fstep_target_put(page, 0);
+        check(!nvn_fstep_target_change(page, 30) && nvn_fstep_target(page) == 0 && nvn_fstep_cap(0, 0, 0) == 0,
+              "  the game's own frame step (target 0) is not switched while running");
+        check(!nvn_fstep_target_change(NULL, 30), "  no state page: refused");
     }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;

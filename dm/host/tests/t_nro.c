@@ -8,6 +8,25 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include <sys/wait.h>
 #include <unistd.h>
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
+static int test_engine;   // loader.c dm_fps_target_live: whether an engine frame limit the host writes is found (hle_fpslock.c)
+int dm_fps_lock_engine(void) { return test_engine; }
+// The frame rate changed while the game runs (loader.c, compiled here): taken only by a state page the host steps, with no engine limit; 30 or 60 only
+static void fps_target_live(void) {
+    _Alignas(8) uint8_t page[0x80] = {0}; float t = 60;
+    dm_fps_state = NULL;
+    assert(!dm_fps_target_live() && !dm_fps_target_set(30));   // no state page: next start
+    dm_fps_state = page; g_fps_mod = "main"; memcpy(page, &t, 4);
+    assert(dm_fps_target_live() == 60);
+    assert(dm_fps_target_set(30) && dm_fps_target_live() == 30); memcpy(&t, page, 4); assert(t == 30);
+    assert(dm_fps_target_set(60) && dm_fps_target_live() == 60); memcpy(&t, page, 4); assert(t == 60);
+    assert(!dm_fps_target_set(120) && !dm_fps_target_set(0) && !dm_fps_target_set(45)); memcpy(&t, page, 4); assert(t == 60);
+    test_engine = 1;   // an engine limit reads the target once: next start
+    assert(!dm_fps_target_live() && !dm_fps_target_set(30)); memcpy(&t, page, 4); assert(t == 60);
+    test_engine = 0; t = 0; memcpy(page, &t, 4);   // the game's own frame step: not switched mid-run
+    assert(!dm_fps_target_live() && !dm_fps_target_set(60)); memcpy(&t, page, 4); assert(t == 0);
+    dm_fps_state = NULL;
+    puts("frame rate changed while the game runs (dm_fps_target_set): OK");
+}
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }
@@ -58,6 +77,7 @@ static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NU
 static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i].loaded); }
 
 int main(void) {
+    fps_target_live();
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
     for (int i = 0; i < 1432; i++) fprintf(manifest, "nro%d 00 128\n", i);

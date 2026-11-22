@@ -39,7 +39,7 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Symptom:** constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`.
 - **Cause:** SDK 1.3.1 exports `movie::Buffer::Data()`, `Capacity()` and `Size()` as non-const methods. Looking up only the const overloads misses the symbols in `subsdk0`.
 - **Fix:** resolve each getter by the const name first, then by its non-const name. The decoder still requires all three; it uses the guest's methods to read the buffer without assuming its layout.
-- **Found on:** [Ultra Street Fighter II: The Final Challengers (#960)](https://github.com/seedds/nxnative/issues/960).
+- **Found on:** [ULTRA STREET FIGHTER II: The Final Challengers](../../dm/games/01007330027EE000/README.md) ([#960](https://github.com/seedds/nxnative/issues/960)).
 
 ### `movie::Decoder` taken over as a MediaCodec-style protocol
 

@@ -163,7 +163,7 @@ To enroll a cut for any game's own module:
 - **Symptom:** `jump table 590ee8` assertion in `patch_nso.py` on ULTRA STREET FIGHTER II: The Final Challengers 1.1.1 (SDK 1.3.1).
 - **Cause:** `tbnz w17, #3, next; and x18, x17, #0xf; ldrsw x18, [x13, x18, lsl #2]; add x18, x18, x13; br x18` bounds the index without a compare: on the fall-through bit 3 is clear and the mask removes every higher bit, so 8 entries, not the 16 the mask allows. The base `x13` is built by `adrp` + `add` before two loops around the dispatch, whose back edges land before the guard.
 - **Fix:** the [jump solver](#jump-tables-proved-over-control-flow): the `tbnz` narrows the low bits of `w17`, and the mask is of the same root: 8 entries.
-- **Found on:** ULTRA STREET FIGHTER II: The Final Challengers (`01007330027EE000`) 1.1.1, `main` build `8726f5e816b001b2af588df35996c4c0`, `main+0x590ee8` (reported with a first matcher by PikaMan80 in [#960](https://github.com/seedds/nxnative/issues/960); [PR #2108](https://github.com/seedds/nxnative/pull/2108)). There is no profile for this title yet; its `main` and five other modules now rewrite.
+- **Found on:** [ULTRA STREET FIGHTER II: The Final Challengers](../../dm/games/01007330027EE000/README.md) 1.1.1, `main` build `8726f5e816b001b2af588df35996c4c0`, `main+0x590ee8` (reported with a first matcher by PikaMan80 in [#960](https://github.com/seedds/nxnative/issues/960), then landed in `7b5d631` after [PR #2108](https://github.com/seedds/nxnative/pull/2108)).
 
 ### Bit test after the mask
 

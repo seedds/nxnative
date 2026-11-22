@@ -51,6 +51,7 @@
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
+#   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 #   · MVGL / NXSH (Media.Vision, Digimon Story Time Stranger): MDB1 archives (wide 64-bit LZ4 or legacy 32-bit doboz, mvgl.py) whose .shad entries and embedded main records are NXVS / NXFS / NXCS containers with control and code spans; see mvgl_jobs and nxsh_shader
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
@@ -1940,6 +1941,141 @@ def bea_members(d, label):
             zstd = zstd or zstd_mod(); data = zstd.decompress(data)
         if len(data) != usz: red(f'{label}/{path}: {len(data):#x} bytes, the entry says {usz:#x}')
         yield path, data
+
+FALCOM_PKA = bytes.fromhex('0dcff77f')   # PH3/Falcom deduplicated package archive ('.pka', magic 0x7ff7cf0d)
+FALCOM_SKIP_EXT = ('.dds.phyre', '.dae.phyre', '.xml')   # textures, Collada meshes and asset manifests inside Falcom .pkg / .pka archives
+
+def falcom_decompress(raw, usz, flags, where):
+    """Decompress one Falcom .pkg / .pka entry: flags 0 = stored, 1 = raw LZ4 block, 0x10 = zstd frame.
+    Returns bytes on success, None for an unknown storage flag (caller logs one [WARN] per archive), or red() on corrupt/oversized data."""
+    if flags == 0:
+        if len(raw) != usz: red(f'{where}: {len(raw):#x} stored bytes, the entry says {usz:#x}')
+        return bytes(raw)
+    if flags == 1:
+        if usz > 255 * len(raw): red(f'{where}: {usz:#x} bytes from {len(raw):#x} stored is more than an LZ4 block can hold (255 to 1)')
+        import lz4.block
+        try: m = lz4.block.decompress(raw, uncompressed_size=usz)
+        except lz4.block.LZ4BlockError as e: red(f'{where}: its {len(raw):#x} stored bytes are not an LZ4 block ({e})')
+        if len(m) != usz: red(f'{where}: {len(m):#x} bytes, the entry says {usz:#x}')
+        return m
+    if flags == 0x10:
+        if raw[:4] != ZSTD_MAGIC: red(f'{where}: flags 0x10 entry does not start with a zstd frame')
+        zstd = zstd_mod(); dec = zstd.ZstdDecompressor()
+        try: m = dec.decompress(raw, max_length=usz)
+        except zstd.ZstdError as e: red(f'{where}: invalid zstd frame ({e})')
+        if len(m) != usz or not dec.eof: red(f'{where}: zstd stream length does not match {usz:#x}')
+        return m
+    return None
+
+def falcom_pkg(d):
+    """Nihon Falcom's package ('.pkg', no magic). Layout: u32 0, u32 entry count n, n × 0x50-byte entries {+0 name (64 bytes NUL-padded), +0x40 u32 length, u32 stored length,
+    u32 offset from file start, u32 flags}, then the data with the first entry starting right after the table (8 + 0x50 * n). Seen with flags 1 (LZ4 block, CLE Switch ports
+    holding BNSH) and 0x10 (zstd, PH3/NISA Trails into Reverie 01008CB0156BC000: 213 loose .pkg files holding RYHP GLSLC shaders); flags 9 with stored length 0 = external data.
+    → [(name, length, stored length, offset, flags)] when d matches the table invariants, else None."""
+    if len(d) < 8 + 0x50: return None
+    zero, n = struct.unpack_from('<II', d, 0)
+    if zero or not n or n > (len(d) - 8) // 0x50: return None
+    table_end = 8 + 0x50 * n
+    if struct.unpack_from('<I', d, 8 + 0x48)[0] != table_end: return None   # checked before reading the table: plain files starting with u32 0 exit here
+    es = []
+    for o in range(8, table_end, 0x50):
+        usz, csz, off, fl = struct.unpack_from('<4I', d, o + 0x40)
+        if off > len(d) or csz > len(d) - off or (csz and off < table_end): return None
+        es.append((bytes(d[o:o + 0x40]).split(b'\0', 1)[0].decode('utf-8', 'replace'), usz, csz, off, fl))
+    return es
+
+def falcom_pkg_shaders(d, entries, label, out):
+    """Scan each non-skipped entry of a Falcom .pkg archive through scan_blob. Unknown flags with data are skipped with one [WARN] per package."""
+    other = collections.Counter()
+    for name, usz, csz, off, fl in entries:
+        if not csz or name.lower().endswith(FALCOM_SKIP_EXT): continue
+        entry_label = f'{label}/{name}'
+        m = falcom_decompress(d[off:off + csz], usz, fl, entry_label)
+        if m is None: other[fl] += 1; continue
+        before = len(out)
+        scan_blob(m, entry_label, out)
+        if len(out) == before and m[:4] == GLSLC_MAGIC: out.extend(glslc_shaders(m, entry_label, need=False))
+    if other:
+        print(f'[WARN] {label}: {sum(other.values())} entries not read, their storage flags (' +
+              ', '.join(f'{f:#x} × {n}' for f, n in sorted(other.items())) +
+              ') are not ones this reader knows (0 = stored, 1 = LZ4, 0x10 = zstd)', flush=True)
+
+def falcom_pka_index(path, label):
+    """PH3/Falcom deduplicated package archive ('.pka', magic 0x7ff7cf0d; Trails into Reverie 01008CB0156BC000's 8.09 GB data/asset/nx/assets.pka holds 14,915 virtual .pkg
+    files / 83,768 unique zstd blobs, 5,710 of them .fx*.phyre shader archives). Layout: magic u32, pkg_count u32, pkg_count × {char[32] pkg_name, u32 entry_count,
+    entry_count × {char[64] name, u8[32] sha256}}, file_count u32, file_count × {u8[32] sha256, u64 offset, u32 csz, u32 usz, u32 flags}, then data blobs.
+    Returns deduplicated non-skipped [(pkg_name, entry_name, offset, csz, usz, flags)] after validating all archive bounds."""
+    with open(path, 'rb') as f:
+        size = f.seek(0, 2); f.seek(0)
+        if size < 12: red(f'{label}: PKA archive is shorter than its header ({size} bytes)')
+        magic, pkg_count = struct.unpack('<4sI', f.read(8))
+        if magic != FALCOM_PKA: red(f'{label}: PKA header magic {magic.hex()}, expected {FALCOM_PKA.hex()}')
+        if pkg_count > (size - 12) // 36: red(f'{label}: PKA header lists {pkg_count} packages, more than fit in the archive')
+        names = {}
+        for i in range(pkg_count):
+            hdr = f.read(36)
+            if len(hdr) != 36: red(f'{label}: PKA package {i} header runs past the end of the archive')
+            pnm = hdr[:32].split(b'\0', 1)[0].decode('utf-8', 'replace')
+            ecnt = struct.unpack_from('<I', hdr, 32)[0]
+            if ecnt > (size - f.tell()) // 96: red(f'{label}: PKA package {pnm} lists {ecnt} entries, more than fit in the archive')
+            raw = f.read(ecnt * 96)
+            if len(raw) != ecnt * 96: red(f'{label}: PKA package {pnm} entries run past the end of the archive')
+            for o in range(0, len(raw), 96):
+                enm = raw[o:o + 64].split(b'\0', 1)[0].decode('utf-8', 'replace')
+                if enm.lower().endswith(FALCOM_SKIP_EXT): continue
+                names.setdefault(raw[o + 64:o + 96], (pnm, enm))
+        cnt_raw = f.read(4)
+        if len(cnt_raw) != 4: red(f'{label}: PKA file table count runs past the end of the archive')
+        file_count = struct.unpack('<I', cnt_raw)[0]
+        if file_count > (size - f.tell()) // 52: red(f'{label}: PKA file table lists {file_count} files, more than fit in the archive')
+        ft_raw = f.read(file_count * 52)
+        if len(ft_raw) != file_count * 52: red(f'{label}: PKA file table runs past the end of the archive')
+        ft_end = f.tell()
+        entries = []
+        for o in range(0, len(ft_raw), 52):
+            off, csz, usz, fl = struct.unpack_from('<QIII', ft_raw, o + 32)
+            if csz and (off < ft_end or off > size or csz > size - off):
+                red(f'{label}: PKA file entry {o // 52} ({csz:#x} bytes at {off:#x}) lies outside archive data ({ft_end:#x}..{size:#x})')
+            if not csz: continue
+            who = names.get(ft_raw[o:o + 32])
+            if who is not None: entries.append((who[0], who[1], off, csz, usz, fl))
+    return entries
+
+def falcom_pka_jobs(files, parts=64):
+    """Shard deduplicated Falcom .pka entries across pool workers by compressed size, without loading multi-GB archives into memory."""
+    found, consumed, errors = [], set(), []
+    for p, r in files:
+        consumed.add(p)
+        try: entries = falcom_pka_index(p, '/' + r)
+        except (SystemExit, ValueError, OSError, struct.error) as e:
+            errors.append((p, r, (FALCOM_PKA, None, unreadable_why(e, r)))); continue
+        found.append((p, r, entries))
+    jobs, step = errors, max(sum(e[3] for _, _, es in found for e in es) // parts, 1)
+    for p, r, entries in found:
+        cur, size = [], 0
+        for e in entries:
+            cur.append(e); size += e[3]
+            if size >= step: jobs.append((p, r, (FALCOM_PKA, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (FALCOM_PKA, tuple(cur))))
+    return jobs, consumed
+
+def falcom_pka_shaders(path, rel, entries, out):
+    """Read and scan one shard of deduplicated Falcom .pka entries."""
+    other = collections.Counter()
+    with open(path, 'rb') as f:
+        for pnm, enm, off, csz, usz, fl in entries:
+            entry_label = f'/{rel}/{pnm}/{enm}'
+            f.seek(off); raw = f.read(csz)
+            if len(raw) != csz: red(f'{entry_label}: short read ({len(raw):#x} of {csz:#x} bytes)')
+            m = falcom_decompress(raw, usz, fl, entry_label)
+            if m is None: other[fl] += 1; continue
+            before = len(out)
+            scan_blob(m, entry_label, out)
+            if len(out) == before and m[:4] == GLSLC_MAGIC: out.extend(glslc_shaders(m, entry_label, need=False))
+    if other:
+        print(f'[WARN] /{rel}: {sum(other.values())} entries not read, their storage flags (' +
+              ', '.join(f'{f:#x} × {n}' for f, n in sorted(other.items())) +
+              ') are not ones this reader knows (0 = stored, 1 = LZ4, 0x10 = zstd)', flush=True)
 
 TFXO = b'.tfxo file\0'
 def tfxo_shaders(d, label):
@@ -3883,6 +4019,8 @@ def scan_blob(d, label, out, depth=0, left=None):
     if (shaders := viper_shader(d, label)) is not None: out.extend(shaders); return   # Star Fox's shader binaries
     if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:
         if shaders := phyre_shaders(d, label): out.extend(shaders); return
+        if d[:4] == b'RYHP' and GLSLC_MAGIC in d:
+            if shaders := glslc_shaders(d, label, need=False): out.extend(shaders); return
     if d[:4] == b'VIPR':   # Star Fox's resource containers: two of them wrap the engine's NDSR upscaler networks (ounce-nvn2-upper_left_ndsr.bin), 40 shaders each, as a file inside
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
@@ -4237,6 +4375,10 @@ def scan_file_in(args):
         if args[2][1] is None: red(args[2][2])
         lspk_shaders(args[2][1], rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == FALCOM_PKA:
+        if args[2][1] is None: red(args[2][2])
+        falcom_pka_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == KIT:   # a range of a KIT archive's members (kit_jobs)
         import kit
         for e in args[2][1]:
@@ -4378,6 +4520,23 @@ def scan_file_in(args):
     if head[:4] == b'NXCX' and head[12:16] == bytes(4) and head[8:12] != GFX_MAGIC and head[4:8] not in (ZSTD_MAGIC, LZ4_FRAME_MAGIC):
         with open(path, 'rb') as f: archive = nxcx_shaders(f, '/' + rel)
         if archive is not None: return rel, uniq_keys(archive), var_pairs(archive), trees
+    if head[:4] == FALCOM_PKA:
+        falcom_pka_shaders(path, rel, falcom_pka_index(path, '/' + rel), found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(head) >= 8 and head[:4] == b'\0\0\0\0' and (n := struct.unpack_from('<I', head, 4)[0]):
+        size = os.path.getsize(path)
+        table_end = 8 + 0x50 * n
+        if table_end <= size:
+            with open(path, 'rb') as f:
+                f.seek(8 + 0x48)
+                first_off = struct.unpack('<I', f.read(4))[0]
+            if first_off == table_end:
+                from romfs import mmap
+                with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+                    entries = falcom_pkg(d)
+                    if entries is not None:
+                        falcom_pkg_shaders(d, entries, '/' + rel, found)
+                        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
@@ -4540,8 +4699,9 @@ def plan_jobs(files, heads, romfs_v, main_v):
     ls_jobs, lsps = lspk_jobs(files)   # Larian's packages: indexed BSHD programs, without reading unrelated assets
     kt_jobs, kits = kit_jobs(files)   # Unravel TWO's KIT shards: chained LZ4 resources and Phyre effects
     tt_jobs, ttdats = ttdat_jobs(files)   # TT Games' DATs: only indexed .nnx_shaders, Oodle through the game's own decoder
-    big += ea_work + pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + mv_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs + kt_jobs + tt_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in mvgls and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps and p not in kits and p not in ttdats and p not in ea_paths]
+    pk_jobs, pkas = falcom_pka_jobs(starting(FALCOM_PKA))   # PH3/Falcom deduplicated .pka archives (Trails into Reverie)
+    big += ea_work + pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + mv_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs + kt_jobs + tt_jobs + pk_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in mvgls and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in lsps and p not in kits and p not in ttdats and p not in ea_paths and p not in pkas]
     return big, files
 
 

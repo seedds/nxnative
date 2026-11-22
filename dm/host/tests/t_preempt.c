@@ -2,9 +2,18 @@
 // to model a host dispatch delay: it is guest-runnable as soon as StartThread or
 // a signal makes it ready, even though Mach still reports it stopped. Its payload
 // must precede the lower-priority caller's return, including delays over 5 ms.
-#include "../hle_thread.c"
 #include <assert.h>
+#include <time.h>
 #include <unistd.h>
+#include "../dm.h"
+
+static uint64_t request_test_now(void);
+static int request_test_sleep(const struct timespec *, struct timespec *);
+#define now_ns request_test_now
+#define nanosleep request_test_sleep
+#include "../hle_thread.c"
+#undef nanosleep
+#undef now_ns
 
 static thr_t worker;
 static uint32_t event_read, event_write;
@@ -309,10 +318,27 @@ static int native_join_handoff(void) {
 // held until the worker exited, the flag stayed set for good and every later slot read was refused. The worker reads the flag after its request, then clears it
 static _Atomic int request_busy, request_seen;
 static int request_calls;
+static _Thread_local int in_request;
+static pthread_mutex_t request_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t request_cv = PTHREAD_COND_INITIALIZER;
+
+// Model the reply after the starter's store, without relying on the runner
+// scheduling the starter within the host's service timeout or round trip.
+static uint64_t request_test_now(void) { return in_request ? 0 : now_ns(); }
+static int request_test_sleep(const struct timespec *ts, struct timespec *remaining) {
+    if (!in_request || ts->tv_sec || ts->tv_nsec != SERVICE_ROUND_TRIP_NS) return nanosleep(ts, remaining);
+    pthread_mutex_lock(&request_mu);
+    while (!atomic_load(&request_busy)) pthread_cond_wait(&request_cv, &request_mu);
+    pthread_mutex_unlock(&request_mu);
+    return 0;
+}
+
 static void *request_work(void *arg) {
     thr_t *t = arg; pthread_setspecific(g_keythr, t); t->host_work = &dm_host_work;
     g_lock(); worker_ready = 1; while (!t->started) g_cond_wait(&t->cv, NULL); g_unlock();
+    in_request = 1;
     for (int i = 0; i < request_calls; i++) dm_thread_service_request();
+    in_request = 0;
     atomic_store(&request_seen, atomic_load(&request_busy));
     atomic_store(&request_busy, 0);
     atomic_store(&payload, 2);
@@ -330,7 +356,10 @@ static int service_request_start(int calls) {
     for (;;) { g_lock(); int ready = worker_ready; g_unlock(); if (ready) break; usleep(100); }
     r[0] = t.handle; svc_thread(0x09, r); assert(r[0] == 0);
     int held = atomic_load(&payload) == 2;   // the worker finished before the starter came back
+    pthread_mutex_lock(&request_mu);
     atomic_store(&request_busy, 1);          // the store the game makes after StartThread
+    pthread_cond_signal(&request_cv);
+    pthread_mutex_unlock(&request_mu);
     pthread_join(w, NULL);
     int seen = atomic_load(&request_seen), busy = atomic_load(&request_busy);
     g_lock(); g_all = t.all;

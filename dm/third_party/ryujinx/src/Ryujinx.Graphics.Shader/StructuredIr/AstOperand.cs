@@ -13,6 +13,10 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
         public AggregateType VarType { get; set; }
 
+        // A by-reference call argument denotes storage, not its current value.
+        // Expression propagation must retain both the lvalue and its declaration.
+        public bool AddressTaken { get; set; }
+
         public int Value { get; }
 
         private AstOperand()

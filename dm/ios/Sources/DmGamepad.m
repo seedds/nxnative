@@ -557,7 +557,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 }
 
 // ---- Physical controllers ----
-// Each controller with an extended gamepad profile is a player of its own, as on the Mac (front_mac.m): it holds a slot (pad_slots.h: player 1 first, a reconnected controller
+// Each supported controller is a player of its own, as on the Mac (front_mac.m): it holds a slot (pad_slots.h: player 1 first, a reconnected controller
 // gets its player back) and goes to dm_pad_set_player, and hle_hid.c reports player n on its own npad while the slot is held (dm_pad_players). Player 1's controller is ORed
 // with the touch gamepad; a one-player game that supports only No1 / Handheld still sees every controller as player 1 (hle_hid.c). Each player has its controller's rumble and
 // gyro; the phone's gyro is player 1's. With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins). With DM_PAD_PRESS_TO_JOIN=1 a controller is
@@ -569,8 +569,52 @@ static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 327
 static const char *pad_name(GCController *c);
 static void npad_name(int p, char *out, size_t cap);
 static int cp_poll(void);
-static void read_pad(GCExtendedGamepad *g) {
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0 && !g_press_to_join) return;
+static void pad_report(GCController *c, uint64_t m, float lx, float ly, float rx, float ry) {
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); if (p < 0 && !g_press_to_join) return;
+    if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, a press the game also gets
+        char nb[16];
+        if (!m) return;
+        if ((p = pad_slot_take_lowest(&g_slots, (__bridge const void *)c, pad_name(c))) < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", pad_name(c), DM_PLAYERS); return; }
+        g_held[p] = c; dm_motion_attach(c, p); dm_pad_players(pad_slot_mask(&g_slots));
+        npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", pad_name(c), p + 1, nb);
+    }
+    if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
+    dm_haptics_apple_controller(p, c);
+    dm_pad_set_player(p, m, axis(lx), axis(ly), axis(rx), axis(ry));
+}
+// iOS presents a lone Joy-Con sideways through live input, with no extended gamepad (#2971).
+// Its direction pad is the stick and the face buttons go by position, as in SDL's Apple mapping.
+static GCControllerLiveInput *pad_live_input(GCController *c) {
+    NSString *category = c.productCategory;
+    if ([category isEqualToString:@"Nintendo Switch Joy-Con (L)"] || [category isEqualToString:@"Nintendo Switch Joy-Con (R)"]) return c.input;
+    return nil;
+}
+static id<GCDirectionPadElement> pad_live_stick(GCControllerLiveInput *input) {
+    return input.dpads[GCInputLeftThumbstick] ?: input.dpads[GCInputDirectionPad];
+}
+static BOOL pad_usable(GCController *c) {
+    if (c.extendedGamepad) return YES;
+    GCControllerLiveInput *input = pad_live_input(c);
+    return pad_live_stick(input) || input.buttons[GCInputButtonA] || input.buttons[GCInputButtonX];
+}
+static uint64_t pad_live_buttons(GCControllerLiveInput *input) {
+    uint64_t m = 0;
+    #define K(name, bit) if (input.buttons[name].pressedInput.pressed) m |= 1ull << bit
+    K(GCInputButtonX, B_A); K(GCInputButtonA, B_B); K(GCInputButtonY, B_X); K(GCInputButtonB, B_Y);
+    K(GCInputLeftShoulder, B_L); K(GCInputRightShoulder, B_R); K(GCInputLeftTrigger, B_ZL); K(GCInputRightTrigger, B_ZR);
+    K(GCInputButtonMenu, B_PLUS); K(GCInputButtonOptions, B_MINUS); K(GCInputLeftThumbstickButton, B_LS);
+    #undef K
+    return m;
+}
+static void read_pad(GCController *c) {
+    GCExtendedGamepad *g = c.extendedGamepad;
+    if (!g) {
+        GCControllerLiveInput *input = pad_live_input(c);
+        if (!input) return;
+        id<GCDirectionPadElement> stick = pad_live_stick(input);
+        pad_report(c, pad_live_buttons(input), stick.xAxis.value, stick.yAxis.value, 0, 0);
+        return;
+    }
     _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= 1ull << bit
@@ -579,19 +623,35 @@ static void read_pad(GCExtendedGamepad *g) {
     if (g.leftThumbstickButton) K(g.leftThumbstickButton, B_LS); if (g.rightThumbstickButton) K(g.rightThumbstickButton, B_RS);
     K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
     #undef K
-    if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, a press the game also gets
-        GCController *c = g.controller; char nb[16];
-        if (!m) return;
-        if ((p = pad_slot_take_lowest(&g_slots, (__bridge const void *)c, pad_name(c))) < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", pad_name(c), DM_PLAYERS); return; }
-        g_held[p] = c; dm_motion_attach(c, p); dm_pad_players(pad_slot_mask(&g_slots));
-        npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", pad_name(c), p + 1, nb);
-    }
-    if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
-    dm_haptics_apple_controller(p, g.controller);
-    dm_pad_set_player(p, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value), axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
+    pad_report(c, m, g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value);
 }
-// Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); the app gives them no function
-static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
+// Returns YES on first registration, so a controller waiting to join is logged once.
+static BOOL pad_listen(GCController *c) {
+    GCExtendedGamepad *g = c.extendedGamepad;
+    if (g) {
+        for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
+        if (g.valueChangedHandler) return NO;
+        g.valueChangedHandler = ^(GCExtendedGamepad *profile, GCControllerElement *el) {
+            (void)el;
+            if (profile.valueChangedHandler) read_pad(profile.controller);
+        };
+    } else {
+        // The system keeps Home and Capture for a lone Joy-Con, as before it had a game input route.
+        GCControllerLiveInput *input = c.input;
+        if (input.elementValueDidChangeHandler) return NO;
+        __weak GCController *weak = c;
+        input.elementValueDidChangeHandler = ^(id<GCDevicePhysicalInput> state, id<GCPhysicalInputElement> el) {
+            (void)el;
+            GCController *controller = weak;
+            if (controller && state.elementValueDidChangeHandler) read_pad(controller);
+        };
+    }
+    return YES;
+}
+static void pad_unlisten(GCController *c) {
+    if (c.extendedGamepad) c.extendedGamepad.valueChangedHandler = nil;
+    else pad_live_input(c).elementValueDidChangeHandler = nil;
+}
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
 static void pads_start(void) {
@@ -602,13 +662,13 @@ static void pads_start(void) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
-    if (gone) { gone.extendedGamepad.valueChangedHandler = nil; dm_motion_detach(gone, 0); }
+    if (gone) dm_motion_detach(gone, 0);
     BOOL any = NO; int motion = 0;
-    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad) {
+    for (GCController *c in GCController.controllers) if (c != gone && pad_usable(c)) {
         if (c.motion.hasRotationRate) motion = 1;
-        any = YES; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+        any = YES; pad_listen(c);
         dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
-        read_pad(c.extendedGamepad);
+        read_pad(c);
     }
     if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
     if (!any) { dm_haptics_apple_controller(0, nil); dm_pad_set(0, 0, 0, 0, 0); }
@@ -618,26 +678,24 @@ static BOOL pads_slotted(GCController *gone) {
     NSArray<GCController *> *now = GCController.controllers; char nb[16]; BOOL waiting = NO;
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
-        g_held[p].extendedGamepad.valueChangedHandler = nil;
+        pad_unlisten(g_held[p]);
         dm_motion_detach(g_held[p], p);   // player 1's: the phone's gyro (if on) takes over from its next sample
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
-    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
+    for (GCController *c in now) if (c != gone && pad_usable(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         if (g_press_to_join) {   // a player at its first button (read_pad)
-            waiting = YES; pad_keep_system_buttons(c);
-            if (!c.extendedGamepad.valueChangedHandler) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
-            c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+            waiting = YES;
+            if (pad_listen(c)) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
             continue;
         }
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c; pad_keep_system_buttons(c);
-        c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+        g_held[p] = c; pad_listen(c);
         dm_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
-        read_pad(c.extendedGamepad);
+        read_pad(c);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
     dispatch_async(dispatch_get_main_queue(), ^{ cp_poll(); });   // a controller came or went while the controller applet's prompt is up
@@ -645,7 +703,11 @@ static BOOL pads_slotted(GCController *gone) {
 }
 - (void)padsChanged:(NSNotification *)note {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
-    if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
+    if (gone) pad_unlisten(gone);   // even a controller still waiting for its first press can have a handler
+    if (c) {
+        BOOL usable = pad_usable(c);
+        if (!usable || g_merge) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), usable ? "" : " (no supported gamepad profile: not used)");
+    }
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
     dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
 }
@@ -653,7 +715,7 @@ static BOOL pads_slotted(GCController *gone) {
 
 // The controller applet's prompt (front.h front_ctrl_support, ctrl_prompt.h; GitHub issue #1640), as the Mac's (front_mac.m): the game asked for more players than it sees, and
 // the game's thread waits while a card is up over the game. A controller that joins meanwhile is a player at once (its first button with DM_PAD_PRESS_TO_JOIN, its connection
-// without) and the count follows. A and B are GameController's buttonA and buttonB on any controller (the press that makes a controller join does not count); the card's
+// without) and the count follows. A and B are GameController's buttonA and buttonB on an extended pad, or the mapped A and B of a lone Joy-Con (the joining press does not count); the card's
 // Done and Cancel buttons take touches, and its scrim keeps every other touch from the game and the touch gamepad. The game gets no controller input while it is up, nor
 // until the A or B that closed it is let go. A front end passes the texts in the player's language as DM_CTRL_PROMPT_TEXT (cp_text). Main thread
 static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel, g_cp_ok;
@@ -666,11 +728,18 @@ static UIView *g_cp_view; static UILabel *g_cp_count; static UIButton *g_cp_done
 static DmCtrlPrompt *g_cp_target;
 static void cp_buttons(int *a, int *b) {
     *a = *b = 0;
-    for (GCController *c in GCController.controllers) { GCExtendedGamepad *g = c.extendedGamepad; if (g) { *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed; } }
+    for (GCController *c in GCController.controllers) {
+        GCExtendedGamepad *g = c.extendedGamepad;
+        if (g) { *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed; }
+        else if (pad_usable(c)) {
+            uint64_t m = pad_live_buttons(c.input);
+            *a |= (m & DM_BTN_A) != 0; *b |= (m & DM_BTN_B) != 0;
+        }
+    }
 }
 static int cp_waiting(void) {   // connected controllers that are no player yet
     int n = 0;
-    if (!g_merge) for (GCController *c in GCController.controllers) if (c.extendedGamepad && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
+    if (!g_merge) for (GCController *c in GCController.controllers) if (pad_usable(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
     return n;
 }
 static UILabel *cp_label(const char *text, CGFloat size, UIFontWeight w, CGFloat alpha) {
@@ -724,7 +793,7 @@ static int cp_poll(void) {
         g_cp_ok = g_cp.ok; dispatch_semaphore_signal(g_cp_done);
         ph = cp_step(&g_cp, joined, 0, a, b, 0, 0);   // nothing held: the game has its input at once
     }
-    if (ph == CP_IDLE) { for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) read_pad(g_held[p].extendedGamepad); return 0; }   // each controller read as it is now
+    if (ph == CP_IDLE) { for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) read_pad(g_held[p]); return 0; }   // each controller read as it is now
     return 1;
 }
 int front_ctrl_support(int min, int max) {

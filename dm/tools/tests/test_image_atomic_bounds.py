@@ -34,12 +34,12 @@ import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
 import dmsh_abi   # noqa: E402
 TBIAS_BANK = dmsh_abi.TBIAS_BANK
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
-XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
+XC = dmsh_chain.CROSS_MSL  # dmsh_build.XC without fragment padding
 
 
 def cross(spv, msl):
-    """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
-    subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
+    """spirv-cross as dmsh_build runs it (MSL 3.2): image atomics must come out as native texture atomics"""
+    subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
     source = atomic.check_msl(msl.read_text())
     assert ('.atomic_fetch_' in source or re.search(r'<ulong, access::read_write>.*\.atomic_(max|min)\(', source, re.S)) and 'access::read_write' in source, msl
     return source
@@ -174,25 +174,6 @@ class Portable(unittest.TestCase):
         self.assertEqual(offset((0, 0, 0), (8, 4, 3)), 0)
         self.assertEqual(offset((7, 3, 2), (8, 4, 3)), 95)
         self.assertEqual([offset((0, 0, z), (8, 4, 3)) for z in range(3)], [0, 32, 64])
-
-    def test_msl_version_follows_image_atomics(self):
-        with tempfile.TemporaryDirectory(prefix='dm-atomic-spv-') as temp:
-            def module(name, ops):
-                path = Path(temp) / name
-                path.write_bytes(struct.pack('<5I', 0x07230203, 0x10000, 0, 100, 0) + b''.join(struct.pack('<%dI' % len(o), *o) for o in ops))
-                return str(path)
-            capability = [(2 << 16) | 17, 1]  # OpCapability Shader
-            plain = module('plain.spv', [capability])
-            texel = module('texel.spv', [capability, [(6 << 16) | 60, 1, 2, 3, 4, 5]])  # OpImageTexelPointer
-            self.assertFalse(atomic.uses_image_atomics(plain))
-            self.assertTrue(atomic.uses_image_atomics(texel))
-            self.assertEqual(atomic.cross_args(XC, plain), XC)
-            self.assertEqual(atomic.cross_args(XC, texel), XC[:2] + ['30100'] + XC[3:])
-            self.assertEqual(XC[2], '20300')  # not changed in place
-            # A zero-length instruction stops the walk. A module without the texel pointer's word is not walked, and spirv-cross, which runs next, rejects it
-            with self.assertRaises(ValueError): atomic.uses_image_atomics(module('zero.spv', [[0, 0], [(6 << 16) | 60, 1, 2, 3, 4, 5]]))
-            not_spirv = Path(temp) / 'not.spv'; not_spirv.write_bytes(b'\0' * 20)
-            with self.assertRaises(ValueError): atomic.uses_image_atomics(str(not_spirv))
 
     def test_pointer_emulation_rejected(self):
         native = 'uint _1 = spvDescriptorSet0.img.atomic_fetch_add(uint3(c), 1u).x;'
@@ -512,6 +493,75 @@ class Compiler(unittest.TestCase):
             subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
             self.assertRegex(msl.read_text(), r'_c%d\s*\[\[id\(\d+\)\]\]' % TBIAS_BANK)
             self.compile_metal(msl, work, 'tbuf')
+
+    def test_buffer_pool_live_offset_msl(self):
+        import dmsh_reflect
+        source = ('#include <metal_stdlib>\nusing namespace metal;\n'
+                  'struct spvDescriptorSetBuffer0\n{\n'
+                  '    array<texture_buffer<uint>, 33> cp_t_cb0_40000000 [[id(0)]];\n'
+                  '    device uint* output [[id(33)]];\n};\n'
+                  'kernel void k(constant spvDescriptorSetBuffer0& a [[buffer(0)]]) { '
+                  'a.output[0] = a.cp_t_cb0_40000000[32].read(3).x; '
+                  'a.output[1] = a.cp_t_cb0_40000000[32].get_width(); }\n')
+        leaf = 'static uint leaf(constant array<texture_buffer<uint>, 33>& cp_t_cb0_40000000) { return cp_t_cb0_40000000[32].read(uint(cp_t_cb0_40000000[1].read(0).x)).x + cp_t_cb0_40000000[32].get_width(); }\n'
+        source = source.replace('kernel void k(', leaf + 'kernel void k(')
+        source = source.replace('a.output[1] = a.cp_t_cb0_40000000[32].get_width();', 'a.output[1] = leaf(a.cp_t_cb0_40000000);')
+        rewritten = dmsh_reflect.pool_arrays(source)
+        bindings = dmsh_reflect.reflect('pool', 'cs', rewritten, {'sbufs': []})
+        self.assertEqual(bindings[0]['kind'], dmsh_abi.KIND_TEX_POOL)
+        self.assertEqual(bindings[1]['arg_id'], 1)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-pool-') as temp:
+            work = Path(temp); msl = work / 'pool.metal'; msl.write_text(rewritten)
+            self.compile_metal(msl, work, 'pool')
+
+    def test_wrapped_buffer_fetch_offset_before_row_split(self):
+        table = (RYU / 'Decoders/InstTable.cs').read_text()
+        def base(name):
+            m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', table)
+            assert m is not None, name
+            return int(m[1].replace('x', '0'), 2)
+        def mov(reg, value): return base('Mov32i') | ((value & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | reg
+        texture = (8 << 36) | (1 << 31) | (7 << 16)
+        surface = (0x48 << 36) | (1 << 33) | (4 << 20) | (7 << 16)
+        program = [mov(0, 16383), mov(1, 0), base('Tld') | texture | (255 << 20) | 4,
+                   base('SustD') | surface | (1 << 8) | 4, mov(1, 1),
+                   base('Txq') | texture | (1 << 22) | (255 << 8) | 5,
+                   base('SustD') | (surface & ~(0xff << 20)) | (5 << 20) | (1 << 8) | 5, base('Exit') | (7 << 16) | 15]
+        words = []
+        for i, instruction in enumerate(program):
+            if i % 3 == 0: words.append(0)
+            words.append(instruction)
+        with tempfile.TemporaryDirectory(prefix='dm-buffer-rows-') as temp:
+            work = Path(temp); code = work / 'rows.bin'; code.write_bytes(struct.pack('<%dQ' % len(words), *words))
+            jobs = work / 'jobs.json'
+            jobs.write_text(json.dumps([dict(key='rows', stage='cs', code=str(code), tex={},
+                img={'0': dict(type='buffer', fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jobs), str(work)], check=True)
+            spv = work / 'rows.spv'; subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+            res = json.loads((work / 'rows.res.json').read_text())
+            self.assertTrue(res['textures'][0]['row_bias'])
+            self.assertEqual(res['textures'][0]['tbx'], 0)
+            self.assertEqual(res['images'][0]['tbx'], 2)   # row lead and logical width precede the writable image's offset
+            ops = instructions(spv)
+            defs = {a[1]: (op, a) for op, a in ops if op in (43, 61, 65, 80, 95, 124, 128, 169, 176, 194, 196, 197, 199)}
+            fetch = next(a for op, a in ops if op == 95)
+            op, coords = defs[fetch[3]]; self.assertEqual(op, 80)
+            op, xcast = defs[coords[2]]; self.assertEqual(op, 124)
+            op, x = defs[xcast[2]]; self.assertEqual(op, 199)
+            op, ycast = defs[coords[3]]; self.assertEqual(op, 124)
+            op, y = defs[ycast[2]]; self.assertEqual(op, 194)
+            self.assertEqual(x[2], y[2])   # both coordinates split the same moved linear index
+            self.assertEqual(defs[x[3]][1][2], 16383)
+            self.assertEqual(defs[y[3]][1][2], 14)
+            def depends_on_add(value, seen=None):
+                seen = set() if seen is None else seen
+                if value in seen or value not in defs: return False
+                seen.add(value); op, a = defs[value]
+                return op == 128 or (op != 43 and any(depends_on_add(v, seen) for v in a[2:]))
+            self.assertTrue(depends_on_add(x[2]))
+            msl = work / 'rows.metal'
+            subprocess.run([str(SPIRV_CROSS), *XC, str(spv), '--output', str(msl)], check=True)
+            self.compile_metal(msl, work, 'rows')
 
     def test_real_translation_and_cross(self):
         self.assertTrue(os.access(SPIRV_CROSS, os.X_OK), f'{SPIRV_CROSS} required for compiler acceptance')

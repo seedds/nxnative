@@ -12,6 +12,7 @@
 #include <TargetConditionals.h>
 #include <mach/mach.h>
 #include <mach/vm_statistics.h>
+#include <stdatomic.h>
 #if TARGET_OS_IPHONE
 #include <os/proc.h>
 #endif
@@ -149,7 +150,7 @@ static void *memstat_thread(void *p) {
     return NULL;
 }
 
-__attribute__((constructor)) static void memstat_start(void) {
+static void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
     char *path = strdup(p);
@@ -191,7 +192,7 @@ static void *thrcpu_thread(void *p) {
     }
     return NULL;
 }
-__attribute__((constructor)) static void thrcpu_start(void) {
+static void thrcpu_start(void) {
     const char *p = getenv("DM_THRCPU");
     if (!p || !*p) return;
     char *spec = strdup(p);
@@ -199,4 +200,11 @@ __attribute__((constructor)) static void thrcpu_start(void) {
     if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; spec = malloc(n); snprintf(spec, n, "%s/Documents/%s", getenv("HOME"), p); }
 #endif
     pthread_t th; pthread_create(&th, NULL, thrcpu_thread, spec); pthread_detach(th);
+}
+// DM_MEMSTAT and DM_THRCPU, started once by the host's loading (main.c host_preload), not by a constructor: on iOS a constructor runs before the app's main() sets what Documents/env.txt
+// holds, so either switch set there did nothing (GitHub issue #1184)
+void dm_diag_samplers_start(void) {
+    static atomic_int once;
+    if (atomic_exchange(&once, 1)) return;
+    memstat_start(); thrcpu_start();
 }

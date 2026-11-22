@@ -57,10 +57,16 @@ class Ue3CacheTests(unittest.TestCase):
             if oodle_calls is not None: self.assertEqual(len(self.calls), oodle_calls)
             else: self.assertTrue(self.calls)
 
-    def test_chunks_must_run_to_the_end(self):
-        d, _ = package(record(*shader(1)))
-        with self.assertRaisesRegex(SystemExit, 'no compressed chunk'):
-            shader_split.ue3_body(d + b'trailing', 'p.xxx')
+    def test_only_zero_padding_can_follow_the_last_chunk(self):
+        body = record(*shader(1))
+        d, summary = package(body)
+        self.assertEqual(shader_split.ue3_body(d + bytes(0x8000 - len(d)), 'p.xxx'), summary + body)
+        for tail in (b'\0', b'\0\0\0'):
+            with self.subTest(tail=tail):
+                self.assertEqual(shader_split.ue3_body(d + tail, 'p.xxx'), summary + body)
+        for tail in (b'x', b'\0x\0', b'trailing', shader_split.UE3_TAG + b'\0'):
+            with self.subTest(tail=tail), self.assertRaisesRegex(SystemExit, 'no compressed chunk'):
+                shader_split.ue3_body(d + tail, 'p.xxx')
 
     def test_records_of_both_caches(self):
         shaders = [shader(i, 0x100 + 0x80 * (i % 2)) for i in range(4)]

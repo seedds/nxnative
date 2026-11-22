@@ -5,7 +5,8 @@
 typedef struct {
     int target, format, flags, samples;   // NVNtextureTarget / NVNformat / NVNtextureFlags / sample count (0 or 1 = single-sampled)
     uint32_t width, height, depth, levels, stride;
-    int pkg_layout;                       // Packaged layout byte 0 (log2 block height, log2 block depth) | byte 1's low nibble (log2 width alignment in GOBs) << 8, + 1; 0 = automatic
+    uint16_t pkg_layout;                  // Packaged layout byte 0 | byte 1's low nibble << 8, + 1 (0..0x1000); 0 = automatic
+    uint16_t gob_order;                   // Captured from the owning device: 0 = Tegra X1, 1 = Switch 2; independent of texture usage flags
 } nvn_texdesc;
 
 typedef struct {

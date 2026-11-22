@@ -29,10 +29,10 @@ GROUP = chunk_id(2, uepak.IO_SHADER_CODE)
 OTHER = chunk_id(3, uepak.IO_SHADER_CODE)
 
 
-def library(groups):
-    """One shader per group: (chunk ID, decoded bytes, stored bytes), frequency pixel."""
+def library(groups, hash_size=20):
+    """One shader per group: (chunk ID, decoded bytes, stored bytes), frequency pixel. hash_size is 20 (SHA-1) or 8 (Unreal 4.27's xxHash64)."""
     n = len(groups)
-    b = struct.pack('<II', 1, 1) + bytes(20) + struct.pack('<I', n) + bytes(20 * n)
+    b = struct.pack('<II', 1, 1) + bytes(hash_size) + struct.pack('<I', n) + bytes(hash_size * n)
     b += struct.pack('<I', n) + b''.join(gid for gid, _, _ in groups)
     b += struct.pack('<III', 1, 0, n) + struct.pack('<I', n)
     b += b''.join(struct.pack('<Q', 3 | i << 4) for i in range(n))
@@ -78,11 +78,11 @@ def directory(paths, mount='../../../'):
     return b + struct.pack('<i', len(strs)) + b''.join(fstr(x) for x in strs)
 
 
-def pak11(path, names):
-    """A version 11 pak's footer and encoded index, as far as uepak.inline_shaders reads them: only the directory index's names"""
+def pak11(path, names, version=11):
+    """A version 11 (or 12) pak's footer and encoded index, as far as uepak.inline_shaders reads them: only the directory index's names"""
     d = b''.join(n.encode() + b'\0' for n in names)
     index = fstr('../../../') + struct.pack('<iQ', len(names), 0) + struct.pack('<i', 0) + struct.pack('<iQQ', 1, 0, len(d)) + bytes(20)
-    path.write_bytes(d + index + bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, len(d), len(index)) + bytes(20) + bytes(32 * 5))
+    path.write_bytes(d + index + bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, version, len(d), len(index)) + bytes(20) + bytes(32 * 5))
 
 
 def aes_encrypt(key, data):
@@ -130,6 +130,43 @@ class IoStore(unittest.TestCase):
         out = self.root / 'finished'; self.assertEqual(uepak.finish(str(self.work), str(out)), [entries[0]['name']])
         self.assertEqual((out / entries[0]['name']).read_bytes(), (self.work / 'archives' / entries[0]['name']).read_bytes())
         self.assertEqual(json.loads((self.work / 'job.json').read_text())['records'], [])
+
+    def test_a_library_of_8_byte_hashes_is_read_like_one_of_sha1s(self):   # Godzilla: Destroy All Monsters Melee Remastered, Unreal 4.27 with xxHash64 shader hashes
+        raw = b'LSLG-eight-byte-hashes'
+        container(self.romfs, 'Game.utoc', [(LIB, library([(GROUP, raw, raw)], hash_size=8)), (GROUP, raw)])
+        entries, records = self.run_job()
+        self.assertEqual((len(entries), records), (1, 0)); self.assertEqual(self.shaders(entries[0]), [raw])
+        a = uepak.archive((self.work / 'archives' / entries[0]['name']).read_bytes())
+        self.assertEqual(len(a['shaders']), 1)
+
+    def test_an_exact_length_with_wrong_counts_does_not_select_the_hash_width(self):
+        # The map and shader group reference different index slots for the same shader.
+        # Both width interpretations reach EOF, but only the 8-byte one has matching group counts.
+        data = struct.pack('<II8sI8s', 1, 1, b'map hash', 1, b'shd hash')
+        data += struct.pack('<I12s', 1, GROUP)
+        data += struct.pack('<III', 1, 1, 1)   # map count, first index, shader count
+        data += struct.pack('<IQ', 1, 3)       # shader count, frequency and group
+        data += struct.pack('<IIIII', 1, 0, 1, 1, 1)
+        data += struct.pack('<III', 2, 0, 0)
+        container(self.romfs, 'Game.utoc', [(LIB, data), (GROUP, b'q')])
+        entries, records = self.run_job()
+        self.assertEqual((len(entries), records), (1, 0))
+        out = (self.work / 'archives' / entries[0]['name']).read_bytes()
+        a = uepak.archive(out)
+        self.assertEqual((a['maps'], a['indices'], out[a['code']:]), ([(1, 1)], [0, 0], b'q'))
+        self.assertEqual(out[8:28], b'map hash' + bytes(12))
+        self.assertEqual(out[32:52], b'shd hash' + bytes(12))
+
+    def test_a_pak_footer_of_version_12_is_read(self):
+        path = self.root / 'v12.pak'; pak11(path, ['Game/A.ushaderbytecode'], version=12)
+        with open(path, 'rb') as f: self.assertEqual(uepak.footer(f)[4], 12)
+        with open(path, 'rb') as f: self.assertEqual(uepak.pak_version(f), 12)
+        self.assertEqual(uepak.pak_shader_sources(str(path)), (False, True))
+
+    def test_version_12_refuses_the_legacy_footer_position(self):
+        file = io.BytesIO(bytes(21) + struct.pack('<IIQQ', uepak.PAK_MAGIC, 12, 0, 0) + bytes(20))
+        with self.assertRaisesRegex(ValueError, 'a version 12 pak footer with its magic 0x2c'):
+            uepak.footer(file)
 
     def test_patch_library_uses_base_and_patch_groups(self):
         base, updated = b'LSLG-unchanged', b'LSLG-updated'
@@ -244,6 +281,36 @@ class IoStore(unittest.TestCase):
         with patch.object(ss, 'nvn2_stage', return_value='ms'), patch.object(ss, 'check', return_value=None):
             self.assertEqual(ss.ue_shaders(self.decoded_archive([(rec, 1)]), 'A')[0][1], 'ms')   # UE 5's 1 is mesh, UE 4's hull
         with self.assertRaises(SystemExit): ss.ue_shaders(self.decoded_archive([(b'neither' * 20, 3)]), 'A')
+
+    def untagged(self, code=ss.GFX_MAGIC + bytes(0x3c)):
+        """Unreal 4.27 Switch shaders without the 'LSLG' + stage tag: the same layout from its header on (code length, code, control length, control, tail)"""
+        ctl = ss.CTL_MAGIC + bytes(0x20 - 4) + struct.pack('<I', 0x880)
+        ctl += bytes(0x704 - 0x24) + struct.pack('<I', len(code)) + bytes(0x880 - 0x708)
+        return bytes(16) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(24), ctl, code
+
+    def test_an_untagged_record_gives_its_control_and_code(self):
+        rec, ctl, code = self.untagged()
+        self.assertEqual(uepak.raw_record(rec), (ctl, code))
+        self.assertIsNone(uepak.lslg(rec))   # no tag: the LSLG reader leaves it alone
+
+    def test_magic_in_the_shader_code_does_not_hide_the_control_section(self):
+        rec, ctl, code = self.untagged(ss.GFX_MAGIC + bytes(12) + ss.CTL_MAGIC + bytes(44))
+        self.assertEqual(ss.ue_shaders(self.decoded_archive([(rec, 3)]), 'A'), [('A#UE0', 'ps', ctl, code)])
+
+    def test_an_untagged_record_whose_lengths_disagree_is_refused(self):
+        rec, ctl, code = self.untagged()
+        self.assertIsNone(uepak.raw_record(rec.replace(struct.pack('<I', len(code)) + code, struct.pack('<I', len(code) + 4) + code, 1)))
+        self.assertIsNone(uepak.raw_record(b'no record here' * 8))
+        bad = rec.replace(struct.pack('<I', len(ctl)) + ctl, struct.pack('<I', len(ctl) + 1) + ctl, 1)
+        with self.assertRaisesRegex(SystemExit, 'no recognized Unreal shader record layout'):
+            ss.ue_shaders(self.decoded_archive([(bad, 3)]), 'A')
+
+    def test_an_archive_of_untagged_records_takes_the_stage_from_the_frequency(self):
+        rec, ctl, code = self.untagged()
+        self.assertEqual(ss.ue_shaders(self.decoded_archive([(rec, 3)]), 'A'), [('A#UE0', 'ps', ctl, code)])
+        self.assertEqual(ss.ue_shaders(self.decoded_archive([(rec, 0)]), 'A')[0][1], 'vs')
+        with self.assertRaisesRegex(SystemExit, 'has frequency 99'):
+            ss.ue_shaders(self.decoded_archive([(rec, 99)]), 'A')
 
     @staticmethod
     def table(streams):   # FShaderMapResourceCode: hashes, then {i32 length, code, i32 raw size, u8 frequency}

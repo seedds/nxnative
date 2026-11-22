@@ -48,16 +48,22 @@ uint64_t mtl_sub_commit(void);
 
 uint64_t mtl_completed_fence(void);                 // Completed physical submissions, including CPU-visible post effects
 uint64_t mtl_last_fence(void);                       // Fence value of the most recent submit (0 = never submitted)
+enum { POOL_STATS = 14 };
+void mtl_pool_stats(uint64_t s[POOL_STATS]);              // the pool tables' counts for the power line (nvn_mtl.m mtl_pool_stats)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
+void mtl_set_present_suspended(int on);              // Stop admitting display work while the graphics gate is closed
+void mtl_drop_queued_presents(void);                 // Release queued frames without waiting for the GPU
+void mtl_suspend_drain(void);                        // Wait for existing work only, on the suspend worker
 void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's unwritten captures, written now even during the prewarm (going to the background, quitting); ending: the process ends after waiting up to wait_ms
 enum { MTL_QUIT_ARCH_MS = 10000 };   // what quitting gives the archive's write (atexit; the graceful exit: dm.h DM_QUIT_ARCH_MS, the same): a file of 900 bases took 1.8-4 s on Macs
 void mtl_warm_stop(void);   // the process is ending: the pipeline prewarm takes no more lines, and what it has not built is left to the next start (no compiles beside the archive's write)
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
 void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
+int mtl_depth_bounds_hw(void);   // the depth bounds test is enabled (DM_NVN_DEPTH_BOUNDS != 0) and the GPU supports it (Apple10 and later), asked once with one log line
 uint64_t mtl_ext_tex(void *tex);
 // The producer is done with one (a swap chain destroyed, a window surface replaced) and has waited for its presents' tickets (mtl_present_wait): the serial goes now, and the
 // texture leaves the residency set and the present path's references once every present committed so far has completed on the GPU. Each mtl_ext_tex takes one of these

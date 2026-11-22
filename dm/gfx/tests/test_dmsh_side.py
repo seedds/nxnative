@@ -14,8 +14,10 @@ ONE = MAIN
 class Unit(unittest.TestCase):
     def test_one_body_per_entry_point(self):
         u, info = dmsh_side.unit(BASE)
-        self.assertEqual(info, {'alpha': ['main0_a', 'main0_u_a'], 'logic': ['main0_l', 'main0_u_l']})
-        for name in ('main0', 'main0_u'): self.assertEqual(u.count(f' dm_body_{name}(float4 gl_FragCoord, constant spvDescriptorSetBuffer0& spvDescriptorSet0)'), 1)
+        self.assertEqual(info, {'alpha': ['main0_a'], 'logic': []})   # main0_u holds its own alpha test and logic operation, and main0 gets no logic operation beside it
+        self.assertEqual(u.count(' dm_body_main0(float4 gl_FragCoord, constant spvDescriptorSetBuffer0& spvDescriptorSet0)'), 1)
+        self.assertEqual(u.count('fragment main0_out_u main0_u('), 1); self.assertNotIn('dm_body_main0_u', u)   # main0_u as fs_uint wrote it
+        self.assertEqual(u.count('struct dm_alpha_state '), 1); self.assertEqual(u.count('struct dm_logic_state '), 1)   # the helpers once, main0_u's
         self.assertEqual(u.count('out.m_1 = float4(0.5);'), BASE.count('out.m_1 = float4(0.5);'))
 
     def test_a_parameter_it_cannot_pass(self):
@@ -54,10 +56,10 @@ class Cut(unittest.TestCase):
             for sdk, flags in self.FLAGS:
                 with self.subTest(sdk=sdk):
                     _, lib = self.compile(d, u, sdk, flags)
-                    base, side = dmsh_side.cut(lib.read_bytes(), set(info['alpha'] + info['logic']))
+                    base, side = dmsh_side.cut(lib.read_bytes(), set(info['alpha'] + info['logic']) | {'main0_u'})   # as ps_libraries cuts it
                     (d / 'base.metallib').write_bytes(base); (d / 'side.metallib').write_bytes(side)
-                    self.assertEqual(pso_offline.functions(d / 'base.metallib'), {'main0': False, 'main0_u': True})   # main0_u's colours wait for the pipeline's constants
-                    self.assertEqual(pso_offline.functions(d / 'side.metallib'), {'main0_a': False, 'main0_u_a': True, **dict.fromkeys(info['logic'], True)})   # main0_u's take its constants
+                    self.assertEqual(pso_offline.functions(d / 'base.metallib'), {'main0': False})
+                    self.assertEqual(pso_offline.functions(d / 'side.metallib'), {'main0_a': False, 'main0_u': True})   # main0_u waits for the pipeline's constants
 
     def test_refuses_what_it_does_not_know(self):
         with self.assertRaises(ValueError): dmsh_side.cut(b'not a library', set())

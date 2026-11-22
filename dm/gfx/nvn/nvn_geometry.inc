@@ -805,11 +805,16 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
     uint64_t ib = 0; void *mb; uint64_t mo;
     if (di && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ib)) { g_geo_why = GCP_IB; return 0; }
+    // The synthetic raster program below keeps only VS/FS and drops di, so draw_()'s ubd_conflict cannot see the lean GS's
+    // stage-2 bindings or an indexed draw's index buffer. Land conflicting inline updates before encoding, as native task/mesh
+    // draws do for their stages; shadowable uniform reads keep their deferral.
+    NvShader *lean = pr->sh[2]->geo_lean_v[3];
+    if (g_nubd && (g_enc || ubd_lazy()) && (ubd_conflict_sh(lean, 2) || (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + ((uint64_t)di->count << di->itype))))) { g_ubd_conflicts++; rp_end(); ubd_land(); }
     uint32_t bi = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     NvProg *raster = pr->geo_lean_raster;
     if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = pr->sh[0]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
     if (g_mrun.n && (pr->sh[0] != g_mrun.vs || pr->sh[1] != g_mrun.fs || fn != g_mrun.fn || (__bridge void *)g_enc != (__bridge void *)g_mrun.en)) geo_mesh_flush_draw();
-    g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.prims = geo_mesh_prims(fn); g_geo_mesh.lean = pr->sh[2]->geo_lean_v[3];
+    g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.prims = geo_mesh_prims(fn); g_geo_mesh.lean = lean;
     g_geo_mesh.a = (geo_mesh_args){ib, di ? 1u << di->itype : 0, dw ? (uint32_t)dw->first : 0, (uint32_t)(dw ? dw->count : di->count), di ? di->base_vertex : 0, bi, 0};
     g_geo_program = raster;
     p_draw synthetic = {.prim = 4, .count = 3, .instances = 1, .base_instance = (int32_t)bi};

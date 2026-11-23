@@ -32,6 +32,7 @@ uint8_t *dm_mod_rtld_slot(size_t *page_out) {
     if (page_out) *page_out = g_test_rtld_pg;
     return g_test_rtld_slot;
 }
+int dm_sdk_ounce(void) { return 0; }
 void hlecount_svc(int num) { (void)num; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
 const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { (void)handle; return NULL; }

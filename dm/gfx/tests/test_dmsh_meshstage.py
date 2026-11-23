@@ -676,7 +676,7 @@ fragment main0_out main0(main0_in in [[stage_in]])
         src = self.fs_uint(self.GBUFFER % '8.96831e-44')
         for n, nm in enumerate(('m_48', 'm_50', 'm_52', 'm_54')):
             self.assertIn(f'    float4 {nm} [[color({n}), function_constant(dm_uf{n})]];\n    uint4 {nm}_ui [[color({n}), function_constant(dm_ui{n})]];\n', src)
-            self.assertIn(f'    if (dm_ui{n}) r.{nm}_ui = as_type<uint4>(out.{nm}); else if (dm_si{n}) r.{nm}_si = as_type<int4>(out.{nm}); else r.{nm} = out.{nm};\n', src)
+            self.assertIn(f'if (dm_ui{n}) r.{nm}_ui = as_type<uint4>(out.{nm}); else if (dm_si{n}) r.{nm}_si = as_type<int4>(out.{nm}); else r.{nm} = out.{nm};', src)
 
     def test_smooth_or_computed_inputs_too(self):   # the code no longer decides: an R8Uint target beside them would have been refused (Kirby and the Forgotten Land, #2760)
         self.assertIsNotNone(self.fs_uint(self.SRC % ('', '_26')))

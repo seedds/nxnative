@@ -930,8 +930,10 @@ static inline __attribute__((always_inline)) float4 dm_rop(float4 c, uint m)
     float4 s = m == %du ? float4(255.0f) : (m == %du ? float4(65535.0f) : float4(1023.0f, 1023.0f, 1023.0f, 3.0f));
     return rint(precise::clamp(c, 0.0f, 1.0f) * s) / s;   // precise: NaN goes to 0, as both store it; the product is float32's, rint rounds it to nearest even
 }
+constant bool dm_blend_off [[function_constant(%d)]];   // abi.BLEND_OFF_FC: the pipeline's blend words are both 0 (nvn_mtl.m fn_off), so nothing to fix up
 static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
+    if (is_function_constant_defined(dm_blend_off) && dm_blend_off) return;
     uint m = dm_s.zero, r = dm_s.round;
     if ((m | r) == 0u) return;
 %s}
@@ -953,6 +955,6 @@ def blend_zero(msl):
     body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
     if not k or k != n: return msl, 0
     bits, rb = abi.BLEND_ZERO_BITS, abi.BLEND_ROUND_BITS
-    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16,
+    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16, abi.BLEND_OFF_FC,
                            ''.join(f'    dm_o.{nm} = dm_rop(dm_bz(dm_o.{nm}, m >> {bits * c}u), r >> {rb * c}u);\n' for nm, c in cols))
     return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

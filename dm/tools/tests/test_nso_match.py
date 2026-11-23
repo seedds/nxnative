@@ -375,7 +375,7 @@ class Matching(unittest.TestCase):
             # the game's own build (a build row without CUTS) is no loss: no file
             ns.update(MOD=SimpleNamespace(build_id=bytes.fromhex('cd' * 16)), NAME='sdk', outdir=str(root / 'own'))
             with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
-            self.assertFalse((root / 'own').exists())
+            self.assertFalse((root / 'own/sdk.match.tsv').exists())   # every module writes its exefs.tsv now: the folder is there, a match.tsv is not
 
     def test_sdk_wide_rules_apply_to_every_build_without_cuts(self):
         # sdk_patches.py's MATCH_CUTS apply to every game's sdk of a build with no CUTS, the selected profile's own builds too (without a match.tsv: they lost nothing); an empty

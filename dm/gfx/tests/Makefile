@@ -202,6 +202,9 @@ check_t_thermal: t_thermal
 thermal-tsan: t_thermal_tsan
 	./t_thermal_tsan
 	DM_THERMAL_CAP=0 ./t_thermal_tsan
+t_cb_unbound: t_cb_unbound.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cb_unbound.m $(MTL_T_SRC) $(FW)
+check_t_cb_unbound: RUN_ENV = MTL_DEBUG_LAYER=1
 t_perf_order: t_perf_order.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_perf_order.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_perf_order_tsan: t_perf_order.m $(MTL_T_DEP)

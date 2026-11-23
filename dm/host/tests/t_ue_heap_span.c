@@ -1,12 +1,67 @@
 // Wwise finds its span header by masking an interior pointer returned from Unreal's heap (#996).
 #include "../hle_uemalloc.c"
 #include <assert.h>
+#include <pthread.h>
 
 module_t *g_mod;
 int g_nmod;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 int gate_obs_present(int id) { (void)id; return 0; }
 void gate_obs_set(int id, void (*callback)(uint64_t *, int)) { (void)id; (void)callback; }
+
+// A game can read a small block it has just freed: TMap::Add(Key, *Found) copies from its own storage after growing it (#2345). Unreal's binned allocator leaves such a block intact.
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define COUNTS_ZONE_BLOCKS 0   // a sanitizer's zones report its whole heap
+#else
+#define COUNTS_ZONE_BLOCKS 1
+#endif
+static size_t blocks_in_zone(void) { malloc_statistics_t s; malloc_zone_statistics(g_zone, &s); return s.blocks_in_use; }
+static void assert_filled(const uint8_t *p, size_t n, uint8_t v) { for (size_t i = 0; i < n; i++) assert(p[i] == v); }
+static void *free_small_blocks(void *arg) {
+    uintptr_t seed = (uintptr_t)arg;
+    for (unsigned i = 0; i < 20000; i++) {
+        size_t n = 16 + ((seed + i) * 37) % 2048;
+        uint8_t *p = m_Malloc(NULL, n, 0);
+        memset(p, (int)(seed + 1), n);
+        p = m_Realloc(NULL, p, n + 64, 0);
+        assert_filled(p, n, (uint8_t)(seed + 1));
+        m_Free(NULL, p);
+    }
+    return NULL;
+}
+static void test_freed_small_blocks(void) {
+    enum { kept = 64, grown = 4096, limit = FREED_MAX, more = FREED_RING * 4 };
+    uint8_t *freed = m_Malloc(NULL, kept, 0);
+    memset(freed, 0xa5, kept);
+    m_Free(NULL, freed);
+    assert_filled(freed, kept, 0xa5);
+    // A growing Realloc moves the block and leaves the old one readable, as the map's copy expects
+    uint8_t *old = m_Malloc(NULL, kept, 0);
+    memset(old, 0x3c, kept);
+    uint8_t *moved = m_Realloc(NULL, old, grown, 0);
+    assert(moved != old);
+    assert_filled(old, kept, 0x3c);
+    assert_filled(moved, kept, 0x3c);
+    // A size the block still holds stays put, and a shrink past half gives the larger block back
+    size_t usable = malloc_size(moved);
+    assert(m_Realloc(NULL, moved, usable - 1, 0) == moved);
+    uint8_t *less = m_Realloc(NULL, moved, kept, 0);
+    assert(less != moved && malloc_size(less) < usable);
+    assert_filled(less, kept, 0x3c);
+    m_Free(NULL, less);
+    // The ring holds a bounded number of blocks: the oldest is really freed
+    for (unsigned i = 0; i < more; i++) m_Free(NULL, m_Malloc(NULL, 128, 0));
+    assert(!COUNTS_ZONE_BLOCKS || blocks_in_zone() <= FREED_RING);
+    // A block over the limit is not kept
+    size_t before = blocks_in_zone();
+    m_Free(NULL, m_Malloc(NULL, limit + 4096, 0));
+    assert(!COUNTS_ZONE_BLOCKS || blocks_in_zone() == before);
+    // Frees from several threads neither lose nor free a block twice
+    pthread_t threads[4];
+    for (uintptr_t i = 0; i < 4; i++) assert(!pthread_create(&threads[i], NULL, free_small_blocks, (void *)i));
+    for (unsigned i = 0; i < 4; i++) assert(!pthread_join(threads[i], NULL));
+    assert(!COUNTS_ZONE_BLOCKS || blocks_in_zone() <= FREED_RING);
+}
 
 int main(void) {
     enum { span = 65536, count = 16 };
@@ -48,6 +103,7 @@ int main(void) {
         assert(malloc_size(less) < big);
         m_Free(NULL, less);
     }
+    test_freed_small_blocks();
     assert(atomic_load(&g_used) == 0);
     malloc_destroy_zone(g_zone);
     puts("Unreal virtual-span alignment and realloc contents passed");

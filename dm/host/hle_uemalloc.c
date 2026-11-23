@@ -65,12 +65,29 @@ static void *alloc(size_t n, uint32_t a) {
     if (p) used((int64_t)malloc_size(p));
     return p;
 }
-static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
+// FMallocBinned3 leaves a freed small block untouched until it is reused, and games depend on it: TMap::Add(Key, *Found) grows the map, freeing the block Found points into, and only
+// then copies from it (SHIN MEGAMI TENSEI V: Vengeance's battle tasks). A malloc zone clears a freed block at once, so the most recently freed small blocks wait here, intact, and the
+// one a new block pushes out is the one really freed. At most FREED_RING * FREED_MAX (8 MiB) is held. Larger blocks go back at once, as Binned3's OS-backed allocations do
+enum { FREED_RING = 256, FREED_MAX = 32 << 10 };
+static _Atomic(void *) g_freed[FREED_RING];
+static _Atomic uint32_t g_freed_next;
+static void release(void *p) {
+    if (!p) return;
+    size_t n = malloc_size(p);
+    used(-(int64_t)n);
+    if (n <= FREED_MAX) p = atomic_exchange_explicit(&g_freed[atomic_fetch_add_explicit(&g_freed_next, 1, memory_order_relaxed) % FREED_RING], p, memory_order_acq_rel);
+    if (p) malloc_zone_free(g_zone, p);
+}
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
-    // The zone's realloc first: it grows in place and gives back what a shrink leaves, and an in-place block keeps its boundary. Only a block it leaves off the boundary is copied
     size_t old = malloc_size(p), alignment = align_of(n, a);
+    if (old <= FREED_MAX) {   // the zone's realloc would free the old block before the caller's last read of it: move by hand, unless the block still fits (a shrink past half gives it back)
+        if (n <= old && n > old / 2 && !((uintptr_t)p & (alignment - 1))) return p;
+        void *moved = alloc(n, a); if (!moved) return NULL;
+        memcpy(moved, p, old < n ? old : n); release(p); return moved;
+    }
+    // A larger block: the zone's realloc first. It grows in place and gives back what a shrink leaves, and an in-place block keeps its boundary. Only a block it leaves off the boundary is copied
     void *q = malloc_zone_realloc(g_zone, p, n); if (!q) return NULL;
     used((int64_t)malloc_size(q) - (int64_t)old);
     if (!((uintptr_t)q & (alignment - 1))) return q;

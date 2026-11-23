@@ -282,6 +282,9 @@ t_addr_known: t_addr_known.m $(MTL_T_DEP)
 # The address → pool cache's region table (pc_get / pc_put): another page of a region already seen, a pool's bounds, and no entry kept across a change of the pools
 t_pool_region: t_pool_region.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_region.m $(MTL_T_SRC) $(FW)
+# The per-draw walks' binding lists (sh_lists_make): every kind the walks act on, in rf.b's order
+t_binding_lists: t_binding_lists.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_binding_lists.m $(MTL_T_SRC) $(FW)
 t_file_wire: t_file_wire.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_file_wire.m $(MTL_T_SRC) $(FW)
 t_gpu_only_addr: t_gpu_only_addr.m $(MTL_T_DEP)

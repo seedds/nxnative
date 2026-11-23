@@ -7124,6 +7124,8 @@ static void shmap_read(void) {
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
+    uint8_t buf_n, buf_idx[NVN_REFL_MAXB];   // and those that read a buffer or a handle out of one (sh_buf_list), made with tex_idx
+    uint8_t tex_n, tex_idx[NVN_REFL_MAXB]; int lists_nb;   // rf.b's bindings that name a texture or an image, in order (sh_tex_list; lists_nb: the rf.nb it was made for + 1, 0 = not made)
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time, borrowed from its arena: valid only while ab_pass is the current pass. Keeping it here strongly would pin retired arenas for shaders no longer drawn.
     uint8_t ab_cbuf_only;   // 0 not decided, 1: its only bindings read through a uniform buffer are plain CBUF slots (args_cbuf_only), so a block can be patched when only those changed; 2 not
@@ -15722,6 +15724,33 @@ static int fb_tile_ready(NvShader *vs, NvShader *fs, id<MTLFunction> fn, const u
         os_unfair_lock_lock(&g_fb_tp_lock); g_fb_tp[i].ps = ps; g_fb_tp[i].done = 1; os_unfair_lock_unlock(&g_fb_tp_lock); } });
     return 0;
 }
+// The bindings of sh that name a texture or an image (a slot, a handle in a uniform buffer, a table or a pool), as indices into rf.b in its order. The checks every draw makes of
+// the textures it reads (fb_depth_rule, fb_prepare, ubd_conflict_textures) walk these alone: a material's fragment shader has two sampler bindings and more beside each texture
+// (docs/reference/frame-rate.md, "Per-draw checks walked every reflected binding"). Made once a shader.
+// lists_nb is stored last with release and read with acquire, so a thread that sees it set also sees both lists; the lists are made under g_sh_lists_lock, so two threads that both find them missing do not write them at once
+static os_unfair_lock g_sh_lists_lock = OS_UNFAIR_LOCK_INIT;
+static __attribute__((noinline)) void sh_lists_make(NvShader *sh) {
+    os_unfair_lock_lock(&g_sh_lists_lock);
+    if (__atomic_load_n(&sh->lists_nb, __ATOMIC_ACQUIRE) == sh->rf.nb + 1) { os_unfair_lock_unlock(&g_sh_lists_lock); return; }   // another thread made them meanwhile
+    int n = 0, m = 0;
+    for (int i = 0; i < sh->rf.nb && i < NVN_REFL_MAXB; i++) {
+        switch (sh->rf.b[i].kind) {
+            case NVN_RB_TEX: case NVN_RB_TBUF: case NVN_RB_TEXU: case NVN_RB_TBUFU: case NVN_RB_IMG: case NVN_RB_IMGU:
+            case NVN_RB_TEXD: case NVN_RB_TEXA: case NVN_RB_TEXP: case NVN_RB_TEXH: case NVN_RB_IMGP: sh->tex_idx[n++] = (uint8_t)i; break;   // every kind ubd_conflict_textures, fb_prepare and fb_depth_rule act on (t_binding_lists)
+            default: break;
+        }
+        switch (sh->rf.b[i].kind) {   // what ubd_conflict_sh looks at beside the textures: a buffer by slot or by address, global memory, a handle or an address kept in a uniform buffer
+            case NVN_RB_CBUF: case NVN_RB_SBUFP: case NVN_RB_UBOP: case NVN_RB_GMEM:
+            case NVN_RB_TEXU: case NVN_RB_SAMPU: case NVN_RB_SBUFU: case NVN_RB_IMGU: case NVN_RB_TBUFU: sh->buf_idx[m++] = (uint8_t)i; break;
+            default: break;
+        }
+    }
+    sh->tex_n = (uint8_t)n; sh->buf_n = (uint8_t)m; __atomic_store_n(&sh->lists_nb, sh->rf.nb + 1, __ATOMIC_RELEASE);
+    os_unfair_lock_unlock(&g_sh_lists_lock);
+}
+static inline void sh_lists(NvShader *sh) { if (__builtin_expect(__atomic_load_n(&sh->lists_nb, __ATOMIC_ACQUIRE) != sh->rf.nb + 1, 0)) sh_lists_make(sh); }
+static inline int sh_tex_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->tex_idx; return sh->tex_n; }
+static inline int sh_buf_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->buf_idx; return sh->buf_n; }
 // The texture slots (bit per slot 0-255) whose attachment this draw reads from the tile; 0 = none (then g_fb_tfn and the rest are not this draw's)
 static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1]; memset(tile, 0, 4 * sizeof *tile);
@@ -15866,8 +15895,9 @@ static void fb_depth_rule(NvShader *fs, uint32_t dsw) {
     uint64_t dser = R.rt.depth->serial; int slot[4], stid[4], ns = 0;
     uint32_t direct = fs->rf.bindless ? fb_texu_reads(fs, dser, R.rt.n > 0) : 0;
     uint32_t slot_planes[4];
-    for (int i = 0; i < fs->rf.nb; i++) {
-        const nvn_rbind *b = &fs->rf.b[i];
+    const uint8_t *texs; int ntexs = sh_tex_list(fs, &texs);
+    for (int ti = 0; ti < ntexs; ti++) {
+        int i = texs[ti]; const nvn_rbind *b = &fs->rf.b[i];
         int image = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
         if (!image && (b->kind != NVN_RB_TEX || b->reg >= NTEX)) continue;
         int tid = (int)((image ? bound_img(1, b->reg) : bound_tex(1, b->reg)) & 0xfffff);
@@ -15913,8 +15943,9 @@ static void fb_prepare(NvProg *pr) {
     if (R.rt.depth) fb_depth_rule(fs, dsw);
     if (R.rt.n && R.rt.depth && g_fb_dread != FB_DS_BOTH && ((fs->rf.pool && pool_ds_read(R.rt.depth) && (g_fb_dread_pool = 1)) || fs->rf.dyn)) g_fb_dread |= FB_DS_BOTH;
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) {
-        const nvn_rbind *b = &fs->rf.b[i];
+    const uint8_t *texs; int ntexs = sh_tex_list(fs, &texs);
+    for (int ti = 0; ti < ntexs && g_fb_n < 4; ti++) {
+        const nvn_rbind *b = &fs->rf.b[texs[ti]];
         int image = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
         // A texture named by one handle in a uniform buffer (TEXU): encode_args resolves it as below and substitutes the snapshot as it does a slot's (fb_snapshot_slot). FINAL FANTASY XII
         // THE ZODIAC AGE's limit-break echo (e40adef79f6f29b7, 6 draws a frame) samples the 1920x1080 layer it blends into through one: magenta strokes over the effect while only slots were
@@ -16508,10 +16539,12 @@ static int ubd_buffer_texture_hit(int tid) {   // caller holds g_rmu; metadata o
 }
 static int ubd_conflict_textures(NvShader *sh, int st) {
     if (!g_nubd) return 0;
+    const uint8_t *texs; int ntexs = sh_tex_list(sh, &texs);
+    if (!ntexs) return 0;   // no texture binding: nothing to look up, and no lock
     int hit = 0;
     os_unfair_lock_lock(&g_rmu);
-    for (int i = 0; i < sh->rf.nb && !hit; i++) {
-        const nvn_rbind *b = &sh->rf.b[i];
+    for (int ti = 0; ti < ntexs && !hit; ti++) {
+        const nvn_rbind *b = &sh->rf.b[texs[ti]];
         switch (b->kind) {
         case NVN_RB_TEXP: case NVN_RB_TEXH: case NVN_RB_IMGP: hit = b->dtt == MTLTextureTypeTextureBuffer; break;   // selected on the GPU: any update may overlap
         case NVN_RB_TEX: case NVN_RB_TBUF: hit = ubd_buffer_texture_hit((int)(bound_tex(st, b->reg) & 0xfffff)); break;
@@ -16534,7 +16567,8 @@ static int ubd_conflict_textures(NvShader *sh, int st) {
 }
 static int ubd_conflict_sh(NvShader *sh, int st) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages)
     if (ubd_conflict_textures(sh, st)) return 1;
-    for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
+    const uint8_t *bufs; int nbufs = sh_buf_list(sh, &bufs);   // the other kinds (samplers, textures by slot, the host's own blocks) are nothing to this walk
+    for (int bi = 0; bi < nbufs; bi++) { const nvn_rbind *b = &sh->rf.b[bufs[bi]];
         if (b->kind == NVN_RB_GMEM) { if (ubd_hits(0, UINT64_MAX)) return 1; continue; }   // reads any pool
         if (b->reg >= 16) continue;
         const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];

@@ -19550,16 +19550,20 @@ typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t ma
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
 static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
+static int fx_checked(int v, const char *by) {
+    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
+    MLOG("present upscaling (%s): %s", by, v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
+    return v;
+}
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
     const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
     if (e && (!strcmp(e, "metalfx") || !strcmp(e, "1"))) v = 1;
     else if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) v = 0;
     else if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE=%s: metalfx or off; keeping %s", e, v ? "metalfx" : "off");
-    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("present upscaling: this GPU has no Metal 4 MetalFX spatial scaler; the present scales bilinearly"); v = 0; }
-    MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
-    return g_fx_mode = v;
+    return g_fx_mode = fx_checked(v, "DM_PRESENT_UPSCALE");
 }
+void dm_gfx_present_upscale(int on) { g_fx_mode = fx_checked(on != 0, "Settings window"); }   // fx_encode makes the scaler at the next present that needs it
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
@@ -19575,13 +19579,31 @@ static id<MTLTexture> fx_tex(__strong id<MTLTexture> *slot, MTLPixelFormat pf, N
     t.label = label; res_add(t); res_commit();
     return *slot = t;
 }
+// What the present does now, for the Mac's settings window while the game runs (Launcher.swift LiveSettings shows it under Upscaling): $DM_ROOT/upscaling_now.txt, one line,
+// "off", "idle <w> <h>" (MetalFX on, the picture shown no larger than the game renders it) or "metalfx <w> <h> <out w> <out h>". Written on a change only, off the present thread,
+// and only with a launcher that can show that window (DM_SETTINGS_PID)
+static void fx_status(const char *what, NSUInteger cw, NSUInteger ch, NSUInteger ow, NSUInteger oh) {
+    static char last[96]; static int on = -1; static dispatch_queue_t q;
+    if (on < 0) { on = getenv("DM_SETTINGS_PID") && getenv("DM_ROOT"); if (on) q = dispatch_queue_create("dm.upscaling-now", DISPATCH_QUEUE_SERIAL); }
+    if (!on) return;
+    char now[96];
+    if (!strcmp(what, "off")) snprintf(now, sizeof now, "off\n");
+    else if (!strcmp(what, "idle")) snprintf(now, sizeof now, "idle %lu %lu\n", (unsigned long)cw, (unsigned long)ch);
+    else snprintf(now, sizeof now, "metalfx %lu %lu %lu %lu\n", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh);
+    if (!strcmp(now, last)) return;
+    memcpy(last, now, sizeof now);
+    NSString *line = @(now), *path = [@(getenv("DM_ROOT")) stringByAppendingPathComponent:@"upscaling_now.txt"];
+    dispatch_async(q, ^{ [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]; });
+}
 // Encodes the upscale of the rectangle r of raw into cb (see above). Returns the scaled picture, which the present pass draws 1:1 into vp; or the canvas, when the scaler wrote it
 // (*wrote = 1: no pass); or nil (the bilinear pass). canvas: the present's target when the picture fills it unflipped (else nil), written by the scaler where it takes it.
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last.
 // iPad Pro 13" M4, Breath of the Wild 1920x1440 → 2752x2064: writing the canvas took the present command buffer from 1.61 to 1.34 ms
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait, id<MTLTexture> canvas, int *wrote) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
-    if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
+    int shown = fx == &g_fx_present;   // the window's present, not a screenshot's
+    if (fx_mode() != 1) { if (shown) fx_status("off", 0, 0, 0, 0); return nil; }
+    if (!fx_wanted(vp, cw, ch)) { if (shown) fx_status("idle", cw, ch, 0, 0); return nil; }
     NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
     id<MTL4FXSpatialScaler> sc = fx->sc;
     if (!sc || sc.inputWidth != cw || sc.inputHeight != ch || sc.colorTextureFormat != raw.pixelFormat || sc.outputWidth != ow || sc.outputHeight != oh || sc.outputTextureFormat != out_pf) {
@@ -19618,6 +19640,7 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
     if (in_place && !fx->in_place_n++ && remake_wait) MLOG("present upscaling: MetalFX reads the presented texture itself (%lux%lu), no copy (DM_FX_INPLACE=0 copies it)", (unsigned long)cw, (unsigned long)ch);
     if (direct && !fx->direct_n++ && remake_wait) MLOG("present upscaling: MetalFX writes the drawable itself (%lux%lu), no present pass after it (DM_FX_DIRECT=0 keeps the pass)", (unsigned long)ow, (unsigned long)oh);
     *wrote = direct;
+    if (shown) fx_status("metalfx", cw, ch, ow, oh);
     return out;
 }
 // ---------- A game's own upscaler drawn by MetalFX (DM_UPSCALER) ----------

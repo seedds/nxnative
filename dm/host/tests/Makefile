@@ -419,6 +419,12 @@ $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
 $(B)/t_svc_memory_unlimited: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=0 -o $@ t_svc_memory.c
+$(B)/t_svc_memory_auto_nx: $(MEM_DEPS) | $(B)
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=-1 -DTEST_SDK_OUNCE=0 -o $@ t_svc_memory.c
+$(B)/t_svc_memory_ounce: $(MEM_DEPS) | $(B)
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=-1 -DTEST_SDK_OUNCE=1 -o $@ t_svc_memory.c
+$(B)/t_svc_memory_ounce_unlimited: $(MEM_DEPS) | $(B)
+	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -DDM_GAME_MEM_MAP_LIMIT=0 -DTEST_SDK_OUNCE=1 -o $@ t_svc_memory.c
 $(B)/t_svc_memory_16k: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=address,undefined -DTEST_PAGE_16K -o $@ t_svc_memory.c
 $(B)/t_svc_memory_tsan: $(MEM_DEPS) | $(B)
@@ -426,9 +432,13 @@ $(B)/t_svc_memory_tsan: $(MEM_DEPS) | $(B)
 $(B)/t_svc_memory_dirty: $(MEM_DEPS) ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h | $(B)
 	$(CLANG) $(MEM_FLAGS) -DTEST_REAL_DIRTY -o $@ t_svc_memory.c ../../gfx/nvn/nvn_dirty.c
 .PHONY: memory memory-tsan memory-dirty memory-profile
-memory: $(B)/t_svc_memory $(B)/t_svc_memory_unlimited $(B)/t_svc_memory_16k
+memory: $(B)/t_svc_memory $(B)/t_svc_memory_unlimited $(B)/t_svc_memory_auto_nx $(B)/t_svc_memory_ounce $(B)/t_svc_memory_ounce_unlimited $(B)/t_svc_memory_16k
 	$(B)/t_svc_memory
 	$(B)/t_svc_memory_unlimited
+	$(B)/t_svc_memory_auto_nx
+	$(B)/t_svc_memory_ounce
+	DM_ALIAS_SIZE=0x10000000 $(B)/t_svc_memory_ounce --alias-probe
+	$(B)/t_svc_memory_ounce_unlimited
 	$(B)/t_svc_memory_16k
 memory-tsan: $(B)/t_svc_memory_tsan
 	$(B)/t_svc_memory_tsan

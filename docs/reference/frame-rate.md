@@ -1017,6 +1017,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - the submit thread standing on the deck (85–105 s, per-frame instructions fitted against draws a frame, at 2,180 draws): 73.93 → 73.06 M instructions a frame (−1.2 %), CPU p50 9.40 → 9.18 ms.
   - PR #2542's own run before PR #2482 (M4 Pro): 84,748 → 1,948 views made by frame 4,200.
 
+### Same-pass feedback views made at every draw
+
+- **Symptom:** `newTextureViewWithPixelFormat` under `fb_prepare` in the replay thread's samples, every frame.
+- **Cause:** a draw sampling its own attachment through a level or slice range got a new view at every draw, retired after the submission. A mip-chain pass does so at every level of every frame.
+- **Fix:** `fb_view` makes the same view and keeps it in the texture's [view cache](rendering.md#texture-views-cached-by-texture-and-view-parameters), its key marked (`pad[0] = 1`) so it never matches a registration's own view. The cache keeps 8 views per texture (`VC_WAYS`, 4 before), so a chain's per-level views do not evict the registrations'. These views live until the texture is released, as the cache's others do.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): its bloom and environment chains, about 1 % of the replay thread in view creation (a Metal System Trace's time profile of the replay thread before these changes).
+
 ### Late frames with an idle GPU stepped the hold up and unpaced holds did not probe
 
 - **Symptom:** on a warm start, Ocarina of Time stepped the frame hold 1 → 2 → 3 at presents 9 and 12 (cost 1.92 and 5.57 vsyncs, GPU 0.02 and 0.01 vsyncs) on a progress screen while the pipeline archive was written, then stayed at hold 3 (~18 fps) for ~1,470 presents even though the scene's GPU work was 12.5 ms.

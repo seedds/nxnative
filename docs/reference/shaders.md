@@ -169,6 +169,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Digimon Story Time Stranger](../../dm/games/010062E01FE0C000/README.md) ([issue #872](https://github.com/seedds/nxnative/issues/872)): v1.2.2 (`135c83cdea06aec2`) extracts 19,078 unique RomFS shaders (`37,885` `NXVS` + `37,885` `NXFS` across 51 wide `MDB1` archives), 202 unique shaders from `main` (`28` `NXVS`, `172` `NXFS`, `2` `NXCS`, zero missed controls), and 3,657 additional DLC shaders (22,937 total). Legacy `MDB1` reading was re-verified on [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md).
 - **Check:** `dm/tools/tests/test_split_mvgl.py` and `dm/tools/fuzz/fuzz_shader_split.py` (`nxvs` / `nxfs` seeds).
 
+### A shader cache of zlib blocks whose records cross block boundaries
+
+- **Symptom:** `shader_split.py` finds nothing in a game whose RomFS holds one shader-cache file of its own, or a hand-written reader finds a fraction of the keys the game asks for and the rest are `not in the shader map`.
+- **Cause:** [BioShock Remastered](../../dm/games/0100AD10102B2000/README.md)'s `shadercache.nx` is `{u32 version 13, u32 block count}`, then per block `{u32 stored length, one zlib stream}`, every block inflating to 32 KiB. Its NVN records are plain `{16-byte header: u32 control length 0x880, u32 code length, u32, u32}, code area, control section}` runs with no offsets or index, and **2,622 of the 20,421 records cross a 32 KiB boundary**: a per-block scan finds 18,041 distinct keys, which looks like a working reader.
+- **Fix:** `shadercache_nx()` in `shader_split.py` walks the block table to the end of the file, inflates every block, joins them in file order and only then scans for control sections; `is_shadercache_nx()` gates the dispatch on the header shape *and* the first entry being a zlib stream, because the file's own name is not evidence — another engine's `shadercache.nx` (Heaps', Dead Cells) is a different container.
+- **Check:** `dm/tools/tests/test_split_shadercache.py` builds a synthetic container whose first record straddles the boundary and asserts both the joined answer and the per-block shortfall; on the game `shader_split.py` prints `shaders: 20427 (pixel 19912, vertex 515); sources other 20419, main 8`.
+- **Found on:** [BioShock Remastered](../../dm/games/0100AD10102B2000/README.md).
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.

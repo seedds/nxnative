@@ -1166,6 +1166,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `dm/gfx/tests/t_pull.m` (the words against Metal's fetch and the CPU conversion), `t_pull_inv.m` (a depth prepass with one pipeline and depth-equal with the other), `test_dmsh_pull.py`; `dm/ios/tests/test_profile_pack.py` packs tiny fixtures through the actual archive step and checks runtime-prebuild library inclusion, explicit overrides and an IPA with a pipeline archive in the ZIP.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): draws that waited for their pipeline on a cold start. [The Legend of Zelda: Echoes of Wisdom](../../dm/games/01008CF01BAAC000/README.md#found-on-this-game): an iPhone build whose launcher toggles built no bases (issue #1684).
 
+### Absent vertex attributes lose W
+
+- **Symptom:** a projectile paints the floor but its airborne mesh is invisible, without a missing-shader error.
+- **Cause:** the native vertex descriptor and the pulling decoder supplied four zero words for an absent attribute (format 0). The shader instead needs the default float vector `(0, 0, 0, 1)` as raw register bits, including when its Metal declaration uses integers. An alpha-tested depth pass can discard every fragment when that W component contributes to opacity; a color pass with depth EQUAL then draws nothing.
+- **Fix:** `vertex_constants` provides the default vector at offset 16 of slot 30 for active absent inputs in `pso_desc`; inactive shadow declarations and unknown formats still read zeros at offset 0. `dm_fetch` supplies the same default for format 0. `pull_layout_fill` preserves nonzero formats with missing buffers so the decoder can distinguish them from absent attributes and keep their zero reads. Unknown formats and invalid streams still read zeros.
+- **Check:** `t_default_attrib` checks float, signed, and unsigned native inputs (beyond `S.nattr`, explicitly absent, and unknown format) as well as shadow-input pipelines with both active shadowed and absent attributes. `t_pull` checks the pulling default, missing buffers, invalid streams, and unknown formats alongside its format comparisons.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering), the Slosher projectile's alpha-tested depth pass ([#3181](https://github.com/seedds/nxnative/issues/3181)).
+
 ### Float32 vertex padding through integer inputs
 
 - **Symptom:** a fullscreen post-process draw writes no color, then a later blur composite darkens scenery while the character remains visible.

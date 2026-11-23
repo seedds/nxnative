@@ -1,14 +1,15 @@
 # Game profile (dm/games/<id>/): the host is built for it (make GAME=base game title ID, required: there is no default game). game_profile.h is generated from game.tsv into gen/<id>/; the chain version header dmsh_chain.h (one for every game) lives in dm/gfx/nvn
+PYTHON ?= $(or $(DM_PYTHON),python3)
 # without GAME only clean passes; anything else (a bare make too, whose default goal is the host) stops and lists the profiles
 ifeq ($(strip $(GAME)),)
 ifneq ($(filter-out clean,$(or $(MAKECMDGOALS),dmhost)),)
-$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}'))
+$(error GAME is not set: make GAME=<base game title ID>: $(shell "$(PYTHON)" ../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}'))
 endif
 endif
 # A profile outside the repository (DM_GAMES_DIR, e.g. the NSP script's provisional profile) is reached through the symlink gen/<id>/profile: make cannot take paths with spaces.
 # DM_GAMES_FIRST=1 (the NSP script's --provisional) takes it even when dm/games has the game
 ifneq ($(strip $(GAME)),)
-GAME_DIR := $(if $(and $(wildcard ../games/$(GAME)/game.tsv),$(if $(DM_GAMES_FIRST),,1)),../games/$(GAME),$(shell python3 ../games/game.py link $(GAME) gen/$(GAME)/profile >&2 && echo gen/$(GAME)/profile))
+GAME_DIR := $(if $(and $(wildcard ../games/$(GAME)/game.tsv),$(if $(DM_GAMES_FIRST),,1)),../games/$(GAME),$(shell "$(PYTHON)" ../games/game.py link $(GAME) gen/$(GAME)/profile >&2 && echo gen/$(GAME)/profile))
 ifeq ($(GAME_DIR),)
 $(error no game profile $(GAME) (neither in dm/games nor in DM_GAMES_DIR))
 endif
@@ -59,7 +60,7 @@ MSL_SRC = $(sort $(wildcard ../gfx/msl/*.metal))
 MSL_H = gen/msl-$(MSL_SDK)/host_msl_gen.h
 # Recheck the toolchain and target on every build; the generator keeps the header unchanged when its inputs match.
 $(MSL_H): $(MSL_SRC) ../gfx/tools/host_msl.py FORCE
-	python3 ../gfx/tools/host_msl.py --sdk $(MSL_SDK) $(if $(MSL_MIN_$(MSL_SDK)),--min $(MSL_MIN_$(MSL_SDK))) $@ $(MSL_SRC)
+	"$(PYTHON)" ../gfx/tools/host_msl.py --sdk $(MSL_SDK) $(if $(MSL_MIN_$(MSL_SDK)),--min $(MSL_MIN_$(MSL_SDK))) $@ $(MSL_SRC)
 .PHONY: host_msl
 host_msl: $(MSL_H)
 .DEFAULT_GOAL := dmhost   # The header generation rules are written first below, so the default goal must be stated explicitly (otherwise make only generates the headers and does not build the host)
@@ -67,7 +68,7 @@ host_msl: $(MSL_H)
 game_profile: $(GAME_H)
 # Regenerated on every make (FORCE): the same GAME can come from another profile folder (DM_GAMES_FIRST), whose game.tsv may be older than the header; game.py writes it only when it changes
 $(GAME_H): $(GAME_DIR)/game.tsv ../games/game.py FORCE
-	@python3 ../games/game.py header $(GAME) $@
+	@"$(PYTHON)" ../games/game.py header $(GAME) $@
 .PHONY: FORCE
 FORCE:
 # The host: one object per source in gen/<id>/obj (dm.h includes the profile header, so every game has its own), compiled on every core, then linked into gen/<id>/dmhost with

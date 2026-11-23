@@ -774,6 +774,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** after closing the previous geometry run's encoders and landing deferred updates, check the existing `sub_cut` policy before preparing the next run. Its draw threshold, deferral exclusions, upload flush, final-fence lifetime and segment timestamp handling remain in force. This adds submissions at existing encoder boundaries without adding render passes. `DM_NVN_GEOMETRY_CUT=0` disables the additional checks; `DM_NVN_CUT=0` still disables draw-count cuts overall. GPU dependency and pixel checks pass with either policy.
 - **Found on:** [NieR:Automata US](../../dm/games/010056B015FE8000/README.md#library-shadow-sequence-and-geometry-ordering). In an alternating warmed workload of 1,024 geometry/query draws at 1080p, median CPU-encode-to-GPU-completion time falls from 11.605 to 7.800 ms; render passes stay at 17 and all query results agree. GPU execution is essentially unchanged (4.004 versus 4.007 ms), while CPU encoding rises from 6.971 to 7.268 ms: the gain is overlap, not reduced shader work. Gameplay improvement remains unmeasured.
 
+### The mesh stage's argument table set at every mesh draw
+
+- **Symptom:** one `setArgumentTable` record a geometry mesh draw on the encode thread, also for draws gathered into a run.
+- **Cause:** `geo_mesh_take` set the mesh stage's table before deciding whether the draw joins a run, whose flush (`geo_mesh_flush_`) sets it itself.
+- **Fix:** only a mesh draw that draws alone sets it (`geo_mesh_encode` in `nvn_geometry.inc`).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): about 2,500 mesh draws a frame on Layer 1400.
+
 ### Reusing upload staging after a slot completes
 
 - **Symptom:** CPU submission spikes during texture updates, with the residency log showing tens of MB of new private staging allocations per frame.

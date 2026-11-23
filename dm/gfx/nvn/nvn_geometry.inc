@@ -591,7 +591,6 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
 static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
-    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     uint32_t tris = g_geo_mesh.a.count / 3;
     id<MTLBuffer> b; size_t o = arena_alloc(64, &b); uint8_t *p = (uint8_t *)b.contents + o;
     uint32_t info[8] = {0, 1, 0, 0, tris, 0, 0, 0}; memcpy(p, info, 32); memcpy(p + 32, &g_geo_mesh.a, sizeof g_geo_mesh.a);
@@ -599,7 +598,8 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = b.gpuAddress + o;
     args_dirty(2); g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; args_dirty(2);
     memcpy(g_geo_bind, save, sizeof save);
-    if (geo_mesh_take(en)) return;
+    if (geo_mesh_take(en)) return;   // drawn with its run, which sets the mesh stage's table itself (geo_mesh_flush_)
+    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];   // only a draw that draws alone needs it here: set at every mesh draw, it was one more recorded call a draw for the encode thread
     uint32_t pg = g_geo_mesh.prims;
     [en drawMeshThreadgroups:MTLSizeMake((tris + pg - 1) / pg, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * pg, 1, 1)];
 }

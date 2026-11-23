@@ -113,6 +113,47 @@ pathlib.Path('paths.json').write_text(json.dumps(paths))
                 with self.assertRaises(FileNotFoundError): bench.run_one(argparse.Namespace(**{**vars(a), 'env': ['DM_SAVE_SYNC=0']}), '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
                 self.assertEqual(seen['DM_SAVE_SYNC'], '0')
 
+    def test_stretches_and_judge(self):   # --verdict: a slow stretch the window's percentiles hide, frames of 1 s or more, event-wait holds
+        ft = [30.0] * 1000 + [70.0] * 1000 + [30.0] * 1000 + [31.0] * 400   # the last 400 frames: under half a stretch, left out
+        self.assertEqual(bench.stretches(ft), [30.0, 70.0, 30.0])
+        self.assertEqual(bench.stretches([10.0] * 600), [10.0])   # one stretch of at least half of n counts
+        s = bench.summary(ft, [], [], 0, len(ft), 100.0, 1000 / 60)
+        self.assertEqual(s['frame_p50'], 30.0); self.assertEqual(s['long_frames'], 0); self.assertEqual(s['worst_stretch'], 70.0)
+        v, why = bench.judge(s); self.assertEqual(v, 'BAD'); self.assertIn('1 of 3 stretches over 45.0 ms (worst 70.0 ms)', why[0])
+        self.assertEqual(bench.judge(s, slow_ms=80)[0], 'CLEAN')   # an absolute limit instead of the factor
+        clean = bench.summary([30.0] * 3000, [], [], 0, 3000, 100.0, 1000 / 60)
+        self.assertEqual(bench.judge(clean), ('CLEAN', []))
+        self.assertEqual(bench.judge(dict(clean, holds=2))[0], 'BAD')
+        stall = bench.summary([30.0] * 2999 + [1200.0], [], [], 0, 3000, 100.0, 1000 / 60)
+        self.assertEqual(stall['long_frames'], 1); self.assertIn('1 frames of 1 s or more (worst 1.2 s)', bench.judge(stall)[1][0])
+        self.assertEqual(bench.judge({'frames': 0}), ('BAD', ['no frames']))
+
+    def test_verdict_cli(self):   # bench.py --verdict: BAD runs in results.md and exit 1; a clean run exits 0
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); gid = '01007EF00011E000'; build = root / f'{gid}_build'
+            (build / 'run/save').mkdir(parents=True); (build / 'extract/v0/RomFS').mkdir(parents=True); (build / 'patched_v0').mkdir()
+            host = root / 'host'
+            host.write_text('''#!/usr/bin/env python3
+import os, pathlib
+slow = os.environ.get('FAKE_SLOW') == '1'
+rows = []
+for i in range(3000):
+    ms = 70.0 if slow and 1000 <= i < 2000 else 30.0
+    rows += [f'{i}\\t@t_s\\t{i * 0.001:.3f}', f'{i}\\t@frame_ms\\t{ms}']
+pathlib.Path(os.environ['DM_NVN_TSV']).write_text('\\n'.join(rows) + '\\n')
+if slow: print('[RED] queue 4: an event wait has held it 6.0 s: word 0x1 is 0x0')
+''')
+            host.chmod(0o755)
+            route = {'keys': '0:A', 'from': 0, 'secs': 3.0, 'about': 'synthetic'}
+            for slow, code, word in (('0', 0, 'every run CLEAN'), ('1', 1, 'BAD: base run 1')):
+                out = root / f'out{slow}'
+                argv = ['bench.py', str(build), '--out', str(out), '--runs', '1', '--no-hud', '--verdict', '--variant', f'base:host={host},FAKE_SLOW={slow}']
+                with mock.patch.object(sys, 'argv', argv), mock.patch.object(bench, 'routes', return_value={'test': route}), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ex: bench.main()
+                self.assertEqual(ex.exception.code, code, (out / 'base-1/log.txt').read_text())
+                self.assertIn(word, (out / 'results.md').read_text())
+                r = json.loads((out / 'results.json').read_text())['results']['base'][0]
+                self.assertEqual(r['holds'], int(slow)); self.assertEqual(r['worst_stretch'], 70.0 if slow == '1' else 30.0)
 
 if __name__ == '__main__':
     unittest.main()

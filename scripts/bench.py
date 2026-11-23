@@ -11,6 +11,9 @@
 #   pso=<folder> another pipeline archive); without one, a single variant 'base'. --runs N: each variant N times, in turn (default 2).
 #   --fps / --scale: DM_FPS_TARGET (with the display link at that rate) / DM_RENDER_SCALE for every variant; --env KEY=VALUE for every variant. --out <folder>: where the runs go
 #   (default <id>_build/bench/<date-time>): per run log.txt, frames.tsv and the screenshots, and results.json and results.md for all.
+#   --verdict: judge every run as CLEAN or BAD (a long-play check, for a route long enough to show slow stretches): BAD on a frame of 1 s or more in the window, a queue held by
+#   an event wait ("an event wait has held it" in the log), or a slow stretch: a run of --stretch frames (default 1000) whose median frame time is over --slow-factor (default 1.5)
+#   times the run's own frame p50, or over --slow-ms when that is given. Exit code 1 when any run is BAD. Without --verdict the counts are still reported.
 # A route line in bench.tsv: name, DM_KEYS (seconds from host start), the window's start and length in seconds, a description. The window starts once the scene is loaded and the
 # pipelines of the first frames are built, so runs compare the scene rather than its loading. Load on the Mac moves the numbers: compare variants of one invocation, not invocations.
 import argparse, datetime, json, math, os, re, shutil, signal, statistics, subprocess, sys, time
@@ -65,12 +68,37 @@ def frames(tsv, t0, t1):
     return ft, shown, gpu, dropped, len(sel)
 
 
-def summary(ft, shown, gpu, dropped, n, secs, budget):
+def stretches(ft, n=1000):
+    """Median frame time of each run of n consecutive frames (the last one counted when it holds at least half of n): a slow stretch shows here when the percentiles of
+    the whole window hide it"""
+    out = []
+    for i in range(0, len(ft), n):
+        w = ft[i:i + n]
+        if len(w) >= max(1, n // 2): out.append(statistics.median(w))
+    return out
+
+
+def judge(s, slow_factor=1.5, slow_ms=None):
+    """CLEAN or BAD for one run's summary, with the reasons: frames of 1 s or more, event-wait holds, slow stretches (a stretch median over slow_ms, or over slow_factor
+    times the run's frame p50)"""
+    if not s.get('frames'): return 'BAD', ['no frames']
+    why = []
+    if s.get('long_frames'): why.append(f"{s['long_frames']} frames of 1 s or more (worst {s['frame_max'] / 1000:.1f} s)")
+    if s.get('holds'): why.append(f"{s['holds']} event-wait holds")
+    lim = slow_ms if slow_ms else (slow_factor * s['frame_p50'] if s.get('frame_p50') else None)
+    slow = [m for m in s.get('stretches') or [] if lim and m > lim]
+    if slow: why.append(f"{len(slow)} of {len(s['stretches'])} stretches over {lim:.1f} ms (worst {max(slow):.1f} ms)")
+    return ('BAD' if why else 'CLEAN'), why
+
+
+def summary(ft, shown, gpu, dropped, n, secs, budget, stretch=1000):
     d = {'frames': n, 'fps': round(n / secs, 1) if secs else None, 'dropped': dropped}
     for name, xs in (('frame', ft), ('shown', shown), ('gpu', gpu)):
         for p in (50, 95, 99): d[f'{name}_p{p}'] = round(pct(xs, p), 2) if xs else None
         d[f'{name}_max'] = round(max(xs), 2) if xs else None
     d['over_budget'] = sum(1 for x in ft if x > budget * 1.5)   # frames taking more than 1.5 times the target's frame time: the spikes the Metal HUD shows
+    d['long_frames'] = sum(1 for x in ft if x >= 1000)   # a frame of 1 s or more: a stall the player sees as a freeze
+    st = stretches(ft, stretch); d['stretches'] = [round(x, 2) for x in st]; d['worst_stretch'] = round(max(st), 2) if st else None
     return d
 
 
@@ -124,11 +152,13 @@ def run_one(a, gid, build, var, route, out, lock):
             except subprocess.TimeoutExpired: p.kill(); p.wait()
         if lock: lock.unlink(missing_ok=True)
     budget = 1000.0 / (a.fps or 60)
-    s = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget) if (out / 'frames.tsv').is_file() else {'frames': 0}
+    s = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget, getattr(a, 'stretch', 1000)) if (out / 'frames.tsv').is_file() else {'frames': 0}
     log_text = (out / 'log.txt').read_text(errors='replace')
     m = re.findall(r'frame step: game time [\d.]+ s in [\d.]+ s \(([\d.]+) of real time\)', log_text)
     if m: s['game_speed'] = float(m[-1])
     s['red_lines'] = sum(1 for ln in log_text.splitlines() if '[RED]' in ln)
+    s['holds'] = len(re.findall(r'an event wait has held', log_text))   # a GPU queue parked on an event word for seconds (nvn_queue.inc): a freeze, or the start of a GPU hang
+    s['verdict'], s['why'] = judge(s, getattr(a, 'slow_factor', 1.5), getattr(a, 'slow_ms', None))
     return s
 
 
@@ -185,6 +215,10 @@ def main():
     ap.add_argument('--shots', type=lambda v: [float(x) for x in v.split(',')], help='screenshot times in seconds from host start, comma-separated (default: after the measurement window; in-window captures perturb timing)')
     ap.add_argument('--no-hud', action='store_true', help='no Metal performance HUD')
     ap.add_argument('--out', help='the output folder (default <id>_build/bench/<date-time>)')
+    ap.add_argument('--verdict', action='store_true', help='judge each run CLEAN or BAD (frames of 1 s or more, event-wait holds, slow stretches); exit 1 when any run is BAD')
+    ap.add_argument('--stretch', type=int, default=1000, help='frames in a stretch for the slow-stretch check (default 1000)')
+    ap.add_argument('--slow-factor', type=float, default=1.5, help="a stretch is slow when its median is over this times the run's frame p50 (default 1.5)")
+    ap.add_argument('--slow-ms', type=float, help='a stretch is slow when its median is over this many ms (instead of --slow-factor)')
     a = ap.parse_args()
     build = Path(a.build).expanduser().resolve()
     m = re.match(r'([0-9A-Fa-f]{16})_build$', build.name)
@@ -208,13 +242,20 @@ def main():
         for label, var in variants.items():
             d = out / f'{label}-{i + 1}'
             s = run_one(a, gid, build, var, route, d, lock); results[label].append(s)
-            print(f'  {label} run {i + 1}: ' + (f'{s["fps"]} fps, frame p50 {s["frame_p50"]} / p99 {s["frame_p99"]} / max {s["frame_max"]} ms, GPU p50 {s["gpu_p50"]} ms' if s.get('frames') else f'no frames (see {d / "log.txt"})'), flush=True)
-    keys = ['fps', 'frame_p50', 'frame_p95', 'frame_p99', 'frame_max', 'shown_p99', 'shown_max', 'dropped', 'over_budget', 'gpu_p50', 'gpu_p95', 'game_speed', 'red_lines']
+            print(f'  {label} run {i + 1}: ' + (f'{s["fps"]} fps, frame p50 {s["frame_p50"]} / p99 {s["frame_p99"]} / max {s["frame_max"]} ms, GPU p50 {s["gpu_p50"]} ms' if s.get('frames') else f'no frames (see {d / "log.txt"})')
+                  + (f'; {s["verdict"]}' + (': ' + '; '.join(s['why']) if s['why'] else '') + (f' | stretch medians {" ".join(f"{x:.0f}" for x in s["stretches"])}' if s.get('stretches') else '') if a.verdict else ''), flush=True)
+    keys = ['fps', 'frame_p50', 'frame_p95', 'frame_p99', 'frame_max', 'shown_p99', 'shown_max', 'dropped', 'over_budget', 'long_frames', 'worst_stretch', 'holds', 'gpu_p50', 'gpu_p95', 'game_speed', 'red_lines']
     md = (f'{gid}, route `{a.route}` ({route["about"]}), window {route["secs"]:g} s, fps target {a.fps or "profile"}, render scale {a.scale or "profile"}; '
           f'medians over runs (range); times in ms; over_budget = frames longer than 1.5 frame times\n\n' + table(results, keys) + '\n')
     (out / 'results.md').write_text(md); (out / 'results.json').write_text(json.dumps({'game': gid, 'route': a.route, **{k: v for k, v in vars(a).items() if k != 'build' and k != 'save'}, 'save': str(a.save), 'variants': variants, 'results': results}, indent=1, default=str))
+    if a.verdict:
+        bad = [f'{label} run {i + 1}' for label, rs_ in results.items() for i, r in enumerate(rs_) if r.get('verdict') != 'CLEAN']
+        md += f"\nverdict (frames of 1 s or more, event-wait holds, {a.stretch}-frame stretches over {f'{a.slow_ms:g} ms' if a.slow_ms else f'{a.slow_factor:g} × the run p50'}): " + (f"BAD: {', '.join(bad)}" if bad else 'every run CLEAN') + '\n'
+        (out / 'results.md').write_text(md)
     print('\n' + md)
-    sys.exit(0 if all(r.get('frames') for rs_ in results.values() for r in rs_) else 1)
+    ok = all(r.get('frames') for rs_ in results.values() for r in rs_)
+    if a.verdict: ok = ok and all(r.get('verdict') == 'CLEAN' for rs_ in results.values() for r in rs_)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == '__main__':

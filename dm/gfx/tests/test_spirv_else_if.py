@@ -9,13 +9,17 @@ In normal mode (XLATE_DEBUG=0) the structured program makes the second test an E
 nothing but an If). The SPIR-V generator used to take only an Else as the false target of an If, so the false edge
 went to the merge block and the ElseIf and Else bodies had no way in. Debug mode (the build default) adds a comment
 node per instruction, so there the Else also holds the branch's comment and no ElseIf forms: it is the control. This
-checks that every block of the translated module can be reached in both modes. The program is built here from its
-encoding; no game data.
-Set XLATE to a dmsh_xlate binary built from this tree (default dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate).
+checks that every block of the translated module can be reached in both modes, that both validate, and that the MSL
+keeps all three results. The program is built here from its encoding; no game data.
+
+The translator is built from this tree's own sources (spirv_else_if/ElseIf.csproj, as goto_conditions does), with
+dmsh_xlate's flags for a pixel shader, so the test checks the SpirvGenerator.cs of the change under test. Needs the
+.NET SDK 10 or later, spirv-val and SPIRV-Cross; skipped without them. DMSH_TEST_DOTNET names the dotnet to use,
+DMSH_TEST_RYU_SRC another Ryujinx.Graphics.Shader source folder (-p:RyuSrc).
 """
-import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import struct
 import subprocess
@@ -23,11 +27,14 @@ import sys
 import tempfile
 import unittest
 
-TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-sys.path.insert(0, str(TOOLS))
-import dmsh_chain  # noqa: E402
-
-XLATE = Path(os.environ.get('XLATE', TOOLS / 'dmsh_xlate_bin' / 'dmsh_xlate'))
+HERE = Path(__file__).resolve().parent
+TOOLS = HERE.parent / 'tools'
+try:   # the chain's own SPIRV-Cross options, so the MSL here is the MSL the chain makes
+    sys.path.insert(0, str(TOOLS))
+    import dmsh_chain  # noqa: E402
+    CROSS_MSL = list(dmsh_chain.CROSS_MSL)
+except (ImportError, AttributeError):
+    CROSS_MSL = ['--msl', '--msl-version', '30200', '--msl-argument-buffers', '--msl-texture-buffer-native']
 RZ, PT = 255, 7
 CONTROL = 0x000fea0000000000 << 64   # stall 5, yield, no barriers
 
@@ -116,18 +123,46 @@ def unreachable_blocks(spv):
     return [x for x in labels if x not in refs]
 
 
-@unittest.skipUnless(XLATE.is_file() and os.access(XLATE, os.X_OK), f'needs {XLATE}')
+def find_spirv_cross():
+    found = shutil.which('spirv-cross')
+    if found:
+        return found
+    bundled = TOOLS / 'spirv_cross_bin' / 'spirv-cross'
+    if platform.system() == 'Darwin' and bundled.is_file():
+        return str(bundled)
+    return None
+
+
 class ElseIfChains(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.dotnet = os.environ.get('DMSH_TEST_DOTNET') or shutil.which('dotnet')
+        cls.spirv_val = shutil.which('spirv-val')
+        cls.spirv_cross = find_spirv_cross()
+        missing = [name for name, tool in (('dotnet', cls.dotnet), ('spirv-val', cls.spirv_val),
+                                           ('spirv-cross', cls.spirv_cross)) if not tool]
+        if missing:
+            raise unittest.SkipTest('needs ' + ', '.join(missing))
+        version = subprocess.run([cls.dotnet, '--version'], capture_output=True, text=True).stdout.strip()
+        if not version or int(version.split('.')[0]) < 10:
+            raise unittest.SkipTest(f'needs the .NET SDK 10 or later (have {version or "none"})')
         cls.tmp = tempfile.TemporaryDirectory(prefix='spirv_else_if_')
         work = Path(cls.tmp.name)
+        # as test_dmsh_goto_conditions.py builds: no build servers, every obj / bin (the referenced projects' too) under
+        # the temporary directory, none left in the checkout
+        command = [cls.dotnet, 'build', str(HERE / 'spirv_else_if/ElseIf.csproj'), '-c', 'Release',
+                   '--disable-build-servers', '-p:UseSharedCompilation=false',
+                   '--artifacts-path', str(work / 'artifacts'), '-o', str(work / 'bin')]
+        if os.environ.get('DMSH_TEST_RYU_SRC'):
+            command.append('-p:RyuSrc=' + os.environ['DMSH_TEST_RYU_SRC'])
+        build = subprocess.run(command, capture_output=True, text=True)
+        if build.returncode:
+            cls.tmp.cleanup()
+            raise AssertionError('ElseIf.csproj did not build:\n' + build.stdout[-4000:] + build.stderr[-2000:])
         (work / 'else_if.bin').write_bytes(program())
-        jobs = [{'key': f'else_if_{mode}', 'stage': 'ps', 'arch': 'sm86', 'code': str(work / 'else_if.bin'),
-                 'fout': {'0': 'float'}, 'debug': mode == 'debug'} for mode in ('debug', 'normal')]
-        (work / 'job.json').write_text(json.dumps(jobs))
-        r = subprocess.run([str(XLATE), str(work / 'job.json'), str(work / 'out')], capture_output=True, text=True, timeout=120)
-        cls.log = r.stdout + r.stderr
+        run = subprocess.run([cls.dotnet, str(work / 'bin' / 'ElseIf.dll'), str(work / 'else_if.bin'), str(work / 'out')],
+                             capture_output=True, text=True, timeout=300)
+        cls.log = run.stdout + run.stderr
         cls.spv = {mode: (work / 'out' / f'else_if_{mode}.spv') for mode in ('debug', 'normal')}
 
     @classmethod
@@ -140,25 +175,24 @@ class ElseIfChains(unittest.TestCase):
                 self.assertTrue(path.is_file(), self.log)
                 self.assertEqual(unreachable_blocks(path.read_bytes()), [], f'{mode} mode')
 
-    @unittest.skipUnless(shutil.which('spirv-val'), 'needs spirv-val')
     def test_modules_validate(self):
         for mode, path in self.spv.items():
             with self.subTest(mode=mode):
-                r = subprocess.run(['spirv-val', '--target-env', 'vulkan1.2', str(path)], capture_output=True, text=True)
+                self.assertTrue(path.is_file(), self.log)
+                r = subprocess.run([self.spirv_val, '--target-env', 'vulkan1.2', str(path)], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    @unittest.skipUnless(Path(dmsh_chain.SPIRV_CROSS).is_file(), 'needs the chain\'s spirv-cross')
     def test_msl_keeps_all_three_results(self):
         for mode, path in self.spv.items():
             with self.subTest(mode=mode):
-                msl = subprocess.run([dmsh_chain.SPIRV_CROSS, *dmsh_chain.CROSS_MSL, str(path)], capture_output=True,
+                self.assertTrue(path.is_file(), self.log)
+                msl = subprocess.run([self.spirv_cross, *CROSS_MSL, str(path)], capture_output=True,
                                      text=True, check=True).stdout
                 # The program moves the three results as integer bit patterns; SPIRV-Cross drops unreachable blocks,
                 # so a branch without a way in loses its constant from the MSL.
-                for value in (1.0, 2.0, 3.0):
-                    bits = f32(value)
-                    forms = (str(bits), hex(bits), f'0x{bits:08X}')
-                    self.assertTrue(any(f in msl for f in forms), f'{mode} mode: the branch writing {value} is missing')
+                missing = [value for value in (1.0, 2.0, 3.0)
+                           if not any(f in msl for f in (str(f32(value)), hex(f32(value)), f'0x{f32(value):08X}'))]
+                self.assertEqual(missing, [], f'{mode} mode: the branches writing {missing} are missing from the MSL')
 
 
 if __name__ == '__main__':

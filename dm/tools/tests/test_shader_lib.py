@@ -158,6 +158,17 @@ class Write(Base):   # dmsh_build.py writes the image from functions that read i
         plain = self.root / 'plain.img'; shader_lib.write({**data, 'path.json': b'from a path', 'bytes.tsv': b'given'}, str(plain))   # the bytes themselves, on no thread
         self.assertEqual(plain.read_bytes(), self.image.read_bytes())
 
+    def test_write_reports_progress(self):
+        events = []
+        shader_lib.write({'a': b'1234', 'b': lambda: b'56789'}, str(self.image), on_progress=lambda d, t, b: events.append((d, t, b)))
+        self.assertEqual([(d, t) for d, t, _ in events], [(0, 2), (1, 2), (2, 2)])
+        self.assertEqual(events[0][2], 0)
+        self.assertGreater(events[1][2], 0)
+        self.assertGreater(events[2][2], events[1][2])
+        empty = []
+        shader_lib.write({}, str(self.root / 'empty.img'), on_progress=lambda d, t, b: empty.append((d, t, b)))
+        self.assertEqual(empty, [(0, 0, 0)])
+
     def test_a_function_that_fails_or_has_no_bytes_leaves_no_image(self):
         def gone(): raise OSError('the cache lost it')
         for bad, error in ((gone, 'the cache lost it'), (lambda: None, 'no bytes to write')):

@@ -187,7 +187,7 @@ def commit(key='', names=None):
     if not STORE.full:
         for p in staged: os.unlink(p)
 
-def publish_library(label):
+def publish_library(label, on_progress=None):
     """The library's image <dir>.img from the staged outputs and the files left on disk (these win), and for a partial build the image it builds on, less the outputs of the keys it built
     (and its stamp, when the profile's inputs changed). Then the folder and the staged entries go. When the image cannot be written, a full build whose drive is out of space stops at once
     without unpacking loose files back onto the full drive; otherwise the staged outputs go back into the folder, which works as it is, and a folder restore that fails too removes what it
@@ -204,7 +204,7 @@ def publish_library(label):
     for n in staged: files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
     for n in os.listdir(d):
         if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)): files[n] = os.path.join(d, n)
-    try: shader_lib.write(files, image)
+    try: shader_lib.write(files, image, on_progress=on_progress) if on_progress else shader_lib.write(files, image)
     except (OSError, ValueError) as e:
         cache_full = getattr(STORE, 'full', False)
         def stop(why, err2=None):
@@ -1057,17 +1057,22 @@ else:
             if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
                 for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
 
-# Progress for the NSP script (DMSH_PROGRESS: a small JSON file it reads, build_ipa_from_nsp.py ShaderWatch), written at most every half second
+# Progress for the NSP script (DMSH_PROGRESS: a small JSON file it reads, build_ipa_from_nsp.py ShaderWatch), written at most every half second and on every phase change
 PROGRESS = os.environ.get('DMSH_PROGRESS')
 _prog = {'t': 0.0, 'lock': threading.Lock()}
-def progress(step, done, total, force=False, **extra):
+_prog_step = ''
+def progress(step, done=None, total=None, force=False, **extra):
+    global _prog_step
     if not PROGRESS: return
     with _prog['lock']:
         now = time.time()
-        if not force and now - _prog['t'] < 0.5: return
-        _prog['t'] = now
+        if not force and step == _prog_step and now - _prog['t'] < 0.5: return
+        _prog['t'] = now; _prog_step = step
+        payload = {'step': step, **extra}
+        if done is not None: payload['done'] = done
+        if total is not None: payload['total'] = total
         try:
-            with open(PROGRESS + '.tmp', 'w') as f: json.dump({'step': step, 'done': done, 'total': total, **extra}, f)
+            with open(PROGRESS + '.tmp', 'w') as f: json.dump(payload, f)
             os.replace(PROGRESS + '.tmp', PROGRESS)
         except OSError: pass
 
@@ -1101,7 +1106,7 @@ for i, key in enumerate(keys):
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = (False, 'source only') if SOURCE_ONLY else cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
-    progress('cache check', i + 1, len(keys), cached=len(cache_hits))
+    progress('cache check', i + 1, len(keys), force=i + 1 == len(keys), cached=len(cache_hits))
 NMISS = sum(1 for k in keys if k not in cache_hits)
 xerr = {}
 def xlate_errors(r):
@@ -1151,7 +1156,7 @@ def fin(key, wb):
         finished()
 def finished(*_):   # one more shader finished, for the progress
     with _prog['lock']: DONE['n'] += 1; n = DONE['n']
-    progress('compiling', n, len(keys), cached=len(cache_hits), misses=NMISS)
+    progress('compiling', n, len(keys), force=n == len(keys), cached=len(cache_hits), misses=NMISS)
 # The shaders are finished in worker processes (PROCS of them): fin's own Python, the rules that rewrite the MSL above all, holds the GIL, and with threads one core ran it for all of them
 # while the Metal compiles they waited on ran at about a third of the machine (Ocarina of Time, 16 cores: 104% CPU for this process, 4-5 cores busy in all). A worker is a fork of this
 # process, made before any thread starts, so it has every table and fingerprint read above; spawn would run this script again, its start removing the outputs. A worker does not open
@@ -1281,7 +1286,11 @@ def mesh_finish(pair):
         commit(names=[name])
 _mesh = sorted(dmsh_chain.mesh_pairs(GAME, dm_dir)); _mesh_asked = dmsh_chain.asked_mesh_pairs(GAME)
 if _mesh:
-    with cf.ThreadPoolExecutor(NJ) as ex: list(ex.map(mesh_finish, _mesh))
+    progress('compiling mesh libraries', 0, len(_mesh), force=True, unit='pairs')
+    with cf.ThreadPoolExecutor(NJ) as ex:
+        for _i, _f in enumerate(cf.as_completed([ex.submit(mesh_finish, p) for p in _mesh]), 1):
+            _f.result()
+            progress('compiling mesh libraries', _i, len(_mesh), force=_i == len(_mesh), unit='pairs')
 shutil.rmtree(w, ignore_errors=True)
 st = collections.Counter(r[1] for r in res)
 print(f'shaders {len(res)}: ok {st["ok"]}, ' + ', '.join(f'{k} {v}' for k, v in st.items() if k != 'ok'))
@@ -1323,18 +1332,20 @@ if not want:   # a full build: the stamp, then the c1 guard and uniform read ext
     with open(os.path.join(out, CAS_USED + '.tmp'), 'w') as _f: _f.write(''.join(d + '\n' for d in sorted(set(digests.values()))))
     os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
 # The libraries' images, from what this build staged (and for a partial build the images it builds on): the folders go, and what reads a library from here on reads the image
-for _label in ('mac', 'ios'):
+_img_labels = [label for label in ('mac', 'ios') if label_dir(label)]
+for _label in _img_labels:
     _d = label_dir(_label)
-    if not _d: continue
     if not want: dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
-    publish_library(_label)
+    _step = f'writing the {"Mac" if _label == "mac" else "iOS"} library image' if len(_img_labels) > 1 else 'writing the library image'
+    publish_library(_label, on_progress=lambda done, total, size, step=_step: progress(step, done, total, force=done == total, unit='files', bytes=size))
 if not want: print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
-if PROGRESS:
-    try: os.unlink(PROGRESS)
-    except FileNotFoundError: pass
 if not want:
-    for _tool, _table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):
+    for _tool, _table, _step in (('c1_guard.py', 'c1_full.tsv', 'c1 guard'), ('cb_extent.py', 'cb_extent.tsv', 'uniform read extents')):
+        progress(_step, force=True)
         _r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), _tool), out, str(GAME.table(_table))], capture_output=True, text=True)
         if _r.returncode: sys.exit(f'[RED] {_tool} failed ({_r.returncode}): {_r.stderr.strip()[-500:]}')
         print(f'{_table}: {(_r.stdout.strip().splitlines() or [""])[-1]}', flush=True)
 elif STAMP_BEFORE != INPUTS: print(f'no library stamp: the profile\'s inputs changed since the last full build ({STAMP_BEFORE} → {INPUTS}), and a partial build does not rebuild the rest', flush=True)
+if PROGRESS:
+    try: os.unlink(PROGRESS)
+    except FileNotFoundError: pass

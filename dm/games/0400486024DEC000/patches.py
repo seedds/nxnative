@@ -505,6 +505,38 @@ MATCH_CUTS = {'main': [
     ]},
 ]}
 
+# The game's animation-container update (v131072 main+0x4358a0, 0x308 bytes). At +0x48 it loads the first list's head from the
+# container in x23 (ldr x9,[x23,#0x20]); +0x4c compares it against the empty sentinel (x23+0x18) and searches both lists for the entry
+# matching x24, taking SIGSEGV at +0x68 (ldr x12,[x19,#0x10]) when the head field holds game numbers instead of a pointer (first crash
+# 0x3f800000c3f16bc0, high word float 1.0; second 0x1235e132c76e6de9, top byte 0x12 — a stale transform write into a dead slot; lr
+# main+0x4358e8 both runs). The stub runs the relocated head load, then rejoins the natural path when the head is the container's own
+# empty sentinel (x23+0x18, whatever mapping the container lives in — init-time containers sit in host memory, where a heap-range
+# check alone would misfire); otherwise it checks the head's top byte against the guest heap range [0x70,0x90) and rejoins on a pass.
+# A failing head diverts to +0x94, the function's own not-found path (the exact target the natural second-list-exhausted branch at
+# +0x2d0 takes): it releases the container lock taken at +0x44, reloads x23 from the global table and allocates a fresh entry, so the
+# corrupt list is treated as a miss. The path reads no x9 before writing it (+0xf0), and x16 is free in the function (never used), so
+# the diverted state is exactly a natural miss. There is no x23 check: a container invalid enough to matter faults at the +0x44 lock
+# call before the hook, and a garbage-but-mapped x23 takes balanced acquire/release pairs on the same address either way.
+# anim_guard_v2.s, assembled with clang; both passing checks jump over the divert branch to the rejoin.
+anim_guard = (
+    0xf94012e9,                                       # the original head load
+    0x910062f0, 0xeb10013f, 0x540000c0,               # head == x23+0x18 (empty): rejoin, any mapping
+    0xd378fd30, 0xf101c210, 0xf100821f, 0x54000043)   # head's top byte in [0x70,0x90): rejoin, else the not-found path
+def anim_list_guard(ctx):
+    here, emit, site, put, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.base
+    load = base + 0x48
+    site(load, 'e91240f9')   # ldr x9,[x23,#0x20]
+    cont, miss = base + 0x4c, base + 0x94
+    start = here()
+    for w in anim_guard: emit(w)
+    emit(B(here(), miss))
+    emit(B(here(), cont))
+    put(load, [B(load, start)], 'animation-container list guard: a non-sentinel head outside the guest heap takes the not-found path instead of the walk')
+MATCH_STUBS = {'main': [
+    {'name': 'animation-container list guard', 'size': 776, 'fingerprints': ['0ba9ea17d1b40cc565658409486c4860c2d3123f47d7535e285bd4c868584982'],   # v131072 main+0x4358a0
+     'stub': anim_list_guard},
+]}
+
 BINDING = [
     {'what': 'movie pictures a frame: up to 2', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own movie player constructor, found by its function's fingerprint on any build that keeps the function; no other game has it: the fingerprint matches no function in the mains of Donkey Kong Bananza, Splatoon Raiders, Pokopia, Mario Tennis Fever, Switch Sports, Yoshi and the Mysterious Book, Mario Golf, Xenoblade Chronicles 2 or Super Mario 3D All-Stars, and Breath of the Wild's and Tears of the Kingdom's movies go through subsdk0's movie::Decoder, not a player in main",
@@ -527,4 +559,7 @@ BINDING = [
     {'what': 'screen shape: taller render targets, cameras, Layout2 panes and a 16:9 movie viewport (DM_SCREEN_ASPECT)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own display setup, camera, pane and movie code; installed together after every function matches. Indexed pane edits verify the authored name, class and dimensions they use",
      'checked': 'v131072 main: one function per fingerprint, free registers read at each site; indexed pane names, classes and dimensions checked against the UIL records. In-place Vert+ projection-object updates (and DM_SCREEN_FOV=off Hor-) executed on ARM64 in test_ocarina_screen_shape.py and verified in Kakariko Village on Mac at 16:9, 16:10 and 4:3 (2026-11-23); 0/3 projection fingerprint matches in TOTK, BOTW and Mario Kart World; physical iPad/iPhone retest pending'},
+    {'what': 'animation-container list guard: a corrupt list head takes the not-found path', 'now': 'game', 'goal': 'game', 'purpose': 'crash fix',
+     'why': "the game's own animation-container function, found by its function's fingerprint on any build that keeps the function; the check reuses that function's own not-found path and touches nothing else",
+     'checked': 'v131072 main: one function with this fingerprint; the hook site, the sentinel compare, the not-found rejoin (the natural second-list-exhausted target), the continue and the free registers read by disassembly; the stub emission simulated (all branch targets verified) and the forged build byte-checked by the rewriter (2026-11-21)'},
 ]

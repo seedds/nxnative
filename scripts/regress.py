@@ -1078,6 +1078,7 @@ def run_env(g, art, route, outdir, a):
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
+        if not (prof / 'mesh_pairs.tsv').is_file() and (g.build / 'shader/mesh_pairs.tsv').is_file(): env['DM_MESH_PAIRS'] = str(g.build / 'shader/mesh_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
     try: run_saves.cloud_off(env, run_saves.asked(a.env))   # last, after every override: cloud saves off (dm/tools/run_saves.py)

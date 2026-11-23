@@ -128,7 +128,8 @@ if [ "$GFXAPI" = vulkan ] || [ "$GFXAPI" = gl ]; then cp "$GD/shader_map.tsv" $T
 else cp "$GD/shader_map.tsv" "$GD/c1_full.tsv" $TD/ || die "copy shader tables"
   if [ -f "$GD/cb_extent.tsv" ]; then cp "$GD/cb_extent.tsv" $TD/ || die "copy cb_extent.tsv"; else t "no $GD/cb_extent.tsv: the host copies whole uniform bindings"; fi
   # the shader pairs, beside the shader map where the pipeline prebuild reads them (nvn_mtl.m pso_prebuild): without them the app makes no pulling bases, and a hybrid draw has no stand-in
-  for f in shader_pairs.tsv pso_pairs.tsv; do if [ -f "$GD/$f" ]; then cp "$GD/$f" $TD/ || die "copy $f"; fi; done; fi   # optional
+  for f in shader_pairs.tsv pso_pairs.tsv mesh_pairs.tsv; do if [ -f "$GD/$f" ]; then cp "$GD/$f" $TD/ || die "copy $f"; fi; done
+  if [ ! -f "$TD/mesh_pairs.tsv" ] && [ -n "${DM_MESH_PAIRS:-}" ] && [ -f "$DM_MESH_PAIRS" ]; then cp "$DM_MESH_PAIRS" "$TD/mesh_pairs.tsv" || die "copy mesh_pairs.tsv"; fi; fi   # optional
 # A profile may have no recorded prewarm seeds yet (Pokopia). The host also reads the device's own list.
 if [ -f "$GD/pso_manifest.tsv" ]; then cp "$GD/pso_manifest.tsv" $TD/ || die "copy pso_manifest.tsv"
 else t "no $GD/pso_manifest.tsv: no bundled prewarm seed list"; fi
@@ -167,8 +168,9 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
   [ "$PH" != none ] || PH=
   [ -n "$PH" ] || t "prewarm pipelines: no Mac host of this game (make -C dm/host GAME=$GAME, or DM_PSO_HOST=<host>): the device builds the prewarm lists' pipelines at its first start"
   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
+  MP_ARG=(); if [ ! -f "$GD/mesh_pairs.tsv" ] && [ -n "${DM_MESH_PAIRS:-}" ] && [ -f "$DM_MESH_PAIRS" ]; then MP_ARG=(--pairs "$GD/shader_pairs.tsv" --pairs "$GD/pso_pairs.tsv" --pairs "$DM_MESH_PAIRS"); fi
   "${DM_PYTHON:-python3}" "$DM/gfx/tools/pso_offline.py" --game "$GAME" --msl "$MSL_IOS/b-$V" --out "$PSO" --work "$W/build/ios/pso/work" --gpu "$GPUS" ${DM_PSO_IOS_MIN:+--os-min "$DM_PSO_IOS_MIN"} \
-    ${PH:+--prewarm-host "$PH"} | while IFS= read -r ln; do t "$ln"; done
+    ${MP_ARG[@]+"${MP_ARG[@]}"} ${PH:+--prewarm-host "$PH"} | while IFS= read -r ln; do t "$ln"; done
   if [ "${PIPESTATUS[0]}" != 0 ]; then   # an optimization: the device builds the bases on its first start without it
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=

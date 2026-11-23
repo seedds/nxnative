@@ -1110,5 +1110,63 @@ class Default(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), 'on')
 
 
+class MeshBases(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        write_refl = lambda k, j: (self.d / f'{k}_b.json').write_text(json.dumps(dict(chain=CHAIN, **j)))
+        write_lib = lambda k, fns: (self.d / f'{k}_b.metallib').write_bytes(metallib(fns))
+        write_refl('ts1', {'entry': 'main0', 'mesh_stage': {'kind': 'ts', 'threads': 32, 'payload': 20, 'task': True}})
+        write_refl('tss', {'entry': 'main0', 'mesh_stage': {'kind': 'ts', 'threads': 32, 'payload': po.abi.MESH_PAYLOAD_MAX + 64, 'task': True}})
+        write_refl('ms1', {'entry': 'main0', 'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms', 'threads': 32, 'payload': 20, 'task': True}})
+        write_refl('mn1', {'entry': 'main0', 'entry_z': 'main0_z', 'entry_object': 'main0_o', 'mesh_stage': {'kind': 'ms', 'threads': 32, 'payload': 0, 'task': False}})
+        write_refl('mp1', {'entry': 'main0', 'entry_object': 'main0_o', 'mesh_stage': {'kind': 'ms', 'threads': 32, 'payload': 0, 'task': False, 'prim': 1}})
+        write_refl('fs1', {'entry': 'main0', 'raster': {}})
+        write_refl('fsp', {'entry': 'main0', 'raster': {'primitive_id': 1}})
+        write_refl('fsc', {'entry': 'main0', 'raster': {}})
+        write_lib('ts1', [('main0', False)])
+        write_lib('tss', [('main0', False)])
+        write_lib('ms1', [('main0', False), ('main0_z', ('dm_border_off',))])
+        write_lib('mn1', [('main0', False), ('main0_z', False), ('main0_o', False)])
+        write_lib('mp1', [('main0', False), ('main0_o', False)])
+        write_lib('fs1', [('main0', ('dm_border_off', 'dm_blend_off'))])
+        write_lib('fsp', [('main0', False)])
+        write_lib('fsc', [('main0', ('other_fc',))])
+
+    def test_read_pairs_and_plan_mesh(self):
+        text = b'# mesh triples\nM\tts1\tms1\tfs1\nM\ttss\tms1\tfs1\nM\t-\tmn1\tfs1\nM\t-\tmn1\t-\nM\t-\tmp1\tfs1\nM\t-\tmn1\tfsp\nM\t-\tmn1\tfsc\nmn1\tfs1\n'
+        pairs = po.read_pairs(text)
+        self.assertIn(('M', 'ts1', 'ms1', 'fs1'), pairs)
+        self.assertIn(('mn1', 'fs1'), pairs)
+        meshes, rest, left = po.plan_mesh(self.d, CHAIN, pairs, False)
+        self.assertEqual(meshes, [
+            ('ts1_b', 'main0', 'ms1_b', 'main0', 'fs1_b', 'main0', 32, 32, 32),
+            ('tss_b', 'main0', 'ms1_b', 'main0', 'fs1_b', 'main0', 16, 32, 32),
+            ('mn1_b', 'main0_o', 'mn1_b', 'main0', 'fs1_b', 'main0', 16, 1, 32),
+        ])
+        self.assertEqual(rest, [('M', '-', 'mn1', '-'), ('M', '-', 'mn1', 'fsc')])
+        self.assertEqual(left['primitive data'], 1)
+        self.assertEqual(left['primitive ID'], 1)
+        # near=0 selects entry_z (which triggers needs_cut because main0_z is not ms1_b's first function and declares dm_border_off)
+        meshes_z, _, _ = po.plan_mesh(self.d, CHAIN, [('M', 'ts1', 'ms1', 'fs1')], True)
+        self.assertEqual(meshes_z[0][3], 'main0_z')
+        self.assertEqual(po.cut_entries(self.d, [], meshes=meshes_z), {('ms1_b', 'main0_z')})
+        # script emits mesh_render_pipeline_descriptors with unspecialized color attachments
+        cfg = po.script(self.d, [], meshes=meshes)
+        md = cfg['pipeline_descriptors']['mesh_render_pipeline_descriptors']
+        self.assertEqual(len(md), 3)
+        self.assertEqual(md[0]['payload_memory_length'], 32)
+        self.assertEqual(md[1]['payload_memory_length'], 16)
+        self.assertEqual(md[2]['max_total_threads_per_object_threadgroup'], 1)
+        self.assertEqual(len(md[0]['color_attachments']), 8)
+        self.assertEqual(po.pair_of(meshes[0]), ('M', 'ts1', 'ms1', 'fs1'))
+        self.assertEqual(po.pair_of(meshes[2]), ('M', '-', 'mn1', 'fs1'))
+        # groups_of puts mesh bases in their own m-prefixed batches
+        self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], [], 2, 2, meshes=meshes)], [('m00001', 2, 0), ('m00002', 1, 0)])
+        # read_failed / write_failed round-trips mesh base tuples
+        po.write_failed(self.d, 'applegpu_g18p', [meshes[0]], [])
+        self.assertEqual(po.read_failed(self.d, 'applegpu_g18p'), ([meshes[0]], []))
+
+
 if __name__ == '__main__':
     unittest.main()

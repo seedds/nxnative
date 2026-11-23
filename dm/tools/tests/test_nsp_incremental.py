@@ -626,10 +626,11 @@ class SplitShaders(Base):
         self.splits += 1; self.last_cmd = cmd; out = Path(cmd[4]); out.mkdir(parents=True); (out / 'main.bin').write_bytes(self.rows.encode())
         for n, t in zip(self.NAMES, cmd[5:]): Path(t).write_text(self.table(n))
         Path(cmd[7]).with_name('geo_pairs.tsv').write_text(self.table('geo_pairs.tsv'))   # written beside shader_pairs.tsv
+        Path(cmd[7]).with_name('mesh_pairs.tsv').write_text(self.table('mesh_pairs.tsv'))
         Path(log).write_text(self.log)
 
-    def table(self, n):   # tests that set their own tables need not name geo_pairs.tsv
-        if hasattr(self, 'tables'): return self.tables[n] if n != 'geo_pairs.tsv' else self.tables.get(n, '# none\n')
+    def table(self, n):   # tests that set their own tables need not name geo_pairs.tsv or mesh_pairs.tsv
+        if hasattr(self, 'tables'): return self.tables[n] if n not in ('geo_pairs.tsv', 'mesh_pairs.tsv') else self.tables.get(n, '# none\n')
         return f'# split header\n{n}\t{self.rows}\n'
 
     def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, env=None, glslc_play=()):

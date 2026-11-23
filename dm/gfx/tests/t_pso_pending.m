@@ -470,7 +470,7 @@ static void test_nil_prediction_falls_back_then_predicts(void) {
     [dev expectAbsentPendingKey:&predicted_key onSubmitterCall:2];
     g_exec_next = stream; g_sub_serial = 1; g_pp_submit_mark = 0;
 
-    id<MTLRenderPipelineState> got = pso_get_(demand, nil);
+    id<MTLRenderPipelineState> got = pso_get(demand, nil);
     EXPECT_TRUE("demand compile synchronously falls back after speculative nil", got != nil && (__bridge void *)got == (__bridge void *)[dev resultForCall:2]);
     EXPECT_TRUE("repeated demanded draw is not queued as duplicate speculation", queue_index(&demand_key) < 0);
     EXPECT_TRUE("demand compiler call ran on submitter thread", [dev callWasOnSubmitter:2]);

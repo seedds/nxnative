@@ -1,4 +1,5 @@
 #include "audio_input.h"
+#include "audio_input_dualsense.h"
 #include "hle.h"
 #include <AVFAudio/AVFAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -123,7 +124,10 @@ static OSStatus input_proc(void *ctx, AudioUnitRenderActionFlags *flags, const A
         atomic_fetch_sub_explicit(&d->callbacks, 1, memory_order_release);
         return kAudio_ParamError;
     }
-    for (int i = 0; i < d->channel_count; i++) d->buffers->mBuffers[i].mDataByteSize = frames * sizeof(float);
+    for (int i = 0; i < d->channel_count; i++) {
+        d->buffers->mBuffers[i].mData = d->planes[i];
+        d->buffers->mBuffers[i].mDataByteSize = frames * sizeof(float);
+    }
     OSStatus status = AudioUnitRender(d->unit, flags, time, 1, frames, d->buffers);
     if (status != noErr) {
         atomic_store_explicit(&d->failed, 1, memory_order_release);
@@ -131,7 +135,14 @@ static OSStatus input_proc(void *ctx, AudioUnitRenderActionFlags *flags, const A
         return status;
     }
     const float *planes[INPUT_CHANNEL_MAX];
-    for (int i = 0; i < d->channel_count; i++) planes[i] = d->planes[i];
+    for (int i = 0; i < d->channel_count; i++) {
+        planes[i] = d->buffers->mBuffers[i].mData;
+        if (!planes[i]) {
+            atomic_store_explicit(&d->failed, 1, memory_order_release);
+            atomic_fetch_sub_explicit(&d->callbacks, 1, memory_order_release);
+            return kAudio_ParamError;
+        }
+    }
     dm_audio_input_process(planes, d->channel_count, frames, d->format.mSampleRate);
     atomic_fetch_sub_explicit(&d->callbacks, 1, memory_order_release);
     return noErr;
@@ -160,6 +171,7 @@ static int input_prepare_locked(void) {
     int uses_default = 0, fell_back = 0;
     AudioDeviceID device = selected_input_device(&uses_default, &fell_back);
     if (device == kAudioObjectUnknown || AVAudioApplication.sharedInstance.recordPermission != AVAudioApplicationRecordPermissionGranted) return 0;
+    dm_ds_usb_mic_enable(device);   // a DualSense over USB: its built-in mic selected and unmuted first
     if (fell_back) fprintf(stderr, "[dm] audio input: selected UID is unavailable; falling back to the system default input\n");
     AudioComponentDescription desc = { kAudioUnitType_Output, kAudioUnitSubType_HALOutput, kAudioUnitManufacturer_Apple, 0, 0 };
     AudioComponent component = AudioComponentFindNext(NULL, &desc);

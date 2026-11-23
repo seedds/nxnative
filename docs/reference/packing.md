@@ -149,6 +149,13 @@
 - **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge. Applies to every Vulkan game's shader step.
 
+### The shader step stands at 99% after the last shader
+
+- **Symptom:** a shader build's progress line stops just short of its total (`42,811 of 42,848` for Ocarina of Time, every shader from the cache) and stays frozen through the late mesh, library-image and table steps before the stage ends, which looks like a hang.
+- **Cause:** `dmsh_build.py` wrote `DMSH_PROGRESS` at most every half second during `cache check` and `compiling` without flushing the final count, emitted no progress for mesh libraries, `publish_library` (40–49 s for Ocarina of Time's 10.7 GB Mac image on an M3 Max; two images on iOS), or `c1_guard.py` and `cb_extent.py` (6.5–19 s with a warm memo, ~100–106 s cold), and unlinked the progress file before running the table tools. `ShaderWatch` also mapped every step other than `cache check` back to `compiling`, hiding `compiling RT library`.
+- **Fix:** `dmsh_build.py` now flushes the final count of `cache check` and `compiling`, flushes immediately on every step change, reports `compiling mesh libraries` across `_mesh`, passes an `on_progress` callback through `publish_library` to `shader_lib.write` for `writing the library image` (or `writing the Mac library image` and `writing the iOS library image` on dual-image builds, with file counts and bytes written), and reports `c1 guard` and `uniform read extents` before unlinking `DMSH_PROGRESS` at exit. `ShaderWatch` reads `step`, counts, unit and formatted bytes directly from `DMSH_PROGRESS`.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072 on an M3 Max ([PR #2684](https://github.com/seedds/nxnative/pull/2684)). Checked in `dm/tools/tests/test_shader_lib.py` (`test_write_reports_progress`), `dm/tools/tests/test_nsp_mac.py` (`test_shader_watch_follows_all_phases`) and `dm/tools/tests/test_shader_toolchain_cache.py` (`BuildProgress`).
+
 ### The split shader tables differ from a game profile's
 
 - **Symptom:** the shader split stops with `the split shader tables differ from game profile <id>'s`, on the game version the profile registers.

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Any
 import unittest
@@ -557,6 +558,114 @@ class MetalPrefill(unittest.TestCase):
         with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib,))   # fewer pieces than libraries
         self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
         self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
+
+
+class BuildProgress(unittest.TestCase):
+    """dmsh_build.py's DMSH_PROGRESS reporting through ShaderWatch: throttling, final flush, mesh pairs, single/dual library images, and table steps."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
+
+    def load_progress(self, progress_path):
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_prog' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.FunctionDef) and n.name == 'progress') + 1
+        ns: dict[str, Any] = dict(os=os, json=json, time=time, threading=threading, PROGRESS=str(progress_path))
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        return ns
+
+    def test_progress_throttles_same_step_and_flushes_step_change_or_force(self):
+        prog = self.root / 'progress.json'
+        ns = self.load_progress(prog)
+        now = [100.0]
+        ns['time'] = types.SimpleNamespace(time=lambda: now[0])
+        ns['progress']('compiling', 1, 10, cached=10, misses=0)
+        self.assertEqual(json.loads(prog.read_text())['done'], 1)
+        now[0] = 100.1
+        ns['progress']('compiling', 2, 10, cached=10, misses=0)
+        self.assertEqual(json.loads(prog.read_text())['done'], 1)   # within 0.5 s for the same step
+        ns['progress']('compiling', 10, 10, force=True, cached=10, misses=0)
+        self.assertEqual(json.loads(prog.read_text())['done'], 10)   # forced final count flushes immediately
+        ns['progress']('c1 guard')
+        self.assertEqual(json.loads(prog.read_text()), {'step': 'c1 guard'})   # step change flushes without waiting 0.5 s
+
+    def test_finished_flushes_final_count_and_mesh_reports_pairs(self):
+        prog = self.root / 'progress.json'
+        ns = self.load_progress(prog)
+        watch = nsp.ShaderWatch(prog)
+        seen = []
+        orig = ns['progress']
+        def record(*a, **kw):
+            orig(*a, **kw)
+            w = watch()
+            if w is not None: seen.append(w)
+        ns['progress'] = record
+        fn: ast.stmt = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'finished')
+        ns.update(DONE=collections.Counter(), keys=['a', 'b'], cache_hits={'a', 'b'}, NMISS=0)
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        ns['finished'](); ns['finished']()
+        self.assertEqual(seen[-1], {'step': 'compiling', 'done': 2, 'total': 2, 'unit': 'shaders', 'note': ''})
+        seen.clear()
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_mesh' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.If)) + 1
+        ns.update(cf=cf, NJ=2, GAME=None, dm_dir='', mesh_finish=lambda pair: None,
+                  dmsh_chain=types.SimpleNamespace(mesh_pairs=lambda g, d: {('v1', 'g1'), ('v2', 'g2')}, asked_mesh_pairs=lambda g: set()))
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        self.assertEqual(seen[0], {'step': 'compiling mesh libraries', 'done': 0, 'total': 2, 'unit': 'pairs'})
+        self.assertEqual(seen[-1], {'step': 'compiling mesh libraries', 'done': 2, 'total': 2, 'unit': 'pairs'})
+
+    def run_tail(self, *, ios=False, want=()):
+        prog = self.root / f'progress-{"ios" if ios else "mac"}-{len(want)}.json'
+        ns = self.load_progress(prog)
+        watch = nsp.ShaderWatch(prog)
+        seen = []
+        orig = ns['progress']
+        def record(*a, **kw):
+            orig(*a, **kw)
+            w = watch()
+            if w is not None: seen.append(w)
+        ns['progress'] = record
+        mac_dir = self.root / f'mac-{"ios" if ios else "mac"}-{len(want)}'; mac_dir.mkdir()
+        (mac_dir / '0000000000000001_b.metal').write_bytes(b'msl' * 100)
+        ios_dir = self.root / f'ios-{len(want)}'
+        if ios:
+            ios_dir.mkdir()
+            (ios_dir / '0000000000000001_b.metallib').write_bytes(b'lib' * 100)
+        names = {'label_dir', 'publish_library', 'owned_output'}
+        funcs: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        store = shader_cache.Store(self.root / f'cas-{"ios" if ios else "mac"}-{len(want)}.db')
+        self.addCleanup(store.close)
+        ns.update(
+            os=os, sys=sys, errno=errno, re=re, shutil=shutil, shader_lib=shader_lib, dmsh_chain=dmsh_chain,
+            STORE=store, STAGE='stage/test', OLD_IMAGE={}, OUT_KEY=re.compile(r'([0-9a-f]{16})_b'),
+            out=str(mac_dir), IOSOUT=str(ios_dir) if ios else None, want=set(want),
+            GAME=types.SimpleNamespace(id='0100000000000000', table=lambda n: self.root / n),
+            INPUTS='aaaaaaaaaaaa', STAMP_BEFORE='aaaaaaaaaaaa', __file__=str(TOOLS / 'dmsh_build.py'),
+            subprocess=types.SimpleNamespace(run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, 'ok\n', '')),
+        )
+        exec(compile(ast.Module(body=funcs, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_img_labels' for t in n.targets))
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(ast.Module(body=self.tree.body[start:], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        return seen, prog.exists()
+
+    def test_tail_progress_single_dual_and_partial_builds(self):
+        mac_seen, mac_left = self.run_tail(ios=False, want=())
+        self.assertFalse(mac_left)
+        mac_steps = list(dict.fromkeys(e['step'] for e in mac_seen))
+        self.assertEqual(mac_steps, ['writing the library image', 'c1 guard', 'uniform read extents'])
+        mac_img = [e for e in mac_seen if e['step'] == 'writing the library image']
+        self.assertEqual((mac_img[0]['done'], mac_img[-1]['done'], mac_img[-1]['total'], mac_img[-1]['unit']), (0, 2, 2, 'files'))
+        self.assertIn('note', mac_img[-1])
+
+        ios_seen, ios_left = self.run_tail(ios=True, want=())
+        self.assertFalse(ios_left)
+        ios_steps = list(dict.fromkeys(e['step'] for e in ios_seen))
+        self.assertEqual(ios_steps, ['writing the Mac library image', 'writing the iOS library image', 'c1 guard', 'uniform read extents'])
+
+        partial_seen, partial_left = self.run_tail(ios=False, want=('0000000000000001',))
+        self.assertFalse(partial_left)
+        self.assertEqual(list(dict.fromkeys(e['step'] for e in partial_seen)), ['writing the library image'])
 
 
 if __name__ == '__main__':

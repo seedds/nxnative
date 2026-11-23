@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <dlfcn.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -255,26 +256,65 @@ static int sdk_has_local_language_list(void) {
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
 static const unsigned k_force_disabled = UINT_MAX;
-static void force_init(void) {
-    unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+static const char *force_entry_label(const hle_force_ent *e) {
+    if (e->to) return e->to;
+    Dl_info di;
+    if (e->fn && dladdr(e->fn, &di) && di.dli_sname) return di.dli_sname;
+    return "?";
+}
+static int force_build(int abort_on_error) {
+    unsigned long sz = 0; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+    if (g_force && sz % sizeof *g_force) {
+        if (abort_on_error) die("forced takeover section size %lu is not a multiple of entry size %zu", sz, sizeof *g_force);
+        LOG("forced takeover section size %lu is not a multiple of entry size %zu", sz, sizeof *g_force);
+        g_force = NULL; g_nforce = 0;
+        return 1;
+    }
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
     g_fidx = calloc(cap, sizeof *g_fidx); g_fmask = cap - 1;
+    if (!g_force_hits || !g_fidx) die("forced takeover index allocation failed");
     int native_language_list = sdk_has_local_language_list();
+    int bad = 0;
     for (unsigned i = 0; i < g_nforce; i++) {   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+        if (!g_force[i].name || !g_force[i].why || (!g_force[i].fn == !g_force[i].to)) {
+            if (abort_on_error) die("malformed forced takeover entry %u (%s)", i, g_force[i].name ? g_force[i].name : "(null)");
+            LOG("malformed forced takeover entry %u (%s)", i, g_force[i].name ? g_force[i].name : "(null)");
+            bad++; continue;
+        }
         if (native_language_list && (!strcmp(g_force[i].name, k_language_list) || !strcmp(g_force[i].name, k_language_count)))
             g_force_hits[i] = k_force_disabled;
         for (unsigned j = sym_hash(g_force[i].name) & g_fmask;; j = (j + 1) & g_fmask) {
             if (!g_fidx[j]) { g_fidx[j] = i + 1; break; }
-            if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
+            if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].name)) {
+                const hle_force_ent *prev = &g_force[g_fidx[j] - 1];
+                if (abort_on_error)
+                    die("duplicate entry in the forced takeover list: %s (%s and %s)", g_force[i].name, force_entry_label(prev), force_entry_label(&g_force[i]));
+                LOG("duplicate entry in the forced takeover list: %s (%s and %s)", g_force[i].name, force_entry_label(prev), force_entry_label(&g_force[i]));
+                bad++; break;
+            }
         }
     }
     for (unsigned i = 0; i < g_nforce; i++)   // an alias binds to the guest's definition: a target the host takes over would bypass that take-over
-        if (g_force[i].to)
+        if (g_force[i].name && !g_force[i].fn && g_force[i].to)
             for (unsigned j = sym_hash(g_force[i].to) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask)
-                if (g_force_hits[g_fidx[j] - 1] != k_force_disabled && !strcmp(g_force[g_fidx[j] - 1].name, g_force[i].to))
-                    die("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
+                if (g_force_hits[g_fidx[j] - 1] != k_force_disabled && !strcmp(g_force[g_fidx[j] - 1].name, g_force[i].to)) {
+                    if (abort_on_error) die("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
+                    LOG("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
+                    bad++; break;
+                }
+    return bad;
+}
+static void force_init(void) { (void)force_build(1); }
+// Build-time self-check (`dmhost --check-tables`): validate the linked __DATA,swforce registrations without game files or a GPU, reporting every error before returning non-zero.
+int dm_check_tables(void) {
+    int bad = force_build(0);
+    if (!g_nforce) { LOG("forced takeover list is empty"); bad++; }
+    free(g_fidx); g_fidx = NULL; g_fmask = 0;
+    free(g_force_hits); g_force_hits = NULL;
+    g_force = NULL; g_nforce = 0;
+    return bad != 0;
 }
 static void *force_lookup(const char *name) {
     if (!g_fmask) return NULL;

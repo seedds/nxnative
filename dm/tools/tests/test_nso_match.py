@@ -16,6 +16,7 @@ import struct
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -427,8 +428,8 @@ class Matching(unittest.TestCase):
                 f"MATCH_CUTS = {{'main': [{rule!r}]}}\n")
             for bid, expected_nb in ((known, '1f2003d5'), ('00' * 16, 'e0124091')):
                 img = bytearray(self.original)
-                ns = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
-                          MOD=SimpleNamespace(build_id=bytes.fromhex(bid)), IMG=img, TEXT_END=0x2000, NAME='main', outdir=str(root / f'out_{bid}'))
+                ns: dict[str, Any] = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                                          MOD=SimpleNamespace(build_id=bytes.fromhex(bid)), IMG=img, TEXT_END=0x2000, NAME='main', outdir=str(root / f'out_{bid}'))
                 with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
                 self.assertEqual([(c[0], c[1], c[2]) for c in ns['ALIAS_APPLIED']], [(0x108, 'e00317aa', expected_nb)])
 

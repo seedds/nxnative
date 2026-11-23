@@ -1,4 +1,5 @@
-// friends service unit test: presence is accepted (Twelve Minutes stops its start-up on a failed UserPresence::Initialize, seedds/nxnative#217),
+// friends service unit test: presence is accepted (Twelve Minutes stops its start-up on a failed UserPresence::Initialize, seedds/nxnative#217) and the notification queue opens
+// empty (Beach Buggy Racing 2 stops its start-up on a failed NotificationQueue::Initialize),
 // while the calls that would reach the service still fail. Expected results are hand-written, not taken from the implementation.
 #include "../hle_friends.c"
 #include <mach-o/getsect.h>
@@ -23,7 +24,9 @@ int main(void) {
     CHECK(h_fr_UpInit(presence, uid) == RES_OK, "UserPresence::Initialize succeeds");
     CHECK(h_fr_UpDesc(presence, "in game") == RES_OK, "UserPresence::SetDescription succeeds");
     CHECK(h_fr_UpCommit(presence) == RES_OK, "UserPresence::Commit succeeds");
-    CHECK(h_fr_NqInit(presence, uid) == RES_FAIL, "NotificationQueue::Initialize still fails");
+    CHECK(h_fr_NqInit(presence, uid) == RES_OK, "NotificationQueue::Initialize succeeds (Beach Buggy Racing 2 stops its start-up otherwise)");
+    uint8_t info[0x200] = {0};
+    CHECK(h_fr_NqPop(presence, info) != RES_OK, "NotificationQueue::Pop finds no notification");
     CHECK(h_fr_OpenSession(uid) == RES_FAIL, "DeclareOpenOnlinePlaySession still fails");
     // Resolve the actual takeovers: a missing or misspelled overload would run the SDK's friends client instead (PR #2162, issue #3177).
     Result (*key_uid)(void *, const void *, int) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb");
@@ -72,8 +75,8 @@ int main(void) {
     Result (*nq_init_nouid)(void *) = hook("_ZN2nn7friends17NotificationQueue10InitializeEv");
     Result (*nq_clear)(void *) = hook("_ZN2nn7friends17NotificationQueue5ClearEv");
     void (*nq_fini)(void *) = hook("_ZN2nn7friends17NotificationQueue8FinalizeEv");
-    if (nq_init_nouid) CHECK(nq_init_nouid(obj) == RES_FAIL, "NotificationQueue::Initialize without Uid fails");
-    if (nq_clear) CHECK(nq_clear(obj) == RES_FAIL, "NotificationQueue::Clear fails");
+    if (nq_init_nouid) CHECK(nq_init_nouid(obj) == RES_OK, "NotificationQueue::Initialize without Uid succeeds");
+    if (nq_clear) CHECK(nq_clear(obj) == RES_OK, "NotificationQueue::Clear succeeds on the empty queue");
     if (nq_fini) { nq_fini(obj); CHECK(!memcmp(obj, ctx, sizeof obj), "NotificationQueue::Finalize leaves cut object untouched"); }
     Result (*fl_ensure_nouid)(void *) = hook("_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextE");
     Result (*fl_avail_nouid)(uint8_t *) = hook("_ZN2nn7friends27CheckFriendListAvailabilityEPb");

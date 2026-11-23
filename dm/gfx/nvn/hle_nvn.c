@@ -2632,9 +2632,9 @@ static void tsummary(uint64_t frame) {
             LOG("[nvn] thread policy: %s; %u guest worker threads QoS %#x; present QoS %#x", rl, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
-    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
+    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc, ea, eb, ep, ef, efb; mtl_pkg_stats(&up, &re); mtl_pkg_edge_stats(&ea, &eb, &ep, &ef, &efb); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
     { uint64_t sh, st, sm; mtl_spare_stats(&sh, &st, &sm); LOG("[nvn] packaged textures' spares: held %llu, retired idle or at memory pressure %llu, %llu MB", (unsigned long long)sh, (unsigned long long)st, (unsigned long long)sm); }
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu, edge snapshots %llu (%llu KB, peak %llu KB, failed %llu / %llu KB); write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, (unsigned long long)ea, (unsigned long long)(eb >> 10), (unsigned long long)(ep >> 10), (unsigned long long)ef, (unsigned long long)(efb >> 10), fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),
@@ -4659,7 +4659,22 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
-    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
+    unsigned levels = t->d.levels ? t->d.levels : 1;
+    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, one_d = t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY;
+    int nz = r->depth ? r->depth : 1;
+    if (level >= levels || level >= 32 || r->xoffset < 0 || r->yoffset < 0 || r->zoffset < 0 || r->width < 0 || r->height < 0 || nz < 0) {
+        ONCE_LOG("[RED] WriteTexels: invalid mip or region");
+        return;
+    }
+    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1;
+    uint32_t lh = one_d ? 1 : (t->d.height >> level ? t->d.height >> level : 1);
+    uint32_t lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
+    if ((uint64_t)r->xoffset + (uint64_t)r->width > lw || (uint64_t)r->yoffset + (uint64_t)r->height > lh ||
+        (uint64_t)r->zoffset + (uint64_t)nz + (is3d ? 0ull : (uint64_t)layer0) > (is3d ? lz : t->L.layers)) {
+        ONCE_LOG("[RED] WriteTexels: region exceeds the mip dimensions or layers");
+        return;
+    }
+    if (!r->width || !r->height) return;
     // A linear texture (LINEAR or LINEAR_RENDER_TARGET) is one 2D level of rows of its stride, written by rows as ReadTexels reads it (mtl_read_texels) and the upload reads it (gsb_geom).
     // The block-linear writes below refuse its layout (nvn_deswizzle_geom), and the whole-level path dropped the write: a movie decoded into a LINEAR | VIDEO_DECODE texture (the host's
     // native-texture output, nvn_host_write_texture) drew black (Tsukihime's title backdrop, 1920x1080 RGBA8, nxnative PR #1983)
@@ -4683,7 +4698,6 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_bl(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
         if (ok) { mtl_tex_cpu_written(t); return; }
     }
-    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
     if (!row) row = wb;

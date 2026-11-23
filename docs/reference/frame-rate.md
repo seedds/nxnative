@@ -780,6 +780,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** mapped, non-sparse RGBA16F 2D/cube arrays with at least 32 faces and dimensions at most 64×64 write all faces in one dispatch per mip. An RGBA16Uint view preserves the exact stored component bits, including half-float NaN payloads, without floating-point conversion. Temporary views live until GPU completion; direct targets participate in dropped-upload recovery. Initial fills retain their original texture and usage contract. Large images, other formats, linear/compressible layouts, multisampling and unaligned sources keep the staged path. `DM_NVN_DIRECT_UPLOAD=0` restores it for all uploads. `t_direct_upload.m` compares all mip/face bits after CPU edits and spare reuse, checks fallback and initial fills, and injects a lost direct upload; Metal validation passes 26,384 checks normally and 26,388 with recovery injection.
 - **Found on:** [NieR:Automata US](../../dm/games/010056B015FE8000/README.md#small-light-probe-array-uploads). Its 16×16×768, five-mip RGBA16F array needs five direct dispatches instead of 3,840 staged dispatches and 3,840 copies. In an alternating warmed benchmark on M4 Pro, CPU upload encoding plus commit falls from 3.916 to 0.0275 ms and upload GPU time from 1.802 to 0.0355 ms. Gameplay and terminal-screen improvement remain unmeasured.
 
+### Vertex streams the shader does not read looked up every draw
+
+- **Symptom:** `bind_vbufs`, and `mtl_gpu_addr` under it, a large share of the replay thread; the `[nvn] vertex bindings` line's address lookups many times the draws.
+- **Cause:** `bind_vbufs` and `pull_layout_fill` looked up, compared and bound every stream slot holding an address. A game leaves the streams of earlier meshes bound, so most were streams the draw's shader never reads.
+- **Fix:** only the streams the vertex shader's inputs read (`vs_streams`) are bound or laid out. The pipeline's vertex descriptor is built from the same inputs (`pso_desc`), so it names no other stream. With no vertex shader (a draw without one, or a unit test) every bound stream still is. Unread streams still count in `ubd_conflict` and `vbuf_prepare`, and their vertex-table slots keep what they held, which no pipeline of the draw reads.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 14 of the 16 slots held an address at every draw; about 9 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
+
 ### Address to memory pool lookups by binary search
 
 - **Symptom:** the submit thread's CPU samples dominated by `mtl_addr` / `mtl_gpu_addr` (vertex buffers in `draw`, uniform buffers in `encode_args`).

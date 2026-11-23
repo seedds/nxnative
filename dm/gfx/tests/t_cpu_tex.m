@@ -409,6 +409,54 @@ static void pool_index(void) {
     mtl_alias_drop_pool(&pools[1]);
     CHECK(!tex_cpu_written(&b) && !cpu_pool_present(&pools[1]), "the last pool's Finalize removes its table");
 }
+// WriteTexels validates mip level, sign and region bounds before touching texture storage, allocating a scratch buffer or marking the texture CPU-written.
+static void write_texels_bounds(void) {
+    const size_t len = 131072;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "bounds pool initialized");
+    uint8_t src[512]; memset(src, 0xfe, sizeof src);
+    // 2D 4x4 RGBA8: oversized width/height, negative origin/size, invalid mip level and zero-sized region
+    NVNtextureBuilder tb; NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "2D texture for bounds check initialized");
+    const NVNcopyRegion bad_2d[] = {
+        {0, 0, 0, 5, 4, 1}, {0, 0, 0, 4, 5, 1}, {-1, 0, 0, 1, 1, 1}, {0, 0, 0, -1, 1, 1}, {0, 0, 0, 4, 4, 2}, {0, 0, 0, 0, 4, 1},
+    };
+    for (unsigned i = 0; i < sizeof bad_2d / sizeof *bad_2d; i++) h_nvnTextureWriteTexels(&tex, NULL, &bad_2d[i], src);
+    NVNtextureView bad_mip = {0}; h_nvnTextureViewSetDefaults(&bad_mip); h_nvnTextureViewSetLevels(&bad_mip, 1, 1);
+    NVNcopyRegion ok_2d = {0, 0, 0, 4, 4, 1};
+    h_nvnTextureWriteTexels(&tex, &bad_mip, &ok_2d, src);
+    int dirty = 0; for (size_t i = 0; i < ((tex_t *)&tex)->L.size; i++) dirty |= mem[65536 + i];
+    CHECK(!dirty && !tex_cpu_written((const tex_t *)&tex), "invalid 2D WriteTexels regions leave storage untouched and not CPU-written");
+    h_nvnTextureFinalize(&tex);
+    // 2D array (2 layers): a multi-layer write whose second slice overflows must leave layer 0 untouched too
+    NVNtexture arr = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D_ARRAY);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetDepth(&tb, 2);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&arr, &tb), "2D array texture initialized");
+    NVNcopyRegion over_arr = {0, 0, 1, 4, 4, 2};
+    h_nvnTextureWriteTexels(&arr, NULL, &over_arr, src);
+    dirty = 0; for (size_t i = 0; i < ((tex_t *)&arr)->L.size; i++) dirty |= mem[65536 + i];
+    CHECK(!dirty && !tex_cpu_written((const tex_t *)&arr), "overflowing multi-layer WriteTexels leaves earlier layers untouched");
+    h_nvnTextureFinalize(&arr);
+    // 1D array: height holds the layer count, while each layer's mip height is 1
+    NVNtexture a1d = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_1D_ARRAY);
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&a1d, &tb), "1D array texture initialized");
+    NVNcopyRegion over_1d = {0, 0, 0, 4, 2, 1};
+    h_nvnTextureWriteTexels(&a1d, NULL, &over_1d, src);
+    dirty = 0; for (size_t i = 0; i < ((tex_t *)&a1d)->L.size; i++) dirty |= mem[65536 + i];
+    CHECK(!dirty && !tex_cpu_written((const tex_t *)&a1d), "1D array rejects y/height beyond 1");
+    h_nvnTextureFinalize(&a1d);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
+    defer_drain(); munmap(mem, len);
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -446,6 +494,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); pool_index(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); write_texels_bounds(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

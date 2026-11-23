@@ -33,8 +33,9 @@ static double tick_at(double target) {   // one display-link callback, g_gap aft
     last = CACurrentMediaTime();
     static unsigned n; if (g_layers.count < 8) { CAMetalLayer *nl = offscreen_layer(); [g_q4 addResidencySet:nl.residencySet]; [g_layers addObject:nl]; }   // the queue takes at most 32 residency sets
     CAMetalLayer *l = g_layers[n++ % g_layers.count];
-    FakeLinkUpdate *u = [FakeLinkUpdate new]; double t0 = CACurrentMediaTime();
-    u.drawable = [l nextDrawable]; u.targetTimestamp = t0 + ROOM; u.targetPresentationTimestamp = target > 0 ? target : t0 + 0.050;
+    FakeLinkUpdate *u = [FakeLinkUpdate new];
+    u.drawable = [l nextDrawable]; double t0 = CACurrentMediaTime();
+    u.targetTimestamp = t0 + ROOM; u.targetPresentationTimestamp = target > 0 ? target : t0 + 0.050;
     [g_delegate metalDisplayLink:(CAMetalDisplayLink *)(id)u needsUpdate:(CAMetalDisplayLinkUpdate *)u];
     return CACurrentMediaTime() - t0;
 }
@@ -172,6 +173,58 @@ int main(void) { @autoreleasepool {
     }
     snprintf(name, sizeof name, "a 2-tick acquire probes within %d woken callbacks (took %d), no waits in between (%d)", LINK_LATCH_PROBE, n, waited_early);
     CHECK(name, g_link_latched == latched0 + 1 && n <= LINK_LATCH_PROBE && waited_early == 0 && g_link_latch_misses == 0 && g_link_dropped == 0);
+
+    // 6. Entry gate with GPU timing (issue #3251): early CPU presents whose GPU work finishes past room - tick / 8 never drain into the latch
+    g_gap = 1. / 60; g_link_drain = (nvn_link_drain){0}; g_link_latch_health = (nvn_link_latch_health){0}; atomic_store(&g_link_drain_req, 0); g_link_latch_misses = 0;
+    present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL);   // put one standing frame in the queue
+    uint64_t entries_gpu0 = g_link_drain.entries;
+    for (int i = 0; i < need + 20; i++) {
+        uint64_t f = 500 + (uint64_t)i;
+        atomic_store(&g_cur_frame, f);
+        frame_start(1, 500); waiting(0);
+        double t_wake = CACurrentMediaTime();
+        tick(); frame_done();
+        // Record frame f's GPU ending 15.5 ms after its wake (> 14.4 ms limit on 16.5 ms room), read when the next tick takes frame f
+        gpu_tag_begin(f);
+        gpu_tag_done(f, t_wake + 0.005, t_wake + 0.0155);
+    }
+    atomic_store(&g_cur_frame, 0);
+    CHECK("early CPU presents whose GPU runs past room - tick/8 do not drain into the latch", g_link_drain.entries == entries_gpu0 && !atomic_load(&g_link_drain_req) && queued() == 1);
+
+    // 7. Runtime exit on real Metal 4 late GPU completion (f.GPUEndTime > update.targetTimestamp): immediately exits the latch, restores a standing frame, and backs off
+    while (queued()) tick();   // empty the queue before arming the drain watch
+    g_link_drain = (nvn_link_drain){0}; g_link_drain.in = 1; g_link_drain.held = 0; g_link_drain.stand = 0;
+    g_link_latch_health = (nvn_link_latch_health){0}; g_link_latch_misses = 0;
+    pthread_mutex_lock(&g_link_mu); g_link_started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu);
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    [g_q4 waitForEvent:gate value:1];   // hold the latched present on the Metal 4 queue past ROOM (16.5 ms)
+    uint64_t late_gpu0 = atomic_load(&g_link_latch_late_gpu), exits0 = g_link_latch_exits, latched_lg0 = g_link_latched;
+    frame_start(1, 500); waiting(0); tick(); frame_done();
+    CHECK("latched present queued while GPU is held", g_link_latched == latched_lg0 + 1 && queued() == 0);
+    usleep(22000);   // past update.targetTimestamp (16.5 ms)
+    gate.signaledValue = 1;
+    for (int i = 0; i < 200 && atomic_load(&g_link_latch_late_gpu) == late_gpu0; i++) usleep(1000);   // wait for feedback handler
+    CHECK("Metal 4 feedback detects GPUEndTime > update.targetTimestamp", atomic_load(&g_link_latch_late_gpu) == late_gpu0 + 1);
+    // Next callback exits the latch without waiting, leaving the woken present standing in the queue
+    frame_start(1, 500); waiting(0); tick(); frame_done();
+    CHECK("late GPU forces immediate latch exit and restores a standing frame", g_link_latch_exits == exits0 + 1 && g_link_latch_misses == LINK_LATCH_GIVE_UP && queued() == 1);
+    // Following callback takes the standing frame (age >= 0) and backs off the drain
+    frame_start(1, 500); waiting(0); tick(); frame_done();
+    CHECK("standing frame after late-GPU exit backs off the drain into the latch", g_link_drain.back == 1 && !g_link_drain.in && queued() == 1);
+
+    // 8. Runtime exit on a skipped display-link callback right after entering a drain (even when late_gpu == 0)
+    while (queued()) tick();   // empty the queue before arming the drain watch
+    g_link_drain = (nvn_link_drain){0}; g_link_drain.in = 1; g_link_drain.held = 0; g_link_drain.stand = 0;
+    g_link_latch_health = (nvn_link_latch_health){0}; g_link_latch_misses = 0;
+    pthread_mutex_lock(&g_link_mu); g_link_started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu);
+    exits0 = g_link_latch_exits;
+    frame_start(1, 500); waiting(0); tick(); frame_done();   // frame 1 latched cleanly (g_link_drain.held == 1 < LINK_LATCH_GIVE_UP)
+    usleep(35000);   // simulate CAMetalDisplayLink skipping a 60 Hz tick (cb_gap > 1.35 * 16.67 ms)
+    frame_start(1, 500); waiting(0); tick(); frame_done();
+    CHECK("skipped tick right after a drain into the latch forces immediate exit", g_link_latch_exits == exits0 + 1 && g_link_latch_misses == LINK_LATCH_GIVE_UP && queued() == 1);
+    frame_start(1, 500); waiting(0); tick(); frame_done();
+    CHECK("standing frame after skipped-tick exit backs off the drain", g_link_drain.back == 1 && !g_link_drain.in && queued() == 1);
+    while (queued()) tick();   // leave queue empty for hold_case
 
     hold_case(2, 120, 60, 2, "60 fps on a 120 Hz link takes the queued frame on the second tick");
     hold_case(2, 144, 60, 3, "60 fps on a virtual 120 Hz link holds through an uneven first tick");

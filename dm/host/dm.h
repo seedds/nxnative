@@ -45,15 +45,19 @@ __attribute__((weak)) void dm_log(const char *fmt, ...) {
 #define LOG(...) dm_log("[dm] " __VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
-#define DM_SWITCH_ALIAS UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
-// The alias region this run gets: at least the Switch's 64 GB on the Mac, the profile's mem_alias on an iPhone, or DM_ALIAS_SIZE when set.
-// Shared by mem_init_once (hle_svc.c) and the Mac loader's undo_alias_cuts (loader.c).
-static inline size_t dm_alias_size(void) {
+#define DM_SWITCH_ALIAS  UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
+#define DM_SWITCH2_ALIAS UINT64_C(0x2000000000)   // a Switch 2's alias region on Mac: 128 GB (holds two 60 GB reservations, e.g. Xenoblade Chronicles 2 Switch 2 Edition)
+// The alias region this run gets: on the Mac, at least the console's alias region (64 GB for Switch 1, 128 GB for Switch 2 when ounce is set);
+// on an iPhone, the profile's mem_alias; or DM_ALIAS_SIZE when set.
+// Shared by mem_init_once (hle_svc.c, with ounce = dm_sdk_ounce() after sdk loads) and the Mac loader's undo_alias_cuts (loader.c, which runs before sdk loads and compares against DM_SWITCH_ALIAS).
+static inline size_t dm_alias_size_for(int ounce) {
     size_t pg = (size_t)getpagesize();
 #if TARGET_OS_IPHONE
+    (void)ounce;
     size_t alias = DM_GAME_MEM_ALIAS;
 #else
-    size_t alias = DM_GAME_MEM_ALIAS > DM_SWITCH_ALIAS ? DM_GAME_MEM_ALIAS : DM_SWITCH_ALIAS;
+    size_t floor = ounce ? DM_SWITCH2_ALIAS : DM_SWITCH_ALIAS;
+    size_t alias = DM_GAME_MEM_ALIAS > floor ? DM_GAME_MEM_ALIAS : floor;
 #endif
     const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) {
@@ -62,6 +66,7 @@ static inline size_t dm_alias_size(void) {
     }
     return alias;
 }
+static inline size_t dm_alias_size(void) { return dm_alias_size_for(0); }
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
 typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;

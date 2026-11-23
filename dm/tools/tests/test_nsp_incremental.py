@@ -368,11 +368,14 @@ class DeriveProfile(Base):
         with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\n')   # every profile has one (the host is built with it)
         self.derive(); patched = self.tmp / 'work/patched_v65536'
         logs = self.tmp / 'logs'; logs.mkdir()
-        def boot(*args): (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text('# table\n'); return 0
+        def boot(host, patched_dir, henv, *args):
+            self.assertNotIn('DM_ALIAS_SIZE', henv)
+            self.assertEqual(henv.get('DM_KEEP_ALIAS_CUTS'), '1')
+            (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text('# table\n'); return 0
         def check(key):
             patched.with_name(patched.name + '.key').parent.mkdir(parents=True, exist_ok=True); patched.with_name(patched.name + '.key').write_text(key + '\n')
             with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
-                return nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+                return nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {'DM_ALIAS_SIZE': '0x118000000'}, logs, game.Game(self.pdir))
         g = check('a' * 64)
         self.assertTrue(nsp.region_checked(g, patched))
         self.derive(); self.assertTrue(nsp.region_checked(game.Game(self.pdir), patched))   # the derivation's inputs are unchanged: its stamp stays
@@ -623,10 +626,11 @@ class SplitShaders(Base):
         self.splits += 1; self.last_cmd = cmd; out = Path(cmd[4]); out.mkdir(parents=True); (out / 'main.bin').write_bytes(self.rows.encode())
         for n, t in zip(self.NAMES, cmd[5:]): Path(t).write_text(self.table(n))
         Path(cmd[7]).with_name('geo_pairs.tsv').write_text(self.table('geo_pairs.tsv'))   # written beside shader_pairs.tsv
+        Path(cmd[7]).with_name('mesh_pairs.tsv').write_text(self.table('mesh_pairs.tsv'))
         Path(log).write_text(self.log)
 
-    def table(self, n):   # tests that set their own tables need not name geo_pairs.tsv
-        if hasattr(self, 'tables'): return self.tables[n] if n != 'geo_pairs.tsv' else self.tables.get(n, '# none\n')
+    def table(self, n):   # tests that set their own tables need not name geo_pairs.tsv or mesh_pairs.tsv
+        if hasattr(self, 'tables'): return self.tables[n] if n not in ('geo_pairs.tsv', 'mesh_pairs.tsv') else self.tables.get(n, '# none\n')
         return f'# split header\n{n}\t{self.rows}\n'
 
     def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, env=None, glslc_play=()):

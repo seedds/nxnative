@@ -32,6 +32,15 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 - The first boss fight's third stage (resolved, 2026-11-05, 16 GB M2 Air, docked): it measures its ink map with about 1,550 occlusion queries a frame, each after 7 inline updates of the query block and with colour writes masked off (`wm=0xfffffff0`), so those draws read the map directly rather than from the tile. Their 11,010 writes in one submission overflowed the host's list of queued writes, and from then on each query ended its render pass, at 1-2 fps ([the reference entry](../../../docs/reference/rendering.md#a-submission-past-8192-queued-writes-counted-as-writing-everywhere)). With a list that grows as needed (a larger fixed limit in the measured build), the stage holds a median of 17.7-19.9 ms with at most 118 render passes. A later stretch of the same run sat at 32-34 ms (frames 15,300-16,200); where in the game that was is not known (open).
 - Focus: the game stops drawing its 3D scene when the window loses focus (10 passes, GPU 2 ms), so a frame rate read then says nothing.
 
+The Slosher airborne ink is visible after [restoring absent vertex attributes' W component](../../../docs/reference/rendering.md#absent-vertex-attributes-lose-w) (resolved, 2026-11-22; [#3181](https://github.com/seedds/nxnative/issues/3181)).
+The projectile depth vertex shader `f73e8aad899ed6fd` reads attribute 12.W, but the draw binds attributes 0 through 9.
+An offline GPU replay of captured inputs produced opacity 0 with the old zero default and approximately 0.943624 with W=1.
+The paired color shader `8765a6ba6c743fbe` uses depth EQUAL.
+The depth and color vertex shaders produced bit-identical positions for all 527 vertices, so position differences did not explain the missing mesh.
+A full build of the installed update's 27,190 extracted shaders passed on chain `2ca5130feae8`, including 10,619 pulling libraries, with no shader losses.
+The scripted attack capture and the player's gameplay check confirmed airborne ink on an M4 MacBook Air with macOS 27.0.1.
+Other games and iOS gameplay remain unchecked for this change.
+
 ## Dynamic resolution
 
 The game writes 29 `ReportCounter(TIMESTAMP_TOP)` reports a frame and steers its dynamic resolution by the GPU time between them ([issue #1064](https://github.com/seedds/nxnative/issues/1064), M2 Air, 1920x1080 handheld). With one time for the whole submission it read about 0 and kept the 3D view at 1440x810 (render scale 0.75) at 26 ms of GPU a frame; with segment times it scaled between 0.39 and 1.0 of the render-scale size. With the GPU's idle gaps between command buffers counted it read about 16 ms where the GPU worked about 8 and held 0.50–0.57 of full size; without them its width median went to 0.94, and dropped frames from 4 to 35 per 300 ([issue #1290](https://github.com/seedds/nxnative/issues/1290)). Both are the host's default now ([GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment)); not rerun on main.
@@ -52,6 +61,8 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - `dm/games/profile_guess.py` does not recognise `Generic_21_4_4`. `pl::IsRunningOnOunce` answers false.
 
 ## Found on this game
+
+- [Absent vertex attributes lose W](../../../docs/reference/rendering.md#absent-vertex-attributes-lose-w): resolved, the Slosher airborne ink disappears when its depth pass reads zero opacity.
 
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
 - [Optional stage byte in short NVN2 control sections](../../../docs/reference/shaders.md#optional-stage-byte-in-short-nvn2-control-sections): the offline build's `IndexError` on a short agl vertex record is resolved, 2026-11-17.

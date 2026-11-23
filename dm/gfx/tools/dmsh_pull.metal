@@ -2,7 +2,8 @@
 // The host fills dm_vlayout for each draw (nvn_mtl.m): per stream the base address (kept 4-byte aligned: a base's low bits go into its attributes' offsets), stride (0: every vertex
 // reads element 0) and divisor (0: per vertex; else the element is base instance + (instance - base instance) / divisor, Metal's own rule for a step rate with a base instance;
 // the base instance is the draw's [[base_instance]], so indirect draws, whose arguments the CPU never reads, are right too), and per NVN attribute (all 32 of NVN2's, so an input at attribute 16 or above is pulled too) the raw NVN attribute state word
-// (format 8 bits, offset 19, stream 5; format 0 or one this table does not know reads zeros, as the host's zero buffer).
+// (format 8 bits, offset 19, stream 5).
+// Format 0 reads (0, 0, 0, 1.0) as raw float bits. Unknown formats and streams without a buffer read zeros.
 // The result is four 32-bit register words: float formats as float bits (unorm and snorm through the unpack builtins, which round as Metal's vertex fetch does; a plain division
 // under fast math is a unit in the last place off for some values), integer formats zero- or sign-extended, the int-to-float formats converted, missing components 0, 0, 0 and
 // 1 (1.0 for the float formats). The input then takes them with as_type, whatever type the translator gave it. Bit-identical to Metal's fetch for every format it has (t_pull.m).
@@ -78,7 +79,10 @@ static inline uint4 dm_decode(device const uchar *p, uint fmt, bool al) {
 }
 // NVN attribute a of this draw, for vertex vid of instance iid ([[vertex_id]] and [[instance_id]], which include the base vertex and base instance; bi: [[base_instance]])
 static inline uint4 dm_fetch(constant dm_vlayout &L, uint a, uint vid, uint iid, uint bi) {
-    uint w = L.attr[a], off = (w >> 8) & 0x7ffffu, st = w >> 27, stride = L.s[st].stride, div = L.s[st].divisor;
+    uint w = L.attr[a], off = (w >> 8) & 0x7ffffu, st = w >> 27;
+    if ((w & 0xffu) == 0u) return uint4(0u, 0u, 0u, 0x3f800000u);
+    if (st >= 16u || L.s[st].base == nullptr) return uint4(0u);
+    uint stride = L.s[st].stride, div = L.s[st].divisor;
     uint idx = stride == 0u ? 0u : div != 0u ? (iid - bi) / div + bi : vid;
     uint rel = idx * stride + off;
     return dm_decode(L.s[st].base + rel, w & 0xffu, (rel & 3u) == 0u);

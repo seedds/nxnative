@@ -8851,6 +8851,14 @@ static uint64_t vbuf_draw_bytes(int st, const nvn_refl *rf, const p_draw *dw, co
     if (!attr_end || (!vstream_last(st, dw, di, &last) && (S.stream[st].divisor || !vbuf_index_last(di, &last)))) return 0;
     return last * S.stream[st].stride + attr_end;
 }
+static id<MTLBuffer> vertex_constants(void) {
+    static id<MTLBuffer> b;
+    if (!b) {
+        b = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(b);
+        ((uint32_t *)b.contents)[7] = 0x3f800000;
+    }
+    return b;
+}
 // Returns the first stream the vertex shader reads (rf) whose non-zero address is in no memory pool, or -1. Such a slot would keep the buffer an earlier draw bound
 // there, so the caller skips the draw, as for an index buffer in no pool; a stream with address 0 reads the zero buffer through the vertex descriptor (ZERO_ATTR)
 static unsigned g_vbuf_prefix_mask;
@@ -8886,8 +8894,8 @@ static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf, const
         }
         enc_r_vbuf(en, VB_SLOT(s), gpu);
     }
-    static id<MTLBuffer> zero; static uint64_t zero_gpu;
-    if (!zero) { zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(zero); zero_gpu = zero.gpuAddress; }
+    static uint64_t zero_gpu;
+    if (!zero_gpu) zero_gpu = vertex_constants().gpuAddress;
     enc_r_vbuf(en, 30, zero_gpu);
     return bad;
 }
@@ -8915,12 +8923,12 @@ static void pull_layout_fill(pull_layout *Lp, const nvn_refl *rf, const p_draw *
     }
     for (int a = 0; a < 32 && a < S.nattr; a++) {
         va_st v = S.attr[a];
-        if (!v.fmt || v.stream >= 16) continue;
-        if (!L.s[v.stream].base) {   // the attribute reads zeros
-            if (S.vbuf[v.stream].address) RED_ONCE(159, "vertex stream %d's buffer %#llx is in no memory pool; its attributes read zeros", v.stream, (unsigned long long)S.vbuf[v.stream].address);
-            continue;
+        if (!v.fmt) continue;
+        if (v.stream < 16) {
+            if (!L.s[v.stream].base && S.vbuf[v.stream].address) RED_ONCE(159, "vertex stream %d's buffer %#llx is in no memory pool; its attributes read zeros", v.stream, (unsigned long long)S.vbuf[v.stream].address);
+            v.offset += lo[v.stream];
         }
-        v.offset += lo[v.stream]; memcpy(&L.attr[a], &v, 4);
+        memcpy(&L.attr[a], &v, 4);
     }
     *Lp = L;
 }
@@ -10155,7 +10163,12 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (on) { if (at != loc) ZERO_ATTR(loc, rf->v[v].ct); for (int q = 0; q < 3; q++) if (rf->v[v].sh[q] != 0xff && rf->v[v].sh[q] != at) ZERO_ATTR(rf->v[v].sh[q], q); }
         // When a >= S.nattr, k.attr[a] keeps the 0 from memset, vfmt(0) is Invalid, the same fallback branch is taken and the RED_ONCE condition of fmt being non-0 does not hold.
         if (ka.fmt && vf == MTLVertexFormatInvalid) RED_ONCE(15, "vertex attribute format %#x not mapped", ka.fmt);
-        if (vf == MTLVertexFormatInvalid) { ZERO_ATTR(at, ct); continue; }
+        if (vf == MTLVertexFormatInvalid) {
+            ZERO_ATTR(at, ct);
+            // Missing attributes read (0, 0, 0, 1.0); unused shadow declarations must stay zero.
+            if (!ka.fmt) vd.attributes[at].offset = 16;
+            continue;
+        }
         int st = ka.stream;
         if (vconv_wanted(rf, v, k, on) && nconv < VCONV_MAX) {   // converted on the CPU at draw time (vconv_bind): the register's 32-bit values, 4 components, its own slot
             int slot = VCONV_SLOT0 + nconv++;

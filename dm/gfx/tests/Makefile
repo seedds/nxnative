@@ -837,6 +837,9 @@ check_t_vk_renderdragon: RUN_ENV = MTL_DEBUG_LAYER=1
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
 check_t_float_pad: RUN_ENV = MTL_DEBUG_LAYER=1
+t_default_attrib: t_default_attrib.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_default_attrib.m $(MTL_T_SRC) $(FW)
+check_t_default_attrib: RUN_ENV = MTL_DEBUG_LAYER=1
 # Kept vertex conversions: kept from the second submission, equal to vconv_elem, dropped by a write to the source (game, host or GPU), left by a write beside it.
 t_vconv_keep: t_vconv_keep.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vconv_keep.m $(MTL_T_SRC) $(FW)

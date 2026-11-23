@@ -2,16 +2,18 @@
 import base64
 import copy
 import hashlib
-import importlib.util
 from pathlib import Path
 import struct
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 REPO = Path(__file__).resolve().parents[3]
-spec = importlib.util.spec_from_file_location('nextendo_patches', REPO / 'dm/tools/nextendo_patches.py')
-assert spec is not None and spec.loader is not None
-p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import nextendo_patches as p
+import nso
 TITLE = '0100000000001000'; BUILD = '12' * 32
 
 def catalog(offset=0x104, original=b'abcd', changed=b'WXYZ', rle=False):
@@ -65,7 +67,7 @@ class NextendoPatchTests(unittest.TestCase):
             root=Path(folder); source=root/'main'; out=root/'online/main'
             header=bytearray(0x100); header[:4]=b'NSO0'; header[0x40:0x60]=bytes.fromhex(BUILD)
             chunks=[b'0000abcd',b'ro00',b'data']
-            for i,(memory,chunk) in enumerate(zip([0,0x10,0x20],chunks)):
+            for i,(memory,chunk) in enumerate(zip([0,0x1000,0x2000],chunks)):
                 struct.pack_into('<III',header,0x10+0x10*i,0x100+sum(map(len,chunks[:i])),memory,len(chunk))
                 struct.pack_into('<I',header,0x60+4*i,len(chunk))
             original=header+b''.join(chunks); source.write_bytes(original)
@@ -74,6 +76,28 @@ class NextendoPatchTests(unittest.TestCase):
             self.assertEqual(new[0x40:0x60],bytes.fromhex(BUILD)); self.assertEqual(new[0x104:0x108],b'WXYZ')
             self.assertEqual(new[0xa0:0xc0],hashlib.sha256(b'0000WXYZ').digest())
             with self.assertRaises(ValueError): p.prepare_nso(source,out,TITLE,catalog(offset=0x108,original=b'\0'*4))
+    def test_zbic_main_with_and_without_a_signed_patch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, out = Path(folder)/'main', Path(folder)/'online/main'
+            text, stored = b'0000abcd' + b'\0'*24, b'ZBIC'
+            header = bytearray(0x100); header[:4] = b'NSO0'; header[0x40:0x60] = bytes.fromhex(BUILD)
+            struct.pack_into('<I', header, 0xc, nso.NSO_ZSTD | 0x9)  # compressed text, with its hash checked
+            struct.pack_into('<III', header, 0x10, 0x100, 0, len(text))
+            struct.pack_into('<III', header, 0x20, 0x104, 0x1000, 0)
+            struct.pack_into('<III', header, 0x30, 0x104, 0x1000, 0)
+            struct.pack_into('<I', header, 0x60, len(stored))
+            header[0xa0:0xc0] = hashlib.sha256(text).digest()
+            original = header + stored; source.write_bytes(original)
+            decode = Mock(return_value=text)
+            with patch.dict(sys.modules, zbic=SimpleNamespace(decompress=decode)):
+                self.assertEqual(p.prepare_nso(source,out,TITLE,{'revision':1,'patches':[]}), [])
+                self.assertFalse(out.exists())
+                self.assertEqual(p.prepare_nso(source,out,TITLE,catalog()), ['synthetic'])
+            self.assertEqual(decode.call_count, 2)
+            decode.assert_called_with(stored)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(struct.unpack_from('<I', out.read_bytes(), 0xc)[0], 0x8)
+            self.assertEqual(nso.read(out).image[:len(text)], b'0000WXYZ' + text[8:])
     def test_signed_document_rejects_duplicate_fields(self):
         with self.assertRaises(ValueError): p.strict_json('{"revision":1,"revision":2}')
 

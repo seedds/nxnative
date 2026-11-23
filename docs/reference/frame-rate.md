@@ -784,7 +784,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 ### The mesh stage's argument table set at every mesh draw
 
 - **Symptom:** one `setArgumentTable` record a geometry mesh draw on the encode thread, also for draws gathered into a run.
-- **Cause:** `geo_mesh_take` set the mesh stage's table before deciding whether the draw joins a run, whose flush (`geo_mesh_flush_`) sets it itself.
+- **Cause:** `geo_mesh_encode` set the mesh stage's table before deciding whether the draw joins a run (`geo_mesh_take`), whose flush (`geo_mesh_flush_`) sets it itself.
 - **Fix:** only a mesh draw that draws alone sets it (`geo_mesh_encode` in `nvn_geometry.inc`).
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): about 2,500 mesh draws a frame on Layer 1400.
 
@@ -835,7 +835,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 - **Symptom:** `fb_prepare`, `fb_depth_rule`, `ubd_conflict_textures` and `ubd_conflict_sh` in the replay thread's samples, mostly in their own loops.
 - **Cause:** each walked all of the shader's reflected bindings at every draw and skipped the kinds it does not handle. A material's fragment shader has samplers and more beside each texture.
-- **Fix:** each shader keeps, made once, the indices of its texture and image bindings and of the bindings `ubd_conflict_sh` looks at (`sh_lists_make` in `nvn_mtl.m`). The loops walk those lists with the same conditions inside, and a shader with no texture binding skips `ubd_conflict_textures`' lock. The lists are published by a release store of `tl_nb`, read with acquire.
+- **Fix:** each shader keeps, made once, the indices of its texture and image bindings and of the bindings `ubd_conflict_sh` looks at (`sh_lists_make` in `nvn_mtl.m`). The loops walk those lists with the same conditions inside, and a shader with no texture binding skips `ubd_conflict_textures`' lock. The lists are published by a release store of `lists_nb`, read with acquire.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 45 bindings at the 90th percentile, a third of them textures; the walks were about 7 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
 
 ### Main guest thread keeps inherited default QoS

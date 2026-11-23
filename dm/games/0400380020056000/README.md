@@ -53,6 +53,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [Switch Pro Controller stick stays zero in GameController](../../../docs/reference/services.md#switch-pro-controller-stick-stays-zero-in-gamecontroller): USB BETOP T6 For NS left stick stayed zero in GameController while HID `0x30` moved ([issue #2655](https://github.com/seedds/nxnative/issues/2655)); automatic per-stick passive HID fallback added (`DM_PRO_STICKS=0` disables it), pending hardware retest.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): the `main` duplicate-selection mismatch is resolved, 2026-11-17, with the registered shader identities preserved.
 - [Optional stage byte in short NVN2 control sections](../../../docs/reference/shaders.md#optional-stage-byte-in-short-nvn2-control-sections): the offline build's `IndexError` on a short agl vertex record is resolved, 2026-11-17.
 

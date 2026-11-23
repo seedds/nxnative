@@ -1188,20 +1188,24 @@ static int reg_read(uint64_t g, int *id_, int *samp) {   // → 0 when note g is
 // The raw table admits pools noted by address getters (hle_nvn.c pool_mark_addressed) or reached by fixed pointers read before binding (gmem_discover). Other pools stay out, avoiding residency
 // for texture-only storage that Metal keeps in textures of its own. With the original getter-only filter, Ocarina of Time excluded 172 pools of 3,721 MB of the 4,588 MB, its whole 2,432 MB
 // graphics pool among them; with them in, the first scene passed 12 GB of Metal's 12.1 GB working set and took a 16 GB Mac into swap, and once into a kernel panic in IOGPUGroupMemory
-static struct { uintptr_t lo, hi; } *g_addr; static int g_naddr, g_addr_cap;   // sorted, disjoint. Under g_mu
-static int addr_first(uintptr_t lo) { int a = 0, b = g_naddr; while (a < b) { int m = (a + b) / 2; if (g_addr[m].hi <= lo) a = m + 1; else b = m; } return a; }   // the first range that ends after lo
-static int addr_meets(uintptr_t lo, uintptr_t hi) { int i = addr_first(lo); return i < g_naddr && g_addr[i].lo < hi; }
+static struct { uintptr_t lo, hi; } *g_addr; static size_t g_naddr, g_addr_cap;   // sorted, disjoint. Under g_mu
+static size_t addr_first(uintptr_t lo) { size_t a = 0, b = g_naddr; while (a < b) { size_t m = a + (b - a) / 2; if (g_addr[m].hi <= lo) a = m + 1; else b = m; } return a; }   // the first range that ends after lo
+static int addr_meets(uintptr_t lo, uintptr_t hi) { size_t i = addr_first(lo); return i < g_naddr && g_addr[i].lo < hi; }
 void mtl_pool_addressed(const void *mem, uint64_t size) {
     uintptr_t lo = (uintptr_t)mem, hi = lo + size;
     pthread_mutex_lock(&g_mu);
-    int i = addr_first(lo);
+    size_t i = addr_first(lo);
     if (i == g_naddr || g_addr[i].lo > lo || g_addr[i].hi < hi) {
         if (i > 0 && g_addr[i - 1].hi == lo) i--;   // touching on the left
-        int j = i;
+        size_t j = i;
         while (j < g_naddr && g_addr[j].lo <= hi) { lo = MIN(lo, g_addr[j].lo); hi = MAX(hi, g_addr[j].hi); j++; }
-        if (i == j && g_naddr == g_addr_cap) { g_addr_cap = g_addr_cap ? g_addr_cap * 2 : 256; g_addr = realloc_or_die(g_addr, (size_t)g_addr_cap * sizeof *g_addr, "the addressed range table"); }
+        if (i == j && g_naddr == g_addr_cap) {
+            if (g_addr_cap > SIZE_MAX / sizeof *g_addr / 2) MDIE("addressed range table too large");
+            g_addr_cap = g_addr_cap ? g_addr_cap * 2 : 256;
+            g_addr = realloc_or_die(g_addr, g_addr_cap * sizeof *g_addr, "the addressed range table");
+        }
         if (j != i + 1) memmove(g_addr + i + 1, g_addr + j, (size_t)(g_naddr - j) * sizeof *g_addr);
-        g_naddr += 1 - (j - i); g_addr[i].lo = lo; g_addr[i].hi = hi;
+        g_naddr = g_naddr - (j - i) + 1; g_addr[i].lo = lo; g_addr[i].hi = hi;
         atomic_fetch_add(&g_pool_gen, 1);   // the table rebuilds before the next draw that uses it
     }
     pthread_mutex_unlock(&g_mu);

@@ -1,0 +1,34 @@
+# Mina the Hollower 1.0.6, SDK 21.4.3, Yacht Club engine, NVN.
+
+# ---- Identity ----
+title_id	0100DCD01F306000
+program_id	0100DCD01F306000
+
+# ---- App ----
+name	Mina the Hollower
+ipa	MinaTheHollower.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.0.6	main=e86ae07bdfec77ee10d50d2163d0ff2e	sdk=cb82ed52216313df5626154efb64d45f
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	default.sndbnk.yc
+zip_store	.yc:.metallib
+
+# ---- Memory ----
+# Compact profile tested on iPhone Duo: a 5 GiB block with a 4.5625 GiB alias window.
+mem_reserve	0x140000000
+mem_alias	0x124000000
+mem_stack	0x4000000
+app_pool	0xCD500000
+# the NPDM declares 32 MB of system resource
+sys_resource	0x2000000
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Mina the Hollower Yacht Club YCD shaders

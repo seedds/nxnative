@@ -3443,7 +3443,8 @@ def ue3_package(head): return head[:4] == UE3_TAG and len(head) >= 6 and 0 < str
 def ue3_body(d, label):
     """An Unreal Engine 3 package with its compressed chunks decoded: the summary, then chunks, each {tag, u32 block size, u32 compressed and raw size of the chunk, then per block a u32
     compressed and raw size} and the blocks (Batman: Arkham Knight: blocks of 0x20000 bytes, Oodle Mermaid, 8C 0A; a block stored whole has its two sizes equal). Zlib blocks are inflated here,
-    the others go to the game's own decoder (oodle). A package without chunks is returned as it is"""
+    the others go to the game's own decoder (oodle). Mortal Kombat 11 serializes the tag, sizes and block table as u64 instead of u32 (the tag's high word is zero).
+    A package without chunks is returned as it is"""
     i = d.find(UE3_TAG, 4)
     if i < 0: return d
     out = [d[:i]]
@@ -3452,13 +3453,25 @@ def ue3_body(d, label):
             # Borderlands: Game of the Year Edition pads cooked packages to a 32 KiB boundary after the last chunk.
             if d.count(0, i) == len(d) - i: break
             red(f'{label}: no compressed chunk at {i:#x} (the chunks do not run to the end of the package)')
-        bs, cs, us = struct.unpack_from('<III', d, i + 4)
+        wide = d[i:i + 8] == UE3_TAG + bytes(4)
+        word, fmt = (8, '<QQ') if wide else (4, '<II')
+        bs, cs, us = field(d, '<QQQ' if wide else '<III', i + word, f'{label} chunk at {i:#x}')
         if not bs: red(f'{label}: chunk at {i:#x} has block size 0')
-        nb = (us + bs - 1) // bs; o = i + 16 + 8 * nb
+        nb = (us + bs - 1) // bs; table = i + 4 * word; o = table + 2 * word * nb
+        span(d, table, 2 * word * nb, f'{label} chunk at {i:#x} block table')
+        start, raw = o, 0
         for k in range(nb):
-            c, u = struct.unpack_from('<II', d, i + 16 + 8 * k)
+            c, u = struct.unpack_from(fmt, d, table + 2 * word * k)
+            if not c or u != min(bs, us - raw): red(f'{label}: chunk at {i:#x} block {k} has inconsistent sizes')
             blk = span(d, o, c, f'{label} chunk at {i:#x} block {k}')
-            out.append(blk if c == u else zlib.decompress(blk) if blk[:1] == b'\x78' else oodle(blk, u)); o += c
+            # RFC 1950: DEFLATE, a window no larger than 32 KiB, and the
+            # CMF/FLG check bits. Smaller windows need not start with 0x78
+            # (MK11's Tweakvars.xxx uses 0x28 0x15).
+            is_zlib = len(blk) >= 2 and blk[0] & 0x0f == 8 and blk[0] >> 4 <= 7 and int.from_bytes(blk[:2], 'big') % 31 == 0
+            decoded = blk if c == u else zlib.decompress(blk) if is_zlib else oodle(blk, u)
+            if len(decoded) != u: red(f'{label}: chunk at {i:#x} block {k} decoded to {len(decoded)} bytes, expected {u}')
+            out.append(decoded); o += c; raw += u
+        if o - start != cs or raw != us: red(f'{label}: chunk at {i:#x} totals differ from its header')
         i = o
     return b''.join(out)
 
@@ -3466,11 +3479,25 @@ def ue3_shaders(d, label):
     """Shader records of an Unreal Engine 3 game's shader caches (Batman: Arkham Knight: GlobalShaderCache-Switch.bin, 'BMSG', 1,847 shaders; CombinedShaderCache-Switch.xxx, a package holding
     22,874 once its chunks are decoded, ue3_body; none of 68 other packages sampled holds any): u32 record length, u32 code area length, u32 control length (0x880), on the global cache one more u32,
     then the code area, right followed by its control section. Found by the control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front.
+    Mortal Kombat 11 stores control-first records: {u32 control size, u32 code size, u32 0, u32 control size}, then the control (with trailing compiler text/reflection) and the code area.
     The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start()
         if c + 0x708 > len(d): continue
+        # MK11 stores {u32 control size, u32 code size, u32 0, u32 control size},
+        # then the control (including compiler text) and finally the code area.
+        if c >= 16:
+            nc, nk, zero, repeat = struct.unpack_from('<IIII', d, c - 16)
+            own, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+            a = c + nc
+            if not zero and nc == repeat and 0x760 <= own <= nc and nk == ncode and nk > 0 and a + nk <= len(d):
+                ctl, code = d[c:a], d[a:a + nk]
+                st = glslc_stage(ctl, code)
+                why = check(label, st, ctl, code) if st else 'no stage in the code area header'
+                if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
+                out.append((f'{label}#UE3@{c:x}', st, ctl, code))
+                continue
         n = struct.unpack_from('<I', d, c + 0x704)[0]; a = c - n
         if a < 12 or d[a:a + 4] not in (GFX_MAGIC, CS_MAGIC): continue
         nctl = next((lc for k in (4, 8) if a - k - 4 >= 0 for ln, lc in [struct.unpack_from('<II', d, a - k - 4)] if ln == n and 0x760 <= lc <= 0x1000), None)

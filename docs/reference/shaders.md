@@ -910,6 +910,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Witcher 3: Wild Hunt — Complete Edition](../../dm/games/0100A0800E9C4000/README.md) (v458752): 29,673 shaders (vertex 24,617, pixel 4,968, compute 46, geometry 22, domain 13, hull 7; 21,233 from `content`, 7,877 from the DLCs) in 80 s on an M1 Max, against 563 before.
 - **Check:** `dm/tools/tests/test_split_redengine.py` covers material records, static shader programs spanning chunks, an uncompressed DLC stub, wrong lengths, a damaged record flag, and zstd errors in both formats. A flag at +8 without the footer still goes through the plain reader.
 
+### NVNC shader caches
+
+- **Symptom:** a build stops at the run-time capture step, for example `captured only 6 run-time shaders, the profile needs 2818`, although the game ships its compiled shaders in one file.
+- **How it is stored:** `resources/nvn_shader_cache` has a 16-byte header {`NVNC`, u32 version 1, u32 count, u32 blob size}, `count` 64-byte records with the entry's u32 offset at +0x38 and u32 size at +0x3c, and a blob of whole GLSLC outputs. Offsets count from the start of the blob, and the header, records and blob fill the file exactly.
+- **Fix:** `nvnc_shaders` (`shader_split.py`) reads each record's entry as a GLSLC output. An unknown version, sizes that do not add up, a record past the blob or an entry that is no GLSLC output is a red line that names the file and leaves it out.
+- **Found on:** Alien: Isolation (`010075D00E8BA000`, 3,225 entries; issue #3242, layout from its report). The shaders it compiles at run time still come from the capture step.
+- **Check:** `dm/tools/tests/test_split_nvnc.py` (synthetic caches). Not yet run on the game's own file.
+
 ## Control sections and code
 
 ### Code area and control section layout

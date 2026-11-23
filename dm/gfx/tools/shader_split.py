@@ -46,6 +46,7 @@
 #   · shadercache.nx (Blind Squirrel's Unreal Engine 3 ports: BioShock Remastered v13, BioShock 2 Remastered v28): header {u32 version, u32 block count}, then per block
 #       {u32 stored length, [u32 raw length in v28,] one zlib stream}; the blocks are joined before scanning because records straddle block boundaries. A record = 16-byte header
 #       {u32 control length, u32 code length, ?, ?}, code area, control section; see shadercache_nx
+#   · NVNC (Alien: Isolation's resources/nvn_shader_cache): a table of whole GLSLC outputs, see nvnc_shaders
 #   · bnd2 (Criterion's Bundle 2: Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): whole GLSLC outputs in its zlib resources, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
@@ -4965,6 +4966,25 @@ def shadercache_nx(d, label, need=True):
     if not out and need: red(f'{label}: {ver} version, {count} blocks, no NVN record')
     return out
 
+NVNC = b'NVNC'
+
+def nvnc_shaders(path, label):
+    """A shader cache of whole GLSLC outputs (Alien: Isolation, resources/nvn_shader_cache: 3,225). Header {'NVNC', u32 version 1, u32 count, u32 blob size}, then count 64-byte records, each with
+    the entry's u32 offset at +0x38 and u32 size at +0x3c (offsets from the start of the blob; the rest of a record is not used), then the blob. Header, records and blob fill the file exactly"""
+    with open(path, 'rb') as f: d = f.read()
+    version, count, blob_size = field(d, '<III', 4, label)
+    if version != 1: red(f'{label}: NVNC version {version}: only version 1 is known')
+    blob = 16 + 64 * count
+    if blob + blob_size != len(d): red(f'{label}: {count} records and a blob of {blob_size} bytes do not add up to the file\'s {len(d)} bytes')
+    out = []
+    for i in range(count):
+        at, size = struct.unpack_from('<II', d, 16 + 64 * i + 0x38)
+        if at + size > blob_size: red(f'{label}: entry {i}: offset {at:#x} and size {size:#x} run past the blob of {blob_size:#x} bytes')
+        got = glslc_shaders(d[blob + at:blob + at + size], f'{label}@{blob + at:#x}', need=False)
+        if not got: red(f'{label}: entry {i} at {blob + at:#x} holds no whole GLSLC output')
+        out += got
+    return out
+
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
@@ -5142,6 +5162,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] == DBX:   # DrinkBox's shader container (shaders.dat.nx): one whole-file format, blocks self-checking
         with open(path, 'rb') as f: found += dbx_shaders(f.read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == NVNC:   # a table of whole GLSLC outputs (nvnc_shaders)
+        found += nvnc_shaders(path, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == FZLC:   # REDengine 3's static shader cache (fzlc_shaders)
         found += fzlc_shaders(path, '/' + rel)

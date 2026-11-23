@@ -129,6 +129,17 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** the case is noted once without `[RED]` (`unmapped page of a sparse pool: bound to the zero buffer`, `hle_nvn.c` `nvn_vpool_unmapped`); an address in no pool and no reservation is still red. The zero buffer is shared and 64 KB: a store through it is kept, not dropped (no game is known to store there).
 - **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
 
+### Misaligned physical mappings into a sparse virtual pool
+
+- **Symptom:** `[nvn] virtual pool …: a request not aligned to the host page … is kept in the page table only: textures read it, the GPU cannot address it`; buffers, indirect arguments, and shaders addressing that sparse pool fail lookup (`in no memory pool`) or read zeros.
+- **Cause:** Switch NVN aligns physical pools and virtual mappings to 4 KB, whereas Apple Silicon uses 16 KB host pages. `vm_remap` cannot zero-copy alias a physical address whose offset modulo 16 KB differs from the virtual offset (for example, a physical pool allocated at `+0x3000` mapped at virtual offset `0`, or a `CPU_UNCACHED` physical pool mapped across 16 KB boundaries).
+- **Fix:** two-tier general handling in `hle_nvn.c` and `nvn_mtl.m`:
+  1. `PHYSICAL | CPU_NO_ACCESS` pools starting inside a host page are re-backed once on a host page boundary at `nvnMemoryPoolInitialize` (recorded in a side table so `pool_t` stays 40 bytes for captures), allowing zero-copy `vm_remap` with no shadow memory or sync overhead.
+  2. Misaligned CPU-accessible mappings (`vshadow_map`) get anonymous pages inside the virtual pool's existing reservation (`mmap(..., MAP_FIXED)` + normal `vrun_set`, so unmaps still free pages and return zeros via `vunmap_defer` and large pools never wire their whole reservation). CPU writes to the physical pool are dirty-tracked and synced at submission start (`nvn_shadow_sync`). GPU writes (storage buffers, `mtl_sub_update`, `mtl_sub_fill`, buffer copies, writable buffer images, events, counters, visibility reports) are written back on completion (`POST_SHADOW_WB`, `nvn_shadow_writeback`) through a `vm_remap` RW alias of the physical pages (zero `SIGSEGV`/`SIGBUS` writeback faults) using lazy per-host-page snapshots (`vshadow_arm_entry`, allocated only for GPU-written pages so static assets cost 0 snapshot RAM and concurrent CPU+GPU writes in the same 16 KB host page never clobber each other).
+  3. Active sparse virtual pools also enable `MTL4VisibilityOptionResourceAlias` in `resource_vis()` (`mtl_sparse_alias_delta`) so Metal 4 barriers keep replaced sparse run buffers coherent.
+- **Found on:** Immortals Fenyx Rising (`010010A00B228000`, [PR #3126](https://github.com/seedds/nxnative/pull/3126)).
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_sparse_shadow` (45 checks under `MTL_DEBUG_LAYER=1`: `CPU_NO_ACCESS` 16 KB re-backing, misaligned `CPU_UNCACHED` shadow sync, GPU fill/event writeback through zero-fault RW alias, concurrent CPU+GPU writes in the same host page, partial unmap, `resource_vis()` sparse alias, clipped buffer textures, compressed `IMAGE` textures in sparse pools, >32 immediate and deferred handle binds, and `geo_big_*` scratch reuse/trim).
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).
@@ -769,6 +780,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `t_nvn` 6c2b writes a 37x5 `LINEAR | VIDEO_DECODE` texture with a stride of 256 and a 16x16 `LINEAR_RENDER_TARGET` texture with a stride of 128. Each gets four regions (whole, part, one texel, one row or column), some with a padded source stride. The check compares the storage byte for byte, including the row padding and the bytes after the texture, then reads the texture back with ReadTexels. It also checks that a region past the last row writes nothing, and that no CPU-written texture is added for these buffer views. Without the fix, three of these checks fail; with `mtl_tex_cpu_written` in place of the view rule, the last one fails.
 - **Open:** a `LINEAR_RENDER_TARGET` or `IMAGE` linear texture that the GPU drew into as a private texture (`cpu_unc_drop`) and the CPU then partly writes is uploaded from its storage, as a block-linear texture is. No game is known to do that.
 
+### Out-of-range `WriteTexels` regions overran the scratch buffer
+
+- **Symptom:** heap corruption or unexpected storage writes when a game calls `nvnTextureWriteTexels` / `nvnTextureWriteTexelsStrided` with an invalid mip level, negative coordinates/size, or a region exceeding the mip dimensions or layers.
+- **Cause:** `write_region_bl` returned `-1` on out-of-range regions and fell back to the whole-level `lin` scratch-buffer path in `write_texels` (`hle_nvn.c`), which had no bounds checks and copied past the end of `lin` before swizzling back into `t->mem`. A multi-layer region that overflowed on a later layer also mutated earlier layers before failing.
+- **Fix:** `write_texels` validates mip level (`levels = t->d.levels ? t->d.levels : 1`, `< 32`), non-negative origin/dimensions/depth, and mip width/height/depth/layer bounds (treating `1D` and `1D_ARRAY` mip height as `1`) up front before touching storage or allocating `lin`, logging `[RED] WriteTexels: ...` once on rejection; valid zero-width/height regions return without writing or marking the texture CPU-written.
+- **Found on:** [PR #2906](https://github.com/seedds/nxnative/pull/2906) (reported alongside Baldur's Gate: Dark Alliance, Guacamelee!, and Oceanhorn testing); reproduced directly by synthetic bounds checks.
+- **Check:** `t_cpu_tex --metal` (`write_texels_bounds`) verifies oversized width/height, negative origin/size, out-of-range mip level, zero-sized regions, overflowing multi-layer 2D array writes, and `1D_ARRAY` height > 1 all leave storage untouched and do not mark the texture CPU-written.
+
 ### Packaged texture data copied at `TextureInitialize`
 
 - **Cause:** a texture created with `TextureBuilderSetPackagedTextureData` gets that data copied into its storage by NVN at `TextureInitialize` (a compressible pool cannot be written by the CPU).
@@ -1227,6 +1246,13 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** Metal usage came only from the texture builder's `IMAGE` flag. A render texture may instead have only `COMPRESSIBLE`, then its descriptor be used in a shader image slot. Snowdrop writes these descriptors with `RegisterTexture`, not `RegisterImage`. Its depth-conversion compute shader `cf5ba107e29b51f4` gathers from a depth texture and unconditionally writes four pixels per invocation to a 256×256 R16F texture whose flags are `0x8`. Its Metal texture had read / render-target usage (`0x5`), so the image binding was rejected.
 - **Fix:** before a draw or dispatch uses a writable image, `image_prepare` resolves it with image intent and ensures its backing allows shader writes. `RegisterImage` also keeps this intent in its host snapshot; neither path changes the guest texture. A texture already rendered into is upgraded through `tex_upgrade`: end its render pass first, copy every mip / slice, replace all shared serials and invalidate cached sampled views. Load-only image slots accept read-only storage without upgrading, and ordinary render targets retain their original usage. `t_image_usage.m` exercises both registration entry points, a late registration while a render pass is open, the clear and other mip surviving the upgrade, and a GPU image write read through a sampled alias.
 - **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (SDK 13.3.5, Snowdrop).
+
+### A writable buffer image took the registration lock twice
+
+- **Symptom:** macOS terminates the host before the game's title screen. The crash report shows `_os_unfair_lock_recursive_abort` in `encode_args_full` on the queue replay thread.
+- **Cause:** argument encoding already holds the texture and sampler registration lock. The sparse shadow writeback path for writable buffer images acquired that same lock again to look up the texture's guest memory range.
+- **Fix:** read the registration under the lock the argument encoder already holds and keep scheduling writeback for the same range. `t_buffer_image_bias` checks that the production encoder binds a real writable buffer image, and `t_sparse_shadow` checks writeback into physical pages.
+- **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) 1.6.2225577 on the Mac (Apple M6, macOS 27.2.1).
 
 ### Plural texture binds, builder-registered samplers, strided texel writes, device item 0x67
 

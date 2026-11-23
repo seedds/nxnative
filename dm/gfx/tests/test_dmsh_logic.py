@@ -122,12 +122,12 @@ def fixture(out):   # Actual build reflection and libraries, starting at the syn
             pathlib.Path(dest).write_bytes(data)
 
     ns = dict(globals(), loc={key: ('synthetic', 0)}, pc_of={key: []}, out=str(out), w=str(work), CHAIN=dmsh_chain.version(),
-              IOSOUT=None, TARGETS={'mac'}, BF_WANT=set(), DUAL_WANT=set(), SIDE_STATS=collections.Counter(), BF_STATS=collections.Counter(),
-              SPIRV_CROSS='synthetic-msl', XC=[], clone=shutil.copyfile,
+              IOSOUT=None, TARGETS={'mac'}, BF_WANT=set(), SIDE_STATS=collections.Counter(), BF_STATS=collections.Counter(),
+              SPIRV_CROSS='synthetic-msl', XC=[], SOURCE_ONLY=False, clone=shutil.copyfile,
               subprocess=types.SimpleNamespace(run=lambda *a, **kw: subprocess.CompletedProcess(a, 0), CalledProcessError=subprocess.CalledProcessError),
               MTL=types.SimpleNamespace(compile=compile_msl, compile_split=compile_split, with_compiler=lambda target, refl: refl))
     tree = ast.parse((pathlib.Path(dmsh_entry.__file__).parent / 'dmsh_build.py').read_text())
-    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {'finish', 'ps_libraries', 'ps_omap', 'write_refl', 'atomic_json'}]
+    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {'cross_msl', 'finish', 'ps_libraries', 'ps_omap', 'write_refl', 'atomic_json'}]
     exec(compile(tree, 'dmsh_build.py', 'exec'), ns)
     status, reason, refl = ns['finish'](key, str(work), {'stage': 'ps', 'code': str(code)}, b'')
     if status != 'ok': raise AssertionError((status, reason))

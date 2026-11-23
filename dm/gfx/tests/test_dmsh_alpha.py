@@ -1,4 +1,4 @@
-"""The alpha test entry points (dmsh_alpha.py, dmsh_side.py): main0 and main0_d get one that takes the state and tests colour 0's alpha after the body (main0_u holds the same test
+"""The alpha test entry points (dmsh_alpha.py, dmsh_side.py): main0 gets one that takes the state and tests colour 0's alpha after the body (main0_u holds the same test
 under its constant, dmsh_entry.fs_uint), the output stays
 a library that compiles for the Mac and the iPhone, and shaders without a float colour 0 alpha get none. With --fixture <dir>, writes the replay test's shaders (t_alpha.m): the base
 sources and their side libraries, compiled"""
@@ -56,7 +56,7 @@ class AlphaVariant(unittest.TestCase):
         # main0_u: the state an argument only with the test, which reads colour 0's alpha before the outputs are typed
         self.assertIn(f'fragment main0_out_u main0_u(float4 gl_FragCoord [[position]], constant dm_alpha_state& dm_alpha [[buffer({dmsh_abi.ALPHA_BUFFER}), function_constant(dm_at)]]', v)
         self.assertIn(UTEST + '\n    main0_out_u r = {};', v)
-        self.assertEqual(dmsh_entry.typed_ops(BASE), {'alpha': True, 'logic': True})
+        self.assertEqual(dmsh_entry.typed_ops(BASE), {'alpha': True, 'logic': True, 'dual': True})
 
     def test_the_body_stays_as_written(self):
         v, _ = variant(BASE)

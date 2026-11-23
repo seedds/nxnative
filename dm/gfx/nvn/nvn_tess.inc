@@ -243,6 +243,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     }
     uint32_t binst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     lc_land(); rp_flush(); rp_end(); ubd_land();
+    if (ggs) geo_big_reset();   // enc_r_begin opens behind MTLStageAll -> MTLStageAll: earlier geometry draws are done
     uint32_t *cpi = malloc((size_t)ncp * 4); if (!cpi) { tess_refuse(pr, dw, di, "no memory"); return; }
     uint32_t lo = UINT32_MAX, hi = 0;
     if (dw) { lo = (uint32_t)dw->first; hi = lo + ncp - 1; for (uint32_t i = 0; i < ncp; i++) cpi[i] = i; }

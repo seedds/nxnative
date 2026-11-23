@@ -345,7 +345,9 @@ def toolchain_fp():
     for cmd in (['spirv-cross', '--version'], ['xcrun', '-sdk', 'macosx', 'metal', '--version'], ['xcrun', '-sdk', 'macosx', '--show-sdk-build-version']):
         try: r = sh(cmd); out.append(r.stdout + r.stderr)
         except FileNotFoundError: out.append('missing')   # spirv-cross on PATH: only revisions before the in-repo build (dm/gfx/tools/spirv_cross_bin) run it; a tree's own is in its chain key
-    return hashlib.sha256('\0'.join(out).encode()).hexdigest()
+    # metal --version ends with InstalledDir:, the Metal toolchain's mount point (Xcode 26 and later: a cryptex under /private/var/run/com.apple.security.cryptexd/mnt/, named
+    # with a random suffix at each boot); the version, build and target lines name the compiler, so the chain keys stay the same across reboots (dmsh_mtlcache.compiler_id does the same)
+    return hashlib.sha256('\0'.join(re.sub(r'(?m)^InstalledDir:.*\n?', '', o) for o in out).encode()).hexdigest()
 
 
 def chain_key(tree, g, tools):
@@ -356,7 +358,9 @@ def chain_key(tree, g, tools):
         sources = digest(sorted(p for p in pkg.rglob('*') if p.is_file()), root=pkg)
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
         if not pairs.is_file(): pairs = g.build / 'shader/pso_pairs.tsv'
-        side += digest([pairs])
+        geo = g.profile_dir(tree) / 'geo_pairs.tsv'   # the vertex / geometry pairs that get mesh libraries (dmsh_chain.mesh_pairs), the split's copy for a profile without one
+        if not geo.is_file(): geo = g.build / 'shader/geo_pairs.tsv'
+        side += digest([pairs] + ([geo] if geo.is_file() else []))
     elif g.kind == 'vk':
         v, inp = digest([tree.path / 'dm/gfx/tools/vk_shaders.py'])[:12], g.ver
         side = ''

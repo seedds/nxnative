@@ -181,6 +181,42 @@ int main(void) { @autoreleasepool {
         EXPECT("border constant in main0_z: the host's specialized base found", 1, [zeroArchive newRenderPipelineStateWithDescriptor:pre_desc(@"vb", @"f1", 1) error:nil] != nil);
         EXPECT("border constant in main0_z: no main0 base", 0, [zeroArchive newRenderPipelineStateWithDescriptor:pre_desc(@"vb", @"f1", 0) error:nil] != nil);
     }
+    // Pixel shaders with dm_blend_off (alone and beside dm_border_off): pso_offline.py specializes dm_blend_off = false (and dm_border_off = true),
+    // so both pre_desc and hybrid_get (FN_OFF_BORDER, shader_load's dm_blend_off = false) find the base in the archive, while FN_OFF_BLEND does not
+    NSString *fb = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_border_off [[function_constant(%d)]];\n"
+        "constant bool dm_blend_off [[function_constant(%d)]];\n"
+        "fragment float4 main0() { return float4(is_function_constant_defined(dm_border_off) && dm_border_off ? 1 : 0, is_function_constant_defined(dm_blend_off) && dm_blend_off ? 1 : 0, 0, 1); }\n",
+        DMSH_BORDER_FC, DMSH_BLEND_OFF_FC];
+    NSString *fb0 = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_blend_off [[function_constant(%d)]];\n"
+        "fragment float4 main0() { return float4(0, is_function_constant_defined(dm_blend_off) && dm_blend_off ? 1 : 0, 0, 1); }\n", DMSH_BLEND_OFF_FC];
+    if (!lib(msl, @"fb_b", fb) && !lib(msl, @"fb0_b", fb0)) {
+        put([msl stringByAppendingPathComponent:@"fb_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"blend_zero\": true}", DMSH_CHAIN]);
+        put([msl stringByAppendingPathComponent:@"fb0_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"blend_zero\": true}", DMSH_CHAIN]);
+        put([tables stringByAppendingPathComponent:@"blend.tsv"], @"v1\tfb\nv1\tfb0\n");
+        NSString *bo = [root stringByAppendingPathComponent:@"blend"];
+        int rc = sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/blend.tsv --out %@ --work %@/blend-work --depth gl --no-compute > %@/pso_blend.log 2>&1",
+                     tool, gpu, msl, tables, bo, root, root]);
+        EXPECT("blend constant: pso_offline.py made the archive", 0, rc);
+        if (rc) fprintf(stderr, "%s\n", [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_blend.log"] encoding:NSUTF8StringEncoding error:nil].UTF8String);
+        NSString *boPath = [bo stringByAppendingFormat:@"/%@.mtl4a", gpu];
+        id<MTL4Archive> boArchive = arch_file_ok(boPath) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:boPath] error:nil] : nil;
+        EXPECT("blend constant: archive opened", 1, boArchive != nil);
+        MTL4RenderPipelineDescriptor *db = pre_desc(@"v1", @"fb", 0), *db0 = pre_desc(@"v1", @"fb0", 0);
+        EXPECT("blend+border: pre_desc base found", 1, db && [boArchive newRenderPipelineStateWithDescriptor:db error:nil] != nil);
+        EXPECT("blend-only: pre_desc base found", 1, db0 && [boArchive newRenderPipelineStateWithDescriptor:db0 error:nil] != nil);
+        id<MTLLibrary> vl = lib_from_file([msl stringByAppendingPathComponent:@"v1_bp.metallib"], NULL);
+        id<MTLFunction> vf = fn4_note([vl newFunctionWithName:@"main0"], vl, @"main0", nil);
+        for (NSString *fk in @[@"fb_b", @"fb0_b"]) {
+            id<MTLLibrary> fl = lib_from_file([msl stringByAppendingFormat:@"/%@.metallib", fk], NULL);
+            MTLFunctionConstantValues *fcv = [MTLFunctionConstantValues new]; BOOL no = NO; [fcv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+            id<MTLFunction> ff = fn_spec(fl, @"main0", fcv, nil);
+            MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+            d.vertexFunction = vf; d.fragmentFunction = ff; d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor]; d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            MTL4RenderPipelineDescriptor *p0 = pso_desc4(d, 1, FN_OFF_BORDER), *p1 = pso_desc4(d, 1, FN_OFF_BORDER | FN_OFF_BLEND);
+            EXPECT("hybrid stand-in (FN_OFF_BORDER) matches pair archive", 1, p0 && [boArchive newRenderPipelineStateWithDescriptor:p0 error:nil] != nil);
+            EXPECT("steady-state blend-off (FN_OFF_BORDER|FN_OFF_BLEND) is distinct", 0, p1 && [boArchive newRenderPipelineStateWithDescriptor:p1 error:nil] != nil);
+        }
+    }
     EXPECT("batched archive: full coverage stamp preserved", 1, [[NSString stringWithContentsOfFile:[batched stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]
             isEqualToString:[NSString stringWithContentsOfFile:[bundle stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]]);
     // its stamp matches: only the pair with function constants is built here

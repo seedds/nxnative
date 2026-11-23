@@ -144,6 +144,30 @@ class Anchors(unittest.TestCase):
 
     # ---- data anchors ----
 
+    def test_bss_is_inside_the_module_up_to_the_headers_size(self):
+        """.bss follows .data for the size at 0x3C, though the loaded image stops at .data's end: a pointer cheat's base
+        or data freeze there anchors and compiles across builds, and only past .bss is an address outside the module."""
+        old = self.build('a', {0x100: reader(0x100, SIZE + 0x100), 0x200: reader(0x200, SIZE + 0x100, 0x20)})
+        new = self.build('b', {0x300: reader(0x300, SIZE + 0x280), 0x500: reader(0x500, SIZE + 0x280, 0x20)}, build=B2)
+        self.assertEqual(old.where(SIZE), 'bss')
+        self.assertEqual(old.where(SIZE + BSS - 8, 8), 'bss')
+        self.assertIsNone(old.where(SIZE + BSS - 4, 8))
+        self.assertIsNone(old.where(SIZE + BSS))
+        self.assertIsNone(old.where(SIZE - 4, 8))   # across .data's end and the bss's start
+        text = (f'[Pointer]\n580F0000 {SIZE + 0x100:08X}\n780F0000 00000038\n640F0000 00000000 000003E7\n'
+                f'[Freeze]\n02000000 {SIZE + 0x11E:08X} 000003E7\n')
+        got, report, skipped = self.roundtrip(old, new, text)
+        self.assertEqual(skipped, 0, report)
+        self.assertEqual(got['Pointer'][2][:2], [0x580f0000, SIZE + 0x280])
+        self.assertEqual(got['Freeze'][2], [0x02000000, SIZE + 0x29e, 0x3e7])
+        # a fixed main address in .bss compiles on its build; one past .bss is still outside the module
+        self.source(f'format = 1\n[[cheats]]\nname = "In"\nbuilds = ["1111111111111111"]\ntarget = "main+{SIZE + 0x100:#X}"\ntype = "u32"\nvalue = 1\n'
+                    f'[[cheats]]\nname = "Out"\nbuilds = ["1111111111111111"]\ntarget = "main+{SIZE + BSS:#X}"\ntype = "u32"\nvalue = 1\n')
+        _, entries, report, skipped = ca.compile_source(self.dir / 's.cheats.toml', old)
+        self.assertEqual(skipped, 1, report)
+        self.assertEqual(entries[0][2], [0x04000000, SIZE + 0x100, 1])
+        self.assertIn('outside the main NSO image', report[1])
+
     def test_data_field_follows_the_object_the_code_references(self):
         """A stat field keeps its offset from the object the code references, wherever the object moves."""
         old = self.build('a', {0x100: reader(0x100, 0x4100), 0x200: reader(0x200, 0x4100, 0x20)})

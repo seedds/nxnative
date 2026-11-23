@@ -13,6 +13,7 @@
 # Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1), DMSH_SCONST (dmsh_wide.constant_reads, default fp; non-default options yield a different V, which the host will not load)
 from typing import Any
 import os, sys, ast, hashlib
+from pathlib import Path
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
 FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_tess.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
@@ -68,7 +69,7 @@ def __getattr__(name) -> Any:   # MAC_MIN, MAC_MIN_FLAG and MAC_METAL as the mod
 # directly followed one (spirv_msl.cpp, OpControlBarrier): a fence made of that line ordered memory and no longer waited for the group (GitHub issue #2786). 3.1's texture atomics follow
 MSL_VERSION = '30200'
 CROSS_MSL = ['--msl', '--msl-version', MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native']
-INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
+INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'geo_pairs.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/
 # the translator defaults to the in-repo build that matches the lock file (dm/tools/native_tools.sh; a rebuild has another fingerprint)
@@ -109,7 +110,7 @@ def profile_rows(g):   # the profile keys that change how a shader is built (nvn
     return ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in g.rows if k.startswith(('nvn_', 'shader_'))).encode()
 
 def table_pairs(p, kind=None):
-    """{(vertex key, geometry key)} of a pair table: geo_mesh.tsv's rows (kind None), or the G rows of a pipeline record (kind 'G'); a missing table has none"""
+    """{(vertex key, geometry key)} of a pair table: geo_mesh.tsv's or geo_pairs.tsv's rows (kind None), or the G rows of a pipeline record (kind 'G'); a missing table has none"""
     out = set()
     if not p.exists(): return out
     for ln in p.read_text().splitlines():
@@ -119,9 +120,17 @@ def table_pairs(p, kind=None):
         if len(c) >= 2 and c[0] and c[1]: out.add((c[0][:16], c[1][:16]))
     return out
 
-def mesh_pairs(g):
-    """The vertex / geometry pairs that get a mesh library (dmsh_mesh.py): those the game drew with a lean geometry kernel and no mesh library, which the host writes to the pipeline record
-    as G rows (pso_manifest.tsv; nvn_geometry.inc geo_mesh_fn), and the hand-written geo_mesh.tsv, for pairs no recording has reached yet"""
+def mesh_pairs(g, package=None):
+    """The vertex / geometry pairs that may get a mesh library (dmsh_mesh.py; dmsh_build.py builds one where the geometry shader has a lean passthrough kernel): every pair of a shader
+    variation, which the split writes (geo_pairs.tsv: the profile's, else the split's copy beside the package, as pso_pairs.tsv), those the game drew with a lean geometry kernel and no
+    mesh library, which the host writes to the pipeline record as G rows (pso_manifest.tsv; nvn_geometry.inc geo_mesh_fn), and the hand-written geo_mesh.tsv, for pairs no variation
+    names (NieR:Automata's separate programs)"""
+    geo = g.table('geo_pairs.tsv')
+    if not geo.exists() and package: geo = Path(package).resolve().with_name('geo_pairs.tsv')
+    return asked_mesh_pairs(g) | table_pairs(geo)
+
+def asked_mesh_pairs(g):
+    """The pairs drawn (the pipeline record's G rows) or named by hand (geo_mesh.tsv): those whose mesh library failing is a red line; a variation pair no one drew only counts"""
     return table_pairs(g.table('pso_manifest.tsv'), 'G') | table_pairs(g.table('geo_mesh.tsv'))
 
 def inputs(g):

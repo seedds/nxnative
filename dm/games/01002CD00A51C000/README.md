@@ -2,7 +2,9 @@
 
 Update 1.0.12 (v786432), SDK 19.3.3, on NVN (131 shaders, GLSLC programs). Modules `main` and `sdk`. A Multimedia Fusion 2 game (its splash: "made using Multimedia Fusion 2 by Clickteam") on MP2 Games' Switch runtime, with its level and editor logic in Lua files in RomFS. The standard host and rewriter run this build with no game-specific fix: no shader overrides, rewriter cuts or host changes. The profile is the NSP script's provisional one with only the shader group corrected ([What it needs](#what-it-needs)). Only this update is registered in the profile.
 
-On the Mac (2026-10-29, a short gameplay check): splash, title menu, the opening sequence and level 00 played through to its win (input moves Baba and pushes the rocks), then the world map, all at 60 fps (frame time p50 16.67 / p95 16.70 ms) with audio and no `[RED]` line. Continue Playing in a second run brought back the map with level 00 solved, so the save and its reload work. The unsigned IPA has not been built from this profile or tested on an iPhone.
+On the Mac (2026-10-29, a short gameplay check): splash, title menu, the opening sequence and level 00 played through to its win (input moves Baba and pushes the rocks), then the world map, all at 60 fps (frame time p50 16.67 / p95 16.70 ms) with audio and no `[RED]` line. Continue Playing in a second run brought back the map with level 00 solved, so the save and its reload work. On 2026-11-23 (M6 Mac mini, macOS 27.2.1), a fresh run reached level 00. A second run reloaded the scratch save, cleared the level and reached the world map. Both runs completed without `[RED]` lines.
+
+On 2026-11-23, Xcode 27.2 built `BabaIsYou.ipa` from the registered 1.0.12 profile. The unsigned IPA contains the bundled RomFS and all 131 translated iOS shaders. The archive passed its integrity check.
 
 ## What it needs
 
@@ -39,6 +41,6 @@ On the Mac (2026-10-29, a short gameplay check): splash, title menu, the opening
 
 ## Open
 
-- iPhone: an IPA from this profile is not built or tested.
+- iPhone: sideload the unsigned IPA to verify launch and gameplay on device.
 - One boot's first audio callback came 216 ms late, and the host retried the AudioUnit (`[RED] audio #0: the device has not called back`); sound played after it. The later runs did not log it.
 - Only level 00 and the world map were played; later worlds, the level editor and the other languages are untested.

@@ -48,6 +48,67 @@ class PoolArrays(unittest.TestCase):
         self.assertLess(out.index('dm_pool_mark(constant P* p'), out.index('struct spvPool_'))
         self.assertIn('.sample((&spvDescriptorSet0.fp_s_cb0_40000000->e[0])[min(uint(int(_7)), spvDescriptorSet0.fp_s_cb0_40000000->n)], uv)', out)
 
+    def test_image_pool(self):
+        # 3D read_write image pool (The Duskbloods' GXFogVolume_*) and read-only 2D image pool: both reflect as img_pool, unmarked
+        msl = ('struct spvDescriptorSetBuffer0\n{\n'
+               '    array<texture3d<float, access::read_write>, 1048576> cp_i3d_cb0_40000000_ [[id(0)]];\n'
+               '    array<texture2d<uint, access::read>, 1048576> cp_i2d_cb0_40000000_r32ui [[id(1048576)]];\n'
+               '    constant _16* cp_s0 [[id(2097152)]];\n};\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n'
+               '    uint i = min(uint(h & 1048575), 1048575u);\n'
+               '    float v = d.cp_i3d_cb0_40000000_[i].read(uint3(p)).x;\n'
+               '    uint u = d.cp_i2d_cb0_40000000_r32ui[i].read(uint2(p.xy)).x;\n'
+               '    d.cp_i3d_cb0_40000000_[int(i)].write(float4(v, float(u), 0.0, 1.0), uint3(p));\n}\n')
+        out = NS['pool_arrays'](msl)
+        self.assertIn('struct spvPool_cp_i3d_cb0_40000000_\n{\n    uint n;\n    ulong seen;\n    array<texture3d<float, access::read_write>, 1> e;\n};', out)
+        self.assertIn('struct spvPool_cp_i2d_cb0_40000000_r32ui\n{\n    uint n;\n    ulong seen;\n    array<texture2d<uint, access::read>, 1> e;\n};', out)
+        self.assertIn('constant spvPool_cp_i3d_cb0_40000000_* cp_i3d_cb0_40000000_ [[id(0)]];', out)
+        self.assertIn('constant spvPool_cp_i2d_cb0_40000000_r32ui* cp_i2d_cb0_40000000_r32ui [[id(1)]];', out)
+        self.assertIn('cp_s0 [[id(2)]]', out)
+        self.assertNotIn('dm_pool_mark', out)
+        self.assertIn('(&d.cp_i3d_cb0_40000000_->e[0])[min(uint(int(i)), d.cp_i3d_cb0_40000000_->n)].write(', out)
+        self.assertIn('(&d.cp_i2d_cb0_40000000_r32ui->e[0])[min(uint(i), d.cp_i2d_cb0_40000000_r32ui->n)].read(', out)
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': [{'binding': 0, 'cb_slot': 0, 'cb_offset': 0x310 // 4, 'flags': 0, 'slot': 0}], 'cbufs': []})}
+        self.assertEqual((b['cp_i3d_cb0_40000000_']['kind'], b['cp_i3d_cb0_40000000_']['elem']), (abi.KIND_IMG_POOL, 'texture3d<float, access::read_write>'))
+        self.assertEqual((b['cp_i2d_cb0_40000000_r32ui']['kind'], b['cp_i2d_cb0_40000000_r32ui']['elem']), (abi.KIND_IMG_POOL, 'texture2d<uint, access::read>'))
+        self.assertTrue(NS['pool_fallback']('cp_i3d_cb0_40000000_') and NS['pool_fallback']('fp_t2d_cb0_40000000') and not NS['pool_fallback']('fp_t2d_cb14_0'))
+        self.assertTrue(NS['pool_image']('cp_i3d_cb0_40000000_') and not NS['pool_image']('fp_t2d_cb0_40000000'))
+
+    def test_buffer_image_pool_read_write_width_and_early_z(self):
+        # 1D buffer image pool (Persona 3 Reload's cp_ib_cb0_40000000_): bias header word + dm_buffer_read / dm_buffer_write / dm_buffer_width
+        msl = ('struct spvDescriptorSetBuffer0\n{\n'
+               '    array<texture_buffer<float, access::read_write>, 1048576> cp_ib_cb0_40000000_ [[id(0)]];\n'
+               '};\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n'
+               '    uint w = d.cp_ib_cb0_40000000_[i].get_width();\n'
+               '    float4 v = d.cp_ib_cb0_40000000_[i].read(uint(c));\n'
+               '    d.cp_ib_cb0_40000000_[int(i)].write(float4(v.x, float(w), 0.0, 1.0), uint(c));\n'
+               '}\n')
+        out = NS['pool_arrays'](msl)
+        self.assertIn('struct spvPool_cp_ib_cb0_40000000_\n{\n    uint n;\n    uint bias;\n    ulong seen;\n    array<texture_buffer<float, access::read_write>, 1> e;\n};', out)
+        self.assertIn('dm_buffer_width(d.cp_ib_cb0_40000000_, min(uint(i), d.cp_ib_cb0_40000000_->n))', out)
+        self.assertIn('dm_buffer_read(d.cp_ib_cb0_40000000_, min(uint(i), d.cp_ib_cb0_40000000_->n), uint(c))', out)
+        self.assertIn('dm_buffer_write(d.cp_ib_cb0_40000000_, min(uint(int(i)), d.cp_ib_cb0_40000000_->n), float4(v.x, float(w), 0.0, 1.0), uint(c))', out)
+        self.assertNotIn('dm_pool_mark', out)
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': [], 'cbufs': []})}
+        self.assertEqual((b['cp_ib_cb0_40000000_']['kind'], b['cp_ib_cb0_40000000_']['elem']), (abi.KIND_IMG_POOL, 'texture_buffer<float, access::read_write>'))
+        # Fragment shader with a marked tex_pool + read-only buffer image pool keeps early_fragment_tests (BUFFER_POOL_READ's own dm_buffer_write definition must not suppress it);
+        # actually calling dm_buffer_write keeps depth tests late
+        frag_hdr = ('struct spvDescriptorSetBuffer0\n{\n'
+                    '    array<texture2d<float>, 1048576> fp_t2d_cb0_40000000 [[id(0)]];\n'
+                    '    array<texture_buffer<float, access::read_write>, 1048576> fp_ib_cb0_40000000_ [[id(1048576)]];\n};\n')
+        frag_ro = frag_hdr + 'fragment main0_out main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n    float4 a = d.fp_t2d_cb0_40000000[i].sample(s, u) + d.fp_ib_cb0_40000000_[i].read(0u);\n}\n'
+        frag_wr = frag_hdr + 'fragment main0_out main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n    float4 a = d.fp_t2d_cb0_40000000[i].sample(s, u); d.fp_ib_cb0_40000000_[i].write(a, 0u);\n}\n'
+        self.assertIn('[[early_fragment_tests]] fragment main0_out main0(', NS['pool_arrays'](frag_ro))
+        self.assertNotIn('early_fragment_tests', NS['pool_arrays'](frag_wr))
+        # Callable forwarding of a buffer-image pool also wraps .write() into dm_buffer_write
+        callable_msl = ('struct spvDescriptorSetBuffer0\n{\n    array<texture_buffer<uint, access::write>, 1048576> cp_ib_cb0_40000000_ [[id(0)]];\n};\n'
+                        'void put(uint idx, constant array<texture_buffer<uint, access::write>, 1048576>& cp_ib_cb0_40000000_)\n{\n'
+                        '    cp_ib_cb0_40000000_[idx].write(uint4(1u, 2u, 3u, 4u), idx);\n}\n'
+                        'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n    put(0u, d.cp_ib_cb0_40000000_);\n}\n')
+        cout = NS['pool_arrays'](callable_msl)
+        self.assertIn('dm_buffer_write(cp_ib_cb0_40000000_, min(uint(idx), cp_ib_cb0_40000000_->n), uint4(1u, 2u, 3u, 4u), idx)', cout)
+
     def test_mark_tests_with_a_plain_load(self):
         # an atomic load goes to the shared cache every time, and a pass's pixels queue on the few words its IDs share (frame-rate.md); only a clear bit takes the atomic
         mark = NS['POOL_MARK']

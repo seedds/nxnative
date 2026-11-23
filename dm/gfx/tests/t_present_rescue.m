@@ -24,6 +24,7 @@
 - (void)invalidate { self.invalidated = YES; }
 @end
 @interface RescueUpdate : NSObject
+@property CFTimeInterval targetTimestamp;
 @property CFTimeInterval targetPresentationTimestamp;
 @end
 @implementation RescueUpdate
@@ -53,6 +54,8 @@ static int checks, failed;
 static void reset(void) {
     test_now = 10000000000ull; test_focus = 1; test_focus_since = 0;
     g_dm_present_link = 1; g_rescue_mode = 0; g_rescue_back_ns = 3000000000ull; g_rescue_n = 0;
+    g_link_probe_pending = 0; g_link_probe_at = 0; g_link_probe_fail = 0;
+    atomic_store(&g_test_link_hold, 0);
     g_link_tick_ns = test_now - 1000000000ull; g_stall_t0 = g_link_tick_ns;
     g_stall_logged = g_stall_red = 0; g_stall_drop = 0;
     g_pq_in = g_pq_read = g_pq_done = 0; g_link_owns_layer = 1;
@@ -118,7 +121,7 @@ static void startup_rescue(void) {
     wait_frame(); link_sync();   // rescue requested before the first mode has been applied
     g_link = link;
     uint64_t tick = g_link_tick_n, last = g_link_tick_ns;
-    RescueUpdate *update = [RescueUpdate new]; update.targetPresentationTimestamp = CACurrentMediaTime();
+    RescueUpdate *update = [RescueUpdate new]; update.targetTimestamp = update.targetPresentationTimestamp = CACurrentMediaTime();
     [[NvMetalDisplayLinkDelegate new] metalDisplayLink:(id)link needsUpdate:(id)update];
     CHECK("a callback during rescue keeps the watchdog stalled", g_stall_t0 && g_link_tick_ns == last && g_link_tick_n == tick);
     wait_frame();   // the next acquire must return before there can be another enqueue
@@ -210,6 +213,21 @@ static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh scree
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link in a window", g_link_mode == 2 && test_match_fps == 120);
     g_dm_present_link = 1; test_screen_hz = 0; test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
+static void forty(void) {   // 40 fps automatically selects the 120 Hz link (3 ticks = 25 ms) and asks front_screen_match(120); movie/thermal drops to 30/60 and back return to 120 Hz
+    reset(); test_fullscreen = 0; test_variable_refresh = 0; test_screen_hz = 120; test_game_fps = 40; g_present_link_env = 0; g_link_drain_on = 0;
+    SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
+    link_sync();
+    CHECK("40 fps automatically selects the 120 Hz link", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && mtl_link_rate() == 120);
+    CHECK("40 fps asks the screen matcher for 120 Hz", test_match_fps == 120);
+    CHECK("40 fps leaves g_dm_present_link untouched", g_dm_present_link == 1);
+    test_game_fps = 30; link_sync();
+    CHECK("a 30 fps movie during 40 fps drops to the 30 Hz link", g_link_mode == 3 && test_match_fps == 30);
+    test_game_fps = 40; link_sync();
+    CHECK("after the movie ends, 40 fps returns to the 120 Hz link and asks for 120 Hz", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 120);
+    g_present_link_env = 1; g_dm_present_link = 1; link_sync();
+    CHECK("explicit DM_PRESENT_LINK=1 keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
+    g_present_link_env = 0; test_game_fps = 60; g_link_drain_on = -1; test_screen_hz = 0; link_sync(); g_link = nil; g_link_started = 0;
+}
 static void settling(void) {
     reset(); g_link = nil; g_link_started = 0; g_link_owns_layer = 0; g_dm_present_link = 0; link_sync();
     NSObject *dummy_layer = [NSObject new]; test_layer = (__bridge void *)dummy_layer; test_settling = 1; g_dm_present_link = 1;
@@ -226,6 +244,116 @@ static void settling(void) {
     for (int i = 0; i < 1000 && g_link_started; i++) usleep(1000);
     CHECK("invalidating the started display link stops its thread cleanly", !g_link_started && !g_link && !g_link_owns_layer);
     test_layer = NULL; test_settling = 0;
+}
+static void wait_link_started(void) {
+    for (int i = 0; i < 1000; i++) {
+        pthread_mutex_lock(&g_pq_mu); int ready = g_link != nil; pthread_mutex_unlock(&g_pq_mu);
+        if (ready) return;
+        usleep(1000);
+    }
+}
+static void wait_link_stopped(void) {
+    for (int i = 0; i < 1000 && g_link_started; i++) usleep(1000);
+}
+static void probation(void) {
+    reset(); g_link = nil; g_link_started = 0; g_link_owns_layer = 0; g_dm_present_link = 0; link_sync();
+    NSObject *dummy_layer = [NSObject new]; test_layer = (__bridge void *)dummy_layer;
+    g_dm_present_link = 1; link_sync(); wait_link_started();
+    CHECK("initial display link is not on probation", g_link != nil && !g_link_probe_pending && !g_link_probe_at);
+
+    // 1. Trigger rescue, let the link retire, then retry: a link silent for 67 ms after attach rescues at once.
+    g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame();
+    CHECK("initial stall triggers rescue", g_rescue_mode == 1);
+    link_sync(); wait_link_stopped();
+    CHECK("rescue retires the silent link", !g_link_started && !g_link && !g_link_owns_layer);
+    test_now = g_rescue_back_at; link_sync(); wait_link_started();
+    CHECK("retried link enters probation once live", g_link != nil && !g_link_probe_pending && g_link_probe_at == test_now);
+    test_now += LINK_PROBE_NS; wait_frame();
+    CHECK("a retried 60 Hz link silent for 67 ms rescues at once", g_rescue_mode == 1 && g_link_probe_fail == 1 && !g_link_probe_at);
+    link_sync(); wait_link_stopped();
+
+    // 2. A callback ends probation, restoring the normal 500 ms threshold.
+    test_now = g_rescue_back_at; link_sync(); wait_link_started();
+    CHECK("second retry enters probation", g_link != nil && g_link_probe_at == test_now);
+    RescueUpdate *update = [RescueUpdate new]; update.targetTimestamp = update.targetPresentationTimestamp = CACurrentMediaTime();
+    [[NvMetalDisplayLinkDelegate new] metalDisplayLink:(id)g_link needsUpdate:(id)update];
+    CHECK("a callback clears probation", !g_link_probe_at);
+    test_now += 100000000ull; wait_frame();
+    CHECK("after a callback, 100 ms silence does not trigger probation rescue", !g_rescue_mode);
+    test_now += 400000000ull; wait_frame();
+    CHECK("after a callback, 500 ms silence triggers normal rescue", g_rescue_mode == 1 && g_link_probe_fail == 1);
+    link_sync(); wait_link_stopped();
+
+    // 3. front_screen_settling() delays probation until the link actually starts.
+    test_settling = 1;
+    test_now = g_rescue_back_at; link_sync();
+    CHECK("settling holds probation pending without arming the clock", !g_rescue_mode && !g_link_started && g_link_probe_pending && !g_link_probe_at);
+    test_now += 1500000000ull;
+    test_settling = 0; link_sync(); wait_link_started();
+    CHECK("probation starts when the link attaches after settling", g_link != nil && !g_link_probe_pending && g_link_probe_at == test_now);
+    test_now += LINK_PROBE_NS; wait_frame();
+    CHECK("settled retry rescues after its full 67 ms probation", g_rescue_mode == 1 && g_link_probe_fail == 2);
+    link_sync(); wait_link_stopped();
+
+    // 4. g_classic_busy delays probation until the handoff finishes and the link attaches.
+    pthread_mutex_lock(&g_pq_mu); g_classic_busy = 1; pthread_mutex_unlock(&g_pq_mu);
+    test_now = g_rescue_back_at; link_sync();
+    for (int i = 0; i < 1000; i++) {
+        pthread_mutex_lock(&g_pq_mu); int owns = g_link_owns_layer; pthread_mutex_unlock(&g_pq_mu);
+        if (owns) break;
+        usleep(1000);
+    }
+    test_now += 200000000ull; wait_frame();
+    CHECK("waiting for g_classic_busy does not trip probation before the link exists", !g_rescue_mode && g_link_probe_pending && !g_link_probe_at);
+    pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+    wait_link_started();
+    CHECK("probation starts clean once g_classic_busy clears", g_link != nil && !g_link_probe_pending && g_link_probe_at == test_now && !g_stall_t0);
+
+    // 5. Focus loss and regain honor the foreground grace period during probation.
+    test_focus = 2; test_now += 200000000ull; wait_frame();
+    CHECK("inactive time during probation does not trigger rescue", !g_rescue_mode && g_link_probe_at != 0);
+    test_focus = 1; test_focus_since = test_now; wait_frame();
+    CHECK("regaining focus starts a fresh probation grace period", !g_rescue_mode);
+    test_focus_since = test_now + 1; wait_frame();
+    CHECK("a newer focus timestamp cannot underflow probation", !g_rescue_mode);
+    test_focus_since = test_now; test_now += LINK_PROBE_NS - 1; wait_frame();
+    CHECK("67 ms - 1 ns active after focus does not trigger probation rescue", !g_rescue_mode);
+    test_now++; wait_frame();
+    CHECK("67 ms active after focus triggers probation rescue", g_rescue_mode == 1 && g_link_probe_fail == 3);
+    link_sync(); wait_link_stopped();
+
+    // 6. Mode 0 during rescue or probation clears probation so a later re-enable starts without stale probation.
+    g_dm_present_link = 0; link_sync();
+    CHECK("switching to mode 0 during rescue clears probation", !g_rescue_mode && !g_link_probe_pending && !g_link_probe_at);
+    test_now += 500000000ull;
+    g_dm_present_link = 1; link_sync(); wait_link_started();
+    CHECK("re-enabling after mode 0 does not inherit stale probation", g_link != nil && !g_link_probe_pending && !g_link_probe_at);
+    g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame();
+    link_sync(); wait_link_stopped();
+    test_now = g_rescue_back_at; link_sync(); wait_link_started();
+    CHECK("retry enters probation before mode 0 switch", g_link != nil && g_link_probe_at == test_now);
+    g_dm_present_link = 0; link_sync(); wait_link_stopped();
+    CHECK("switching to mode 0 during probation clears probation", !g_link_probe_pending && !g_link_probe_at);
+    test_now += 500000000ull;
+    g_dm_present_link = 1; link_sync(); wait_link_started();
+    CHECK("re-enabling after leaving probation starts clean", g_link != nil && !g_link_probe_pending && !g_link_probe_at);
+
+    // 7. A 30 Hz link gets a 134 ms (4-refresh) probation window, and g_test_link_hold starts retried links paused.
+    test_game_fps = 30; g_link_drain_on = 0; link_sync();
+    CHECK("30 fps non-draining window selects the 30 Hz link", g_link_mode == 3);
+    g_stall_t0 = g_link_tick_ns = test_now - 500000000ull; wait_frame();
+    link_sync(); wait_link_stopped();
+    atomic_store(&g_test_link_hold, 1);
+    test_now = g_rescue_back_at; link_sync(); wait_link_started();
+    CHECK("DM_TEST_LINK_STALL starts a retried link paused", g_link != nil && g_link.paused && g_link_probe_at == test_now);
+    test_now += 2 * LINK_PROBE_NS - 1; wait_frame();
+    CHECK("a 30 Hz link silent for 134 ms - 1 ns does not trigger probation rescue", !g_rescue_mode);
+    test_now++; wait_frame();
+    CHECK("a 30 Hz link silent for 134 ms triggers probation rescue", g_rescue_mode == 1 && g_link_probe_fail == 4);
+    atomic_store(&g_test_link_hold, 0);
+    g_dm_present_link = 0; link_sync(); wait_link_stopped();
+    CHECK("probation cleanup stops the display link cleanly", !g_link_started && !g_link && !g_link_owns_layer && !g_link_probe_at);
+    test_game_fps = 60; g_link_drain_on = -1; test_layer = NULL; test_settling = 0;
 }
 static void metal_lifecycle(void) {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -245,7 +373,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120(); settling();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120(); forty(); settling(); probation();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

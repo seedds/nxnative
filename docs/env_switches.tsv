@@ -135,6 +135,20 @@ DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` or the one file `b-<chain version>.img` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NDVE_ENGINE	switch	`0` runs nn::ndve's movie network (Ocarina of Time's title and opening movies) as the game's 12 translated dispatches after its colour conversion instead of the host's kernels (dm/gfx/msl/ndve_engine.metal, on by default: the same output, about half the frame's GPU time on an M4 Pro); `ab` alternates with DM_AB; `check` runs the game's dispatches and the host's network beside them and logs every 300 frames how many texels of the two differ. The host's kernels take only the model they were written for, bound by its shaders' keys and its weights' layout (docs/reference/shaders.md, The NDVE movie network by the host)
+DM_NET_TRACE	switch	`1` logs host UDP socket sendto/recvfrom activity (`fd >= 4`) and captured NNCS public IP (`hle_net.c`)
+DM_NEXTENDO	switch	`1` enables opt-in Nextendo Network online mode (`nextendo_client.c`, `nextendo_apple.m`, `hle_net.c`, `hle_account.c`, `hle_friends.c`, `hle_misc.c`, `hle_offline.c`, `hle_sf.c`); `0` or unset keeps offline mode (default)
+DM_NEXTENDO_ACCESS_TOKEN	switch	Pre-provisioned Nextendo OAuth access token for `/api/friends`, `/api/presence`, and `/api/bcat`; overrides `access_token` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_ALLOW_PASSTHROUGH	switch	`1` permits DNS and TLS passthrough for non-Nintendo hostnames when `DM_NEXTENDO=1`; `0` (default) blocks unlisted third-party hostnames
+DM_NEXTENDO_API	switch	Base URL of the Nextendo account/web API server (e.g. a self-hosted `nextendo-account` instance); overrides `api_url` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_BAAS_HOST	switch	BAAS hostname substituted for `accounts.nintendo.com` / `api.accounts.nintendo.com` and embedded as `iss`/`jku` in local BAAS `id_token` JWTs; overrides `baas_host` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_BAAS_KEY	path	Optional PEM RSA private key used to sign local BAAS `id_token` JWTs for titles that verify them against `baas-jwks`; overrides `baas_key_path` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_CLIENT_ID	switch	Registered OAuth 2.0 public PKCE `client_id` (and `X-Nextendo-Client-Id` header) for the Nextendo server; overrides `client_id` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_CONFIG	path	Path to the `key=value` Nextendo configuration and token store file (mode `0600`, default `<DM_SAVE parent>/nextendo.conf` or `~/Library/Application Support/nxnative/nextendo.conf`)
+DM_NEXTENDO_NAT_DOMAINS	switch	Comma-separated wildcard hostname patterns routed to `DM_NEXTENDO_NAT_HOST` in addition to `nncs2-*.n.n.srv.nintendo.net`; overrides `nat_domains` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_NAT_HOST	switch	Hostname or IPv4 address for Nextendo NAT-check / Pia endpoints (must differ from `DM_NEXTENDO_SERVER_HOST` for Pia NAT-check); overrides `nat_host` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_REFRESH_TOKEN	switch	Pre-provisioned Nextendo OAuth refresh token; overrides `refresh_token` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_SERVER_HOST	switch	Hostname or IPv4 address for redirected Nintendo endpoints (`*.nintendo.net`, `*.nintendo.com`, `*.nintendowifi.net`, `*.nintendo.co.jp`); overrides `server_host` in `DM_NEXTENDO_CONFIG`
+DM_NEXTENDO_TOKEN	switch	Pre-provisioned `nx2.` Nextendo game token (`nx2.<base64url(pid.username.expiry)>.<sig>`); overrides `nex_token` in `DM_NEXTENDO_CONFIG`
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NRO_CAPTURE	diagnostic	folder: a `nn::ro::LoadModule` with no rewritten copy writes the image to `<folder>/<SHA-256>.nro` and ends the run (the NSP script's capture of an NRO the game decodes at run time)
@@ -288,6 +302,7 @@ DM_OBSOLETE	path	Folder the pipeline archive moves the files no pipeline was tak
 DM_OE_SCRIPT	diagnostic	Scripted applet state changes at given seconds, `key=value@seconds,…` with keys `focus`, `opmode` and `bg` (`bg=1` / `bg=0` run the whole background round trip), e.g. `bg=1@20,bg=0@25`
 DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle tool mode to decode Trinity packs (`ONEPACK` files); set by the NSP script
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)
+DM_ONLINE_MODE	player	Multiplayer mode (`off` default offline, `nextendo` for Nextendo Network); also selectable in the Mac/iOS launcher (`dm/games/settings.tsv`)
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup

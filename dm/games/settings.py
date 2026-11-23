@@ -132,6 +132,8 @@ def build(gid, patched, control, other_programs=()):
             on_off = ['1', '0'] if values == '-' else values.split('/')
             if len(on_off) != 2 or not all(on_off) or on_off[0] == on_off[1]: sys.exit(f'settings.tsv:{n}: toggle values are - or <on>/<off>: {values}')
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
+        elif kind == 'text':
+            if values and values != '-': s['placeholder'] = values
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
         out.append(s)
     return {'schema': SCHEMA, 'game': g.id, 'settings': out}

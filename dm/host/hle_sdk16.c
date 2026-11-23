@@ -1,6 +1,7 @@
 // System service interfaces used by games on newer SDKs (16.x): oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
+#include "nextendo_client.h"
 #include <fcntl.h>
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -46,7 +47,14 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTaskD1Ev", "network c
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask10InitializeENS_2os14EventClearModeE", "network clock task init (offline)", Result, h_time_NcInit, void *self, int mode) { (void)self; (void)mode; return RES_OK; }
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", "network clock task start: finishes at once with failure", Result, h_time_NcStart, void *self) { (void)self; hle_signal_system_event(g_ev_netclock); return RES_OK; }
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask14GetFinishEventEv", "network clock task finish event: already signalled", void *, h_time_NcEvent, void *self) { (void)self; hle_signal_system_event(g_ev_netclock); return g_ev_netclock; }
-HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", "network clock task result: offline, failure", Result, h_time_NcResult, void *self) { (void)self; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", "network clock task result: offline failure; host NTP clock available when DM_NEXTENDO=1", Result, h_time_NcResult, void *self) {
+    (void)self;
+    if (dm_nextendo_enabled()) {
+        LOG("nextendo: time::AsyncEnsureNetworkClockAvailabilityTask::GetResult -> RES_OK");
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
 
 // The host has none of the original system shared fonts (0 standard / 1 Simplified Chinese / 2 Simplified Chinese extension / 3 Traditional Chinese / 4 Korean / 5 Nintendo extension) and uses stand-ins,
 //   one file per type in $DM_FONT_DIR (font_file), all made by dm/tools/make_shared_fonts.py: types 0-4 are unhinted cuts of one source font (macOS's Arial Unicode), each with its type's characters,

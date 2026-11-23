@@ -88,7 +88,9 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
     fclose(f);
 }
 
-static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) {   // a saved choice this build still offers: one of its values, or a number in its range
+static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) {   // a saved choice this build still offers: one of its values, a number in its range, or free text
+    CFTypeRef text = CFDictionaryGetValue(rule, CFSTR("text"));
+    if (text && text == kCFBooleanTrue) return 1;
     CFTypeRef values = CFDictionaryGetValue(rule, CFSTR("values"));
     if (values && CFGetTypeID(values) == CFArrayGetTypeID()) {
         for (CFIndex i = 0; i < CFArrayGetCount(values); i++) {

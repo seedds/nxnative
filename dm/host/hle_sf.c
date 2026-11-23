@@ -9,6 +9,7 @@
 // then the data words, whose CMIF part starts 16-byte aligned to the buffer: in a domain session the domain header {u8 type, u8 objects, u16 size, u32 object, u32, u32 token} first,
 // then {"SFCI", version, command, token} and the arguments. The response is the same with {u32 objects, 3 × u32} and {"SFCO", version, result, token}
 #include "hle.h"
+#include "nextendo_client.h"
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <pthread.h>
@@ -81,6 +82,7 @@ HLE_FORCE("_ZN2nn2sf4hipc31InitializeHipcServiceResolutionEv", "service name res
 HLE_FORCE("_ZN2nn2sf4hipc29FinalizeHipcServiceResolutionEv", "service name resolution (sm)", void, h_sf_FinRes, void) {}
 HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect to a service through sm → a host session for the services the host serves", Result, h_sf_Connect,
           uint32_t *out, const char *name) {
+    if (dm_nextendo_enabled() && name) LOG("nextendo: sf::ConnectToHipcService('%s')", name);
     for (size_t k = 0; k < sizeof sf_served / sizeof *sf_served; k++)
         if (!strncmp(name, sf_served[k].name, 8)) {
             *out = sf_new(sf_served[k].name, 0, sf_served[k].answer, NULL, NULL); LOG("sf: %s → host session %#x (every request succeeds with zeroed output)", sf_served[k].name, *out);
@@ -89,6 +91,11 @@ HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect t
     unsigned long nreg; const sf_service_ent *reg = sf_registered(&nreg);
     for (unsigned long k = 0; k < nreg; k++)
         if (!strncmp(name, reg[k].name, 8)) { *out = sf_new(reg[k].name, 0, reg[k].answer, NULL, NULL); LOG("sf: %s → host session %#x", reg[k].name, *out); return RES_OK; }
+    if (dm_nextendo_enabled() && (!strncmp(name, "dauth:0", 8) || !strncmp(name, "aauth:u", 8))) {
+        *out = sf_new(name, 0, NULL, NULL, NULL);
+        LOG("sf: %s → host session %#x (Nextendo stub)", name, *out);
+        return RES_OK;
+    }
     LOG("[RED] sf: the game connects to service %.8s itself, which the host does not serve", name);
     return 0xe15u;   // sm ResultNotRegistered
 }

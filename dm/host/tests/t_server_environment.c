@@ -4,6 +4,7 @@
 #include <mach-o/getsect.h>
 
 static int unexpected, checks, failed;
+__thread _Atomic int dm_host_work;
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; unexpected++; }
 void dm_applet_enter(const char *name) { (void)name; unexpected++; }
 void dm_applet_leave(void) { unexpected++; }
@@ -18,9 +19,21 @@ int dm_sk_setopt(int fd, int l, int o, const void *v, unsigned n) { (void)fd; (v
 int dm_sk_fcntl(int fd, int c, int v) { (void)fd; (void)c; (void)v; unexpected++; return -1; }
 long dm_sk_recvfrom(int fd, void *d, unsigned long n, int f, void *a, unsigned *an) { (void)fd; (void)d; (void)n; (void)f; (void)a; (void)an; unexpected++; return -1; }
 long dm_sk_sendto(int fd, const void *d, unsigned long n, int f, const void *a, unsigned an) { (void)fd; (void)d; (void)n; (void)f; (void)a; (void)an; unexpected++; return -1; }
+long dm_sk_sendmsg(int fd, const void *m, int f) { (void)fd; (void)m; (void)f; unexpected++; return -1; }
+long dm_sk_recvmsg(int fd, void *m, int f) { (void)fd; (void)m; (void)f; unexpected++; return -1; }
 int dm_sk_poll(void *fds, uint64_t n, int ms) { (void)fds; (void)n; (void)ms; unexpected++; return -1; }
 int dm_sk_select(int n, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) { (void)n; (void)r; (void)w; (void)e; (void)tv; unexpected++; return -1; }
 int dm_sk_errno(void) { unexpected++; return 0; }
+int dm_sk_listen(int fd, int backlog) { (void)fd; (void)backlog; unexpected++; return -1; }
+int dm_sk_accept(int fd, void *a, unsigned *n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }
+int dm_sk_getaddrinfo(const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4; }
+int dm_sk_getaddrinfo_ex(const char *h, const char *s, const void *hint, void **res, int p) { (void)p; return dm_sk_getaddrinfo(h, s, hint, res); }
+void dm_sk_freeaddrinfo(void *ai) { (void)ai; unexpected++; }
+int dm_nifm_get_ip(uint32_t *ip) { (void)ip; unexpected++; return -1; }
+int dm_nifm_get_ip_config(uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) { (void)a; (void)b; (void)c; (void)d; (void)e; unexpected++; return -1; }
+Result dm_friends_get_list_online(int *c, void *o, int off, int n, const void *f) { (void)c; (void)o; (void)off; (void)n; (void)f; unexpected++; return RES_FAIL; }
+Result dm_friends_get_ids_online(int *c, uint64_t *o, int off, int n, const void *f) { (void)c; (void)o; (void)off; (void)n; (void)f; unexpected++; return RES_FAIL; }
+void dm_friends_async_set(void *ctx, int ok) { (void)ctx; (void)ok; unexpected++; }
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static void *hook(const char *name) {

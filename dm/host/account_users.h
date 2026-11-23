@@ -17,3 +17,5 @@ unsigned dm_account_users(void);
 int dm_account_create_user(int user);
 // Registered UID -> slot, -1 for an unknown UID. NULL is not a guest account.
 int dm_account_user(const void *uid);
+// Optional per-account UID override for slot 0 (used in online mode so two players never share the default UID).
+void dm_account_set_uid0_override(uint64_t uid0);

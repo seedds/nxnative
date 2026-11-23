@@ -3,6 +3,11 @@
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
 #include "hle.h"
 #include "hle_net.h"
+#include "nextendo_client.h"
+
+Result dm_friends_get_list_online(int *count, void *out, int off, int n, const void *filt);
+Result dm_friends_get_ids_online(int *count, uint64_t *out, int off, int n, const void *filt);
+void dm_friends_async_set(void *ctx, int ok);
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
@@ -80,12 +85,12 @@ HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "Poll over process-lo
 HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "local UDP (offline BSD service)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
 HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "local UDP (offline BSD service)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
 HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
-HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
-HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAi2, void *ai) { (void)ai; }
+HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution: EAI_FAIL offline, Nextendo DNS redirect when DM_NEXTENDO=1", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { return dm_sk_getaddrinfo_ex(h, s, hint, res, 1); }
+HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo", void, h_sk_FreeAi2, void *ai) { dm_sk_freeaddrinfo(ai); }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 // SDK 11's overloads with plain sockaddr / int arguments (Big Brain Academy: Brain vs. Brain, through Pia)
 HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
+HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "BSD accept: fails offline, real host accept when DM_NEXTENDO=1", int, h_sk_Accept2, int s, void *a, unsigned *n) { return dm_sk_accept(s, a, n); }
 HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "local UDP (offline BSD service)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
 HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "local UDP (offline BSD service)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
 HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "local UDP (offline BSD service)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
@@ -120,23 +125,47 @@ HLE_FORCE("_ZN2nn8irsensor30GetImageTransferProcessorStateEPNS0_27ImageTransferP
           void *s, void *b, size_t n, const void *h) { (void)s; (void)b; (void)n; (void)h; return RES_FAIL; }
 
 // ---------- ssl: offline, creating a context fails ----------
-HLE_FORCE("_ZN2nn3ssl7Context15ImportClientPkiEPmPKcS4_jj", "SSL (cut)", Result, h_ssl_ImpCli, void *self, uint64_t *id, const char *a, const char *b, unsigned x, unsigned y) { (void)self; (void)a; (void)b; (void)x; (void)y; if (id) *id = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", "SSL (cut)", Result, h_ssl_ImpSrv, void *self, uint64_t *id, const char *a, unsigned n, int f) { (void)self; (void)a; (void)n; (void)f; if (id) *id = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ssl7Context9ImportCrlEPmPKcj", "SSL (cut)", Result, h_ssl_ImpCrl, void *self, uint64_t *id, const char *a, unsigned n) { (void)self; (void)a; (void)n; if (id) *id = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", "SSL (cut)", Result, h_ssl_Certs,
-          void **out, uint8_t *buf, unsigned bn, void *ids, unsigned n) { (void)buf; (void)bn; (void)ids; (void)n; if (out) *out = NULL; return RES_FAIL; }
+HLE_FORCE("_ZN2nn3ssl7Context15ImportClientPkiEPmPKcS4_jj", "SSL import client PKI: cut offline; succeeds when DM_NEXTENDO=1", Result, h_ssl_ImpCli, void *self, uint64_t *id, const char *a, const char *b, unsigned x, unsigned y) {
+    (void)self; (void)a; (void)b; (void)x; (void)y;
+    if (dm_nextendo_enabled()) { if (id) *id = 1; return RES_OK; }
+    if (id) *id = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", "SSL import server PKI: cut offline; succeeds when DM_NEXTENDO=1", Result, h_ssl_ImpSrv, void *self, uint64_t *id, const char *a, unsigned n, int f) {
+    (void)self; (void)a; (void)n; (void)f;
+    if (dm_nextendo_enabled()) { if (id) *id = 1; return RES_OK; }
+    if (id) *id = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3ssl7Context9ImportCrlEPmPKcj", "SSL import CRL: cut offline; succeeds when DM_NEXTENDO=1", Result, h_ssl_ImpCrl, void *self, uint64_t *id, const char *a, unsigned n) {
+    (void)self; (void)a; (void)n;
+    if (dm_nextendo_enabled()) { if (id) *id = 1; return RES_OK; }
+    if (id) *id = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", "SSL built-in certificates: cut offline; system anchors when DM_NEXTENDO=1", Result, h_ssl_Certs,
+          void **out, uint8_t *buf, unsigned bn, void *ids, unsigned n) {
+    (void)ids;
+    if (dm_nextendo_enabled()) {
+        uint32_t cnt = 0;
+        int ok = dm_nextendo_builtin_certs_fill(out, buf, bn, n, &cnt) == 0;
+        LOG("nextendo: ssl::GetBuiltInCertificates(Base, bn=%u, n=%u) -> ok=%d count=%u", bn, n, ok, cnt);
+        return ok ? RES_OK : RES_FAIL;
+    }
+    if (out) *out = NULL;
+    return RES_FAIL;
+}
 
-// ---------- nifm / nsd: offline ----------
+// ---------- nifm / nsd: offline by default; real IP / Nextendo when DM_NEXTENDO=1 ----------
 HLE_FORCE("_ZN2nn4nifm19SetLocalNetworkModeEb", "offline: the local network mode switch is ignored", void, h_nifm_LocalMode, unsigned on) { (void)on; }
-HLE_FORCE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", "offline: the network request is not submitted (returns at once, IsNetworkAvailable is always false)", void, h_nifm_SubmitWait, void) {}
-HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "offline: no IP configuration", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
-    uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
+HLE_FORCE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", "network request wait (returns at once; IsNetworkAvailable reflects DM_NEXTENDO)", void, h_nifm_SubmitWait, void) {}
+HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "IP configuration: fails offline; host IPv4 when DM_NEXTENDO=1", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
+    return dm_nifm_get_ip_config(a, b, c, d, e) == 0 ? RES_OK : RES_FAIL;
 }
 // SDK 10's functions of the same name take socket::InAddr / in_addr, exactly the other way round from the generation above and in hle_net.c (Super Mario 3D World + Bowser's Fury)
-HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_", "offline: no IP configuration (SDK 10 overload)", Result, h_nifm_IpCfg10, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
-    uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
+HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_", "IP configuration (SDK 10 overload): fails offline; host IPv4 when DM_NEXTENDO=1", Result, h_nifm_IpCfg10, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
+    return dm_nifm_get_ip_config(a, b, c, d, e) == 0 ? RES_OK : RES_FAIL;
 }
-HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "offline: no IP (SDK 10 overload)", Result, h_nifm_GetIp10, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "primary IP (SDK 10 overload): fails offline; host IPv4 when DM_NEXTENDO=1", Result, h_nifm_GetIp10, uint32_t *a) {
+    return dm_nifm_get_ip(a) == 0 ? RES_OK : RES_FAIL;
+}
 // SDK 21 (Star Fox): the IPv4 and IPv6 configurations at once, with their counts
 HLE_FORCE("_ZN2nn4nifm18GetCurrentIpConfigEPNS0_10Ipv4ConfigEPiPNS0_10Ipv6ConfigES3_ii", "offline: no IP configuration (SDK 21 overload)", Result, h_nifm_IpCfg21,
           void *v4, int *n4, void *v6, int *n6, int c4, int c6) { (void)v4; (void)v6; (void)c4; (void)c6; if (n4) *n4 = 0; if (n6) *n6 = 0; return RES_FAIL; }
@@ -149,13 +178,39 @@ HLE_FORCE("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv", "server environme
 
 // ---------- friends: newer SDK overloads ----------
 HLE_FORCE("_ZN2nn7friends12SetAllocatorEPFPvmEPFvS1_mE", "friends library allocator; no session is created, ignored", void, h_fr_SetAlloc, void *a, void *f) { (void)a; (void)f; }
-HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", "friend list is empty (cut)", Result, h_fr_List2,
-          int *count, void *out, const void *uid, int off, int n, const void *filt) { (void)out; (void)uid; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends27CheckFriendListAvailabilityEPbRKNS_7account3UidE", "friend list unavailable (cut)", Result, h_fr_ListAvail, uint8_t *out, const void *uid) { (void)uid; *out = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", "friend list (cut): the request fails at once", Result, h_fr_ListEnsure, void *ctx, const void *uid) { (void)ctx; (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", "friend list: fails offline; Nextendo friends when DM_NEXTENDO=1", Result, h_fr_List2,
+          int *n, void *o, const void *u, int off, int max, const void *f) {
+    (void)u;
+    if (dm_nextendo_enabled()) return dm_friends_get_list_online(n, o, off, max, f);
+    if (n) *n = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE", "friend NSA ID list: fails offline; Nextendo friend PIDs when DM_NEXTENDO=1", Result, h_fr_ListIds,
+          int *n, uint64_t *o, const void *u, int off, int max, const void *f) {
+    (void)u;
+    if (dm_nextendo_enabled()) return dm_friends_get_ids_online(n, o, off, max, f);
+    if (n) *n = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn7friends27CheckFriendListAvailabilityEPbRKNS_7account3UidE", "friend list availability: false offline; true when DM_NEXTENDO=1 and linked", Result, h_fr_ListAvail, uint8_t *out, const void *uid) {
+    (void)uid;
+    *out = (uint8_t)(dm_nextendo_enabled() && dm_nextendo_is_linked());
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", "friend list ensure: fails offline; refreshes Nextendo friends when DM_NEXTENDO=1", Result, h_fr_ListEnsure, void *ctx, const void *uid) {
+    (void)uid;
+    if (dm_nextendo_enabled() && dm_nextendo_is_linked()) {
+        (void)dm_nextendo_refresh_friends();
+        dm_friends_async_set(ctx, 1);
+        return RES_OK;
+    }
+    dm_friends_async_set(ctx, 0);
+    return RES_FAIL;
+}
 HLE_FORCE("_ZN2nn7friends12AsyncContext7HasDoneEPb", "async context: always done", Result, h_fr_AcHasDone, void *self, uint8_t *done) { (void)self; *done = 1; return RES_OK; }
-HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS_7account3UidERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameESA_", "play history is not registered (cut)",
-          Result, h_fr_PlayHist2, const void *uid, const void *key, const void *a, const void *b) { (void)uid; (void)key; (void)a; (void)b; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS_7account3UidERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameESA_", "play history fails offline; accepted when DM_NEXTENDO=1",
+          Result, h_fr_PlayHist2, const void *uid, const void *key, const void *a, const void *b) {
+    (void)uid; (void)key; (void)a; (void)b;
+    return (dm_nextendo_enabled() && dm_nextendo_is_linked()) ? RES_OK : RES_FAIL;
+}
 
 // ---------- ngc: newer SDK overloads (with bool). Always judged as no profanity ----------
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter10InitializeEPvmb", "profanity filter init; the host has no word list", Result, h_ngc_Init3, void *self, void *work, uint64_t sz, unsigned check) { (void)self; (void)work; (void)sz; (void)check; return RES_OK; }
@@ -197,20 +252,29 @@ HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPage
 // Octopath Traveler 0 imports the offline HTML page applet too (pages shipped in the game's HTML document NCA, which the host does not extract)
 
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
-HLE_FORCE("nnsocketAccept", "offline (cut)", int, h_c_sk_Accept, void) { return -1; }
-HLE_FORCE("nnsocketListen", "offline (cut)", int, h_c_sk_Listen, void) { return -1; }
-HLE_FORCE("nnsocketRecvMsg", "offline (cut)", int, h_c_sk_RecvMsg, void) { return -1; }
-HLE_FORCE("nnsocketSendMsg", "offline (cut)", int, h_c_sk_SendMsg, void) { return -1; }
+HLE_FORCE("nnsocketAccept", "BSD accept: fails offline, real host accept when DM_NEXTENDO=1", int, h_c_sk_Accept, int s, void *a, unsigned *n) { return dm_sk_accept(s, a, n); }
+HLE_FORCE("nnsocketListen", "BSD listen: fails offline, real host listen when DM_NEXTENDO=1", int, h_c_sk_Listen, int s, int n) { return dm_sk_listen(s, n); }
+HLE_FORCE("nnsocketRecvMsg", "BSD recvmsg: fails offline, real host recvmsg when DM_NEXTENDO=1", long, h_c_sk_RecvMsg, int s, void *m, int f) { return dm_sk_recvmsg(s, m, f); }
+HLE_FORCE("nnsocketSendMsg", "BSD sendmsg: fails offline, real host sendmsg when DM_NEXTENDO=1", long, h_c_sk_SendMsg, int s, const void *m, int f) { return dm_sk_sendmsg(s, m, f); }
 HLE_FORCE("nnsocketShutdown", "local UDP (offline BSD service)", int, h_c_sk_Shutdown, int s, int h) { return dm_sk_shutdown(s, h); }
-HLE_FORCE("nnsocketGetAddrInfoWithOptions", "name resolution with resolver options (cut): EAI_FAIL", int, h_c_sk_GaiOpt, const char *h, const char *s, const void *hint, void **res, const void *o, unsigned long n) { (void)h; (void)s; (void)hint; (void)o; (void)n; if (res) *res = NULL; return SK_EAI_FAIL; }
-HLE_FORCE("nnsocketGetAddrInfo", "name resolution (cut): EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
-HLE_FORCE("nnsocketFreeAddrInfo", "pairs with GetAddrInfo (cut)", void, h_c_sk_FreeAi, void *ai) { (void)ai; }
+HLE_FORCE("nnsocketGetAddrInfoWithOptions", "name resolution with resolver options: EAI_FAIL offline, Nextendo DNS redirect when DM_NEXTENDO=1", int, h_c_sk_GaiOpt, const char *h, const char *s, const void *hint, void **res, const void *o, unsigned long n) { (void)o; (void)n; return dm_sk_getaddrinfo(h, s, hint, res); }
+HLE_FORCE("nnsocketGetAddrInfo", "name resolution: EAI_FAIL offline, Nextendo DNS redirect when DM_NEXTENDO=1", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { return dm_sk_getaddrinfo(h, s, hint, res); }
+HLE_FORCE("nnsocketFreeAddrInfo", "pairs with GetAddrInfo", void, h_c_sk_FreeAi, void *ai) { dm_sk_freeaddrinfo(ai); }
 HLE_FORCE("nnsocketGAIStrError", "resolver error text", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 
-// ---------- bcat: news / data delivered from the server (Super Mario Odyssey). Initialize talks to the bcat service (an SDK abort without it); mounting the delivery cache fails,
-// which the game treats as "nothing delivered" (main+0x6c9258: a failure skips the read unless the caller asked for an error dialog, which only logs here). Syncing needs the network, which nifm reports unavailable ----------
-HLE_FORCE("_ZN2nn4bcat10InitializeEv", "data delivery init (connects to the bcat service); the host has none, no-op", void, h_bcat_Init, void) {}
-HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "mount delivery cache: no delivery data, fails", Result, h_bcat_Mount, void) { return RES_FAIL; }
+// ---------- bcat: news / data delivered from the server (Super Mario Odyssey). Initialize talks to the bcat service (an SDK abort without it); mounting the delivery cache fails offline,
+// which the game treats as "nothing delivered" (main+0x6c9258). When DM_NEXTENDO=1, syncs from Nextendo /api/bcat/<titleId> when configured ----------
+HLE_FORCE("_ZN2nn4bcat10InitializeEv", "data delivery init (connects to the bcat service); no-op", void, h_bcat_Init, void) {}
+HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "mount delivery cache: fails offline; syncs Nextendo BCAT when DM_NEXTENDO=1", Result, h_bcat_Mount, void) {
+    if (dm_nextendo_enabled()) {
+        const char *save = getenv("DM_SAVE");
+        char dir[1024];
+        if (save && *save) snprintf(dir, sizeof dir, "%s/bcat", save);
+        else snprintf(dir, sizeof dir, "/tmp/nxnative-bcat-%s", DM_GAME_ID);
+        if (dm_nextendo_sync_bcat(DM_GAME_ID, dir) == 0) return RES_OK;
+    }
+    return RES_FAIL;
+}
 HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "unmount delivery cache", void, h_bcat_Unmount, void) {}
 
 // ---------- album: the capture album (Monster Hunter Rise saves its own photo-mode pictures there). Initialize connects to the capture service (capsrv, an abort in sm::Initialize at the start of

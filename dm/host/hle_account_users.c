@@ -38,8 +38,19 @@ unsigned dm_account_users(void) {
     unsigned mask = g_users_mask;
     pthread_mutex_unlock(&g_users_lock); return mask;
 }
+static uint64_t g_uid0_override;
+void dm_account_set_uid0_override(uint64_t uid0) {
+    pthread_mutex_lock(&g_users_lock); g_uid0_override = uid0; pthread_mutex_unlock(&g_users_lock);
+}
 int dm_account_user(const void *uid) {
     int i = dm_uid_user(uid);
+    if (i < 0 && uid) {
+        pthread_mutex_lock(&g_users_lock); uint64_t ov = g_uid0_override; pthread_mutex_unlock(&g_users_lock);
+        if (ov) {
+            uint64_t v[2]; memcpy(v, uid, sizeof v);
+            if (v[1] == DM_UID1 && v[0] == ov) i = 0;
+        }
+    }
     return i >= 0 && (dm_account_users() & (1u << i)) ? i : -1;
 }
 int dm_account_create_user(int user) {

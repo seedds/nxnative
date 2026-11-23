@@ -2,6 +2,7 @@
 // Layout follows the public Horizon ABI: PosixTime = int64 seconds; CalendarTime = {s16 year, s8 month/day/hour/minute/second};
 // CalendarAdditionalInfo = {u32 day of week, u32 day of year, char time zone name[8], u32 DST, s32 UTC offset in seconds}.
 #include "hle.h"
+#include "nextendo_client.h"
 #include <stdatomic.h>
 #include <time.h>
 
@@ -121,7 +122,7 @@ HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditi
           Result, h_time_ToCalendarTimeRule, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt, const void *rule) { (void)rule; return h_time_ToCalendarTime(ct, ai, pt); }
 // Whether the network clock's last sync is recent enough (the service compares the steady time point of its context with now). The host does not know when its clock last synced,
 // so it never claims it: the answer a Switch gives when its last sync is old
-HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "network clock accuracy (time service): the host does not know its last sync, never sufficient", unsigned, h_time_NetAccurate, void) { return 0; }
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "network clock accuracy: 0 offline; 1 when DM_NEXTENDO=1", unsigned, h_time_NetAccurate, void) { return dm_nextendo_enabled() ? 1u : 0u; }
 // Clock snapshot (Tears of the Kingdom: CreateWithStandardSystemClock asks the time service, which the host never opens → abort in sm::Initialize). 0xD0 bytes, laid out
 // as Ryujinx lays out the service's ClockSnapshot and as this SDK's constructor clears it (its last store is the byte at +0xcd): +0x00 user clock context {offset,
 // steady time point}, +0x20 network clock context, +0x40 user time, +0x48 network time, +0x50 / +0x58 user / network calendar, +0x60 / +0x78 their additional info,

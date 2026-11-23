@@ -49,6 +49,16 @@ struct SettingRow: View {
                         .accessibilityLabel(s.label)
                         .accessibilityValue(percentage)
                 }
+            case "text":
+                VStack(alignment: .leading, spacing: 6) {
+                    settingLabel
+                    TextField(s.placeholder ?? "", text: m.binding(s))
+                        .textFieldStyle(.roundedBorder)
+                        #if canImport(UIKit)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        #endif
+                }
             default:
                 Toggle(isOn: Binding(get: { (m.values[s.env] ?? s.def) == s.onValue }, set: { m.values[s.env] = $0 ? s.onValue : s.offValue })) {
                     settingLabel

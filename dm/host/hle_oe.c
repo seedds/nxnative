@@ -2,6 +2,7 @@
 // oe::Initialize is in hle_sdkinit.c, not here.
 // Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
 #include "hle.h"
+#include "nextendo_client.h"
 #include "front.h"
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
@@ -482,8 +483,18 @@ HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG"
 // Age of Imprisonment asks at boot (main+0x1af4504), after picking its language from GetDesiredLanguage. The host's language is DM_LANG alone and limits nothing
 HLE_FORCE("_ZN2nn2oe26IsLanguageSelectionLimitedEv", "language selection limit (through am): none", unsigned, h_oe_LangLimited, void) { return 0; }
 
-// nn::util::Uuid 16 bytes: a fixed local value (only used to tell devices apart locally, networking is cut)
-HLE_FORCE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", "pseudo device ID; a fixed host value", void, h_oe_GetDevId, uint8_t *uuid) {
+// nn::util::Uuid 16 bytes: a fixed local value offline; XORed with Nextendo PID online so two devices never collide.
+HLE_FORCE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", "pseudo device ID; fixed offline, per-account online", void, h_oe_GetDevId, uint8_t *uuid) {
     static const uint8_t k[16] = {0x78, 0x62, 0x6c, 0x00, 0x53, 0x57, 0x4e, 0x41, 0x54, 0x49, 0x56, 0x45, 0x31, 0x30, 0x30, 0x31};
-    memcpy(uuid, k, 16);
+    uint8_t out[16];
+    memcpy(out, k, 16);
+    if (dm_nextendo_enabled()) {
+        uint64_t pid = dm_nextendo_get_pid();
+        if (pid) {
+            uint64_t lo; memcpy(&lo, out + 8, 8);
+            lo ^= pid;
+            memcpy(out + 8, &lo, 8);
+        }
+    }
+    memcpy(uuid, out, 16);
 }

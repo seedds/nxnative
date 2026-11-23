@@ -119,6 +119,7 @@ def settings_rules(listed):   # DMSettings: what the launcher accepts as each se
         if s['kind'] == 'range': rules.append({'env': s['env'], 'min': float(s['min']), 'max': float(s['max'])})
         elif s['kind'] == 'choice': rules.append({'env': s['env'], 'values': [o[0] for o in s['options']]})
         elif s['kind'] == 'toggle': rules.append({'env': s['env'], 'values': [s.get('on', '1'), s.get('off', '0')]})
+        elif s['kind'] == 'text': rules.append({'env': s['env'], 'text': True})
     return rules
 
 

@@ -12,6 +12,7 @@ struct Setting: Decodable, Identifiable {
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
+    let placeholder: String?   // text: hint shown when empty
     var id: String { env }
     var sectionTitle: String { section ?? "Game" }
     var basic: Bool { level == "basic" }
@@ -30,7 +31,7 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off, placeholder }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 

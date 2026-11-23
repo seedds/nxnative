@@ -58,3 +58,4 @@ General changes first needed here; each applies to every game:
 - Only one board and one minigame were played; the other boards, modes (Koopathlon, Bowser Kaboom Squad, Rhythm Kitchen, …) and most minigame NROs were not loaded. Motion minigames were turned off at the prompt.
 - Only the 2.3.0 build (`v458752`) is registered.
 - iPhone: not built, not installed, not tested.
+- Online play (`DM_ONLINE_MODE=nextendo` / `DM_NEXTENDO=1`): Verified live on macOS against `nextendo.network` with two separate accounts and isolated saves (OAuth 2.0 + PKCE sign-in, NPLN Auth/UGC/Matchmaking/Gamesync over HTTP/2 gRPC, NNCS1/NNCS2 NAT check, P2P UDP PIA, room creation and 2-player room join). Requires the title's NPLN certificate-pinning patch in the packaged `.app` and a registered Nextendo `client_id` (or a self-hosted `nextendo-docs` stack). Remote cross-network match and iOS runtime remain untested.

@@ -13,6 +13,8 @@ typedef enum {
     DM_TLS_READ, DM_TLS_WRITE
 } dm_tls_stage;
 
+enum { DM_TLS_VERIFY_PLATFORM_TRUST = 1, DM_TLS_VERIFY_STRICT_X509 };
+
 static inline void dm_tls_trace(dm_tls_stage stage, uint64_t session, uint32_t result,
                                 int32_t native, uint64_t detail, unsigned flags) {
     int saved = errno;
@@ -22,9 +24,14 @@ static inline void dm_tls_trace(dm_tls_stage stage, uint64_t session, uint32_t r
         unsigned used = atomic_load(&events);
         while (used < 128) {
             if (atomic_compare_exchange_weak(&events, &used, used + 1)) {
+                const char *reason = "";
+                if (stage == DM_TLS_VERIFY && result) {
+                    if (detail == DM_TLS_VERIFY_PLATFORM_TRUST) reason = " verify=platform-trust";
+                    else if (detail == DM_TLS_VERIFY_STRICT_X509) reason = " verify=strict-x509";
+                }
                 fprintf(stderr, "[ssl-trace] stage=%u session=%" PRIu64 " result=0x%08" PRIx32
-                        " native=%" PRId32 " detail=%" PRIu64 " flags=0x%02x\n",
-                        (unsigned)stage, session, result, native, detail, flags);
+                        " native=%" PRId32 " detail=%" PRIu64 " flags=0x%02x%s\n",
+                        (unsigned)stage, session, result, native, detail, flags, reason);
                 break;
             }
         }

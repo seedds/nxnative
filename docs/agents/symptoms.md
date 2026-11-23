@@ -581,6 +581,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 ## Optional online-service backend
 
 - an enabled native socket connects, but the SDK's TLS context is still an unavailable-service cut. → [Native client TLS](../reference/online-services.md#native-client-tls)
+- `DM_SSL_TRACE=1` reports the same verify failure for a rejected chain and for a chain that passes platform trust but fails strict X.509. → [A scoped CA failure does not say which TLS check rejected it](../reference/online-services.md#a-scoped-ca-failure-does-not-say-which-tls-check-rejected-it)
 - a service template reaches native DNS unchanged, or an IP handoff loses the logical TLS service identity. → [Explicit routing and NSD](../reference/online-services.md#explicit-routing-and-nsd)
 - a service transport works but the SDK has no usable account identity/token or friends snapshot. → [Account and social providers](../reference/online-services.md#account-and-social-providers)
 

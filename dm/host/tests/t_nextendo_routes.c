@@ -42,7 +42,7 @@ static void resolve_checks(int ready) {
     hint.flags = 4; CHECK(dm_net_getaddrinfo("api.console.invalid", "443", &hint, &output) == 8 && !output, "AI_NUMERICHOST does not turn a mapped DNS name into a numeric caller input");
     hint.flags = 1; CHECK(dm_net_getaddrinfo(NULL, "0", &hint, &output) == 0 && output, "passive null-host binding never requires a DNS service route"); if (output) dm_net_freeaddrinfo(output);
 }
-static void tls_checks(int ready, unsigned port, bool reject_pin) {
+static void tls_checks(int ready, unsigned port, bool reject_peer) {
     char context[32] = {0}, connection[32] = {0}; CHECK(dm_ssl_context_create(context, 32) == 0 && dm_ssl_connection_create(connection, context) == 0, "actual native TLS registry prepared");
     CHECK(dm_ssl_set_hostname(connection, "never-configured.nintendo.net", 29) != 0, "unknown SNI cannot bypass fail-closed DNS through a literal socket");
     CHECK(dm_ssl_set_hostname(connection, "127.0.0.9", 9) != 0, "an unconfigured numeric address does not authorize TLS SNI");
@@ -54,12 +54,12 @@ static void tls_checks(int ready, unsigned port, bool reject_pin) {
         CHECK(dm_net_getaddrinfo("api.console.invalid", service, &hint, &answer) == 0 && answer, "actual TLS socket obtains the routed resolver address");
         int fd = dm_net_socket(2, 1, 6); dm_net_addrinfo *info = answer;
         CHECK(info && fd >= 0 && dm_net_connect(fd, info->addr, info->addrlen) == 0 && dm_ssl_set_socket(connection, fd) == 0, "guest TCP descriptor is connected and borrowed safely"); if (answer) dm_net_freeaddrinfo(answer);
-        if (reject_pin) {
-            CHECK(dm_ssl_handshake(connection) != 0, "a different enrolled certificate rejects the actual TLS peer");
+        if (reject_peer) {
+            CHECK(dm_ssl_handshake(connection) != 0, "a different CA or enrolled certificate rejects the actual TLS peer");
             int sent = 99; uint32_t verification = 0;
             CHECK(dm_ssl_last_error(connection, &verification, true) == 0 && verification &&
                   dm_ssl_write(connection, "PING", &sent, 4) != 0 && sent == 0,
-                  "failed pin verification retains its error and sends no application data");
+                  "failed verification retains its error and sends no application data");
             dm_ssl_connection_destroy(connection); dm_ssl_context_destroy(context); return;
         }
         CHECK(dm_ssl_handshake(connection) == 0, "mapped SNI and only its scoped DER CA complete a real TLS handshake");
@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     CHECK(dm_bcat_online_enabled() == (status == 0), "BCAT capability requires an opted-in, fully published profile");
     resolve_checks(status == 0);
     setenv("DM_NETWORK", "auto", 1); resolve_checks(status == 0);
-    tls_checks(status == 0, argc >= 4 ? (unsigned)strtoul(argv[3],NULL,10) : 0, argc == 5 && !strcmp(argv[4], "reject-pin"));
+    tls_checks(status == 0, argc >= 4 ? (unsigned)strtoul(argv[3],NULL,10) : 0, argc == 5 && !strcmp(argv[4], "reject-peer"));
     if (argc == 5 && !strcmp(argv[4], "v2")) v2_checks();
     if (argc == 5 && !strcmp(argv[4], "handoff")) handoff_checks((unsigned)strtoul(argv[3], NULL, 10));
     unsetenv("DM_NEXTENDO_ROUTES"); setenv("DM_NETWORK", "auto", 1);

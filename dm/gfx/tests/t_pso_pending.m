@@ -41,6 +41,12 @@ static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 @interface TestPipelineState : NSObject { @public int call; } @end
 @implementation TestPipelineState @end
 
+// Metal's descriptor checks the function type before GateDevice gets a build.
+@interface TestFunction : NSObject
+@property(nonatomic) MTLFunctionType functionType;
+@end
+@implementation TestFunction @end
+
 // The fake compiler blocks selected invocation numbers, so the test can hold
 // real pso_pend_kick workers in the compiler without relying on driver timing.
 @interface GateDevice : NSObject {
@@ -203,6 +209,15 @@ static void reset_pso_cache(void) {
 }
 
 static NvShader *test_vs, *test_fs;
+static NvShader *fixture_shader(const char *key, MTLFunctionType type) {
+    NvShader *shader = [NvShader new];
+    snprintf(shader->key, sizeof shader->key, "%s", key);
+    TestFunction *function = [TestFunction new];
+    function.functionType = type;
+    shader->fn = (id<MTLFunction>)function;
+    return shader;
+}
+
 static uint64_t g_key_vs[1024], g_key_fs[1024];
 static pso_key make_key(unsigned tag) {
     pso_key k = {0};
@@ -427,9 +442,8 @@ static void test_nil_prediction_falls_back_then_predicts(void) {
     reset_queue(); reset_pso_cache(); state_reset();
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE");
     GateDevice *dev = [[GateDevice alloc] initBlockingThrough:1 nilCall:1]; g_dev = (id<MTLDevice>)(id)dev;
-    NvShader *vs1 = [NvShader new], *fs1 = [NvShader new], *vs2 = [NvShader new], *fs2 = [NvShader new];
-    snprintf(vs1->key, sizeof vs1->key, "pending-vs1"); snprintf(fs1->key, sizeof fs1->key, "pending-fs1");
-    snprintf(vs2->key, sizeof vs2->key, "pending-vs2"); snprintf(fs2->key, sizeof fs2->key, "pending-fs2");
+    NvShader *vs1 = fixture_shader("pending-vs1", MTLFunctionTypeVertex), *fs1 = fixture_shader("pending-fs1", MTLFunctionTypeFragment);
+    NvShader *vs2 = fixture_shader("pending-vs2", MTLFunctionTypeVertex), *fs2 = fixture_shader("pending-fs2", MTLFunctionTypeFragment);
     NvProg *demand = [NvProg new]; demand->sh[0] = vs1; demand->sh[1] = fs1;
     NvProg *predicted = [NvProg new]; predicted->sh[0] = vs2; predicted->sh[1] = fs2;
     pso_key demand_key; pso_key_fill(&demand_key, vs1, fs1, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
@@ -534,8 +548,8 @@ static void test_prediction_at_first_new_miss(void) {
 int main(void) {
     @autoreleasepool {
         setvbuf(stdout, NULL, _IONBF, 0);
-        test_vs = [NvShader new]; test_fs = [NvShader new];
-        snprintf(test_vs->key, sizeof test_vs->key, "pending-base-vs"); snprintf(test_fs->key, sizeof test_fs->key, "pending-base-fs");
+        test_vs = fixture_shader("pending-base-vs", MTLFunctionTypeVertex);
+        test_fs = fixture_shader("pending-base-fs", MTLFunctionTypeFragment);
         test_two_active_exact_take_and_release();
         test_next_draws_pass_the_guess_limit();
         test_interleaved_prediction_budgets();

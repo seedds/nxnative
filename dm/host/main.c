@@ -128,7 +128,7 @@ static void host_preload(int argc, char **argv) {
     }
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM graceful exit (hle_lifecycle.c)
     { void crash_set_dump_hook(void (*)(void)); void svc_thread_dump(void); crash_set_dump_hook(svc_thread_dump); }   // Dump guest thread state on a crash
-    const char *names[argc + DM_GAME_NMOD]; int n = 0;
+    const char *names[argc + DM_GAME_NMOD + 8]; int n = 0;
     int i = 2;
     for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];
     if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
@@ -138,7 +138,9 @@ static void host_preload(int argc, char **argv) {
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
     if (!n) n = profile_modules(argv[1], names);
+    n = dm_exl_mod_modules(names, n, 8);   // prepared code plugins of enabled mods (DM_ROMFS_OVERLAY, Mac only)
     load_modules(argv[1], names, n);
+    dm_exl_fake_rtld();   // with a mod code plugin among the modules: the stand-in rtld its module walk expects below main (hle_exl.c)
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();
@@ -168,6 +170,7 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--check-tables")) { int dm_check_tables(void); return dm_check_tables(); }   // build-time check of the linked __DATA,swforce table (loader.c)
     { int mtl_pso_prebuild_tool(void); int r = mtl_pso_prebuild_tool(); if (r) return r == 2; }   // DM_PSO_PREBUILD=tool: what a first start would build, made with no game (nvn_mtl.m)
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {

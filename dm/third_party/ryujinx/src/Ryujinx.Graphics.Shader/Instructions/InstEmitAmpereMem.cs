@@ -194,6 +194,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 // Bits 74..75 select U8/U16/B32 (Mesa NAK sm70_encode.rs OpIsberd/OpIsbewr). Fast Fusion's task/mesh pair reads U16 payload entries (mode 0x34).
                 LsSize2 size = width switch { 0 => LsSize2.U8, 4 => LsSize2.U16, _ => LsSize2.B32 };
+                int inputWords = area == 0x30 ? context.TranslatorContext.GpuAccessor.QueryAmpereStageInputWords() : 0;
+                if (inputWords > 0)
+                {
+                    // Stage input kept apart (ResourceManager.GetStageInputMemoryId): dmsh_meshstage.py backs dm_stage_in with the task's device-buffer payload slice.
+                    int id = context.ResourceManager.GetStageInputMemoryId(inputWords);
+                    Operand inAddr = context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64)));
+                    EmitLoad(context, StorageKind.SharedMemory, size, inAddr, x.Rd, 0, id);
+                    return;
+                }
+
                 int baseOffset = area == 0x30 ? stage[1] : stage[2];
                 Operand addr = mode == 0x78 ? Const(stage[0])
                     : area == 0xb0 && stage.Length >= 7 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage, size != LsSize2.B32))

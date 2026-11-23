@@ -5,12 +5,33 @@
 #include "../hle.h"
 #include <assert.h>
 #include <errno.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #include <sys/wait.h>
 #include <unistd.h>
 static int wait_for_render(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
+static kern_return_t render_policy_set(thread_t, thread_policy_flavor_t, thread_policy_t, mach_msg_type_number_t);
 #define pthread_cond_timedwait_relative_np wait_for_render
+#define thread_policy_set render_policy_set
 #include "../hle_audren.c"
+#undef thread_policy_set
 #undef pthread_cond_timedwait_relative_np
+
+// Synthetic render loops must not promote the test runner. One short-lived pthread below exercises the real Mach boundary.
+static struct { int live, started, active, fail, sets, resets; } policy;
+static kern_return_t render_policy_set(thread_t thread, thread_policy_flavor_t flavor, thread_policy_t p, mach_msg_type_number_t n) {
+    if (policy.live) return thread_policy_set(thread, flavor, p, n);
+    assert(policy.started);
+    if (flavor == THREAD_TIME_CONSTRAINT_POLICY) {
+        assert(!policy.active); policy.sets++;
+        if (policy.fail) return KERN_FAILURE;
+        policy.active = 1;
+    } else {
+        assert(flavor == THREAD_STANDARD_POLICY && policy.active);
+        policy.active = 0; policy.resets++;
+    }
+    return KERN_SUCCESS;
+}
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 enum { PACE_BLOCKS = 2000 };
@@ -37,13 +58,14 @@ void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) { (void)fn; (void)arg; (void)prio; (void)stack; return NULL; }
 void dm_guest_thread_join(void *tt) { (void)tt; }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 uint64_t now_ns(void) { return pace.now; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open_sink(void) { return NULL; }
 int dm_audio_output_channels(void) { return 2; }   // the stereo route; the six-channel resampler is checked directly below
 int dm_audio_route(void) { return 2; }
-void dm_pcmout_close(void *k) { (void)k; }
-void dm_pcmout_start(void *k) { (void)k; }
+void dm_pcmout_close(void *k) { (void)k; assert(!policy.active); policy.started = 0; }
+void dm_pcmout_start(void *k) { (void)k; assert(!policy.active); policy.started = 1; }
 int dm_pcmout_append(void *k, void *b) {
     (void)k;
     if (pace.rate) {
@@ -320,6 +342,7 @@ static void blocks_exec(void *obj, void *state) {
     t_ar->frame_n = SAMPLES;
 }
 static void test_renderer_blocks(void) {
+    memset(blocks_n, 0, sizeof blocks_n);
     blocks_on = 1;
     for (int r = 0; r < 2; r++) {
         ar_t *a = &g_ar[r];
@@ -337,6 +360,40 @@ static void test_renderer_blocks(void) {
         }
     }
     memset(g_ar, 0, sizeof g_ar);
+}
+
+static void *policy_thread(void *unused) {
+    (void)unused;
+    assert(!pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0));
+    assert(render_rt());
+    thread_time_constraint_policy_data_t p = {0};
+    mach_msg_type_number_t n = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = FALSE;
+    thread_t self = pthread_mach_thread_np(pthread_self());
+    assert(thread_policy_get(self, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, &n, &def) == KERN_SUCCESS && !def);
+    mach_timebase_info_data_t tb; assert(mach_timebase_info(&tb) == KERN_SUCCESS);
+    fprintf(stderr, "Mach audio policy readback: period %u computation %u constraint %u, timebase %u/%u\n", p.period, p.computation, p.constraint, tb.numer, tb.denom);
+    assert((uint64_t)p.period * tb.numer / tb.denom == 5000000);
+    // XNU may raise computation to half the constraint; the accepted budget is not guaranteed to equal the request.
+    assert((uint64_t)p.computation * tb.numer / tb.denom >= 1000000 && p.computation <= p.constraint);
+    assert(p.constraint == p.period && p.preemptible);
+    render_rt_end();
+    thread_extended_policy_data_t extended = {0}; n = THREAD_EXTENDED_POLICY_COUNT; def = FALSE;
+    assert(thread_policy_get(self, THREAD_EXTENDED_POLICY, (thread_policy_t)&extended, &n, &def) == KERN_SUCCESS && !def && extended.timeshare);
+    return NULL;
+}
+static void test_render_policy(void) {
+    // Failure and the diagnostic opt-out must still publish every renderer's PCM, without an unmatched policy reset.
+    unsetenv("DM_AUDREN_RT");
+    test_renderer_blocks(); assert(policy.sets == 2 && policy.resets == 2);
+    policy.fail = 1;
+    test_renderer_blocks(); assert(policy.sets == 4 && policy.resets == 2);
+    setenv("DM_AUDREN_RT", "0", 1);
+    test_renderer_blocks(); assert(policy.sets == 4 && policy.resets == 2);
+    unsetenv("DM_AUDREN_RT"); policy.fail = 0;
+    policy.live = 1;
+    pthread_t thread; assert(!pthread_create(&thread, NULL, policy_thread, NULL));
+    assert(!pthread_join(thread, NULL)); policy.live = 0;
+    puts("audren scheduling: real worker policy set/read/reset; setup/teardown outside real-time; PCM preserved on rejection and opt-out");
 }
 
 // The update lock is read off Update, else off UpdateImpl; a miss keeps the caller's offset and is a red line. Built from prologues of the forms the SDKs have (`bl` into a PLT stub or straight to the function)
@@ -475,7 +532,7 @@ int main(int argc, char **argv) {
     }
     test_update_lock();
     test_two_renderers();
-    test_renderer_blocks();
+    test_render_policy();
     if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--malformed")) { test_malformed(16, 0); return 0; }
     test_headers();

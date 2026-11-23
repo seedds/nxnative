@@ -86,7 +86,7 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 '''
 
 
-# The same shader with fp_s3 bounded (TranslationFlags.MetalStorageBounds, GitHub issue #2618), as the translator writes a bounded read and dmsh_fetch.select_guards makes it a
+# The same shader with fp_s3 bounded (TranslationFlags.MetalStorageBounds, GitHub issue #2618), as the translator writes a bounded read and dmsh_rewrite.select_guards makes it a
 # select: its signed index, the comparison with the length table (fp_c27, slot 3's words before the address and in all), and a read that gives 0 outside
 TABLE = '(*spvDescriptorSet0.fp_c%d)._m0[1]' % abi.SBLEN_BANK
 

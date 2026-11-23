@@ -49,6 +49,8 @@ No `pad_layout` key (the iPhone pad starts in the 3D layout).
 
 ## Files and shaders
 
+- **Resolved: duplicate representative labels (2026-11-19, [issue #2964](https://github.com/seedds/nxnative/issues/2964)).** A full split of the registered 13.0.5 inputs with all 99 DLC reproduces the old map in order under last-copy selection. The 133 embedded occurrences reduce to 77 keys, and all 22 duplicate-key groups have byte-identical complete controls and code. Checked first-copy selection changes 31 map rows from the BNSH at `0x4f1a000` and 5 from `0x4f41000`. There are 22 source-label changes and 14 additional index-only changes. All 35,012 serialized package records match byte for byte by key. The 53 shader facts and 31,148 shader pairs match the registered tables, and both splits emit an empty supplemental pair table.
+- The refreshed map passes strict packing on the Mac. Chain `03a3ac831bfb` built the host and all 35,012 Metal libraries, including geometry shader `ef507c559969bc0a`. The library and its generated constant-buffer tables carry the refreshed input stamp. Pipeline prebuild built all 31,148 bases with zero failures. Gameplay and iOS were not rerun for the refresh.
 - The RomFS is one `data.arc` (17.6 GB; the profile's `romfs_marker`) beside 14 NRRs. Its header (magic `0xABCDEF9876543210`) gives the offsets of the music, file and shared-file sections and of the file system table (one zstd frame of 50 MB); paths are Hash40s (CRC-32 of the path, its length in the top byte). A path leads to its current file through its info index, file info, info-to-data entry and file data, at file section + directory offset + 4 × its offset, zstd or stored (`dm/gfx/tools/smash_arc.py` documents the layout) ([01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content)).
 - The archive also keeps every earlier version of updated files, which no path leads to any more: 183,882 data blobs, 169,939 of them current (the 98 fighter NROs, 764 with their old versions, which the NRRs of older releases still list). A file's first bytes name its format: SSBH `HBSS` resources (`RDHS` shader databases, `XFUN` effect libraries, `LDOM` / `HSEM` / `LTAM` / `MINA` / `LEKS` models, meshes, materials, animations, skeletons), `EFFN` effects, `SARC` UI layouts, `BNTX`, `NUS3` sound and the NROs (`NRO0` at +0x10).
 - Shaders: 35,012 (22,197 vertex, 12,761 pixel, 53 compute, 1 geometry): GLSLC outputs in the 41 SSBH shader databases (`.nushdb`, 7,764), BNSH in the effects (`EFFN`, 26,419) and UI layouts (SARC, 752), and 77 in `main`. The split reads `data.arc`'s current files (`shader_split.py` `smash_arc_jobs`).
@@ -59,6 +61,8 @@ No `pad_layout` key (the iPhone pad starts in the 3D layout).
 - From `run/save_ref` (past the first launch): A skips the movie, A at the title reaches the main menu, A (Smash), A (a ruleset), A (Random stage), then at the fighter select (after its "Joined!" banner) `LUp~0.85`, `LLeft~0.85`, `LDown~0.3`, `LRight~0.4` lands on Mario, A, Plus.
 
 ## Found on this game
+
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 
 General host changes first needed here; each applies to every game:
 
@@ -83,5 +87,4 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- The one geometry shader among the 35,012: whether it builds is not recorded.
 - The base game 1.0.0 (v0) packed alone (a derived profile) stops before the address region check: the NRO collection's `data.arc` reader (`dm/gfx/tools/smash_arc.py`) knows only 13.x's file system table, and 1.0.0's is not one zstd frame (`ZstdError: Unknown frame descriptor`); with the NROs skipped, the rewrite of its `main` (`fd471eb4…`) stops at a jump table it cannot resolve (`patch_nso.py`, `jump table f5c9cc`). Its engine region is not measured.

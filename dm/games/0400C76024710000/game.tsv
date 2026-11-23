@@ -24,9 +24,11 @@ romfs_marker	re_chunk_000.pak
 zip_store	.pak:.metallib
 
 # ---- Memory ----
-# the NPDM declares 20 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
-mem_reserve	0x140000000
-mem_alias	0x118000000
+# In its first 15 s in nnMain the game reserves 32.00 GiB (main+0x12de5a4) and 6.27 GiB (main+0x14cda60), reaching alias +38.41 GiB.
+# The Mac gives every game at least the Switch's 64 GiB; iOS takes this row: 40 GiB (verified on an A20 Pro iPhone with DM_ALIAS_SIZE=42949672960, issue #2935; requires the extended virtual addressing entitlement).
+# mem_reserve is the 40 GiB alias region plus the 640 MB the provisional profile had besides it (256 MB in front, a 128 MB heap region, the 256 MB of stacks).
+mem_reserve	0xA28000000
+mem_alias	0xA00000000
 mem_stack	0x10000000
 # the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
 app_pool	0x240000000
@@ -44,4 +46,4 @@ shader_note	PRAGMATA shaders
 # the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
 depth_mode	zero
 
-# address regions: 2026-11-10, in its first 15 s in nnMain the game's regions reach alias +38.41 GB, past the profile's 4.38 GB alias region, the iPhone layout: the request returning to main+0x12de5a4 takes 32.00 GB: a smaller one works only if its allocator places nothing by fixed offsets; the request returning to main+0x14cda60 takes 6.27 GB: a smaller one works only if its allocator places nothing by fixed offsets (docs/reference/memory.md, Virtual address memory and the alias region) (rewrite 6d87e4dc95ee)
+# address regions: 2026-11-10, in its first 15 s in nnMain the game's regions reach alias +38.41 GB: the request returning to main+0x12de5a4 takes 32.00 GB and main+0x14cda60 takes 6.27 GB (rewrite 6d87e4dc95ee)

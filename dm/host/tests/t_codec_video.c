@@ -23,6 +23,7 @@ static OSStatus vt_test_create(CFAllocatorRef, CMVideoFormatDescriptionRef, CFDi
 
 static _Atomic int vt_callback_error, vt_refuse_create, vt_refused;
 static _Atomic int vt_double_loss, vt_initial_failed;
+static _Thread_local OSStatus vt_create_status;
 static mavc *vt_callback_avc; static mav1 *vt_callback_av1;
 static OSStatus vt_test_decode(VTDecompressionSessionRef session, CMSampleBufferRef sample, VTDecodeFrameFlags flags, void *source, VTDecodeInfoFlags *info) {
     int second = atomic_load(&vt_double_loss);
@@ -45,7 +46,8 @@ static OSStatus vt_test_create(CFAllocatorRef allocator, CMVideoFormatDescriptio
         *session = NULL; dm_movie_active(0); atomic_store(&vt_refused, 1);
         return kVTVideoDecoderNotAvailableNowErr;
     }
-    return VTDecompressionSessionCreate(allocator, format, specification, attributes, callback, session);
+    vt_create_status = VTDecompressionSessionCreate(allocator, format, specification, attributes, callback, session);
+    return vt_create_status;
 }
 
 uint64_t now_ns(void) { return 1; }
@@ -94,35 +96,52 @@ static const uint8_t vp9[] = {
     0xff,0xff,0xff,0xf2,0x2a,0xc0,0x00,
 };
 
+static bool vt_av1_available(void) {
+    if (!hw_av1()) return false;
+    // A virtual Mac can advertise hardware AV1 but have no decoder for a real session.
+    mav1 a = {0};
+    size_t n = 0;
+    const uint8_t *seq = find_seq(av1, sizeof av1, &n);
+    assert(seq);
+    vt_create_status = noErr;
+    int opened = av1_open(&a, seq, n);
+    av1_close(&a);
+    if (opened == 1) return true;
+    assert(vt_create_status == kVTCouldNotFindVideoDecoderErr);
+    return false;
+}
+
 // Real VideoToolbox sessions invalidated between packets, as can happen while
 // iOS takes the app out of focus. The decoder must still return every picture.
-static void vt_session_lifecycle(void) {
+static void vt_session_lifecycle(bool test_av1) {
     mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts;
-    int avc_pictures = 0, av1_pictures = 3;
+    int avc_pictures = 0;
     for (int i = 0; i < 3; i++) {
         if (i == 1) { assert(c->vs); VTDecompressionSessionInvalidate(c->vs); }
         mavc_decode(c, h264, sizeof h264, i * 1000);
         while (mavc_take(c, 1, nv12, 64, 64, &pts)) avc_pictures++;
     }
     mavc_free(c);
-    if (VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
-        mav1 *a = mav1_new(NULL); mav1_picture pic; av1_pictures = 0;
+    printf("invalidated VideoToolbox sessions: H.264 %d/3 pictures\n", avc_pictures);
+    assert(avc_pictures == 3);
+    if (test_av1) {
+        mav1 *a = mav1_new(NULL); mav1_picture pic; int av1_pictures = 0;
         for (int i = 0; i < 3; i++) {
             if (i == 1) { assert(a->vs && !a->soft); VTDecompressionSessionInvalidate(a->vs); }
             if (mav1_decode(a, av1, sizeof av1, i * 1000, &pic) == 1) av1_pictures++;
         }
         mav1_free(a);
-    } else puts("VideoToolbox lifecycle: hardware AV1 unavailable; AV1 case skipped");
-    printf("invalidated VideoToolbox sessions: H.264 %d/3 pictures, AV1 %d/3 pictures\n", avc_pictures, av1_pictures);
+        printf("invalidated VideoToolbox sessions: AV1 %d/3 pictures\n", av1_pictures);
+        assert(av1_pictures == 3);
+    }
     fflush(stdout);
-    assert(avc_pictures == 3 && av1_pictures == 3);
 }
 static uint64_t vt_hash(const uint8_t *p, size_t stride, int width, int height) {
     uint64_t hash = 0;
     for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) hash = hash * 31 + p[(size_t)y * stride + x];
     return hash;
 }
-static void vt_reference_recovery(void) {
+static void vt_reference_recovery(bool test_av1) {
     uint64_t expected_avc[36], expected_av1[36];
     for (int loss = -1; loss < 14; loss++) {
         mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts; int got = 0;
@@ -150,7 +169,7 @@ static void vt_reference_recovery(void) {
             got++;
         }
         assert(got == 36); mavc_drop(c); assert(!c->history.count); mavc_free(c);
-        if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (!test_av1) continue;
         mav1 *a = mav1_new(NULL); mav1_picture pic; got = 0;
         for (int loop = 0; loop < 3; loop++) for (int i = 0; i < 12; i++) {
             if ((loss < 12 ? loss : 7) == i && a->vs) {
@@ -178,9 +197,9 @@ static void vt_av1_random_access(void) {
     a.seq[2] |= 8;   // reduced_still_picture_header implies a shown key frame
     assert(av1_key(&a, hidden, sizeof hidden));
 }
-static void vt_worker_lifecycle(void) {
+static void vt_worker_lifecycle(bool test_av1) {
     for (int codec = CV_H264; codec <= CV_AV1; codec++) {
-        if (codec == CV_AV1 && !VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) continue;
+        if (codec == CV_AV1 && !test_av1) continue;
         for (int action = 0; action < 4; action++) {
             _Alignas(16) uint8_t dec[0x400] = {0}; uint64_t id;
             const uint8_t *packet = codec == CV_H264 ? h264 : av1;
@@ -189,6 +208,7 @@ static void vt_worker_lifecycle(void) {
             cv_dec *d = cv_of(dec); vt_callback_avc = d->avc; vt_callback_av1 = d->av1;
             assert(!cv_dec_submit(&id, dec, packet, size, 1000, false)); settle(dec);
             assert(d->nheld == 1 && d->held_ts[0] == 1000);
+            if (codec == CV_AV1) assert(d->av1->vs && !d->av1->soft);
             atomic_store(&vt_callback_error, 1);
             atomic_store(&vt_refused, 0); atomic_store(&vt_refuse_create, 1);
             assert(!cv_dec_submit(&id, dec, packet, size, 2000, false));
@@ -213,10 +233,12 @@ static void vt_worker_lifecycle(void) {
     puts("VideoToolbox workers: callback invalidation, inactive session refusal, resume, Flush, Stop and Finalize");
 }
 int main(void) {
-    vt_session_lifecycle();
-    vt_reference_recovery();
+    bool test_av1 = vt_av1_available();
+    if (!test_av1) puts("VideoToolbox lifecycle: hardware AV1 unavailable; AV1 lifecycle cases skipped");
+    vt_session_lifecycle(test_av1);
+    vt_reference_recovery(test_av1);
     vt_av1_random_access();
-    vt_worker_lifecycle();
+    vt_worker_lifecycle(test_av1);
     _Alignas(16) static uint8_t dec[0x400], pool[3][0x40], spt[0x80], mem[16 * 16 * 4];
     uint64_t size, align, id; uint32_t idx; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts; bool eos;
 
@@ -230,18 +252,17 @@ int main(void) {
     cv_dec *d = cv_of(dec); assert(d && d->vpx_ok);
     void *ev = NULL; assert(!h_cv_vp9event(&ev, dec) && ev == dec + CV_EVENT_OFF && g_ev[ev_slot(ev)].bound && ev_set(ev));
 
-    // Registering makes a buffer acquirable at once, its sync handle signalled; an empty queue answers 3604
+    // Registering gives each buffer to the decoder and makes it acquirable at once, its sync handle unsignalled until a picture lands; an empty queue answers 3604
     for (uint32_t i = 0; i < 2; i++) assert(!h_cv_vp9reg(dec, i, pool[i], 0));
-    for (uint32_t i = 0; i < 2; i++) { assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == i && sync.magic == CV_SYNC && sync.gen == 0 && h_gs_trywait(&sync)); }
+    cv_sync sync0, sync1;
+    assert(!h_cv_vp9acq(&idx, &sync0, dec) && idx == 0 && sync0.magic == CV_SYNC && sync0.gen == 1 && !h_gs_trywait(&sync0));
+    assert(!h_cv_vp9acq(&idx, &sync1, dec) && idx == 1 && sync1.magic == CV_SYNC && sync1.gen == 1 && !h_gs_trywait(&sync1));
     assert(h_cv_vp9acq(&idx, &sync, dec) == CV_NONE);
     assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
 
-    // Released: acquirable again with a new handle that signals once a picture is in the buffer; the picture's properties and its NV12 / RGBA readback
-    h_cv_vp9rel(dec, 0, sync);
-    assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && sync.gen == 1 && !h_gs_trywait(&sync));
-    assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
+    // First picture lands directly in registered buffer 0 without a Release; its properties and NV12 / RGBA readback
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000, false) && id == 1);
-    settle(dec); assert(h_gs_trywait(&sync));
+    settle(dec); assert(h_gs_trywait(&sync0) && !h_gs_trywait(&sync1));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 1000 && !eos);
     uint32_t cs = 7; w = h = 0;   // SDK 19's form: the same properties, and colour space 0
     assert(!h_cv_vp9props19(&w, &h, &cw, &ch, &cs, &ts, &eos, dec, 0) && w == 16 && h == 16 && ts == 1000 && !eos && cs == 0);
@@ -253,6 +274,15 @@ int main(void) {
     assert(!h_cv_nv12(pool[0], 0, 0, 0, 16, 16, y, 16, 256, uv, 16, 128) && !memcmp(y, nv12, 256) && !memcmp(uv, nv12 + 256, 128));
     assert(!h_cv_rgba(pool[0], 0, 0, 0, 16, 16, rgba, 64, sizeof rgba));
     for (int i = 0; i < 1024; i += 4) assert(rgba[i] >= 250 && rgba[i + 1] <= 5 && rgba[i + 2] <= 5 && rgba[i + 3] == 255);
+    // Second picture fills registered buffer 1; then Release returns buffer 0 with a new handle (gen 2) that signals on the next picture
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1001, false) && id == 2);
+    settle(dec); assert(h_gs_trywait(&sync1) && !d->pcount);
+    h_cv_vp9rel(dec, 0, sync0);
+    assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && sync.gen == 2 && !h_gs_trywait(&sync));
+    assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1002, false) && id == 3);
+    settle(dec); assert(h_gs_trywait(&sync) && !d->pcount);
+    assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && ts == 1002);
 
     // No released buffer: pictures wait; the event goes down at CV_READY, with room left for a client's signal in flight, and packets are refused (3603) at CV_HOLD.
     // A packet not yet decoded counts as the picture it will give: the event and the refusal are the same whether the decoder's thread has got to it or not
@@ -279,14 +309,14 @@ int main(void) {
     settle(dec); assert(d->nheld == CV_READY - 1 && ev_set(ev));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000 + CV_HOLD - CV_READY + 1);
 
-    // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer is signalled at once
+    // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer (including a buffer registered while pictures wait) is signalled at once
     assert(!h_spt_create(spt) && g_ev[ev_slot(spt)].bound);
     h_cv_vp9rel(dec, 0, sync);   // buffer 0 takes the next waiting picture at once
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0);
     assert(!h_spt_request(spt, &sync) && ev_set(spt) && !SPT(spt)->armed);
-    assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2);
-    for (int i = 0; i < 2; i++) { h_cv_vp9rel(dec, (uint32_t)i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec)); }   // the last two waiting pictures go out
-    h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && !h_gs_trywait(&sync));
+    assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && sync.gen == 1 && h_gs_trywait(&sync));   // takes a waiting picture at register
+    h_cv_vp9rel(dec, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && !d->nheld);   // the last waiting picture goes out
+    h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && sync.gen == 2 && !h_gs_trywait(&sync));
     assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed);
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false));
     settle(dec); assert(ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
@@ -335,6 +365,33 @@ int main(void) {
     for (int i = 0; i < 6; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 7000 + i, false));
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     for (int i = 0; i < 3; i += 2) { h_cv_poolfin(pool[i]); assert(!pool_of(pool[i])); }
+    // NintendoSDK_movie's startup sequence (SDK 19-22): RegisterVideoFrame calls Register -> Acquire -> RequestSyncPointEvent and returns; Start runs immediately without a Release.
+    // The event must stay armed until a real picture lands (never fire early and race Start), and releasing an unfilled buffer must not duplicate its pending entry
+    {   _Alignas(16) static uint8_t dk[0x400], pk[0x40], mk[16 * 16 * 4], ek[0x80];
+        assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(pk, mk, size, &pref, 1, 0));
+        assert(!h_cv_vp9init2(dk, 0x10000, 16, 16, 1, 1, 3, NULL, 0)); cv_dec *k = cv_of(dk);
+        assert(!h_spt_create(ek));
+        assert(!h_cv_vp9reg(dk, 0, pk, 0) && k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 1 && !h_gs_trywait(&sync));
+        assert(!h_spt_request(ek, &sync) && !ev_set(ek) && SPT(ek)->armed);
+        assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) == CV_NONE);
+        assert(!h_cv_vp9start(dk) && !ev_set(ek) && SPT(ek)->armed);
+        assert(!h_cv_vp9submit(&id, dk, vp9, sizeof vp9, 5000, false));
+        settle(dk); assert(ev_set(ek) && !SPT(ek)->armed && !ev_by_me(ek) && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) && w == 16 && h == 16 && ts == 5000 && !eos && !k->pcount);
+        // Release -> Acquire -> RequestSyncPointEvent -> Submit for the next picture
+        h_cv_vp9rel(dk, 0, sync); assert(k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 2 && !h_gs_trywait(&sync));
+        assert(!h_spt_request(ek, &sync) && !ev_set(ek) && SPT(ek)->armed);
+        // Releasing an unfilled buffer advances its generation without duplicating it in pend[], and Unregister -> Register keeps generation monotonic
+        h_cv_vp9rel(dk, 0, sync); assert(k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 3 && !h_gs_trywait(&sync));
+        assert(!h_spt_request(ek, &sync) && !ev_set(ek) && SPT(ek)->armed);
+        assert(!h_cv_vp9submit(&id, dk, vp9, sizeof vp9, 6000, false));
+        settle(dk); assert(ev_set(ek) && !SPT(ek)->armed && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) && ts == 6000);
+        assert(!h_cv_vp9unreg(dk, 0) && !h_cv_vp9reg(dk, 0, pk, 0) && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 5 && !h_gs_trywait(&sync));
+        h_spt_destroy(ek);
+        assert(!h_cv_vp9fin(dk));
+        h_cv_poolfin(pk);
+    }
     // VP8 (libvpx) and H.264 (VideoToolbox) take the same protocol: one released buffer, one key frame, its picture read back red
     {   _Alignas(16) static uint8_t d8[0x400], p8[0x40], m8[16 * 16 * 4];
         assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(p8, m8, size, &pref, 1, 0));

@@ -11,7 +11,6 @@ Control version 1.2.19 (`v1638400`; the game displays 1.2.18, build 376452), SDK
 | `sys_resource 0` | the NPDM declares no system resource, so the SDK does not use virtual address memory |
 | `app_pool 0xCD500000` | application-pool budget; the SDK requests a `0xc9400000`-byte heap |
 | `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000` | 4 GiB layout with a 3.5 GiB heap partition, 256 MiB alias region and 256 MiB stacks |
-| [`dual_want.tsv`](dual_want.tsv) | three observed pixel shaders write the secondary blend source; enables existing dual-source entries |
 
 No game-code patches, fixed-address gates, host game branches or new profile switches. Shader-container support is bound to the CIVBSF format revision; the text and colour fixes implement general descriptor semantics.
 

@@ -2,12 +2,17 @@
 """Ampere ALU instructions through the offline translator (dmsh_xlate, arch sm86), on registers the translator cannot fold, their result stored to shared memory so
 that it is kept: BREV, and HADD2 / HMUL2 with an immediate (test_dmsh_ampere_mem.py's Pokopia class has those two on constants, a negative immediate's sign, F2FP.MERGE_C,
 F2I from a half, UP2UR, MEMBAR and ERRBAR). Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import re, sys, unittest
+import re, shutil, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_dmsh_ampere_mem import EXIT, Translated, inst
 
 STORE = (0x000fe8000000c800, 0x0000080609008388)   # STS.U32 [R9 * 16 + 8], R6 (Mario Kart World f94552a2a2bff505): the sink, R9 the thread index
+
+
+# The 64-bit address of storage buffer 0 in R8:R9, as agl's analysis shaders and Bananza's muck normal pass take theirs
+ULDC_SB0 = (0x000fe20000000a00, 0x0000040000047ab9)   # ULDC.64 UR4, c[0][0x10]: storage entry 0 of an NVN2 compute c0 with one storage slot
+MOV_R8_UR4, MOV_R9_UR5 = (0x000fe20008000000, 0x0000000400087c02), (0x000fe20008000000, 0x0000000500097c02)
 
 
 def waiting(i): return (i[0] | 0x3f << 52, i[1])   # the instruction waits on every scoreboard (control bits 116..121): it reads what an S2R before it wrote
@@ -27,8 +32,6 @@ class FloatRed(Translated):
     reads back from those buffers was several times too bright. A compare-and-swap loop on the word. On a storage buffer, dmsh_rewrite.float_add_msl makes the loop one native
     atomic add: test_storage_add_is_one_native_add fails when the translator or spirv-cross changes the loop's shape so that the rewrite no longer finds it (PR #1930)"""
     RED = (0x000fe20000000000 | 3 << 9, 0x0000000608ff098e)   # RED.F32.FTZ.RN [R8], R6: (control and type, opcode and registers)
-    ULDC_SB0 = (0x000fe20000000a00, 0x0000040000047ab9)   # ULDC.64 UR4, c[0][0x10]: storage entry 0 of an NVN2 compute c0 with one storage slot
-    MOV_R8_UR4, MOV_R9_UR5 = (0x000fe20008000000, 0x0000000400087c02), (0x000fe20008000000, 0x0000000500097c02)
     RED_E = (RED[0] | 1 << 8, RED[1])   # RED.E.F32.FTZ.RN [R8.64], R6: the 64-bit address of that storage buffer, as agl's analysis shaders add into theirs
 
     def test_adds_in_a_loop(self):
@@ -38,7 +41,7 @@ class FloatRed(Translated):
 
     def test_storage_add_is_one_native_add(self):
         import dmsh_rewrite
-        code = b''.join(inst(*i) for i in (self.ULDC_SB0, self.MOV_R8_UR4, self.MOV_R9_UR5)) + b''.join(inst(*waiting(i)) for i in (s2r_tid(6), self.RED_E)) + inst(*EXIT)
+        code = b''.join(inst(*i) for i in (ULDC_SB0, MOV_R8_UR4, MOV_R9_UR5)) + b''.join(inst(*waiting(i)) for i in (s2r_tid(6), self.RED_E)) + inst(*EXIT)
         for reduced in (True, False):   # dmsh_build's default (an add) and XLATE_REDUCED=0 (spvFAdd)
             with self.subTest(reduced=reduced):
                 msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0], reduced=reduced)
@@ -46,6 +49,38 @@ class FloatRed(Translated):
                 out = dmsh_rewrite.float_add_msl(msl)
                 self.assertRegex(out, r'atomic_fetch_add_explicit\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\], _\d+, memory_order_relaxed\);')
                 self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
+
+
+class HalfRed(Translated):
+    """RED.E.ADD.F16x2.FTZ.RN (0x98e, type 4 at bits 73..75): Donkey Kong Bananza's muck normal pass (be71d8f78b52e62f, e5f7ed151822e560) adds each face normal into its vertices'
+    half4 normal, two halves per word. Dropped with a log line, the normals stayed the zeros the mesh pass writes, and normalizing them made NaN: black blots in the scene"""
+    RED = (FloatRed.RED[0] & ~(7 << 9) | 4 << 9, FloatRed.RED[1])   # RED.F16x2.FTZ.RN [R8], R6
+
+    RED_E_PT = (RED[0] | 1 << 8, RED[1] | 7 << 12)   # RED.E.F16x2.FTZ.RN [R8.64], R6, unpredicated (PT)
+
+    def test_adds_in_a_loop(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(6), s2r_tid(8), s2r_tid(9), self.RED)) + inst(*EXIT))
+        self.assertNotIn('Invalid reduction type', ' '.join(self.res.get('notes', [])))
+        self.assertIn('atomic_compare_exchange_weak_explicit', msl)
+
+    LDG_R6 = (0x000fe2200c1e1900, 0x0000043f08067981)   # LDG.E R6, [R8.64 + 4]: the value from the word after the sum, so the GPU unpacks it (an immediate would be folded)
+
+    def on_gpu(self, value, word, threads):
+        """The translator's own kernel on this Mac's GPU: threads each add the half pair value (read from storage word 1) into storage word 0, which starts at word; word 0 after"""
+        import metal_kernel
+        code = b''.join(inst(*i) for i in (ULDC_SB0, MOV_R8_UR4, MOV_R9_UR5, self.LDG_R6)) + inst(*waiting(self.RED_E_PT)) + inst(*EXIT)
+        msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0])
+        self.assertNotIn('if (false)', msl)
+        return metal_kernel.run(msl, 'main0', [word, value], threads, argument_buffer=True)[0]
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs Metal')
+    def test_sums_on_gpu(self):   # 1,024 threads each add (1.0, 0.5): exactly (1024.0, 512.0)
+        self.assertEqual(self.on_gpu(0x38003c00, 0, 1024), 0x60006400)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs Metal')
+    def test_rounds_to_nearest_even_on_gpu(self):
+        # (2048.0, 2048.0) + (3.0, 1.5): 2051 is a tie between 2050 and 2052, the even one is 2052 (0x6802); 2049.5 rounds to 2050 (0x6801). Toward zero would give 2050 and 2048
+        self.assertEqual(self.on_gpu(0x3e004200, 0x68006800, 1), 0x68016802)
 
 
 class DeadChannel(Translated):

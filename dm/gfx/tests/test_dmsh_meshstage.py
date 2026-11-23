@@ -35,6 +35,16 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     _23[%d] = (*spvDescriptorSet0.cp_c3)._m0[0];
 }
 """
+# A payload-spilled mesh shader's kernel: the translator's dm_stage_in follows the stage memory, and the body reads it (ISBERD 0x30 / 0x34 / 0x38)
+KERNEL_IN = HEAD + """
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    threadgroup spvUnsafeArray<uint, %d> _23;
+    threadgroup spvUnsafeArray<uint, %d> _24;
+    if (gl_LocalInvocationID.x != 0u) return;
+    _23[%d] = _24[int(gl_LocalInvocationID.x) + 1] + _24[0];
+}
+"""
 # The same with a byte store helper, as dmsh_build.py shared_store_msl leaves it, called on the stage memory
 STORE = KERNEL.replace('kernel void', 'void dmsh_shared_store8_0(thread const int& _9, thread const int& _10, threadgroup spvUnsafeArray<uint, %d>& _23)\n{\n    ((threadgroup uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));\n}\n\nkernel void', 1) \
     .replace('    if (gl_', '    int _11 = 3; int _12 = 7; dmsh_shared_store8_0(_11, _12, _23);\n    if (gl_', 1)
@@ -175,9 +185,19 @@ class Facts(unittest.TestCase):
         self.assertEqual((i['kind'], i['threads'], i['payload'], i['task'], i['max_v'], i['max_p'], i['primitive']), ('ms', 8, 1408, True, 32, 16, [(0, 0)]))
         self.assertEqual(ms.info(control(7, max_v=128, max_p=64), area)['primitive'], [])
 
-    def test_task_memory(self):   # the payload's bytes hold the mesh count at +4, as the game's stores do
+    def test_task_memory(self):   # the payload's bytes hold the mesh count at +4, as the game's stores do. A task reads no input: its outputs follow word 0's block
         lay, size = ms.memory(ms.info(control(6), bytes(0x80)))
-        self.assertEqual(lay, [0, 0x10, 0x110, 0x210]); self.assertEqual(size, 0x210)
+        self.assertEqual(lay, [0, 0x10, 0x10, 0x110]); self.assertEqual(size, 0x110)
+
+    def test_payload_spill_memory(self):   # Nintendo Switch Sports Resort's 07abb052a670b8ba / d60092d7424cb5b4: 27,904 payload bytes, past Metal's 16 KB
+        t = ms.info(control(6, payload=27904), bytes(0x80))
+        self.assertTrue(ms.payload_spill(t)); self.assertFalse(ms.payload_spill(ms.info(control(6, payload=abi.MESH_PAYLOAD_MAX), bytes(0x80))))
+        self.assertEqual(ms.memory(t), ([0, 0x10, 0x10, 0x10 + 27904], 0x10 + 27904))
+        m = ms.info(control(7, threads=26, payload=27904, task=1, max_v=64, max_p=126), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(m)
+        self.assertEqual(lay[2], 0x10); self.assertEqual(lay[4:], [lay[3] - lay[2], 6, 64 * 24])   # stage[4..6] vertex records stay intact; the input is not in stage memory
+        self.assertLessEqual(size, ms.METAL_MAX_SHARED)
+        self.assertEqual(ms.payload_words(m), 6976)
 
     def test_mesh_memory(self):   # 128 vertices: four blocks of 32. Six components a block, 0x80 bytes each; the primitive bytes follow, 3 a triangle after the count's word
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
@@ -248,9 +268,16 @@ class Facts(unittest.TestCase):
 
 
 class Stage(unittest.TestCase):
-    def task(self):
-        i = ms.info(control(6), bytes(0x80))
+    def task(self, payload=256):
+        i = ms.info(control(6, payload=payload), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
+
+    def spill_mesh(self, with_input=True, threads=26, max_v=64, max_p=126, payload=27904, in_words=None):
+        i = ms.info(control(7, threads=threads, payload=payload, task=1, max_v=max_v, max_p=max_p), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(i)
+        iw = ms.payload_words(i) if in_words is None else in_words
+        src = KERNEL_IN % (size // 4, iw, lay[3] // 4) if with_input else KERNEL % (size // 4, lay[3] // 4)
+        return ms.to_stage(src, i), i
 
     def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0, reads=None):
         area = sph(pos, b'\x30') + (sph(0, b'\x01') if primitive else b'')
@@ -468,10 +495,54 @@ class Stage(unittest.TestCase):
             self.assertNotIn('spill', i); self.assertNotIn('dm_scr', src); self.assertRegex(src, r'\n    threadgroup spvUnsafeArray<uint, \d+> _23;\n')
             self.assertNotIn('mem_device', src); self.assertNotIn('dm_tag', src)
 
+    def test_payload_spill_task_stores_in_slice_and_fences(self):
+        src, i = self.task(payload=27904); out = ms.memory(i)[0][2] // 4
+        self.assertIn(f'device uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]', src)
+        self.assertIn('struct dm_payload_t { ulong off; };', src)
+        self.assertIn('if (dm_tg >= dm_spill[0])', src)
+        self.assertIn('ulong dm_off = 4ul + ulong(dm_tg) * 6976ul;', src)
+        self.assertIn('device uint* dm_slice = dm_spill + dm_off;', src)
+        self.assertIn(f'dm_slice[i] = _23[{out}u + i];', src)
+        self.assertIn('atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);', src)
+        self.assertIn('dm_payload.off = dm_off;', src)
+        self.assertNotIn('dm_payload.w', src)
+
+    def test_payload_spill_mesh_reads_from_slice(self):
+        src, i = self.spill_mesh()
+        self.assertNotIn('threadgroup spvUnsafeArray<uint, 6976> _24;', src)
+        self.assertIn('dm_in_t _24)', src)
+        self.assertIn('atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);', src)
+        self.assertIn('dm_in_t dm_in = { dm_spill + dm_payload.off, dm_tg };', src)
+        self.assertIn(', _23, dm_in);', src)
+        self.assertIn(f'const device uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]', src)
+        self.assertNotIn('spill', i)
+
+    def test_payload_spill_mesh_without_input_reads_links(self):   # a mesh shader that reads no ISBERD 0x30..0x38 still takes dm_payload_t { ulong off; } without needing dm_spill
+        src, _ = self.spill_mesh(with_input=False)
+        self.assertIn('struct dm_payload_t { ulong off; };', src)
+        self.assertNotIn('dm_in_t', src)
+        self.assertNotIn('dm_spill', src)
+
+    def test_payload_spill_mesh_coexists_with_mesh_scratch(self):   # 32-thread mesh with payload > 16 KB and stage array >= 6 KB gets both mesh_spill and payload_spill cleanly
+        src, i = self.spill_mesh(threads=32, max_v=256, max_p=256)
+        self.assertEqual(i['spill'], 1)
+        self.assertIn('device spvUnsafeArray<uint,', src)
+        self.assertIn('dm_in_t _24)', src)
+        self.assertIn(f'const device uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]', src)
+        self.assertIn(f'device uchar* dm_scr [[buffer({abi.MESH_SCRATCH_SLOT})]]', src)
+
+    def test_payload_spill_mesh_bad_stage_in_refused(self):
+        with self.assertRaises(ValueError): self.spill_mesh(in_words=1024)
+        i = ms.info(control(7, threads=26, payload=27904, task=1, max_v=64, max_p=126), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(i)
+        src = (KERNEL_IN % (size // 4, ms.payload_words(i), lay[3] // 4)).replace('_24[0]', 'helper(_24)')
+        with self.assertRaises(ValueError): ms.to_stage(src, i)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
         i = ms.info(control(7, payload=128, max_v=128, max_p=126, prim_at=0x80), sph(0xf0) + sph(0x01, b'\x01'))   # the primitive id and an attribute
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word(), ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i),
+        cases = [self.task()[0], self.task(payload=27904)[0], self.spill_mesh()[0], self.spill_mesh(with_input=False)[0], self.spill_mesh(threads=32, max_v=256, max_p=256)[0],
+                 self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word(), ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i),
                  self.big()[0], self.big(task=True)[0], self.big(store=True)[0]]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
@@ -630,6 +701,98 @@ class OnGpu(unittest.TestCase):
             r = subprocess.run([str(d / 'run'), str(d / 's.metallib')], capture_output=True, text=True)
             print(r.stdout, end='')
             if r.returncode in (2, 3): self.skipTest(r.stdout.strip().splitlines()[-1])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_spilled_payload_object_to_mesh_on_gpu(self):
+        # End-to-end GPU check of >16 KB task-to-mesh payload spill: 64 object groups each write 27,904 bytes (6,976 words) of unique data and launch 4 mesh groups (26 threads);
+        # every mesh group verifies word 0 (its mesh workgroup index) and all 6,974 payload words (words 2..6975), then a second draw with cap=16 verifies groups past dm_spill[0] launch nothing
+        pay_bytes, pay_words = 27904, 6976
+        ti = ms.info(control(6, threads=32, payload=pay_bytes), bytes(0x80))
+        tlay, tsize = ms.memory(ti)
+        t_out = tlay[2] // 4
+        t_kernel = HEAD + f"""
+kernel void main0(uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{{
+    threadgroup spvUnsafeArray<uint, {tsize // 4}> _23;
+    uint g = _23[0], lane = gl_LocalInvocationID.x;
+    if (lane == 0u) _23[{t_out + 1}u] = 4u;
+    for (uint k = 2u + lane; k < {pay_words}u; k += 32u) _23[{t_out}u + k] = ((g + 1u) * 0x9E3779B1u) ^ (k * 0x85EBCA6Bu);
+}}
+"""
+        mi = ms.info(control(7, threads=26, payload=pay_bytes, task=1, max_v=64, max_p=126), sph(0xf0, b'\x30'))
+        mlay, msize = ms.memory(mi)
+        m_kernel = HEAD + f"""
+kernel void main0(device atomic_uint* dm_rep [[buffer(1)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{{
+    threadgroup spvUnsafeArray<uint, {msize // 4}> _23;
+    threadgroup spvUnsafeArray<uint, {pay_words}> _24;
+    uint lane = gl_LocalInvocationID.x, mg = _23[0], w0 = _24[0], tag = _24[2] ^ (2u * 0x85EBCA6Bu), bad = 0u;
+    if (w0 != mg) bad = 1u;
+    for (uint k = 2u + lane; k < {pay_words}u; k += 26u) if (_24[k] != (tag ^ (k * 0x85EBCA6Bu))) bad = 1u;
+    if (bad != 0u) atomic_fetch_add_explicit(dm_rep, 1u, memory_order_relaxed);
+    if (lane == 0u) {{ atomic_fetch_add_explicit(dm_rep + 1, 1u, memory_order_relaxed); atomic_fetch_add_explicit(dm_rep + 2, tag, memory_order_relaxed); }}
+}}
+"""
+        t_src = ms.to_stage(t_kernel, ti)
+        m_src = ms.to_stage(m_kernel, mi) + '\nfragment float4 dm_fs() { return float4(0.0); }\n'
+        runner = r"""#import <Metal/Metal.h>
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) { @autoreleasepool {
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    if (!dev) { printf("no Metal device\n"); return 2; }
+    NSError *err = nil;
+    id<MTLLibrary> tl = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
+    id<MTLLibrary> ml = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&err];
+    if (!tl || !ml) { printf("%s\n", err.localizedDescription.UTF8String); return 1; }
+    MTLMeshRenderPipelineDescriptor *pd = [MTLMeshRenderPipelineDescriptor new];
+    pd.objectFunction = [tl newFunctionWithName:@"main0"]; pd.meshFunction = [ml newFunctionWithName:@"main0_z"]; pd.fragmentFunction = [ml newFunctionWithName:@"dm_fs"];
+    pd.payloadMemoryLength = 16; pd.maxTotalThreadsPerObjectThreadgroup = 32; pd.maxTotalThreadsPerMeshThreadgroup = 26;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithMeshDescriptor:pd options:0 reflection:nil error:&err];
+    if (!ps) { printf("%s\n", err.localizedDescription.UTF8String); return 2; }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; id<MTLTexture> tgt = [dev newTextureWithDescriptor:td];
+    id<MTLBuffer> spill = [dev newBufferWithLength:16 + 64 * PAY_BYTES options:MTLResourceStorageModeShared];
+    id<MTLBuffer> rep = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    uint32_t rec[2] = {64, 10};
+    id<MTLBuffer> draw = [dev newBufferWithBytes:rec length:sizeof rec options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> q = [dev newCommandQueue];
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t cap = pass == 0 ? 64u : 16u;
+        ((uint32_t *)spill.contents)[0] = cap;
+        memset(rep.contents, 0, 16);
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = tgt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+        [en setRenderPipelineState:ps];
+        [en setObjectBuffer:draw offset:0 atIndex:DRAW_SLOT];
+        [en setObjectBuffer:spill offset:0 atIndex:SPILL_SLOT];
+        [en setMeshBuffer:rep offset:0 atIndex:1];
+        [en setMeshBuffer:spill offset:0 atIndex:SPILL_SLOT];
+        [en drawMeshThreadgroups:MTLSizeMake(64, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(32, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(26, 1, 1)];
+        [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        if (cb.error) { printf("%s\n", cb.error.localizedDescription.UTF8String); return 1; }
+        const uint32_t *r = rep.contents;
+        uint32_t want_sum = 0; for (uint32_t g = 0; g < cap; g++) want_sum += 4u * ((10u + g + 1u) * 0x9E3779B1u);
+        printf("pass %d (cap=%u): bad=%u ran=%u sum=%u want=%u\n", pass, cap, r[0], r[1], r[2], want_sum);
+        if (r[0] != 0 || r[1] != cap * 4u || r[2] != want_sum) return 1;
+    }
+    return 0; } }
+"""
+        defs = dict(PAY_BYTES=pay_bytes, DRAW_SLOT=abi.MESH_DRAW_SLOT, SPILL_SLOT=abi.MESH_SPILL_SLOT)
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 't.metal').write_text(t_src); (d / 'm.metal').write_text(m_src)
+            for name in ('t', 'm'):
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(d / f'{name}.metal'), '-o', str(d / f'{name}.air')], check=True)
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / f'{name}.air'), '-o', str(d / f'{name}.metallib')], check=True)
+            (d / 'run.m').write_text(''.join(f'#define {k} {v}\n' for k, v in defs.items()) + runner)
+            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+            r = subprocess.run([str(d / 'run'), str(d / 't.metallib'), str(d / 'm.metallib')], capture_output=True, text=True)
+            print(r.stdout, end='')
+            if r.returncode == 2: self.skipTest(r.stdout.strip().splitlines()[-1])
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 

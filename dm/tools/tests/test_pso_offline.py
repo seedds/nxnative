@@ -82,6 +82,7 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.constants(p), {'main0': ('dm_border_off',), 'main0_u': ('dm_border_off', 'spvLinearTextureAlignmentOverride'), 'vs': ()})
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
+            self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, False))   # dmsh_abi.h DMSH_BLEND_OFF_FC: false in the pair archive so hybrid stand-ins serve every blend state
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -129,6 +130,34 @@ class Plan(unittest.TestCase):
         self.assertEqual(left, {'reflection': 2, 'mesh': 1, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
+
+    def test_vertex_entry_is_the_name_the_reflection_gives_the_library(self):   # nvn_mtl.m side_entry, as shader_load and pre_desc take it
+        own = {'entry': 'main0', 'entry_z': 'main0_z'}
+        self.assertEqual([po.vertex_entry(own, z) for z in (False, True)], ['main0', 'main0_z'])   # no pulling library: the shader's own, in <key>_b
+        named = dict(own, pull={'entry': 'main0_p', 'entry_z': 'main0_zp', 'slot': 16, 'inputs': [0]})
+        self.assertEqual([po.vertex_entry(named, z) for z in (False, True)], ['main0_p', 'main0_zp'])
+        for pull in ({}, {'entry': 'main0'}, {'entry': '', 'entry_z': None}, {'entry_z': 7}):   # names none for the depth mode: the shader's own (today's libraries repeat it)
+            self.assertEqual(po.vertex_entry(dict(own, pull=pull), True), 'main0_z', pull)
+        self.assertEqual(po.vertex_entry(dict(own, pull={'entry_z': 'main0_zp'}), False), 'main0')
+        self.assertEqual(po.vertex_entry(dict(own, pull=True), False), 'main0')   # not a pulling library's record
+        self.assertEqual(po.vertex_entry({'entry': 'main0', 'pull': {'entry': 'main0_p', 'entry_z': 'main0_zp'}}, True), 'main0_p')   # no near = 0 entry of its own: `entry`, as the host
+        self.assertIsNone(po.vertex_entry({}, False))
+
+    def test_a_pulling_library_with_names_of_its_own(self):   # one compile unit holding a shader's entry points and its pulling ones cannot name both main0
+        vz = [('main0', False), ('main0_z', False)]
+        refl = {'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0}]}
+        self.shader('unit', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': [('main0_p', False), ('main0_zp', ('dm_border_off',))]})
+        self.shader('own', dict(refl, pull={'entry': 'main0', 'entry_z': 'main0_z'}), {'_b': vz, '_bp': vz})   # as dmsh_pull.variant names them today
+        self.shader('stale', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': vz})   # names an entry point its library does not hold: no base
+        self.shader('fs', {}, {'_b': [('main0', False)]})
+        pairs = [('unit', 'fs'), ('own', 'fs'), ('stale', 'fs')]
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
+        self.assertEqual(bases, [('unit_bp', 'main0_p', 'fs_b', 'main0'), ('own_bp', 'main0', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, True)
+        self.assertEqual(bases, [('unit_bp', 'main0_zp', 'fs_b', 'main0'), ('own_bp', 'main0_z', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        self.assertEqual(po.cut_entries(self.d, bases), {('unit_bp', 'main0_zp')})   # specialized, and not its library's first function: from a library of its own, under that name
 
     def test_border_constant_is_specialized_as_the_host_does(self):   # pre_fn: dm_border_off true, every other constant at its default; a pair with another constant stays on the device
         vz = [('main0', False), ('main0_z', False)]
@@ -493,7 +522,9 @@ class Build(BuildCase):
         profiles = ('01008CF01BAAC000', '010089C01E9CA000', '010056B015FE8000', '01007BB017812000',
                     '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000',
                     '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000',
-                    '01006A800016E000')   # Super Smash Bros. Ultimate: a player's start log (its note)
+                    '01006A800016E000',  # Super Smash Bros. Ultimate: a player's start log (its note)
+                    '0400E88025B1A000',  # Star Fox: a Mac app's start log (its note)
+                    '01005CA01580E000')  # Persona 5 Royal: an iPhone app's start log (its note)
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')
@@ -965,7 +996,7 @@ class Prewarm(BuildCase):
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
 
-    def step(self, python, host_game=None, make_exit=0, **extra):
+    def step(self, python, host_game=None, make_exit=0, selected_python=None, **extra):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
         i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
         j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
@@ -975,7 +1006,12 @@ class IpaFallback(unittest.TestCase):
             if host_game:
                 host = Path(d) / f'dm/host/gen/{host_game}/dmhost'; host.parent.mkdir(parents=True); host.write_text('#!/bin/sh\nexit 0\n'); host.chmod(0o755)
                 make = Path(d) / 'bin/make'; make.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$W/make.args"\nexit ' + str(make_exit) + '\n'); make.chmod(0o755)
-            env = dict({k: v for k, v in os.environ.items() if k != 'DM_PSO_HOST'}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            env = dict({k: v for k, v in os.environ.items() if k not in ('DM_PSO_HOST', 'DM_PYTHON')}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            if selected_python is not None:
+                selected = Path(d) / 'selected python'
+                selected.write_text('#!/bin/sh\n' + selected_python)
+                selected.chmod(0o755)
+                env['DM_PYTHON'] = str(selected)
             if host_game: env['DM'] = str(Path(d) / 'dm')
             script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\n[ ! -f "$W/make.args" ] || cat "$W/make.args"\necho went on\n'
             return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
@@ -984,6 +1020,13 @@ class IpaFallback(unittest.TestCase):
         out = self.step('mkdir -p "$W/build/ios/pso/bundle"; echo half; exit 1\n')
         self.assertIn('[RED] pipeline archive: pso_offline.py failed', out); self.assertIn('PSO=[]', out); self.assertNotIn('folder', out); self.assertIn('went on', out)
         self.assertNotIn('FAIL', out)
+
+    def test_archive_uses_the_packagers_python(self):
+        out = self.step('echo system Python; exit 1\n',
+                        selected_python='echo selected Python; mkdir -p "$W/build/ios/pso/bundle"\n')
+        self.assertIn('selected Python', out)
+        self.assertIn('folder', out)
+        self.assertNotIn('system Python', out)
 
     def test_prewarm_host(self):   # DM_PSO_HOST names the Mac host the prewarm files are made with; none, or no host of this game in the tree: none, with a line saying how
         out = self.step('echo "ARGS $*"; exit 0\n', DM_PSO_HOST='/x/dmhost')

@@ -30,6 +30,22 @@ static const struct { int on, src, dst, eq; char a0, a1; uint32_t word; } rows[]
 };
 enum { NROWS = sizeof rows / sizeof *rows };
 static blend_st state(int r) { blend_st b = {.target = 0, .src_rgb = (uint64_t)rows[r].src, .dst_rgb = (uint64_t)rows[r].dst, .src_a = O, .dst_a = Z, .eq_rgb = (uint64_t)rows[r].eq, .eq_a = ADD}; return b; }
+
+static void replace_float_case(void) {
+    pso_key key = {.blend_en = 1, .chmask = 0xf};
+    key.cfmt[0] = MTLPixelFormatRG11B10Float;
+    key.blend[0] = state(0);
+    CHECK(!pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.cfmt[0] = MTLPixelFormatRGBA16Float;
+    CHECK(!pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.blend[0].dst_a = O;
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.blend[0] = state(2);
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+    key.cfmt[0] = MTLPixelFormatRGBA8Unorm;
+    key.blend[0] = state(0);
+    CHECK(pso_desc(&key, nil, nil, nil, 0).colorAttachments[0].blendingEnabled);
+}
 // A merged pass's draw (g_pso_lmap, the map from the physical attachments to the shader's outputs; g_pso_fsfn, the fragment that writes each output to its attachment), as draw has it
 // for a pass that reads its targets from the tile: the words it binds are the state's under the map, as its pipeline's blending is. The shader's output 0 (the mist's SRC_ALPHA /
 // ONE_MINUS_SRC_ALPHA) goes to physical attachment 1, an RGBA16F target, beside an RGBA8 one at attachment 0 that no output reaches. Read without the map, the word is 0 (attachment 0
@@ -42,7 +58,9 @@ static void merged_case(NSString *source, prog_t *program, int on) {
         "    out.m_0 = float4(v, v, v, x < 4u ? 0.0 : 1.0);\n    dm_blend0(out, dm_blend);\n    dm_merged_out r = {};\n    r.m_1 = out.m_0;\n    return r;\n}\n"];
     NSError *error = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:merged options:nil error:&error];
     CHECK(lib != nil); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
-    id<MTLFunction> fn = fn4_note([lib newFunctionWithName:@"main_m"], lib, @"main_m", nil);
+    MTLFunctionConstantValues *mcv = [MTLFunctionConstantValues new]; BOOL no = NO;
+    [mcv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+    id<MTLFunction> fn = fn_spec(lib, @"main_m", mcv, nil);   // as shader_load: a function with dm_blend_off is specialized with false
     CHECK(fn != nil); if (!fn) return;
     static tex_t unused = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98202}, target = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98203};
     unused.d = (nvn_texdesc){.width = 8, .height = 1, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8};
@@ -88,6 +106,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
     mtl_init(); g_msl_dir = @(argv[1]);
+    replace_float_case();
     int on = bz_on();
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingString:@"/blend.metal"] encoding:NSUTF8StringEncoding error:&error];
     if (!source) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
@@ -96,7 +115,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     NvProg *pr = [NvProg new];
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vblend_b");
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "pblend_b");
+    MTLFunctionConstantValues *pcv = [MTLFunctionConstantValues new]; BOOL pno = NO;
+    [pcv setConstantValue:&pno type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+    ps->fn = fn_spec(lib, @"main0", pcv, nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "pblend_b");   // as shader_load
     CHECK(ps->fn != nil);
     static prog_t program; program.serial = 98200; serial_put(program.serial, pr);
     merged_case(source, &program, on);
@@ -136,6 +157,38 @@ int main(int argc, char **argv) { @autoreleasepool {
         CHECK(bz_word(lmap) == (on ? rows[r].word : 0));
         S.color.blend_en = rows[r].on ? 2 : 0; S.blend[1] = state(r); memset(&S.blend[0], 0, sizeof S.blend[0]);
         CHECK(bz_word(NULL) == (on ? rows[r].word << DMSH_BLEND_ZERO_BITS : 0));   // output 1's bits
+    }
+    // pso_blend_live / pso_off must read k->cfmt (not global g_pass.cfmt), so fsp_plan, fb_tile_ready, warm_task and pso_predict_rest_ never use another pass's formats
+    {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm;
+        pso_key k = {.cfmt = {MTLPixelFormatRGBA16Float}, .blend_en = 0, .chmask = 0xf};
+        CHECK(pso_blend_live(&k, ps, 0) == 0 && pso_off(&k, ps, 0) == (FN_OFF_BORDER | FN_OFF_BLEND));
+        memset(g_pass.cfmt, 0, sizeof g_pass.cfmt);
+        k.blend_en = 1; k.blend[0] = state(1);
+        CHECK(pso_blend_live(&k, ps, 0) == (on ? 1 : 0));
+        CHECK(pso_off(&k, ps, 0) == (on ? FN_OFF_BORDER : (FN_OFF_BORDER | FN_OFF_BLEND)));
+        // Force FN_OFF_BLEND on the mist state with bz_word = 1 bound: dm_blend0 is compiled out, so Apple's blender stores NaN at alpha 0
+        MTLRenderPipelineDescriptor *d = pso_desc(&k, pr->sh[0], ps, nil, 0);
+        NSError *be = nil; id<MTLRenderPipelineState> off_ps = pso_build(d, FN_OFF_BORDER | FN_OFF_BLEND, &be);
+        CHECK(off_ps != nil);
+        if (off_ps) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:8 height:1 mipmapped:NO];
+            td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+            id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+            uint32_t bz[2] = {1u, 0u}; id<MTLBuffer> bb = [g_dev newBufferWithBytes:bz length:16 options:MTLResourceStorageModeShared];
+            CHECK(rt != nil && bb != nil);
+            if (rt && bb) {
+                id<MTLCommandBuffer> cb = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
+                rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(0.25, 0.5, 0.75, 1.0);
+                id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+                [re setRenderPipelineState:off_ps]; [re setFragmentBuffer:bb offset:0 atIndex:DMSH_BLEND_BUFFER];
+                [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [re endEncoding];
+                [cb commit]; [cb waitUntilCompleted];
+                CHECK(cb.status == MTLCommandBufferStatusCompleted);
+                uint16_t raw[32] = {0}; [rt getBytes:raw bytesPerRow:64 fromRegion:MTLRegionMake2D(0, 0, 8, 1) mipmapLevel:0];
+                CHECK(isnan(half(raw[0])) && isnan(half(raw[4])) && isnan(half(raw[8])));   // columns 0-2 (NaN, +Inf, -Inf at alpha 0) bypass dm_blend0 and become NaN
+            }
+        }
     }
     const uint16_t *px = pixels.contents;
     if (getenv("DM_T_DUMP")) for (int r = 0; r < NROWS; r++) { printf("row %d:", r); for (int x = 0; x < 8; x++) printf(" %g", half(px[r * 128 + x * 4])); printf("\n"); }   // the red channel as stored

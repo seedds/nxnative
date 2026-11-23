@@ -19,6 +19,12 @@ threadgroups (nvn_geometry.inc mtk_encode). The task and object functions read t
                 gl_PrimitiveID. PRAGMATA's mesh shaders (5aab38bb5ba67ef7) write a primitive id (0x35 bit 0): without its room it lay over the primitive count byte, and every
                 workgroup drew nothing
   primitives    a mesh shader's primitive bytes: the count at +3 (0x88), index bytes from +4 (0x80, control +0x5f per primitive: 1 point, 2 line, 3 triangle)
+
+A payload past Metal's (abi.MESH_PAYLOAD_MAX, 16 KB) goes through a device buffer the host binds at abi.MESH_SPILL_SLOT in both stages (payload_spill): word 0 its slice count,
+then a slice of the payload's words (rounded to 4) for each of the draw's task workgroups. The task stores its payload in its threadgroup's slice behind a device-scope fence and
+hands its mesh threadgroups the slice's word offset in Metal's payload; the mesh shader's input is then a shared memory of its own (job stage_input_words, the translator's
+dm_stage_in), read from the slice behind a device-scope fence instead of sitting in the mesh shader's stage memory. Nintendo Switch Sports Resort's sea task shaders hand 21-28 KB
+to their mesh shaders. A task's stage memory has no input area either (a task reads no ISBERD 0x30..0x38): its outputs follow word 0
 """
 import re
 import struct
@@ -31,6 +37,16 @@ METAL_MAX_VERTICES, METAL_MAX_PRIMITIVES = 256, 512   # a Metal mesh's limits
 METAL_MAX_GRID = abi.MESH_GRID   # mesh threadgroups an object threadgroup may launch
 METAL_MAX_SHARED = 0x8000   # threadgroup memory of a Metal function
 SPILL_MIN = 6000   # bytes of stage memory from which a mesh shader's array is a device slice (to_stage): measured gain 20-46 % from 6.5 KB, none at 5.3 KB
+
+
+def payload_spill(i):
+    """Whether a task or mesh shader's payload exceeds Metal's object payload limit and goes through a device buffer."""
+    return i['payload'] > abi.MESH_PAYLOAD_MAX
+
+
+def payload_words(i):
+    """Words of one task workgroup's slice in the payload spill buffer (16-byte aligned)."""
+    return (i['payload'] + 15 & ~15) >> 2
 
 
 def is_stage(ctl):
@@ -71,9 +87,10 @@ def info(ctl, area):
 
 def memory(i):
     """(the stage memory's offsets for the translator: the workgroup's number, the input, the outputs, the primitive bytes; the shared memory's bytes)."""
-    out = INPUT + (i['payload'] + 15 & ~15)
     if i['kind'] == 'ts':
+        out = INPUT   # a task shader reads no ISBERD 0x30..0x38 input: its outputs follow word 0's block
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
+    out = INPUT if (i['task'] and payload_spill(i)) else INPUT + (i['payload'] + 15 & ~15)
     # The guest's attribute stores: all vertex blocks of 32 vertices first, then all primitive blocks of 32 primitives, each block its own SPH's components (Ocarina of Time's
     # ee4ef51a4fddc28e, 128 vertices of 6 components and 64 primitives of 4, writes vertex v at (v / 32) * 768 + (v % 32) * 4 and primitive p at 3072 + (p / 32) * 512 + (p % 32) * 4)
     # A primitive block holds the per-primitive SPH's system values first, then its generic attributes (per_primitive)
@@ -121,6 +138,8 @@ def own_shared(code):
 # PRAGMATA's 539 mesh shaders all failed here when the array had to follow the brace
 _KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{[ \t]*\n((?:(?![ \t]*threadgroup\b)[ \t]+[^\n{}]*;[ \t]*\n)*?)'
                      r'[ \t]*threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
+# A payload-spilled mesh shader's input (the translator's dm_stage_in), the threadgroup array that follows the stage memory
+_STAGE_IN = re.compile(r'[ \t]*threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
 _NAME = re.compile(r'(\w+)\s*(?:\[\[.*\]\])?$')
 _THREAD = re.compile(r'(uint3?)\s+(\w+)\s*\[\[(thread_position_in_threadgroup|threadgroup_position_in_grid)\]\]$')
 
@@ -192,17 +211,30 @@ def to_stage(msl, i, reads=None):
     params, local, words, mem = _params(m[1]), m[2].strip(), int(m[3]), m[4]
     names = [_name(p) for p in params]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
+    pspill, slice_w, rest = (kind == 'ts' or i.get('task')) and payload_spill(i), payload_words(i), msl[m.end():]
+    # A payload-spilled mesh shader's input: its dm_stage_in array leaves the body, which reads the task's device slice through dm_in_t instead (word 0 its workgroup's number)
+    sin = None
+    if pspill and kind == 'ms':
+        n = _STAGE_IN.match(rest)
+        if n:
+            if int(n[1]) != slice_w: raise ValueError(f'ms: dm_stage_in has {n[1]} words, expected {slice_w}')
+            sin, rest = n[2], rest[n.end():]
+            if re.search(rf'(?<![.\w]){re.escape(sin)}(?!\s*\[)(?=\s*[,)])', rest):
+                raise ValueError('ms: dm_stage_in is passed to a helper function')
+    body_params = plain + [f'threadgroup spvUnsafeArray<uint, {words}>& {mem}'] + ([f'dm_in_t {sin}'] if sin else [])
     # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs. Its thread variables
     # stay in it: one call a thread, as the kernel ran
-    src = (msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' +
-           (f'    {local}\n' if local else '') + msl[m.end():])
+    in_t = ('struct dm_in_t { const device uint* p; uint w0; uint operator[](int k) const { return k ? p[k] : w0; } uint operator[](uint k) const { return k ? p[k] : w0; } };\n'
+            if sin else '')
+    src = (msl[:m.start()] + in_t + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(body_params)})\n{{\n' +
+           (f'    {local}\n' if local else '') + rest)
     # A mesh shader's stage array of SPILL_MIN bytes or more leaves threadgroup memory: 5-16 KB a 32-thread group limited how many groups an Apple GPU held at once (about 0.09 ms a KB per
     # 16k groups on an M3 Pro), and the body ran 20-46 % faster with the array in a per-group device slice (Ocarina of Time's foliage meshes)
     spill = kind == 'ms' and i['threads'] == 32 and SPILL_MIN <= words * 4 <= abi.MESH_SCRATCH_STRIDE
     if spill:
         i['spill'] = 1   # the build writes the reflection's mesh_spill from it: the host binds the scratch buffer at abi.MESH_SCRATCH_SLOT
         src = _device(src)
-    call = f'dm_stage_body({", ".join(names + [mem])});'
+    call = f'dm_stage_body({", ".join(names + [mem] + (["dm_in"] if sin else []))});'
     # The thread's and the threadgroup's numbers: the kernel's parameters where it has them (an attribute may appear once in a function), else parameters of the wrapper's own
     own = {t[3]: t[2] + ('.x' if t[1] == 'uint3' else '') for t in map(_THREAD.match, params) if t}
     lid, tg = own.get('thread_position_in_threadgroup', 'dm_lid'), own.get('threadgroup_position_in_grid', 'dm_tg')
@@ -211,6 +243,7 @@ def to_stage(msl, i, reads=None):
     thr, pay = i['threads'], i['payload'] + 3 >> 2
     wg, inp, out, prim = lay[0] >> 2, lay[1] >> 2, lay[2] >> 2, lay[3]
     bar = 'mem_flags::mem_device | mem_flags::mem_threadgroup' if spill else 'mem_flags::mem_threadgroup'   # the device slice is ordered by the same barriers
+    fence = '    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n'
     if spill:
         # The slice (dmsh_abi.h DMSH_MESH_SCRATCH_*): lane 0 takes a ticket and claims the slice at ticket & mask when its flag is free or names a submission that is over, compare-and-swap to
         # this group's tag (a 32-thread group is one SIMD-group on Apple GPUs: lane 0's atomics, broadcast); a slice another group owns costs a new ticket. The entry clears the flag after its
@@ -220,7 +253,6 @@ def to_stage(msl, i, reads=None):
         w4 = words // 4
         h = '(device atomic_uint*)dm_scr'
         flag = f'{h} + {abi.MESH_SCRATCH_FLAGS // 4}u + dm_t'
-        fence = '    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n'
         start = ('    uint dm_t = ~0u;\n'
                  f'    if ({lid} == 0u)\n    {{\n'
                  f'        uint dm_m = atomic_load_explicit({h} + {abi.MESH_SCRATCH_MASK}, memory_order_relaxed), dm_tag = atomic_load_explicit({h} + {abi.MESH_SCRATCH_TAG}, memory_order_relaxed);\n'
@@ -245,16 +277,21 @@ def to_stage(msl, i, reads=None):
                  f'    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n'
                  f'    threadgroup_barrier({bar});\n')
         release = ''
-    head = f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
-    sig = ', '.join(params + extra)
+    head = 'struct dm_payload_t { ulong off; };\n' if pspill else f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
+    sig = ', '.join(params + extra + ([f'{"device" if kind == "ts" else "const device"} uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]'] if pspill and (kind == 'ts' or sin) else []))
     draw = f'constant uint* dm_draw [[buffer({abi.MESH_DRAW_SLOT})]]'   # the draw's {count, first}, which the host binds (nvn_geometry.inc mtk_encode)
     scr = f', device uchar* dm_scr [[buffer({abi.MESH_SCRATCH_SLOT})]]' if spill else ''   # the scratch buffer the host binds when the reflection says mesh_spill
     if kind == 'ts':
+        store = (f'    if ({tg} >= dm_spill[0]) {{ if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(0u, 1u, 1u)); return; }}\n'
+                 f'    ulong dm_off = 4ul + ulong({tg}) * {slice_w}ul;\n'
+                 '    device uint* dm_slice = dm_spill + dm_off;\n'
+                 f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_slice[i] = {mem}[{out}u + i];\n'
+                 '    threadgroup_barrier(mem_flags::mem_device);\n' + fence +
+                 f'    if ({lid} == 0u) dm_payload.off = dm_off;\n') if pspill else f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
         return src + '\n' + head + (
             f'[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {draw})\n{{\n{start}'
             f'    if ({lid} == 0u) {mem}[{wg}] = dm_draw[1] + {tg};\n'
-            f'    threadgroup_barrier({bar});\n    {call}\n    threadgroup_barrier({bar});\n'
-            f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
+            f'    threadgroup_barrier({bar});\n    {call}\n    threadgroup_barrier({bar});\n' + store +
             f'    if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(min({mem}[{out + 1}], {METAL_MAX_GRID}u), 1u, 1u));\n}}\n')
     vertex, primitive = i['vertex'], i['primitive']
     max_v, max_p = i['max_v'], i['max_p']
@@ -295,9 +332,10 @@ def to_stage(msl, i, reads=None):
 
     def entry(name, gl):
         # With a task the payload is the input, its word 0 the workgroup's number among the task's launches, as the hardware leaves it (+0 is not a word the task writes: it starts at +4)
-        fill = (f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
-                f'    threadgroup_barrier({bar});\n'
-                f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n') if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_block.first + {tg};\n'
+        fill = ((('' if spill else fence) + (f'    dm_in_t dm_in = {{ dm_spill + dm_payload.off, {tg} }};\n' if sin else '') + f'    if ({lid} == 0u) {mem}[{wg}] = {tg};\n') if pspill else
+                (f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
+                 f'    threadgroup_barrier({bar});\n'
+                 f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n')) if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_block.first + {tg};\n'
         return (f'[[mesh]] void {name}({sig}, dm_mesh_t dm_out' + (', const object_data dm_payload_t& dm_payload [[payload]]' if i['task'] else ', const object_data dm_block_t& dm_block [[payload]]') +
                 scr + f')\n{{\n{start}{fill}'
                 f'    threadgroup_barrier({bar});\n    {call}\n    threadgroup_barrier({bar});\n'

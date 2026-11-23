@@ -1,0 +1,39 @@
+# Game profile of Fate/hollow ataraxia REMASTERED (Switch, update 1.0.2 = v131072, NACP display version "1.0.2 b723").
+# Format: see dm/games/README.md
+# TYPE-MOON's Fuzz engine (smash::fw), SDK 16.2.6, rendering through Nintendo's OpenGL ES / EGL stack (subsdk0, not loaded): main resolves GL and EGL entry points via eglGetProcAddress
+# (including EXT aliases and glGetShaderSource), which the host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m). subsdk3 is NintendoSDK_movie.
+# The shaders are 78 GLSL sources the game builds at run time: no game file holds them, so the NSP script captures them by booting the game on the Mac (gl_capture.tsv lists them) and
+# dm/gfx/tools/gl_shaders.py translates them offline; the host finds each by the hash of its text.
+
+# ---- Identity ----
+title_id	010070E022546000
+program_id	010070E022546000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Fate/hollow ataraxia REMASTERED
+ipa	FateHollowAtaraxiaRemastered.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2 b723	main=6c16aa06a25504cee9cf0f4f7b5e615c	subsdk3=220d36873cbb6d5dc39a9a37127ea80d	sdk=a5cb2175cad2ca2afdd4c13577dbd079
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk3 = NintendoSDK_movie). subsdk0 (NintendoSDK_OpenGL), subsdk1 (GLSLC) and subsdk2 (NintendoSDK_Vulkan) are not loaded
+modules	main subsdk3 sdk
+romfs_marker	obb/pack11d.bin
+zip_store	.bin:.dat:.metallib
+
+# ---- Memory ----
+# The NPDM declares 0 MB of system resource, so the game has no virtual address memory; main sets a heap of at most the pool − 64 MB − 12 MB of bss (a 3328 MB heap region)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py writes the GL library and its table, not the profile)
+shader_note	Fate/hollow ataraxia REMASTERED has no NVN shaders (its GLSL shaders go through the GL layer)

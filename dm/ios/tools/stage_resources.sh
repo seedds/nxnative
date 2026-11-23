@@ -42,21 +42,42 @@ DM_RESOURCE_PSO=${DM_RESOURCE_PSO:-}   # (a project prepared before the pipeline
 echo 'Copy game resources (the first build copies the complete game; later builds sync changes)'
 # A first copy into an empty place is an APFS clone (cp -c, clonefile): the game's files take no more disk space until either side changes, where rsync wrote all of them again
 # (BotW's app is 16.5 GB; a full copy filled a Mac that had 13 GB free). cp falls back to a plain copy on a volume without clones. Later builds sync with rsync as before
-sync_dir() {   # source folder, destination folder
-    if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then mkdir -p "$2"; /bin/cp -cRp -- "$1/." "$2/" || die "copy $1 to $2"
-    else /usr/bin/rsync -a --delete -- "$1/" "$2/" || die "sync $1 to $2"; fi
+sync_dir() {   # source folder, destination folder, optional rsync flags
+    local source=$1 destination=$2
+    shift 2
+    if [ ! -d "$destination" ] || [ -z "$(ls -A "$destination" 2>/dev/null)" ]; then
+        mkdir -p "$destination"; /bin/cp -cRp -- "$source/." "$destination/" || die "copy $source to $destination"
+    else
+        /usr/bin/rsync -a --delete "$@" -- "$source/" "$destination/" || die "sync $source to $destination"
+    fi
 }
+sync_image() (   # source image, destination image
+    # Keep rsync's size and whole-second mtime check on rebuilds.
+    if [ -f "$2" ] && [ ! -L "$2" ]; then
+        source_stamp=$(/usr/bin/stat -L -f '%z:%m' -- "$1") || die "stat $1"
+        staged_stamp=$(/usr/bin/stat -f '%z:%m' -- "$2") || die "stat $2"
+        [ "$source_stamp" != "$staged_stamp" ] || return 0
+    fi
+    [ ! -d "$2" ] || die "Image destination is a directory: $2"
+    # Clone to a fresh path on the destination volume, then publish the complete image.
+    stage_dir=$(/usr/bin/mktemp -d "${2%/*}/.stage-image.XXXXXXXX") || die "create staging directory for $2"
+    trap '/bin/rm -rf -- "$stage_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    /bin/cp -cp -- "$1" "$stage_dir/image" || die "copy $1 to $2"
+    /bin/mv -f -- "$stage_dir/image" "$2" || die "replace $2"
+)
 sync_libraries() {   # shader libraries (a folder, or an NVN game's one file: dm/tools/shader_lib.py), the app's msl folder for them, their name there
     if [ -f "$1" ]; then
-        rm -rf "${2:?}/$3"; mkdir -p "$2"
-        if [ -f "$2/$3.img" ]; then /usr/bin/rsync -a -- "$1" "$2/$3.img"; else /bin/cp -cp -- "$1" "$2/$3.img" || die "copy $1"; fi
+        mkdir -p "$2"
+        sync_image "$1" "$2/$3.img"
+        rm -rf "${2:?}/$3"
     else
         rm -f "${2:?}/$3.img"; sync_dir "$1" "$2/$3"
     fi
 }
 sync_romfs() {   # the RomFS (an image file or a folder), the app folder it goes in
     if [ -f "$1" ]; then
-        if [ -f "$2/romfs.img" ]; then /usr/bin/rsync -a -- "$1" "$2/romfs.img"; else /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"; fi
+        sync_image "$1" "$2/romfs.img"
         rm -rf "$2/romfs"; rm -f "$2/romfs.id"
     else
         sync_dir "$1" "$2/romfs"
@@ -94,7 +115,12 @@ beside_romfs "$DM_RESOURCE_ROMFS" "$APP"
 for old in "$APP"/p[0-9]*; do [ -d "$old" ] && rm -rf "$old"; done   # the programs of a project prepared for several
 fi
 if [ -n "$DM_RESOURCE_AOC" ]; then
-    sync_dir "$DM_RESOURCE_AOC" "$APP/aoc"
+    if [ "${DM_RESOURCE_AOC_CHECKSUM:-NO}" = YES ]; then
+        # A replacement from --aoc-dir can match the old image's size and whole-second mtime.
+        sync_dir "$DM_RESOURCE_AOC" "$APP/aoc" --checksum
+    else
+        sync_dir "$DM_RESOURCE_AOC" "$APP/aoc"
+    fi
 else
     rm -rf "$APP/aoc"
 fi

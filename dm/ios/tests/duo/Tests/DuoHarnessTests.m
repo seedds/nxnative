@@ -12,6 +12,7 @@
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 #import "DuoHarnessRuntime.h"
+#import "DmRotation.h"
 #include "dm_input.h"
 #include <math.h>
 #include <stdio.h>
@@ -45,6 +46,71 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 
 @implementation DuoFakeTouch
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
+@end
+
+@interface DuoLiveButton : NSObject
+@property (nonatomic, getter=isPressed) BOOL pressed;
+- (DuoLiveButton *)pressedInput;
+@end
+@implementation DuoLiveButton
+- (DuoLiveButton *)pressedInput { return self; }
+@end
+
+typedef void (^DuoLiveHandler)(id<GCDevicePhysicalInput>, id<GCPhysicalInputElement>);
+
+// Live profiles cannot be constructed through GameController's public snapshot API.
+@interface DuoLiveInput : NSObject
+@property (nonatomic, copy) DuoLiveHandler elementValueDidChangeHandler;
+@property (nonatomic, copy) NSDictionary<NSString *, DuoLiveButton *> *buttons;
+@property (nonatomic, copy) NSDictionary<NSString *, GCControllerDirectionPad *> *dpads;
+- (void)setPressed:(BOOL)pressed button:(NSString *)name;
+- (void)moveX:(float)x y:(float)y;
+@end
+@implementation DuoLiveInput
+- (instancetype)init {
+    if ((self = [super init])) {
+        NSMutableDictionary *buttons = [NSMutableDictionary dictionary];
+        for (NSString *name in @[GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY,
+                                 GCInputLeftShoulder, GCInputRightShoulder, GCInputButtonMenu, GCInputButtonHome])
+            buttons[name] = [DuoLiveButton new];
+        _buttons = [buttons copy];
+        _dpads = @{ GCInputDirectionPad: [GCController controllerWithExtendedGamepad].extendedGamepad.dpad };
+    }
+    return self;
+}
+- (void)setPressed:(BOOL)pressed button:(NSString *)name {
+    DuoLiveButton *button = self.buttons[name];
+    button.pressed = pressed;
+    DuoLiveHandler handler = self.elementValueDidChangeHandler;
+    if (handler) handler((id)self, (id)button);
+}
+- (void)moveX:(float)x y:(float)y {
+    GCControllerDirectionPad *stick = self.dpads[GCInputDirectionPad];
+    [stick setValueForXAxis:x yAxis:y];
+    DuoLiveHandler handler = self.elementValueDidChangeHandler;
+    if (handler) handler((id)self, (id)stick);
+}
+@end
+
+@interface DuoLiveController : NSObject
+@property (nonatomic, copy) NSString *productCategory;
+@property (nonatomic, readonly) NSString *vendorName;
+@property (nonatomic, readonly) GCExtendedGamepad *extendedGamepad;
+@property (nonatomic, readonly) GCMotion *motion;
+@property (nonatomic, readonly) DuoLiveInput *input;
+- (instancetype)initWithCategory:(NSString *)category;
+@end
+@implementation DuoLiveController
+- (instancetype)initWithCategory:(NSString *)category {
+    if ((self = [super init])) {
+        _productCategory = [category copy];
+        _input = [DuoLiveInput new];
+    }
+    return self;
+}
+- (NSString *)vendorName { return self.productCategory; }
+- (GCExtendedGamepad *)extendedGamepad { return nil; }
+- (GCMotion *)motion { return nil; }
 @end
 
 #if DUO_HARNESS_HAS_NATIVE_POSE_API
@@ -1300,6 +1366,104 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 }
 
 
+- (void)testLiveJoyConMapsSidewaysAndKeepsItsOwnPlayer {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    DuoLiveController *joy = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    DuoLiveController *remote = [[DuoLiveController alloc] initWithCategory:@"Siri Remote"];
+    [self setHarnessControllers:@[(GCController *)joy, (GCController *)remote] notification:GCControllerDidConnectNotification];
+    XCTAssertEqual(duo_harness_state().connected_players, 1u);
+    XCTAssertNil(remote.input.elementValueDidChangeHandler);
+
+    NSArray *names = @[GCInputButtonX, GCInputButtonA, GCInputButtonY, GCInputButtonB,
+                       GCInputLeftShoulder, GCInputRightShoulder, GCInputButtonMenu];
+    const uint64_t mapped[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_L, DM_BTN_R, DM_BTN_PLUS};
+    for (NSUInteger i = 0; i < names.count; i++) {
+        [joy.input setPressed:YES button:names[i]];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, mapped[i]);
+        [joy.input setPressed:NO button:names[i]];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, 0u);
+    }
+    [joy.input moveX:1 y:-1];
+    DuoHarnessPlayerInput player = duo_harness_state().players[0];
+    XCTAssertEqual(player.lx, 32767);
+    XCTAssertEqual(player.ly, -32767);
+    XCTAssertEqual(player.rx, 0);
+    XCTAssertEqual(player.ry, 0);
+
+    GCController *extended = [GCController controllerWithExtendedGamepad];
+    [self setHarnessControllers:@[extended, (GCController *)joy] notification:GCControllerDidConnectNotification];
+    uint32_t other = duo_harness_state().connected_players & ~1u;
+    XCTAssertEqual(__builtin_popcount(other), 1);
+    if (other) {
+        int slot = __builtin_ctz(other);
+        [self deliverSnapshotChangeFor:extended button:extended.extendedGamepad.buttonB value:1];
+        [joy.input setPressed:YES button:GCInputButtonA];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_B);
+        XCTAssertEqual(duo_harness_state().players[slot].buttons, DM_BTN_A);
+
+        DuoLiveHandler stale = joy.input.elementValueDidChangeHandler;
+        [self setHarnessControllers:@[extended] notification:GCControllerDidDisconnectNotification];
+        XCTAssertNil(joy.input.elementValueDidChangeHandler);
+        if (stale) stale((id)joy.input, (id)joy.input.buttons[GCInputButtonA]);
+        DuoHarnessState state = duo_harness_state();
+        XCTAssertEqual(state.connected_players, other);
+        XCTAssertEqual(state.players[0].buttons, 0u);
+        XCTAssertEqual(state.players[0].lx, 0);
+        XCTAssertEqual(state.players[slot].buttons, DM_BTN_A);
+    }
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+}
+
+- (void)testLiveJoyConsJoinOnButtonAndKeepPromptInputOutOfGame {
+    UIWindow *window = [self harnessRootViewController].view.window;
+    XCTAssertTrue(window && front_metal_layer());
+    if (!window || !front_metal_layer()) return;
+
+    const char *env = getenv("DM_PAD_PRESS_TO_JOIN");
+    NSString *saved = env ? @(env) : nil;
+    setenv("DM_PAD_PRESS_TO_JOIN", "1", 1);
+    CGRect bounds = window.bounds;
+    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    if (saved) setenv("DM_PAD_PRESS_TO_JOIN", saved.UTF8String, 1);
+    else unsetenv("DM_PAD_PRESS_TO_JOIN");
+
+    DuoLiveController *left = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (L)"];
+    DuoLiveController *right = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    [self setHarnessControllers:@[(GCController *)right, (GCController *)left] notification:GCControllerDidConnectNotification];
+    XCTAssertEqual(duo_harness_state().connected_players, 0u);
+    [left.input moveX:1 y:0];
+    [left.input setPressed:YES button:GCInputButtonHome];
+    XCTAssertEqual(duo_harness_state().connected_players, 0u, @"Stick and system Home must not join a player");
+    [left.input setPressed:YES button:GCInputLeftShoulder];
+    XCTAssertEqual(duo_harness_state().connected_players, 1u, @"First press gets player 1 even when listed second");
+    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L);
+
+    NSUInteger originalSubviews = window.subviews.count;
+    XCTestExpectation *closed = [self expectationWithDescription:@"controller prompt returns"];
+    __block int result = -1;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        result = front_ctrl_support(2, 2);
+        [closed fulfill];
+    });
+    NSPredicate *shown = [NSPredicate predicateWithBlock:^BOOL(UIWindow *candidate, NSDictionary *bindings) {
+        (void)bindings; return candidate.subviews.count > originalSubviews;
+    }];
+    XCTNSPredicateExpectation *open = [[XCTNSPredicateExpectation alloc] initWithPredicate:shown object:window];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[open] timeout:5], XCTWaiterResultCompleted);
+    XCTAssertEqual(duo_harness_state().players[0].buttons, 0u);
+    [right.input setPressed:YES button:GCInputButtonA];   // Switch B joins the second player and completes the prompt
+    [self waitForExpectations:@[closed] timeout:5];
+    XCTAssertEqual(result, 1);
+    XCTAssertEqual(duo_harness_state().connected_players, 3u);
+    XCTAssertEqual(duo_harness_state().players[1].buttons, 0u, @"The button that closed the prompt is held back until release");
+    [right.input setPressed:NO button:GCInputButtonA];
+    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L, @"Both players' current input is restored on release");
+    [right.input setPressed:YES button:GCInputButtonA];
+    XCTAssertEqual(duo_harness_state().players[1].buttons, DM_BTN_B);
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+}
+
 - (void)testControllersKeepIndependentPlayersAndLayoutKeepsMotionState {
     if (@available(iOS 13.0, *)) {
         GCController *first = [GCController controllerWithExtendedGamepad];
@@ -1361,5 +1525,34 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     }
 }
 
+// Rotation (DM_ROTATION): the view controllers' mask and the app's, which replaces the Info.plist list (main.m), so a phone can be locked upright
+- (void)testRotationSettingSetsTheOrientationMasks {
+    const UIInterfaceOrientationMask all = UIInterfaceOrientationMaskAll, land = UIInterfaceOrientationMaskLandscape,
+        upright = UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
+    XCTAssertEqual(dm_rotation_mask(NULL, all), all);
+    XCTAssertEqual(dm_rotation_mask("auto", land), land, @"auto keeps the device's own list");
+    XCTAssertEqual(dm_rotation_mask("landscape", all), land);
+    XCTAssertEqual(dm_rotation_mask("portrait", land), upright, @"portrait is allowed even where the Info.plist lists only landscape");
+    XCTAssertEqual(dm_rotation_mask("sideways", land), land, @"an unknown value is auto");
+
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    [root.view layoutIfNeeded];
+    unsetenv("DM_ROTATION");
+    BOOL pad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    XCTAssertEqual(root.supportedInterfaceOrientations, all);
+    XCTAssertEqual(front_ios_app_orientations(), pad ? all : land, @"auto: the Info.plist list for this device");
+    XCTAssertTrue(dm_setting_live("DM_ROTATION", NULL), @"the in-game menu offers Rotation");
+    dm_setting_live("DM_ROTATION", "landscape");
+    XCTAssertEqual(root.supportedInterfaceOrientations, land);
+    XCTAssertEqual(front_ios_app_orientations(), land);
+    dm_setting_live("DM_ROTATION", "portrait");
+    XCTAssertEqual(root.supportedInterfaceOrientations, upright);
+    XCTAssertEqual(front_ios_app_orientations(), upright);
+    dm_setting_live("DM_ROTATION", "auto");
+    XCTAssertEqual(root.supportedInterfaceOrientations, all);
+    XCTAssertEqual(front_ios_app_orientations(), pad ? all : land);
+    unsetenv("DM_ROTATION");
+}
 
 @end

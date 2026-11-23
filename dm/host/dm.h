@@ -58,9 +58,12 @@ enum { STB_LOCAL = 0, STB_WEAK = 2, STV_DEFAULT = 0 };
 // Run-time state of one NSO module
 typedef struct {
     char name[16];
+    const char *dir;           // the folder its rewritten files are in: the module folder, or a mod's prepared exefs (hle_exl.c dm_exl_mod_modules)
     uint8_t *base;             // Start address of the image (including the patch area) in the host address space
     size_t size;
     size_t guest_size;         // Horizon module span through MOD0's page-aligned bss end, excluding rewriter pages
+    uint8_t *span_slot;        // Mac contiguous startup reservation slot (start of pre-base patch area + image); NULL for JIT-placed or NRO modules
+    size_t span_len;
     uint64_t text_end, ro_off, data_off, key_page_off, key_page_size;   // From the rewriter fixups header
     uint64_t ue_malloc_vt;     // Unreal's FMallocBinned3 vtable, found by the rewriter (patch_nso.py, ue_malloc.py; hle_uemalloc.c); 0 = none
     unsigned ue_malloc_slot;   // the slot of its name getter, which names the slot layout
@@ -112,6 +115,7 @@ extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 
 void load_modules(const char *dir, const char **names, int n);
 const char *dm_module_dir(void);   // the folder load_modules read the modules and the rewriter's tables from (the cheat engine reads main.changed.tsv there)
+uint8_t *dm_mod_rtld_slot(size_t *page_out);   // Mac contiguous startup reservation's 3-page slot below main for a stand-in rtld (loader.c); NULL if none
 void run_module_inits(void);
 module_t *nro_find(const uint8_t sha256[32]);   // the mapped NRO with this hash (loader.c)
 int nro_refused(const uint8_t sha256[32]);      // an NRO the pack refused (an online SDK, nro.tsv "refused")
@@ -197,6 +201,20 @@ void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
 void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Resource count callback (registered by the graphics layer): called every 250 ticks, when the loading screen has been dismissed, and on exit when the record is full
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)
 void dm_guest_write_prepare(void *addr, size_t len);
+int dm_guest_as_contains(uintptr_t a);   // hle_svc.c: the address lies in the reserved guest address block
+// hle_exl.c: exlaunch code plugins (a mod's exefs/subsdk<N>). The process handle GetInfo 65001 answers; the stand-in rtld below the modules and its QueryMemory regions;
+// the writable views of module code MapProcessMemory makes, written back into the code on unmap and after each module's DT_INIT
+extern const uint32_t dm_exl_process_handle;
+void dm_exl_fake_rtld(void);
+int dm_exl_rtld_query(uint64_t addr, uint64_t *base, uint64_t *size, uint64_t *state, uint64_t *perm);
+uint64_t dm_exl_rtld_base(void);
+uint64_t dm_exl_rtld_size(void);
+int dm_exl_view_source_ok(uint64_t src, uint64_t size);
+void dm_exl_code_prepare(uint64_t src);   // prepares writable alias + changed.tsv for src's module outside g_map_lock / g_view_mu
+int dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size);   // 0 ok, -1 out of memory or view table full
+int dm_exl_mod_modules(const char **names, int n, int room);   // adds prepared mod code plugins from DM_ROMFS_OVERLAY before sdk (Mac only); returns new count
+int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size);
+void dm_exl_sync_all(void);
 void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the guest heap's base and opened length (guest addresses), 0 / 0 when none
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: hole-free guest heap read for the cheat VM (under the memory lock); 0 = ok, 1 = a byte outside the opened span
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)

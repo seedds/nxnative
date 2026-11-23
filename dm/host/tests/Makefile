@@ -139,11 +139,17 @@ $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 nro: $(B)/t_nro
 	$(B)/t_nro
 # the cheat engine (hle_cheats.c, compiled into the test with stubs for the loader, the heap and the keys)
-$(B)/t_cheats: t_cheats.c ../hle_cheats.c ../dm.h ../dm_input.h $(GAME_H) | $(B)
+$(B)/t_cheats: t_cheats.c ../hle_cheats.c ../code_write.h ../dm.h ../dm_input.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c
 .PHONY: cheats
 cheats: $(B)/t_cheats
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats
+$(B)/t_exl: t_exl.c memory_profile/game_profile.h ../hle_exl.c ../hle_svc.c ../code_write.h ../hle.h ../dm.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Imemory_profile -I.. -framework CoreFoundation -o $@ t_exl.c
+.PHONY: exl
+exl: $(B)/t_exl
+	$(B)/t_exl
+run: exl
 # Regenerated on every make (FORCE), by the host Makefile: a header from an older game.py lacks newer defines; game.py writes it only when it changes, so an unchanged header rebuilds no test
 $(GAME_H): FORCE
 	$(MAKE) -C .. game_profile GAME=$(GAME)

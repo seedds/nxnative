@@ -758,26 +758,61 @@ def site_retry_window(parts):
         emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), t)); emit(NOP)
     return start
 
-# ---- Function boundaries (eh_frame_hdr) ----
+# ---- Function boundaries (eh_frame_hdr, or .eh_frame when a module has no .eh_frame_hdr) ----
 m0 = struct.unpack_from('<I', IMG, 4)[0]
 assert IMG[m0:m0 + 4] == b'MOD0'
-ehs = m0 + struct.unpack_from('<i', IMG, m0 + 16)[0]
+ehs_rel, ehe_rel = struct.unpack_from('<ii', IMG, m0 + 16)
+ehs, ehe = m0 + ehs_rel, m0 + ehe_rel
 def rd(o, enc):
     fmt, app = enc & 0xF, enc & 0x70
-    v, sz = {0x3: (struct.unpack_from('<I', IMG, o)[0], 4), 0xB: (struct.unpack_from('<i', IMG, o)[0], 4),
-             0x4: (struct.unpack_from('<Q', IMG, o)[0], 8)}[fmt]
+    spec, sz = {0x0: ('<Q', 8), 0x2: ('<H', 2), 0x3: ('<I', 4), 0x4: ('<Q', 8),
+                0xA: ('<h', 2), 0xB: ('<i', 4), 0xC: ('<q', 8)}[fmt]
+    v = struct.unpack_from(spec, IMG, o)[0]
     if app == 0x10: v += o
     if app == 0x30: v += ehs
     return v, sz
-_, penc, cenc, tenc = IMG[ehs:ehs + 4]
-o = ehs + 4
-_, s = rd(o, penc); o += s
-nfde, s = rd(o, cenc); o += s
 starts = set()
-for _ in range(nfde):
-    a, s = rd(o, tenc); o += s
-    _, s = rd(o, tenc); o += s
-    starts.add(a)
+if ehe > ehs:
+    _, penc, cenc, tenc = IMG[ehs:ehs + 4]
+    o = ehs + 4
+    _, s = rd(o, penc); o += s
+    nfde, s = rd(o, cenc); o += s
+    for _ in range(nfde):
+        a, s = rd(o, tenc); o += s
+        _, s = rd(o, tenc); o += s
+        starts.add(a)
+elif ehs_rel != 0:
+    # No .eh_frame_hdr (empty range in MOD0): devkitA64-linked modules (exlaunch plugins) point both ends at .eh_frame itself.
+    # Walk CIE/FDE records up to the zero terminator, indexing each CIE's 'R' pointer encoding by its offset.
+    cies, o = {}, ehs
+    while o + 8 <= len(IMG):
+        ln = struct.unpack_from('<I', IMG, o)[0]
+        if ln in (0, 0xFFFFFFFF) or ln < 4 or o + 4 + ln > len(IMG): break
+        cid = struct.unpack_from('<I', IMG, o + 4)[0]
+        if cid == 0:
+            ver = IMG[o + 8]
+            p = o + 9; aug = IMG[p:IMG.index(b'\0', p)].decode('latin1'); p += len(aug) + 1
+            if ver >= 4: p += 2   # address_size, segment_selector_size
+            for _ in range(2):    # code_alignment_factor (uleb), data_alignment_factor (sleb)
+                while IMG[p] & 0x80: p += 1
+                p += 1
+            if ver == 1: p += 1   # return_address_register
+            else:
+                while IMG[p] & 0x80: p += 1
+                p += 1
+            fenc = 0x00
+            if aug.startswith('z'):
+                while IMG[p] & 0x80: p += 1
+                p += 1
+                for c in aug[1:]:
+                    if c == 'R': fenc = IMG[p]; p += 1
+                    elif c == 'P': pe = IMG[p]; p += 1 + rd(p + 1, pe)[1]
+                    elif c == 'L': p += 1
+            cies[o] = fenc
+        else:
+            fenc = cies.get(o + 4 - cid)
+            if fenc is not None and fenc != 0xFF: starts.add(rd(o + 8, fenc)[0])
+        o += 4 + ln
 starts = sorted(x for x in starts if x < TEXT_END)
 
 # ---- Linear scan to find all rewrite points (not relying on register read/write reports) ----

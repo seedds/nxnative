@@ -875,7 +875,56 @@ static void map_image(module_t *m, const char *dir) {
     if (z2) remap_at(m, base + m->back_off, x2, z2, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
 }
+static void mod_span_init(int n) { (void)n; }
+uint8_t *dm_mod_rtld_slot(size_t *page_out) { (void)page_out; return NULL; }
 #else
+static uint8_t *g_mod_span;
+static size_t g_mod_span_page;
+
+uint8_t *dm_mod_rtld_slot(size_t *page_out) {
+    if (!g_mod_span) return NULL;
+    if (page_out) *page_out = g_mod_span_page;
+    return g_mod_span;
+}
+
+// Reserve one contiguous virtual span for startup NSOs not placed by jit_slot: 3 pages at the bottom for an optional
+// stand-in rtld (hle_exl.c), then each module in load order (main, subsdk*, mod plugins, sdk) separated by a PROT_NONE
+// guard page. Guarantees Horizon's ascending address order (rtld < main < subsdks < sdk) even when small plugins would
+// otherwise land in an mmap gap below main, and keeps FAR modules' front patch areas strictly above the rtld slot.
+static void mod_span_init(int n) {
+    if (n <= 0) return;
+    long pg_raw = sysconf(_SC_PAGESIZE);
+    size_t pg = pg_raw >= 0x4000 ? (size_t)pg_raw : 0x4000;
+    size_t *offs = calloc((size_t)n, sizeof *offs), *lens = calloc((size_t)n, sizeof *lens);
+    if (!offs || !lens) { free(offs); free(lens); return; }
+    size_t total = 4 * pg;   // [0, 3*pg): optional stand-in rtld; [3*pg, 4*pg): guard page
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+        module_t *m = &g_mod[i];
+        uint64_t pre = m->patch_off < 0 ? (uint64_t)-m->patch_off : 0, img;
+        if (m->patch_off < 0) img = m->image_size;
+        else {
+            char path[1024]; snprintf(path, sizeof path, "%s/%s.patched.bin", m->dir, m->name);
+            struct stat st;
+            if (stat(path, &st) || st.st_size <= 0) continue;
+            img = ((uint64_t)st.st_size + 0x3FFFull) & ~0x3FFFull;
+        }
+        if (jit_slot(m, img, pre)) continue;
+        size_t span = (size_t)((pre + img + (uint64_t)pg - 1) & ~((uint64_t)pg - 1));
+        offs[i] = total; lens[i] = span;
+        total += span + pg;   // one guard page after each module
+        count++;
+    }
+    if (count) {
+        uint8_t *base = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (base != MAP_FAILED) {
+            g_mod_span = base; g_mod_span_page = pg;
+            for (int i = 0; i < n; i++) if (lens[i]) { g_mod[i].span_slot = base + offs[i]; g_mod[i].span_len = lens[i]; }
+        }
+    }
+    free(offs); free(lens);
+}
+
 static uint8_t *slurp(const char *path, size_t *n) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("open %s", path);
@@ -898,6 +947,7 @@ static void map_image(module_t *m, const char *dir) {
         m->size = m->image_size; m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
         uint8_t *slot = jit_slot(m, m->size, pre);
+        if (!slot && m->span_slot && m->span_len >= pre + m->size) slot = m->span_slot + pre;
         uint8_t *a = mmap(slot ? slot - pre : NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
@@ -912,6 +962,7 @@ static void map_image(module_t *m, const char *dir) {
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
     uint8_t *slot = jit_slot(m, m->size, 0);
+    if (!slot && m->span_slot && m->span_len >= m->size) slot = m->span_slot;
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
@@ -934,18 +985,22 @@ void load_modules(const char *dir, const char **names, int n) {
     allocate_modules(n, nros);
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        // "<folder>/<name>": a module from another folder (a mod's code plugin), else one of the module folder
+        const char *sl = strrchr(names[i], '/');
+        if (sl) { char *d = strndup(names[i], (size_t)(sl - names[i])); if (!d) die("module folder"); m->dir = d; strlcpy(m->name, sl + 1, sizeof m->name); }
+        else { m->dir = g_module_dir; strlcpy(m->name, names[i], sizeof m->name); }
+        read_layout(m, m->dir);
     }
     create_keys();
     jit_layout_init();
+    mod_span_init(n);
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, m->dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
-        LOG("%s: base %p size %#zx", names[i], m->base, m->size);
+        t = now_ns(); register_gates(m, m->dir); tg += now_ns() - t;
+        LOG("%s: base %p size %#zx%s%s", m->name, m->base, m->size, m->dir != g_module_dir ? " from " : "", m->dir != g_module_dir ? m->dir : "");
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }
     force_init();
@@ -969,5 +1024,6 @@ void run_module_inits(void) {
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);
         ((void (*)(void))(m->base + m->init))();
+        dm_exl_sync_all();   // flush any persistent MapProcessMemory views before earlier modules' (e.g. main's) DT_INIT runs
     }
 }

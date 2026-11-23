@@ -128,7 +128,7 @@ static void host_preload(int argc, char **argv) {
     }
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM graceful exit (hle_lifecycle.c)
     { void crash_set_dump_hook(void (*)(void)); void svc_thread_dump(void); crash_set_dump_hook(svc_thread_dump); }   // Dump guest thread state on a crash
-    const char *names[argc + DM_GAME_NMOD]; int n = 0;
+    const char *names[argc + DM_GAME_NMOD + 8]; int n = 0;
     int i = 2;
     for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];
     if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
@@ -138,7 +138,9 @@ static void host_preload(int argc, char **argv) {
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
     if (!n) n = profile_modules(argv[1], names);
+    n = dm_exl_mod_modules(names, n, 8);   // prepared code plugins of enabled mods (DM_ROMFS_OVERLAY, Mac only)
     load_modules(argv[1], names, n);
+    dm_exl_fake_rtld();   // with a mod code plugin among the modules: the stand-in rtld its module walk expects below main (hle_exl.c)
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();

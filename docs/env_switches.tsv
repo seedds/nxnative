@@ -44,6 +44,7 @@ DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its parameters in, then the app ends (the iOS app of a game of several programs sets it to `Documents/program.bin`)
 DM_EXFAT_DIR	test	`=<folder on an exFAT volume>`: `test_shader_cache.py` (`Renumbered`) makes its cache files there, so `test_on_the_drive` writes and reads 200 entries on that drive, whose new file may take another inode at its first write (issue #2434), without checking how often the store opened it
+DM_EXL_TRACE	diagnostic	`=1` logs the first four code words written per view by an exlaunch mod plugin (`hle_exl.c`)
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus
@@ -384,7 +385,7 @@ DM_RESOURCE_VERSION	switch	Display version, written to `Gen/resources.env` by `g
 DM_RES_CHECK	diagnostic	`=1` prints the first 40 textures or buffers a shader reaches through its argument block that are not in the residency set (textures attributed to their parent allocation)
 DM_REWRITE_J	switch	`=<positive integer>`: worker processes per module for `patch_nso.py`'s x18 scan and spin wait search; `=1` runs serially. Default: one per core directly, an automatic per-module budget in the NSP script. An explicit value overrides that budget
 DM_ROMFS	path	The game's RomFS folder, mounted read-only as `rom` (default `$DM_ROOT/romfs`); the Mac launcher, the iOS app and the NSP script set it
-DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files)
+DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files); on the Mac, a folder's mod also loads prepared code plugins from `<mod>/exefs/nxnative/` (`scripts/prepare_mod.py`)
 DM_ROMFS_PROGRAMS	path	The folder of the other programs' RomFS images of the application, `<index>.img`, which `fs::MountRom(name, index, …)` mounts (default `romfs_programs` beside `DM_ROMFS`; the NSP script packs them from a NUP of several programs); the iOS app sets it to the app's folder when its RomFS is in Documents
 DM_ROOT	path	Workspace root (default `~/dm-work`): the host's and tools' default paths (RomFS, temporary storage, shader libraries under `build/cache/metal_shader_cache`, probe dumps) are under it
 DM_ROTATION	player	iPhone and iPad orientation lock (`auto` follows the device and its Info.plist list, `landscape` locks landscape, `portrait` locks upright even on landscape-only iPhones); launcher and in-game menu setting

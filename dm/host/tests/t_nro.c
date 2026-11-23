@@ -41,6 +41,7 @@ static uint64_t missing;
 uint64_t resolve_import(module_t *m, const char *name) { (void)m; (void)name; return (uint64_t)&missing; }
 int hle_implements(const char *name) { return !strcmp(name, "vkGetInstanceProcAddr") || !strcmp(name, "nvnBootstrapLoader"); }
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture
+void dm_exl_sync_all(void) {}
 
 typedef struct {
     Elf64_Sym sym[4];

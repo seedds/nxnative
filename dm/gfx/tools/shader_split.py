@@ -3679,6 +3679,9 @@ def slct_shaders(d, base, label):
 def monolith_shaders(d, label, out):
     """Scan decoded archive entries and their XBC1 streams without relying on
     extensions: model streams and map data embed HCPS alongside other assets."""
+    # An NDSR pack (the upscaler's networks): Xenoblade Chronicles 2's Switch 2 Edition keeps /monolib/shader/ndsr.pck as an XBC1 member of bf2.ard, whose decoded
+    # payload comes back here; without this its 9 shaders the title screen draws with were left out (Xenoblade DE's Switch 2 Edition ships the same pack loose)
+    if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     pos = 0; compressed = []
     # Separate literal scans use Python's fast substring search. Alternation's
     # character-set search is costly across the archive's decoded texture data.
@@ -3970,7 +3973,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
         for nm, member in members: scan_blob(member, label + nm, out, depth + 1, left)
         return
-    if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
+    if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'DMPA') or d[:8] == b'cmp\0zlib':
         monolith_shaders(d, label, out)
         return
     if d[:8] == PACX4:   # LZ4 chunks: as with Yaz0, the budget counts decoded bytes
@@ -4552,8 +4555,9 @@ def scan_file_in(args):
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
     # Containers the generic prefilter below would drop, read whole by scan_blob: Monolith's, which it also ships loose, without an ARH/ARD archive (Xenoblade DE;
-    # DRSM model streams contain several embedded XBC1 resources), and Phyre's effects and FFX/X-2's loose programs, their two lengths before the code (phyre_shaders)
-    if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'RYHP') or d[:8] == b'cmp\0zlib' or d[8:12] == GFX_MAGIC:
+    # DRSM model streams contain several embedded XBC1 resources; DMPA model packages (.wimdo) keep plain HCPS programs beside the model: 18 of Xenoblade DE's, the only copy
+    # of 14 shaders its Switch 2 Edition's prologue draws with), and Phyre's effects and FFX/X-2's loose programs, their two lengths before the code (phyre_shaders)
+    if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'DMPA', b'RYHP') or d[:8] == b'cmp\0zlib' or d[8:12] == GFX_MAGIC:
         scan_blob(d, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] != ZSTD_MAGIC and head[4:8] in (ZSTD_MAGIC, LZ4_FRAME_MAGIC): d = unsized(d, '/' + rel)   # HAL's .cmp containers (Kirby and the Forgotten Land: 7,201 of them, 5,121 zstd frames with 19,364 BNSH inside and 2,080 LZ4 frames). Read raw, the split found 121 shaders and the game asked for 900 it did not have ("[RED] shader ... is not in the shader map")

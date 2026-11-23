@@ -38,6 +38,7 @@ The NSP script produced `MarioRabbidsSparksOfHope.ipa` (9.8 GB) on 2026-10-27, c
 ## Found on this game
 
 - [Image bindings supply shader-write intent](../../../docs/reference/nvn-objects.md#image-bindings-supply-shader-write-intent): compute writes to render textures used as images, even when their builder omitted `IMAGE`.
+- [A writable buffer image took the registration lock twice](../../../docs/reference/nvn-objects.md#a-writable-buffer-image-took-the-registration-lock-twice).
 - [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy): `EnableAlbumImageTakenNotification` reaches the am proxy the host does not create. The host now handles it alongside the disable call.
 - [Shader records in Snowdrop SDF data slices](../../../docs/reference/shaders.md#shader-records-in-snowdrop-sdf-data-slices).
 - [Separate virtual ranges in Snowdrop's page allocator](../../../docs/reference/memory.md#separate-virtual-ranges-in-snowdrops-page-allocator).

@@ -14722,9 +14722,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
                 else if (lead) RED_ONCE(119, "buffer image whose view starts %u elements before it (below Metal's view alignment), in shader %s (stage %d) with no offset table entry for it (an array of images, or past %d of them): its accesses land %u elements early",
                                         lead, sh->key, nvn_stage, DMSH_TBIAS_SLOTS, lead);
                 if (b->rw || b->atom) {
-                    os_unfair_lock_lock(&g_rmu);
                     tex_t bt = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t : (tex_t){0};
-                    os_unfair_lock_unlock(&g_rmu);
                     if (bt.mem && bt.d.target == NVN_TEXTURE_TARGET_BUFFER) {
                         int bw, bh, bpb = nvn_fmt_bpb(bt.d.format, &bw, &bh);
                         if (bpb) post_shadow_wb((uint64_t)(uintptr_t)bt.mem, (uint64_t)bt.d.width * (uint64_t)bpb);

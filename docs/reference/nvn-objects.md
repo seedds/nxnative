@@ -1239,6 +1239,13 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** before a draw or dispatch uses a writable image, `image_prepare` resolves it with image intent and ensures its backing allows shader writes. `RegisterImage` also keeps this intent in its host snapshot; neither path changes the guest texture. A texture already rendered into is upgraded through `tex_upgrade`: end its render pass first, copy every mip / slice, replace all shared serials and invalidate cached sampled views. Load-only image slots accept read-only storage without upgrading, and ordinary render targets retain their original usage. `t_image_usage.m` exercises both registration entry points, a late registration while a render pass is open, the clear and other mip surviving the upgrade, and a GPU image write read through a sampled alias.
 - **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (SDK 13.3.5, Snowdrop).
 
+### A writable buffer image took the registration lock twice
+
+- **Symptom:** macOS terminates the host before the game's title screen. The crash report shows `_os_unfair_lock_recursive_abort` in `encode_args_full` on the queue replay thread.
+- **Cause:** argument encoding already holds the texture and sampler registration lock. The sparse shadow writeback path for writable buffer images acquired that same lock again to look up the texture's guest memory range.
+- **Fix:** read the registration under the lock the argument encoder already holds and keep scheduling writeback for the same range. `t_buffer_image_bias` checks that the production encoder binds a real writable buffer image, and `t_sparse_shadow` checks writeback into physical pages.
+- **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) 1.6.2225577 on the Mac (Apple M6, macOS 27.2.1).
+
 ### Plural texture binds, builder-registered samplers, strided texel writes, device item 0x67
 
 - `nvnCommandBufferBindTextures` (the plural of `BindTexture`), `nvnSamplerPoolRegisterSamplerBuilder` (a sampler registered from its builder), `nvnTextureWriteTexelsStrided` (`WriteTexels` with row and image strides) and device item 0x67, which the game reads before every program it loads and uses as the alignment of its copies of the shader (256, the driver's own constant: [Separate sampler bindings per stage](#separate-sampler-bindings-per-stage)).

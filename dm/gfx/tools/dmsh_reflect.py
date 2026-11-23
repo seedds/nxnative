@@ -501,7 +501,7 @@ def reflect(key, stage, msl, res):
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
             if b and b['flags'] & 2:   # BufferUsageFlags.Bounded: its accesses compare with its entry in the length table (dmsh_abi.h DMSH_SBLEN_BANK), the translator's storage slot
-                if e['kind'] not in (abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH) or not 0 <= b['slot'] < abi.SBLEN_SLOTS:
+                if e['kind'] not in (abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH) or not 0 <= b['slot'] < abi.SBLEN_SLOTS:
                     raise ValueError(f"{key}: storage buffer {e['msl_name']} is bounded but is a {e['kind']} binding, slot {b['slot']}")
                 e['sbx'] = b['slot']
     if any('sbx' in e for e in binds) and not any(e['kind'] == abi.KIND_SBLEN for e in binds):

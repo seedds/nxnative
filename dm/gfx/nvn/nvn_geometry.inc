@@ -1048,19 +1048,24 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
             MLOG("[RED] geometry draw needs %llu MiB of scratch, above the 256 MiB bound", (unsigned long long)(total >> 20));
         return may_wait ? 0 : -1;
     }
+    // the GPU-only regions in the private geometry scratch pool (geo_big_take), the ones the CPU writes in the shared arena
+    { uint64_t b0 = 0;
+        #define GEO_BIG(N, G) do { b0 = (b0 + 255) & ~255ull; (G) = b0; b0 += (N); } while (0)
+        GEO_BIG(input_size, j->input); GEO_BIG(output_size, j->output); GEO_BIG(raw_size, j->raw); GEO_BIG(packed_size, j->packed); GEO_BIG(count_size, j->cnt);
+        #undef GEO_BIG
+        uint64_t big = geo_big_take(b0); j->input += big; j->output += big; j->raw += big; j->packed += big; j->cnt += big; }
+    total -= input_size + output_size + raw_size + packed_size + count_size;
     id<MTLBuffer> scratch; size_t off = arena_alloc((size_t)total, &scratch);
     uint8_t *cpu = (uint8_t *)scratch.contents + off; uint64_t gpu = scratch.gpuAddress + off;
     size_t used = 0;
     #define GEO_ALLOC(N, G, P) do { used = (used + 255) & ~(size_t)255; (G) = gpu + used; (P) = cpu + used; used += (size_t)(N); } while (0)
-    void *pinput, *poutput, *praw, *ppacked, *pcnt, *pmap, *pcapture_ix, *pinfo, *pcapture_info, *pargs, *pjob, *plean_job;
-    GEO_ALLOC(input_size, j->input, pinput); GEO_ALLOC(output_size, j->output, poutput); GEO_ALLOC(raw_size, j->raw, praw); GEO_ALLOC(packed_size, j->packed, ppacked); GEO_ALLOC(count_size, j->cnt, pcnt);
+    void *pmap, *pcapture_ix, *pinfo, *pcapture_info, *pargs, *pjob, *plean_job;
     GEO_ALLOC(words * 4, j->map, pmap); GEO_ALLOC(nu * 4, j->capture_ix, pcapture_ix); GEO_ALLOC(32, j->info, pinfo); GEO_ALLOC(sizeof(nvn_geo_capture), j->capture_info, pcapture_info);
     GEO_ALLOC(20, j->args, pargs); GEO_ALLOC(sizeof(nvn_geo_pack_job), j->job, pjob);
     GEO_ALLOC(sizeof(nvn_geo_lean_job), j->lean_job, plean_job);
     void *pcompact = NULL, *pruns = NULL; uint64_t run_gpu = 0; j->compact_map = 0; j->runs = NULL; j->nruns = 0;
     if (ids) { GEO_ALLOC(words * 4, j->compact_map, pcompact); GEO_ALLOC(id_runs * 8, run_gpu, pruns); GEO_ALLOC(id_runs * sizeof(nvn_geo_capture), j->capture_info, pcapture_info); }
     #undef GEO_ALLOC
-    (void)pinput; (void)poutput; (void)praw; (void)ppacked; (void)pcnt;
     if (used > total) MDIE("geometry scratch size accounting");
     size_t unique_count = 0;
     if(cached){memcpy(pmap,cached->data+raw_n,words*4);unique_count=cached->unique;memcpy(pcapture_ix,cached->data+raw_n+words*4,unique_count*4);}
@@ -1164,16 +1169,20 @@ static int geo_prep_gpu(NvProg *pr, NvShader *vs, NvShader *gs, NvShader *reader
     uint64_t count_size = emits ? (groups + (groups + 63) / 64) * 4 : 4;
     uint64_t total = input_size + output_size + raw_size + packed_size + count_size + 32 + sizeof(nvn_geo_capture) + 20 + sizeof(nvn_geo_pack_job) + 32 + 10 * 255;
     if (total > (256ull << 20)) return 0;
+    { uint64_t b0 = 0;
+        #define GEO_BIG(N, G) do { b0 = (b0 + 255) & ~255ull; (G) = b0; b0 += (N); } while (0)
+        GEO_BIG(input_size, j->input); GEO_BIG(output_size, j->output); GEO_BIG(raw_size, j->raw); GEO_BIG(packed_size, j->packed); GEO_BIG(count_size, j->cnt);
+        #undef GEO_BIG
+        uint64_t big = geo_big_take(b0); j->input += big; j->output += big; j->raw += big; j->packed += big; j->cnt += big; }
+    total -= input_size + output_size + raw_size + packed_size + count_size;
     id<MTLBuffer> scratch; size_t off = arena_alloc((size_t)total, &scratch);
     uint8_t *cpu = (uint8_t *)scratch.contents + off; uint64_t gpu = scratch.gpuAddress + off;
     size_t used = 0;
     #define GEO_ALLOC(N, G, P) do { used = (used + 255) & ~(size_t)255; (G) = gpu + used; (P) = cpu + used; used += (size_t)(N); } while (0)
-    void *pinput, *poutput, *praw, *ppacked, *pcnt, *pinfo, *pcapture_info, *pargs, *pjob, *pdisp; uint64_t disp;
-    GEO_ALLOC(input_size, j->input, pinput); GEO_ALLOC(output_size, j->output, poutput); GEO_ALLOC(raw_size, j->raw, praw); GEO_ALLOC(packed_size, j->packed, ppacked);
-    GEO_ALLOC(count_size, j->cnt, pcnt); GEO_ALLOC(32, j->info, pinfo); GEO_ALLOC(sizeof(nvn_geo_capture), j->capture_info, pcapture_info); GEO_ALLOC(20, j->args, pargs);
+    void *pinfo, *pcapture_info, *pargs, *pjob, *pdisp; uint64_t disp;
+    GEO_ALLOC(32, j->info, pinfo); GEO_ALLOC(sizeof(nvn_geo_capture), j->capture_info, pcapture_info); GEO_ALLOC(20, j->args, pargs);
     GEO_ALLOC(sizeof(nvn_geo_pack_job), j->job, pjob); GEO_ALLOC(32, disp, pdisp);
     #undef GEO_ALLOC
-    (void)pinput; (void)poutput; (void)praw; (void)ppacked; (void)pcnt;
     if (used > total) MDIE("geometry scratch size accounting (GPU count)");
     uint32_t vi[8] = {(uint32_t)nv, 1, 0, 0, 0, 0, 0, 0}; memcpy(pinfo, vi, 32);   // GeometryCounts.x, the primitive count, comes from the GPU (dm_tess_geo)
     nvn_geo_capture ci = {j->input, 0, {0, (uint32_t)nv, first_instance, 1}, GEO_CAPTURE_WORDS, {0}};
@@ -1312,6 +1321,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     if (!g_geo_split_depth && geo_mesh_draw(pr, dw0, di0)) return;
     gcp_count(pr, g_geo_split_depth ? GCP_SPLIT : g_geo_why);
     lc_land(); rp_flush(); rp_end(); ubd_land();
+    geo_big_reset();   // enc_r_begin ends transform feedback and opens behind MTLStageAll -> MTLStageAll: earlier geometry draws are done
     // This is already an encoder boundary. Start earlier GPU work before the
     // CPU prepares the next run; retain sub_cut's deferral/fence safety gates.
     if (geo_cut_on()) sub_cut();

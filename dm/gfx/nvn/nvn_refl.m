@@ -144,7 +144,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 r->tbx = (uint16_t)(x + 1); }
             id sx = b[@"sbx"];   // a bounded storage buffer's slot in the length table (dmsh_reflect.py; Ryujinx TranslationFlags.MetalStorageBounds)
             if (sx) { int x = [sx intValue];
-                if (x < 0 || x >= DMSH_SBLEN_SLOTS || (r->kind != NVN_RB_SBUFU && r->kind != NVN_RB_SBUFQ)) FAIL("B binding %s: length table slot %d of a binding that is not a storage buffer by address", nm.UTF8String, x);
+                if (x < 0 || x >= DMSH_SBLEN_SLOTS || (r->kind != NVN_RB_SBUFP && r->kind != NVN_RB_UBOP && r->kind != NVN_RB_SBUFU && r->kind != NVN_RB_SBUFQ)) FAIL("B binding %s: length table slot %d of a binding that is not a storage buffer", nm.UTF8String, x);
                 r->sbx = (uint8_t)(x + 1); }
             id bb = b[@"border_bit"];   // a twin sampler (dmsh_rewrite.py border_emu)
             if (bb) { int bit = [bb intValue]; if (bit < 0 || bit >= DMSH_BORDER_SAMPLERS || (r->kind != NVN_RB_SAMP && r->kind != NVN_RB_SAMPT && r->kind != NVN_RB_SAMPU && r->kind != NVN_RB_SAMPI) || r->n)

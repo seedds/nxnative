@@ -982,3 +982,10 @@ t_depth_bounds: t_depth_bounds.m $(MTL_T_DEP)
 check_t_depth_bounds: t_depth_bounds
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+
+# Per-run misaligned sparse mappings, sparse alias visibility, >32 handle splits, BC+IMAGE sparse textures, geometry scratch reuse + trim
+t_sparse_shadow: t_sparse_shadow.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_shadow.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_sparse_shadow
+check_t_sparse_shadow: t_sparse_shadow
+	MTL_DEBUG_LAYER=1 ./t_sparse_shadow

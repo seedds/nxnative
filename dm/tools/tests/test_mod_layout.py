@@ -1,4 +1,4 @@
-"""mod_layout: any NSO or NRO whose data shares the code's 16 KB page gets ro and data moved up in patch_nso.py, with every reference between text and the moved part following them
+"""mod_layout: any NSO or NRO whose writable data shares the code's 16 KB page gets data moved up in patch_nso.py, with references to and from the moved part following it
 (FINAL FANTASY VIII Remastered's Math.nro: text, ro and data of 4 KB each). Images here are built by hand."""
 import os
 from pathlib import Path
@@ -33,7 +33,7 @@ def math_nro():
     struct.pack_into('<6I', out, 0x20, 0, RO, RO, DATA - RO, DATA, SIZE - DATA)
     # a function reaching ro and data, a text adrp, an in-text literal load to an inline pool whose word mimics adrp into ro, and an unallocated 0xDC word
     pool = FN + 0x20
-    code = [ADRP(0, FN, 0x2100), ldr_lit(1, FN + 4, LIT), adr(2, FN + 8, LIT), ADRP(3, FN + 12, FN),
+    code = [ADRP(0, FN, 0x2100), ldr_lit(1, FN + 4, LIT), adr(2, FN + 8, 0x2100), ldr_lit(3, FN + 12, 0x2100),
             ldr_lit(4, FN + 16, pool), RET, 0xDC000000, 0, ADRP(5, pool, 0x2100), 0]
     struct.pack_into(f'<{len(code)}I', out, FN, *code)
     # MOD0 in ro: dynamic, bss start / end, eh_frame_hdr start / end, module object
@@ -42,10 +42,10 @@ def math_nro():
     for i, (tag, v) in enumerate(((7, RELA), (8, 48), (9, 24), (6, SYMTAB), (5, STRTAB), (10, 12), (12, FN), (0, 0))):
         struct.pack_into('<qQ', out, DYN + 16 * i, tag, v)
     struct.pack_into('<QQq', out, RELA, 0x2100, 1027, FN)        # RELATIVE to text: stays
-    struct.pack_into('<QQq', out, RELA + 24, 0x2108, 1027, LIT)  # RELATIVE to ro: moves
+    struct.pack_into('<QQq', out, RELA + 24, 0x2108, 1027, LIT)  # RELATIVE to ro: addend stays
     struct.pack_into('<IBBHQQ', out, SYMTAB + 24, 1, 0x11, 0, 1, 0x2100, 8)   # data symbol: moves
     struct.pack_into('<IBBHQQ', out, SYMTAB + 48, 3, 0x12, 0, 1, FN, 24)      # function symbol: stays
-    struct.pack_into('<IBBHQQ', out, SYMTAB + 72, 5, 0x16, 0, 1, 0x1800, 8)   # STT_TLS symbol (>= ro): must stay
+    struct.pack_into('<IBBHQQ', out, SYMTAB + 72, 5, 0x16, 0, 1, 0x2800, 8)   # STT_TLS symbol (>= data): must stay
     out[STRTAB:STRTAB + 12] = b'\0d\0f\0t\0\0\0\0\0\0'
     # .eh_frame_hdr (pcrel eh_frame pointer, datarel table) and one zR CIE + FDE for the function
     out[EHH:EHH + 4] = bytes((1, 0x1b, 3, 0x3b))
@@ -87,7 +87,7 @@ def small_nso():
     # DT_RELR: slot0 (start) + bitmap bit 2 -> slot0 + 16 = slot2
     struct.pack_into('<QQ', img, relr, slot0, (1 << 2) | 1)
     struct.pack_into('<Q', img, slot0, fn)          # points into text: stays
-    struct.pack_into('<Q', img, slot2, ro + 0x20)   # points into ro: moves
+    struct.pack_into('<Q', img, slot2, slot0)       # points into data: moves
     struct.pack_into('<IBBHQQ', img, symtab + 24, 1, 0x11, 0, 1, slot0, 8)
     img[strtab:strtab + 8] = b'\0g\0\0\0\0\0\0'
     img[ehh:ehh + 4] = bytes((1, 0x1b, 3, 0x3b))
@@ -107,36 +107,35 @@ class Layout(unittest.TestCase):
 
     def test_data_on_its_own_16k_page(self):
         self.assertEqual(self.D, 0x2000)
-        (t, tsz), (ro, _), (do, dsz) = self.new_mod.segments
-        self.assertEqual((t, tsz, ro, do, dsz), (0, 0x1000, 0x3000, 0x4000, 0x1000))
-        self.assertGreaterEqual(do, (tsz + 0x3FFF) & ~0x3FFF)
-        self.assertEqual(self.new_mod.image[RO:RO + self.D], bytes(self.D))
+        self.assertEqual(self.new_mod.segments, ((0, 0x1000), (RO, 0x3000), (0x4000, 0x1000)))
+        self.assertEqual(self.new_mod.image[DATA:DATA + self.D], bytes(self.D))
         # The embedded NRO header stays self-consistent and loadable by nso.load()
         reloaded = nso.load(bytes(self.new_mod.image), 'Math')
-        self.assertEqual(reloaded.segments, ((0, 0x3000), (0x3000, 0x1000), (0x4000, 0x1000)))
+        self.assertEqual(reloaded, self.new_mod)
         self.assertEqual(mod_layout.relayout_module(self.new_mod)[1], 0)
 
     def test_code_references_and_inline_pool(self):
         D = self.D
         pool = FN + 0x20
         got = struct.unpack_from('<10I', self.new_mod.image, FN)
-        self.assertEqual(got[:6], (ADRP(0, FN, 0x2100 + D), ldr_lit(1, FN + 4, LIT + D), adr(2, FN + 8, LIT + D),
-                                   ADRP(3, FN + 12, FN), ldr_lit(4, FN + 16, pool), RET))
+        self.assertEqual(got[:6], (ADRP(0, FN, 0x2100 + D), ldr_lit(1, FN + 4, LIT), adr(2, FN + 8, 0x2100 + D),
+                                   ldr_lit(3, FN + 12, 0x2100 + D), ldr_lit(4, FN + 16, pool), RET))
         self.assertEqual(got[6], 0xDC000000)              # unallocated opc=3 V=1 untouched
         self.assertEqual(got[8], ADRP(5, pool, 0x2100))   # inline literal pool word untouched
 
     def test_tables_and_tls_symbol(self):
         D, n = self.D, self.new_mod.image
         m0 = struct.unpack_from('<I', n, 4)[0]
-        self.assertEqual(m0, MOD0 + D)
-        self.assertEqual(struct.unpack_from('<i', n, m0 + 4)[0], DYN - MOD0)   # MOD0 and dynamic moved together
+        self.assertEqual(m0, MOD0)
+        self.assertEqual(struct.unpack_from('<i', n, m0 + 4)[0], DYN + D - MOD0)
         tags = dict(struct.unpack_from('<qQ', n, DYN + D + 16 * i) for i in range(7))
-        self.assertEqual((tags[7], tags[6], tags[5], tags[12]), (RELA + D, SYMTAB + D, STRTAB + D, FN))
-        self.assertEqual(struct.unpack_from('<QQq', n, RELA + D), (0x2100 + D, 1027, FN))
-        self.assertEqual(struct.unpack_from('<QQq', n, RELA + D + 24), (0x2108 + D, 1027, LIT + D))
-        self.assertEqual(struct.unpack_from('<Q', n, SYMTAB + D + 24 + 8)[0], 0x2100 + D)
-        self.assertEqual(struct.unpack_from('<Q', n, SYMTAB + D + 48 + 8)[0], FN)
-        self.assertEqual(struct.unpack_from('<Q', n, SYMTAB + D + 72 + 8)[0], 0x1800)   # STT_TLS not shifted
+        self.assertEqual((tags[7], tags[6], tags[5], tags[12]), (RELA, SYMTAB, STRTAB, FN))
+        self.assertEqual(struct.unpack_from('<QQq', n, RELA), (0x2100 + D, 1027, FN))
+        self.assertEqual(struct.unpack_from('<QQq', n, RELA + 24), (0x2108 + D, 1027, LIT))
+        self.assertEqual(struct.unpack_from('<Q', n, SYMTAB + 24 + 8)[0], 0x2100 + D)
+        self.assertEqual(struct.unpack_from('<Q', n, SYMTAB + 48 + 8)[0], FN)
+        self.assertEqual(struct.unpack_from('<Q', n, SYMTAB + 72 + 8)[0], 0x2800)   # STT_TLS stays
+        self.assertEqual(n[EHH:EHF + 40], self.old_bytes[EHH:EHF + 40])
         self.assertEqual(nso_code.fde_ranges(bytearray(n)), nso_code.fde_ranges(bytearray(self.old_bytes)))
         self.assertEqual(nso_code.fde_ranges(bytearray(n)), [(FN, FN + 24)])
 
@@ -145,39 +144,40 @@ class Layout(unittest.TestCase):
         mod = nso.load(raw, 'small')
         out, D, _ = mod_layout.relayout_module(mod)
         self.assertEqual(D, 0x2000)
-        self.assertEqual(out.segments, ((0, tsz), (ro + D, 0x1000), (do + D, 0x1000)))
+        self.assertEqual(out.segments, ((0, tsz), (ro, 0x1000), (do + D, 0x1000)))
         self.assertEqual(struct.unpack_from('<I', out.image, 4)[0], m0)   # MOD0 in text stays
         self.assertEqual(struct.unpack_from('<i', out.image, m0 + 4)[0], dyn + D - m0)   # MOD0 -> dynamic shifts
-        self.assertEqual(struct.unpack_from('<2I', out.image, fn), (ADRP(0, fn, slot0 + D), adr(1, fn + 4, ro + 0x20 + D)))
-        self.assertEqual(struct.unpack_from('<QQ', out.image, relr + D), (slot0 + D, (1 << 2) | 1))
+        self.assertEqual(struct.unpack_from('<2I', out.image, fn), (ADRP(0, fn, slot0 + D), adr(1, fn + 4, ro + 0x20)))
+        self.assertEqual(struct.unpack_from('<QQ', out.image, relr), (slot0 + D, (1 << 2) | 1))
         self.assertEqual(struct.unpack_from('<Q', out.image, slot0 + D)[0], fn)
-        self.assertEqual(struct.unpack_from('<Q', out.image, slot2 + D)[0], ro + 0x20 + D)
+        self.assertEqual(struct.unpack_from('<Q', out.image, slot2 + D)[0], slot0 + D)
 
     def test_eh_frame_empty_aug_lsda_lpstart_and_omitted_table(self):
         d = bytearray(math_nro())
-        lsda, cfi_magic = 0x1800, 0xCAFEBABE
+        eh_frame, lsda, cfi_magic = 0x2700, 0x2800, 0xCAFEBABE
         # Header: penc=0x1b (pcrel sdata4), cenc=0x0b (sdata4), tenc=0xff (omitted search table)
         d[EHH:EHH + 4] = bytes((1, 0x1b, 0x0b, 0xff))
-        struct.pack_into('<ii', d, EHH + 4, EHF - (EHH + 4), 2)
+        struct.pack_into('<ii', d, EHH + 4, eh_frame - (EHH + 4), 2)
         # CIE: zPLR (P=0x1b pcrel to FN, L=0x1b pcrel, R=0x1b pcrel)
         cie_body = bytearray(b'\x01zPLR\0\x04\x78\x1e')
-        aug_data = bytearray([0x1b]) + struct.pack('<i', FN - (EHF + 8 + len(cie_body) + 2)) + bytes([0x1b, 0x1b])
+        aug_data = bytearray([0x1b]) + struct.pack('<i', FN - (eh_frame + 8 + len(cie_body) + 2)) + bytes([0x1b, 0x1b])
         cie_body += bytes([len(aug_data)]) + aug_data
         while (len(cie_body) + 4) % 4: cie_body.append(0)
-        struct.pack_into('<II', d, EHF, len(cie_body) + 4, 0)
-        d[EHF + 8:EHF + 8 + len(cie_body)] = cie_body
+        struct.pack_into('<II', d, eh_frame, len(cie_body) + 4, 0)
+        d[eh_frame + 8:eh_frame + 8 + len(cie_body)] = cie_body
         # FDE 1: aug_len=0 followed by CFI magic (must NOT be touched)
-        fde1 = EHF + 8 + len(cie_body)
-        struct.pack_into('<IIiIBI', d, fde1, 20, fde1 + 4 - EHF, FN - (fde1 + 8), 12, 0, cfi_magic)
+        fde1 = eh_frame + 8 + len(cie_body)
+        struct.pack_into('<IIiIBI', d, fde1, 20, fde1 + 4 - eh_frame, FN - (fde1 + 8), 12, 0, cfi_magic)
         # FDE 2: aug_len=4 pointing to LSDA with lpe=0x1b (pcrel lpstart -> FN)
         fde2 = fde1 + 24
-        struct.pack_into('<IIiIBi', d, fde2, 20, fde2 + 4 - EHF, FN + 12 - (fde2 + 8), 12, 4, lsda - (fde2 + 17))
+        struct.pack_into('<IIiIBi', d, fde2, 20, fde2 + 4 - eh_frame, FN + 12 - (fde2 + 8), 12, 4, lsda - (fde2 + 17))
         struct.pack_into('<I', d, fde2 + 24, 0)
         d[lsda] = 0x1b
         struct.pack_into('<i', d, lsda + 1, FN - (lsda + 1))
 
         out, D, _ = mod_layout.relayout_module(nso.load(bytes(d), 'eh'))
         self.assertEqual(D, 0x2000)
+        self.assertEqual(struct.unpack_from('<i', out.image, EHH + 4)[0], eh_frame + D - (EHH + 4))
         # FDE 1 CFI magic preserved; FDE 1 pc_begin moved by -D; LSDA lpstart moved by -D
         self.assertEqual(struct.unpack_from('<I', out.image, fde1 + D + 17)[0], cfi_magic)
         self.assertEqual(struct.unpack_from('<i', out.image, fde1 + D + 8)[0], FN - (fde1 + D + 8))
@@ -197,8 +197,8 @@ class Layout(unittest.TestCase):
         nso_raw, _ = small_nso()
         nso_path = root / 'subsdk9'; nso_path.write_bytes(nso_raw)
         env = dict(os.environ, DM_GAME='01008B900DC0A000', DM_REWRITE_J='1')
-        for path, name, exp_te, exp_ro, exp_do in ((nro_path, 'nro0', 0x1000, 0x3000, 0x4000),
-                                                   (nso_path, 'subsdk9', 0x11000, 0x13000, 0x14000)):
+        for path, name, exp_te, exp_ro, exp_do in ((nro_path, 'nro0', 0x1000, 0x1000, 0x4000),
+                                                   (nso_path, 'subsdk9', 0x11000, 0x11000, 0x14000)):
             out_dir = root / f'out_{name}'; out_dir.mkdir()
             p = subprocess.run([sys.executable, str(TOOLS / 'patch_nso.py'), str(path), str(out_dir), name],
                                env=env, capture_output=True, text=True)

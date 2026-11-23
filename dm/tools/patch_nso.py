@@ -37,7 +37,7 @@ src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 # against its header before anything is allocated (a damaged module stops here with a [RED] line)
 MOD = nso.cli_read(src)
 ORIG_TEXT = bytes(MOD.image[:MOD.text_end])   # the text as the file has it, before any relayout, cut or site: <name>.changed.tsv compares against it
-# Horizon maps modules at 4 KB, Apple hosts at 16 KB (W^X / signed __TEXT): move ro and data up by whole 4 KB pages when data would share the code's 16 KB page (mod_layout.py)
+# Horizon maps modules at 4 KB, Apple hosts at 16 KB (W^X / signed __TEXT): move writable data up by whole 4 KB pages when it would share the code's 16 KB page (mod_layout.py)
 try: MOD, _relayout_D, _relayout_notes = mod_layout.relayout_module(MOD)
 except mod_layout.Error as e: sys.exit(f'[RED] {NAME}: {e}')
 if _relayout_D: print(f'{NAME}: ' + '; '.join(_relayout_notes))

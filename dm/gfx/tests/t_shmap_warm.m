@@ -1,7 +1,17 @@
 // Reading the shader map is one thing and starting the prewarm another. The map is read once from any thread (shmap_read_once: the prefetch at nvnProgramSetShaders, the submit thread), inside a
 // dispatch_once; the prewarm and its prepare step run on the submit path, at the first submission, and reach shmap_load again (pso_prebuild). With the prewarm inside the once, that second call on
 // the same thread trapped in _dispatch_once_wait: every game with a window and a prebuild, at its first program.
+static unsigned g_freeze_mask;
+static int g_freeze_on[8], g_freeze_off[8];
+static void test_clock_freeze(int reason, int on) {
+    if (reason >= 0 && reason < 8) {
+        if (on) { g_freeze_mask |= 1u << reason; g_freeze_on[reason]++; }
+        else { g_freeze_mask &= ~(1u << reason); g_freeze_off[reason]++; }
+    }
+}
+#define guest_clock_freeze_for test_clock_freeze
 #include "../nvn/nvn_mtl.m"
+#undef guest_clock_freeze_for
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -42,11 +52,15 @@ int main(void) { @autoreleasepool {
 
     mtl_prepare();   // the first submission: the prewarm, then the prebuild, which calls shmap_load again on this thread
     EXPECT_EQ("the first submission starts the prewarm", 1, g_warm_started);
+    EXPECT_EQ("the prepare step balanced its guest clock freeze (reason 3)", 1, g_freeze_on[3] == 1 && g_freeze_off[3] == 1);
+    EXPECT_EQ("pso4_init balanced its guest clock freeze (reason 4)", 1, g_freeze_on[4] == 1 && g_freeze_off[4] == 1);
+    EXPECT_EQ("no guest clock freeze left held after prepare", 0, g_freeze_mask);
     EXPECT_EQ("the prebuild path was reached: the compiler it needs exists", 1, hybrid_on());
     EXPECT_EQ("the item is still there", 1, g_warm_items.count);
 
     mtl_prepare(); shmap_load();   // later calls: nothing starts twice
     EXPECT_EQ("the prewarm starts once", 1, g_warm_started);
+    EXPECT_EQ("later calls do not freeze again", 1, g_freeze_on[3] == 1 && g_freeze_on[4] == 1);
 
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     printf("%d checks, %d failed\n", g_checks, g_failed);

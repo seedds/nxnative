@@ -2767,6 +2767,10 @@ def xnb_decompress(d, first_block=False):
 class _Rd:   # a little-endian reader over bytes, with .NET's BinaryReader strings (7-bit encoded length + UTF-8)
     def __init__(s, d, p): s.d, s.p = d, p
     def u8(s): s.p += 1; return s.d[s.p - 1]
+    def i32(self) -> int:
+        v: int = struct.unpack_from('<i', self.d, self.p)[0]
+        self.p += 4
+        return v
     def un(s, f): v = struct.unpack_from(f, s.d, s.p); s.p += struct.calcsize(f); return v[0] if len(v) == 1 else v
     def raw(s, n): s.p += n; return s.d[s.p - n:s.p]
     def str(s):
@@ -2782,73 +2786,131 @@ def mgfx_effect(d, p, label):
     pixel (0), u32 length, the bytecode, u8 sampler count, {u8 type, u8 texture slot, u8 sampler slot, u8 has state (then 20 bytes of state), name, u8 parameter} each, u8 count + constant buffer
     indices, u8 count + attributes {name, u8 usage, u8 index, i16 location}}; the bytecode is u32 control length, the control section, u32 code length, the code area. Then the parameters and the
     techniques and passes, read to the end so that a misread shows: a pass names its vertex and pixel shader by index, 255 for none. → [(label, stage, ctl, code)], or None when the header is not
-    version 8's or its first shader is not an NVN one (four bytes 'MGFX' anywhere in a main).
+    version 5, 8 or 10's or its first shader is not an NVN one (four bytes 'MGFX' anywhere in a main).
     Version 5 (Bastion: MonoGame 3.0's EffectReader, 24 XNB files in Content/Effects and 7 .dx11.mgfxo files in Resources) has no effect key and no constant buffer names, each shader's
-    bytecode is a whole GLSLC output of one stage, and its shaders are written in MonoGame's DirectX layout: no sampler names and no attribute list"""
-    v5 = d[p + 4:p + 5] == b'\x05'
-    if d[p + 4:p + 5] != b'\x08' and not v5: return None
+    bytecode is a whole GLSLC output of one stage, and its shaders are written in MonoGame's DirectX layout: no sampler names and no attribute list.
+    Version 10 (MonoGame 3.8+, TMNT: Shredder's Revenge: 6 stock effects in main and 13 Content/Shaders/*.zxnb effects) widens the effect-level counts and indices (constant buffers, their
+    parameter bindings, shaders, parameters, annotations, techniques, passes and pass shader indices, -1 for none) from u8 to i32 and ends with a trailing 'MGFX' signature."""
+    ver = d[p + 4] if p + 5 <= len(d) else None
+    if ver not in (5, 8, 10): return None
+    v5, v10 = ver == 5, ver == 10
+    xnb = label.lower().endswith(('.xnb', '.zxnb'))
     r = _Rd(d, p + (6 if v5 else 10))
+    def count() -> int: return r.i32() if v10 else r.u8()
     try:
-        for _ in range(r.u8()):
+        ncb = count()
+        if not 0 <= ncb < 0x1000: return None
+        for _ in range(ncb):
             if not v5: r.str()
-            r.raw(2); r.raw(3 * r.u8())
-        if d[r.p + 6:r.p + 10] != b'\x91\x68\x86\x19' if v5 else d[r.p + 10:r.p + 14] != CTL_MAGIC: return None   # shader count, then the first shader's stage, length (and control length)
-    except IndexError: return None
+            r.raw(2)
+            npar = count()
+            if not 0 <= npar < 0x10000: return None
+            r.raw((6 if v10 else 3) * npar)
+        nsh = count()
+        if not 0 < nsh < 0x1000 or r.p + 13 > len(d): return None
+        if d[r.p + 5:r.p + 9] != b'\x91\x68\x86\x19' if v5 else d[r.p + 9:r.p + 13] != CTL_MAGIC: return None   # the first shader's stage, length (and control length)
+    except (IndexError, struct.error): return None
     def no_annotations():
-        if r.u8(): red(f'{label} MGFX @{p:#x}: annotations (MonoGame writes none)')
+        if count(): red(f'{label} MGFX @{p:#x}: annotations (MonoGame writes none)')
     out = []
-    for i in range(r.u8()):
-        vs, n = r.u8(), r.un('<I')
-        if r.p + n > len(d):   # a shader whose length runs past the data: a stray 'MGFX' in other content, not an effect
-            if label.endswith('.xnb'): red(f'{label} MGFX @{p:#x}: shader {i} claims {n:#x} bytes past the end of the file')
-            return None
-        bc = r.raw(n)
-        if v5:
-            g = glslc_shaders(bc, f'{label} MGFX @{p:#x} shader {i}', need=False)
-            if vs > 1 or len(g) != 1 or bc[:4] != b'\x91\x68\x86\x19' or struct.unpack_from('<I', bc, 0x44)[0] != n: red(f'{label} MGFX @{p:#x} shader {i}: {n:#x} bytes, not one GLSLC output of one stage')
-            (_, st, ctl, code), = g
-        else:
-            nctl = struct.unpack_from('<I', bc, 0)[0]; ncode = struct.unpack_from('<I', bc, 4 + nctl)[0] if 8 + nctl <= n else -1
-            if vs > 1 or 8 + nctl + ncode != n: red(f'{label} MGFX @{p:#x} shader {i}: {n:#x} bytes, not a control section and a code area')
-            ctl, code = bc[4:4 + nctl], bc[8 + nctl:]
-            st = sph_stage(code) if code[:4] == GFX_MAGIC else None
-        why = check(label, st, ctl, code) if st == ('ps', 'vs')[vs] else f'the SPH stage is {st}, the effect says {("pixel", "vertex")[vs]}'
-        if why: red(f'{label} MGFX @{p:#x} shader {i}: {why}')
-        out.append((f'{label}#MGFX@{p:#x}#{i}', st, ctl, code))
-        for _ in range(r.u8()):
-            r.raw(3)
-            if r.u8(): red(f'{label} MGFX @{p:#x} shader {i}: a sampler state (none in the version 5 effects seen)') if v5 else r.raw(20)   # address u / v / w, border colour, filter, max anisotropy, max mip level, mip LOD bias
-            if not v5: r.str()
-            r.u8()
-        r.raw(r.u8())
-        if not v5:
-            for _ in range(r.u8()): r.str(); r.raw(4)
-    def params():   # {u8 class, u8 type, name, semantic, annotations, u8 rows, u8 columns, elements, struct members, the value when it has neither} each → how many
-        n = r.u8()
-        for _ in range(n):
-            typ = r.raw(2)[1]; r.str(); r.str(); no_annotations()
-            rows, cols = r.u8(), r.u8()
-            if params() + params(): continue
-            if typ in (1, 2, 3): r.raw(4 * rows * cols)   # bool, int32, single
-            elif typ == 4: r.str()
-        return n
-    params()
-    for _ in range(r.u8()):   # techniques
-        r.str(); no_annotations()
-        for _ in range(r.u8()):   # passes: name, annotations, vertex / pixel shader index, then the blend, depth-stencil and rasterizer states when present
-            r.str(); no_annotations(); v, f = r.u8(), r.u8()
-            if v != 255 and v >= len(out) or f != 255 and f >= len(out): red(f'{label} MGFX @{p:#x}: a pass names shader {v} / {f} of {len(out)}')
-            for n in (18, 25, 12):
-                if r.u8(): r.raw(n)
+    try:
+        for i in range(nsh):
+            vs, n = r.u8(), r.un('<I')
+            if r.p + n > len(d):   # a shader whose length runs past the data: a stray 'MGFX' in other content, not an effect
+                if xnb: red(f'{label} MGFX @{p:#x}: shader {i} claims {n:#x} bytes past the end of the file')
+                return None
+            bc = r.raw(n)
+            if v5:
+                g = glslc_shaders(bc, f'{label} MGFX @{p:#x} shader {i}', need=False)
+                if vs > 1 or len(g) != 1 or bc[:4] != b'\x91\x68\x86\x19' or struct.unpack_from('<I', bc, 0x44)[0] != n: red(f'{label} MGFX @{p:#x} shader {i}: {n:#x} bytes, not one GLSLC output of one stage')
+                (_, st, ctl, code), = g
+            else:
+                nctl = struct.unpack_from('<I', bc, 0)[0]; ncode = struct.unpack_from('<I', bc, 4 + nctl)[0] if 8 + nctl <= n else -1
+                if vs > 1 or 8 + nctl + ncode != n: red(f'{label} MGFX @{p:#x} shader {i}: {n:#x} bytes, not a control section and a code area')
+                ctl, code = bc[4:4 + nctl], bc[8 + nctl:]
+                st = sph_stage(code) if code[:4] == GFX_MAGIC else None
+            why = check(label, st, ctl, code) if st == ('ps', 'vs')[vs] else f'the SPH stage is {st}, the effect says {("pixel", "vertex")[vs]}'
+            if why: red(f'{label} MGFX @{p:#x} shader {i}: {why}')
+            out.append((f'{label}#MGFX@{p:#x}#{i}', st, ctl, code))
+            for _ in range(r.u8()):
+                r.raw(3)
+                if r.u8(): red(f'{label} MGFX @{p:#x} shader {i}: a sampler state (none in the version 5 effects seen)') if v5 else r.raw(20)   # address u / v / w, border colour, filter, max anisotropy, max mip level, mip LOD bias
+                if not v5: r.str()
+                r.u8()
+            r.raw(r.u8())
+            if not v5:
+                for _ in range(r.u8()): r.str(); r.raw(4)
+        def params():   # {u8 class, u8 type, name, semantic, annotations, u8 rows, u8 columns, elements, struct members, the value when it has neither} each → how many
+            n = count()
+            if not 0 <= n < 0x10000: red(f'{label} MGFX @{p:#x}: invalid parameter count {n}')
+            for _ in range(n):
+                typ = r.raw(2)[1]; r.str(); r.str(); no_annotations()
+                rows, cols = r.u8(), r.u8()
+                if params() + params(): continue
+                if typ in (1, 2, 3): r.raw(4 * rows * cols)   # bool, int32, single
+                elif typ == 4: r.str()
+            return n
+        params()
+        none = -1 if v10 else 255
+        ntech = count()
+        if not 0 <= ntech < 0x1000: red(f'{label} MGFX @{p:#x}: invalid technique count {ntech}')
+        for _ in range(ntech):   # techniques
+            r.str(); no_annotations()
+            npass = count()
+            if not 0 <= npass < 0x1000: red(f'{label} MGFX @{p:#x}: invalid pass count {npass}')
+            for _ in range(npass):   # passes: name, annotations, vertex / pixel shader index, then the blend, depth-stencil and rasterizer states when present
+                r.str(); no_annotations(); v, f = count(), count()
+                if v != none and not 0 <= v < len(out) or f != none and not 0 <= f < len(out): red(f'{label} MGFX @{p:#x}: a pass names shader {v} / {f} of {len(out)}')
+                for n in (18, 25, 12):
+                    if r.u8(): r.raw(n)
+        if v10 and r.raw(4) != MGFX: red(f'{label} MGFX @{p:#x}: missing trailing MGFX signature at {r.p - 4:#x}')
+    except (IndexError, struct.error):
+        red(f'{label} MGFX @{p:#x}: effect is truncated at {r.p:#x} (size {len(d):#x})')
     # in Bastion's 24 XNB files the length in front of 'MGFX' (EffectReader reads that many bytes) runs to the file's end, about 0xff0 bytes past the effect, all zeros
-    if r.p > len(d) or label.endswith('.xnb') and d[r.p:].strip(b'\0'): red(f'{label} MGFX @{p:#x}: the effect ends at {r.p:#x}, the file at {len(d):#x}')
+    if r.p > len(d) or xnb and d[r.p:].strip(b'\0'): red(f'{label} MGFX @{p:#x}: the effect ends at {r.p:#x}, the file at {len(d):#x}')
     return out
 
 def mgfx_shaders(d, label):
     out = []
     for m in re.finditer(MGFX, d): out += mgfx_effect(d, m.start(), label) or []
-    if label.endswith('.xnb') and b'EffectReader' in d[:0x200] and not out: red(f'{label}: an XNB effect without an MGFX version 5 or 8 effect of NVN shaders')
+    if label.lower().endswith(('.xnb', '.zxnb')) and b'.EffectReader' in d[:0x200] and not out:
+        red(f'{label}: an XNB effect without an MGFX version 5, 8 or 10 effect of NVN shaders')
     return out
+
+def zxnb_effect(path, label):
+    """Peek a raw-DEFLATE .zxnb (Tribute Games' ParisEngine: TMNT: Shredder's Revenge has 1,547, only 13 effects):
+    return the full decompressed XNB only when the stream begins with an XNB EffectReader header, b'' for other raw-DEFLATE
+    .zxnb assets (textures, fonts, SoundEffectReader audio), or None if the file is not raw DEFLATE."""
+    limit = max(GZIP_FLOOR, NEST * os.path.getsize(path))
+    with open(path, 'rb') as f:
+        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), b''
+        try:
+            while len(head) < 0x200 and not dec.eof:
+                chunk = f.read(4096)
+                if not chunk: break
+                head += dec.decompress(chunk, 0x200 - len(head))
+        except zlib.error:
+            return None
+        if head[:3] != b'XNB' or b'.EffectReader' not in head:
+            return b''
+        out, total = [head], len(head)
+        try:
+            if dec.unconsumed_tail:
+                part = dec.decompress(dec.unconsumed_tail, limit - total + 1)
+                out.append(part); total += len(part)
+            while not dec.eof and total <= limit:
+                chunk = f.read(65536)
+                if not chunk: break
+                part = dec.decompress(chunk, limit - total + 1)
+                out.append(part); total += len(part)
+            if total <= limit:
+                part = dec.flush()
+                out.append(part); total += len(part)
+        except zlib.error as e:
+            red(f'{label}: invalid raw-DEFLATE stream ({e})')
+        if total > limit: red(f'{label}: raw-DEFLATE stream expands beyond its {limit:#x} byte budget')
+        if not dec.eof: red(f'{label}: truncated raw-DEFLATE stream')
+        return b''.join(out)
 
 def rel_targets(img):
     """A module image's relative relocations: {slot: target}, both module offsets. RELA's R_AARCH64_RELATIVE entries (type 0x403) carry the target as their addend; DT_RELR (SDK 20, tag 36,
@@ -4588,6 +4650,13 @@ def fzlc_shaders(path, label):
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
+    if ext.lower() == '.zxnb':
+        d = zxnb_effect(path, '/' + rel)
+        if d is not None:
+            if not d: return rel, {}, set(), {}
+            if d[:3] == b'XNB' and d[4] == 5 and d[5] & 0xC0 and len(d) > 14: d = xnb_decompress(d)
+            found = mgfx_shaders(d, '/' + rel)
+            return rel, uniq_keys(found), var_pairs(found), {}
     with open(path, 'rb') as f:
         head = f.read(16)
         if head[:4] == b'NXSD':
@@ -4798,7 +4867,7 @@ def scan_file_in(args):
     if d[:3] == b'XNB' and d[4] == 5 and d[5] & 0xC0 and len(d) > 14:   # a compressed XNB (Stardew Valley: 3,535 LZ4 files, 8 LZX): only effects (EffectReader) carry MGFX shaders, and for LZX the reader names sit in the first block, so it decides whether the rest is worth decoding
         if d[5] & 0x80:
             head_d = xnb_decompress(d, first_block=True)
-            if b'EffectReader' not in head_d: return rel, {}, set(), {}
+            if b'.EffectReader' not in head_d: return rel, {}, set(), {}
             d = head_d if len(head_d) >= struct.unpack_from('<I', d, 10)[0] else xnb_decompress(d)
         else:
             d = xnb_decompress(d)
@@ -4822,7 +4891,7 @@ def nxcx_shaders(f, label):
     Seek to GLSLC candidates through a mapping so random magic in compressed textures needs no full-file copy.
     """
     from romfs import mmap
-    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', NEEDLE, SUMO_NX, NVNSH)
+    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', MGFX + b'\x0a', NEEDLE, SUMO_NX, NVNSH)
     overlap = max(map(len, other)) - 1
     offsets, tail, at = [], b'', 0
     loose = False

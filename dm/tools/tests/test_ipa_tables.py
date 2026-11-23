@@ -67,5 +67,17 @@ class IpaTables(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('FAIL:', result.stdout)
 
+    def test_c1_header_check_accepts_clean_and_legacy_headers_only(self):
+        script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
+        line = next(ln.strip().removesuffix('; fi') for ln in script.splitlines() if 'c1_full.tsv' in ln and 'grep' in ln)
+        env = dict(os.environ, GD=str(self.profile), V='0123456789ab', IN='aaaaaaaaaaaa')
+        def check(header):
+            (self.profile / 'c1_full.tsv').write_text(header)
+            return subprocess.run(['bash', '-c', f'die() {{ exit 1; }}\n{line}\n'], env=env, capture_output=True, text=True).returncode
+        self.assertEqual(check('# chain b-0123456789ab inputs aaaaaaaaaaaa\n'), 0)
+        self.assertEqual(check('# chain b-0123456789ab inputs aaaaaaaaaaaa 2026-11-01T21:36:26+00:00\n'), 0)
+        self.assertNotEqual(check('# chain b-0123456789ab inputs aaaaaaaaaaaa0\n'), 0)
+        self.assertNotEqual(check('# chain b-0123456789ab inputs bbbbbbbbbbbb\n'), 0)
+
 
 if __name__ == '__main__': unittest.main()

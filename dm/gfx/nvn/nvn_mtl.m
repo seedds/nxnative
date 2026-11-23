@@ -7107,6 +7107,12 @@ static void shmap_read_once(void) { static dispatch_once_t once; dispatch_once(&
 // That, then the prewarm (warm_start) once: the submit thread and the tools only. The flag is set before warm_start runs, so a call from inside it (pso_prebuild) returns at
 // once; inside the dispatch_once that call re-entered it and libdispatch aborted (Tears of the Kingdom and Pokémon Scarlet at boot, chain d0e99bd4b2fe)
 static void shmap_load(void) { shmap_read_once(); static int warmed; if (!warmed) { warmed = 1; warm_start(); } }
+// c1_full.tsv / cb_extent.tsv header match: exact "# chain b-<V> inputs <digest>", or followed by a space (older tables with a clock stamp)
+static BOOL table_head_ok(NSString *head, NSString *want) {
+    if (!head) return NO;
+    NSString *h = [head hasSuffix:@"\r"] ? [head substringToIndex:head.length - 1] : head;
+    return [h isEqualToString:want] || [h hasPrefix:[want stringByAppendingString:@" "]];
+}
 static void shmap_read(void) {
     if (g_shmap) return;
     const char *e = getenv("DM_NVN_SHMAP");
@@ -7142,8 +7148,8 @@ static void shmap_read(void) {
     NSString *cp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"c1_full.tsv"];   // Same directory as the mapping table (Mac: dm/games/<id>; iOS: dm/ inside the App, copied along by build_ipa.sh)
     NSString *ct = cp ? [NSString stringWithContentsOfFile:cp encoding:NSUTF8StringEncoding error:nil] : nil;
     NSString *head = ct ? [[ct componentsSeparatedByString:@"\n"] firstObject] : nil;
-    NSString *want = [NSString stringWithFormat:@"# chain b-%s inputs %@ ", DMSH_CHAIN, st_inputs ?: @"-"];   // a library without a stamp matches no table
-    if (!head || ![head hasPrefix:want]) {
+    NSString *want = [NSString stringWithFormat:@"# chain b-%s inputs %@", DMSH_CHAIN, st_inputs ?: @"-"];   // a library without a stamp matches no table
+    if (!table_head_ok(head, want)) {
         MLOG("[RED] c1_full.tsv is stale or missing (its header must name this library's chain and inputs; a full dmsh_build.py run makes it); every c1 gets its own 64 KiB");
     } else {
         g_c1_full_valid = 1; g_c1_full = [NSMutableSet set];
@@ -7153,7 +7159,7 @@ static void shmap_read(void) {
         NSString *xp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"cb_extent.tsv"];
         NSString *xt = [NSString stringWithContentsOfFile:xp encoding:NSUTF8StringEncoding error:nil];
         NSString *xh = xt ? [[xt componentsSeparatedByString:@"\n"] firstObject] : nil;
-        if (!xh || ![xh hasPrefix:want]) MLOG("cb_extent.tsv is stale or missing: uniform reads are taken to reach the whole binding");
+        if (!table_head_ok(xh, want)) MLOG("cb_extent.tsv is stale or missing: uniform reads are taken to reach the whole binding");
         else { NSMutableDictionary *d = [NSMutableDictionary dictionary];
             for (NSString *line in [xt componentsSeparatedByString:@"\n"]) { if (!line.length || [line hasPrefix:@"#"]) continue;
                 NSRange t = [line rangeOfString:@"\t"]; if (t.location != NSNotFound) d[[line substringToIndex:t.location]] = [line substringFromIndex:t.location + 1]; }

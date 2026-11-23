@@ -1560,9 +1560,16 @@ SPIN_PATHS, SPIN_STEPS, SPIN_STORES = 256, 4096, 4   # complete paths back to T;
 SPIN_LSE = ('ldadd', 'ldclr', 'ldeor', 'ldset', 'ldsmax', 'ldsmin', 'ldumax', 'ldumin')
 SPIN_BAD = {'bl', 'blr', 'br', 'ret', 'eret', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'udf', 'mrs', 'msr', 'sys', 'sysl', 'wfe', 'wfi', 'sev', 'sevl', 'clrex', 'dc', 'ic', 'at',
             'tlbi', 'drps', 'dcps1', 'dcps2', 'dcps3', 'blraa', 'blrab', 'blraaz', 'blrabz', 'braa', 'brab', 'braaz', 'brabz', 'retaa', 'retab', 'eretaa', 'eretab'}
+# The decoded instructions are cached, but bounded: the search decodes up to SPIN_WIN bytes before every backward branch of the module, and a capstone instruction with its details
+# takes 0.5-2.6 KB. Kept for every address, EA SPORTS FC 27 1.8e's main (185 MB of text, 46 million instructions) passed 24 GB in find_spin_regions, still growing when it was stopped.
+# The heads are visited in address order and a region spans a few hundred bytes, so the recent entries are the ones asked for again. The image does not change while the regions are
+# found (spin_emit writes after all of them), so an entry decoded again is the same instruction; nothing compares them by identity. So the cache starts over at 65,536 entries
+# (a region holds a few hundred) and is emptied once the regions are found. Each forked worker of the parallel search has its own copy, bounded the same way.
 spin_dec = {}
 def spin_ins(a):
-    if a not in spin_dec: spin_dec[a] = next(md.disasm(bytes(IMG[a:a + 4]), a), None)
+    if a not in spin_dec:
+        if len(spin_dec) >= 1 << 16: spin_dec.clear()
+        spin_dec[a] = next(md.disasm(bytes(IMG[a:a + 4]), a), None)
     return spin_dec[a]
 def spin_norm(n):
     n = {'fp': 'x29', 'lr': 'x30', 'wsp': 'sp'}.get(n, n)
@@ -1849,6 +1856,7 @@ def find_spin_regions():
     return [spin_region(T, spin_cand[T]) for T in sorted(heads)]
 
 spin_regions = find_spin_regions()   # all found on the unchanged image first: emitting patches back-edges
+spin_dec.clear()   # the regions keep the instructions they need; spin_emit decodes nothing
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]
 for g in spin_regions: spin_emit(g)
 if os.environ.get('DM_SPIN_LIST'):

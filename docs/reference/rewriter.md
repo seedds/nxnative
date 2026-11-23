@@ -563,6 +563,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
 - **Check:** synthetic tests cover SIGTERM during active pool jobs, invalid counts and explicit worker limits through the packing script. The original speed measurements and module comparisons are in [PR #761](https://github.com/seedds/nxnative/pull/761); their timings are contributor measurements, not local regression results. Local game validation is recorded in Breath of the Wild's note; other games and NROs have no new local runtime validation here.
 
+### Spin-wait search memory bounded
+
+- **Symptom:** the rewrite step's memory keeps growing in `find_spin_regions` and the rewrite does not finish. EA SPORTS FC 27 1.8e's `main` (185 MB of text) passed 24 GB with `DM_REWRITE_J=1`.
+- **Cause:** `spin_ins` kept every instruction it decoded in a dict that was never emptied. The search decodes up to `SPIN_WIN` bytes before every backward branch of the module, and one capstone instruction with its details takes 0.5–2.6 KB. A text of 46 million instructions decodes most of them.
+- **Fix:** the cache starts over at 65,536 entries and is emptied once the regions are found. The heads are visited in address order and a region spans a few hundred bytes, so the entries asked for again are the recent ones. The image does not change during the search, so an instruction decoded again is the same, and nothing compares them by identity. `spin_emit` uses the instructions the regions keep and decodes none. This holds for every NSO and NRO.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md#found-on-this-game) 1.8e.50bc.
+- **Check:** the rewrite of 1.8e's `main` peaks at 2.4 GB. Rewritten with and without the change, 21 output files were byte-identical: from FC 27's `sdk` and Mario Tennis Fever's `main` and `sdk`. `test_spin_waits.py` and `test_rewrite_parallel.py` pass.
+
 ### A pool's shutdown hangs on a worker that has just started
 
 - **Symptom:** a rewrite never ends, using no CPU: `patch_nso.py` waits in `wait4` and one forked worker of the same command in `sem_wait`, in `multiprocessing/queues.py` `get`, having run no job. It is rare and needs small jobs (about 1 in 6,000 pools of tiny jobs under load). Separately, a SIGTERM could be ignored until the rewrite ended, or leave workers behind.

@@ -256,6 +256,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [UnMetal](01008F4014A74000/README.md) | `01008F4014A74000` | 1.2.0 | 14.3.0 | Unepic Fran's own engine (`arcadix`) | OpenGL | — |
 | [Warhammer Survivors](0100CAA026246000/README.md) | `0100CAA026246000` | 1.0.0 (base) | 21.4.7 | Unity 6000.0.74f1 IL2CPP, FMOD | NVN | — |
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL | — |
+| [XCOM 2 Collection (provisional)](0100D0B00FB74000/README.md) | `0100D0B00FB74000` | 1.0.3 (program 2: 1.0.1) | 9.3.1 | a launcher and Unreal Engine 3 game programs | NVN | — |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 2](0100E95004038000/README.md) | `0100E95004038000` | 2.1.0 | 3.5.0 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 3](010074F013262000/README.md) | `010074F013262000` | 2.2.1 | 12.3.9 | Monolith's engine | NVN | — |

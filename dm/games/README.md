@@ -45,6 +45,10 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 
 | Game | Title ID | Build | SDK | Engine | Graphics | Frame rate |
 |---|---|---|---|---|---|---|
+**Frame rate** shows the profile's default target or a documented mode for the listed build. A dash means no setting is listed here. The [120 fps option](../../docs/settings.md#frame-rate) was tested on Mac and needs a 120 Hz display. See each game note for measured rates and test conditions.
+
+| Game | Title ID | Build | SDK | Engine | Graphics | Frame rate |
+|---|---|---|---|---|---|---|
 | [13 Sentinels: Aegis Rim](01003FC01670C000/README.md) | `01003FC01670C000` | 1.10 | 11.4.3 | Vanillaware's engine | NVN | — |
 | [13 Sentinels: Aegis Rim, Asian release](01008D7016438000/README.md) | `01008D7016438000` | 1.00 (base) | 11.4.3 | Vanillaware's engine | NVN | — |
 | [13 Sentinels: Aegis Rim, Japanese release](010045C014650000/README.md) | `010045C014650000` | 1.00 (base) | 10.8.2 | Vanillaware's engine | NVN | — |
@@ -133,6 +137,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Hyrule Warriors: Age of Calamity](01002B00111A2000/README.md) | `01002B00111A2000` | 1.3.0 | 9.6.0 | Koei Tecmo's KTGL | NVN | 60 fps target |
 | [Hyrule Warriors: Age of Imprisonment](04003F40232DE000/README.md) | `04003F40232DE000` | v196608 (Switch 2) | 20.5.15 (Ounce) | Koei Tecmo's KTGL | NVN2 | — |
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN | — |
+| [Katamari Damacy REROLL](0100D7000C2C6000/README.md) | `0100D7000C2C6000` | 1.2 | 5.4.0 | Unity 2018.1.2f1 IL2CPP | NVN | — |
 | [Kirby Air Riders](040077201BE50000/README.md) | `040077201BE50000` | v458752 (Switch 2) | 20.5.26 (Ounce) | Its own engine (`phx`, `Aurora`) | NVN2 | — |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN | — |
 | [Kirby's Dream Buffet](0100A8E016236000/README.md) | `0100A8E016236000` | 1.0.0 | 13.3.0 | HAL Laboratory's engine (Basil, NintendoWare) | NVN | — |
@@ -260,6 +265,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Unicorn Overlord, Asian release](010054B01AD92000/README.md) | `010054B01AD92000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN | — |
 | [UnMetal](01008F4014A74000/README.md) | `01008F4014A74000` | 1.2.0 | 14.3.0 | Unepic Fran's own engine (`arcadix`) | OpenGL | — |
 | [Warhammer Survivors](0100CAA026246000/README.md) | `0100CAA026246000` | 1.0.0 (base) | 21.4.7 | Unity 6000.0.74f1 IL2CPP, FMOD | NVN | — |
+| [We Love Katamari REROLL+ Royal Reverie](010089D018D18000/README.md) | `010089D018D18000` | 1.0.3 | 14.3.1 | Unity 2021.3.16f1 IL2CPP | NVN | — |
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL | — |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 2](0100E95004038000/README.md) | `0100E95004038000` | 2.1.0 | 3.5.0 | Monolith's engine | NVN | — |

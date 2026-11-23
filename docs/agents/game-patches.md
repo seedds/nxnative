@@ -730,6 +730,9 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **`sdk`**, address space, at goal, checked: 20 registered builds rewritten byte-identical with the rules alone, 2026-10-29 and 2026-10-30; the 2 MB alignment on every sdk build on the drive, 2026-10-30: node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB, as SDK 20: the SDK-wide rules. One rule per reviewed implementation; every sdk build without CUTS gets them
 - **`sdk`**, address space, at goal, checked: both function pairs reproduced all three exact cuts on the two original SDK builds, with six more equivalent implementations found in 48 distinct SDK builds: Older VammManager: 64 MB node area and 32 MB large-region alignment. The two older SDK implementations need smaller reservations and alignment to fit the iPhone alias region after the Snowdrop metadata reservation
 
+- **sdk** `2587a39a…` ([sdk_patches.py:6](../../dm/tools/sdk_patches.py#L6)): Super Mario RPG 1.0.1, We Love Katamari REROLL+ Royal Reverie 1.0.3
+  - cut `+0x12d8b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
+  - cut `+0x12d94c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 
 ### SDK-wide function-matched rules
 

@@ -6,7 +6,9 @@
 // left right), and key events: the D-pad and the left stick are the arrow keys with key repeat, and the browser's spatial navigation as their default action (the focus moves
 // to the nearest focusable element that way, unless the page prevented the key or moved the focus itself); at load the first element in tab order takes the focus. A is
 // keyCode 32 (as the pause menu reads it) and clicks the focused link or button when the page does not take it. B goes back, or ends the page from its first one
-// (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3); other URLs outside the document are refused.
+// (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3), or when it calls the browser's own
+// close(), which the Switch's applet reports the same way (exit reason 3 with the callback URL as the last URL; pages use it as their confirm button); other URLs outside the
+// document are refused.
 // Input: hle_hid.c's state while the page is shown (dm_input_peek: the keyboard, every controller, DM_CTL), sent to the page 60 times a second; buttons held when it appears count
 // only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
 // 1280x720 is fitted to the game's 16:9 picture. Its sounds follow the host's audio (DM_AUDIO; silent on the Mac by default)
@@ -68,6 +70,10 @@ static NSString *const SHIM = @R"JS(
     }, 'footer.')
   };
   window.nx = stub(nx, '');
+
+  // The browser's own close(): the Switch's web applet ends there and reports its callback URL as the last URL, which the host answers as exit reason 3 with that URL, the
+  // same end as a navigation under it. Pages use it as their confirm button (BioShock Remastered's legal terms: close() alone, with no navigation at all)
+  window.close = function () { post({k: 'close'}); };
 
   // Sounds follow the host's audio: muted, every connection to the speakers goes through a gain of 0 (the sounds still play and end, for pages that wait for them)
   if (cfg.muted && window.AudioNode) {
@@ -422,6 +428,10 @@ static NSString *mime(NSString *ext) {
     else if ([k isEqualToString:@"back"] && _web.canGoBack) [_web goBack];   // B: back, or the end from the first page (exit reason 1)
     else if ([k isEqualToString:@"back"]) { _closed = YES; [self stopInput]; [self setHiddenState:YES]; _shown = NO; g_touch = 0; dm_web_ended(1, NULL); }
     else if ([k isEqualToString:@"end"]) { _closed = YES; [self stopInput]; [self setHiddenState:YES]; _shown = NO; g_touch = 0; dm_web_ended((uint32_t)[b[@"r"] intValue], NULL); }
+    else if ([k isEqualToString:@"close"]) { _closed = YES; [self stopInput]; [self setHiddenState:YES]; _shown = NO; g_touch = 0;
+        // The page closed itself (the browser's close(), which pages use as their confirm button): exit reason 4, the applet's own end. BioShock Remastered's
+        // legal-terms loop accepts the page only with this reason (main+0x999198, cmp w0, #4) and writes its first-run save on hardware's own answer
+        dm_web_ended(4, NULL); }
     else if ([k isEqualToString:@"log"]) { static int n; if (n++ < 200) LOG("web: page %s", [b[@"d"] description].UTF8String); }
 }
 - (void)deliver:(NSString *)m { [_web evaluateJavaScript:[NSString stringWithFormat:@"window.__dm&&__dm.recv(%@)", json(m)] completionHandler:nil]; }

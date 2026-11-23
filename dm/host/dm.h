@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <TargetConditionals.h>
+#include <unistd.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
@@ -43,6 +45,24 @@ __attribute__((weak)) void dm_log(const char *fmt, ...) {
 #define LOG(...) dm_log("[dm] " __VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
+#define DM_SWITCH_ALIAS UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
+// The alias region this run gets: at least the Switch's 64 GB on the Mac, the profile's mem_alias on an iPhone, or DM_ALIAS_SIZE when set.
+// Shared by mem_init_once (hle_svc.c) and the Mac loader's undo_alias_cuts (loader.c).
+static inline size_t dm_alias_size(void) {
+    size_t pg = (size_t)getpagesize();
+#if TARGET_OS_IPHONE
+    size_t alias = DM_GAME_MEM_ALIAS;
+#else
+    size_t alias = DM_GAME_MEM_ALIAS > DM_SWITCH_ALIAS ? DM_GAME_MEM_ALIAS : DM_SWITCH_ALIAS;
+#endif
+    const char *as = getenv("DM_ALIAS_SIZE");
+    if (as && *as) {
+        alias = (size_t)strtoull(as, NULL, 0);
+        if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as);
+    }
+    return alias;
+}
+
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
 typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;
 typedef struct { uint64_t r_offset, r_info; int64_t r_addend; } Elf64_Rela;
@@ -72,6 +92,8 @@ typedef struct {
     uint64_t fps_target_ptr;   // a target frame rate the game steps by, an int32 at [main + fps_target_ptr] + fps_target_field (patch_nso.py, fps_target.py; hle_fpslock.c); 0 = none
     uint32_t fps_target_field;
     uint64_t monolith_interval; // Monolith's native frame interval, an int32 at main + this (monolith_fps.py); 0 = not found
+    struct { uint64_t off; uint8_t len, orig[16], cut[16]; } alias_cut[32];   // iOS-only alias cuts (patch_nso.py ALIAS_CUT rows), undone at load on Mac when alias >= DM_SWITCH_ALIAS
+    int n_alias_cut;
     int native_fps_blocked;    // a required timing correction did not match: retain this main's own engine frame limits
     uint64_t ue_fixed_ptr;     // Unreal's GEngine (main's offset of the global) and UEngine::FixedFrameRate in it, a float (patch_nso.py, ue_fixed_rate.py; hle_fpslock.c); 0 = none
     uint32_t ue_fixed_field;

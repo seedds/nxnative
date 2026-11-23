@@ -33,6 +33,17 @@ The build and work folders are `<NSP folder>/01009BC00C38A000_build` and `<NSP f
 
 From a fresh save: A skips the opening, A on the title, A on file 1, A on New Run, A on Isaac. [`smoke.tsv`](smoke.tsv) spaces these by 120 presented frames from frame 300, then stands in the safe starting room. Left stick moves, right stick shoots, Plus pauses. Exit Game in the pause menu saves the run and returns to the main menu, where Continue is selected.
 
+## Audio scheduling checks
+
+2026-11-20, Apple M6 Mac mini (16 GB), macOS 27.2.1, Xcode 27.2 (27B52), base v0: full smoke checks of the [host audio producer's real-time policy](../../../docs/reference/audio.md#late-audio-producer-wakeups-despite-fast-rendering) against `74abcae5`, with real audio and the Metal HUD, passed on both outputs below. Both revisions kept four blocks queued and had zero underruns through the last reported callback checkpoint. This Mac did not reproduce the M4 Ocarina symptom.
+
+| Output | Device format | Callback checkpoint | CPU time, baseline → policy | Reported CPU energy, baseline → policy |
+|---|---|---|---|---|
+| USB Audio & HID | 48 kHz / 240 frames | 8,000 | 24.0 → 23.0% of one core | 0.125 → 0.083 W |
+| Built-in speakers | 44.1 kHz / 256 frames | 6,000 | 8.5 → 12.3% of one core | 0.268 → 0.140 W |
+
+CPU values are means of four steady reports at frames 1,500–2,400, one baseline/candidate pair per output. The mixed CPU-time results and small samples do not establish a power saving or quantify device power. The 44.1 kHz device requests 278–279 client frames at 48 kHz per callback, exercising device conversion and pacing; the deterministic fixture separately checks PCM order. Candidate render peaks were at most 0.45 ms across these runs. The speakers' original 48 kHz rate and 512-frame device buffer were restored after the test. iOS runtime and power remain untested.
+
 ## Found on this game
 
 - **The blend helper's output reference on iOS:** the shared shader helper now names the `thread` address space of its output, and its compiler test covers the packing script's iOS target as well as the Mac: [reference](../../../docs/reference/shaders.md#the-blend-helpers-output-reference-on-ios).

@@ -30,8 +30,9 @@ int main(void) {
     // Tiles decoded one by one (nvn_deswizzle_tile, the placement sparse textures of nvn_mtl.m sparse_sync) read what the whole level reads: a sparse BC6H 2D array (16-byte blocks,
     // 256x256 texels a tile, Mario Kart World's terrain format) and a sparse RGBA8 texture (128x128), each with level 0 one tile short of square, both GOB orders; the mip tail decoded
     // from its own bytes (nvn_deswizzle_from) reads what the whole texture reads
-    static const struct { int format; uint32_t w, h, layers, levels; } tc[] = {{0x50, 1024, 768, 2, 5}, {0x25, 512, 384, 1, 4}};
-    for (int g2 = 0; g2 < 2; g2++) for (unsigned c = 0; c < 2; c++) {
+    // Odd-sized R8 also makes the last tile of a row end with a partial 16-byte segment.
+    static const struct { int format; uint32_t w, h, layers, levels; } tc[] = {{0x50, 1024, 768, 2, 5}, {0x25, 512, 384, 1, 4}, {0x01, 517, 515, 1, 4}};
+    for (int g2 = 0; g2 < 2; g2++) for (unsigned c = 0; c < sizeof tc / sizeof *tc; c++) {
         nvn_texdesc d = { .target = tc[c].layers > 1 ? 4 : 1, .format = tc[c].format, .flags = 0x20, .width = tc[c].w, .height = tc[c].h, .depth = tc[c].layers, .levels = tc[c].levels, .gob_order = (uint16_t)g2 };
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         uint32_t tw, th, td; int nt = nvn_tex_sparse_tiles(&d, &tw, &th, &td);
@@ -45,7 +46,11 @@ int main(void) {
                 uint32_t tx_n = (w + tw - 1) / tw, ty_n = (h + th - 1) / th; size_t tp = (size_t)(tw / bw) * bpb; uint8_t tile[0x10000], lin[0x10000];
                 for (uint32_t ty = 0; ok && ty < ty_n; ty++) for (uint32_t tx = 0; ok && tx < tx_n; tx++) {
                     memcpy(tile, st + y * L.layer_size + nvn_tex_level_offset(&d, (unsigned)l) + ((uint64_t)ty * tx_n + tx) * 0x10000, 0x10000);
+                    memset(lin, 0xa5, sizeof lin);
                     uint32_t wb, nr; ok = !nvn_deswizzle_tile(&d, (unsigned)l, tx, ty, tile, lin, tp, &wb, &nr) && wb && nr;
+                    for (uint32_t r = 0; ok && r < nr; r++) {
+                        for (size_t x = wb; ok && x < tp; x++) ok = lin[(size_t)r * tp + x] == 0xa5;
+                    }
                     for (uint32_t r = 0; ok && r < nr; r++) memcpy(part + (size_t)(ty * (th / bh) + r) * pitch + (size_t)tx * tp, lin + (size_t)r * tp, wb);
                 }
             } else {   // the tail from its own bytes

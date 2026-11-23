@@ -15,7 +15,7 @@
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
-DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
+DM_FPS_TARGET	choice	30=30 fps,40=40 fps?fixups:FRAME_STEP_120,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
@@ -24,6 +24,7 @@ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Ga
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
+DM_ROTATION	choice	auto=Automatic,landscape=Landscape,portrait=Portrait	auto	platform:ios	Game	Rotation
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
@@ -32,8 +33,8 @@ DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
 DM_PAD_PRESS_TO_JOIN	toggle	-	0	always	Controls	Press a button to join
 DM_SW2	toggle	-	0	platform:mac	Controls	Switch 2 controllers	Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access.
 DM_MIC	toggle	-	0	mac-mic	Controls	Microphone	Lets the game hear your microphone. macOS asks for access when you launch with this enabled.	level=basic
-DM_MIC_GAIN	range	1:8:0.5	4	mac-mic	Controls	Microphone gain		needs=DM_MIC=1
-DM_SCREEN_ASPECT	choice	auto=Match screen?platform:ios,1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	auto|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.
+DM_MIC_GAIN	range	1:8:0.5	1	mac-mic	Controls	Microphone gain		needs=DM_MIC=1
+DM_SCREEN_ASPECT	choice	auto=Match screen?platform:ios,1.6=MacBook (16:10)?platform:mac,1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	auto|0	fixups:SCREEN_ASPECT	Game	Picture shape	Taller shapes render more pixels and can increase GPU time and heat.
 DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
 DM_PSO_MTL4	toggle	-	DM_GAME_PSO_MTL4|1	gfxapi:nvn	Performance	Metal 4 pipelines	Keeps a pipeline archive; uses more memory.
 DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first start waits a few minutes for it, once.	needs=DM_PSO_MTL4=1

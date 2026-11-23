@@ -87,7 +87,7 @@ enum {
     RO_CB_NEW, RO_CB_BEGIN, RO_CB_END, RO_COMMIT, RO_COMMIT_REAL, RO_SIGNAL, RO_CB_BLOCK, RO_Q_BLOCK,
     RO_RE_BEGIN, RO_CE_BEGIN, RO_END,
     RO_BAR_QUEUE, RO_BAR_AFTER_STAGES, RO_BAR_ENCODER,
-    RO_R_TABLE, RO_R_PSO, RO_R_DSS, RO_R_VIEWPORT, RO_R_SCISSOR, RO_R_CULL, RO_R_WINDING, RO_R_FILL, RO_R_BIAS, RO_R_CLIP, RO_R_SREF, RO_R_BLEND, RO_R_VIS, RO_R_AMP, RO_R_CMAP,
+    RO_R_TABLE, RO_R_PSO, RO_R_DSS, RO_R_VIEWPORT, RO_R_SCISSOR, RO_R_CULL, RO_R_WINDING, RO_R_FILL, RO_R_BIAS, RO_R_CLIP, RO_R_DBND, RO_R_SREF, RO_R_BLEND, RO_R_VIS, RO_R_AMP, RO_R_CMAP,
     RO_R_DRAW, RO_R_DRAW_INST, RO_R_DRAW_IND, RO_R_DRAW_IDX, RO_R_DRAW_IDX_IND, RO_R_MESH, RO_R_MESH_IND, RO_R_STORE_C, RO_R_STORE_D, RO_R_STORE_S,
     RO_C_TABLE, RO_C_PSO, RO_C_DISPATCH, RO_C_DISPATCH_IND, RO_C_COPY_BB, RO_C_COPY_BT, RO_C_COPY_BT_OPT, RO_C_COPY_TB, RO_C_COPY_TB_OPT, RO_C_COPY_TT, RO_C_FILL, RO_C_TGMEM,
     RO_T_ADDR, RO_T_TEX, RO_T_SAMP, RO_T_RESOURCE,
@@ -149,13 +149,14 @@ static id g_rx_cb, g_rx_enc;   // the encode thread's real command buffer and op
 // (it looked at the end of its next encoder or after a 150 us wait), so each held batch sat that long in front of an idle GPU. An upload batch or a snapshot copy counts as
 // work too. DM_NVN_SUB_IDLE_FB=1 reads the commit feedback's count instead, as the first version did (ab: alternates with the DM_AB phases, for measurement)
 enum { RX_PEND_MAX = 48 };
+enum { REC_CMT_NOW = 0, REC_CMT_END = 1, REC_CMT_SEG = 2 };   // RO_COMMIT a[5]: commit now (mdi_wait / copy cut / busy=0), submission end (DM_NVN_SUB_MERGE), or segment cut (held while rx_inflight >= cut_busy_limit)
 static id g_rx_held_cb[RX_PEND_MAX]; static DmCommitFB *g_rx_fb[RX_PEND_MAX]; static id g_rx_stamp_heap[RX_PEND_MAX]; static int g_rx_stamp[RX_PEND_MAX], g_rx_npend;   // the held submissions, oldest first; stamp: the heap slot of the boundary after it (-1: none)
-static int g_rx_after, g_rx_want_stamp;   // the last record was a held commit (or its signal or note); the next boundary stamp is the last held submission's end
+static int g_rx_after, g_rx_want_stamp;   // the last record was a held submission-end commit (or its signal or note); the next boundary stamp is the last held CB's end
 static uint64_t g_rx_ubc;   // the newest uniform shadow the held submissions read (ubc_wait at the commit)
 static struct { uint64_t v; _Atomic uint64_t *p; } g_rx_post[2 * RX_PEND_MAX + 4]; static id g_rx_post_ev[2 * RX_PEND_MAX + 4]; static int g_rx_npost;   // the signals (an event) and notes that followed held commits: made after the real one, in order
-static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_busy_hold;   // main command buffers committed and not reported back (DM_NVN_SUB_IDLE_FB); commits are held (rec_drain waits for them); rec_drain callers waiting; tests: the GPU counts as busy
-static id<MTLSharedEvent> g_rx_ev; static uint64_t g_rx_seq;   // signalled with ++g_rx_seq after every commit of the encode thread (rx_mark)
-static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions held and committed with a later one; commit calls of main command buffers; command buffers in the last one
+static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_busy_hold;   // main command buffers committed and not reported back (DM_NVN_SUB_IDLE_FB); commits are held (rec_drain waits for them); rec_drain callers waiting; tests: synthetic in-flight commits
+static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark); highest fence a blocking waiter needs committed (rec_wake_for_fence)
+static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions / segments held and committed with a later one; commit calls of main command buffers; command buffers in the last one
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int rx_merge_on(void) {
     static int v = -1;
@@ -163,13 +164,40 @@ static int rx_merge_on(void) {
         if (!v) MLOG("DM_NVN_SUB_MERGE=0: every submission is committed on its own"); }
     return sw_on(v);
 }
-static void rx_mark(void) { if (!g_rx_ev) g_rx_ev = [g_dev newSharedEvent]; [g_q4 signalEvent:g_rx_ev value:++g_rx_seq]; }   // after a commit, under g_res_commit_mu
-static int rx_busy(void) {   // the GPU still runs work the encode thread committed
-    static int fbm = -1; if (fbm < 0) fbm = sw_mode("DM_NVN_SUB_IDLE_FB", 0);
-    if (atomic_load_explicit(&g_rx_busy_hold, memory_order_relaxed)) return 1;
-    if (fbm && sw_on(fbm)) return atomic_load(&g_rx_fly) > 0;
-    return g_rx_ev && g_rx_ev.signaledValue < g_rx_seq;
+static void rx_mark_locked(void) {   // after a commit on g_q4, under g_res_commit_mu
+    id<MTLSharedEvent> ev = g_rx_ev;
+    if (!ev) {
+        ev = [g_dev newSharedEvent];
+        if (!ev) MDIE("failed to create the Metal 4 queue progress event");
+        g_rx_ev = ev;
+    }
+    uint64_t s = atomic_load_explicit(&g_rx_seq, memory_order_relaxed) + 1;
+    atomic_store_explicit(&g_rx_seq, s, memory_order_release);
+    [g_q4 signalEvent:ev value:s];
 }
+static void rx_mark(void) {
+    pthread_mutex_lock(&g_res_commit_mu);
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
+}
+static uint64_t rx_inflight(void) {   // commits on g_q4 not yet completed by the GPU (plus any test hold)
+    static int fbm = -1; if (fbm < 0) fbm = sw_mode("DM_NVN_SUB_IDLE_FB", 0);
+    uint64_t hold = (uint64_t)atomic_load_explicit(&g_rx_busy_hold, memory_order_relaxed);
+    if (fbm && sw_on(fbm)) {
+        int fly = rec_on() ? atomic_load_explicit(&g_rx_fly, memory_order_relaxed) : atomic_load_explicit(&g_seg_inflight, memory_order_relaxed);
+        return hold + (fly > 0 ? (uint64_t)fly : 0);
+    }
+    uint64_t seq = atomic_load_explicit(&g_rx_seq, memory_order_acquire);
+    if (!seq) return hold;   // rx_mark_locked publishes the event with the first sequence number
+    uint64_t done = g_rx_ev.signaledValue;
+    return hold + (seq > done ? seq - done : 0);
+}
+static inline uint64_t rx_hold_limit(void) { int lim = cut_busy_limit(); return lim > 0 ? (uint64_t)lim : 1; }
+static inline int rx_need_flush(void) {
+    return atomic_load_explicit(&g_rx_drain, memory_order_acquire)
+        || atomic_load_explicit(&g_rx_need_fence, memory_order_seq_cst) > atomic_load_explicit(&g_sub_cmt, memory_order_seq_cst);
+}
+static int rx_busy(void) { return rx_inflight() > 0; }
 static double rx_stamp_s(id heap, int slot) {   // a boundary stamp in seconds on the Mach clock, as a commit feedback's GPU times are; 0 when it was not written
     if (!heap || slot < 0) return 0;
     NSData *d = [(id<MTL4CounterHeap>)heap resolveCounterRange:NSMakeRange((NSUInteger)slot, 1)]; const MTL4TimestampHeapEntry *en = d.bytes;
@@ -201,7 +229,8 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
             for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[(NSUInteger)i])->blocks) b((id<MTL4CommitFeedback>)part); }
     }];
     pthread_mutex_lock(&g_res_commit_mu);
-    [g_q4 commit:buffers count:(NSUInteger)nb options:o]; rx_mark();
+    uint64_t elapsed = q4_commit_elapsed(buffers, (NSUInteger)nb, o);
+    rx_mark_locked();
     pthread_mutex_unlock(&g_res_commit_mu);
     if (cur) g_rx_cb = nil;
     g_rx_cbs++; g_rx_merged += (uint64_t)n; g_rx_last_nb = nb;
@@ -210,6 +239,7 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
         else { _Atomic uint64_t *np = g_rx_post[i].p; pthread_mutex_lock(&g_note_mu); if (g_rx_post[i].v > atomic_load(np)) atomic_store(np, g_rx_post[i].v); pthread_cond_broadcast(&g_note_cv); pthread_mutex_unlock(&g_note_mu); }
     }
     g_rx_npost = 0;
+    q4_commit_slow(elapsed, "encode thread (main command buffers)");
     if (g_rx_cbs % 20000 == 0) MLOG("held submissions: %llu commits of main command buffers so far, %llu submissions committed with a later one (DM_NVN_SUB_MERGE)", (unsigned long long)g_rx_cbs, (unsigned long long)g_rx_merged);
 }
 static void rx_flush(void) { if (g_rx_npend) rx_commit(0, nil, 0); }   // the held command buffers go to the queue now
@@ -221,20 +251,24 @@ static void rec_exec(const rec_t *r) {
     case RO_CB_BEGIN: [(id<MTL4CommandBuffer>)g_rx_cb beginCommandBufferWithAllocator:rec_id(a[0])]; break;
     case RO_CB_END: cb_end(g_rx_cb, nil); break;   // names the residency sets (nvn_mtl.m res_name)
     case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
-    case RO_COMMIT: {   // a main command buffer (ended): a[0] its feedback, a[2] its uniform shadows, a[5] the submission ends with it
+    case RO_COMMIT: {   // a main command buffer (ended): a[0] its feedback, a[2] its uniform shadows, a[5] REC_CMT_NOW / REC_CMT_END / REC_CMT_SEG
         DmCommitFB *fb = rec_id(a[0]);
-        if (a[5] && fb && g_rx_npend < RX_PEND_MAX && rx_busy() && !atomic_load(&g_rx_drain) && rx_merge_on()) {   // held: the GPU has work
+        int mode = (int)a[5], lim = cut_busy_limit();
+        uint64_t cap = lim > 0 ? (uint64_t)lim : 1;
+        int can_hold = (mode == REC_CMT_END && rx_inflight() >= cap) || (mode == REC_CMT_SEG && lim > 0 && rx_inflight() >= (uint64_t)lim);
+        if (can_hold && fb && g_rx_npend < RX_PEND_MAX && !atomic_load(&g_rx_drain) && rx_merge_on()) {   // held: the GPU has work up to the in-flight limit
             g_rx_held_cb[g_rx_npend] = g_rx_cb; g_rx_fb[g_rx_npend] = fb; g_rx_stamp[g_rx_npend] = -1; g_rx_stamp_heap[g_rx_npend] = nil; g_rx_npend++; if (a[2] > g_rx_ubc) g_rx_ubc = a[2];
-            g_rx_cb = nil; g_rx_after = 1; g_rx_want_stamp = 1; atomic_store(&g_rx_held, 1);
+            g_rx_cb = nil; g_rx_after = mode == REC_CMT_END; g_rx_want_stamp = 1; atomic_store(&g_rx_held, 1);
             break; }
         rx_commit(1, fb, a[2]);
         break; }
-    case RO_COMMIT_REAL: {   // an upload batch, a snapshot copy: a whole command buffer, after everything recorded before it
+    case RO_COMMIT_REAL: {   // a whole command buffer, after everything recorded before it; a[2] is the commit site
         rx_flush();
         id<MTL4CommandBuffer> buffers[] = {rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
         pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
-        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
-        rx_mark(); pthread_mutex_unlock(&g_res_commit_mu);
+        uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
+        rx_mark_locked(); pthread_mutex_unlock(&g_res_commit_mu);
+        q4_commit_slow(elapsed, (const char *)(uintptr_t)a[2]);
         break; }
     case RO_SIGNAL:
         if (after && g_rx_npend && g_rx_npost < (int)(sizeof g_rx_post / sizeof *g_rx_post)) { g_rx_post_ev[g_rx_npost] = rec_id(a[0]); g_rx_post[g_rx_npost].v = a[1]; g_rx_post[g_rx_npost++].p = NULL; g_rx_after = 1; break; }   // its command buffer is not committed yet
@@ -243,7 +277,7 @@ static void rec_exec(const rec_t *r) {
     case RO_RE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb renderCommandEncoderWithDescriptor:rec_id(a[0])]; break;
     case RO_CE_BEGIN: g_rx_enc = [(id<MTL4CommandBuffer>)g_rx_cb computeCommandEncoder]; break;
     case RO_END: [(id<MTL4CommandEncoder>)e endEncoding]; g_rx_enc = nil; g_rx_want_stamp = 0;
-        if (g_rx_npend && (atomic_load(&g_rx_drain) || !rx_busy())) rx_flush();   // the GPU has run out of work (or the submit thread waits): the held ones go to it
+        if (g_rx_npend && (atomic_load(&g_rx_drain) || rx_inflight() < rx_hold_limit())) rx_flush();   // the GPU has room (or rec_drain waits): the held ones go to it
         break;
     case RO_BAR_QUEUE: [(id<MTL4CommandEncoder>)e barrierAfterQueueStages:a[0] beforeStages:a[1] visibilityOptions:a[2]]; break;
     case RO_BAR_AFTER_STAGES: [(id<MTL4CommandEncoder>)e barrierAfterStages:a[0] beforeQueueStages:a[1] visibilityOptions:a[2]]; break;
@@ -258,6 +292,7 @@ static void rec_exec(const rec_t *r) {
     case RO_R_FILL: [(id<MTL4RenderCommandEncoder>)e setTriangleFillMode:a[0]]; break;
     case RO_R_BIAS: [(id<MTL4RenderCommandEncoder>)e setDepthBias:rec_fv(a[0]) slopeScale:rec_fv(a[1]) clamp:rec_fv(a[2])]; break;
     case RO_R_CLIP: [(id<MTL4RenderCommandEncoder>)e setDepthClipMode:a[0]]; break;
+    case RO_R_DBND: [(id<MTL4RenderCommandEncoder>)e setDepthTestMinBound:rec_fv(a[0]) maxBound:rec_fv(a[1])]; break;
     case RO_R_SREF: [(id<MTL4RenderCommandEncoder>)e setStencilFrontReferenceValue:(uint32_t)a[0] backReferenceValue:(uint32_t)a[1]]; break;   // front, back
     case RO_R_BLEND: [(id<MTL4RenderCommandEncoder>)e setBlendColorRed:rec_fv(a[0]) green:rec_fv(a[1]) blue:rec_fv(a[2]) alpha:rec_fv(a[3])]; break;
     case RO_R_VIS: [(id<MTL4RenderCommandEncoder>)e setVisibilityResultMode:a[0] offset:a[1]]; break;
@@ -321,7 +356,7 @@ static void *rec_thread(void *arg) {
         pthread_mutex_lock(&g_rb_mu);
         while (!g_rb_head) {
             if (g_rx_npend) {   // held commits and nothing more to encode: a short wait for the next submission while the GPU still has work (looked at every 50 us), then they go
-                for (int k = 0; k < 9 && !g_rb_head && !atomic_load(&g_rx_drain) && rx_busy(); k++) { struct timespec ts = {0, 50000}; g_rb_sleeping = 1; pthread_cond_timedwait_relative_np(&g_rb_work, &g_rb_mu, &ts); g_rb_sleeping = 0; }
+                for (int k = 0; k < 9 && !g_rb_head && !rx_need_flush() && rx_inflight() >= rx_hold_limit(); k++) { struct timespec ts = {0, 50000}; g_rb_sleeping = 1; pthread_cond_timedwait_relative_np(&g_rb_work, &g_rb_mu, &ts); g_rb_sleeping = 0; }
                 if (g_rb_head) break;
                 g_rb_busy = 1; pthread_mutex_unlock(&g_rb_mu);
                 @autoreleasepool { rx_flush(); }
@@ -375,6 +410,18 @@ static void rec_drain(void) {
     pthread_mutex_unlock(&g_rb_mu);
     if (ws_on()) ws_put(WS_DRAIN, w0, blocked);
 }
+// A thread is about to block waiting for fence: if the encode thread has not committed it yet (for example, DM_NVN_SUB_MERGE held the frame's final submission behind a segment cut),
+// wake it so the held command buffer and its fence signal go to the queue immediately instead of sitting in the 50 us idle loop
+static void rec_wake_for_fence(uint64_t fence) {
+    if (!rec_on() || !g_rb_started || atomic_load_explicit(&g_sub_cmt, memory_order_acquire) >= fence) return;
+    uint64_t cur = atomic_load_explicit(&g_rx_need_fence, memory_order_relaxed);
+    while (cur < fence && !atomic_compare_exchange_weak_explicit(&g_rx_need_fence, &cur, fence, memory_order_seq_cst, memory_order_relaxed)) {}
+    if (atomic_load_explicit(&g_rx_held, memory_order_seq_cst)) {
+        pthread_mutex_lock(&g_rb_mu);
+        if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);
+        pthread_mutex_unlock(&g_rb_mu);
+    }
+}
 // A block of records from another thread than the submit thread (the present snapshot's copy): it goes in one piece behind every block published so far. Everything the game
 // submitted before it presents is published by then (a submission publishes its records before it returns), so the block runs after the frame's work, and the presenting thread
 // does not wait for the encode thread
@@ -423,6 +470,7 @@ static inline id rec_table_real(id t) { return [t isKindOfClass:[DmRecTable clas
 - (void)setTriangleFillMode:(MTLTriangleFillMode)m { rec_put(RO_R_FILL, 0)->a[0] = m; }
 - (void)setDepthBias:(float)u slopeScale:(float)s clamp:(float)c { rec_t *r = rec_put(RO_R_BIAS, 0); r->a[0] = rec_f(u); r->a[1] = rec_f(s); r->a[2] = rec_f(c); }
 - (void)setDepthClipMode:(MTLDepthClipMode)m { rec_put(RO_R_CLIP, 0)->a[0] = m; }
+- (void)setDepthTestMinBound:(float)lo maxBound:(float)hi { rec_t *r = rec_put(RO_R_DBND, 0); r->a[0] = rec_f(lo); r->a[1] = rec_f(hi); }
 - (void)setStencilReferenceValue:(uint32_t)v { rec_t *r = rec_put(RO_R_SREF, 0); r->a[0] = r->a[1] = v; }
 - (void)setStencilFrontReferenceValue:(uint32_t)f backReferenceValue:(uint32_t)b { rec_t *r = rec_put(RO_R_SREF, 0); r->a[0] = f; r->a[1] = b; }
 - (void)setBlendColorRed:(float)r_ green:(float)g blue:(float)b alpha:(float)a { rec_t *r = rec_put(RO_R_BLEND, 0); r->a[0] = rec_f(r_); r->a[1] = rec_f(g); r->a[2] = rec_f(b); r->a[3] = rec_f(a); }
@@ -498,17 +546,25 @@ static void rec_cb_block(id cb, void (^block)(id<MTL4CommandBuffer>)) {
 }
 static id rec_table(id t) { if (!rec_on() || !t) return t; DmRecTable *s = [DmRecTable new]; s->real = t; return s; }
 // The replay's main command buffer: committed once the uniform shadows queued so far are made (ubc_wait)
-static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: the submission ends with this command buffer (the encode thread may keep it open for the next one: merged submissions)
+static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: REC_CMT_NOW / REC_CMT_END / REC_CMT_SEG
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(fb); r->a[2] = ubc_head(); r->a[5] = (uint64_t)end; return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb}; MTL4CommitOptions *o = commit_opts(fb);
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
+    rx_mark();
+    q4_commit_slow(elapsed, "rec_commit (main command buffer)");
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
-    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
+    if (rec_on() && g_rb_started) {
+        rec_t *r = rec_put(RO_COMMIT_REAL, 2);
+        r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); r->a[2] = (uintptr_t)"encode thread (upload batch)";
+        return;
+    }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
+    rx_mark();
+    q4_commit_slow(elapsed, "rec_commit_upload (upload batch)");
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
 // committed after it and after the command buffers committed before it

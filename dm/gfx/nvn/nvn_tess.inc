@@ -243,6 +243,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     }
     uint32_t binst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     lc_land(); rp_flush(); rp_end(); ubd_land();
+    if (ggs) geo_big_reset();   // enc_r_begin opens behind MTLStageAll -> MTLStageAll: earlier geometry draws are done
     uint32_t *cpi = malloc((size_t)ncp * 4); if (!cpi) { tess_refuse(pr, dw, di, "no memory"); return; }
     uint32_t lo = UINT32_MAX, hi = 0;
     if (dw) { lo = (uint32_t)dw->first; hi = lo + ncp - 1; for (uint32_t i = 0; i < ncp; i++) cpi[i] = i; }
@@ -281,7 +282,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     g_draw_binst = binst;
     MTL4RenderPassDescriptor *rd = [MTL4RenderPassDescriptor new]; rd.renderTargetWidth = rd.renderTargetHeight = rd.defaultRasterSampleCount = 1;
-    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, cap); bind_vbufs(re, &vs->rf);
+    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, cap); bind_vbufs(re, &vs->rf, &range, NULL);
     vconv_bind(re, vs, 1, &range, NULL); args_dirty_all(); encode_args(re, vs, 0, 1); enc_r_vbuf(re, 13, g_cap);
     enc_r_draw_instanced(re, MTLPrimitiveTypePoint, lo, span, ni, binst); enc_r_end(re);
     if (tess_stages() < 2) { g_tess_draws++; return; }

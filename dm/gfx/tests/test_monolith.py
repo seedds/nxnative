@@ -57,7 +57,7 @@ class MonolithTests(unittest.TestCase):
         cmp = struct.pack('<8s2I', b'cmp\0zlib', len(packed), len(data)) + packed
         expected = {split.skey(c, k) for c, k in zip(controls, codes)}
         with tempfile.TemporaryDirectory() as tmp:
-            for body in (data, xbc, b'DRSM' + bytes(60) + xbc + xbc, cmp):
+            for body in (data, xbc, b'DRSM' + bytes(60) + xbc + xbc, cmp, b'DMPA' + bytes(0x3ffc) + data):   # DMPA: a .wimdo model package, its HCPS at +0x4000
                 with self.subTest(magic=body[:4]):
                     path = Path(tmp) / 'resource.bin'   # detection uses the header, not the suffix
                     path.write_bytes(body)
@@ -75,7 +75,7 @@ class MonolithTests(unittest.TestCase):
         data, ctls, codes = program(['vs', 'gs', 'ps'])
         out = split.hcps_shaders(data, 0, '/test')
         self.assertEqual([(s, c, k) for _, s, c, k in out], list(zip(['vs', 'gs', 'ps'], ctls, codes)) * 2)
-        self.assertEqual(split.var_pairs(out), {(split.skey(ctls[0], codes[0]), split.skey(ctls[2], codes[2]))})
+        self.assertEqual(split.var_pairs(out), {(split.skey(ctls[0], codes[0]), split.skey(ctls[2], codes[2])), (split.skey(ctls[0], codes[0]), split.skey(ctls[1], codes[1]), 'geo')})
 
     def test_xbc_payload_is_scanned_only_after_decoding(self):
         data = program(['vs', 'ps'])[0]

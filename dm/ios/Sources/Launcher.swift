@@ -14,6 +14,7 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
 /// Cloud saves too). The host brings the save in from there when the game starts and
 /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
 private struct CloudSavesSection: View {
+    let checking: Bool
     @State private var folder: String = ""
     @State private var note: String = ""
     @State private var picking = false
@@ -27,6 +28,7 @@ private struct CloudSavesSection: View {
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
+                .disabled(checking)
                 // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
                 .sheet(isPresented: $picking) {
                     DocumentPicker(types: [.folder]) { url in
@@ -43,6 +45,7 @@ private struct CloudSavesSection: View {
                 Button("Turn off cloud saves", role: .destructive) {
                     dm_clear_cloud_saves(); refresh(); note = ""
                 }
+                .disabled(checking)
             }
         } footer: {
             Text(note.isEmpty
@@ -56,7 +59,7 @@ private struct CloudSavesSection: View {
         var stale: ObjCBool = false
         folder = dm_cloud_saves_path(&stale) ?? ""
         if stale.boolValue && folder.isEmpty {
-            note = "The folder you chose before is no longer readable (the app was signed differently). Please choose it again."
+            note = "The folder you chose before is no longer readable. Please choose it again."
         }
     }
 }
@@ -103,48 +106,19 @@ private struct LauncherView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            HStack(spacing: 0) {
-                VStack(spacing: 16) {
-                    if let icon = appIcon() {
-                        Image(uiImage: icon).resizable().frame(width: 96, height: 96)
-                            .clipShape(RoundedRectangle(cornerRadius: 22))
-                            .accessibilityHidden(true)
-                    }
-                    Text((info("CFBundleDisplayName") as? String) ?? "Game")
-                        .font(.title.weight(.bold)).multilineTextAlignment(.center)
-                    Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
-                        .font(.callout).foregroundStyle(.secondary)
-                    playButton
+            // Landscape: the game's name and Play on the left third, the settings beside them; upright (Rotation, an iPad turned), the name and Play above the settings
+            if geometry.size.width >= geometry.size.height {
+                HStack(spacing: 0) {
+                    header(icon: 96)
+                        .padding(16)
+                        .frame(width: geometry.size.width / 3, height: geometry.size.height)
+                    settingsList.frame(width: geometry.size.width * 2 / 3)
                 }
-                .padding(16)
-                .frame(width: geometry.size.width / 3, height: geometry.size.height)
-                List {
-                    ForEach(m.sections, id: \.self) { section in
-                        let rows = m.rows(in: section)
-                        if !rows.isEmpty {
-                            Section(section) {
-                                ForEach(rows) { SettingRow(s: $0, m: m) }
-                            }
-                        }
-                    }
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
-                    CloudSavesSection()
-                    Section {
-                        HStack {
-                            Text("Memory available")
-                            Spacer()
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
+            } else {
+                VStack(spacing: 0) {
+                    header(icon: 64).padding(.horizontal, 16).padding(.vertical, 12)
+                    settingsList
                 }
-                .listStyle(.insetGrouped)
-                .contentMargins(.horizontal, 12, for: .scrollContent)
-                .frame(width: geometry.size.width * 2 / 3)
             }
         }
         .preferredColorScheme(.dark)
@@ -158,12 +132,66 @@ private struct LauncherView: View {
             Button("Try Again") { DispatchQueue.main.async { start() } }
             Button("Cancel", role: .cancel) {}
         } message: { r in Text(r.unreadableMessage(here: "iPhone")) }
+        .confirmationDialog(SaveSyncReport.missingTitle, isPresented: isAsking(.missing), titleVisibility: .visible, presenting: report) { r in
+            Button("Try Again") { DispatchQueue.main.async { start() } }
+            Button("Play Without Sending") { go("offline") }   // this iPhone's save, not sent: the next start compares again
+            Button(r.sendLabel(here: "iPhone"), role: .destructive) { go(r.localChoice) }   // local:none
+            Button("Cancel", role: .cancel) {}
+        } message: { r in Text(r.missingMessage(here: "iPhone")) }
         .task {
             while !Task.isCancelled {
                 memory = os_proc_available_memory()
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+        // Rotation turns the screen as soon as it is picked, before Play (front_ios.m dm_rotation_set); the saved pick at once when the screen shows
+        .onAppear { if let v = m.values["DM_ROTATION"] { dm_rotation_set(v) } }
+        .onChange(of: m.values["DM_ROTATION"]) { _, v in if let v { dm_rotation_set(v) } }
+    }
+
+    private func header(icon size: CGFloat) -> some View {
+        VStack(spacing: size > 64 ? 16 : 8) {
+            if let icon = appIcon() {
+                Image(uiImage: icon).resizable().frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 22 / 96))
+                    .accessibilityHidden(true)
+            }
+            Text((info("CFBundleDisplayName") as? String) ?? "Game")
+                .font(.title.weight(.bold)).multilineTextAlignment(.center)
+            Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
+                .font(.callout).foregroundStyle(.secondary)
+            playButton
+        }
+    }
+
+    private var settingsList: some View {
+        List {
+            ForEach(m.sections, id: \.self) { section in
+                let rows = m.rows(in: section)
+                if !rows.isEmpty {
+                    Section(section) {
+                        ForEach(rows) { SettingRow(s: $0, m: m) }
+                    }
+                }
+            }
+            Section {
+                Button("Reset to tested defaults") { m.reset() }
+                    .disabled(!m.changed)
+            } footer: {
+                Text("Brings back all settings this game was tested with.")
+            }
+            // The background save check reads the selected folder until it returns.
+            CloudSavesSection(checking: checking)
+            Section {
+                HStack {
+                    Text("Memory available")
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .contentMargins(.horizontal, 12, for: .scrollContent)
     }
 
     @ViewBuilder var playButton: some View {
@@ -172,7 +200,7 @@ private struct LauncherView: View {
         if checking {
             VStack(spacing: 6) {
                 HStack(spacing: 6) { ProgressView(); Text("Checking the cloud save…").font(.callout).foregroundStyle(.secondary) }
-                Button("Play Without It") { checking = false; go("offline") }.font(.callout)
+                Button("Play Without It") { check += 1; go("offline") }.font(.callout)
             }
         }
     }

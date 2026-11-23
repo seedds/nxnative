@@ -8,15 +8,44 @@
 // Only success matters for the failures: the game checks IsSuccess only, so a failure code is a non-zero value under the ro module number 22.
 #include "hle.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <stdbool.h>
 #include <unistd.h>
 
 #define RO_FAIL ((Result)(22 | (1 << 9)))   // a failure under ro module 22
 #define RO_NOT_NRO ((Result)0x816)           // the SDK's result for an image without NRO0 (sdk+0x3471e8)
+#define RO_SYMBOL_NOT_FOUND ((Result)0xa16)  // LookupModuleSymbol(base) when the module or symbol is absent
 static pthread_mutex_t g_ro_mu = PTHREAD_MUTEX_INITIALIZER;   // the SDK holds g_RoLock over a load as well
 uint64_t resolve_import(module_t *m, const char *name);
 int hle_implements(const char *name);
 
 HLE_FORCE("_ZN2nn2ro10InitializeEv", "connect to the ldr:ro service; the host has none, symbol lookups search the loaded modules directly", Result, h_ro_Initialize, void) { LOG("init takeover: ro::Initialize (no-op)"); dm_thread_service_connect(); return 0; }
+
+// The offline host refuses the EOS NRO. An unresolved import would return zero (EOS_Success),
+// so Shredder's Revenge proceeds to create a platform and dereferences the null result.
+// Report the missing implementation so the game takes its own initialization failure path.
+HLE("EOS_Initialize", int32_t, h_eos_Initialize, const void *options) {
+    (void)options;
+    LOG("EOS_Initialize: offline, returning EOS_NotImplemented");
+    return 16;   // EOS_NotImplemented
+}
+
+// The SDK's rtld lists are empty when the host loads the modules. Answer address lookups from the same module table the host uses to relocate them.
+HLE_FORCE("_ZN2nn2ro21GetModuleAddressRangeEPmS1_m", "find the loaded guest module containing an address", bool, h_ro_GetModuleAddressRange,
+          uintptr_t *out_base, size_t *out_size, uintptr_t address) {
+    module_t *m = module_of((const void *)address);
+    if (!m || !m->loaded || address - (uintptr_t)m->base >= m->guest_size) return false;
+    *out_base = (uintptr_t)m->base;
+    *out_size = m->guest_size;
+    return true;
+}
+
+HLE_FORCE("_ZN2nn2ro18LookupModuleSymbolEPmmPKc", "look up a definition in the module at this exact base", Result, h_ro_LookupModuleSymbolAtBase,
+          uintptr_t *out, uintptr_t base, const char *name) {
+    void *p = name ? guest_module_sym(base, name) : NULL;
+    if (!p) return RO_SYMBOL_NOT_FOUND;
+    *out = (uintptr_t)p;
+    return 0;
+}
 
 HLE_FORCE("_ZN2nn2ro12LookupSymbolEPmPKc", "look up a definition by name in the loaded modules or the host Vulkan driver", Result, h_ro_LookupSymbol, uintptr_t *out, const char *name) {
     void *p = name ? guest_sym(name) : NULL;

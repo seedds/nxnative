@@ -209,12 +209,12 @@ static int take_page(range_t *r, uintptr_t p, uint8_t *st) {
     return *st == PG_OPEN && atomic_compare_exchange_strong(&r->state[p], st, PG_BUSY);
 }
 // Unprotect one page of a range: if protected, unprotect and stamp it; if another thread is changing its protection, wait for it to finish and look again -- if the other side was setting read-only, the page is PROT after the wait and still has to be unprotected
-// (an unprotect-before-write never reaches the fault handler, so it must be done here). Returns 1 = this page is managed by this module; 0 = it is not, or the wait on BUSY timed out
+// (an unprotect-before-write never reaches the fault handler, so it must be done here). Returns 1 = this page was protected by this module and is writable now; 0 = it was already NONE or the wait on BUSY timed out
 static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
     for (;;) {
         uint8_t st;
         if (take_page(r, p, &st)) { unprotect_page(r, p); if (count) atomic_fetch_add(count, 1); return 1; }
-        if (st != PG_BUSY) return atomic_load(&r->gen[p]) != 0;   // already NONE: just unprotected by another thread (the fault happened before the unprotect) -> re-execute; pages never protected are not ours
+        if (st != PG_BUSY) return 0;   // already NONE: either another thread just unprotected it (on_fault checks page_writable), or a read-only protection is not this module's (claiming it would loop forever)
         if (!busy_wait(r, p)) return 0;
     }
 }

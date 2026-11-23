@@ -73,6 +73,7 @@ static class SwshXlate
         public int[] QueryAmpereComputeC0Layout() => _job["nvn2_cs"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;
         public int QueryAmpereStageBank() => _job["stage_bank"] is JsonNode b ? (int)b : -1;   // an NVN2 graphics stage's own bank, its push block 1 + stage index (dmsh_build.py job_for)
         public int[] QueryAmpereStageMemory() => _job["stage_memory"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;   // a task or mesh shader (dmsh_meshstage.py)
+        public int QueryAmpereStageInputWords() => _job["stage_input_words"] is JsonNode n ? (int)n : 0;   // a mesh shader's spilled task payload (dmsh_meshstage.py)
         public uint ConstantBuffer1Read(int offset) { if (offset >= 0 && offset + 4 <= _c1.Length) return BitConverter.ToUInt32(_c1, offset); Notes.Add($"c1 read out of bounds +{offset:X} (c1 length {_c1.Length})"); return 0; }
         // All resources go into set 0, each with a distinct binding number (spirv-cross emits them as one argument buffer); the translator's convention of giving the buffer of constant segment number index binding = index+1 is not relied on
         // The translator's own messages (a bindless read it resolved, or could not and removed, its result 0; an invalid encoding) go into the notes, marked, which dmsh_build.py counts apart
@@ -168,6 +169,8 @@ static class SwshXlate
                 false, false, false, false /* depth not rewritten: dmsh_build.py adds the GL entry point (see the file header) */, false, 1f, AlphaTestOp.Always, 0f, attr, false, fout, false,
                 false /* no Y flip */, true /* origin upper-left */, false);
         }
+        // Metal gather offsets have a signed four-bit range, smaller than the offsets encoded by TLD4.PTP.
+        public bool QueryHostSupportsNonConstantTextureGatherOffsets() => false;
         public bool QueryHostSupportsTextureShadowLod() => true;
         public bool QueryHostSupportsDepthClipControl() => false;   // Metal has no -1..1 clip control; the depth convention is not left to the translator, the rewrite is added per entry point in the MSL (see the file header)
         // Job reduced = true: relaxed precision - the translator marks NoContraction only on operations that must be exact (the default marks all: keeps the bit-exact results of Maxwell's separate rounding, at the cost of many optimization-disabled spvFMul etc. in the MSL)

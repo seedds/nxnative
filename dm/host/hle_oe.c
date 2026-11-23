@@ -1,6 +1,6 @@
 // nn::oe (application operating environment): on the real device the console state is queried through the am/oe services; the host gives fixed state directly.
 // oe::Initialize is in hle_sdkinit.c, not here.
-// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
+// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default: first supported language in control.nacp, else en-US; the apps set it from Info.plist DMLanguage).
 #include "hle.h"
 #include "front.h"
 
@@ -467,19 +467,38 @@ HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "resume notification swit
 HLE_FORCE("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", "operation mode change notification switch", void, h_oe_SetOpModeNtf, unsigned on) { g_ntf_opmode = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", "performance mode change notification switch", void, h_oe_SetPerfModeNtf, unsigned on) { g_ntf_perfmode = on & 0xff; }
 
-// nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0
-HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG", uint64_t, h_oe_GetLang, void) {
+// nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0.
+// When DM_LANG is unset, pick the first language supported in control.nacp's SupportedLanguageFlag
+// (+0x302C, NACP bit order matching dm/tools/nacp.py LANGUAGES: en-US, then en-GB, then the game's
+// first supported language), matching Horizon and build_ipa_from_nsp.py's game_language("en-US").
+static const char *oe_lang(void) {
     const char *e = getenv("DM_LANG");
+    if (e && *e) return e;
+    static const char *const k_nacp_lang[] = {
+        "en-US", "en-GB", "ja", "fr", "de", "es-419", "es", "it",
+        "nl", "fr-CA", "pt", "ru", "ko", "zh-Hant", "zh-Hans", "pt-BR",
+        "pl", "th",
+    };
+    uint8_t b[4];
+    if (!dm_control_read(0x302C, b, sizeof b, NULL, 0)) {
+        uint32_t flag = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+        for (unsigned i = 0; i < sizeof k_nacp_lang / sizeof *k_nacp_lang; i++)
+            if (flag & (1u << i)) return k_nacp_lang[i];
+    }
+    return "en-US";
+}
+HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG, else control.nacp", uint64_t, h_oe_GetLang, void) {
+    const char *e = oe_lang();
     char code[8] = {0};
-    strncpy(code, e && *e ? e : "en-US", sizeof code - 1);
+    strncpy(code, e, sizeof code - 1);
     uint64_t v; memcpy(&v, code, 8);
     return v;
 }
 
 // The console's region (Animal Crossing: New Horizons 3.0.3): the SDK asks settings::system::GetRegionCode, which reaches set:sys. A region that fits the language the game is given:
 // 0 Japan, 1 the Americas, 2 Europe, 4 Hong Kong / Taiwan / Korea (nn::settings::system::RegionCode; 3 Australia and 5 China are left out, no language points at them alone)
-HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG", int, h_oe_GetRegion, void) {
-    const char *e = getenv("DM_LANG"); if (!e || !*e) e = "en-US";
+HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG, else control.nacp", int, h_oe_GetRegion, void) {
+    const char *e = oe_lang();
     int r = !strncmp(e, "ja", 2) ? 0 : !strncmp(e, "ko", 2) || !strncmp(e, "zh", 2) ? 4 : !strcmp(e, "en-US") || !strcmp(e, "fr-CA") || !strcmp(e, "es-419") || !strcmp(e, "pt-BR") ? 1 : 2;
     static int once; if (!once++) LOG("oe::GetRegionCode: %d for language %s", r, e);
     return r;

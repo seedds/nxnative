@@ -1395,6 +1395,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `oe::GetRegionCode` answers from the language: Japan, the Americas, Europe or Hong Kong / Taiwan / Korea.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4; found in `main`'s imports before the first boot).
 
+### Default language from control data
+
+- **Symptom:** running the Mac host directly without `DM_LANG` (e.g. via `scripts/bench.py` or `scripts/regress.py`) crashes a game that does not ship American English (`en-US`), such as Xenoblade Chronicles 3 crashing 2.5 s into boot at `main+0x10141ac`.
+- **Cause:** `nn::oe::GetDesiredLanguage` and `nn::oe::GetRegionCode` (`hle_oe.c`) fell back to `en-US` whenever `DM_LANG` was unset, ignoring the title's `control.nacp` `SupportedLanguageFlag` (`+0x302C`). On Horizon, `GetDesiredLanguage` always returns a language declared in the title's control data.
+- **Fix:** when `DM_LANG` is unset or empty, `oe_lang` (`hle_oe.c`) reads `SupportedLanguageFlag` at `+0x302C` via `dm_control_read` and picks the first set language in NACP bit order (`en-US`, then `en-GB`, then `ja` through `th`), falling back to `en-US` when `control.nacp` is absent, too short or sets no known language bit. Both `oe::GetDesiredLanguage` and `oe::GetRegionCode` use it; an explicit `DM_LANG` still passes through unchanged. Checked with synthetic NACP cases in `dm/host/tests/t_oe.c`.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) (lists `en-GB` and no `en-US`; reported in PR #3147).
+
 ### Shared font address: BFTTF header or bare TTF
 
 - **Symptom:** the font engine runs on garbage; crash after the shared fonts load, looking up the "?" glyph (`main+0x6c73c0`, a font cache lookup returning null), with SDK 10's `ScalableFontEngine::LoadFont` failing with error 403 and `SetFont` with 301 on both stand-in fonts; or Japanese, Korean or Chinese text draws nothing in a Unity game while Latin text is fine (Patrick's Parabox's language menu showed three blank lines).

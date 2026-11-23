@@ -132,6 +132,39 @@ class Ue3CacheTests(unittest.TestCase):
         got = shader_split.ue3_shaders(data, 'mk11.xxx')
         self.assertEqual([(st, c, k) for _, st, c, k in got], [('cs', stored, code)])
 
+    def test_compact_records(self):
+        """Batman: Arkham Asylum's compact records: {u32 code region length, u32 metadata length, u32 0}, the code region (code from its SPH, constants, a second code) and the metadata"""
+        def compact(sph, csz, ksz, gsz, seed):
+            region = struct.pack('<I', sph) + bytes([seed]) * (csz - 4) + b'K' * ksz + b'G' * gsz
+            meta = bytearray(0x40); struct.pack_into('<III', meta, 0, 1, csz, ksz); struct.pack_into('<I', meta, 0x1c, gsz); meta[0x28:0x40] = bytes([seed + 1]) * 0x18
+            return struct.pack('<III', len(region), len(meta), 0) + region + bytes(meta), region
+        cases = [(0x1462, 0x1d0, 0x40, 0, 3),      # a pixel shader; GLSLC's code ends 0x30 short of a 256-byte boundary
+                 (0x0461, 0xd0, 0x20, 0x60, 5)]    # a vertex shader with a second code
+        records = [compact(*c) for c in cases]
+        got = shader_split.ue3_shaders(b'\xff' * 7 + records[0][0] + b'\0' * 5 + records[1][0], 'g.bin')
+        self.assertEqual([st for _, st, _, _ in got], ['ps', 'vs'])
+        self.assertTrue(all('#UE3c@' in w for w, *_ in got))
+        for (_, st, ctl, code), (_, region), (_, csz, ksz, gsz, seed) in zip(got, records, cases):
+            self.assertIsNone(shader_split.check('g.bin', st, ctl, code))
+            self.assertEqual(code[:4], shader_split.GFX_MAGIC)
+            self.assertEqual(code[0x30:0x30 + csz], region[:csz])                  # the code at +0x30
+            c_end = (csz + 0x12f) & ~0xff
+            self.assertEqual(code[c_end:c_end + ksz], region[csz:csz + ksz])       # its constants on the next 256-byte boundary
+            self.assertEqual(struct.unpack_from('<II', ctl, 0x6f8), (csz, ksz))
+            self.assertEqual(ctl[0x7d0:0x7e8], bytes([seed + 1]) * 0x18)           # GLSLC's compile information from the metadata
+            if gsz:
+                o = c_end + ((ksz + 0xff) & ~0xff) + 0x30
+                self.assertEqual(code[o:o + gsz], region[csz + ksz:])              # the second code 0x30 into the block after the constants
+                self.assertEqual(struct.unpack_from('<I', ctl, 0x758)[0], gsz)
+
+    def test_compact_lookalikes_are_skipped(self):
+        def rec(sph, csz, ksz=0x40):
+            meta = bytearray(0x40); struct.pack_into('<III', meta, 0, 1, csz, ksz)
+            return struct.pack('<III', csz + ksz, 0x40, 0) + struct.pack('<I', sph) + bytes(csz - 4 + ksz) + bytes(meta)
+        self.assertEqual(shader_split.ue3_shaders(rec(0x0061 | 0xf << 10, 0x1d0), 'max.xxx'), [])   # no graphics stage in the SPH
+        self.assertEqual(shader_split.ue3_shaders(rec(0x1462, 0x200), 'tunnel.xxx'), [])            # a code length GLSLC never writes: +0x704 would not match the code area
+        self.assertEqual(shader_split.ue3_shaders(rec(0x1462, 0x1d0)[:-1], 'cut.xxx'), [])           # metadata past the end
+
     def test_key_skip_masks_the_compile_information(self):
         (c1, k1), (_, k2) = shader(1), shader(2)
         k2 = k1[:0x7d0] + k2[0x7d0:0x7e8] + k1[0x7e8:]   # the same section but its compile information

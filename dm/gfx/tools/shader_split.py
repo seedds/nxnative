@@ -3658,6 +3658,57 @@ def ue3_shaders(d, label):
         why = check(label, st, ctl, code) if st else 'no stage in the code area header'
         if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
+    return out + ue3_compact(d, label)
+
+def ue3_compact_build(region, meta):
+    """The control section and code area Batman: Arkham Asylum's shader loader (main+0xcc6194 on 1.0.1) makes from a compact record, byte for byte (checked against the sections the game gives
+    nvnProgramSetShaders): the metadata, at most 0x40 bytes over a zeroed block whose word 0 is 1, gives the code, constant and second code lengths (+4, +8, +0x1c), GLSLC's register and
+    stage fields (+0xc..+0x24, +0x28..+0x3f) and the rest is a fixed template. The code area is the magic, the code at +0x30, the constants at (code + 0x12f) & ~0xff and the second code
+    0x30 into the 256-byte block after them"""
+    a256 = lambda n: (n + 0xff) & ~0xff
+    m = bytearray(0x40); m[:4] = struct.pack('<I', 1); m[:min(len(meta), 0x40)] = meta[:0x40]
+    u = lambda o: struct.unpack_from('<I', m, o)[0]
+    csz, ksz, gsz = u(4), u(8), u(0x1c)
+    total = a256(csz) + a256(ksz)
+    ctl = bytearray(0x880)
+    ctl[0:0x18] = bytes.fromhex('34127698' '01000000' '10000000' '20010000' '0b000000' '78080000'); struct.pack_into('<I', ctl, 0x20, 0x880)
+    ctl[0x6f0:0x6f8] = ctl[0x7c8:0x7d0] = struct.pack('<Q', 0x880)
+    x748 = x74c = x750 = x754 = x75c = 0
+    if gsz: x748, x74c, x750, x754, x75c, total = 0x30, csz, u(0xc), total | 0x30, u(0x20), (total + gsz + 0x12f) & ~0xff
+    struct.pack_into('<IIIII', ctl, 0x6f8, csz, ksz, a256(csz), total, 0x30)
+    ctl[0x70c:0x714] = m[0xc:0x14]
+    struct.pack_into('<II', ctl, 0x714, m[0x14], 0x10000 if m[0x15] else 0)
+    struct.pack_into('<I', ctl, 0x724, u(0x18)); struct.pack_into('<I', ctl, 0x734, m[0x16])
+    struct.pack_into('<IIIIII', ctl, 0x748, x748, x74c, x750, x754, gsz, x75c)
+    struct.pack_into('<II', ctl, 0x790, 0x2a0035, u(0x24))
+    ctl[0x7d0:0x7e8] = m[0x28:0x40]
+    struct.pack_into('<I', ctl, 0x7e8, 0x880); struct.pack_into('<I', ctl, 0x7f4, 0xc)
+    c_end = (csz + 0x12f) & ~0xff
+    area = bytearray(c_end + a256(ksz) + ((gsz + 0x12f) & ~0xff if gsz else 0)); area[:4] = GFX_MAGIC
+    area[0x30:0x30 + csz] = region[:csz]
+    area[c_end:c_end + ksz] = region[csz:csz + ksz]
+    if gsz: o = c_end + a256(ksz) + 0x30; area[o:o + gsz] = region[csz + ksz:csz + ksz + gsz]
+    return bytes(ctl), bytes(area)
+
+def ue3_compact(d, label):
+    """Batman: Arkham Asylum's shader records (its global shader cache and its packages): u32 code region length, u32 metadata length (under 0x880; the loader takes 0x880 and more as a whole
+    control section, as Batman: Arkham Knight's), u32 0, the code region (the code from its SPH, its constants, a second code), the metadata, whose three lengths add up to the region.
+    The loader builds the control section and code area from them (ue3_compact_build)"""
+    out, end = [], 0
+    for m in re.finditer(rb'(?s)(?=....[\x00-\xff][\x00-\x08]\x00\x00\x00\x00\x00\x00[\x41-\x65])', d):
+        p = m.start()
+        if p < end: continue   # inside the record just taken (its code and metadata are no records)
+        cl, ml = struct.unpack_from('<II', d, p)
+        mo = p + 12 + cl
+        if not (0x50 <= cl <= 0x100000 and 0x20 <= ml < 0x880) or mo + ml > len(d): continue
+        csz, ksz = struct.unpack_from('<II', d, mo + 4)
+        if not csz or csz + ksz + struct.unpack_from('<I', d, mo + 0x1c)[0] != cl: continue
+        ctl, code = ue3_compact_build(d[p + 12:mo], d[mo:mo + ml])
+        st = sph_stage(code)
+        # Other data with the record's shape: no graphics SPH (Max_B6_CH12.xxx), or a code length GLSLC never writes (Overworld_A1_Tunnel.xxx: its code and constants would not fill
+        # the control section's code area; GLSLC pads the code so that it ends 0x30 short of a 256-byte boundary, and the loader's two roundings agree only then)
+        if not st or check(label, st, ctl, code): continue
+        out.append((f'{label}#UE3c@{p:x}', st, ctl, code)); end = mo + ml
     return out
 
 UE_LEGACY, UE_IO = 'UE legacy pak', 'UE IoStore'

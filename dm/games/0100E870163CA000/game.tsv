@@ -1,0 +1,44 @@
+# Game profile of Batman: Arkham Asylum (Switch, update 1.0.1 = v65536, over the 6.84 GB base game). Playable on the Mac
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file
+# Rocksteady's Unreal Engine 3 (package version 0x243, licensee 0x15) with FMOD, Bink movies and Scaleform menus, SDK 14.3.0 (the sdk build of Batman: Arkham Knight 1.0.5, 2aef2cff…).
+# The shaders are compact records in the global shader cache (GlobalShaderCache-Switch.bin) and in the Oodle packages (*.xxx): the loader main+0xcc6194 builds each control section from
+# a fixed template and the record's metadata (shader_split.py ue3_compact): 31,263 of them
+
+# ---- Identity ----
+title_id	0100E870163CA000
+program_id	0100E870163CA000
+
+# ---- App ----
+name	Batman: Arkham Asylum
+ipa	BatmanArkhamAsylum.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.1	main=621ee66a6743d750cb91e4e5e3c94e43	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	BmGame/CookedSwitch/Textures.tfc
+zip_store	.bik:.tfc:.upk:.xxx:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (no virtual address memory): main sets a heap, of at most the pool − 64 MB (the survey's guess, a 3328 MB heap region)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Graphics ----
+# The game selects near-zero NVN depth (one nvnDeviceSetDepthMode call at boot); offline pipeline bases use main0_z.
+depth_mode	zero
+# 60 fps: the game asks for present interval 2, and the engine caps itself at 30 (Coalesced_<language>.bin: bSmoothFrameRate, MaxSmoothedFrameRate=30). With the configurations'
+# MaxSmoothedFrameRate at 60 (a RomFS overlay, README.md Frame rate) and one frame per display tick here, it runs at 60; Unreal Engine 3 steps by the time that passed (walking
+# for 3 s covers the same ground at 30 and 60 fps). Without the overlay the engine's own cap keeps it at 30
+present_interval	display
+
+# ---- Shader split ----
+shader_groups	/BmGame/=bmgame
+shader_note	Batman: Arkham Asylum shaders (Unreal Engine 3 compact shader records)

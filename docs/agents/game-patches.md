@@ -71,6 +71,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Mario Kart World](#mario-kart-world) | 0 | 0 | 1 | 0 | 0 | `game` |
+| [METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)](#metal-gear-solid-peace-walker---master-collection-version-game) | 0 | 0 | 3 | 0 | 0 | `game` |
 | [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
@@ -393,6 +394,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **function-matched frame step** (`main` of builds without FRAME_STEP): frame interval from the host's step: a function of 0x290 bytes, `+0xa0` in it
 - **function-matched frame step** (`main` of builds without FRAME_STEP): frame interval from the host's step: a function of 0x28c bytes, `+0xa4` in it
+
+### METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)
+
+[METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)](../../dm/games/010099801C4FA001/README.md), `010099801C4FA001`, [patches.py](../../dm/games/010099801C4FA001/patches.py).
+
+- **`game`**, race, at goal, checked: 1.3.0 (v131072) main bca1a793…: complete kick_render/wait_render/RenderThread disassembly, DM_PROBE happens-before trace, and 10/10 CPU-loaded Mac runs across DM_PREEMPT=0 and DM_PREEMPT=1 (2026-11-23): render-thread synchronization (defer kick past set_resolve, track idle state in done event). Two data races in the game's own render-thread handshake (premature SignalEvent before set_resolve and unwaited startup kick leaving the done event stale), not a host or SDK bug; function-matched (MATCH_STUBS) across updates
+
+- **function-matched stub** (`main` of builds without STUBS): render-thread synchronization: a function of 0x1a4 bytes, `+0x18`, `+0x190` in it
 
 ### Monster Hunter Rise
 
@@ -744,3 +753,4 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | Key and value | Games | Binding | Why |
 |---|---|---|---|
 | `programs 1=010049900F546001 2=010049900F546002` | [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md) | `game`, at goal | which programs a game has that this host can run: a fact of its files, the profiles that exist for them |
+| `programs 1=010099801C4FA001` | [METAL GEAR SOLID: Peace Walker - Master Collection Version](../../dm/games/010099801C4FA000/README.md) | `game`, at goal | which programs a game has that this host can run: a fact of its files, the profiles that exist for them |

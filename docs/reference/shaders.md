@@ -709,6 +709,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
 - **Found on:** [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](../../dm/games/010051C0134F8000/README.md#shaders) (1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s. The base build played from the title through the opening fight.
 
+### Shared shader archives in five-slot Unreal version 8 paks
+
+- **Symptom:** the shader split reports `shaders: 0` on a version 8 Unreal pak whose directory lists `.ushaderbytecode` files.
+- **Cause:** `pak_shader_sources` sent five-slot v8 paks to the inline scan based on the number of compression-method slots. That count describes the entry header layout. The pak directory describes which shader sources it holds.
+- **Fix:** use the same directory-based selection for both v8 footer layouts. Send the shared archives to the existing archive decoder. Keep scanning for inline shaders when the pak lists cooked packages or a global shader cache, or when an adjacent IoStore container holds inline export bundles.
+- **Found on:** [Oceanhorn 2: Knights of the Lost Realm](../../dm/games/01006CB010840000/README.md#shaders). The two version 1 archives contain 4,496 records, all decoded by the existing version 1 reader.
+
 ### Unreal Engine short version 8 paks and version 1 shader archives
 
 - **Symptom:** the shader split finds no Unreal shaders on a game whose paks hold shared shader archives. The footer reader skips these version 8 paks with `no pak footer`.

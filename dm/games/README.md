@@ -164,6 +164,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Nintendo Switch 2 Welcome Tour](040057C02159A000/README.md) | `040057C02159A000` | v262144 (Switch 2) | 20.5.29 (Ounce) | NintendoWare Bezel Engine 2.16.0 | NVN2 | — |
 | [Nintendo Switch Sports Resort](04008E001F098000/README.md) | `04008E001F098000` | v65536 (Switch 2) | 22.2.10 (Ounce) | sead / agl / gsys, Havok | NVN2 | — |
 | [Oceanhorn: Monster of Uncharted Seas](01007D7001D0E000/README.md) | `01007D7001D0E000` | 1.0.1 | 3.7.0 | Cornfox & Bros.' engine | NVN | — |
+| [Oceanhorn 2: Knights of the Lost Realm](01006CB010840000/README.md) | `01006CB010840000` | 1.1 | 10.4.1 | Unreal Engine 4.24 | NVN | — |
 | [OCTOPATH TRAVELER](010057D006492000/README.md) | `010057D006492000` | 1.0.5 | 3.5.1 | Unreal Engine 4.18 | NVN | 60 fps target |
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN | 60 fps target |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN | 60 fps target |

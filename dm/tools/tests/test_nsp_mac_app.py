@@ -1207,7 +1207,7 @@ class Script(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in pso.iterdir()), ['applegpu_g14s.mtl4a'])
 
     def test_prebake_shader_inputs_in_folder_and_image(self):
-        # A profile input (dual_want.tsv) can change the functions without changing the chain or shader keys.
+        # A profile input (bf_want.tsv, shader_facts.tsv) can change the functions without changing the chain or shader keys.
         for packed in (False, True):
             with self.subTest(packed=packed):
                 tmp = self.prebake_work(); lib = tmp / 'shader/cache/b-0123456789ab'

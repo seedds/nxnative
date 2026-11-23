@@ -174,7 +174,6 @@ DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find
 DM_NVN_DISPATCH_BARRIER	diagnostic	`full`: every compute dispatch is ordered after everything before it in its encoder, as before; by default dispatches are ordered by the game's own barriers and by the copies around them (`nvn_mtl.m` `dbar_game`); `ab` alternates the two with the `DM_AB` phases, for measurement
 DM_NVN_DISPATCH_RANGELESS	switch	0 restores full ordering for dispatches with unknown ranges; 1 uses NVN barriers between guest dispatches and full ordering against host copies; ab alternates
 DM_NVN_DLSS_BILINEAR	diagnostic	`=1` draws every DLSS evaluation with the bilinear stand-in, to tell MetalFX's part in a GPU fault or stall
-DM_NVN_DUAL_WANT	path	`=<file>`: appends the key of each pixel shader a pipeline blends with its output 1 as the second source, while it has no dual-source entry point, to that file, once per key (the profile's `dual_want.tsv`)
 DM_NVN_ENC_LABEL	diagnostic	`=1` labels every render encoder `p<pass in frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draws>` for Instruments traces
 DM_NVN_ENC_THREAD	player	`1` runs the replay's Metal encoding on a thread of its own while the submit thread goes on translating; on by default on iOS (`0` turns it off), off on macOS
 DM_NVN_END_ALIAS	diagnostic	`1` puts the resource-alias flush back on every encoder's end barrier (each costs the command allocator about 100 KB; the start barriers carry it); `ab` alternates it with the `DM_AB` phases

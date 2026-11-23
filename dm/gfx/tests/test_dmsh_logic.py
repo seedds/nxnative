@@ -122,7 +122,7 @@ def fixture(out):   # Actual build reflection and libraries, starting at the syn
             pathlib.Path(dest).write_bytes(data)
 
     ns = dict(globals(), loc={key: ('synthetic', 0)}, pc_of={key: []}, out=str(out), w=str(work), CHAIN=dmsh_chain.version(),
-              IOSOUT=None, TARGETS={'mac'}, BF_WANT=set(), DUAL_WANT=set(), SIDE_STATS=collections.Counter(), BF_STATS=collections.Counter(),
+              IOSOUT=None, TARGETS={'mac'}, BF_WANT=set(), SIDE_STATS=collections.Counter(), BF_STATS=collections.Counter(),
               SPIRV_CROSS='synthetic-msl', XC=[], clone=shutil.copyfile,
               subprocess=types.SimpleNamespace(run=lambda *a, **kw: subprocess.CompletedProcess(a, 0), CalledProcessError=subprocess.CalledProcessError),
               MTL=types.SimpleNamespace(compile=compile_msl, compile_split=compile_split, with_compiler=lambda target, refl: refl))

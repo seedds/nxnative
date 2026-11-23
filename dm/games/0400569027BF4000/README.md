@@ -48,6 +48,7 @@ Raw-pointer discovery validation (2026-11-18, Apple M6 16 GB, macOS 27.2, Xcode 
 - Its streamed textures, gathered on the GPU from the physical memory behind its sparse pools, put every pool behind them into the residency set for good, and the forest entry fell to a few frames a second ([GPU copies into a sparse pool's textures, stored through the page table](../../../docs/reference/nvn-objects.md#gpu-copies-into-a-sparse-pools-textures-stored-through-the-page-table)).
 - It sets the float blend clamp to the largest finite value, which Metal cannot do; no colour target held a non-finite pixel over the opening, so nothing drawn differs ([Float blend clamp](../../../docs/reference/nvn-objects.md#float-blend-clamp-nvncommandbuffersetfloatblendclamp)).
 - 6 of its 7,568 compute shaders run a block with subgroup operations at a loop exit ([A loop exit's subgroup block run by the lanes of every iteration together](../../../docs/reference/shaders.md#a-loop-exits-subgroup-block-run-by-the-lanes-of-every-iteration-together)): found by a translator A/B, not by a picture.
+- A first-run prebuild wrote 15,764 pulling bases to `pso_archive/p*.mtl4a` without opening them in the same session, leaving gameplay draws waiting on `pulling base not made yet` ([Prebuilt pipeline archives not opened during the first run](../../../docs/reference/shaders.md#prebuilt-pipeline-archives-not-opened-during-the-first-run); [GitHub issue #3030](https://github.com/seedds/nxnative/issues/3030)).
 
 ## Open
 

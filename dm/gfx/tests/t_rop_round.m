@@ -40,7 +40,9 @@ static void merged_case(NSString *source, prog_t *program, int on) {
         "{\n    main0_out out = {};\n    out.m_0 = float4(as_type<float>(0x3e858586u));\n    dm_blend0(out, dm_blend);\n    dm_merged_out r = {};\n    r.m_1 = out.m_0;\n    return r;\n}\n"];
     NSError *error = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:merged options:nil error:&error];
     CHECK(lib != nil); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
-    id<MTLFunction> fn = fn4_note([lib newFunctionWithName:@"main_m"], lib, @"main_m", nil);
+    MTLFunctionConstantValues *mcv = [MTLFunctionConstantValues new]; BOOL no = NO;
+    [mcv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+    id<MTLFunction> fn = fn_spec(lib, @"main_m", mcv, nil);   // as shader_load: a function with dm_blend_off is specialized with false
     CHECK(fn != nil); if (!fn) return;
     static tex_t unused = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98310}, target = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 98311};
     unused.d = (nvn_texdesc){.width = 8, .height = 1, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA16F};
@@ -90,7 +92,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     NvProg *pr = [NvProg new];
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vrop_b");
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
-    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "prop_b");
+    MTLFunctionConstantValues *pcv = [MTLFunctionConstantValues new]; BOOL pno = NO;
+    [pcv setConstantValue:&pno type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+    ps->fn = fn_spec(lib, @"main0", pcv, nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "prop_b");   // as shader_load
     CHECK(ps->fn != nil);
     static prog_t program; program.serial = 98300; serial_put(program.serial, pr);
     merged_case(source, &program, on);
@@ -160,6 +164,35 @@ int main(int argc, char **argv) { @autoreleasepool {
     S.color.logic_op = NVN_LOGIC_OP_COPY; S.color.blend_en = 0;
     static const uint8_t lmap[8] = {0xff, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};   // physical target 1 is output 2
     g_pass.cfmt[0] = 0; g_pass.cfmt[1] = MTLPixelFormatRGBA16Unorm; CHECK(rop_word(lmap) == (on ? (uint32_t)DMSH_ROUND_16 << (2 * DMSH_BLEND_ROUND_BITS) : 0u));
+    // pso_blend_live / pso_off must read k->cfmt (not g_pass.cfmt): a normalized target gets blend_live even if g_pass is float/empty, and a float target compiles dm_blend0 out
+    {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA16Float;
+        pso_key k = {.cfmt = {MTLPixelFormatRGBA8Unorm}, .blend_en = 0, .chmask = 0xf};
+        CHECK(pso_blend_live(&k, ps, 0) == (on ? 1 : 0));
+        CHECK(pso_off(&k, ps, 0) == (on ? FN_OFF_BORDER : (FN_OFF_BORDER | FN_OFF_BLEND)));
+        // Force FN_OFF_BLEND with rop_word = DMSH_ROUND_8 bound: dm_rop is compiled out, so Sonic Frontiers' 66.5/255 stores Apple's 67 instead of NVIDIA's 66
+        MTLRenderPipelineDescriptor *d = pso_desc(&k, pr->sh[0], ps, nil, 0);
+        NSError *be = nil; id<MTLRenderPipelineState> off_ps = pso_build(d, FN_OFF_BORDER | FN_OFF_BLEND, &be);
+        CHECK(off_ps != nil);
+        if (off_ps) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:1 mipmapped:NO];
+            td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+            id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+            uint32_t rw[2] = {0u, DMSH_ROUND_8}; id<MTLBuffer> bb = [g_dev newBufferWithBytes:rw length:16 options:MTLResourceStorageModeShared];
+            CHECK(rt != nil && bb != nil);
+            if (rt && bb) {
+                id<MTLCommandBuffer> cb = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
+                rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+                [re setRenderPipelineState:off_ps]; [re setFragmentBuffer:bb offset:0 atIndex:DMSH_BLEND_BUFFER];
+                [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [re endEncoding];
+                [cb commit]; [cb waitUntilCompleted];
+                CHECK(cb.status == MTLCommandBufferStatusCompleted);
+                uint8_t raw[W * 4] = {0}; [rt getBytes:raw bytesPerRow:W * 4 fromRegion:MTLRegionMake2D(0, 0, W, 1) mipmapLevel:0];
+                int idx = -1; for (int x = 0; x < W; x++) if (v[x] == 0.260784327983856201171875f) { idx = x; break; }
+                CHECK(idx >= 0 && raw[idx * 4 + 3] == 67u);
+            }
+        }
+    }
     mtl_pool_del(commands); mtl_drain(); free(commands);
     printf("normalized colour rounding replay (%s): %d checks, %d failed\n", on ? "NVIDIA's rule" : "DM_NVN_ROP_ROUND=0, Apple's conversion", checks, failed);
     return failed != 0;

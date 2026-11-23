@@ -58,6 +58,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [Zero initialization of depth and stencil textures](../../../docs/reference/rendering.md#new-textures-start-as-zero).
 - [iOS layouts: portrait, a half-folded Duo, iPad windows](../../../docs/reference/rendering.md#ios-layouts-portrait-a-half-folded-duo-ipad-windows), from PR #683 (iPhone Duo).
 - [AudioOut stop releases pending buffers](../../../docs/reference/audio.md#stopping-an-audioout-releases-its-pending-buffers), reported on 1.0.0 in PR #190.
+- [A game restart reports a user clock change](../../../docs/reference/services.md#a-game-restart-reports-a-user-clock-change), observed as a renewed time penalty on Mac in 1.3.0.
 - [Unity's integer target frame rate](../../../docs/reference/frame-rate.md#unitys-integer-target-frame-rate).
 
 ## Open

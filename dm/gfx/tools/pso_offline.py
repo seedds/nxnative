@@ -4,7 +4,8 @@
 # The host matches libraries by content, so the archive serves the libraries the app ships (msl/b-<chain>); measurements are in dm/games/01007EF00011E000/README.md.
 # Per pair (vertex key, pixel key) of the profile's shader_pairs.tsv and pso_pairs.tsv, read in that order with repeated lines dropped, as the host reads them:
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
-#     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
+#     <key>_b.json: the pulling library's under `pull` there (vertex_entry); the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour
+#     attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
 #     writes the layer (its reflection's layer_out, dmsh_entry.py layer_out: its pipelines take an input primitive class), a pixel shader that reads the primitive ID (its reflection's
 #     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
@@ -53,9 +54,10 @@ import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read
 import dmsh_abi as abi, dmsh_side
 import vol_space   # the space metal-tt may write, with what APFS frees on demand
 
-# The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
-# device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
-HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
+# The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). dm_border_off is true (almost no draw binds a border twin);
+# dm_blend_off is false so one pulling base in the pair archive serves both blend_live = 0 and 1 draws as hybrid stand-ins (hybrid_get), while steady-state pipelines specialize it true
+# when both blend words are 0. A pair whose functions declare another constant is left to the device (rest_pairs.tsv)
+HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True), 'dm_blend_off': (abi.BLEND_OFF_FC, False)}
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 MAX_FAILED = 8   # pipelines of one group metal-tt may fail on before the run counts as failed (compile_isolating)
@@ -142,6 +144,16 @@ def constants(path):
     return dict(zip(names, consts))
 
 
+def vertex_entry(vj, zero):
+    """The entry point a base takes from a vertex shader's library, by its reflection vj: the shader's own (`entry`, or `entry_z` for the near = 0 depth mode) in <key>_b, and in a
+    pulling library <key>_bp the name the reflection's `pull` gives that entry point (dmsh_pull.py), which is the shader's own where `pull` names none. As the host takes it
+    (nvn_mtl.m: side_entry in shader_load and pre_desc)"""
+    z = bool(zero and vj.get('entry_z')); own = vj['entry_z'] if z else vj.get('entry')
+    pull = vj.get('pull')
+    name = pull.get('entry_z' if z else 'entry') if isinstance(pull, dict) else None
+    return name if isinstance(name, str) and name else own
+
+
 def plan(lib_dir, chain, pairs, zero):
     """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
     lib_dir = romfs.Path(lib_dir); js, fns = {}, {}
@@ -160,7 +172,7 @@ def plan(lib_dir, chain, pairs, zero):
         vj, fj = refl(vk), refl(fk)
         if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: left['reflection'] += 1; continue
         if vj.get('mesh_stage'): left['mesh'] += 1; continue   # a mesh shader's pair (shader_split.py var_pairs, for its padding): its pipelines are mesh pipelines, built at the draw (nvn_geometry.inc mtk_pso)
-        ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fentry = fj.get('entry') or 'main0'
+        ventry = vertex_entry(vj, zero); fentry = fj.get('entry') or 'main0'
         pull = isinstance(vj.get('pull'), dict)
         if not pull and vj.get('vertex_inputs'): left['stage inputs'] += 1; continue
         if vj.get('layer_out'): left['layer'] += 1; continue

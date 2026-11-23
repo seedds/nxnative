@@ -63,6 +63,25 @@ class Regress(unittest.TestCase):
                 compiler.write_bytes(b'compiler version two')
                 self.assertNotEqual(before, regress.chain_key(tree, g, 'other tools'))
 
+    def test_toolchain_fingerprint_survives_a_remount(self):   # the Metal toolchain's mount point gets a new random name at each boot; chain keys must not follow it
+        mnt = '/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v27.2.47.0.'
+        def toolchain(suffix, version='32023.922'):
+            out = {'spirv-cross': 'Git commit:  Timestamp: 2026-09-16T11:27:19\n',
+                   'metal': f'Apple metal version {version} (metalfe-{version}.4)\nTarget: air64-apple-darwin27.0.0\nThread model: posix\n'
+                            f'InstalledDir: {mnt}{suffix}/Metal.xctoolchain/usr/metal/current/bin\n',
+                   '--show-sdk-build-version': '26B118\n'}
+            return lambda cmd, **kw: NS(stdout=next(v for k, v in out.items() if k in cmd), stderr='')
+        with patch.object(regress, 'sh', toolchain('em8TI5')): first = regress.toolchain_fp()
+        with patch.object(regress, 'sh', toolchain('Xq3ZpA')): self.assertEqual(first, regress.toolchain_fp())
+        with patch.object(regress, 'sh', toolchain('em8TI5', '32023.950')): self.assertNotEqual(first, regress.toolchain_fp())
+        g = NS(kind='gl', ver='v0', shader_roots=list); gl = NS(sources=lambda roots: [])
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {}, clear=True), patch.object(regress, 'load_module', return_value=gl), \
+             patch.object(regress.shutil, 'which', return_value=None):
+            keys = []
+            for suffix in ('em8TI5', 'Xq3ZpA'):
+                with patch.object(regress, 'sh', toolchain(suffix)): keys.append(regress.chain_key(NS(path=Path(d)), g, regress.toolchain_fp()))
+            self.assertEqual(keys[0], keys[1])
+
     def test_gl_manifest_preserves_translation_failures(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / 'translations.json'
@@ -833,6 +852,63 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
             stack.enter_context(patch.object(regress, 'say'))
             regress.cmd_check(a)
             self.assertEqual(finish.call_args.args[0]['games']['game']['status'], 'NEW-FAIL')
+
+
+class InterfaceCheck(unittest.TestCase):
+    def test_each_tree_uses_its_own_pso_offline_and_imports(self):   # baseline and candidate trees each run pso_offline in their own process (PR #3190 / #3176: new dmsh_abi constant)
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            out = root / 'out'; lib = out / 'b-testchain'; lib.mkdir(parents=True)
+            vs, ps = '0' * 16, '1' * 16
+            (lib / f'{vs}_b.json').write_text(json.dumps({'chain': 'testchain', 'entry': 'main0'}))
+            (lib / f'{vs}_b.metal').write_text(VS)
+            (lib / f'{ps}_b.json').write_text(json.dumps({'chain': 'testchain', 'entry': 'main0'}))
+            (lib / f'{ps}_b.metal').write_text(PS)
+            prof = root / 'prof'; prof.mkdir()
+            (prof / 'shader_pairs.tsv').write_text(f'{vs}\t{ps}\n')
+
+            trees = {}
+            for name, has_new_const, include_in_plan in (('base', False, False), ('cand', True, True)):
+                t = root / name
+                tools = t / 'dm/gfx/tools'; tools.mkdir(parents=True)
+                dm_tools = t / 'dm/tools'; dm_tools.mkdir(parents=True)
+                games = t / 'dm/games'; games.mkdir(parents=True)
+                (games / 'game.py').write_text('print("gl")\n')
+                (dm_tools / 'romfs.py').write_text(f'TREE = {name!r}\n')   # romfs is already in the harness process's sys.modules
+                (tools / 'dmsh_abi.py').write_text('BORDER_FC = 216\n' + ('BLEND_OFF_FC = 217\n' if has_new_const else ''))
+                (tools / 'lazy_helper.py').write_text(f'INCLUDE = {include_in_plan!r}\n')
+                (tools / 'pso_offline.py').write_text(
+                    'import os, sys\n'
+                    'from pathlib import Path\n'
+                    'sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools"))\n'
+                    'import romfs\n'
+                    f'assert romfs.TREE == {name!r}, romfs.TREE\n'
+                    'import dmsh_abi as abi\n'
+                    + ('_ = abi.BLEND_OFF_FC\n' if has_new_const else '_ = abi.BORDER_FC\n') +
+                    'def pair_text(paths): return b"".join(Path(p).read_bytes() for p in paths if p and Path(p).is_file())\n'
+                    'def read_pairs(text): return [tuple(l.split("\\t")[:2]) for l in text.decode().splitlines() if l and "\\t" in l]\n'
+                    'def plan(lib_dir, chain, pairs, zero):\n'
+                    '    import lazy_helper\n'
+                    '    bases = [(f"{vk}_b", "main0", f"{fk}_b", "main0") for vk, fk in pairs] if lazy_helper.INCLUDE else []\n'
+                    '    return bases, [], {}\n'
+                )
+                tr = regress.Tree.__new__(regress.Tree); tr.id, tr.path = name, t
+                trees[name] = tr
+
+            g = NS(id='0100000000000000', build=root / 'build',
+                   profile_dir=lambda tree: prof, env=lambda tree: dict(os.environ))
+            path0 = list(sys.path)
+            self.assertIn('romfs', sys.modules)
+            for order in (('base', 'cand'), ('cand', 'base')):
+                res = {name: regress.interface_check(trees[name], g, out) for name in order}
+                self.assertEqual(res['base'], {'checked': 1, 'bad': [], 'not_in_archive': 1})
+                self.assertEqual(res['cand']['checked'], 1)
+                self.assertEqual(res['cand']['not_in_archive'], 0)
+                self.assertEqual(res['cand']['bad'], [{'vs': vs, 'entry': 'main0', 'ps': ps, 'missing': ['locn1'], 'type': ['locn2 float4/int4']}])
+            self.assertEqual(sys.path, path0)
+            for modname in ('pso_offline', 'dmsh_abi', 'lazy_helper'):
+                self.assertNotIn(modname, sys.modules)
 
 
 class Validated(unittest.TestCase):

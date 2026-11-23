@@ -91,10 +91,26 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("archive set admitted together", admit ? 3 : 0, dev->opens);
     EXPECT("no compiler on rejection", admit ? 1 : 0, dev->compilers);
     EXPECT("no serializer on rejection", 0, g_arch_cap);
+    if (admit && !native) {
+        // Newly prebuilt p*.mtl4a files must also obey the 2 GiB address-space reserve before being opened in-run.
+        // exact: 1.5 GiB existing + 2.0 GiB reserve fills the 3.5 GiB gap (no room for +0.5 GiB); ample: 12 GiB gap fits it.
+        // Adjust vm_hi for exact to reflect the 1.5 GiB already mapped by pso4_init (mocked regions do not grow on open).
+        if (exact) regions[nr++] = (typeof(regions[0])){vm_lo + 4 * G, G + G / 2};
+        NSString *pnew = [device stringByAppendingPathComponent:@"p00001.mtl4a"];
+        archive(pnew, G / 2);
+        g_comp4 = (id)[NSObject new];
+        arch_adopt_prebuilt();
+        g_comp4 = nil;
+        EXPECT("adopt respects VA reserve", exact ? 3 : 4, dev->opens);
+        unlink(pnew.fileSystemRepresentation);
+    }
     EXPECT("fallback disables hybrids", 0, hybrid_on());
     g_shmap = [NSMutableDictionary dictionary]; g_warm_started = 1;   // no shaders or prewarm tasks in this fixture
     EXPECT("fallback skips prebuild", -1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    id<MTLLibrary> lib = [MTLCreateSystemDefaultDevice() newLibraryWithSource:@"#include <metal_stdlib>\nvertex metal::float4 v() { return 0; }" options:nil error:nil];
+    d.vertexFunction = [lib newFunctionWithName:@"v"];
+    EXPECT("fixture vertex function", 1, d.vertexFunction != nil);
     EXPECT("render through the device", 1, pso_build(d, 1, NULL) == dev->pipeline);
     EXPECT("compute through the device", 1, cps_new(nil, NULL) == dev->pipeline);
     EXPECT("render device call", 1, dev->renders); EXPECT("compute device call", 1, dev->computes);

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dispatch/dispatch.h>
 // Keep the host's cache observations/deletions in a directory owned by this test.
 // Metal itself still uses its real compiler cache; only this translation unit's
 // confstr calls see the fixture parent, including when testing the former cleanup.
@@ -20,13 +21,17 @@ static size_t archive_confstr(int name, char *buffer, size_t length) {
     return size;
 }
 #define confstr archive_confstr
+static void archive_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block);
+#define dispatch_after archive_dispatch_after
 #include "../nvn/nvn_mtl.m"
+#undef dispatch_after
 static void archive_cache_cleanup(void) {
     [NSFileManager.defaultManager removeItemAtPath:@(archive_cache_root) error:nil];
 }
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
-void *front_metal_layer(void) { return NULL; }
+static CAMetalLayer *test_layer;
+void *front_metal_layer(void) { return (__bridge void *)test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
@@ -41,6 +46,26 @@ static void exec_then(void *dir) {
     [[NSString stringWithFormat:@"%d\n", files] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
+
+// Drive the real archive timer callback on its queue without waiting ten seconds for each retry.
+static int test_archive_timer;
+static dispatch_block_t test_timer_block;
+static void archive_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block) {
+    if (test_archive_timer && queue == g_arch_q) {
+        EXPECT("at most one archive timer queued", 1, test_timer_block == nil);
+        test_timer_block = block;
+    } else {
+        dispatch_after(when, queue, block);
+    }
+}
+static void fire_archive_timer(void) {
+    dispatch_sync(g_arch_q, ^{
+        dispatch_block_t tick = test_timer_block;
+        EXPECT("archive timer armed", 1, tick != nil);
+        test_timer_block = nil;
+        if (tick) tick();
+    });
+}
 
 static id<MTLLibrary> g_lib, g_lib2;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name)
 static id<MTLCommandQueue> g_q;
@@ -565,7 +590,7 @@ static void crashed_flush_race(int compute) {
         if (compute) arch_capture_cs(cd, NULL, NULL); else arch_capture(rd, NULL, 1, NULL);
     });
     EXPECT("crash race: capture entered", 0, dispatch_semaphore_wait(capture->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    arch_hand_over(ep, 1);
+    arch_hand_over(ep, ARCH_FLUSH_NOW);
     EXPECT("crash race: handed over while active", 1, g_ep != ep && atomic_load(&ep->active) == 1);
     dispatch_semaphore_signal(capture->release);
     EXPECT("crash race: capture left", 0, dispatch_group_wait(ep->busy, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
@@ -614,7 +639,7 @@ static void compiler_death_notifications(void) {
     if (slot < 0) abort();
     pso_pend_start(slot, gen, d, 0, q);
     EXPECT("notify background: specialization entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    arch_hand_over(ep, 1);
+    arch_hand_over(ep, ARCH_FLUSH_NOW);
     dispatch_semaphore_t writer = dispatch_semaphore_create(0);
     dispatch_async(g_arch_q, ^{ dispatch_semaphore_signal(writer); });
     EXPECT("notify background: writer finishes with plain compile unresolved", 0, dispatch_semaphore_wait(writer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
@@ -626,13 +651,23 @@ static void compiler_death_notifications(void) {
     EXPECT("notify background: handed-over period not published", 1, archive_files(@(cdir)).count);
     // Geometry and embedded pipelines share these MTLDevice boundaries; no reporter is required to notify the archive.
     CompileFailureDevice *device = [CompileFailureDevice new]; device->device = g_dev;
+    id<MTLLibrary> mesh_lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct V { float4 p [[position]]; };\n"
+        "[[mesh]] void ms(mesh<V, void, 3, 1, topology::triangle> out) { out.set_primitive_count(0); }\n"
+        options:nil error:&err];
+    id<MTLFunction> mesh_fn = [mesh_lib newFunctionWithName:@"ms"];
+    EXPECT("notify device: fixture mesh function", 1, mesh_fn != nil);
     for (int kind = 0; kind < 4; kind++) {
         d.vertexDescriptor.layouts[16].stride = 4832 + kind * 16;
         EXPECT("notify device: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
         ep = g_ep; g_dev = (id<MTLDevice>)device; id result;
         if (kind == 0) result = cps_new([g_lib2 newFunctionWithName:@"vs"], NULL);   // unregistered: directly through the MTLDevice
         else if (kind == 1) result = pso_build_dev(d, 0, NULL);
-        else if (kind == 2) result = dev_mps([MTLMeshRenderPipelineDescriptor new], NULL);
+        else if (kind == 2) {
+            MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
+            m.meshFunction = mesh_fn; m.fragmentFunction = [g_lib newFunctionWithName:@"fs"];
+            result = dev_mps(m, NULL);
+        }
         else result = dev_lib(@"fragment void fixture() {}", NULL);
         g_dev = device->device;
         EXPECT("notify device: compile refused", 1, result == nil);
@@ -800,6 +835,82 @@ int main(int argc, char **argv) { @autoreleasepool {
         pso4_init(); crashed_flush_race(0); crashed_flush_race(1); compiler_death_notifications();
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive compiler death: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--active-flush")) {
+        pso4_init();
+        test_archive_timer = 1;
+        test_layer = [CAMetalLayer layer];
+        const uint64_t idle_ns = (ARCH_FLUSH_INTERVAL_S + 1) * (uint64_t)NSEC_PER_SEC;
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        EXPECT("capture before the timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns() - idle_ns);
+        ser_compile_begin();
+        ArchEpoch *busy = ep_enter();
+        fire_archive_timer();
+        EXPECT("idle timer keeps the period while its compile is pending", 1, busy == g_ep);
+        atomic_store(&dm_present_ns, now_ns());
+        ep_leave(busy);
+        ser_compile_end();
+        fire_archive_timer();
+        EXPECT("compile completion and a retry cannot start a write after presentation resumes", 0, archive_files(@(dir)).count);
+        EXPECT("the partial period is still pending", 1, atomic_load(&g_arch_new));
+        atomic_store(&dm_present_ns, now_ns() - idle_ns);
+        plain_compile_begin();
+        fire_archive_timer();
+        EXPECT("idle timer also defers for a plain compile", 0, archive_files(@(dir)).count);
+        plain_compile_end();
+        fire_archive_timer();
+        EXPECT("retry wrote the archive when idle with no compiles pending", 1, archive_files(@(dir)).count);
+        EXPECT("the partial period was drained", 0, atomic_load(&g_arch_new));
+        EXPECT("no retry after the archive was written", 1, test_timer_block == nil);
+        atomic_store(&dm_present_ns, now_ns());
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture before explicit save", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        mtl_arch_save(5000, 0);
+        EXPECT("explicit save also writes during presentation", 2, archive_files(@(dir)).count);
+        g_arch_period_max = 1;
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture fills another period", 1, pso_build(cd, 0, &err) != nil);
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("full period also writes during presentation", 3, archive_files(@(dir)).count);
+        g_arch_period_max = ARCH_PERIOD_MAX;
+        test_layer = nil;
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture before headless timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns());
+        fire_archive_timer();
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("headless timer wrote the capture", 4, archive_files(@(dir)).count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive active flush: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--adopt-prebuilt")) {
+        // Real Metal 4 end-to-end check of arch_adopt_prebuilt(): a no-layout base captured into p*.mtl4a is opened and indexed in the same process,
+        // clears g_pbase_miss, serves compile=0 lookups with zero recompiles, stays out of g_arch_use (arch_sweep), and is idempotent on repeat calls.
+        pso4_init();
+        MTLRenderPipelineDescriptor *nd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        nd.vertexFunction = fn4_note([g_lib newFunctionWithName:@"vs0"], g_lib, @"vs0", nil);
+        nd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        EXPECT("adopt: misses before capture", 1, pso_build_ex(nd, 0, &err, 0) == nil);
+        EXPECT("adopt: miss cached in g_pbase_miss", 1, g_pbase_miss.n == 1);
+        MTL4RenderPipelineDescriptor *m4 = pso_desc4(nd, 1, 0);
+        EXPECT("adopt: Metal 4 base descriptor built", 1, m4 != nil);
+        EXPECT("adopt: prebuild capture succeeded", 1, arch_capture(m4, &err, 0, NULL) != nil);
+        arch_flush_wait();
+        EXPECT("adopt: wrote a p*.mtl4a file", 1, archive_files(@(dir)).count == 1 && [archive_files(@(dir))[0] hasPrefix:@"p"]);
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;
+        arch_adopt_prebuilt();
+        EXPECT("adopt: indexed into g_arch_ix and g_arch_ixf", 1, g_arch_ix.n == 1 && g_arch_ixf.count == 1);
+        EXPECT("adopt: prior miss cleared", 0, g_pbase_miss.n);
+        EXPECT("adopt: excluded from arch_sweep", 0, g_arch_use.count);
+        EXPECT("adopt: compile=0 lookup finds base in same run", 1, pso_build_ex(nd, 0, &err, 0) != nil);
+        EXPECT("adopt: served from archive via index (1 ask, 0 compiles)", 1, g_pb_archived == arch0 + 1 && g_pb_built == built0 && g_arch_asks == asks0 + 1);
+        arch_adopt_prebuilt();
+        EXPECT("adopt: idempotent on already-opened file", 1, g_arch_ixf.count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive adopt prebuilt: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
     }
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");

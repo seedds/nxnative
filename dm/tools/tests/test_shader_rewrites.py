@@ -59,6 +59,63 @@ class UniformMatchScan(unittest.TestCase):
         self.assertGreater(matches, 1000)   # the corpus must exercise matching paths, not only no-ops
 
 
+class GuardScans(unittest.TestCase):
+    # dmsh_rewrite.select_guards' scans against the patterns tried at every character, kept here as they were: the same matches in the same order, with their spans and groups
+    SIZE = r'\(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> (?:2|4)u\)' % dmsh_abi.CBSIZE_BANK
+    TABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % dmsh_abi.SBLEN_BANK
+    GBOOL = re.compile(r'\bbool (_\d+) = [^;\n]* < %s;' % SIZE)
+    SBOOL = re.compile(r'\bbool (_\d+) = \(uint\(_\d+\) \+ %s\) < %s;' % (TABLE, TABLE))
+    NAME = re.compile(r'(?<!\[)\b(_\d+) \?')
+    ROW, BUF = '(*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0]', '(*spvDescriptorSet0.cp_s3)._m0[_12 ? _3 : 0]'
+    SIZED = 'bool _5 = _3 < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);' % dmsh_abi.CBSIZE_BANK
+    ROW_SIZED = SIZED.replace(' >> 2u', ' >> 4u')
+    LENGTH = 'bool _12 = (uint(_3) + {0}.z) < {0}.w;'.format('(*spvDescriptorSet0.cp_c%d)._m0[1]' % dmsh_abi.SBLEN_BANK)
+    CHOICE, STORED = '_5 ? %s[_4] : 0.0' % ROW, '_12 ? %s : 0u' % BUF
+
+    @staticmethod
+    def seen(m):
+        return m.span(), m.groups(), m.groupdict()
+
+    def compare(self, src, conds=('_5', '_12')):
+        """→ how many matches the two comparisons and the two choices have on src, and whether a name of conds is left: each scan as its pattern"""
+        counts = []
+        for new, old in ((dmsh_rewrite._GBOOL, self.GBOOL), (dmsh_rewrite._SBOOL, self.SBOOL)):
+            want = [self.seen(m) for m in old.finditer(src)]
+            self.assertEqual([self.seen(m) for m in new.finditer(src)], want, src); counts.append(len(want))
+        def logged(log):   # a replacement that records its matches; every third is left as it is, as a choice on another name is
+            def repl(m):
+                log.append(self.seen(m)); return m.group(0) if len(log) % 3 == 0 else '<%d>' % len(log)
+            return repl
+        for pat in (dmsh_rewrite._GROW, dmsh_rewrite._SROW):
+            want, got = [], []
+            text = pat.sub(logged(want), src)
+            self.assertEqual(dmsh_rewrite._gsub(pat, logged(got), src), text, src); self.assertEqual(got, want, src); counts.append(len(want))
+        want = next((m for m in self.NAME.finditer(src) if m.group(1) in conds), None); got = dmsh_rewrite._gleft(src, conds)
+        self.assertEqual(got and self.seen(got), want and self.seen(want), src)
+        return counts + [int(bool(want))]
+
+    def test_boundaries_and_both_forms(self):
+        for prefix in ('', 'x', '_', '.', 'é', '́', '\x00', ' ', '(', '>', '>(', 'x(', '((', '[', '_5 ? '):
+            for body in (self.SIZED, self.ROW_SIZED, self.LENGTH, self.CHOICE, '(%s)' % self.CHOICE, self.CHOICE.replace('[_4]', '.z'), self.STORED, '(%s)' % self.STORED, '_5 ? _7 : 0.0'):
+                for suffix in ('', ';', ')', '.x', 'u', '1', ' ? ', dmsh_rewrite._GREAD, '\n'):
+                    self.compare(prefix + body + suffix)
+        self.assertEqual(self.compare(self.SIZED + '\nfloat _6 = %s;' % self.CHOICE), [1, 0, 1, 0, 1])
+        self.assertEqual(self.compare(self.ROW_SIZED + '\nfloat _6 = %s;' % self.CHOICE), [1, 0, 1, 0, 1])
+        self.assertEqual(self.compare(self.LENGTH + '\nuint _6 = as_type<uint>(%s) + (%s);' % (self.STORED, self.STORED)), [0, 1, 0, 2, 1])
+        self.assertEqual(self.compare('xbool' + self.SIZED[4:] + ' float _6 = _7 * (%s);' % self.CHOICE), [0, 0, 1, 0, 1])
+        self.assertEqual(self.compare('float _6 = %s[_4];' % self.ROW), [0, 0, 0, 0, 0])   # the index's own choice is no name's
+
+    def test_as_the_patterns_on_random_text(self):
+        rng = random.Random(1932)
+        parts = [self.SIZED, self.ROW_SIZED, self.LENGTH, self.SIZED.replace('_5', '_١'), 'bool ', 'bool _7 = _3', ' < ', self.CHOICE, '(%s)' % self.CHOICE, self.CHOICE.replace('[_4]', '.z'),
+                 self.CHOICE.replace('_5', '_7'), self.STORED, '(%s)' % self.STORED, self.ROW, self.BUF, '_5', '_12', '_7', '_5 ? ', '_12 ?', ' ? ', ' ?', ' : 0.0', ' : 0', 'u',
+                 dmsh_rewrite._GREAD, '(*spvDescriptorSet0.fp_c14)._m0[', '(', ')', '[', ']', '>', '.', '_', 'x', '1', '١', 'é', '́', '\x00', ' ', ';', '\n', ' = ']
+        totals = [0] * 5
+        for _ in range(10000):
+            totals = [a + b for a, b in zip(totals, self.compare(noise(rng, parts, rng.randrange(30))))]
+        for n in totals: self.assertGreater(n, 1000)   # the corpus must exercise every scan's matching paths, not only no-ops
+
+
 class AssignedOnce(unittest.TestCase):
     def test_a_name_assigned_once(self):
         self.assertTrue(dmsh_fetch._once('float _12 = 1.0;\n', '_12'))
@@ -161,12 +218,16 @@ class TypedOutputs(unittest.TestCase):   # dmsh_entry.fs_uint: main0_u for every
                 '    out.m_3.x = (*spvDescriptorSet0.fp_c8)._m0[2].w;\n    out.gl_FragDepth = 0.5;')
         src = f'struct main0_out\n{{\n{four}}};\n\nfragment main0_out main0(main0_in in [[stage_in]])\n{{\n    main0_out out = {{}};\n{body}\n    return out;\n}}\n'
         u = fs_uint(src)
+        self.assertIn(f'constant bool dm_du [[function_constant({dmsh_abi.TYPED_DUAL_FC})]];\n', u)
         for n in range(4):
             self.assertIn(f'constant bool dm_ui{n} [[function_constant({dmsh_abi.UINT_FC + n})]];\nconstant bool dm_si{n} [[function_constant({dmsh_abi.SINT_FC + n})]];\n'
-                          f'constant bool dm_uf{n} = !dm_ui{n} && !dm_si{n};\n', u)
+                          f'constant bool dm_uf{n} = !dm_ui{n} && !dm_si{n}{" && !dm_du" if n >= 1 else ""};\n', u)
             self.assertIn(f'    float4 m_{n} [[color({n}), function_constant(dm_uf{n})]];\n    uint4 m_{n}_ui [[color({n}), function_constant(dm_ui{n})]];\n'
                           f'    int4 m_{n}_si [[color({n}), function_constant(dm_si{n})]];\n', u)
-            self.assertIn(f'    if (dm_ui{n}) r.m_{n}_ui = as_type<uint4>(out.m_{n}); else if (dm_si{n}) r.m_{n}_si = as_type<int4>(out.m_{n}); else r.m_{n} = out.m_{n};\n', u)   # the bits as they are
+            base_store = f'if (dm_ui{n}) r.m_{n}_ui = as_type<uint4>(out.m_{n}); else if (dm_si{n}) r.m_{n}_si = as_type<int4>(out.m_{n}); else r.m_{n} = out.m_{n};'
+            want = f'    if (dm_du) r.m_1_du = out.m_1; else {base_store}\n' if n == 1 else f'    if (!dm_du) {{ {base_store} }}\n' if n >= 2 else f'    {base_store}\n'
+            self.assertIn(want, u)   # the bits as they are
+        self.assertIn('    float4 m_1_du [[color(0), index(1), function_constant(dm_du)]];\n', u)
         self.assertIn('    float gl_FragDepth [[depth(any)]];\n};', u); self.assertIn('    r.gl_FragDepth = out.gl_FragDepth;\n', u)   # not a colour: as main0 has it
         self.assertIn('fragment main0_out_u main0_u(main0_in in [[stage_in]], ', u); self.assertIn(')\n{\n    main0_out out = dm_body_main0(in);\n', u)
 

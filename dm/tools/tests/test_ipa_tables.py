@@ -24,7 +24,8 @@ class IpaTables(unittest.TestCase):
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
         start = script.index('program_tables() {')
         end = script.index('\n}', start) + 2
-        env = dict(os.environ, GD=str(self.profile), PATCHED=str(self.patched), TD=str(self.tables),
+        env = {k: v for k, v in os.environ.items() if k != 'DM_PYTHON'}
+        env.update(GD=str(self.profile), PATCHED=str(self.patched), TD=str(self.tables),
                    GFXAPI=api, DM=str(REPO / 'dm'), GAME='test', VNACP='absent')
         # Settings generation is outside this test. All table copies use the real cp.
         helpers = 'set -u\ndie() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\npython3() { :; }\n'

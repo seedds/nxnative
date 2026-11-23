@@ -40,6 +40,12 @@ No game-specific executable cuts. `dm/tools/sdk_patches.py`'s SDK-wide rules cut
 - The precise `SleepThread` (`sleep_precise`, found on Metroid Dread) took Mario's frame-time p95 from 19.7 to 18.4 ms.
 - The spin-wait rewrite finds 175 loops in `main`; the store rule added one more in each build.
 
+### Display-link rescue at fullscreen startup
+
+**Resolved in [PR #3004](https://github.com/seedds/nxnative/pull/3004).** Wonder 1.2.1 froze in 5 of 5 cold fullscreen starts on an M4 Mac mini (macOS 27.2.1) with a fixed 144 Hz external display. Each run logged rescue before the initial `present pacing mode 0 → 1` and before the screen's switch to 120 Hz. The test app was built on `0b5fd602` with a local change that made `pl::IsRunningOnOunce` return 1 and included the Switch 2 Edition add-on's shaders.
+
+The author alternated starts of two app copies that differed only in the host and its signature. The patched copy froze in 0 of 5 starts (one-sided Fisher p = 0.004). Three patched starts entered rescue before the first mode change, returned the layer to the present thread, and reached mode 1 at frames 199–206. Comparing only runs with that ordering, selected after testing, gives p = 0.018. With `DM_SCREEN_MATCH=0`, 0 of 3 baseline starts entered rescue. The stock 1.2.1 build was outside this comparison.
+
 ## Rendering
 
 Game-specific findings; the general host changes they led to are listed under [Found on this game](#found-on-this-game).
@@ -101,13 +107,15 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [Display-link rescue during startup can leave the present queue without a consumer](../../../docs/reference/frame-rate.md#display-link-rescue-during-startup-can-leave-the-present-queue-without-a-consumer). See the [fullscreen startup results](#display-link-rescue-at-fullscreen-startup).
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
-- **Its Switch 2 Edition's program:** [A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"](../../../docs/reference/packing.md#a-switch-2-edition-nup-stops-at-2-base-packages-or-is-not-a-base-title-id): the Switch 2 program (`040015100B514001`, no profile) mounts this program's RomFS by program index and the upgrade add-on itself; the NUP packer packs this RomFS beside it.
+- **Its Switch 2 Edition's program:** [A Switch 2 Edition NUP stops at "2 base packages" or "is not a base title ID"](../../../docs/reference/packing.md#a-switch-2-edition-nup-stops-at-2-base-packages-or-is-not-a-base-title-id): the Switch 2 program ([`040015100B514001`](../040015100B514001/README.md)) mounts this program's RomFS by program index and the upgrade add-on itself; the NUP packer packs this RomFS beside it.
 - **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): choosing two players splits a Joy-Con 2 pair through the controller applet, one sideways Joy-Con each.
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 
 - **Resolved: `Ver. ?` on the title screen of a build packed from an update-only NUP**: [A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers](../../../docs/reference/packing.md#a-game-packed-from-a-nup-or-a-dump-shows-ver--for-a-build-its-profile-registers). One Mac boot before and after.
+- **Resolved: Polish and Thai can be chosen**: [Polish and Thai, and a Switch 2 SDK's own language list](../../../docs/reference/services.md#polish-and-thai-and-a-switch-2-sdks-own-language-list). 1.2.1 ships both (`Mals/EUpl`, `Mals/THth`, `Font/Font_THth`); the tools did not know their codes. One Mac boot each to the title screen.
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - **zstd files inside a RomFS image** (`shader_split.py` `unzs`): [The zstd command given a path inside the image](../../../docs/reference/packing.md#the-zstd-command-given-a-path-inside-the-image).

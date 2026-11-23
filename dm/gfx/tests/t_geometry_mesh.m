@@ -6,7 +6,8 @@
 // Then again with samples-passed counting on (a counter reset before the draws, a report after them; Donkey Kong Bananza draws its depth prepass so): the draws still join runs,
 // and the report holds every sample the draws passed (the draws cover separate columns, so the count is the same in any order).
 // Then with a fragment shader that reads a uniform buffer and discards when its x is set, bound for draw 2 alone: draws with the same fragment bindings share a run, a change
-// of them draws the waiting run first (geo_mesh_ft_change), so draw 2's columns stay clear and the others keep their depth: four runs (0-1, 2, 3, and 4-5 after the scissor)
+// of them draws the waiting run first (geo_mesh_ft_change), so draw 2's columns stay clear and the others keep their depth: four runs (0-1, 2, 3, and 4-5 after the scissor).
+// Finally, inline updates aliasing the geometry stage's storage counter (updates=1) or an indexed mesh draw's index buffer (updates=2) must precede the draw rather than landing at pass end.
 #define main geometry_fixture_main
 #include "t_geometry.m"
 #undef main
@@ -15,7 +16,10 @@ static const unsigned mr_first[MR_DRAWS] = {0, 5, 60, 37, 41, 61}, mr_count[MR_D
 static int mr_bit(unsigned v) { return v % 5 != 2; }
 static int mr_discard(unsigned k) { return k == 2; }   // the fragment case: draws whose fragment uniform discards   // the kernel keeps triangle t of a draw when vertex (first + t)'s bit is set
 static NvProg *mr_nolib;   // the test pair's kernel after another vertex shader, which has no mesh library
-static int run_case(NSString *directory, int pass, int counting, int frag) {
+static int dbnd_sent;
+static void dbnd_take(float lo, float hi) { (void)lo; (void)hi; dbnd_sent++; }
+// bounds: 0 none, 1 on a GPU taken as having the depth bounds test, 2 on one without; updates: 0 none, 1 stage-2 SSBO counter, 2 indexed draw index buffer
+static int run_case(NSString *directory, int pass, int counting, int frag, int bounds, int updates) {
     NSError *error = nil;
     id<MTLLibrary> vl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"vertex.metallib"]] error:&error];
     id<MTLLibrary> ll = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"lean.metallib"]] error:&error];
@@ -68,31 +72,53 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
     p_scissor all = {0, 0, MR_W, MR_H}; EMIT(OP_SCISSOR, all);
     p_clear_ds cl = {.depth = 1, .depth_mask = 1}; EMIT(OP_CLEAR_DS, cl);
     p_bind_program bp = {frag ? &ck : &cp, 7}; EMIT(OP_BIND_PROGRAM, bp);
+    if (bounds) { p_depth_bounds db = {1, 0.5f, 1}; EMIT(OP_DEPTH_BOUNDS, db); }
     p_bind_vattr va = {.n = 1}; va_st attribute = {.fmt = NVN_FORMAT_RGBA32F}; memcpy(va.st, &attribute, 4); EMIT(OP_BIND_VATTR, va);
     p_bind_vstream stream = {.n = 1}; stream.st[0].stride = 16; EMIT(OP_BIND_VSTREAM, stream);
     p_bind_vbuf vb = {.n = 1}; vb.r[0] = (NVNbufferRange){(uint64_t)vtx, MR_TRIS * 3 * 16}; EMIT(OP_BIND_VBUF, vb);
     uint64_t *rep = (uint64_t *)(mem + 106496); rep[0] = UINT64_MAX;   // the samples-passed report (counter, time)
     float *fu = (float *)(mem + 110592); fu[64] = 1;   // the fragment uniforms: keep (x 0), discard (x 1)
+    uint32_t *idx = (uint32_t *)(mem + 114688);   // zero-initialized; updates == 2 fills each draw's indices inline right before its indexed draw
     if (counting) { uint64_t t = NVN_COUNTER_TYPE_SAMPLES_PASSED; EMIT(OP_RESET_COUNTER, t); }
     for (unsigned k = 0; k < MR_DRAWS; k++) {
         if (k == mr_scissored) { p_scissor cut = {0, 0, 120, MR_H}; EMIT(OP_SCISSOR, cut); }   // ends the run: columns 120 on keep the earlier draws, not the later ones
+        if (updates == 1) {   // An inline update aliases the geometry stage's storage counter. It must precede that kernel's atomic add.
+            struct { uint64_t dst, n; uint32_t value, pad; } u = {(uint64_t)(ctr + 4 * k), 4, 100, 0};
+            EMIT(OP_UPDATE_UB, u);
+        } else if (updates == 2) {   // An inline update fills the draw's index buffer right before the indexed mesh draw.
+            uint32_t nidx = 3 * mr_count[k];
+            uint64_t bytes = (uint64_t)nidx * 4, dst = (uint64_t)(idx + 3 * mr_first[k]);
+            size_t z = (8 + 16 + (size_t)bytes + 7) & ~7ull;
+            op_hdr h = {OP_UPDATE_UB, (uint32_t)z};
+            memcpy(mem + used, &h, 8); memcpy(mem + used + 8, &dst, 8); memcpy(mem + used + 16, &bytes, 8);
+            uint32_t *dst_ix = (uint32_t *)(mem + used + 24);
+            for (uint32_t j = 0; j < nidx; j++) dst_ix[j] = 3 * mr_first[k] + j;
+            used += z;
+        }
         p_bind_buf u = {.stage = 0, .index = 0, .addr = (uint64_t)(uni + 64 * k), .size = 16}; EMIT(OP_BIND_UBO, u);
         p_bind_buf c = {.stage = 2, .index = 0, .addr = (uint64_t)(ctr + 4 * k), .size = 16}; EMIT(OP_BIND_SSBO, c);
         if (frag && (!k || mr_discard(k) != mr_discard(k - 1))) { p_bind_buf f = {.stage = 1, .index = 0, .addr = (uint64_t)(fu + 64 * mr_discard(k)), .size = 16}; EMIT(OP_BIND_UBO, f); }
-        p_draw d = {.prim = 4, .first = (int32_t)(3 * mr_first[k]), .count = (int32_t)(3 * mr_count[k]), .instances = 1}; EMIT(OP_DRAW, d);
+        if (updates == 2) {
+            p_draw_idx d = {.prim = 4, .itype = 2, .count = (int32_t)(3 * mr_count[k]), .instances = 1, .ibuf = (uint64_t)(idx + 3 * mr_first[k])}; EMIT(OP_DRAW_IDX, d);
+        } else {
+            p_draw d = {.prim = 4, .first = (int32_t)(3 * mr_first[k]), .count = (int32_t)(3 * mr_count[k]), .instances = 1}; EMIT(OP_DRAW, d);
+        }
     }
     if (counting) { uint64_t rc[2] = {NVN_COUNTER_TYPE_SAMPLES_PASSED, (uint64_t)(uintptr_t)rep}; EMIT(OP_REPORT_COUNTER, rc); }
     op_hdr end = {OP_END, 8}; memcpy(mem + used, &end, 8);
     #undef EMIT
     state_reset(); memset(&R, 0, sizeof R); S.ds.dt = 1; S.ds.dw = 1; S.ds.df = 2;   // LESS, written
-    uint64_t runs0 = g_mrun_runs, rdraws0 = g_mrun_draws, mesh0 = g_geo_mesh_n;
+    uint64_t runs0 = g_mrun_runs, rdraws0 = g_mrun_draws, mesh0 = g_geo_mesh_n, za0 = g_za_total;
+    g_dbnd_hw = bounds ? bounds == 1 : -1; g_dbnd_test_enc = bounds ? dbnd_take : NULL; dbnd_sent = 0;
     mtl_sub_begin(); mtl_exec(mem);
     id<MTLBuffer> b = [g_dev newBufferWithLength:MR_W * MR_H * 4 options:MTLResourceStorageModeShared]; res_add(b);
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MR_W, MR_H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:MR_W * 4 destinationBytesPerImage:MR_W * MR_H * 4];
     finish(); if (counting) mtl_drain();   // the report is written when the command buffer's completion work runs
-    int ready = g_geo_mesh_n - mesh0 == MR_DRAWS && (!geo_mesh_run_on() || g_mrun_draws - rdraws0 == MR_DRAWS);   // the pipelines are built in the background: earlier passes draw some other way
+    g_dbnd_hw = -1; g_dbnd_test_enc = NULL;
+    int ready = g_geo_mesh_n - mesh0 == MR_DRAWS && (!geo_mesh_run_on() || bounds == 1 || g_mrun_draws - rdraws0 == MR_DRAWS);   // the pipelines are built in the background: earlier passes draw some other way
     int bad = 0;
     if (ready) {
+        EXPECT("mesh-local geometry scratch is not a missing GPU binding", 0, g_za_total - za0);
         const float *px = b.contents; unsigned drawn = 0;
         for (unsigned g = 0; g < MR_TRIS; g++) {
             float want = 1;
@@ -102,8 +128,11 @@ static int run_case(NSString *directory, int pass, int counting, int frag) {
         }
         for (unsigned i = 0; i < MR_W * MR_H; i++) drawn += px[i] != 1;   // each pixel is covered by one triangle at most: one sample passed for each written
         if (counting) EXPECT("samples-passed counting on: the report holds every sample the draws passed", drawn, rep[0]);
-        for (unsigned k = 0; k < MR_DRAWS; k++) EXPECT("each draw's kernel ran once per triangle with its own counter", mr_count[k], ctr[4 * k]);
-        if (geo_mesh_run_on() && frag) EXPECT("a change of the fragment bindings and the scissor split the draws into four runs", 4, g_mrun_runs - runs0);
+        for (unsigned k = 0; k < MR_DRAWS; k++) EXPECT("each draw's kernel ran once per triangle with its own counter", mr_count[k] + (updates == 1 ? 100 : 0), ctr[4 * k]);
+        if (bounds) EXPECT(bounds == 1 ? "depth bounds on a GPU with the test: the bounds sent" : "depth bounds on a GPU without the test: no call", bounds == 1, dbnd_sent > 0);
+        if (bounds == 1) EXPECT("depth bounds that can reject, with depth written: every draw drawn alone, no run", 0, g_mrun_runs - runs0);
+        else if (geo_mesh_run_on() && updates) EXPECT("each conflicting inline update separates the mesh draws", MR_DRAWS, g_mrun_runs - runs0);
+        else if (geo_mesh_run_on() && frag) EXPECT("a change of the fragment bindings and the scissor split the draws into four runs", 4, g_mrun_runs - runs0);
         else if (geo_mesh_run_on()) EXPECT(counting ? "with counting on, the scissor and the report split the draws into two runs" : "the scissor and the end split the draws into two runs", 2, g_mrun_runs - runs0);
         else EXPECT("no runs with DM_NVN_GEO_MESH_RUN=0", 0, g_mrun_runs - runs0);
     }
@@ -116,12 +145,16 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_PSO_RECORD", record, 1); setenv("DM_PSO_USER", "/dev/null", 1);   // the pipeline record (pso_record) is opened at its first line
     mtl_init();
     int r = 0;
-    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
+    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0, 0, 0, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
     if (r < 0 || failed) return 1;
     if (!r) { fprintf(stderr, "the mesh pipelines were never ready\n"); return 1; }
-    if ((r = run_case(@(argv[1]), 40, 1, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
-    r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1)); pass++) usleep(100000);   // the fragment case's pipelines
+    if ((r = run_case(@(argv[1]), 40, 1, 0, 0, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
+    r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1, 0, 0)); pass++) usleep(100000);   // the fragment case's pipelines
     if (r <= 0 || failed) { if (!r) fprintf(stderr, "the fragment case's mesh pipelines were never ready\n"); return 1; }
+    for (int bounds = 1; bounds <= 2; bounds++)
+        if ((r = run_case(@(argv[1]), 81 + bounds, 0, 0, bounds, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with depth bounds %s, the draws did not draw as expected\n", bounds == 1 ? "applied" : "not applied"); return 1; }
+    for (int updates = 1; updates <= 2; updates++)
+        if ((r = run_case(@(argv[1]), 83 + updates, 0, 0, 0, updates)) <= 0 || failed) { if (!r) fprintf(stderr, "the deferred-update case %d did not use mesh draws\n", updates); return 1; }
     {   // the log's compute-path line (mtl_geocomp_stats): the first passes drew while the mesh pipelines were built, the test pair's vertex and geometry keys among the most
         char gc[768]; uint64_t n = mtl_geocomp_stats(gc, sizeof gc); printf("geometry compute path: %s\n", gc);
         EXPECT("the compute path's draws are counted", 1, n > 0);

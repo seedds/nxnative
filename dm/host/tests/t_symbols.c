@@ -9,14 +9,14 @@
 
 static hle_ent entries[4];
 static hle_force_ent forces[3];
-static hle_force_ent *force_sec = forces; static unsigned long force_sec_n = 3;   // the alias phase swaps in its own table
+static hle_force_ent *force_sec = forces; static unsigned long force_sec_n = 3, force_sec_extra;   // the alias phase swaps in its own table
 static int have_sections;
 static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, const char *sect, unsigned long *size) {
     (void)mh; assert(!strcmp(seg, "__DATA"));
     *size = 0;
     if (!have_sections) return NULL;
     if (!strcmp(sect, "swhle")) { *size = sizeof entries; return (uint8_t *)entries; }
-    assert(!strcmp(sect, "swforce")); *size = force_sec_n * sizeof *force_sec; return (uint8_t *)force_sec;
+    assert(!strcmp(sect, "swforce")); *size = force_sec_n * sizeof *force_sec + force_sec_extra; return (uint8_t *)force_sec;
 }
 #define getsectiondata test_section
 #include "../hle.c"
@@ -32,6 +32,7 @@ uint64_t guest_ticks(void) { return 0; }
 void guest_clock_read_wait(void) {}
 void hlecount_seal(void) {}
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture
+void dm_exl_sync_all(void) {}
 void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
@@ -61,6 +62,114 @@ static void expect_abort(int duplicate) {
     }
     int status; assert(waitpid(pid, &status, 0) == pid);
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+}
+
+static void check_language_bindings(void) {
+    uint8_t image[0x100] = {0};
+    char names[sizeof k_language_list + sizeof k_language_count];
+    memcpy(names, k_language_list, sizeof k_language_list);
+    memcpy(names + sizeof k_language_list, k_language_count, sizeof k_language_count);
+    Elf64_Sym symbols[] = {
+        {0}, {.st_name = 0, .st_shndx = 1, .st_value = 4},
+        {.st_name = sizeof k_language_list, .st_shndx = 1, .st_value = 8},
+    };
+    module_t sdk = {.name = "sdk", .base = image, .size = sizeof image, .ro_off = 16,
+                    .symtab = symbols, .strtab = names, .nsym = 3};
+    module_t *loaded[] = {&sdk};
+    g_mod = &sdk; g_nmod = 1; g_loaded = loaded; g_nloaded = 1;
+    int list_fallback, count_fallback;
+    hle_force_ent hooks[] = {
+        {k_language_list, &list_fallback, "test"}, {k_language_count, &count_fallback, "test"},
+    };
+    force_sec = hooks; force_sec_n = 2;
+    const struct { const char *stamp; unsigned symbols; size_t data_off; int native; } cases[] = {
+        {"FS_ACCESS: { sdk_version: 20.5.25, spec: Ounce }", 3, sizeof image, 1},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }\n", 3, sizeof image, 1},
+        {"FS_ACCESS: { sdk_version: 22.2.11, spec: Ounce }", 3, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: NX }", 3, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }", 2, sizeof image, 0},
+        {"FS_ACCESS: { sdk_version: 22.2.10, spec: Ounce }", 3, 0, 0},
+        {"", 3, sizeof image, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        strcpy((char *)image + sdk.ro_off, cases[i].stamp);
+        sdk.nsym = cases[i].symbols;
+        sdk.data_off = cases[i].data_off;
+        force_init();
+        int other, weak0;
+        Elf64_Sym list_import = {.st_name = symbols[1].st_name};
+        Elf64_Sym count_import = {.st_name = symbols[2].st_name};
+        assert(bind_sym(&sdk, &list_import, &other, &weak0) == (uint64_t)(cases[i].native ? (void *)(image + 4) : &list_fallback));
+        assert(bind_sym(&sdk, &count_import, &other, &weak0) == (uint64_t)(cases[i].native ? (void *)(image + 8) : &count_fallback));
+        force_check();
+        reset_sections();
+    }
+    g_mod = NULL; g_nmod = 0; g_loaded = NULL; g_nloaded = 0;
+    force_sec = forces; force_sec_n = 3;
+}
+
+static int run_check_tables_capture(char *buf, size_t cap) {
+    fflush(stderr);
+    int pfd[2];
+    int pr = pipe(pfd); assert(!pr);
+    int saved = dup(STDERR_FILENO); assert(saved >= 0);
+    int dr = dup2(pfd[1], STDERR_FILENO); assert(dr >= 0);
+    close(pfd[1]);
+    int rc = dm_check_tables();
+    fflush(stderr);
+    dr = dup2(saved, STDERR_FILENO); assert(dr >= 0);
+    close(saved);
+    ssize_t n = read(pfd[0], buf, cap - 1);
+    close(pfd[0]);
+    buf[n > 0 ? n : 0] = 0;
+    return rc;
+}
+
+static void check_tables_selfcheck(void) {
+    char err[1024];
+    int dummy = 0;
+    hle_force_ent ok[] = {
+        {"_ZN2nn2vi10InitializeEv", &dummy, "vi", NULL},
+        {"_ZN2nn9bluetooth13InitializeBleEv", &dummy, "ble", NULL},
+        {"_ZN2nn5codec19HardwareOpusDecoder5ResetEv", NULL, "alias", "_ZN2nn5codec11OpusDecoder5ResetEv"},
+    };
+    have_sections = 1; force_sec = ok; force_sec_n = 3; force_sec_extra = 0;
+    int rc = run_check_tables_capture(err, sizeof err);
+    assert(rc == 0 && !err[0]);
+
+    // Empty section fails the build-time self-check.
+    have_sections = 0;
+    rc = run_check_tables_capture(err, sizeof err);
+    assert(rc == 1 && strstr(err, "empty"));
+
+    // Duplicate + alias-to-taken-over are both reported in one pass without aborting.
+    hle_force_ent dup_and_alias[] = {
+        {"_ZN2nn2vi10InitializeEv", &dummy, "vi", NULL},
+        {"_ZN2nn9bluetooth13InitializeBleEv", &dummy, "ble 1", NULL},
+        {"_ZN2nn9bluetooth13InitializeBleEv", &dummy, "ble 2", NULL},
+        {"_ZN2nn5codec3BadEv", NULL, "alias to taken over", "_ZN2nn2vi10InitializeEv"},
+    };
+    have_sections = 1; force_sec = dup_and_alias; force_sec_n = 4;
+    rc = run_check_tables_capture(err, sizeof err);
+    assert(rc == 1 && strstr(err, "_ZN2nn9bluetooth13InitializeBleEv") && strstr(err, "forced alias _ZN2nn5codec3BadEv"));
+
+    // Malformed entries (missing fn/to, both fn and to, NULL why, NULL name) are rejected.
+    hle_force_ent bad_entries[] = {
+        {"missing_impl", NULL, "bad", NULL},
+        {"both_fn_and_to", &dummy, "bad", "target"},
+        {"missing_why", &dummy, NULL, NULL},
+        {NULL, &dummy, "bad", NULL},
+    };
+    force_sec = bad_entries; force_sec_n = 4;
+    rc = run_check_tables_capture(err, sizeof err);
+    assert(rc == 1 && strstr(err, "malformed"));
+
+    // Misaligned section size is rejected.
+    force_sec = ok; force_sec_n = 3; force_sec_extra = 1;
+    rc = run_check_tables_capture(err, sizeof err);
+    assert(rc == 1 && strstr(err, "not a multiple"));
+
+    force_sec = forces; force_sec_n = 3; force_sec_extra = 0; have_sections = 0;
 }
 
 int main(void) {
@@ -133,6 +242,10 @@ int main(void) {
     expect_abort(2);
     g_loaded = NULL; g_nloaded = 0; force_sec = forces; force_sec_n = 3;
     reset_sections();
+    check_language_bindings();
+    check_tables_selfcheck();
+    puts("Build-time table self-check: valid table accepted; empty, duplicate, bad alias, malformed and misaligned rejected: OK");
+    puts("Language list and count: verified SDK exports and paired host fallback: OK");
     puts("Guest aliases: bound to the loaded definition over the module's own, orphan left as bound, alias to a taken-over name rejected: OK");
     puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");
     return 0;

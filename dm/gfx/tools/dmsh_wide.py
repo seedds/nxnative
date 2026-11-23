@@ -21,7 +21,7 @@ A buffer whose address came from a game uniform slot or the push constants is bo
 word is read only inside the memory the host bound, from its length table (c[DMSH_SBLEN_BANK], dmsh_abi.h), and gives 0 outside it:
 
     int _96 = int(_49);  bool _100 = (uint(_96) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;
-    float _51 = as_type<float>(select(0u, (*spvDescriptorSet0.cp_s0)._m0[_100 ? _96 : 0], _100));   (as dmsh_fetch.select_guards writes it)
+    float _51 = as_type<float>(select(0u, (*spvDescriptorSet0.cp_s0)._m0[_100 ? _96 : 0], _100));   (as dmsh_rewrite.select_guards writes it)
 
 A run of such words is read whole when its first and its last word are both inside (the bound is one interval of word indices), and word by word, each bounded as
 before, when it is not (a run that crosses the end of the memory bound): the same words, the same zeros, and one read in the usual case.
@@ -43,7 +43,7 @@ _VEC = {2: 'packed_uint2', 3: 'packed_uint3', 4: 'packed_uint4'}
 _SIGNED = re.compile(r'^\s*int (' + _IDENT + r') = int\((' + _IDENT + r')\);\s*$')   # a bounded read's signed copy of its word index
 _TABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK   # a word of the length table
 _INSIDE = re.compile(r'^\s*bool (' + _IDENT + r') = \(uint\((' + _IDENT + r')\) \+ (' + _TABLE + r')\) < (' + _TABLE + r');\s*$')
-_BLOAD = re.compile(r'select\(0u, \(\*spvDescriptorSet0\.(' + _BUF + r')\)\._m0\[(' + _IDENT + r') \? (' + _IDENT + r') : 0\], \2\)')   # as select_guards writes it (dmsh_fetch.py)
+_BLOAD = re.compile(r'select\(0u, \(\*spvDescriptorSet0\.(' + _BUF + r')\)\._m0\[(' + _IDENT + r') \? (' + _IDENT + r') : 0\], \2\)')   # as select_guards writes it (dmsh_rewrite.py)
 
 
 def _root(v, adds):   # (value, byte offset) the sums lead back to

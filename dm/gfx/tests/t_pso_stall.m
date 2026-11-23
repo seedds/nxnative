@@ -295,6 +295,54 @@ int main(void) { @autoreleasepool {
     EXPECT("returned: the other from the archive", 1, g_pre_archived);
     EXPECT("returned: put back first", 1, g_pre_deferred >= 2);
     EXPECT("returned: stamped", 1, [NSFileManager.defaultManager fileExistsAtPath:stamp5]);
+
+    // prepare_prebuild adopts newly written p*.mtl4a files before frame 0 so the same session finds its pulling bases without waiting for a restart
+    NSString *arch6 = [root stringByAppendingPathComponent:@"archive6"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch6 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch6; g_arch4 = @[]; g_arch4p = @[]; g_arch_ixf = @[]; g_arch_use = @[];
+    nvn_hm_clear(&g_arch_ix, NULL); [g_arch_opened removeAllObjects];
+    os_unfair_lock_lock(&g_pbase_lock); nvn_hm_clear(&g_pbase, hm_rel); nvn_hm_clear(&g_pbase_miss, hm_rel); os_unfair_lock_unlock(&g_pbase_lock);
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf4\nv1\tf6\n");
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    id<MTLLibrary> vl6 = lib_from_file([msl stringByAppendingPathComponent:@"v1_bp.metallib"], nil), fl6 = lib_from_file([msl stringByAppendingPathComponent:@"f4_b.metallib"], nil);
+    pd.vertexFunction = [vl6 newFunctionWithName:@"main0"]; pd.fragmentFunction = [fl6 newFunctionWithName:@"main0"];
+    pd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    fn4_note(pd.vertexFunction, vl6, @"main0", nil); fn4_note(pd.fragmentFunction, fl6, @"main0", nil);
+    // Record a prior archive miss before prepare_prebuild runs, proving arch_adopt_prebuilt clears g_pbase_miss
+    EXPECT("adopt: misses before prepare_prebuild", 1, pso_build_ex(pd, FN_OFF_BORDER, nil, 0) == nil);
+    EXPECT("adopt: miss cached", 1, g_pbase_miss.n == 1);
+    reset_counts(); uint64_t pb_built0 = g_pb_built;
+    prepare_prebuild();
+    EXPECT("adopt: prebuild finished before frame 0", 0, (int)atomic_load(&g_pre_running));
+    EXPECT("adopt: both bases built", 2, g_pre_built);
+    EXPECT("adopt: indexed into g_arch_ix", 1, g_arch_ix.n >= 2 && g_arch_ixf.count == 1);
+    EXPECT("adopt: prior miss cleared", 0, g_pbase_miss.n);
+    EXPECT("adopt: compile=0 lookup finds pulling base in same run", 1, pso_build_ex(pd, FN_OFF_BORDER, nil, 0) != nil);
+    EXPECT("adopt: no base recompiled on draw lookup", pb_built0, g_pb_built);
+    EXPECT("adopt: newly adopted file excluded from arch_sweep", 0, g_arch_use.count);
+    NSUInteger ixf_n = g_arch_ixf.count;
+    arch_adopt_prebuilt();
+    EXPECT("adopt: idempotent on already-opened files", ixf_n, g_arch_ixf.count);
+
+    // prepare_prebuild still does not hang past g_pre_tail_ms when a compile never returns (#294)
+    NSString *arch7 = [root stringByAppendingPathComponent:@"archive7"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch7 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch7; g_arch4 = @[]; g_arch4p = @[]; g_arch_ixf = @[];
+    nvn_hm_clear(&g_arch_ix, NULL); [g_arch_opened removeAllObjects];
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv3\tf1\nv1\tf4\n");
+    HoldCompiler *hold2 = [HoldCompiler new]; hold2->entered = dispatch_semaphore_create(0); hold2->release = dispatch_semaphore_create(0);
+    arm(hold2); reset_counts(); int saved_tail = g_pre_tail_ms; g_pre_tail_ms = 200;
+    uint64_t t7 = bp_now();
+    prepare_prebuild();
+    uint64_t dt7 = bp_now() - t7;
+    EXPECT("adopt held: returned after bounded tail wait", 1, dt7 >= 150 * NSEC_PER_MSEC && dt7 < 5 * NSEC_PER_SEC);
+    EXPECT("adopt held: prebuild still running in background", 1, (int)atomic_load(&g_pre_running));
+    EXPECT("adopt held: skipped adoption while workers active", 0, g_arch_ixf.count);
+    dispatch_semaphore_signal(hold2->release);
+    EXPECT("adopt held: finished after release", 1, until(^{ return (int)!atomic_load(&g_pre_running); }, 30));
+    g_pre_tail_ms = saved_tail;
+    if ((id)g_ep->comp == hold2) g_ep->comp = hold2->compiler;
+
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_stall: %d checks, %d failed\n", checks, failed);
     return failed != 0;

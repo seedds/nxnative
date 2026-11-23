@@ -1,9 +1,4 @@
-"""Equivalent duplicates keep their first source and payload through the full split.
-
-Issues #2924/#2927: source labels also order package records, so a change from
-last to first representatives needs verified profile maps, even for equal code.
-All inputs here are synthetic.
-"""
+"""Checked duplicate representatives through the full split and packing gate."""
 import os
 from pathlib import Path
 import re
@@ -12,8 +7,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from dm.tools.tests.test_split_rt import REPO, bnsh, fz, nvn2_stage, ss
+from dm.tools.tests.test_nsp_incremental import game, nsp
+from dm.tools.tests.test_split_rt import REPO, bnsh, fz, nvn2_stage, record, ss
 
 
 def nso(data):
@@ -51,14 +48,16 @@ class Representatives(unittest.TestCase):
         self.main = self.root / 'main'
         self.main.write_bytes(nso(b''))
 
+    def split_env(self, workers=1):
+        return dict(os.environ, DM_GAME='01007BB017812000', J=str(workers), DM_SPLIT_REGISTERED_MAP='',
+                    DM_UE_SHADERS=str(self.root / 'ue_shaders'), DM_GLSLC_CAPTURE=str(self.root / 'glslc_capture'))
+
     def split(self, workers=1, versions=()):
         out = [self.root / name for name in ('pkg', 'map.tsv', 'facts.tsv', 'pairs.tsv', 'pso.tsv')]
         roms = ','.join(str(r) for r, _ in [(self.rom, self.main), *versions])
         mains = ','.join(str(m) for _, m in [(self.rom, self.main), *versions])
         result = subprocess.run([sys.executable, REPO / 'dm/gfx/tools/shader_split.py', roms, mains, *out],
-                                capture_output=True, text=True,
-                                env=dict(os.environ, DM_GAME='01007BB017812000', J=str(workers),
-                                         DM_UE_SHADERS=str(self.root / 'ue_shaders'), DM_GLSLC_CAPTURE=str(self.root / 'glslc_capture')))
+                                capture_output=True, text=True, env=self.split_env(workers))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('[RED]', result.stdout + result.stderr)
         rows = [line.split('\t') for line in out[1].read_text().splitlines()
@@ -139,6 +138,97 @@ class Representatives(unittest.TestCase):
             ss.skey(*a): ('vs_other.bin', 1, 'vertex', prefix + '1', *a),
         })
         self.assertEqual(self.split(workers=2)[1], before)
+
+    def test_packing_keeps_registered_representatives_and_package_indices(self):
+        for location in ('main', 'unreal'):
+            with self.subTest(location=location):
+                if location == 'main':
+                    ctl, code = fz.VS
+                    a, b = (ctl, code), (ctl, code[:-1] + bytes([code[-1] ^ 1]))
+                    # The registered last copy of b has different descriptor padding.
+                    old_b = ctl + b'padding', b[1]
+                    data, _ = bnsh([[(8, *b)], [(8, *a)], [(8, *a)], [(8, *old_b)]])
+                    self.main.write_bytes(nso(data))
+                    package, prefix = 'vs_main.bin', 'main#BNSH@0x0#var'
+                else:
+                    self.main.write_bytes(nso(b''))
+                    ctl, _ = nvn2_stage(0)
+                    a = ctl, struct.pack('<I', 0x461) + bytes(28)
+                    b = old_b = ctl, a[1][:-1] + b'\x01'
+                    ue = self.root / 'ue_shaders'; ue.mkdir()
+                    (ue / 'ShaderArchive-A.ushaderbytecode').write_bytes(archive([b, a, a, b]))
+                    package, prefix = 'vs_other.bin', '/ue_shaders/ShaderArchive-A.ushaderbytecode#UE'
+                ka, kb = (ss.skey(*s) for s in (a, b))
+                rows, snapshot = self.split()
+                self.assertEqual([r[3:] for r in rows], [[kb, prefix + '0'], [ka, prefix + '1']])
+
+                profile = self.root / f'{location}-profile'; profile.mkdir()
+                (profile / 'game.tsv').write_text('modules\tmain\n')
+                shader_map = profile / 'shader_map.tsv'
+                registered = ''.join(f'{package}\t{i}\tvertex\t{k}\t{prefix}{i + 2}\n' for i, k in enumerate((ka, kb)))
+                header = 'package\tindex\tstage\tdm_ctl_sha16\tsource\n'
+                shader_map.write_text(header + registered)
+                for name, fixture in (('shader_facts.tsv', 'facts.tsv'), ('shader_pairs.tsv', 'pairs.tsv'), ('pso_pairs.tsv', 'pso.tsv')):
+                    (profile / name).write_bytes(snapshot[fixture])
+
+                pkg = self.root / 'pkg'
+                with mock.patch.object(nsp, 'PROG'):
+                    args = (sys.executable, REPO, [self.rom], [self.main], pkg, self.split_env(), self.root / 'logs', game.Game(profile))
+                    key = nsp.split_shaders(*args)
+                    self.assertEqual(key, nsp.package_key(pkg))
+                    self.assert_records([line.split('\t') for line in registered.splitlines()], {
+                        ka: (package, 0, 'vertex', prefix + '2', *a),
+                        kb: (package, 1, 'vertex', prefix + '3', *old_b),
+                    })
+                    self.assertEqual(nsp.split_shaders(*args), key)
+                    self.assertEqual(shader_map.read_text(), header + registered)
+                    shader_map.write_text(header + registered.replace(prefix + '3', prefix + '99'))
+                    with self.assertRaisesRegex(nsp.BuildError, 'the split shader tables differ'):
+                        nsp.split_shaders(*args)
+
+    def test_packing_keeps_a_registered_source_across_romfs_files(self):
+        ctl, code = fz.VS
+        other = ctl, code[:-1] + bytes([code[-1] ^ 1])
+        registered, _ = bnsh([[(8, ctl + b'padding', code)]])
+        duplicate, _ = bnsh([[(8, ctl, code)]])
+        middle, _ = bnsh([[(8, *other)]])
+        (self.rom / 'middle.asset').write_bytes(middle)
+        registered_file = self.rom / 'z.asset'
+        registered_file.write_bytes(registered)
+        _, snapshot = self.split()
+        profile = self.root / 'registered-profile'
+        profile.mkdir()
+        (profile / 'game.tsv').write_text('modules\tmain\n')
+        for table, name in (('map', 'shader_map'), ('facts', 'shader_facts'), ('pairs', 'shader_pairs'), ('pso', 'pso_pairs')):
+            (profile / f'{name}.tsv').write_bytes(snapshot[f'{table}.tsv'])
+
+        (self.rom / 'a.asset').write_bytes(duplicate)
+        standalone, _ = self.split()
+        self.assertEqual(standalone[0][3:], [ss.skey(ctl, code), '/a.asset#BNSH@0x0#var0'])
+        pkg = self.root / 'pkg'
+        with mock.patch.object(nsp, 'PROG'):
+            args = (sys.executable, REPO, [self.rom], [self.main], pkg, self.split_env(), self.root / 'logs', game.Game(profile))
+            self.assertEqual(nsp.split_shaders(*args), nsp.package_key(pkg))
+            self.assertEqual((pkg / 'vs_other.bin').read_bytes(), snapshot['vs_other.bin'])
+            registered_file.unlink()
+            with self.assertRaisesRegex(nsp.BuildError, 'the split shader tables differ'):
+                nsp.split_shaders(*args)
+
+    def test_registered_representative_cannot_hide_a_conflicting_rt_copy(self):
+        a, _ = record()
+        b, _ = record(entries=((('begin', 'continue'), 0, 64),))
+        first = ('main#BNSH@0x0#var0', 'rt', a['control'], a['code'])
+        registered = ('main#BNSH@0x0#var1', *first[1:])
+        conflict = ('main#BNSH@0x0#var2', 'rt', b['control'], b['code'])
+        key = ss.skey(*first[2:])
+        shader_map = self.root / 'registered.tsv'
+        shader_map.write_text(f'rt_main.bin\t0\traytracing\t{key}\t{registered[0]}\n')
+        sources = ss.read_registered_sources(str(shader_map))
+        with self.assertRaisesRegex(SystemExit, 'control section or code area differs'):
+            ss.uniq_keys([first, registered, conflict], sources)
+        results = [(copy[0], {key: copy}, set(), {}) for copy in (first, registered, conflict)]
+        with self.assertRaisesRegex(SystemExit, 'control section or code area differs'):
+            ss.merge_keys(results, sources)
 
 
 if __name__ == '__main__':

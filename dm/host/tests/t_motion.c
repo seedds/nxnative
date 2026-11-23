@@ -1,5 +1,6 @@
 // Controller motion fusion (motion_fusion.h): axis maps, units, orientation from the gyro, tilt correction toward gravity, and the SixAxisSensorState fields. No host, no controller
 #include "../motion_fusion.h"
+#include "../motion_swing.h"
 #include <stdio.h>
 #include <float.h>
 
@@ -101,6 +102,66 @@ static void mapping_and_precision(void) {
     run(&s, &m, 0, 0, -1, 0, 0, 0.0001f, 300, 0);
     CHECK(finite_state(&s) && near(s.angle[2], 0.03f / (2 * (float)M_PI), 5e-6f), "small rotations retain precision over five minutes");
     CHECK(near(s.R[0][0], cosf(0.03f), 1e-4f) && near(s.R[1][0], sinf(0.03f), 1e-4f), "small rotations accumulate in orientation");
+}
+
+// A scripted swing (motion_swing.h): parsing, the profile's timing and peak, the controller back where it began, gravity and saturation, and that integrating its own gyro
+// reproduces its own direction (the six-axis state stays self-consistent for a reader that integrates, as the SDK's sensor fusion does)
+static void swing_checks(void) {
+    swing_spec sp;
+    CHECK(swing_parse("Swing", &sp) && sp.axis == 2 && sp.sign == 1 && sp.peak_dps == SWING_DPS_DEFAULT, "Swing: +z at the default speed");
+    CHECK(swing_parse("swing-x@1800", &sp) && sp.axis == 0 && sp.sign == -1 && sp.peak_dps == 1800, "Swing-x@1800: axis, sign and speed");
+    CHECK(swing_parse("SWINGY", &sp) && sp.axis == 1 && sp.sign == 1, "SwingY: any case");
+    CHECK(!swing_parse("Swing@5000", &sp) && !swing_parse("Swing@", &sp) && !swing_parse("Swingw", &sp) && !swing_parse("Swing-", &sp) && !swing_parse("Swingz1", &sp) && !swing_parse("Swin", &sp) && !swing_parse("Shake", &sp),
+          "bad swings are refused (speed out of range, no axis after a sign, unknown axis, trailing text)");
+    CHECK(swing_parse("Lift", &sp) && sp.lift && sp.axis == 2 && sp.sign == 1 && sp.peak_dps == LIFT_G_DEFAULT && !swing_parse("Lift@9", &sp) && swing_parse("lift-x@1", &sp) && sp.lift && sp.axis == 0 && sp.sign == -1,
+          "Lift: a move along +z at 3 G by default, any axis and sign, at most 8 G");
+    CHECK(swing_parse("Swing", &sp) && !sp.lift, "Swing is no lift");
+    {   // a lift up: the reading is heavier (-z beyond 1 G) while it speeds up, lighter while it brakes, no turn, still and flat afterwards
+        float a[3], g[3], an[3], d[9]; swing_spec up = {2, 1, 3, 1};
+        CHECK(swing_pose(&up, LIFT_S / 4, a, g, an, d) && fabsf(a[2] + 4) < 1e-4f && a[0] == 0 && g[0] == 0 && g[2] == 0 && d[8] == 1, "lift: at its quarter, -1 - 3 G on z, no rotation");
+        CHECK(swing_pose(&up, 3 * LIFT_S / 4, a, g, an, d) && fabsf(a[2] - 2) < 1e-4f, "lift: braking, -1 + 3 G");
+        CHECK(!swing_pose(&up, LIFT_S, a, g, an, d) && a[2] == -1, "lift: done after LIFT_S, at rest");
+        CHECK(swing_spec_duration(&up) == LIFT_S && swing_spec_impact(&up) == LIFT_S / 4, "lift: its length and its strongest push");
+        swing_spec hard = {2, 1, 8, 1};
+        CHECK(swing_pose(&hard, LIFT_S / 4, a, g, an, d) && a[2] == -(float)SWING_ACC_MAX_G, "lift: 8 G up flat would read -9 G: capped at the IC's -8 G");
+        swing_spec down = {2, -1, 2, 1};
+        CHECK(swing_pose(&down, LIFT_S / 4, a, g, an, d) && fabsf(a[2] - 1) < 1e-4f, "lift down (-z): lighter, -1 + 2 G");
+    }
+    float acc[3], gyro[3], ang[3], dir[9];
+    swing_spec z = {2, 1, 1500};
+    CHECK(!swing_pose(&z, -0.01, acc, gyro, ang, dir) && acc[2] == -1 && dir[0] == 1 && gyro[2] == 0, "before the swing: at rest, flat");
+    CHECK(!swing_pose(&z, swing_duration(1500), acc, gyro, ang, dir) && acc[2] == -1 && ang[2] == 0, "after the swing: at rest, flat");
+    double ti = swing_impact(1500);
+    CHECK(fabs(ti - 0.72) < 1e-9 && fabs(swing_duration(1500) - 1.44) < 1e-9, "impact 0.72 s in, over 1.44 s at 1500 deg/s");
+    CHECK(swing_pose(&z, ti, acc, gyro, ang, dir) && near(gyro[2], 1500.f / 360, 1e-3f) && gyro[0] == 0 && gyro[1] == 0, "the impact is the peak: 1500 deg/s about z");
+    CHECK(near(ang[2], 0, 1e-4f) && near(dir[0], 1, 1e-4f) && near(dir[4], 1, 1e-4f), "at the impact the controller faces where it began (the backswing took half the angle)");
+    CHECK(near(acc[1], (float)SWING_ACC_MAX_G, 1e-4f) && near(acc[2], -1, 1e-4f), "the centripetal pull toward the pivot (-y) reads +y in the six-axis convention and saturates at 8 G");
+    swing_pose(&z, SWING_BACK_S, acc, gyro, ang, dir);
+    CHECK(near(ang[2], -0.25f, 1e-4f) && near(dir[1], -1, 1e-4f) && near(gyro[2], 0, 1e-4f), "the backswing ends still, turned a quarter clockwise (x toward world -y)");
+    swing_pose(&z, 0.3, acc, gyro, ang, dir);
+    CHECK(gyro[2] < 0 && near(gyro[2], -300.f / 360, 1e-3f), "the backswing turns the other way at 300 deg/s at most");
+    double peak = 0; for (int i = 0; i * 0.001 < SWING_BACK_S; i++) { swing_pose(&z, i * 0.001, acc, gyro, ang, dir); peak = fmax(peak, fabs(gyro[2]) * 360); }   // every ms of the backswing (an integer step: a double stepped by 0.001 drifts)
+    CHECK(peak < 301, "the backswing stays slow");
+    swing_spec x = {0, -1, 1500};
+    swing_pose(&x, SWING_BACK_S, acc, gyro, ang, dir);
+    CHECK(near(acc[1], -1, 1e-4f) && near(acc[2], 0, 1e-4f) && near(dir[5], 1, 1e-4f), "a quarter turn about +x (backswing of Swing-x): the front up, gravity along the body's -y");
+    // integrate the reported gyro (rev/s) at 200 Hz through motion_fusion and compare with the reported direction, whole swing, each axis and sign
+    for (int a = 0; a < 3; a++) for (int sg = -1; sg <= 1; sg += 2) {
+        swing_spec s1 = {a, sg, 1800}; motion_map id; motion_map_parse(&id, NULL); motion_state st; motion_reset(&st);
+        float a0[3] = {0, 0, -1}, w0[3] = {0}; motion_update(&st, &id, a0, w0, 0, 0);
+        double T = swing_duration(1800); int ok = 1, back = 1;
+        for (int i = 1; i * 0.005 <= T + 0.01; i++) {
+            double t = i * 0.005; swing_pose(&s1, t - 0.0025, acc, gyro, ang, dir);   // the midpoint's rate over the step
+            float w[3] = {gyro[0] * 2 * (float)M_PI, gyro[1] * 2 * (float)M_PI, gyro[2] * 2 * (float)M_PI};
+            motion_update(&st, &id, a0, w, 0.005f, 0);
+            swing_pose(&s1, t, acc, gyro, ang, dir);
+            for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) ok &= near(st.R[c][r], dir[3 * r + c], 2e-3f);
+            for (int r = 0; r < 3; r++) ok &= isfinite(acc[r]) && fabsf(acc[r]) <= (float)SWING_ACC_MAX_G;
+        }
+        for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) back &= near(st.R[r][c], r == c, 1e-3f);
+        CHECK(ok, "the reported gyro integrates to the reported direction, accelerations finite and within 8 G");
+        CHECK(back, "the swing ends where it began");
+    }
 }
 
 // The rest offset learner (motion_rest): a controller held still with a gyro offset learns it from two agreeing one-second windows and takes it off, ramped in; moving, a slow
@@ -243,6 +304,7 @@ int main(void) {
     float rl[3] = {0, -1, 0}; motion_phone_to_switch(3, rl, o); CHECK(near(o[0], 1, 1e-6f) && near(o[1], 0, 1e-6f), "rotation axes follow the picture");
 
     invalid_samples();
+    swing_checks();
     rest_checks();
     lag_checks();
     mapping_and_precision();

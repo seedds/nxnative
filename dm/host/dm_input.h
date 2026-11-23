@@ -13,6 +13,9 @@ enum {
 };
 #define DM_BTN_SHAKE (1ull << 63)   // not an NpadButton: the controller is shaken while set (its six-axis sensor, hle_hid.c); never reaches the game's buttons
 #define DM_STICK_MAX 32767
+// One swing of player 1's controller about its own axis (0 x, 1 y, 2 z; sign +1 / -1), as DM_KEYS' Swing (hle_hid.c, motion_swing.h): a front end's key for motion games
+// without a motion controller. It plays to its end (1.44 s, the impact 0.72 s in) on player 1's sensor while no live motion drives it
+void dm_input_swing(int axis, int sign);
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 uint64_t dm_input_samples(void);   // Cumulative number of times the game has sampled the controller
 // The cheat VM's key mask (hle_cheats.c): every input source's button bits (0..15 in the enum above) ORed and the

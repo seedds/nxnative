@@ -90,6 +90,49 @@ static void acquire_lateness(void) {
     CHECK(line_end && !strcmp(line_end + 1, "0\t@late_ms\t1.250\n"), "a link wake 1.25 ms after the slot logs 1.250 ms");
     free(rows);
 }
+// Deferred acquire wait (NVN semantics): AcquireTexture with a non-null NVNsync returns without blocking and executes the display-link wait in nvnSyncWait (or on the next
+// AcquireTexture if the game only uses nvnQueueWaitSync). Finite timeouts do not consume the pending wait; WindowFinalize cleanly detaches it
+static void deferred_acquire_sync(void) {
+    g_link_mode = 1;
+    nvn_present_config(60, 0);
+    win_t win = {.interval = 2, .ntex = 2};
+    NVNsync s;
+    h_nvnSyncInitialize(&s, NULL);
+    int idx = -1;
+    // Align g_link_started_tick with g_link_tick_n via a baseline synchronous wait
+    mtl_link_wait_ticks(1, 100000000ull);
+    uint64_t t0 = g_link_tick_n; unsigned w0 = test_waits;
+    CHECK(h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx) == NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS, "deferred acquire succeeds");
+    CHECK(g_link_tick_n == t0 && test_waits == w0, "deferred acquire with NVNsync takes zero ticks and zero waits");
+    CHECK(h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, "zero-timeout SyncWait before ticks elapse returns TIMEOUT_EXPIRED");
+    CHECK(g_link_tick_n == t0 && test_waits == w0, "zero-timeout SyncWait takes zero ticks and zero waits");
+    CHECK(h_nvnSyncWait(&s, 1000000ull) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, "short finite timeout before tick returns TIMEOUT_EXPIRED");
+    CHECK(g_link_tick_n == t0, "short finite timeout consumes no ticks");
+    CHECK(h_nvnSyncWait(&s, UINT64_MAX) == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED, "blocking SyncWait finishes the deferred acquire wait");
+    CHECK(g_link_tick_n - t0 == 2, "deferred acquire at interval 2 takes two 60 Hz ticks in SyncWait");
+    t0 = g_link_tick_n; w0 = test_waits;
+    CHECK(h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, "second SyncWait returns ALREADY_SIGNALED");
+    CHECK(g_link_tick_n == t0 && test_waits == w0, "second SyncWait takes zero ticks and zero waits");
+    // Already elapsed ticks: zero-timeout SyncWait succeeds without blocking and advances the tick baseline
+    t0 = g_link_tick_n; w0 = test_waits;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    g_link_tick_n += 2;
+    CHECK(h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && test_waits == w0, "elapsed ticks satisfy zero-timeout SyncWait without waiting");
+    // Games that never call CPU nvnSyncWait (only nvnQueueWaitSync): the next AcquireTexture drains the prior pending acquire
+    t0 = g_link_tick_n;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(g_link_tick_n == t0, "first unwaited acquire takes zero ticks");
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    CHECK(g_link_tick_n - t0 == 2, "second acquire drains the first unwaited acquire (two ticks)");
+    t0 = g_link_tick_n;
+    CHECK(h_nvnSyncWait(&s, UINT64_MAX) == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED && g_link_tick_n - t0 == 2, "SyncWait then drains the second acquire (two ticks)");
+    // WindowFinalize detaches a pending deferred acquire cleanly
+    t0 = g_link_tick_n; w0 = test_waits;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &s, &idx);
+    h_nvnWindowFinalize((NVNwindow *)&win);
+    CHECK(h_nvnSyncWait(&s, 0) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && g_link_tick_n == t0 && test_waits == w0, "SyncWait after WindowFinalize is signaled with zero waits");
+    h_nvnSyncFinalize(&s);
+}
 // Present snapshots (mtl_snap_on, fixed for the process: run as "t_link_ticks snap"): the acquire takes the display link's wait as without them, the ring slot wait only on top.
 // It used to wait for a free slot alone, and the link frees slots by dropping frames, so a game ran ahead of its present interval (Donkey Kong Bananza at the 30 fps cap: 43-65 fps).
 // While the link is stalled the slot time paces instead (no link wait)
@@ -225,6 +268,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(mtl_link_wait_ticks(1, 100000000ull) && test_waits == waits, "a game that fell behind does not wait for a drain");
     CHECK(atomic_load(&g_link_drained) == 2 && !atomic_load(&g_link_drain_req) && atomic_load(&g_link_blocked_ns) == 0, "and the request is dropped, with no acquire wait reported");
     acquire_lateness();
+    deferred_acquire_sync();
     pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;

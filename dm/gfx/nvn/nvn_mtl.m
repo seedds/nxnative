@@ -20781,6 +20781,13 @@ uint64_t mtl_snap_acquire_wait(void) {
     if (ws_on()) ws_put(WS_SNAP, w0, blocked);
     return ws_t0() - w0;
 }
+int mtl_snap_acquire_ready(void) {
+    if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 1;
+    int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
+    uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev);
+    pthread_mutex_lock(&g_pq_mu); int busy = ticket > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
+    return !busy && (!ev || g_snap_ev.signaledValue >= ev);
+}
 // Copy the presented texture into the next ring slot; returns the slot's serial (0 = no snapshot: the game's texture is presented as before)
 static uint64_t snap_take(const tex_t *t) {
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
@@ -20914,21 +20921,35 @@ void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock
 // window, a screen asleep or a headless run report rarely or never). DM_PRESENT_SCREEN=0 turns it off (ab with DM_AB). The display link has its own pacing and is left alone
 // (it drains frames standing in its queue instead, nvn_link_drain.h), and so are present snapshots, which run the game a frame ahead of the screen on purpose and are paced by
 // their ring (mtl_snap_acquire_wait). The time waited is the frame's pacing for the frame step (hle_nvn.c g_screen_at): a frame it lengthens is one the screen showed late
+static int g_sdw_mode = -1, g_sdw_silent;
+static uint64_t g_sdw_silent_seen;   // g_sdw_silent: the wait gave up while the newest present seen was g_sdw_silent_seen (0 when the screen has reported none yet)
+static void present_screen_init(void) {
+    if (g_sdw_mode >= 0) return;
+    const char *e = getenv("DM_PRESENT_DEPTH"); int d = e && *e ? atoi(e) : 1; g_sdw_depth = d < 0 ? 0 : d > PQ ? PQ : d;
+    g_sdw_mode = sw_mode("DM_PRESENT_SCREEN", 1);
+    MLOG("present: without the display link the acquire waits until at most %d present(s) queued are not yet on screen (DM_PRESENT_DEPTH; DM_PRESENT_SCREEN %s)", g_sdw_depth, g_sdw_mode == 1 ? "on" : g_sdw_mode ? "ab" : "off");
+}
+int mtl_present_screen_ready(void) {
+    present_screen_init();
+    if (!sw_on(g_sdw_mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 1;
+    pthread_mutex_lock(&g_pq_mu);
+    if (g_sdw_silent && atomic_load(&g_pres_seen) == g_sdw_silent_seen) { pthread_mutex_unlock(&g_pq_mu); return 1; }
+    uint64_t rf = atomic_load(&g_rec_frame), want, have;
+    if (rf > 0) { want = rf > (uint64_t)g_sdw_depth ? rf - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_seen_frame); }
+    else { want = g_pq_in > (uint64_t)g_sdw_depth ? g_pq_in - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_pres_seen); }
+    pthread_mutex_unlock(&g_pq_mu);
+    return have >= want;
+}
 uint64_t mtl_present_screen_wait(double period) {
-    static int mode = -1, silent; static uint64_t silent_seen;   // silent: the wait gave up while the newest present seen was silent_seen (0 when the screen has reported none yet)
-    if (mode < 0) {
-        const char *e = getenv("DM_PRESENT_DEPTH"); int d = e && *e ? atoi(e) : 1; g_sdw_depth = d < 0 ? 0 : d > PQ ? PQ : d;
-        mode = sw_mode("DM_PRESENT_SCREEN", 1);
-        MLOG("present: without the display link the acquire waits until at most %d present(s) queued are not yet on screen (DM_PRESENT_DEPTH; DM_PRESENT_SCREEN %s)", g_sdw_depth, mode == 1 ? "on" : mode ? "ab" : "off");
-    }
-    if (!sw_on(mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
+    present_screen_init();
+    if (!sw_on(g_sdw_mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
     if (!(period > 0)) period = 1.0 / 60;
     uint64_t t0 = now_ns(); int waited = 0, to = 0;
     pthread_mutex_lock(&g_pq_mu);
     // A flag, not the ticket: a screen that has reported no present at all (newest seen 0: a window covered from its first frame, a headless run) is silent too, and with 0 read
     // as "not silent" every acquire waited the whole two periods, a third of the frame rate for the run
-    if (silent && atomic_load(&g_pres_seen) == silent_seen) { pthread_mutex_unlock(&g_pq_mu); return 0; }
-    silent = 0;
+    if (g_sdw_silent && atomic_load(&g_pres_seen) == g_sdw_silent_seen) { pthread_mutex_unlock(&g_pq_mu); return 0; }
+    g_sdw_silent = 0;
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); uint64_t tmo = (uint64_t)(2 * period * 1e9);
     ts.tv_sec += tmo / 1000000000ull; ts.tv_nsec += tmo % 1000000000ull; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
     // Counted in the game's presents, not the replay's: g_pq_in grows only when the queue worker replays a present, a variable time after the game recorded it, and against
@@ -20940,7 +20961,7 @@ uint64_t mtl_present_screen_wait(double period) {
         else { want = g_pq_in > (uint64_t)g_sdw_depth ? g_pq_in - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_pres_seen); }
         if (have >= want || atomic_load(&g_present_discard)) break;
         waited = 1;
-        if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) { if ((byframe ? atomic_load(&g_seen_frame) : atomic_load(&g_pres_seen)) < want) { to = 1; silent = 1; silent_seen = atomic_load(&g_pres_seen); } break; }
+        if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) { if ((byframe ? atomic_load(&g_seen_frame) : atomic_load(&g_pres_seen)) < want) { to = 1; g_sdw_silent = 1; g_sdw_silent_seen = atomic_load(&g_pres_seen); } break; }
     }
     pthread_mutex_unlock(&g_pq_mu);
     uint64_t dt = now_ns() - t0;
@@ -20952,6 +20973,15 @@ void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
     if (!ev) { mtl_present_wait(tk); return; }
     if (atomic_load(&g_present_discard) || g_snap_ev.signaledValue >= ev) return;
     if (![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(164, "present snapshots: a texture's copy did not finish within 2 s; the game draws into it again");
+}
+int mtl_present_texture_ready(uint64_t tk, uint64_t ev) {
+    if (atomic_load(&g_present_discard)) return 1;
+    if (ev) return g_snap_ev.signaledValue >= ev;
+    if (!tk) return 1;
+    pthread_mutex_lock(&g_pq_mu);
+    int ok = g_pq_done >= tk;
+    pthread_mutex_unlock(&g_pq_mu);
+    return ok;
 }
 void mtl_present_wait(uint64_t tk) {
     pthread_mutex_lock(&g_pq_mu);
@@ -21037,18 +21067,31 @@ static struct timespec link_deadline(uint64_t ns) {
     if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
     return ts;
 }
+static uint64_t g_link_started_tick;   // Display-link tick number when the previous frame started work (protected by g_link_mu)
+int mtl_link_ready_ticks(int ticks) {
+    if (!mtl_link_active()) return 1;
+    const uint64_t step = ticks < 1 ? 1 : (uint64_t)ticks;
+    pthread_mutex_lock(&g_link_mu);
+    int ok = g_link_tick_n >= g_link_started_tick + step;
+    pthread_mutex_unlock(&g_link_mu);
+    return ok;
+}
+int mtl_link_ready_tick(int vsyncs) {
+    if (!mtl_link_active()) return 1;
+    if (vsyncs < 1) vsyncs = 1;
+    return mtl_link_ready_ticks(g_link_mode == 3 ? (vsyncs + 1) / 2 : vsyncs * (g_link_mode == 2 ? 2 : 1));
+}
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (!mtl_link_active()) return 0;
-    static uint64_t started_tick;   // Display-link tick number when the previous frame started work (only the game's present thread calls this function)
     const uint64_t step = ticks < 1 ? 1 : (uint64_t)ticks;
     // A drain the callback asked for (nvn_link_drain.h) is taken by this wait or not at all: a wait that finds its tick already passed is a game that fell behind since
     const int req = atomic_exchange(&g_link_drain_req, 0), drain = req & (LINK_DRAIN_LATCH - 1), into_latch = !!(req & LINK_DRAIN_LATCH);
     pthread_mutex_lock(&g_link_mu);
-    if (g_link_tick_n >= started_tick + step) { started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 1; }
+    if (g_link_tick_n >= g_link_started_tick + step) { g_link_started_tick = g_link_tick_n; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 1; }
     uint64_t w0 = now_ns();
     struct timespec ts = link_deadline(timeout_ns);
-    g_link_waiter = drain > 0 ? 0 : started_tick + step;   // the callback of this tick waits for this frame's present (with a drain into the latch, the tick that ends it, below)
-    while (g_link_tick_n < started_tick + step) if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) { g_link_waiter = 0; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 0; }
+    g_link_waiter = drain > 0 ? 0 : g_link_started_tick + step;   // the callback of this tick waits for this frame's present (with a drain into the latch, the tick that ends it, below)
+    while (g_link_tick_n < g_link_started_tick + step) if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) { g_link_waiter = 0; pthread_mutex_unlock(&g_link_mu); atomic_store(&g_link_blocked_ns, 0); return 0; }
     g_link_waiter = 0;
     uint64_t w1 = now_ns(), drained = 0;
     atomic_store(&g_link_blocked_ns, w1 - w0);
@@ -21060,7 +21103,7 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
         g_link_waiter = 0; g_link_waiter_end = 0;
         drained = now_ns() - w1;
     }
-    started_tick = g_link_tick_n;
+    g_link_started_tick = g_link_tick_n;
     pthread_mutex_unlock(&g_link_mu);
     if (drain > 0) {
         atomic_fetch_add(&g_link_drain_ns, drained);

@@ -109,5 +109,57 @@ class Adjacent(unittest.TestCase):
         found = ss.ttdat_programs(ctl + code, 'shaders')
         self.assertEqual([v[1:] for v in found], [('cs', ctl, code)])
 
+    def test_raw_shaders_unaligned_packed_graphics_and_compute(self):
+        """Byte-packed unaligned ctl+code pairs in main (The Ezio Collection): graphics and headerless compute, including back-to-back equal-length shaders."""
+        vs_ctl, vs_code = fz.VS
+        ps_ctl, ps_code = fz.PS
+        cs_ctl, cs_code = compute()
+        cs_ctl2, cs_code2 = compute(16)
+        data = bytes(0x103) + vs_ctl + vs_code + ps_ctl + ps_code + cs_ctl + cs_code + cs_ctl2 + cs_code2
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            found = ss.raw_shaders(data, 'main')
+        self.assertEqual([(v[1], v[3]) for v in found], [('vs', vs_code), ('ps', ps_code), ('cs', cs_code), ('cs', cs_code2)])
+        self.assertEqual(log.getvalue(), '')
+
+    def test_raw_shaders_back_to_back_equal_length_graphics(self):
+        """Two back-to-back graphics ctl+code pairs of identical code length must not let the second steal the first's code as #PHYRE@."""
+        vs_ctl, vs_code = fz.VS
+        vs_code2 = vs_code[:-1] + bytes([vs_code[-1] ^ 1])
+        data = bytes(0x101) + vs_ctl + vs_code + vs_ctl + vs_code2
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            found = ss.raw_shaders(data, 'main')
+        self.assertEqual([(v[1], v[3]) for v in found], [('vs', vs_code), ('vs', vs_code2)])
+        self.assertTrue(all('#RAW@' in v[0] for v in found))
+        self.assertEqual(log.getvalue(), '')
+
+    def test_raw_shaders_preserves_compute_disambiguation(self):
+        """raw_shaders must not bypass adjacent_shader for headerless compute: code before ctl beats metadata after ctl, zeros/ambiguous pairs are rejected."""
+        ctl, code = compute()
+        metadata = bytearray(code)
+        struct.pack_into('<Q', metadata, 32, 1 << 63)   # invalid Maxwell scheduling word
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            found = ss.raw_shaders(bytes(0x2000) + code + ctl + bytes(metadata), 'main')
+        self.assertEqual([v[1:] for v in found], [('cs', ctl, code)])
+        self.assertEqual(log.getvalue(), '')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ss.raw_shaders(bytes(0x2000) + ctl + bytes(len(code)), 'main'), [])
+            self.assertEqual(ss.raw_shaders(bytes(0x2000) + code + ctl + code, 'main'), [])
+
+    def test_raw_shaders_unaligned_random_control_is_ignored(self):
+        """An unaligned CTL_MAGIC whose trailing bytes are not valid code (e.g. non-EXIT metadata) produces no shader and no [RED] line."""
+        ctl, code = compute(None)   # no EXIT instruction
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            found = ss.raw_shaders(bytes(0x103) + ctl + code, 'main')
+        self.assertEqual(found, [])
+        self.assertEqual(log.getvalue(), '')
+
+    def test_raw_shaders_8mod16_packed_headerless_compute(self):
+        """A 4-byte-aligned (8 mod 16) packed ctl+code headerless compute shader is not made ambiguous by a 16-byte-rounded offset."""
+        ctl, code = compute(16)   # EXIT at +16 would still land in an instruction slot (+8) if shifted by +8 bytes
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            found = ss.raw_shaders(bytes(0x2008) + ctl + code + bytes(0x20), 'main')
+        self.assertEqual([v[1:] for v in found], [('cs', ctl, code)])
+        self.assertEqual(log.getvalue(), '')
+
 
 if __name__ == '__main__': unittest.main()

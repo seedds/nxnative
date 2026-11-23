@@ -514,6 +514,8 @@ Reuse works as for the IPA. Each shader output has its own key, named after the 
 - the frame time (start to start) and the time each frame stayed on screen, at p50 / p95 / p99 / max, with the frames that stayed longer than 1.5 frame times;
 - the GPU time per frame (p50 / p95), the frames the system dropped, and the game's speed against real time where the frame step logs it;
 - the `[RED]` lines of the run.
+`draws_per_frame`, `submit_us_per_draw` and `submit_instr_per_draw` are the window's draws per frame and the CPU time and instructions the host spent submitting each draw (`@draws`, `@sub_cpu_ms`, `@sub_instr`). They move with draw-bound work even when the frame time is capped at the target. The instruction column stays empty where the Mac did not count them.
+
 
 `--variant 'label:KEY=VALUE,…'` adds a variant: environment switches, or another host (`host=`), other Mac shader libraries (`msl=` with `shmap=`), other rewritten modules (`patched=`) or another pipeline archive (`pso=`). Variants run in turn, `--runs` times each (2 by default), and the results are medians with their range. `--fps` and `--scale` set the frame rate target and the render scale for every variant. Each run's log, `frames.tsv` and two screenshots, taken at the same moments of the route, are in the output folder (`<id>_build/bench/<date-time>/`), with `results.md` and `results.json`. Load on the Mac moves the numbers, so compare the variants of one run of the script rather than separate runs.
 

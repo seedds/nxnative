@@ -48,8 +48,8 @@ def pct(xs, p):   # nearest-rank percentile
     s = sorted(xs); return s[min(len(s) - 1, max(0, math.ceil(p / 100 * len(s)) - 1))]
 
 
-def frames(tsv, t0, t1):
-    """The per-frame rows of one run (frame / @name / value), the frames whose @t_s lies in [t0, t1): frame time, on-screen interval, GPU time"""
+def window_rows(tsv, t0, t1):
+    """The per-frame rows of one run (frame / @name / value), the frames whose @t_s lies in [t0, t1)"""
     rows = {}
     with open(tsv, errors='replace') as fh:
         for ln in fh:
@@ -57,12 +57,28 @@ def frames(tsv, t0, t1):
             if len(c) != 3 or not c[1].startswith('@'): continue
             try: rows.setdefault(int(c[0]), {})[c[1]] = float(c[2])
             except ValueError: continue
-    sel = [r for f, r in sorted(rows.items()) if '@t_s' in r and t0 <= r['@t_s'] < t1]
+    return [r for f, r in sorted(rows.items()) if '@t_s' in r and t0 <= r['@t_s'] < t1]
+
+
+def frames(tsv, t0, t1):
+    """The window's frame time, on-screen interval and GPU time"""
+    sel = window_rows(tsv, t0, t1)
     ft = [r['@frame_ms'] for r in sel if r.get('@frame_ms', 0) > 0]
     shown = [r['@presented_ms'] for r in sel if r.get('@presented_ms', 0) > 0]
     gpu = [r['@gpu_ms'] for r in sel if r.get('@gpu_ms', -1) >= 0]
     dropped = sum(1 for r in sel if r.get('@presented_ms') == -1)
     return ft, shown, gpu, dropped, len(sel)
+
+
+def submit_cost(tsv, t0, t1):
+    """The window's CPU cost of submitting a draw, over all its frames: it moves with draw-bound work even when the frame time is capped. Instructions only where the Mac counted them"""
+    sel = [r for r in window_rows(tsv, t0, t1) if r.get('@draws', 0) > 0 and '@sub_cpu_ms' in r]
+    draws = sum(r['@draws'] for r in sel)
+    if not draws: return {}
+    d = {'draws_per_frame': round(draws / len(sel), 1), 'submit_us_per_draw': round(sum(r['@sub_cpu_ms'] for r in sel) * 1000 / draws, 3)}
+    counted = [r for r in sel if r.get('@sub_instr', 0) > 0]
+    if counted: d['submit_instr_per_draw'] = round(sum(r['@sub_instr'] for r in counted) / sum(r['@draws'] for r in counted), 1)
+    return d
 
 
 def summary(ft, shown, gpu, dropped, n, secs, budget):
@@ -125,6 +141,7 @@ def run_one(a, gid, build, var, route, out, lock):
         if lock: lock.unlink(missing_ok=True)
     budget = 1000.0 / (a.fps or 60)
     s = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget) if (out / 'frames.tsv').is_file() else {'frames': 0}
+    if s.get('frames'): s.update(submit_cost(out / 'frames.tsv', route['from'], route['from'] + route['secs']))
     log_text = (out / 'log.txt').read_text(errors='replace')
     m = re.findall(r'frame step: game time [\d.]+ s in [\d.]+ s \(([\d.]+) of real time\)', log_text)
     if m: s['game_speed'] = float(m[-1])
@@ -209,9 +226,9 @@ def main():
             d = out / f'{label}-{i + 1}'
             s = run_one(a, gid, build, var, route, d, lock); results[label].append(s)
             print(f'  {label} run {i + 1}: ' + (f'{s["fps"]} fps, frame p50 {s["frame_p50"]} / p99 {s["frame_p99"]} / max {s["frame_max"]} ms, GPU p50 {s["gpu_p50"]} ms' if s.get('frames') else f'no frames (see {d / "log.txt"})'), flush=True)
-    keys = ['fps', 'frame_p50', 'frame_p95', 'frame_p99', 'frame_max', 'shown_p99', 'shown_max', 'dropped', 'over_budget', 'gpu_p50', 'gpu_p95', 'game_speed', 'red_lines']
+    keys = ['fps', 'frame_p50', 'frame_p95', 'frame_p99', 'frame_max', 'shown_p99', 'shown_max', 'dropped', 'over_budget', 'gpu_p50', 'gpu_p95', 'draws_per_frame', 'submit_us_per_draw', 'submit_instr_per_draw', 'game_speed', 'red_lines']
     md = (f'{gid}, route `{a.route}` ({route["about"]}), window {route["secs"]:g} s, fps target {a.fps or "profile"}, render scale {a.scale or "profile"}; '
-          f'medians over runs (range); times in ms; over_budget = frames longer than 1.5 frame times\n\n' + table(results, keys) + '\n')
+          f'medians over runs (range); times in ms; over_budget = frames longer than 1.5 frame times; submit_* = CPU time (µs) and instructions per draw submitted\n\n' + table(results, keys) + '\n')
     (out / 'results.md').write_text(md); (out / 'results.json').write_text(json.dumps({'game': gid, 'route': a.route, **{k: v for k, v in vars(a).items() if k != 'build' and k != 'save'}, 'save': str(a.save), 'variants': variants, 'results': results}, indent=1, default=str))
     print('\n' + md)
     sys.exit(0 if all(r.get('frames') for rs_ in results.values() for r in rs_) else 1)

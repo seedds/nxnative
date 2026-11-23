@@ -25,6 +25,25 @@ class Bench(unittest.TestCase):
             self.assertEqual(s['fps'], 100.0); self.assertEqual(s['frame_p50'], 10.0); self.assertEqual(s['frame_p99'], 10.0); self.assertEqual(s['frame_max'], 50.0)
             self.assertEqual(s['over_budget'], 1)   # only the 50 ms frame is longer than 1.5 × 8.33 ms
 
+    def test_submit_cost_per_draw(self):   # a draw-bound change shows here even when the frame time is capped (issue 2605)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'frames.tsv'
+            rows = ['# kind: nvn-per-frame', 'frame\tname\tvalue']
+            for i in range(20):   # 10 frames before the window; in it, 1000 or 3000 draws for 2 or 8 ms of CPU and 1M or 5M instructions
+                odd = i % 2
+                rows += [f'{i}\t@t_s\t{10 + i * 0.1:.1f}', f'{i}\t@draws\t{3000 if odd else 1000}', f'{i}\t@sub_cpu_ms\t{8.0 if odd else 2.0}', f'{i}\t@sub_instr\t{5000000 if odd else 1000000}']
+            f.write_text('\n'.join(rows) + '\n')
+            s = bench.submit_cost(f, 11.0, 12.0)
+            self.assertEqual(s, {'draws_per_frame': 2000.0, 'submit_us_per_draw': 2.5, 'submit_instr_per_draw': 1500.0})
+
+    def test_submit_cost_without_its_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'frames.tsv'
+            f.write_text('0\t@t_s\t1.0\n0\t@frame_ms\t16.0\n1\t@t_s\t1.1\n1\t@draws\t0\n1\t@sub_cpu_ms\t1.0\n')
+            self.assertEqual(bench.submit_cost(f, 0.0, 2.0), {})
+            f.write_text('0\t@t_s\t1.0\n0\t@draws\t10\n0\t@sub_cpu_ms\t1.0\n0\t@sub_instr\t0\n')   # no instruction counter on this machine: its column stays empty
+            self.assertEqual(bench.submit_cost(f, 0.0, 2.0), {'draws_per_frame': 10.0, 'submit_us_per_draw': 100.0})
+
     def test_percentile(self):
         xs = list(range(1, 101))
         self.assertEqual(bench.pct(xs, 50), 50); self.assertEqual(bench.pct(xs, 99), 99); self.assertEqual(bench.pct(xs, 100), 100); self.assertIsNone(bench.pct([], 50))

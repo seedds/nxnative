@@ -15,6 +15,8 @@ void front_run(void (*guest)(void));
 void *front_metal_layer(void);
 // The highest refresh rate of the screen the game is shown on in Hz, 0 = not known (front_mac.m: the window's screen; front_ios.m: the game view's screen, 60 in Low Power Mode). Any thread
 int front_screen_max_fps(void);
+// The screen's native refresh rate before front_screen_match temporarily switched it to a lower fixed rate in fullscreen (front_mac.m; on iOS, same as front_screen_max_fps). Any thread
+int front_screen_capable_fps(void);
 // The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).
 // Returns 0 and leaves w, h alone when not known (no front end: graphics unit tests). Any thread
 int front_display_pixels(int *w, int *h);

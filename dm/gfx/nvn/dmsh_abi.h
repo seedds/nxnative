@@ -127,6 +127,7 @@
 #define DMSH_KIND_SAMP_C2A "samp_c2a"    // the same for samplers
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
+#define DMSH_KIND_IMG_POOL "img_pool"    // the image pool, indexed by the handle's image ID (an image handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
 #define DMSH_KIND_TEX_HTAB "tex_htab"    // a table the host builds of the handles in uniform slot reg from byte off, element k = the handle at off + 8k (nvn_mtl.m htab_gpu), laid out as a pool: elem = the element type
 #define DMSH_KIND_SAMP_HTAB "samp_htab"  // its samplers; soff and sreg as DMSH_KIND_SAMP_UBO's
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_rewrite.py border_emu): a mask of the samplers to correct, then each one's factors
@@ -206,12 +207,13 @@
 #define DMSH_LOGIC_FC 200
 // The typed-output entry point's function constants (dm/gfx/tools/dmsh_entry.py fs_uint): bool, colour output n goes to an unsigned (DMSH_UINT_FC + n) or a signed (DMSH_SINT_FC + n)
 // integer target: main0_u returns that output as the integer vector of the same bits, and as a float where neither is set; bool, the alpha test runs (DMSH_TYPED_ALPHA_FC: its state at
-// DMSH_ALPHA_BUFFER, dmsh_alpha.py) and the logic operation (DMSH_TYPED_LOGIC_FC: its state at DMSH_LOGIC_BUFFER, the targets it reads by DMSH_LOGIC_FC + n, dmsh_logic.py). nvn_mtl.m
-// typed_fn specializes it per pipeline's targets and fixed-function state
+// DMSH_ALPHA_BUFFER, dmsh_alpha.py), the logic operation (DMSH_TYPED_LOGIC_FC: its state at DMSH_LOGIC_BUFFER, the targets it reads by DMSH_LOGIC_FC + n, dmsh_logic.py), and dual-source
+// blending (DMSH_TYPED_DUAL_FC: colour output 1 returned as [[color(0), index(1)]], outputs 1..7 absent). nvn_mtl.m typed_fn specializes it per pipeline's targets and fixed-function state
 #define DMSH_UINT_FC 208
 #define DMSH_SINT_FC 224
 #define DMSH_TYPED_ALPHA_FC 232
 #define DMSH_TYPED_LOGIC_FC 233
+#define DMSH_TYPED_DUAL_FC 234
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_rewrite.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30

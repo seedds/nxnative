@@ -129,6 +129,17 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** the case is noted once without `[RED]` (`unmapped page of a sparse pool: bound to the zero buffer`, `hle_nvn.c` `nvn_vpool_unmapped`); an address in no pool and no reservation is still red. The zero buffer is shared and 64 KB: a store through it is kept, not dropped (no game is known to store there).
 - **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
 
+### Misaligned physical mappings into a sparse virtual pool
+
+- **Symptom:** `[nvn] virtual pool …: a request not aligned to the host page … is kept in the page table only: textures read it, the GPU cannot address it`; buffers, indirect arguments, and shaders addressing that sparse pool fail lookup (`in no memory pool`) or read zeros.
+- **Cause:** Switch NVN aligns physical pools and virtual mappings to 4 KB, whereas Apple Silicon uses 16 KB host pages. `vm_remap` cannot zero-copy alias a physical address whose offset modulo 16 KB differs from the virtual offset (for example, a physical pool allocated at `+0x3000` mapped at virtual offset `0`, or a `CPU_UNCACHED` physical pool mapped across 16 KB boundaries).
+- **Fix:** two-tier general handling in `hle_nvn.c` and `nvn_mtl.m`:
+  1. `PHYSICAL | CPU_NO_ACCESS` pools starting inside a host page are re-backed once on a host page boundary at `nvnMemoryPoolInitialize` (recorded in a side table so `pool_t` stays 40 bytes for captures), allowing zero-copy `vm_remap` with no shadow memory or sync overhead.
+  2. Misaligned CPU-accessible mappings (`vshadow_map`) get anonymous pages inside the virtual pool's existing reservation (`mmap(..., MAP_FIXED)` + normal `vrun_set`, so unmaps still free pages and return zeros via `vunmap_defer` and large pools never wire their whole reservation). CPU writes to the physical pool are dirty-tracked and synced at submission start (`nvn_shadow_sync`). GPU writes (storage buffers, `mtl_sub_update`, `mtl_sub_fill`, buffer copies, writable buffer images, events, counters, visibility reports) are written back on completion (`POST_SHADOW_WB`, `nvn_shadow_writeback`) through a `vm_remap` RW alias of the physical pages (zero `SIGSEGV`/`SIGBUS` writeback faults) using lazy per-host-page snapshots (`vshadow_arm_entry`, allocated only for GPU-written pages so static assets cost 0 snapshot RAM and concurrent CPU+GPU writes in the same 16 KB host page never clobber each other).
+  3. Active sparse virtual pools also enable `MTL4VisibilityOptionResourceAlias` in `resource_vis()` (`mtl_sparse_alias_delta`) so Metal 4 barriers keep replaced sparse run buffers coherent.
+- **Found on:** Immortals Fenyx Rising (`010010A00B228000`, [PR #3126](https://github.com/seedds/nxnative/pull/3126)).
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_sparse_shadow` (45 checks under `MTL_DEBUG_LAYER=1`: `CPU_NO_ACCESS` 16 KB re-backing, misaligned `CPU_UNCACHED` shadow sync, GPU fill/event writeback through zero-fault RW alias, concurrent CPU+GPU writes in the same host page, partial unmap, `resource_vis()` sparse alias, clipped buffer textures, compressed `IMAGE` textures in sparse pools, >32 immediate and deferred handle binds, and `geo_big_*` scratch reuse/trim).
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).

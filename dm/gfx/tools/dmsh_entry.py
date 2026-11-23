@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # The entry points dmsh_build.py adds to a translated shader's MSL, or rewrites in it: a vertex shader's outputs and its void entry for rasterizer discard (vs_writes, vs_discard),
 # integer vertex inputs (int_inputs), outputs set before the body (vs_init), the base instance from Metal (vs_base_instance), the point size and the layer (drop_point_size,
-# vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's typed-output and dual-source entry points (fs_uint, fs_dual). Functions of
+# vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's typed-output entry point (fs_uint, holding integer targets, alpha test, logic ops and dual-source blending). Functions of
 # the MSL text only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import re, sys
 import dmsh_abi, dmsh_side, dmsh_alpha, dmsh_logic
@@ -225,9 +225,12 @@ def fs_uint(src):
     signed vector of the same bits (as_type, nothing converted), by the bool function constants DMSH_UINT_FC + n (dm_ui<n>) and DMSH_SINT_FC + n (dm_si<n>), a float where neither is set
     (dm_uf<n>); its output struct holds the three members on [[color(n)]], each present by its constant. It also holds the fixed-function work Metal lacks, each by a constant and with its
     arguments present only then: NVN's alpha test (DMSH_TYPED_ALPHA_FC, dm_at: dmsh_alpha.test, on colour 0's alpha before the outputs are typed) and logic operation
-    (DMSH_TYPED_LOGIC_FC, dm_lo: dmsh_logic.parts, on the typed outputs, reading the attachments DMSH_LOGIC_FC + n names), so one function serves every variant a pipeline asks for, and the
+    (DMSH_TYPED_LOGIC_FC, dm_lo: dmsh_logic.parts, on the typed outputs, reading the attachments DMSH_LOGIC_FC + n names), and dual-source blending (DMSH_TYPED_DUAL_FC, dm_du: when colour
+    outputs 0 and 1 share a width and every colour >= 1 is typed, output 1 is returned as [[color(0), index(1)]] and outputs 1..7 are absent, replacing the per-game dual_want.tsv list and
+    main0_d entry point), so one function serves every variant a pipeline asks for, and the
     side library holds one more body than before, not three (dmsh_side.unit gives main0 an alpha test entry point, which needs no specialization, and no logic one). The host specializes it
-    with the pipeline's targets and state (nvn_mtl.m typed_fn) when a target's class is not the one main0 declares or the pipeline has a logic operation. A shader got an integer entry
+    with the pipeline's targets and state (nvn_mtl.m typed_fn) when a target's class is not the one main0 declares, the pipeline has a logic operation, or target 0 blends with a SRC1 factor.
+    A shader got an integer entry
     point only when its code looked like an integer writer, which took five rules and still missed (Trails in the Sky 2nd Chapter: a uniform word, zeros, a register reused by two branches,
     a texel read as it is; Kirby's 76 shaders of #2760): every pixel shader gets it, and the build cuts it into the side library <key>_bx that the host loads on first need
     (dmsh_build.py ps_libraries), so the base library every shader loads stays as it was. A colour member of another type (half) or shape (an index, a function constant) stays as it is.
@@ -242,19 +245,30 @@ def fs_uint(src):
         c, t = re.fullmatch(r'\[\[color\(([0-7])\)\]\]', at or ''), re.fullmatch(r'(float|uint|int)([234]?)', ty)
         if c and t: col[nm] = (t.group(1), t.group(2), int(c.group(1)))
     if not col: return None
-    ns = sorted({n for _, _, n in col.values()})
-    consts = ''.join(f'constant bool dm_ui{n} [[function_constant({dmsh_abi.UINT_FC + n})]];\nconstant bool dm_si{n} [[function_constant({dmsh_abi.SINT_FC + n})]];\n'
-                     f'constant bool dm_uf{n} = !dm_ui{n} && !dm_si{n};\n' for n in ns)
+    by_n = {n: (nm, k0, w) for nm, (k0, w, n) in col.items()}
+    # Dual-source blending: Maxwell feeds output 1 as target 0's second blend source; Metal reads [[color(0), index(1)]] of the same type as colour 0 with no colour >= 1 present
+    dual = (0 in by_n and 1 in by_n and by_n[0][2] == by_n[1][2]
+            and all(nm in col for _, nm, at in mem if re.fullmatch(r'\[\[color\([1-7]\)\]\]', at or '')))
+    ns = sorted(by_n)
+    consts = (f'constant bool dm_du [[function_constant({dmsh_abi.TYPED_DUAL_FC})]];\n' if dual else '') + ''.join(
+        f'constant bool dm_ui{n} [[function_constant({dmsh_abi.UINT_FC + n})]];\n'
+        f'constant bool dm_si{n} [[function_constant({dmsh_abi.SINT_FC + n})]];\n'
+        f'constant bool dm_uf{n} = !dm_ui{n} && !dm_si{n}{" && !dm_du" if dual and n >= 1 else ""};\n' for n in ns)
     kinds = (('float', '', 'dm_uf'), ('uint', '_ui', 'dm_ui'), ('int', '_si', 'dm_si'))
     def member(ty, nm, at):
         if nm not in col: return f'    {ty} {nm} {at};\n' if at else f'    {ty} {nm};\n'
         _, w, n = col[nm]
-        return ''.join(f'    {k}{w} {nm}{sfx} [[color({n}), function_constant({fc}{n})]];\n' for k, sfx, fc in kinds)
+        out_m = ''.join(f'    {k}{w} {nm}{sfx} [[color({n}), function_constant({fc}{n})]];\n' for k, sfx, fc in kinds)
+        if dual and n == 1: out_m += f'    float{w} {nm}_du [[color(0), index(1), function_constant(dm_du)]];\n'
+        return out_m
     def store(nm):
         if nm not in col: return f'    r.{nm} = out.{nm};\n'
         k0, w, n = col[nm]
         put = lambda k, sfx: f'r.{nm}{sfx} = ' + (f'out.{nm};' if k == k0 else f'as_type<{k}{w}>(out.{nm});')
-        return f'    if (dm_ui{n}) {put("uint", "_ui")} else if (dm_si{n}) {put("int", "_si")} else {put("float", "")}\n'
+        body = f'if (dm_ui{n}) {put("uint", "_ui")} else if (dm_si{n}) {put("int", "_si")} else {put("float", "")}'
+        if dual and n == 1: return f'    if (dm_du) {put("float", "_du")} else {body}\n'
+        if dual and n >= 2: return f'    if (!dm_du) {{ {body} }}\n'
+        return f'    {body}\n'
     members = ''.join(member(ty, nm, at) for ty, nm, at in mem)
     alpha = dmsh_alpha.test(src, 'out')
     logic = None if dmsh_logic.refused(src) else dmsh_logic.parts(members, 'r', 'dm_lo')
@@ -271,23 +285,7 @@ def fs_uint(src):
             + pre + '    main0_out_u r = {};\n' + ''.join(store(nm) for _, nm, _ in mem) + post + '    return r;\n}\n')
 
 
-def typed_ops(msl):   # what the typed-output entry point of msl holds besides its outputs (nvn_mtl.m: the reflection's entry_u_alpha, entry_u_logic)
-    return {'alpha': f'dm_at [[function_constant({dmsh_abi.TYPED_ALPHA_FC})]]' in msl, 'logic': f'dm_lo [[function_constant({dmsh_abi.TYPED_LOGIC_FC})]]' in msl}
-
-
-def fs_dual(src):
-    """Dual-source blending. NVN's SRC1 blend factors read the pixel shader's output 1 as target 0's second source (Maxwell feeds MRT 1 to it), and the translator declares that
-    output [[color(1)]]; Metal reads the second source only from [[color(0), index(1)]], and its compiler crashes building a pipeline that blends with an absent one (Pokémon Legends:
-    Arceus's ha_post_effects, f4f36a03b0c6691d). A shader in the profile's dual_want.tsv that writes exactly colours 0 and 1 gets a second entry point, main0_d, the same body with
-    output 1 as index 1 of colour 0; the host takes it for a pipeline whose target 0 blends with a SRC1 factor (nvn_mtl.m pso_desc). Not every such shader gets one: most write a
-    second render target (5,474 of Arceus's 6,156 pixel shaders write exactly colours 0 and 1). It calls main0's body (dmsh_side.shared_body): a copy of the body was compiled again, and
-    a readable-tile rewrite of its samples would not build there (dmsh_fetch.fold). → main0_d, to append to the source with its body shared (with its other entry points), or None"""
-    st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
-    if not st: return None
-    try: e = dmsh_side.entry(src, 'main0')
-    except ValueError: e = None
-    if not e: return None
-    mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
-    if sorted(at for _, _, at in mem if 'color(' in at) != ['[[color(0)]]', '[[color(1)]]']: return None
-    struct = 'struct main0_out_d\n{\n' + ''.join(f'    {ty} {nm} {"[[color(0), index(1)]]" if at == "[[color(1)]]" else at};\n' for ty, nm, at in mem) + '};\n\n'
-    return '\n' + struct + dmsh_side.calling(e, 'main0_d', 'main0_out_d', 'return main0_out_d{' + ', '.join(f'out.{nm}' for _, nm, _ in mem) + '};')
+def typed_ops(msl):   # what the typed-output entry point of msl holds besides its outputs (nvn_mtl.m: the reflection's entry_u_alpha, entry_u_logic, entry_u_dual)
+    return {'alpha': f'dm_at [[function_constant({dmsh_abi.TYPED_ALPHA_FC})]]' in msl,
+            'logic': f'dm_lo [[function_constant({dmsh_abi.TYPED_LOGIC_FC})]]' in msl,
+            'dual': f'dm_du [[function_constant({dmsh_abi.TYPED_DUAL_FC})]]' in msl}

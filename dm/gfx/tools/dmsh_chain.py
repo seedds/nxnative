@@ -69,7 +69,7 @@ def __getattr__(name) -> Any:   # MAC_MIN, MAC_MIN_FLAG and MAC_METAL as the mod
 # directly followed one (spirv_msl.cpp, OpControlBarrier): a fence made of that line ordered memory and no longer waited for the group (GitHub issue #2786). 3.1's texture atomics follow
 MSL_VERSION = '30200'
 CROSS_MSL = ['--msl', '--msl-version', MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native']
-INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'geo_pairs.tsv', 'dual_want.tsv']   # in the game profile folder
+INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'geo_pairs.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/
 # the translator defaults to the in-repo build that matches the lock file (dm/tools/native_tools.sh; a rebuild has another fingerprint)

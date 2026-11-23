@@ -15,6 +15,7 @@
 # pipelines of the first frames are built, so runs compare the scene rather than its loading. Load on the Mac moves the numbers: compare variants of one invocation, not invocations.
 import argparse, datetime, json, math, os, re, shutil, signal, statistics, subprocess, sys, time
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -140,7 +141,7 @@ def run_one(a, gid, build, var, route, out, lock):
             except subprocess.TimeoutExpired: p.kill(); p.wait()
         if lock: lock.unlink(missing_ok=True)
     budget = 1000.0 / (a.fps or 60)
-    s = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget) if (out / 'frames.tsv').is_file() else {'frames': 0}
+    s: dict[str, Any] = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget) if (out / 'frames.tsv').is_file() else {'frames': 0}
     if s.get('frames'): s.update(submit_cost(out / 'frames.tsv', route['from'], route['from'] + route['secs']))
     log_text = (out / 'log.txt').read_text(errors='replace')
     m = re.findall(r'frame step: game time [\d.]+ s in [\d.]+ s \(([\d.]+) of real time\)', log_text)

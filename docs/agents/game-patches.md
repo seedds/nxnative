@@ -434,7 +434,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:75](../../dm/host/hle_fpslock.c#L75): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -453,7 +453,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:76](../../dm/host/hle_fpslock.c#L76): frame interval and dynamic-resolution floor
 
 ### Ori and the Will of the Wisps
 
@@ -723,6 +723,12 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 11.4.0 (Pokémon Legends: Arceus, Kirby and the Forgotten Land): the next rule's size classes with 8 more bytes of body; the 4 GB StandardAllocator region of Arceus's nninitStartup (the host's cap) fits after the 62 MB node area only with it
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 12.3.2 (OCTOPATH TRAVELER II), 12.3.9 (Xenoblade Chronicles 3), 13.3.5 (Mario + Rabbids Sparks of Hope), 14.3.0 (Batman: Arkham Knight), 15.3.2 (Paper Mario: The Thousand-Year Door)
 - regions of 4 MB and more aligned to 2 MB, as SDK 20: SDK 16.2.0 (Sea of Stars), 18.3.2 (Absolum), 18.3.5 (Super Mario Galaxy)
+
+## Host rows of builds no profile registers
+
+Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
+
+- `e7dd1e26…`: [hle_fpslock.c:58](../../dm/host/hle_fpslock.c#L58): engine frame limit set to fps_target: FIFA frame regulator (a build no profile registers)
 
 ## Translator rules keyed by a shader's code
 

@@ -52,6 +52,10 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // EA SPORTS FC 27 1.8e.50bc: the same regulator at [main+0xda5d0f8]. Checked by disassembly of this build: main+0x5d75db8 fmov v1.2d, #30.0; ldr x9, [main+0xda5d0f8];
+    // stur q1, [x9, #8], under GameRenderSettings.Enable (ldrb [x0, #0x1f5] == 1), as main+0x5d501c0 in 1.8d.310c; main+0x9a1ddfc reads the rate as a double at [+0x8].
+    // The global matches masagrator's FPSLocker config for this build (FPSLocker-Warehouse, patches/0100C49025D3E000/E7DD1E26CA35D3BD.yaml: [MAIN, 0xDA5D0F8, 8], double)
+    { "e7dd1e26ca35d3bdacbe6aee17965760", "FIFA frame regulator", 0xda5d0f8, 0x8, FPS_F64, 2, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 #define MAX_LOCKS (NLOCKS + 7)   // target, Monolith, four Unreal rows, Unity targetFrameRate

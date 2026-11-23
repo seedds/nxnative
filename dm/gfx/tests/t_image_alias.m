@@ -33,6 +33,17 @@ static void is_zero(id<MTLTexture> t) {
     for (NSUInteger i=0;i<b.length/4;i++) zero &= p[i]==0;
     CHECK(zero, "fresh family is zero, including beyond its first-used small descriptor");
 }
+static void fragment_copy(id<MTLTexture> source, uint32_t seed) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat width:source.width height:source.height mipmapped:NO];
+    d.storageMode=MTLStorageModePrivate; d.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> target=[g_dev newTextureWithDescriptor:d]; res_add(target);
+    NVNcopyRegion r={.width=(int)source.width,.height=(int)source.height,.depth=1};
+    CHECK(copy_t2t_draw(source,target,0,0,0,0,&r,&r,0,0),"heap-backed texture is copied by the fragment pipeline");
+    id<MTLBuffer> out=read_image(target); uint32_t *p=out.contents; int valid=1;
+    for (NSUInteger i=0;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
+    CHECK(valid,"fragment sampling reads every heap-backed texel");
+    res_remove(target);
+}
 static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
@@ -206,12 +217,13 @@ int main(void) { @autoreleasepool {
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
     same_cell(&pool);
+    fragment_copy(small,0x76543210);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
     depth_planes(&pool);
     cross_size_read();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
-    CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");
+    CHECK([g_res_objects containsObject:small],"the view parent descriptor is resident alongside its heap");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
     tex_t other=image(&pool,991000,64,64); other.off=10<<20; other.mem=pool.mem+other.off; mtl_tex_init(&other);
     CHECK(!objc_getAssociatedObject(tex_mtl(&other),&g_image_heap_owner_key),"single-description storage stays out of the family heaps (its memory is a recycled heap of its own, rh_texture)");
@@ -234,9 +246,10 @@ int main(void) { @autoreleasepool {
     // Finish a second submission: release calls are deferred to the next fence.
     mtl_sub_begin(); mtl_sub_commit(); mtl_drain();
     // GPU completion publishes the fence before its feedback handler drains deferred objects.
-    dispatch_sync(g_feedback_q, ^{}); defer_drain();
+    dispatch_sync(g_feedback_q, ^{}); defer_drain(); res_commit();
     CHECK(g_image_desc.n==0,"finalization releases every recorded description");
     }
+    res_commit();   // apply descriptor retirements queued while the fixture's autorelease pool drained
     if (sw_on(rh_mode())) {   // the heap waits, resident, for the next texture it fits (rh_wait)
         int waits=0; os_unfair_lock_lock(&g_rh_lk); for (unsigned i=0;i<g_rh_n;i++) waits |= (__bridge id)g_rh[i].heap==weak_heap; os_unfair_lock_unlock(&g_rh_lk);
         CHECK(weak_heap && waits && [g_res_objects containsObject:weak_heap],"the last texture hands its heap to the recycled heaps, resident while it waits");
@@ -250,8 +263,9 @@ int main(void) { @autoreleasepool {
         CHECK(tex_mtl(&a).heap!=nil,"a recreated family allocates its backing");
         mtl_tex_release(&a); mtl_tex_release(&b); mtl_alias_drop_pool(&pool);
         mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); mtl_sub_commit(); mtl_drain();
-        dispatch_sync(g_feedback_q,^{}); defer_drain();
+        dispatch_sync(g_feedback_q,^{}); defer_drain(); res_commit();
     } }
+    res_commit();
     CHECK(g_image_heap_n==0,"repeated destruction leaves no heap owner");
     CHECK(g_dev.currentAllocatedSize<=settled+(3<<20),"repeated families do not retain their old physical allocations");
     free(mem);

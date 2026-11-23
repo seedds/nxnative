@@ -11,6 +11,7 @@
 
 static int memory_mprotect(void *addr, size_t size, int prot);
 static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset);
+static int memory_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg);
 static _Noreturn void memory_abort(void);
 static int memory_getpagesize(void) {
 #ifdef TEST_PAGE_16K
@@ -23,12 +24,26 @@ static int memory_getpagesize(void) {
 #define getpagesize memory_getpagesize
 #define mprotect memory_mprotect
 #define mmap memory_mmap
+#define pthread_create memory_pthread_create
 #define abort memory_abort
 #include "../hle_svc.c"
 #undef abort
+#undef pthread_create
 #undef mprotect
 #undef mmap
 #undef getpagesize
+
+static int file_worker_starts;
+static int memory_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg) {
+    if (entry == guest_file_thread) {
+        // Check the state at creation so the result does not depend on when the watcher first runs.
+        assert(g_gf_n > 0);
+        assert(g_heap && g_stack && g_alias && g_alias_cap);
+        assert(g_alias_bits && g_alias_exposed && g_alias_rel && g_alias_aged);
+        ++file_worker_starts;
+    }
+    return pthread_create(thread, attr, entry, arg);
+}
 
 static module_t test_modules[2];
 module_t *g_mod = test_modules;
@@ -36,7 +51,33 @@ int g_nmod;
 struct dm_flags g_flag;
 void hlecount_svc(int num) { (void)num; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
+static const uint8_t readonly_bytes[0x8000] = { 0x53, [0x7fff] = 0x49 };
+static const hle_readonly_shmem readonly_memory = { readonly_bytes, sizeof readonly_bytes };
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { return handle == 0x1042 ? &readonly_memory : NULL; }
+static hle_transfer_memory transfer_memory;
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory) { transfer_memory = memory; return 0x1043; }
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) {
+    if (handle != 0x1043 || !transfer_memory.size) return 0;
+    *memory = transfer_memory;
+    return 1;
+}
 void dm_backtrace(uint64_t fp) { (void)fp; }
+// No exlaunch plugin in this fixture (hle_exl.c): no stand-in rtld, and no module code a MapProcessMemory view could be made of
+const uint32_t dm_exl_process_handle = 0xFFFF8001u;
+int dm_exl_rtld_query(uint64_t addr, uint64_t *base, uint64_t *size, uint64_t *state, uint64_t *perm) { (void)addr; (void)base; (void)size; (void)state; (void)perm; return 0; }
+uint64_t dm_exl_rtld_base(void) { return 0; }
+uint64_t dm_exl_rtld_size(void) { return 0; }
+int dm_exl_view_source_ok(uint64_t src, uint64_t size) { (void)src; (void)size; return 0; }
+void dm_exl_code_prepare(uint64_t src) { (void)src; }
+int dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size) { (void)dst; (void)src; (void)size; return 0; }
+int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size) { (void)dst; (void)src; (void)size; return 0; }
+int dm_sdk_ounce(void) {
+#ifdef TEST_SDK_OUNCE
+    return TEST_SDK_OUNCE;
+#else
+    return 0;
+#endif
+}
 void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 uint64_t guest_ticks(void) { return 0; }
@@ -50,7 +91,7 @@ module_t *module_of(const void *p) {
     for (int i = 0; i < g_nmod; ++i) {
         uintptr_t b = (uintptr_t)g_mod[i].base;
         if (a >= b && a - b < g_mod[i].size) return &g_mod[i];
-        if (g_mod[i].patch_off < 0 && a >= b + g_mod[i].patch_off && a < b) return &g_mod[i];
+        if (g_mod[i].patch_off < 0 && a >= b + g_mod[i].patch_off && a < b + g_mod[i].patch_off + g_mod[i].patch_len) return &g_mod[i];
     }
     return NULL;
 }
@@ -132,6 +173,56 @@ static void expect(uintptr_t a, uintptr_t base, size_t size, unsigned state, uns
     memory_info m = query(a);
     assert(m.base == base && m.size == size && m.state == state && m.attr == attr && m.perm == perm);
 }
+static uint32_t shared_svc(int svc, uint32_t handle, uintptr_t addr, size_t size, unsigned permission) {
+    uint64_t regs[31] = { handle, addr, size, permission };
+    svc_dispatch(svc, regs, 0);
+    return (uint32_t)regs[0];
+}
+static void readonly_shared_memory(void) {
+    uintptr_t addr = alias + 0x10000;
+    size_t size = sizeof readonly_bytes;
+    assert(shared_svc(0x13, 0, addr, size, 1) == 0xe401u);
+    assert(shared_svc(0x13, 0x1042, addr, size, 3) != 0);
+    assert(!pages(1, addr, size));
+    assert(shared_svc(0x13, 0x1042, addr, size, 1) == BAD);
+    assert(!pages(0, addr, size));
+    assert(!shared_svc(0x13, 0x1042, addr, size, 1));
+    expect(addr, addr, size, 6, 0, 1);
+    assert(!memcmp((void *)addr, readonly_bytes, size));
+    assert(pages(1, addr, size) == BAD && pages(0, addr, size) == BAD);
+    assert(shared_svc(0x13, 0x1042, addr, size, 1) == BAD);
+    assert(!shared_svc(0x14, 0x1042, addr, size, 0));
+    assert(query(addr).state == 0);
+    assert(!pages(1, addr, size));
+    assert(*(uint8_t *)addr == 0 && *(uint8_t *)(addr + size - 1) == 0);
+    assert(!pages(0, addr, size));
+}
+static void transfer_memory_setup(void) {
+    uintptr_t addr = alias + 0x10000;
+    size_t size = memory_getpagesize();
+    assert(shared_svc(0x15, 0, addr, size, 0) == BAD);   // unbacked
+    assert(!pages(1, addr, size));
+    assert(shared_svc(0x15, 0, addr + 1, size, 0) == 0xcc01u);
+    assert(shared_svc(0x15, 0, addr, size - 1, 0) == 0xca01u);
+    assert(shared_svc(0x15, 0, addr, size, 2) == 0xd801u);
+    uint64_t regs[31] = {0, addr, size, 0};
+    svc_dispatch(0x15, regs, 0);
+    assert(!regs[0] && regs[1] == 0x1043 && transfer_memory.address == addr);
+    *(uint8_t *)addr = 0x42;
+    hle_transfer_mapping mapping = {0};
+    assert(hle_map_transfer_memory(&mapping, 0x1043, size, 0));
+    assert(mapping.address == addr && *(uint8_t *)mapping.address == 0x42);
+    assert(!hle_map_transfer_memory(&mapping, 0x1042, size, 0));
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size * 2, 0));
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size, 1));
+    transfer_memory.size = 0;   // The guest closed its own handle.
+    assert(pages(0, addr, size) == BAD);
+    hle_unmap_transfer_memory(&mapping);
+    hle_unmap_transfer_memory(&mapping);
+    assert(!pages(0, addr, size));
+    transfer_memory = (hle_transfer_memory){addr, size, 0};
+    assert(!hle_map_transfer_memory(&mapping, 0x1043, size, 0));
+}
 static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
     fflush(NULL); pid_t pid = fork(); assert(pid >= 0);
     if (!pid) {
@@ -185,8 +276,7 @@ static void alias_lifecycle(void) {
     assert(pages(1, alias + g_alias_cap - P, 2 * P) == BAD);
 }
 
-// Device-shared memory (an NVN memory pool's storage, hle_nvn.c) is not given back: UnmapPhysicalMemory or a shrinking SetHeapSize over any page of it fails with InvalidCurrentMemory and
-// leaves every page and byte as it was, as on Horizon; once the pool is gone (each registration removed) both work again (PR #1616, Monster Jam Steel Titans 2)
+// Device-shared memory (an NVN memory pool's storage, hle_nvn.c) stays mapped until the last pool releases it.
 static void device_shared_refused(void) {
     assert(!pages(1, alias, 16 * P));
     memset((void *)alias, 0x6d, 16 * P);
@@ -210,6 +300,51 @@ static void device_shared_refused(void) {
     assert(resize(0) == BAD);
     dm_device_share((void *)(heap + 1024 * 1024), P, 0);
     assert(!resize(0));
+
+    size_t pg = memory_getpagesize(), size = 2 * pg - P;
+    uintptr_t dst = stack + P;
+    assert(!pages(1, alias, size));
+    memset((void *)alias, 0x43, size);
+    assert(!map(dst, alias, size));
+    *(uint8_t *)dst = 0x52;
+    // The first guest page can block the unmap even when it is outside the whole host pages being reclaimed.
+    dm_device_share((void *)dst, P, 1);
+    assert(unmap(dst, alias, size) == BAD);
+    expect(dst, dst, size, 0xb, 0, 3);
+    assert(*(uint8_t *)alias == 0x43 && *(uint8_t *)dst == 0x52);
+    dm_device_share((void *)dst, P, 0);
+    assert(!unmap(dst, alias, size) && *(uint8_t *)alias == 0x52);
+    assert(!pages(0, alias, size));
+}
+
+// Unmap the middle mapping while the 4 KiB neighbors on both sides are still live.
+static void stack_pages_released(void) {
+    size_t pg = memory_getpagesize(), last = 3 * pg - P, size = last - P;
+    uintptr_t dst = stack + P, src = alias + P;
+    assert(!pages(1, alias, 3 * pg));
+    memset((void *)src, 0x5a, size);
+    *(uint8_t *)alias = 0x18;
+    *(uint8_t *)(alias + last) = 0x29;
+    assert(!map(stack, alias, P) && !map(stack + last, alias + last, P));
+    assert(!map(dst, src, size));
+    memset((void *)dst, 0x6b, size);
+    assert(!unmap(dst, src, size));
+    assert(*(uint8_t *)src == 0x6b && *(uint8_t *)(src + size - 1) == 0x6b);
+    assert(*(uint8_t *)stack == 0x18 && *(uint8_t *)(stack + last) == 0x29);
+    if (g_gf_n) {
+        assert(*(uint8_t *)(stack + pg) == 0x6b);
+    } else {
+        size_t native_pg = (size_t)getpagesize();
+        for (uintptr_t p = stack + pg; p < stack + 2 * pg; p += native_pg) {
+            char resident;
+            assert(!mincore((void *)p, native_pg, &resident) && !(resident & MINCORE_INCORE));
+        }
+    }
+    memset((void *)src, 0x7c, size);
+    assert(!map(dst, src, size) && *(uint8_t *)dst == 0x7c && *(uint8_t *)(dst + size - 1) == 0x7c);
+    assert(!unmap(dst, src, size));
+    assert(!unmap(stack, alias, P) && !unmap(stack + last, alias + last, P));
+    assert(!pages(0, alias, 3 * pg));
 }
 
 static void ownership(void) {
@@ -231,7 +366,6 @@ static void ownership(void) {
     assert(!pages(1, alias + 15 * P, 2 * P));
     expect(alias + P, alias + P, 2 * P, 5, 1, 0);
     assert(*(uint8_t *)(alias + P) == 0x34);
-    expect(UINTPTR_MAX, UINTPTR_MAX - P + 1, P, 0, 0, 0);
     assert(call(2, alias + P, P, 3) == BAD && call(3, alias + P, P, 0) == BAD);
     assert(unmap(stack + P, alias + P, P) == BAD);
     assert(unmap(stack + P, alias + 4 * P, 2 * P) == BAD);
@@ -295,6 +429,7 @@ static void module_back_patch(void) {
     assert(!mprotect(b + 0x10000, 0x4000, PROT_READ));
     assert(!mprotect(b + 0x20000, 0x8000, PROT_READ));
     expect((uintptr_t)b - 0x8000, (uintptr_t)b - 0x8000, 0x4000, 4, 0, 5);
+    expect((uintptr_t)b - 0x4000, (uintptr_t)b - 0x4000, 0x4000, 0, 0, 0);
     expect((uintptr_t)b + 0x4000, (uintptr_t)b + 0x4000, 0xc000, 4, 0, 3);
     expect((uintptr_t)b + 0x14000, (uintptr_t)b + 0x14000, 0xc000, 4, 0, 3);
     expect((uintptr_t)b + 0x20000, (uintptr_t)b + 0x20000, 0x8000, 4, 0, 5);
@@ -304,6 +439,38 @@ static void module_back_patch(void) {
     assert(!map(stack, (uintptr_t)b + 0x14000, P));
     assert(!unmap(stack, (uintptr_t)b + 0x14000, P));
     g_nmod = 0; memset(g_mod, 0, sizeof test_modules); assert(!munmap(a, 0x30000));
+}
+
+// The SDK's module parser starts at zero and advances to each returned block's end.
+static void process_memory_walk(void) {
+    const uintptr_t nso = 0x10000, nro = 0x30000;
+    g_mod[0] = (module_t){.base = (uint8_t *)nro, .size = 3 * P, .ro_off = P, .data_off = 2 * P, .nro = 1};
+    g_mod[1] = (module_t){.base = (uint8_t *)nso, .size = 3 * P, .ro_off = P, .data_off = 2 * P, .loaded = 1};
+    g_nmod = 2;
+    expect(0, 0, nso, 0, 0, 0);
+    expect(nso, nso, P, 3, 0, 5);
+    expect(nso + P, nso + P, P, 3, 0, 1);
+    assert(query(nro).state == 0);
+    g_mod[0].loaded = 1;
+    expect(nro - 1, nso + 3 * P, nro - (nso + 3 * P), 0, 0, 0);
+    expect(nro, nro, P, 3, 0, 5);
+
+    uintptr_t cursor = 0;
+    unsigned code_blocks = 0;
+    for (unsigned i = 0; i < 20; ++i) {
+        memory_info m = query(cursor);
+        code_blocks += m.state == 3;
+        uintptr_t next = m.base + m.size;
+        if (!next) {
+            assert(m.state == 0x10 && m.perm == 0 && code_blocks == 4);
+            expect(UINTPTR_MAX, m.base, m.size, 0x10, 0, 0);
+            g_nmod = 0; memset(g_mod, 0, sizeof test_modules);
+            return;
+        }
+        assert(next > cursor);
+        cursor = next;
+    }
+    assert(!"whole-process QueryMemory walk did not terminate");
 }
 
 // Apple has no pthread_barrier. The gate makes races deterministic at entry,
@@ -330,9 +497,9 @@ static void concurrency(void) {
     for (unsigned i = 0; i < 40; ++i) {
         task h = {.svc=1, .b=8 * 1024 * 1024}, p = {.svc=0x2c, .a=alias, .b=8 * 1024 * 1024};
         race(&h, &p);
-        if (DM_GAME_MEM_MAP_LIMIT) assert((!h.result && p.result == LIMIT) || (h.result == LIMIT && !p.result));
+        if (mem_map_limit_on()) assert((!h.result && p.result == LIMIT) || (h.result == LIMIT && !p.result));
         else assert(!h.result && !p.result);
-        assert(info(I_UsedMem) == DM_GAME_MEM_USED + g_heap_cur + (DM_GAME_MEM_MAP_LIMIT ? g_alias_mapped : 0));
+        assert(info(I_UsedMem) == DM_GAME_MEM_USED + g_heap_cur + (mem_map_limit_on() ? g_alias_mapped : 0));
         assert(!pages(0, alias, p.b) && !resize(0));
         assert(!pages(1, alias, P));
         task m = {.svc=4, .a=stack, .b=alias, .c=P}, d = {.svc=0x2d, .a=alias, .b=P};
@@ -580,6 +747,7 @@ static void guest_helper(void) {
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
 // The block: 256 MB in front, the heap region, the stack region, the alias region up to its end. The heap and stack sizes are the profile's, whatever the alias region's size
 static void layout_order(void) {
+    assert(file_worker_starts == (g_gf_n > 0));
     assert(info(I_HeapAddr) == (uint64_t)(uintptr_t)g_as + 0x10000000);
     assert(info(I_HeapSize) == DM_GAME_MEM_RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000);
     assert(info(I_StackAddr) == info(I_HeapAddr) + info(I_HeapSize) && info(I_StackSize) == DM_GAME_MEM_STACK);
@@ -607,12 +775,18 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
 #if !TARGET_OS_IPHONE
-    if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
+    if (!getenv("DM_ALIAS_SIZE")) {
+        size_t want_alias = dm_sdk_ounce() ? SWITCH2_ALIAS : SWITCH_ALIAS;
+        assert(info(I_AliasSize) == want_alias);   // the Mac's alias region is the console's (64 GB Switch 1, 128 GB Switch 2), whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
+#if !__has_feature(address_sanitizer)
+        assert((uint64_t)(uintptr_t)g_as + g_reserve < UINT64_C(1) << 40);
 #endif
-    layout_order();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
+    }
+#endif
+    layout_order(); readonly_shared_memory(); transfer_memory_setup();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
-    if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
+    if (!mem_map_limit_on()) metadata_limit();
 #ifdef TEST_REAL_DIRTY
     dirty_integration();
 #endif
@@ -635,6 +809,6 @@ int main(int argc, char **argv) {
     assert(resize(DM_GAME_APP_POOL - DM_GAME_MEM_USED + P) == 0x10801 && !g_heap_cur);
     g_nmod = 0;
     free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, g_reserve));
-    printf("memory SVCs passed (map limit=%d, host page=%d, guest files %d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize(), g_gf_n);
+    printf("memory SVCs passed (ounce=%d, map limit=%d, host page=%d, guest files %d)\n", dm_sdk_ounce(), mem_map_limit_on(), memory_getpagesize(), g_gf_n);
     return 0;
 }

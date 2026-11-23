@@ -165,7 +165,7 @@ static void alias_index(const alias_key *k, int add) {
         if (add) {
             if (v && i < v->n) continue;
             if (!v || v->n == v->cap) {
-                uint32_t cap = v ? v->cap * 2 : 4; alias_cell *nv = realloc(v, sizeof *nv + cap * sizeof nv->e[0]); if (!nv) abort();
+                uint32_t cap = v ? v->cap * 2 : 4; alias_cell *nv = realloc(v, sizeof *nv + cap * sizeof nv->e[0]); if (!nv) ODIE("no memory for the texture sharing cells (%zu bytes)", sizeof *nv + cap * sizeof nv->e[0]);
                 if (!v) nv->n = 0; nv->cap = cap; v = nv; nvn_hm_put(&g_alias_cells, ck, v);
             }
             v->e[v->n].k = *k; v->e[v->n++].end = end;
@@ -558,20 +558,33 @@ own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use
 // A submitted descriptor and a queue binding hold the compiled program by its immutable initialization serial. Retaining it must not mint serial aliases:
 // alias churn invalidates texture tables and changes composite-program keys
 typedef struct { unsigned refs, retired; } prog_pin;
-static nvn_hmap g_prog_pins = {.klen = 8};   // protected by the submission lock
+// The pins have a lock of their own: a streamed submission pins on the game's thread without the submission lock (nvn_queue.inc). Release and unpin still run under the
+// submission lock, which serial_del needs; they decide under the pin lock and drop the serial after it
+static nvn_hmap g_prog_pins = {.klen = 8};
+static os_unfair_lock g_prog_pin_lk = OS_UNFAIR_LOCK_INIT;
 void mtl_prog_release(prog_t *p) {
     if (!p->serial) return;
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
-    if (pin) pin->retired = 1; else serial_del(p->serial);
+    if (pin) pin->retired = 1;
+    os_unfair_lock_unlock(&g_prog_pin_lk);
+    if (!pin) serial_del(p->serial);
 }
 void mtl_prog_unpin(prog_t *p) {
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
-    if (pin && !--pin->refs) { nvn_hm_del(&g_prog_pins, &p->serial); if (pin->retired) serial_del(p->serial); free(pin); }
+    if (!pin || --pin->refs) { os_unfair_lock_unlock(&g_prog_pin_lk); return; }
+    nvn_hm_del(&g_prog_pins, &p->serial);
+    os_unfair_lock_unlock(&g_prog_pin_lk);
+    if (pin->retired) serial_del(p->serial);
+    free(pin);
 }
 void own_prog_pin(uint64_t serial) {
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &serial);
     if (!pin) { pin = calloc(1, sizeof *pin); if (!pin) ODIE("program retention allocation failed"); nvn_hm_put(&g_prog_pins, &serial, pin); }
     pin->refs++;
+    os_unfair_lock_unlock(&g_prog_pin_lk);
 }
 
 own_alias_unheld own_alias_unheld_locked(void) {
@@ -598,6 +611,19 @@ void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {
         if (!tables[j]->vals[i]) continue;
         uint64_t k; memcpy(&k, tables[j]->keys + (size_t)i * 8, 8); fn(k, (__bridge id)tables[j]->vals[i], j);
     }
+}
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial)) {
+    uint32_t n = 0;
+    for (int j = 0; j < 2; j++) {   // the keys first, then the deletes (a delete moves entries)
+        nvn_hmap *t = j ? &g_ghost : &g_by_serial; uint64_t *ks = NULL; uint32_t nk = 0;
+        for (uint32_t i = 0; i < t->cap; i++) {
+            if (!t->vals[i] || !gone((__bridge id)t->vals[i])) continue;
+            uint64_t *nks = realloc(ks, (nk + 1) * sizeof *ks); if (!nks) ODIE("the dropped serials"); ks = nks; memcpy(&ks[nk++], t->keys + (size_t)i * 8, 8);
+        }
+        for (uint32_t i = 0; i < nk; i++) { if (j) ghost_del_locked(ks[i]); else live_del_locked(ks[i]); if (each) each(ks[i]); }
+        n += nk; free(ks);
+    }
+    return n;
 }
 static void expect_one(CFMutableDictionaryRef want, id o) {   // o, and each texture it is a view of, once more
     for (; o; o = [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil)

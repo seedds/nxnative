@@ -17,7 +17,7 @@ registered cuts. Unreal Engine 3 (Batman: Arkham Knight) inlines the constructor
 Usage on its own: ue_malloc.py <module>... (what the chain finds in each)"""
 import re, struct, sys, os
 
-LAYOUTS = {19: 'Unreal Engine 4.26 / 4.27', 22: 'Unreal Engine 5', 26: 'Unreal Engine 5.6'}   # the getter's slot → the slot layouts of hle_uemalloc.c
+LAYOUTS = {17: 'Unreal Engine 4.24', 19: 'Unreal Engine 4.26 / 4.27', 22: 'Unreal Engine 5', 26: 'Unreal Engine 5.6'}   # the getter's slot → the slot layouts of hle_uemalloc.c
 NAME = 'Binned3'.encode('utf-16-le') + b'\0\0'
 RET, NOP = 0xD65F03C0, 0xD503201F
 

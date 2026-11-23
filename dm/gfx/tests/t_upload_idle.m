@@ -43,6 +43,7 @@ int main(void) { @autoreleasepool {
     res_add(output);
 
     id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    if (!gate) { fprintf(stderr, "FAIL: could not create the upload gate event\n"); return 1; }
     [g_q4 waitForEvent:gate value:1];
     mtl_sub_begin();
     for (unsigned s = 0; s < 3; s++) upload_batch(LARGE, 2);

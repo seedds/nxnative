@@ -94,6 +94,53 @@ int main(void) { @autoreleasepool {
     {   id<MTLTexture> loose = [g_dev newTextureWithDescriptor:td]; vc_key k = {.pf = MTLPixelFormatRGBA8Unorm, .tt = MTLTextureType2D, .nl = 1, .ns = 1};
         os_unfair_lock_lock(&g_rmu); vc_put(loose, NULL, &k, [loose newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm]); uint64_t lo = vc_addr(loose); int none = nvn_hm_get(&g_vc, &lo) == NULL; os_unfair_lock_unlock(&g_rmu);
         CHECK(none, "a texture the owner does not hold is not kept"); }
+    // The views a draw that samples its own attachment is given (fb_view, from fb_prepare: one level of a mip chain, or the levels below the one the pass renders) are kept by
+    // the texture they view too: the same levels, slices, format and swizzle give the view made before, where every such draw made Metal a new one. They have a key of their own
+    // (vc_key pad[0]), so a registration's view of the same parameters is never taken for one, nor the other way round
+    {   tex_t m = target(97201); m.d.levels = 4; nvn_tex_layout(&m.d, &m.L); mtl_tex_init(&m);
+        id<MTLTexture> mb = tex_mtl(&m); mtl_reg_tex(321, &m, NULL);
+        id<MTLTexture> t = view_of(321);   // the registration's own view: all four levels, alpha mapped to 1
+        CHECK(mb && mb.mipmapLevelCount == 4 && t && t.parentTexture == mb && t.mipmapLevelCount == 4 && t.swizzle.alpha == MTLTextureSwizzleOne, "a mip chain and its sampled view");
+        uint64_t made = g_vc_new, hit = g_vc_hit;
+        id<MTLTexture> f1 = fb_view(321, m.serial, mb, t, 1, 1, 0, 1);
+        CHECK(f1 && f1 != t && f1.parentTexture == mb && f1.parentRelativeLevel == 1 && f1.mipmapLevelCount == 1 && f1.pixelFormat == t.pixelFormat && f1.textureType == t.textureType
+              && f1.swizzle.alpha == MTLTextureSwizzleOne && f1.swizzle.red == t.swizzle.red, "a feedback view of one level has the sampled view's format, type and swizzle");
+        CHECK(g_vc_new == made + 1, "it is made once");
+        id<MTLTexture> f1b = fb_view(321, m.serial, mb, t, 1, 1, 0, 1);
+        CHECK(f1b == f1, "the same levels, slices, format and swizzle give the same view");
+        CHECK(g_vc_new == made + 1 && g_vc_hit == hit + 1, "found in the view cache, none made");
+        id<MTLTexture> f2 = fb_view(321, m.serial, mb, t, 2, 1, 0, 1), below = fb_view(321, m.serial, mb, t, 0, 2, 0, 1);
+        CHECK(f2 && f2 != f1 && f2.parentRelativeLevel == 2 && f2.mipmapLevelCount == 1, "another level gives another view");
+        CHECK(below && below != f1 && below != f2 && below.parentRelativeLevel == 0 && below.mipmapLevelCount == 2, "the levels below a level give a view of their own");
+        CHECK(g_vc_new == made + 3, "each made once");
+        CHECK(fb_view(321, m.serial, mb, t, 2, 1, 0, 1) == f2 && fb_view(321, m.serial, mb, t, 0, 2, 0, 1) == below && fb_view(321, m.serial, mb, t, 1, 1, 0, 1) == f1 && g_vc_new == made + 3, "and each found again (more views than the cache had ways)");
+        // The registration's own view and a feedback view of the very same levels, slices, format and swizzle: two entries, each found only by its own key
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t ma = vc_addr(mb); vc_set *set = nvn_hm_get(&g_vc, &ma); vc_key rk; int have = 0;
+        for (int i = 0; set && i < VC_WAYS; i++) if (set->view[i] == (__bridge void *)t) { rk = set->k[i]; have = 1; }
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(have && rk.pad[0] == 0 && rk.pf == (uint32_t)t.pixelFormat && rk.tt == (uint8_t)t.textureType && rk.sw[3] == (uint8_t)MTLTextureSwizzleOne, "the registration's view is in the cache under a registration key");
+        made = g_vc_new;
+        id<MTLTexture> same = fb_view(321, m.serial, mb, t, rk.l0, rk.nl, rk.s0, rk.ns);
+        CHECK(same && same != t && g_vc_new == made + 1, "a feedback view of the registration's parameters is not the registration's view: one is made");
+        vc_key fk = rk; fk.pad[0] = 1;
+        os_unfair_lock_lock(&g_rmu); id<MTLTexture> by_reg = vc_get(mb, &rk), by_fb = vc_get(mb, &fk); os_unfair_lock_unlock(&g_rmu);
+        CHECK(by_fb == same, "the feedback key finds the feedback view");
+        CHECK(by_reg == t, "and the registration key still finds the registration's view, not the feedback view");
+        CHECK(fb_view(321, m.serial, mb, t, rk.l0, rk.nl, rk.s0, rk.ns) == same && g_vc_new == made + 1, "asked again, the feedback view is found");
+        // No matching registration, no entry: an ID that is not one, one past the table, one whose serial moved on, and one whose texture the game has finalized each get a view, made anew every time
+        made = g_vc_new;
+        id<MTLTexture> z1 = fb_view(0, m.serial, mb, t, 3, 1, 0, 1), z2 = fb_view(0, m.serial, mb, t, 3, 1, 0, 1);
+        CHECK(z1 && z2 && z1 != z2 && z1.parentRelativeLevel == 3 && g_vc_new == made, "texture ID 0 gets a view that is not kept");
+        id<MTLTexture> p1 = fb_view(g_ntreg + 7, m.serial, mb, t, 3, 1, 0, 1), p2 = fb_view(-1, m.serial, mb, t, 3, 1, 0, 1);
+        CHECK(p1 && p2 && p1 != p2 && p1 != z1 && g_vc_new == made, "an ID outside the table gets a view that is not kept");
+        id<MTLTexture> s1 = fb_view(321, m.serial + 1, mb, t, 3, 1, 0, 1), s2 = fb_view(321, m.serial + 1, mb, t, 3, 1, 0, 1);
+        CHECK(s1 && s2 && s1 != s2 && g_vc_new == made, "an ID whose registered serial changed gets a view that is not kept");
+        mtl_reg_tex_gone(321);
+        id<MTLTexture> g1 = fb_view(321, m.serial, mb, t, 3, 1, 0, 1), g2 = fb_view(321, m.serial, mb, t, 3, 1, 0, 1);
+        CHECK(g1 && g2 && g1 != g2 && g_vc_new == made, "an ID whose registration is gone gets a view that is not kept");
+        CHECK(fb_view(321, m.serial, mb, t, 1, 1, 0, 1) == f1, "the views kept while it was registered are still found");
+        mtl_tex_release(&m); }
     mtl_sub_commit(); mtl_drain();
     printf("t_view_reuse: %d checks, %d failed\n", checks, fails);
     return fails != 0;

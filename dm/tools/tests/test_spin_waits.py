@@ -33,12 +33,16 @@ POLL = [0xb4000434, 0xb901028b, 0xb940012e, 0x710005df, 0x54ffffc0, 0x885ffd2e, 
         0x1a9f37ed, 0x14000002, 0xd5033f5f, 0x885f7d2f, 0x710005ff, 0x54ffffa1, 0x880ffd3f, 0x35ffff8f, 0x34fffc0e, 0xd65f03c0]
 
 
-def region(words, T, bes):
+def make_scope(words):
     md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
     scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'ARM64_OP_MEM': ARM64_OP_MEM, 'ARM64_OP_REG': ARM64_OP_REG,
              'IMG': struct.pack('<' + 'I' * len(words), *words) + bytes(64), 'md': md, 'spin_dec': {}, 'DATA_BLOCKS': [], 'spin_touched': set()}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
-    return scope['spin_region'](T, bes)
+    return scope
+
+
+def region(words, T, bes):
+    return make_scope(words)['spin_region'](T, bes)
 
 
 def patched(**at):
@@ -103,6 +107,27 @@ class SpinWaits(unittest.TestCase):
         g = region([0xb9400008, 0x34ffffe8], 0, [4])
         self.assertIsNotNone(g)
         self.assertEqual(g['valid'], {4})
+
+    def test_decode_cache_cleared_and_quick_filters_before_decode(self):
+        # Found and rejected heads both leave spin_dec empty, and a head rejected by spin_quick (bl #0; b back) decodes nothing.
+        scope = make_scope(POLL)
+        self.assertIsNotNone(scope['spin_region'](0, [0x80]))
+        self.assertEqual(scope['spin_dec'], {})
+        scope_rej = make_scope([0x94000000, 0x17ffffff])   # bl #0; b #0
+        decoded = []
+        orig = scope_rej['spin_ins']
+        scope_rej['spin_ins'] = lambda a: (decoded.append(a), orig(a))[1]
+        self.assertIsNone(scope_rej['spin_region'](0, [4]))
+        self.assertEqual(decoded, [])
+        self.assertEqual(scope_rej['spin_dec'], {})
+        # A non-lock instruction (add w8, w8, #1; cbz w8, back) does not decode 5 lookahead words in spin_lock.
+        scope_cnt = make_scope([0x11000508, 0x34ffffe8])
+        decoded_cnt = []
+        orig_cnt = scope_cnt['spin_ins']
+        scope_cnt['spin_ins'] = lambda a: (decoded_cnt.append(a), orig_cnt(a))[1]
+        self.assertIsNone(scope_cnt['spin_region'](0, [4]))
+        self.assertLessEqual(set(decoded_cnt), {0, 4})
+        self.assertEqual(scope_cnt['spin_dec'], {})
 
 
 if __name__ == '__main__':

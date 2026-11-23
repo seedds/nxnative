@@ -1,6 +1,6 @@
 # Star Fox (`0400E88025B1A000`)
 
-A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NVN2 with DLSS. A custom engine (its own prefixes: `vfs`, `vrender`, `vjob`, `vscript`, `vspirv`, `veffects`, `vphysics`; project name `eclipse`), with Wwise 2024.1 for audio, Bullet physics and NPLN for online play. Modules `main`, `sdk`, `subsdk0` (the SDK's movie module), `subsdk3` (`nn::camera`); `subsdk1` (the C library) and `subsdk2` (`NintendoSDK_DLSS`) are shipped but `main` imports nothing from them. **Plays on the Mac** (M4 Pro, 48 GB): the title, the prologue cinematic and the tutorial flight, with sound. The tutorial runs at 56 to 60 fps with a 4K screenshot every 4 s and at 60 without them; the cinematic at 30 fps, which looks like the game's own choice (not checked). Scripted input here reached the tutorial's first lesson and worked its options menus; flying under input has not been watched on this Mac (pull request #1259's author reports 7 minutes of it with a controller on an M5 Max). No IPA has been built.
+A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NVN2 with DLSS. A custom engine (its own prefixes: `vfs`, `vrender`, `vjob`, `vscript`, `vspirv`, `veffects`, `vphysics`; project name `eclipse`), with Wwise 2024.1 for audio, Bullet physics and NPLN for online play. Modules `main`, `sdk`, `subsdk0` (the SDK's movie module), `subsdk3` (`nn::camera`); `subsdk1` (the C library) and `subsdk2` (`NintendoSDK_DLSS`) are shipped but `main` imports nothing from them. **Plays on the Mac** (M4 Pro, 48 GB): the title, the prologue cinematic and the tutorial flight, with sound. The tutorial runs at 56 to 60 fps with a 4K screenshot every 4 s and at 60 without them; the cinematic at 30 fps, which looks like the game's own choice (not checked). Scripted input cleared the tutorial ring course on an M4 Pro. The author of pull request #1259 reported seven minutes of controller flight on an M5 Max. No IPA has been built.
 
 ## What it needs
 
@@ -12,8 +12,9 @@ A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NV
 | `romfs_marker data.zip` | `game.tsv` | the RomFS has two files, and this is the game |
 | `zip_store .zip:.metallib` | `game.tsv` | the archive's members are LZ4-compressed already |
 | `shader_groups /data.zip=shader` | `game.tsv` | every shader is a member of the archive |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0 before its first frame, so the offline archive and Mac prebuild use the near-zero vertex entries ([measurement](#found-on-this-game)) |
 
-There is no game-specific patch, and only v131072's build row: the base game, v0, has not been run.
+There is no game-specific patch, and only v131072's build row. Base v0 (main build ID `898024ffa42c059518eb38196f1ee0f635ecdf89`) has a startup report from an M4 Max (macOS 27.2.1, 2026-11-21): its guest input loop exposed a missing streamplay HID feature getter, and with the general host fix the PR #3162 author verified startup and played from an existing save through to Andross once. A fresh-save route, later gameplay and other titles remain unchecked.
 
 ## Files
 
@@ -25,18 +26,46 @@ There is no game-specific patch, and only v131072's build row: the base game, v0
 
 2,856 in [`shader_map.tsv`](shader_map.tsv): 1,483 vertex, 1,305 pixel, 68 compute; 2,828 one per archive member, no task or mesh shaders, and the rest from the two NDSR upscaler networks embedded in `VIPR` containers. All of them translate. A build takes about 4 minutes in all on an M4 Pro. Each member is the engine's shader binary (`_vrender_shader_binary_t`), read as a single-stage program and paired at draw time (`separable_pairs`: 1,480 cover pairs).
 
+### Pipeline prewarm
+
+The 1,480 cover pairs supply the linker with all the fragment input locations it needs. Star Fox binds its actual vertex and fragment pairs during play. The cold run's archive passed all 16 startup probes of the listed pairs, and the draws recorded zero render-base archive hits through the ring course.
+
+On v131072 with an M4 Pro, macOS 27.2.1 and Xcode 27.2, the run from a fresh save and device cache compiled 377 render bases between the first frame and clearing the tutorial ring gate. The prebaked replay, also from a fresh save and cache, compiled 2 bases in play, both for the unrecorded prologue pair `a24aa4c63498e731` / `7f62c7365c44ca42`. Both runs cleared the same gate. The replay used retimed steering and two extra attempts. NX18's separate M4 Max run reported 346 in-play compiles on its title-to-ring-course route. [NX18 baseline](https://github.com/kencalx/NX18/commit/72c84bd43102129eefcd83ad8729495d832f75df)
+
+The [prewarm seed](pso_manifest.tsv) has 326 shader rows, 226 render pipeline rows and 13 compute rows in capture order, including the start of the next lesson. The diagnostic prebake added 34.9 MiB. On replay, the 1.44 s prepare step loaded 195 archived bases and compiled one before the first frame.
+
+The normal Mac app build added a 34.2 MiB prewarm archive, with three captures timing out while waiting on concurrent use of the same shader function. The packaged app reached the title from a fresh save and cache. Its 1.16 s prepare step loaded 193 bases and compiled three before the first frame.
+
 ## The picture
 
-Docked, every 3D target was 768x432 from the first frame of the title to the tutorial: MetalFX stands in for DLSS at 768x432 to 768x432, the game's NDSR compute networks take that to 1536x864, and the result reaches the 3840x2160 swap chain, whose top-left 1920x1080 holds the picture. The game's own defaults give the reason for the figure, not the cause: `render.dynres_min_scale_x` is 0.5 and `max` 1.0, so 768x432 is the minimum of a 1536x864 base, at 6 to 11 ms of GPU time a frame on the M4 Pro. Segment timestamps (the profile key `gpu_timestamps segment` then, the host's default since) changed nothing, with the GPU's idle gaps still counted. Resolved, the cause of the docked size: the host answered graphics scale tier 1 docked, and the game renders 0.8 times smaller below tier 0 (byte +0xa of its mode event, `main+0xba69970`): 768x432 for its 1920x1080 window where tier 0 gives 960x540, its handheld size. The host now answers tier 0 in both modes ([The graphics scale does not follow the operation mode](../../../docs/reference/services.md#the-graphics-scale-does-not-follow-the-operation-mode)). Peppy's close-up 65 s into the intro has a mean luminance gradient (x1000 at 1080p) of 5.8 in console footage, 5.3 with tier 0 and 4.6 with tier 1. The sizes and gradients were measured on a build of the PR author's fork, not on `main`. Whether a console renders above 960x540 is not known.
+Docked, every 3D target was 768x432 from the first frame of the title to the tutorial: MetalFX stands in for DLSS at 768x432 to 768x432, the game's NDSR compute networks take that to 1536x864, and the result reaches the 3840x2160 swap chain, whose top-left 1920x1080 holds the picture. The game's own defaults give the reason for the figure, not the cause: `render.dynres_min_scale_x` is 0.5 and `max` 1.0, so 768x432 is the minimum of a 1536x864 base, at 6 to 11 ms of GPU time a frame on the M4 Pro. Segment timestamps (the profile key `gpu_timestamps segment` then, the host's default since) changed nothing, with the GPU's idle gaps still counted. Resolved, the cause of the docked size: the host answered graphics scale tier 1 docked, and the game renders 0.8 times smaller below tier 0 (byte +0xa of its mode event, `main+0xba69970`): 768x432 for its 1920x1080 window where tier 0 gives 960x540, its handheld size. The host now answers tier 0 in both modes ([The graphics scale does not follow the operation mode](../../../docs/reference/services.md#the-graphics-scale-does-not-follow-the-operation-mode)). Peppy's close-up 65 s into the intro has a mean luminance gradient (x1000 at 1080p) of 5.8 in console footage, 5.3 with tier 0 and 4.6 with tier 1. The sizes and gradients were measured on a build of the PR author's fork, not on `main`.
+
+The shipped Switch 2 configuration sets `render.resolution_scale_console=0.5` and selects NDSR (`render.main_upscaler_console=3`). At a 1920x1080 window and graphics scale tier 0, the game renders its 3D scene at 960x540 and upscales it to 1080p. [Issue #2895](https://github.com/seedds/nxnative/issues/2895#finding-2-why-the-3d-is-960x540-the-games-own-settings)
+
+### Opt-in 4K on the Mac
+
+Create a folder outside the repository with this `veclipse_build.cvar` file in its root. The game reads it after its platform settings. A scale of 1.0 uses the full rendering resolution, and preset 3 requests 3840x2160 for presentation.
+
+```json
+{
+  "system.is_shipping_build": true,
+  "render.resolution_scale_console": 1.0,
+  "render.present_resolution_override": 3
+}
+```
+
+On a display running at 3840x2160 or higher, add `DM_OPMODE=1 DM_ROMFS_OVERLAY="/absolute/path/to/overlay"` to the Mac run command. The overlay leaves the original RomFS files intact. The reporter measured 60 fps in the title and early gameplay on an M4 Max, with the game's 30 fps cinematic segments. Later levels at native 4K remain untested. [Issue #2895](https://github.com/seedds/nxnative/issues/2895)
 
 ## Driving it on the Mac
 
-`python3 scripts/build_ipa_from_nsp.py <folder> --platform mac` builds the Mac shaders and the host and prints the run command. Headless, through `DM_CTL`: the title is up about 40 s after boot and `A` starts the game. The prologue cinematic follows, about 4 minutes on every run (a save holds no progress yet, and skipping it was not tried), then the tutorial's first question, about 300 s after boot: `LDown`, `A` answers no. Shots of the swap chain hold the picture in their top-left quarter. A `shot` takes about 165 ms: a hitch every few seconds in a run that takes them is the shot's.
+`python3 scripts/build_ipa_from_nsp.py <folder> --platform mac` builds the Mac shaders and the host and prints the run command. Headless, through `DM_CTL`: the title is up about 40 s after boot and `A` starts the game. The prologue cinematic follows, about 4 minutes on every run (a save holds no progress yet, and skipping it was not tried), then the tutorial's first question, about 300 s after boot: `LDown`, `A` answers no. Before the VI fix, shots of the 3840x2160 swapchain showed the 1920x1080 picture in the top-left quarter. A `shot` takes about 165 ms: a hitch every few seconds in a run that takes them is the shot's.
 
 DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_KEYS=30:A`, 75 seconds, screenshots at 60 and 68 seconds. The title only creates and resizes the network on this build; the prologue evaluates MetalFX at 960x540 to 960x540, sRGB RGBA8 colour into RGBA16F with an R8 reactive mask. This exposed the [alpha pass taking the original builder's size](../../../docs/reference/rendering.md#metalfxs-dlss-stand-in-preserves-alpha). With its extent matched to RGB, the candidate reached frame 3042 with no new red-line kinds and both screenshots within the harness thresholds against main `233e68b8`. The harness reports PASS with a known baseline issue: profile depth `gl` disagrees with observed `zero`, so this is not clean archive/profile validation. Both runs were marked busy; their frame-time numbers are not a performance comparison. The temporary regression route was not retained.
 
 ## Found on this game
 
+- **Resolved.** On NX18, the v131072 Mac app on an M4 Max (`applegpu_g16s`) refused its 66.5 MB archive stamped near = −w. The first launch built 1,483 pipeline bases in 6.3 s and reached its first frame in 6.6 s. With `depth_mode zero` the archive rebuilt in 12 s from the same build folder, the host found 16 of 16 probed bases, and the first frame came at 1.4 s. [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree) · [NX18 measurement](https://github.com/kencalx/NX18/commit/72c84bd43102129eefcd83ad8729495d832f75df)
+- [GameShare HID feature query opens the service](../../../docs/reference/services.md#gameshare-hid-feature-query-opens-the-service): base v0 startup abort.
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
 - [SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device) and [SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager): its voice and music.
 - [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21): a null read in `nn::chat::GetChattingUid`.
@@ -44,6 +73,7 @@ DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_K
 - [sRGB textures loaded and stored raw through an image](../../../docs/reference/rendering.md#srgb-textures-loaded-and-stored-raw-through-an-image): the pale picture with grey blacks (the upscaler network's encoded store was encoded again); measured on a build of our fork, not on `main`.
 - [A GPU copy into a texture uploaded from its storage uploaded all of it again](../../../docs/reference/nvn-objects.md#a-gpu-copy-into-a-texture-uploaded-from-its-storage-uploaded-all-of-it-again): 7.6 s and 10 s frames at the prologue's scene changes; measured on a build of our fork, not on `main`.
 - [The graphics scale does not follow the operation mode](../../../docs/reference/services.md#the-graphics-scale-does-not-follow-the-operation-mode): the 768x432 scene docked; measured on a build of the PR author's fork, not on `main`.
+- [The display's largest layer from `vi::ListDisplays`](../../../docs/reference/services.md#the-displays-largest-layer-from-vilistdisplays): resolved. With the same overlay and a simulated 4K display query on an M4 Pro, the crop changed from 1920x1080 to 3840x2160 and held through 600 frames.
 - [The DLSS network resized](../../../docs/reference/rendering.md#the-dlss-network-resized): `nvnDlssNetworkResize`.
 - [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx): its DLSS bias mask, which only a red line reported, reaches MetalFX as its reactive mask. Resolved; no visible change in the prologue. DLSS here is 960x540 to 960x540, and the mask (R8, 0 or 255) marks a band at the top and the bottom of the cinematic's frame and the near cockpit edges that cross it, never the characters: the fur trails pull request #1904 put down to the mask were not seen with or without it.
 - [TXD through a uniform register kept no handle](../../../docs/reference/shaders.md#txd-through-a-uniform-register-kept-no-handle): 281 pixel shaders, the fur shells among them.
@@ -55,7 +85,6 @@ DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_K
 
 ## Open
 
-- [The picture](#the-picture): the 3D stayed at 768x432 docked because the host answered graphics scale tier 1 there; the host now answers tier 0, which gives 960x540 (measured on a build of the PR author's fork, not on `main`). Whether a console renders above that is not known.
+- One prologue pair still compiled during the [prewarmed ring-course run](#pipeline-prewarm). Later levels, combat and iOS remain untested.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
-- A `pso_manifest.tsv` has not been recorded; the later levels and combat, and iOS, not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.

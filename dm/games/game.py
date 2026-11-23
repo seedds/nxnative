@@ -195,6 +195,8 @@ def header_one(g):
     if lr < 0 or not 0 <= ld < 1: sys.exit(f'{g.id}: look_rate must be >= 0 and look_dead in [0, 1): {lr} {ld}')
     lc = g.get('look_cam', '')   # pointer look written into the camera (hle_hid.c look_cam): "<main build id> <slot> <pitch> <yaw> <pitch max> <pitch min> <lock>/<mask>", hex; one per build, ';' between
     if lc and not re.fullmatch(r'[0-9a-f]{8,32}( [0-9a-f]+){6}/[0-9a-f]+(;[0-9a-f]{8,32}( [0-9a-f]+){6}/[0-9a-f]+)*', lc): sys.exit(f'{g.id}: look_cam takes <main build id> <slot> <pitch> <yaw> <pitch max> <pitch min> <lock>/<mask> in hex: {lc}')   # touch = Tap (no control: every touch goes to the game's touch screen)
+    s2h = g.get('s2_hid_stubs', 'off')   # the Switch 2 streamplay and vibration-graph stubs (hle_offline.c): on for a game whose SDK the host has no service for (Pokopia, SDK 20.5.25); off elsewhere: the inert constructors leave another game's vibration objects uninitialized (Mario Kart World crashed on its first virtual call)
+    if s2h not in ('on', 'off'): sys.exit(f'{g.id}: s2_hid_stubs must be on or off: {s2h}')
     sks = g.get('shader_key_skip', '')   # control-section bytes the shader keys hash as zeros, <offset>+<length> (hle_nvn.c keys_hash, shader_split.py key_ctl; Batman: Arkham Knight: GLSLC's compile information, 0x770+0x78)
     m = re.fullmatch(r'(0x[0-9a-fA-F]+|\d+)\+(0x[0-9a-fA-F]+|\d+)', sks) if sks else None
     if sks and (not m or not 0x8 <= int(m[1], 0) or not 0 < int(m[2], 0) or int(m[1], 0) + int(m[2], 0) > 0x880 or (int(m[1], 0) < 0x760 and int(m[1], 0) + int(m[2], 0) > 0x700)):   # not over +0x700..+0x75f, the code area and compute fields the tools read; past the magic and version (+0x08: an NVN2 section's key bytes, +0x20..+0x27 for Pokopia, lie before +0x30)
@@ -278,6 +280,7 @@ def header_one(g):
          f'#define DM_GAME_TEX_COPY_STAGING_BUILD "{sc[1] if sc else ""}"',
          f'#define DM_GAME_TEX_COPY_STAGING_PC {sc[2] if sc else 0}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
+         f'#define DM_GAME_S2_HID_STUBS {int(s2h == "on")}',   # Switch 2 streamplay / vibration stubs (hle_offline.c)
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',

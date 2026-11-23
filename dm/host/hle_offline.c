@@ -206,6 +206,7 @@ HLE_FORCE("_ZN2nn4bcat10InitializeEv", "data delivery init (connects to the bcat
 HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "mount delivery cache: no delivery data, fails", Result, h_bcat_Mount, void) { return RES_FAIL; }
 HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "unmount delivery cache", void, h_bcat_Unmount, void) {}
 
+#if DM_GAME_S2_HID_STUBS   // profile key s2_hid_stubs (game.py): these inert stubs replace constructors too, so a game with real Switch 2 vibration support (Mario Kart World) must not get them
 // ---------- Pokopia (SDK 20.5.25): the Switch 2 calls nxnative main does not force yet (its hle_misc.c has nn::streamplay, its hle_hid.c the Joy-Con 2 mouse, sensor and vibration node) ----------
 HLE_FORCE("_ZN2nn10streamplay12CloseSessionEv", "SWITCH2 streamplay: close session; none open", Result, h_stpl_Close, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn10streamplay14StartStreamingEv", "SWITCH2 streamplay: start streaming; reports success, nothing streams", Result, h_stpl_Start, void) { return RES_OK; }
@@ -239,3 +240,4 @@ HLE_FORCE("_ZN2nn3hid15VibrationTarget24SetVibrationDeviceHandleERKNS0_21Vibrati
 HLE_FORCE("_ZN2nn3hid18VibrationConverterC1Ei", "SWITCH2 hid: vibration converter ctor; inert", void, h_hid_VcvCtor, void *self, int rate) { (void)self; (void)rate; }
 HLE_FORCE("_ZN2nn3hid18VibrationConverterD1Ev", "SWITCH2 hid: vibration converter dtor; inert", void, h_hid_VcvDtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn3hid18VibrationConverter12ProcessChunkEPNS0_14VibrationValueEPKsi", "SWITCH2 hid: vibration converter; 0 values", int, h_hid_VcvChunk, void *self, void *out, const short *pcm, int n) { (void)self; (void)out; (void)pcm; (void)n; return 0; }
+#endif   // DM_GAME_S2_HID_STUBS

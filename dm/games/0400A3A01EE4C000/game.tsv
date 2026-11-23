@@ -54,3 +54,6 @@ bonjour_service	_pokopia-ldn._udp
 shader_key_skip	0x20+0x8
 shader_groups	/motor_asset_re/=rdb
 shader_note	Pokemon Pokopia shaders
+# ---- Switch 2 services the host has no device for (hle_offline.c) ----
+# SDK 20.5.25's streamplay and vibration graph (nodes, players, converters) as inert stubs; only this game: they replace constructors (Mario Kart World crashed with them)
+s2_hid_stubs	on

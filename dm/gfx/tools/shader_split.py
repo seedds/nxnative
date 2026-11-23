@@ -57,6 +57,7 @@
 #   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 #   · MVGL / NXSH (Media.Vision, Digimon Story Time Stranger): MDB1 archives (wide 64-bit LZ4 or legacy 32-bit doboz, mvgl.py) whose .shad entries and embedded main records are NXVS / NXFS / NXCS containers with control and code spans; see mvgl_jobs and nxsh_shader
+#   · VFS2 (Cornfox & Bros., Oceanhorn: Monster of Uncharted Seas): indexed archives (directory table, file table, optional name table) holding GLSLC outputs stored raw, bitwise-inverted, or length-prefixed zlib; see vfs2_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -4065,8 +4066,101 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
             # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
             # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
             # that expands 9 times, which then added up to 18 times the file)
+VFS2 = b'VFS2'
+VFS2_MAX = 16 << 20   # single GLSLC output upper bound; keeps corrupt/fuzz length prefixes within fuzzlib's allocation cap
+_VFS2_INV = bytes(range(255, -1, -1))
+
+def vfs2_shaders(d, label):
+    """Cornfox & Bros. VFS2 archive (Oceanhorn: Monster of Uncharted Seas data.vfs): 'VFS2', u32 ndir, ndir × 20-byte directory records ({hash, idx, parent, first_sub, first_file}),
+    u32 nfile, nfile × 24-byte file records ({hash, idx, flags, dir_idx, offset, stored_size}), u32 names_off (0 = omitted), then payload data from data_start (data_start + offset).
+    Optional tail at names_off: u32 nfile + length-prefixed UTF-8 file names, u32 ndir + directory names. Per-file mode (flags & 7): 0 raw, 1 bitwise-NOT (^ 0xff),
+    2 u32 inflated length + zlib stream. Every indexed entry's bounds and encoding are validated; entries whose payload opens with GLSLC_MAGIC are decoded and read by glslc_shaders."""
+    if len(d) < 16 or d[:4] != VFS2: red(f'{label}: truncated VFS2 header ({len(d)} bytes)')
+    with memoryview(d) as mv:
+        ndir, = field(mv, '<I', 4, f'{label} VFS2 header')
+        if ndir > (len(mv) - 16) // 20: red(f'{label}: VFS2 directory table ({ndir} entries) lies outside the {len(mv):#x} bytes there are')
+        file_count_at = 8 + ndir * 20
+        nfile, = field(mv, '<I', file_count_at, f'{label} VFS2 file count')
+        file_off = file_count_at + 4
+        if nfile > (len(mv) - file_off - 4) // 24: red(f'{label}: VFS2 file table ({nfile} entries) lies outside the {len(mv):#x} bytes there are')
+        names_off_at = file_off + nfile * 24
+        names_off, = field(mv, '<I', names_off_at, f'{label} VFS2 name table offset')
+        data_start = names_off_at + 4
+        data_end = names_off if names_off else len(mv)
+        if names_off and not data_start <= names_off <= len(mv):
+            red(f'{label}: VFS2 name table offset {names_off:#x} lies outside [{data_start:#x}, {len(mv):#x}]')
+        parents = [struct.unpack_from('<i', mv, 8 + i * 20 + 8)[0] for i in range(ndir)]
+        for i, p in enumerate(parents):
+            if p < -1 or p >= ndir: red(f'{label}: VFS2 directory {i} has out-of-range parent {p}')
+        fnames, dnames = None, None
+        if names_off:
+            tpos = names_off
+            nf, = field(mv, '<I', tpos, f'{label} VFS2 file name count'); tpos += 4
+            if nf != nfile: red(f'{label}: VFS2 file name count {nf} does not match file count {nfile}')
+            fnames = []
+            for i in range(nf):
+                ln, = field(mv, '<I', tpos, f'{label} VFS2 file name #{i} length'); tpos += 4
+                if ln > len(mv) - tpos: red(f'{label}: VFS2 file name #{i} ({ln:#x} bytes at {tpos:#x}) lies outside the {len(mv):#x} bytes there are')
+                fnames.append(bytes(mv[tpos:tpos + ln]).decode('utf-8', 'replace')); tpos += ln
+            nd, = field(mv, '<I', tpos, f'{label} VFS2 directory name count'); tpos += 4
+            if nd != ndir: red(f'{label}: VFS2 directory name count {nd} does not match directory count {ndir}')
+            dnames = []
+            for i in range(nd):
+                ln, = field(mv, '<I', tpos, f'{label} VFS2 directory name #{i} length'); tpos += 4
+                if ln > len(mv) - tpos: red(f'{label}: VFS2 directory name #{i} ({ln:#x} bytes at {tpos:#x}) lies outside the {len(mv):#x} bytes there are')
+                dnames.append(bytes(mv[tpos:tpos + ln]).decode('utf-8', 'replace')); tpos += ln
+        dir_cache = {}
+        def dir_path(idx, names):
+            if idx in dir_cache: return dir_cache[idx]
+            parts, cur, seen = [], idx, set()
+            while cur >= 0:
+                if cur in seen: red(f'{label}: VFS2 directory parent cycle at {cur}')
+                seen.add(cur)
+                if names[cur]: parts.append(names[cur])
+                cur = parents[cur]
+            res = '/'.join(reversed(parts))
+            dir_cache[idx] = res
+            return res
+        found = []
+        data_span = data_end - data_start
+        for i, (_, _, flg, dir_idx, off, sz) in enumerate(struct.iter_unpack('<6I', mv[file_off:names_off_at])):
+            if ndir and dir_idx >= ndir: red(f'{label}: VFS2 entry #{i} names directory {dir_idx} of {ndir}')
+            if fnames is not None and dnames is not None:
+                dn = dir_path(dir_idx, dnames) if ndir else ''
+                where = f'{dn}/{fnames[i]}' if dn else fnames[i]
+            else:
+                where = f'#{i}'
+            if off > data_span or sz > data_span - off:
+                red(f'{label}: VFS2 entry {where} ({sz:#x} bytes at {off:#x}) lies outside the {data_span:#x}-byte data section')
+            at, mode = data_start + off, flg & 7
+            if mode == 0:
+                if sz < 0x48 or mv[at:at + 4] != GLSLC_MAGIC: continue
+                body = bytes(mv[at:at + sz])
+            elif mode == 1:
+                if sz < 0x48 or bytes(mv[at:at + 4]).translate(_VFS2_INV) != GLSLC_MAGIC: continue
+                body = bytes(mv[at:at + sz]).translate(_VFS2_INV)
+            elif mode == 2:
+                if sz < 6: red(f'{label}: VFS2 compressed entry {where} is shorter than its 4-byte length and zlib header ({sz} bytes)')
+                ulen, = struct.unpack_from('<I', mv, at)
+                try: head = zlib.decompressobj().decompress(mv[at + 4:at + min(sz, 4 + 4096)], 4)
+                except zlib.error as e: red(f'{label}: VFS2 entry {where} has an invalid zlib stream: {e}')
+                if head != GLSLC_MAGIC: continue
+                if not 0x760 < ulen <= VFS2_MAX:
+                    red(f'{label}: VFS2 shader entry {where} declares {ulen:#x} inflated bytes (outside (0x760, {VFS2_MAX:#x}])')
+                z = zlib.decompressobj()
+                try: body = z.decompress(mv[at + 4:at + sz], ulen + 1)
+                except zlib.error as e: red(f'{label}: VFS2 shader entry {where} failed to inflate: {e}')
+                if not z.eof or z.unused_data or len(body) != ulen:
+                    red(f'{label}: VFS2 shader entry {where} inflated to {len(body)} bytes (expected {ulen}, eof={z.eof}, trailing={len(z.unused_data)})')
+            else:
+                red(f'{label}: VFS2 entry {where} uses unsupported encoding mode {mode} (flags {flg:#x})')
+            found.extend(glslc_shaders(body, f'{label}/{where}', need=True))
+    return found
+
+
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
+    if d[:4] == VFS2: out.extend(vfs2_shaders(d, label)); return
     if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
     if d[:12] == ANVIL_CODE: out.extend(anvil_shaders(d, label)); return   # Anvil's ShaderDataNVN.bin: shader records from its first byte
     if bytes(d[:4]) in NXSH_STAGES: out.append(nxsh_shader(d, 0, label, strict=True)); return
@@ -4601,6 +4695,10 @@ def scan_file_in(args):
     if head[:4] == RFRM:   # a Retro Studios form or pack (rfrm_shaders)
         from romfs import mmap   # mapped, not read: Metroid Prime 4's packs reach 3.9 GB and only their MTRL resources are looked at
         with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d: found += rfrm_shaders(d, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == VFS2:   # Cornfox & Bros. VFS2 archive (vfs2_shaders): indexed GLSLC outputs
+        from romfs import mmap
+        with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d: found += vfs2_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'BERG':   # Snowdrop's SDF data slices: shader objects in individual compressed records
         with open(path, 'rb') as f: found += snowdrop_shaders(f.read(), '/' + rel)

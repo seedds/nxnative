@@ -4659,7 +4659,22 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
-    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
+    unsigned levels = t->d.levels ? t->d.levels : 1;
+    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, one_d = t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY;
+    int nz = r->depth ? r->depth : 1;
+    if (level >= levels || level >= 32 || r->xoffset < 0 || r->yoffset < 0 || r->zoffset < 0 || r->width < 0 || r->height < 0 || nz < 0) {
+        ONCE_LOG("[RED] WriteTexels: invalid mip or region");
+        return;
+    }
+    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1;
+    uint32_t lh = one_d ? 1 : (t->d.height >> level ? t->d.height >> level : 1);
+    uint32_t lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
+    if ((uint64_t)r->xoffset + (uint64_t)r->width > lw || (uint64_t)r->yoffset + (uint64_t)r->height > lh ||
+        (uint64_t)r->zoffset + (uint64_t)nz + (is3d ? 0ull : (uint64_t)layer0) > (is3d ? lz : t->L.layers)) {
+        ONCE_LOG("[RED] WriteTexels: region exceeds the mip dimensions or layers");
+        return;
+    }
+    if (!r->width || !r->height) return;
     // A linear texture (LINEAR or LINEAR_RENDER_TARGET) is one 2D level of rows of its stride, written by rows as ReadTexels reads it (mtl_read_texels) and the upload reads it (gsb_geom).
     // The block-linear writes below refuse its layout (nvn_deswizzle_geom), and the whole-level path dropped the write: a movie decoded into a LINEAR | VIDEO_DECODE texture (the host's
     // native-texture output, nvn_host_write_texture) drew black (Tsukihime's title backdrop, 1920x1080 RGBA8, nxnative PR #1983)
@@ -4683,7 +4698,6 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_bl(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
         if (ok) { mtl_tex_cpu_written(t); return; }
     }
-    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
     if (!row) row = wb;

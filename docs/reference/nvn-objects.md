@@ -780,6 +780,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `t_nvn` 6c2b writes a 37x5 `LINEAR | VIDEO_DECODE` texture with a stride of 256 and a 16x16 `LINEAR_RENDER_TARGET` texture with a stride of 128. Each gets four regions (whole, part, one texel, one row or column), some with a padded source stride. The check compares the storage byte for byte, including the row padding and the bytes after the texture, then reads the texture back with ReadTexels. It also checks that a region past the last row writes nothing, and that no CPU-written texture is added for these buffer views. Without the fix, three of these checks fail; with `mtl_tex_cpu_written` in place of the view rule, the last one fails.
 - **Open:** a `LINEAR_RENDER_TARGET` or `IMAGE` linear texture that the GPU drew into as a private texture (`cpu_unc_drop`) and the CPU then partly writes is uploaded from its storage, as a block-linear texture is. No game is known to do that.
 
+### Out-of-range `WriteTexels` regions overran the scratch buffer
+
+- **Symptom:** heap corruption or unexpected storage writes when a game calls `nvnTextureWriteTexels` / `nvnTextureWriteTexelsStrided` with an invalid mip level, negative coordinates/size, or a region exceeding the mip dimensions or layers.
+- **Cause:** `write_region_bl` returned `-1` on out-of-range regions and fell back to the whole-level `lin` scratch-buffer path in `write_texels` (`hle_nvn.c`), which had no bounds checks and copied past the end of `lin` before swizzling back into `t->mem`. A multi-layer region that overflowed on a later layer also mutated earlier layers before failing.
+- **Fix:** `write_texels` validates mip level (`levels = t->d.levels ? t->d.levels : 1`, `< 32`), non-negative origin/dimensions/depth, and mip width/height/depth/layer bounds (treating `1D` and `1D_ARRAY` mip height as `1`) up front before touching storage or allocating `lin`, logging `[RED] WriteTexels: ...` once on rejection; valid zero-width/height regions return without writing or marking the texture CPU-written.
+- **Found on:** [PR #2906](https://github.com/seedds/nxnative/pull/2906) (reported alongside Baldur's Gate: Dark Alliance, Guacamelee!, and Oceanhorn testing); reproduced directly by synthetic bounds checks.
+- **Check:** `t_cpu_tex --metal` (`write_texels_bounds`) verifies oversized width/height, negative origin/size, out-of-range mip level, zero-sized regions, overflowing multi-layer 2D array writes, and `1D_ARRAY` height > 1 all leave storage untouched and do not mark the texture CPU-written.
+
 ### Packaged texture data copied at `TextureInitialize`
 
 - **Cause:** a texture created with `TextureBuilderSetPackagedTextureData` gets that data copied into its storage by NVN at `TextureInitialize` (a compressible pool cannot be written by the CPU).

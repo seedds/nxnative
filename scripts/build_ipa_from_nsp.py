@@ -2300,7 +2300,7 @@ def region_check(repo, d, patched, work, env, logs, g):
     rmtree(rd); table.unlink(missing_ok=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
     henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')),
-                DM_ALIAS_SIZE=f'{SWITCH_ALIAS:#x}', DM_REGIONS=str(table))
+                DM_ALIAS_SIZE=f'{SWITCH_ALIAS:#x}', DM_KEEP_ALIAS_CUTS='1', DM_REGIONS=str(table))
     PROG.set(step='booting the game')
     t0, seen = time.time(), {}
     def done():

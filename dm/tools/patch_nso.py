@@ -87,6 +87,9 @@ else:
 # (a game's own modules: its profile's builds). Every file is loaded, whatever the game, so a module gets the patches of its build wherever it comes from; a build ID claimed twice stops the rewrite.
 # A file may define:
 #   CUTS = {build ID: [(offset, original bytes, new bytes, reason)]}: before rewriting, the original bytes are asserted one by one and any mismatch aborts (listed in <name>.cuts.tsv)
+#   ALIAS_CUTS = {build ID: [offset, ...]}: those of the build's CUTS that exist only to fit an iPhone's small alias region (a MATCH_CUTS rule marks the same with alias_only=True).
+#     The rewriter records each applied one as an ALIAS_CUT row in <name>.fixups.tsv, and the Mac loader restores its original bytes at load when the alias region is at least the
+#     Switch's 64 GB (loader.c undo_alias_cuts; a smaller DM_ALIAS_SIZE or DM_KEEP_ALIAS_CUTS=1 keeps them)
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
@@ -119,7 +122,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_STUBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'ALIAS_CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_STUBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -142,6 +145,8 @@ def load_patches():
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = MOD.build_id[:0x10].hex()
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
+ALIAS_OFFS = set(PATCHES['ALIAS_CUTS'].get(BUILD_ID, ()))
+assert ALIAS_OFFS <= {c[0] for c in PATCHES['CUTS'].get(BUILD_ID, [])}, f'ALIAS_CUTS of build {BUILD_ID} name offsets that are not among its CUTS: {sorted(ALIAS_OFFS - {c[0] for c in PATCHES["CUTS"].get(BUILD_ID, [])})}'
 if BUILD_ID not in PATCHES['CUTS']:
     from nso_match import resolve
     profile = os.path.basename(os.environ.get('DM_GAME', '').rstrip('/'))
@@ -158,8 +163,8 @@ if BUILD_ID not in PATCHES['CUTS']:
             if bid: own.add(bid)
             if bid and bid != BUILD_ID and PATCHES['CUTS'].get(bid): known.append((bid, c[2], len(PATCHES['CUTS'][bid])))
     outcomes, sdk_outcomes = [], []
-    cuts += resolve(IMG, TEXT_END, PATCHES['MATCH_CUTS'].get(profile, {}).get(NAME, []), outcomes=outcomes)
-    cuts += resolve(IMG, TEXT_END, PATCHES['SDK_MATCH_CUTS'].get(NAME, []), outcomes=sdk_outcomes, red=False)
+    cuts += resolve(IMG, TEXT_END, PATCHES['MATCH_CUTS'].get(profile, {}).get(NAME, []), outcomes=outcomes, alias_only=ALIAS_OFFS)
+    cuts += resolve(IMG, TEXT_END, PATCHES['SDK_MATCH_CUTS'].get(NAME, []), outcomes=sdk_outcomes, red=False, alias_only=ALIAS_OFFS)
     if BUILD_ID not in own and (known or outcomes or sdk_outcomes):   # a build the game was brought up on lost nothing
         os.makedirs(outdir, exist_ok=True)
         with open(os.path.join(outdir, NAME + '.match.tsv'), 'w') as f:
@@ -186,9 +191,12 @@ if STUB_RULES and BUILD_ID not in PATCHES['STUBS']:
 # every other module keeps its layout
 if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FAR and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
     PATCH_OFF += 0x10000
+ALIAS_APPLIED = [c for c in cuts if c[0] in ALIAS_OFFS]
+assert len(ALIAS_APPLIED) <= 32, f'too many ALIAS_CUTS ({len(ALIAS_APPLIED)} > 32)'
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
+    if off in ALIAS_OFFS: assert len(ob) <= 16 and off + len(ob) <= TEXT_END, f'ALIAS_CUT at {off:#x} exceeds loader bounds'
     IMG[off:off + len(nb)] = nb
 # Key page indices are fixed; the key page content is written by the loader as "actual key number × 8".
 KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
@@ -1959,6 +1967,10 @@ with open(P('fixups.tsv'), 'w') as f:
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'
             f.write(f'# {capability}\t1\n')
+    for off, ob, nb, why in ALIAS_APPLIED:
+        nbb = bytes.fromhex(nb)
+        assert IMG[off:off + len(nbb)] == nbb, f'ALIAS_CUT at {off:#x} was modified by a later rewriter pass: {bytes(IMG[off:off + len(nbb)]).hex()}'
+        f.write(f'# ALIAS_CUT\t{off:#x}\t{ob}\t{nb}\n')   # iOS-only alias cut the Mac loader undoes at load when alias >= 64 GB
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')

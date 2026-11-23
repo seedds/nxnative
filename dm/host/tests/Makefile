@@ -231,6 +231,12 @@ $(B)/t_audio_input: t_audio_input.c ../audio_input.c ../audio_input.h | $(B)
 audio-input: $(B)/t_audio_input
 	$(B)/t_audio_input
 run: audio-input
+$(B)/t_audio_input_file: t_audio_input_file.c ../audio_input_file.c ../audio_input_file.h ../audio_input.c ../audio_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_audio_input_file.c ../audio_input_file.c ../audio_input.c -framework AudioToolbox -framework CoreFoundation
+.PHONY: audio-input-file
+audio-input-file: $(B)/t_audio_input_file
+	TMPDIR="$(abspath $(B))" $(B)/t_audio_input_file
+run: audio-input-file
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c

@@ -4,6 +4,8 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
+**New: Windows and Linux PCs** (x86-64, in progress): the same games packed for a PC and played from a launcher window, with graphics on Vulkan. One game is tested so far. See [Windows and Linux](#windows-and-linux).
+
 > [!TIP]
 > **Prefer an app to the command line?** [NX2Apple](https://github.com/LNPANDY/NX2Apple) is a community Mac app that builds your games for the iPhone, iPad or Mac, keeps the Mac games in a library and starts them with their settings. It is a separate project that follows this one; this page describes nxnative's own command-line way. Building a front end of your own: [Front ends](docs/frontends.md).
 
@@ -242,6 +244,83 @@ Switch Pro Controller gyro on the Mac still needs the HID support being develope
 - **Short stutters** the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.
 - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
 - **Settings in a file:** lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out. `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.
+
+## Windows and Linux
+
+The port runs the games on x86-64 PCs with Windows 10 or 11, or Linux. A PC's processor is not ARM, so the game's code cannot run unchanged as on Apple chips. When you pack a game, its code is compiled once, ahead of time, to native x86-64 code (`nxaot`, built on LLVM). A JIT fallback (dynarmic) runs any code that was not found ahead of time. The graphics go to Vulkan instead of Metal, and the window, controllers and sound to SDL3. As on Apple, nothing from any game is in the download: you pack your own dump with your own keys, on your PC.
+
+**Status.** One game is tested so far: **Mario vs. Donkey Kong**. It was played on Linux with a software renderer (every level visited), and packed and played on a real Windows 11 PC with an NVIDIA RTX 4060. Other games are not tested yet. On Linux, movies are black and silent until a video decoder is chosen; on Windows they play through Media Foundation. Progress and open items: [docs/design/migration-status.md](docs/design/migration-status.md).
+
+### What your PC needs
+
+- A 64-bit Intel or AMD processor.
+- A GPU driver with **Vulkan 1.3** (current NVIDIA, AMD and Intel drivers have it).
+- **Windows 10 or 11.** The N editions also need the Media Feature Pack for the movies (Settings, Apps, Optional features).
+- **Linux:** glibc 2.38 and GCC 13's C++ library or later (Ubuntu 24.04 or later, Debian 13), and the Vulkan loader (`libvulkan1` on Ubuntu and Debian, which the GPU driver packages bring).
+- Free disk space on the game's drive: the game's size plus about 7 GB.
+- Your own game dump (NSP or XCI, with its update and DLC if you have them) and your console's `prod.keys`.
+
+Nothing else is installed. The download is one self-contained folder, the **bundle**. It carries the launcher, the host program, the recompiler, its own Python 3.14 with the packer's modules, and the extraction and shader tools. There is no installer: unpack it anywhere and run it from there.
+
+### Get the bundle
+
+| System | File | Open |
+|---|---|---|
+| Windows | `nxnative-windows-x86_64.zip` | `nxlauncher.exe` |
+| Linux | `nxnative-linux-x86_64.tar.gz` | `nxlauncher` |
+
+The [port workflow](.github/workflows/port.yml) builds both on every push and on a manual run (its artifacts). To build them yourself, see [Build the bundles](#build-the-bundles) below. A newer bundle can be unpacked anywhere: its launcher takes over the games packed with an older one.
+
+### Pack and play (Windows)
+
+1. Unzip `nxnative-windows-x86_64.zip`, for example to `C:\nxnative\`.
+2. Put each game in a folder of its own, outside the bundle's folder, for example `C:\Games\MarioVsDK\Mario vs. Donkey Kong [0100B99019412000][v0].xci`. The `[title ID][version]` in the name helps the packer; without it, the packer reads the title from the file.
+3. Put `prod.keys` in `%USERPROFILE%\.switch\prod.keys`, or choose it later with **Choose prod.keys...**.
+4. Open `nxlauncher.exe`. The bundle is not signed, so Windows may show "Windows protected your PC": choose **More info**, then **Run anyway**.
+5. Choose **Add game...**, pick the game's `.nsp` or `.xci`, check the keys it found, and choose **Pack**. The window shows each step with a progress bar. The first pack takes minutes, most of them compiling the game's code; packing the same game again takes under a minute.
+6. Choose the game in the list and **Play**. To end it, close the game's window or choose **Stop** in the launcher; both keep what the game saved.
+
+The **Saves** tab backs up and restores the game's save data. **Games folder** (with **Browse...**) is the folder the launcher lists games from. Every setting: [On Windows and Linux](docs/settings.md#on-windows-and-linux). The game's log is `<game folder>\<title ID>-work\run\log.txt`.
+
+Without the launcher, from a terminal: `pack.cmd "C:\Games\MarioVsDK" -k "%USERPROFILE%\.switch\prod.keys"`, then `C:\Games\MarioVsDK\<title ID>_build\run.cmd`.
+
+### Pack and play (Linux)
+
+```
+tar -xzf nxnative-linux-x86_64.tar.gz
+./nxnative-linux-x86_64/nxlauncher
+```
+
+Then follow the same steps as on Windows: **Add game...**, **Pack**, **Play**. `prod.keys` goes in `~/.switch/prod.keys`. The file dialog uses the desktop's portal, or `zenity`. From a terminal: `./nxnative-linux-x86_64/pack.sh ~/Games/MarioVsDK -k ~/.switch/prod.keys`, then `~/Games/MarioVsDK/<title ID>_build/run.sh`.
+
+The Linux build ships as a `.tar.gz` folder that runs from where it is unpacked, the same on every distribution that meets the requirements above. No `.deb` or other system package is made.
+
+### Controls
+
+- **Controllers:** any controller SDL3 knows works, including Xbox, PlayStation (with gyro), the Switch Pro Controller and handheld PCs' built-in controllers.
+- **Keyboard:** the same keys as on the Mac.
+- **Mouse:** stands in for the touchscreen.
+- **Rumble:** works where the controller has it.
+
+### Build the bundles
+
+Everything builds on Linux with Docker; on Windows, use Docker Desktop with WSL2. The Windows programs (`.exe`) are cross-built on Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw), so no Visual Studio is needed. From the repository root:
+
+```sh
+docker build -t nxnative-build -f docker/Dockerfile.build docker
+
+# Linux: nxhost-run and nxlauncher into build/linux
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
+  'cmake -S dm/host -B build/linux -G Ninja -DGAME=010015100B514000 -DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON -DNXHOST_JIT=ON && cmake --build build/linux --target nxhost-run nxlauncher'
+
+# Windows: nxhost-run.exe and nxlauncher.exe into build/win64
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src mstorsjo/llvm-mingw:20261020 sh -c \
+  'cmake -S dm/host -B build/win64 -G Ninja -DGAME=010015100B514000 -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake -DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON -DNXHOST_JIT=ON && cmake --build build/win64 --target nxhost-run nxlauncher && sh dm/tools/mingw_licences.sh build/win64'
+```
+
+A complete bundle needs more than these two programs. It also takes the recompiler (`nxaot`, and `nxaot.exe` with LLVM cross-built for Windows), the published C# tools (`nx_extract`, the Vulkan shader translator), the bundled Python and the SPIR-V tools. Each comes from a script in Docker, and every download those scripts make is pinned by SHA-256. [scripts/package_port.py](scripts/package_port.py) then puts the bundle together and checks it (`--archive --check` writes the `.zip` or `.tar.gz`).
+
+The steps and their commands are in [docker/README.md](docker/README.md) (images, the port's tools, the recompiler) and [docs/development.md, The port's bundles](docs/development.md#the-ports-bundles). The [port workflow](.github/workflows/port.yml) runs the same steps on GitHub Actions. The host's tests run with CTest in the same image (`ctest --test-dir build/linux`). The Windows tests run on a Windows PC or under Wine ([docker/README.md](docker/README.md#running-the-windows-tests-on-the-pc)).
 
 ## Known issues
 

@@ -680,20 +680,18 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     if (!a || a->manual) return orig(sys, o, on, p, pn, in, inn);   // explicit CPU+manual renderers are driven by the game; two renderers just opened, neither has rendered: at most one catch-up frame less
     uint64_t u = atomic_fetch_add(&a->updates, 1) + 1;
     dm_host_lock(&a->cq_mu);
-    if (atomic_load(&a->open) && a->updated && atomic_load(&a->renders) == a->last_r) {
+    if (atomic_load(&a->open) && a->updated && atomic_load(&a->renders) == a->last_r && a->cq_tail - a->cq_head < CQ) {
         uint64_t c = atomic_fetch_add(&a->catchups, 1) + 1;
         if (c <= 3) LOG("audren: renderer %d: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", ar_index(a), (unsigned long long)u, (unsigned long long)c);
-        if (a->cq_tail - a->cq_head >= CQ) {   // queue full: wait for the render thread to play one (every 5 ms), so catch-up frames keep real time; at most 50 ms (an output that stopped)
-            struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 50000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
-            while (atomic_load(&a->open) && a->cq_tail - a->cq_head >= CQ && !pthread_cond_timedwait(&a->cq_cv, &a->cq_mu, &dl)) {}
-        }
-        if (atomic_load(&a->open)) {
-            if (a->cq_tail - a->cq_head < CQ) {
-                uint32_t slot = a->cq_tail % CQ;
-                render_once(a, sys, a->cq[slot], &a->cq_n[slot]);
-                a->cq_tail++;
-                pthread_cond_broadcast(&a->cq_cv);
-            } else render_once(a, sys, NULL, NULL);   // still full (the output stopped): render anyway, output discarded
+        // Queue full: no catch-up frame, and no wait. The frames already queued are ahead of real time, so rendering another would release the game's wave buffers early, and waiting
+        // here blocked the caller: Bink's sound driver in Batman: Arkham Asylum (main+0x950a0) polls with RequestUpdate then GetReleasedWaveBuffer from the game's rendering thread,
+        // several times a movie frame, and each poll waited about 5 ms for the render thread, so the movies ran at 16 fps with the GPU idle. On the Switch an update never waits for a
+        // frame; a driver that loops until a buffer is released (DRAGON QUEST XI S) finds none here and waits on the renderer event, which the render thread's next fresh render signals
+        if (atomic_load(&a->open) && a->cq_tail - a->cq_head < CQ) {
+            uint32_t slot = a->cq_tail % CQ;
+            render_once(a, sys, a->cq[slot], &a->cq_n[slot]);
+            a->cq_tail++;
+            pthread_cond_broadcast(&a->cq_cv);
         }
     }
     if (u < 200 && getenv("DM_AUDREN_TRACE")) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&a->renders) - (a->updated ? a->last_r : 0)));

@@ -49,8 +49,11 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < 4; i++) {
         k.blend[0] = (blend_st){.src_rgb=factors[i], .dst_rgb=factors[(i+1)%4], .src_a=factors[(i+2)%4], .dst_a=factors[(i+3)%4], .eq_rgb=1, .eq_a=1};
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
-        CHECK(d.colorAttachments[0].blendingEnabled, "blending remains enabled");
+        int direct = blend_zero_src1(k.blend[0].src_rgb) == NVN_BLEND_FUNC_ONE && blend_zero_src1(k.blend[0].dst_rgb) == NVN_BLEND_FUNC_ZERO &&
+                     blend_zero_src1(k.blend[0].src_a) == NVN_BLEND_FUNC_ONE && blend_zero_src1(k.blend[0].dst_a) == NVN_BLEND_FUNC_ZERO;
+        CHECK(d.colorAttachments[0].blendingEnabled == !direct, "blending stays enabled unless folded to float ONE+ZERO direct write");
         MTLRenderPipelineDescriptor *ref = [d copy]; ref.fragmentFunction = [lib newFunctionWithName:@"f2"];
+        ref.colorAttachments[0].blendingEnabled = YES;
         ref.colorAttachments[0].sourceRGBBlendFactor = bfac(k.blend[0].src_rgb); ref.colorAttachments[0].destinationRGBBlendFactor = bfac(k.blend[0].dst_rgb);
         ref.colorAttachments[0].sourceAlphaBlendFactor = bfac(k.blend[0].src_a); ref.colorAttachments[0].destinationAlphaBlendFactor = bfac(k.blend[0].dst_a);
         id<MTLRenderPipelineState> reference = [g_dev newRenderPipelineStateWithDescriptor:ref error:&error];

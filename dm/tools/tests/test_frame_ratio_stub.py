@@ -30,6 +30,7 @@ def from32(b): return struct.unpack('<f', struct.pack('<I', b & 0xffffffff))[0]
 
 def load_patches():
     spec = importlib.util.spec_from_file_location('oot_patches', REPO / 'dm/games/0400486024DEC000/patches.py')
+    assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
     return m
 
@@ -51,7 +52,8 @@ class FrameRatioStub(unittest.TestCase):
         ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.__setitem__(off, words), state=cls.page - cls.code,
                                     render_scale=0, render_scale_min=0, base=FN, others={}, capabilities=set())
         m = load_patches()
-        m.dynamic_resolution = m.render_scale = m.screen_shape = lambda c: None   # their own stubs and tests; only the frame ratio here
+        for attr in ('dynamic_resolution', 'render_scale', 'screen_shape'):
+            setattr(m, attr, lambda c: None)   # their own stubs and tests; only the frame ratio here
         m.frame_step(ctx)
         cls.ctx = ctx
         assert list(puts) == [SITE]

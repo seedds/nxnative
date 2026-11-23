@@ -75,6 +75,9 @@ int main(void) { @autoreleasepool {
     EXPECT("image library loads under the same budget", 1, lib != nil);
     EXPECT("image has the same content digest", 1, [objc_getAssociatedObject(lib, &g_lib_tag) isEqual:lib_digest(bytes.bytes, bytes.length)]);
     EXPECT("no source mappings survive any library", 0, live_maps);
+    EXPECT("owned library data count matches succeeded loads", 129, atomic_load(&g_lib_data_n));
+    EXPECT("owned library data bytes match succeeded loads", 129 * bytes.length, atomic_load(&g_lib_data_bytes));
+    EXPECT("owned library data allocation failures zero", 0, atomic_load(&g_lib_data_fails));
     [NSFileManager.defaultManager removeItemAtPath:[folder stringByAppendingString:@".img"] error:nil];
     for (dispatch_data_t d in dev->data) {
         const void *p = NULL; size_t n = 0; dispatch_data_t mapped = dispatch_data_create_map(d, &p, &n);

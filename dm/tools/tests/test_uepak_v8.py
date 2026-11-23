@@ -24,14 +24,15 @@ def entry(off, size, raw, meth, blocks, bsz, short=False):
     return b + struct.pack('<BI', 0, bsz)
 
 
-def pak(path, files, *, short=False, fifth_slot=False):
-    """files: [(name, data, compress)] → a version 8 pak whose footer names Zlib as method 1 or 5"""
+def pak(path, files, *, short=False, fifth_slot=False, codec=None):
+    """files: [(name, data, compress)] → a version 8 pak whose footer names codec (default Zlib) as method 1 or 5"""
     body, index = b'', b''
     method = 5 if fifth_slot else 1
+    cname, compress = (codec[0].encode(), codec[1]) if codec else (b'Zlib', zlib.compress)
     for name, data, comp in files:
         off = len(body)
         if comp:
-            z = zlib.compress(data)
+            z = compress(data)
             head = len(entry(0, 0, 0, method, [(0, 0)], 0, short))
             e = entry(off, len(z), len(data), method, [(head, head + len(z))], 0x10000, short)
             body += e + z
@@ -40,7 +41,7 @@ def pak(path, files, *, short=False, fifth_slot=False):
             body += e + data
         index += fstr(name) + e
     index = fstr('../../../') + struct.pack('<i', len(files)) + index
-    names = bytes(32 * 4) + b'Zlib'.ljust(28, b'\0') if fifth_slot else b'Zlib'.ljust(32, b'\0') + bytes(32 * (3 if short else 4))
+    names = bytes(32 * 4) + cname.ljust(28, b'\0') if fifth_slot else cname.ljust(32, b'\0') + bytes(32 * (3 if short else 4))
     foot = bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 8, len(body), len(index)) + bytes(20) + names
     path.write_bytes(body + index + foot)
 
@@ -61,6 +62,39 @@ class Version8(unittest.TestCase):
         self.shader = b'LSLG' + bytes(range(256)) * 8
         pak(self.p, [('AT/Content/M_Test.uexp', self.shader, True), ('Engine/Config/a.ini', b'[x]\n', False)])
 
+    def test_zstd_pak_blocks_do_not_use_the_game_decoder(self):
+        zstd = uepak.zstd_mod()
+        def stream_compress(data):
+            c = zstd.ZstdCompressor()
+            return c.compress(data) + c.flush()
+        for label, compress in (('framed', zstd.compress), ('no-content-size', stream_compress)):
+            with self.subTest(label=label):
+                pak(self.p, [('Game/Material.uexp', self.shader, True)], codec=('Zstd', compress))
+                pk = uepak.Pak(str(self.p))
+                with pk.f:
+                    def wrong_decoder(*args): self.fail('Zstd must not go to the game decoder')
+                    self.assertEqual(pk.read('Game/Material.uexp', decode=wrong_decoder), self.shader)
+
+    def test_zstd_blocks_reject_wrong_sizes_and_incomplete_frames(self):
+        zstd = uepak.zstd_mod()
+        data = zstd.compress(self.shader)
+        self.assertEqual(uepak.zstd_block(zstd.compress(b''), 0), b'')
+        for block, size in [
+            (data, len(self.shader) - 1),
+            (data, len(self.shader) + 1),
+            (data, -1),
+            (data, -2),
+            (data[:-1], len(self.shader)),
+            (data + b'extra', len(self.shader)),
+            (zstd.compress(b''), 1),
+        ]:
+            with self.subTest(size=size, stored=len(block)), self.assertRaises(zstd.ZstdError):
+                uepak.zstd_block(block, size)
+        pak(self.p, [('Game/Bad.uexp', self.shader, True)], codec=('Zstd', lambda d: zstd.compress(d)[:-1]))
+        pk = uepak.Pak(str(self.p))
+        with pk.f, self.assertRaisesRegex(ValueError, 'block 0 does not decode'):
+            pk.read('Game/Bad.uexp')
+
     def test_footer(self):
         with open(self.p, 'rb') as f: enc, _, _, methods, ver = uepak.footer(f)
         self.assertEqual((enc, ver, methods[0]), (0, 8, 'Zlib'))
@@ -73,18 +107,22 @@ class Version8(unittest.TestCase):
         self.assertEqual(k.read('AT/Content/M_Test.uexp'), self.shader)
         self.assertEqual(k.read('Engine/Config/a.ini'), b'[x]\n')
 
-    def test_ordinary_v8_shortened_fifth_slot_and_inline_archive(self):
-        name = 'Content/Test.ushaderbytecode'
-        pak(self.p, [(name, self.shader, True)], fifth_slot=True)
+    def test_ordinary_v8_shortened_fifth_slot_and_shared_archive(self):
+        name, inline = 'Content/Test.ushaderbytecode', 'Content/Test.uexp'
+        archive = v1_archive([(bytes(20), zlib.compress(self.shader), len(self.shader), 0)])
+        pak(self.p, [(name, archive, True), (inline, self.shader, True)], fifth_slot=True)
         with self.p.open('rb') as f:
             self.assertEqual(uepak.magic_back(f), (0xc8, 8))
             self.assertEqual(uepak.footer(f)[3], ['', '', '', '', 'Zlib'])
         path = str(self.p)
         k = uepak.Pak(path)
-        with k.f: self.assertEqual(k.read(name), self.shader)
-        self.assertEqual(uepak.pak_shader_sources(path), (True, False))
+        with k.f: self.assertEqual(k.read(name), archive)
+        self.assertEqual(uepak.pak_shader_sources(path), (True, True))
         jobs, _ = ss.ue_legacy_jobs([(path, self.p.name)])
-        self.assertEqual(jobs, [(path, self.p.name, (ss.UE_LEGACY, (name,)))])
+        self.assertEqual(jobs, [(path, self.p.name, (ss.UE_LEGACY, (inline,)))])
+        listing, need_oodle = uepak.job(self.tmp.name, 'unused-main', str(self.p.parent / 'work'))
+        self.assertEqual([(item['name'], item['shaders']) for item in listing], [('Test.ushaderbytecode', 1)])
+        self.assertEqual(need_oodle, 0)
 
     def test_short_v8_mixed_pak_job_and_finish(self):
         name, inline = 'Content/Test.ushaderbytecode', 'Content/Test.uexp'

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # A game's shader libraries as one file (dm/tools/shader_lib.py): the folder and image states, and a read by the host's C reader (dm/gfx/nvn/msl_image.h, dm/host/romfs_image.h).
-import os, subprocess, sys, tempfile, unittest
+import errno, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -44,6 +45,23 @@ class Base(unittest.TestCase):
 
 
 class States(Base):
+    def test_failed_write_removes_part_and_keeps_existing_image(self):
+        self.image.write_bytes(b'old image')
+        def full(): raise OSError(errno.ENOSPC, 'No space left on device')
+        with self.assertRaises(OSError) as raised:
+            shader_lib.write({'a': b'written', 'b': full}, str(self.image))
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        self.assertFalse(Path(f'{self.image}.part').exists())
+        self.assertEqual(self.image.read_bytes(), b'old image')
+
+    def test_failed_rename_removes_part_and_keeps_existing_image(self):
+        self.image.write_bytes(b'old image')
+        with mock.patch.object(shader_lib.os, 'replace', side_effect=OSError(errno.ENOSPC, 'No space left on device')):
+            with self.assertRaises(OSError) as raised: shader_lib.write({'a': b'new'}, str(self.image))
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        self.assertFalse(Path(f'{self.image}.part').exists())
+        self.assertEqual(self.image.read_bytes(), b'old image')
+
     def test_pack_replaces_the_folder_and_reads_in_place(self):
         self.folder(k_b__metallib=b'lib', k_b__json=b'{}', k_b__metal=b'src')
         self.assertTrue(self.pack())
@@ -139,6 +157,17 @@ class Write(Base):   # dmsh_build.py writes the image from functions that read i
         self.assertEqual(got, {**data, 'path.json': b'from a path', 'bytes.tsv': b'given'})
         plain = self.root / 'plain.img'; shader_lib.write({**data, 'path.json': b'from a path', 'bytes.tsv': b'given'}, str(plain))   # the bytes themselves, on no thread
         self.assertEqual(plain.read_bytes(), self.image.read_bytes())
+
+    def test_write_reports_progress(self):
+        events = []
+        shader_lib.write({'a': b'1234', 'b': lambda: b'56789'}, str(self.image), on_progress=lambda d, t, b: events.append((d, t, b)))
+        self.assertEqual([(d, t) for d, t, _ in events], [(0, 2), (1, 2), (2, 2)])
+        self.assertEqual(events[0][2], 0)
+        self.assertGreater(events[1][2], 0)
+        self.assertGreater(events[2][2], events[1][2])
+        empty = []
+        shader_lib.write({}, str(self.root / 'empty.img'), on_progress=lambda d, t, b: empty.append((d, t, b)))
+        self.assertEqual(empty, [(0, 0, 0)])
 
     def test_a_function_that_fails_or_has_no_bytes_leaves_no_image(self):
         def gone(): raise OSError('the cache lost it')

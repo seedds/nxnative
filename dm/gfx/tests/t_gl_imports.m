@@ -79,6 +79,10 @@ static void test_vertex_binding(void) {
     assert(!attr(3)->norm); FETCH(3, b[1], 4, 20, 0);
     attr_ptr(3, 0x80e1, GL_UNSIGNED_BYTE, 1, 0, (const void *)0);   // GL_BGRA is four components
     assert(attr(3)->size == 4 && attr(3)->norm); FETCH(3, b[1], 0, 4, 0);
+    void (*attr_iptr)(GLuint, GLint, GLenum, GLsizei, const void *) = import("glVertexAttribIPointer");
+    attr_iptr(3, 2, GL_UNSIGNED_INT, 24, (const void *)16);
+    assert(!attr(3)->norm && vfmt_of(attr(3)) == MTLVertexFormatUInt2); FETCH(3, b[1], 16, 24, 0);
+    attr_ptr(3, 0x80e1, GL_UNSIGNED_BYTE, 1, 0, NULL);
     // glVertexAttribDivisor: binding i's divisor, which a new pointer keeps
     attr_div(2, 4); FETCH(2, b[0], 16, 12, 4); FETCH(3, b[1], 0, 4, 0);
     attr_div(2, 1000); FETCH(2, b[0], 16, 12, 255);   // as far as the layer counts
@@ -149,7 +153,7 @@ static void test_literal_stride_fetch(void) {
         pkey_t k; memset(&k, 0, sizeof k);
         vkey_set(&k, 0, attr(0), vb_of(cur_vao(), 0));
         assert(k.stride[0] == cases[c].stride && k.div[0] == (cases[c].stride ? cases[c].div : 0));   // a constant fetch has no divisor, so one pipeline serves both
-        k.cpf = MTLPixelFormatRGBA8Unorm; k.mask = 15;
+        k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.mask[0] = 15;
         id<MTLRenderPipelineState> pso = pso_get(&p, &k);
         assert(pso);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:1 mipmapped:NO];
@@ -375,8 +379,8 @@ static void test_doom3(void) {
     pr = h_glCreateProgram(); vs = h_glCreateShader(GL_VERTEX_SHADER); shader_of(vs)->si = &vonly; shader_of(vs)->fn = [lib newFunctionWithName:@"vmain"];
     h_glAttachShader(pr, vs); h_glLinkProgram(pr); p = prog_of(pr);
     assert(p->linked && p->fn[0] && !p->fn[1] && p->si[1]->frag && !p->si[1]->nu && !p->si[1]->nt && !p->si[1]->nb && p->si[1]->ub_slot < 0);
-    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask = 15;
-    k.cpf = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
+    pkey_t k; memset(&k, 0, sizeof k); k.vf[0] = MTLVertexFormatFloat4; k.stride[0] = 16; k.mask[0] = 15;
+    k.cpf[0] = MTLPixelFormatRGBA8Unorm; k.dpf = k.spf = MTLPixelFormatDepth32Float_Stencil8;
     assert(pso_get(p, &k));
     h_glDeleteProgram(pr); h_glDeleteShader(vs);
 
@@ -592,6 +596,31 @@ static void test_program_validation(void) {
     h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len == 0 && !log[0]);
     h_glLinkProgram(pr); h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // relinking invalidates validation
     h_glUseProgram(was); h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs); assert(h_glGetError() == GL_NO_ERROR);
+
+    // Explicit layout(binding = N) on samplers initializes u->unit at link time; unqualified samplers stay at unit 0.
+    char row_ok[] = "0123456789abcdef\tfrag\tr:0:4 t:u_y=0:1:sampler2D t:u_uv=2:3:sampler2D:1\tmain#0";
+    shinfo parsed = {0};
+    assert(sh_read_row(row_ok, &parsed) && parsed.nt == 2 && parsed.t[0].unit == 0 && parsed.t[1].unit == 1);
+    sh_free(&parsed);
+    char row_bad[] = "0123456789abcdef\tfrag\tr:0:2 t:u_uv=0:1:sampler2D:999\tmain#0";
+    assert(!sh_read_row(row_bad, &parsed));
+    char row_junk[] = "0123456789abcdef\tfrag\tr:0:2 t:u_uv=0:1:sampler2D:bad\tmain#0";
+    assert(sh_read_row(row_junk, &parsed) && parsed.nt == 0);
+    sh_free(&parsed);
+
+    // GL_TEXTURE_SWIZZLE_RGBA sets all four channels via glTexParameteriv and glTexParameterfv.
+    GLuint swz_tex = 0;
+    h_glGenTextures(1, &swz_tex);
+    h_glBindTexture(GL_TEXTURE_2D, swz_tex);
+    const GLint swz_i[4] = {GL_BLUE, GL_GREEN, GL_RED, GL_ONE};
+    h_glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swz_i);
+    tex_t *st = tex_of(swz_tex);
+    assert(st && st->swz[0] == GL_BLUE && st->swz[1] == GL_GREEN && st->swz[2] == GL_RED && st->swz[3] == GL_ONE);
+    const GLfloat swz_f[4] = {GL_ALPHA, GL_ZERO, GL_RED, GL_GREEN};
+    h_glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swz_f);
+    assert(st->swz[0] == GL_ALPHA && st->swz[1] == GL_ZERO && st->swz[2] == GL_RED && st->swz[3] == GL_GREEN);
+    h_glDeleteTextures(1, &swz_tex);
+    assert(h_glGetError() == GL_NO_ERROR);
 }
 
 static void test_fixed_function_caps(void) {
@@ -962,6 +991,69 @@ static int test_capture_shaders(void) {
     assert(!memcmp(pixel, green, sizeof green) && h_glGetError() == GL_NO_ERROR);
     h_glUseProgram(0); h_glDeleteProgram(pr);
     h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(1, &target); h_glDeleteBuffers(1, &vb); h_glDeleteVertexArrays(1, &vao);
+
+    // Desktop GLSL 1.20 with implicit int->float conversion, sampler3D + texture3D, and GL_TEXTURE_SWIZZLE_RGBA on a 3D LUT.
+    const GLchar *vert3d = "#version 120\nattribute vec2 position;\nvoid main() { gl_Position = vec4(position, 0, 1); }";
+    const GLchar *frag3d = "#version 120\nuniform sampler3D lut;\nvoid main() { float scale = 1; gl_FragColor = texture3D(lut, vec3(0.5)) * scale; }";
+    GLuint vs3 = h_glCreateShader(GL_VERTEX_SHADER), fs3 = h_glCreateShader(GL_FRAGMENT_SHADER), pr3 = h_glCreateProgram();
+    h_glShaderSource(vs3, 1, &vert3d, NULL); h_glCompileShader(vs3);
+    h_glShaderSource(fs3, 1, &frag3d, NULL); h_glCompileShader(fs3);
+    h_glAttachShader(pr3, vs3); h_glAttachShader(pr3, fs3); h_glLinkProgram(pr3);
+    h_glGetProgramiv(pr3, GL_LINK_STATUS, &status); assert(status);
+    GLuint vao2, vb2, fb2, rt2, lut3d;
+    h_glGenVertexArrays(1, &vao2); h_glBindVertexArray(vao2); h_glGenBuffers(1, &vb2); h_glBindBuffer(GL_ARRAY_BUFFER, vb2);
+    h_glBufferData(GL_ARRAY_BUFFER, sizeof vertices, vertices, 0);
+    GLuint pos3 = h_glGetAttribLocation(pr3, "position"); assert(pos3 < 16);
+    h_glVertexAttribPointer(pos3, 2, GL_FLOAT, 0, 0, NULL); h_glEnableVertexAttribArray(pos3);
+    h_glGenTextures(1, &rt2); h_glBindTexture(GL_TEXTURE_2D, rt2);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glGenFramebuffers(1, &fb2); h_glBindFramebuffer(GL_FRAMEBUFFER, fb2);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt2, 0);
+    h_glActiveTexture(GL_TEXTURE0);
+    h_glGenTextures(1, &lut3d); h_glBindTexture(GL_TEXTURE_3D, lut3d);
+    const GLint swz[4] = {GL_BLUE, GL_RED, GL_GREEN, GL_ONE};
+    h_glTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_SWIZZLE_RGBA, swz);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const uint8_t lut_px[4] = {10, 20, 200, 50};
+    h_glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, lut_px);
+    h_glUseProgram(pr3); h_glViewport(0, 0, 1, 1); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    const uint8_t want_swz[4] = {200, 10, 20, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    assert(!memcmp(pixel, want_swz, sizeof want_swz) && h_glGetError() == GL_NO_ERROR);
+
+    // Explicit layout(binding = 1) sampler reads from texture unit 1 without glUniform1i.
+    const GLchar *vertb = "#version 450 core\nlayout(location = 0) in vec2 position;\nvoid main() { gl_Position = vec4(position, 0.0, 1.0); }";
+    const GLchar *fragb = "#version 450 core\nlayout(binding = 0) uniform sampler2D t0;\nlayout(binding = 1) uniform sampler2D t1;\n"
+                          "out vec4 outColor;\nvoid main() { outColor = vec4(texture(t0, vec2(0.5)).r, texture(t1, vec2(0.5)).g, 0.0, 1.0); }";
+    GLuint vsb = h_glCreateShader(GL_VERTEX_SHADER), fsb = h_glCreateShader(GL_FRAGMENT_SHADER), prb = h_glCreateProgram();
+    h_glShaderSource(vsb, 1, &vertb, NULL); h_glCompileShader(vsb);
+    h_glShaderSource(fsb, 1, &fragb, NULL); h_glCompileShader(fsb);
+    h_glAttachShader(prb, vsb); h_glAttachShader(prb, fsb); h_glLinkProgram(prb);
+    h_glGetProgramiv(prb, GL_LINK_STATUS, &status); assert(status);
+    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1");
+    GLint v0[16] = {-1}, v1[16] = {-1};   // allow a full matrix if reflection reports the wrong type
+    assert(u0 > 0 && u1 > 0);
+    h_glGetUniformiv(prb, u0, v0); h_glGetUniformiv(prb, u1, v1);
+    assert(v0[0] == 0 && v1[0] == 1);
+    GLuint bt[2]; h_glGenTextures(2, bt);
+    const uint8_t red_px[4] = {220, 0, 0, 255}, grn_px[4] = {0, 180, 0, 255};
+    h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, bt[0]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red_px);
+    h_glActiveTexture(GL_TEXTURE0 + 1); h_glBindTexture(GL_TEXTURE_2D, bt[1]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, grn_px);
+    h_glActiveTexture(GL_TEXTURE0);
+    h_glUseProgram(prb); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    const uint8_t want_bind[4] = {220, 180, 0, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    assert(!memcmp(pixel, want_bind, sizeof want_bind) && h_glGetError() == GL_NO_ERROR);
+
+    h_glUseProgram(0); h_glDeleteProgram(prb); h_glDeleteShader(vsb); h_glDeleteShader(fsb);
+    h_glDeleteProgram(pr3); h_glDeleteShader(vs3); h_glDeleteShader(fs3);
+    h_glDeleteTextures(2, bt); h_glDeleteTextures(1, &lut3d);
+    h_glDeleteFramebuffers(1, &fb2); h_glDeleteTextures(1, &rt2); h_glDeleteBuffers(1, &vb2); h_glDeleteVertexArrays(1, &vao2);
     puts("GL fresh capture: compile failure, legacy link, cache reuse, uniform writes and GPU readback: OK");
     return 0;
 }
@@ -998,12 +1090,15 @@ static int test_framebuffer_srgb(void) {
     const float color[4] = {0.25f, 0.5f, 0.75f, 0.5f};
     const float blend[4] = {0.375f, 0.375f, 0.375f, 0.5f};
     int checks = 0;
-    for (int kind = 0; kind < 6; kind++) {
+    for (int kind = 0; kind < 7; kind++) {
         int srgb = kind != 1 && kind != 3, rb = kind == 2 || kind == 3;
         GLenum fmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
-        GLuint tex = 0, renderbuffer = 0, fb;
-        h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
-        if (rb) {
+        GLuint tex = 0, renderbuffer = 0, fb = 0;
+        if (kind != 6) h_glGenFramebuffers(1, &fb);
+        h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        if (!fb) {
+            assert(h_eglCreateWindowSurface(NULL, NULL, NULL, NULL));
+        } else if (rb) {
             h_glGenRenderbuffers(1, &renderbuffer); h_glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
             h_glRenderbufferStorage(GL_RENDERBUFFER, fmt, 2, 1);
             h_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, renderbuffer);
@@ -1058,8 +1153,14 @@ static int test_framebuffer_srgb(void) {
             if (srgb_pixel(0, color, 0, rb ? "replacement renderbuffer storage" : "replacement texture storage")) return 1;
             checks++;
         }
-        h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
-        if (rb) h_glDeleteRenderbuffers(1, &renderbuffer); else h_glDeleteTextures(1, &tex);
+        if (fb) {
+            h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &fb);
+            if (rb) h_glDeleteRenderbuffers(1, &renderbuffer); else h_glDeleteTextures(1, &tex);
+        } else {
+            GLint encoding = 0;
+            h_glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK, 0x8210 /* COLOR_ENCODING */, &encoding);
+            assert(encoding == 0x8c40 /* SRGB */);
+        }
     }
     // Write sRGB bytes through the linear render view, then sample the same texture.
     GLuint sample[2], sample_fb; h_glGenTextures(2, sample);
@@ -1086,6 +1187,154 @@ static int test_framebuffer_srgb(void) {
     printf("GL framebuffer sRGB: %d pixel checks passed\n", checks); return 0;
 }
 
+static void test_image_copies(void) {
+    const uint8_t block[16] = {255, 255, 0, 0, 0, 0, 0, 0, 0, 0xf8};   // one red BC3 block
+    GLuint tex[3]; h_glGenTextures(3, tex);
+    h_glBindTexture(GL_TEXTURE_2D, tex[0]);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 1, 1, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, block);
+    h_glBindTexture(GL_TEXTURE_2D, tex[1]);
+    h_glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5, 4, 4, 0, sizeof block, NULL);
+    h_glCopyImageSubData(tex[0], GL_TEXTURE_2D, 0, 0, 0, 0, tex[1], GL_TEXTURE_2D, 0, 0, 0, 0, 1, 1, 1);
+    GLint size = 0; h_glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x86a0, &size); assert(size == sizeof block);
+    uint8_t got[16] = {0}; h_glGetCompressedTexImage(GL_TEXTURE_2D, 0, got); assert(!memcmp(block, got, sizeof got));
+    uint32_t decoded[16] = {0}; h_glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, decoded);
+    for (unsigned i = 0; i < 16; i++) assert(decoded[i] == 0xff0000ff);
+    h_glBindTexture(GL_TEXTURE_2D, tex[2]);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 1, 1, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, NULL);
+    h_glCopyImageSubData(tex[1], GL_TEXTURE_2D, 0, 0, 0, 0, tex[2], GL_TEXTURE_2D, 0, 0, 0, 0, 4, 4, 1);
+    memset(got, 0, sizeof got); h_glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, got);
+    assert(!memcmp(block, got, sizeof got) && h_glGetError() == GL_NO_ERROR);
+    h_glDeleteTextures(3, tex);
+}
+
+static void test_multiple_draw_buffers(void) {
+    typeof(S) saved = S;
+    h_glColorMask(1, 1, 1, 1); h_glDisable(GL_SCISSOR_TEST);
+    GLuint tex[2], fb; h_glGenTextures(2, tex); h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    for (int i = 0; i < 2; i++) {
+        h_glBindTexture(GL_TEXTURE_2D, tex[i]);
+        h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex[i], 0);
+    }
+    const GLenum reverse[] = {GL_COLOR_ATTACHMENT0 + 1, GL_COLOR_ATTACHMENT0};
+    const GLfloat red[] = {1, 0, 0, 1}, green[] = {0, 1, 0, 1};
+    h_glDrawBuffers(2, reverse);
+    h_glClearBufferfv(GL_COLOR, 0, red); h_glClearBufferfv(GL_COLOR, 1, green);
+    h_glColorMaski(0, 0, 1, 0, 0); h_glColorMaski(1, 0, 0, 0, 0);
+    h_glEnable(GL_SCISSOR_TEST); h_glScissor(0, 0, 1, 1);
+    h_glClearColor(0, 1, 1, 0); h_glClear(GL_COLOR_BUFFER_BIT);
+    uint32_t pixels[4] = {0};
+    h_glReadBuffer(GL_COLOR_ATTACHMENT0 + 1); h_glReadPixels(0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    assert(pixels[0] == 0xff00ffff && pixels[1] == 0xff0000ff && pixels[2] == 0xff0000ff && pixels[3] == 0xff0000ff);
+    h_glReadBuffer(GL_COLOR_ATTACHMENT0); h_glReadPixels(0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    for (unsigned i = 0; i < 4; i++) assert(pixels[i] == 0xff00ff00);
+    assert(h_glGetError() == GL_NO_ERROR);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteTextures(2, tex); S = saved;
+}
+
+static void test_texture_buffer_storage(void) {
+    GLuint buf, tex; h_glGenBuffers(1, &buf); h_glGenTextures(1, &tex);
+    const float data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    h_glBindBuffer(GL_TEXTURE_BUFFER, buf); h_glBufferData(GL_TEXTURE_BUFFER, sizeof data, data, 0);
+    h_glBindTexture(GL_TEXTURE_BUFFER, tex); h_glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, buf);
+    id<MTLTexture> before = texture_buffer(tex_of(tex));
+    assert(before.buffer == buf_of(buf)->mb && before.width == 2);
+    h_glBufferData(GL_TEXTURE_BUFFER, sizeof data / 2, data, 0);
+    id<MTLTexture> after = texture_buffer(tex_of(tex));
+    assert(after.buffer == buf_of(buf)->mb && after.width == 1 && before != after);
+    h_glDeleteBuffers(1, &buf); assert(texture_buffer(tex_of(tex)) == g_tbuf0);
+    h_glDeleteTextures(1, &tex); assert(h_glGetError() == GL_NO_ERROR);
+}
+
+static void test_timestamps(void) {
+    GLuint query[2]; h_glGenQueries(2, query);
+    h_glQueryCounter(query[0], GL_TIMESTAMP); h_glQueryCounter(query[1], GL_TIMESTAMP); h_glFinish();
+    int64_t t0 = 0, t1 = 0, available = 0;
+    h_glGetQueryObjecti64v(query[1], GL_QUERY_RESULT_AVAILABLE, &available); assert(available == 1);
+    h_glGetQueryObjecti64v(query[0], GL_QUERY_RESULT, &t0); h_glGetQueryObjecti64v(query[1], GL_QUERY_RESULT, &t1);
+    assert(t0 > 0 && t1 >= t0 && h_glGetError() == GL_NO_ERROR);
+    h_glDeleteQueries(2, query);
+}
+
+static void test_swizzle_and_layout_binding(void) {
+    typeof(S) saved = S;
+    const char *msl =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct A2 { texture2d<float> t0 [[id(0)]]; sampler s0 [[id(1)]]; texture2d<float> t1 [[id(2)]]; sampler s1 [[id(3)]]; };\n"
+        "struct A3 { texture3d<float> lut [[id(0)]]; sampler s0 [[id(1)]]; };\n"
+        "vertex float4 vs(uint vid [[vertex_id]]) { float2 p[3] = {{-1,-1},{3,-1},{-1,3}}; return float4(p[vid], 0, 1); }\n"
+        "fragment float4 fs_bind(constant A2 &a [[buffer(0)]]) { return float4(a.t0.sample(a.s0, float2(0.5)).r, a.t1.sample(a.s1, float2(0.5)).g, 0, 1); }\n"
+        "fragment float4 fs_lut(constant A3 &a [[buffer(0)]]) { return a.lut.sample(a.s0, float3(0.5)); }\n";
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(msl) options:nil error:&err]; assert(lib);
+    id<MTLFunction> fvs = [lib newFunctionWithName:@"vs"], fbind = [lib newFunctionWithName:@"fs_bind"], flut = [lib newFunctionWithName:@"fs_lut"];
+    assert(fvs && fbind && flut);
+
+    char vrow[] = "1111111111111111\tvert\tr:-1:0\tmain#0";
+    char brow[] = "2222222222222222\tfrag\tr:0:4 t:t0=0:1:sampler2D t:t1=2:3:sampler2D:1\tmain#0";
+    char lrow[] = "3333333333333333\tfrag\tr:0:2 t:lut=0:1:sampler3D\tmain#0";
+    shinfo vsi = {0}, bsi = {0}, lsi = {0};
+    assert(sh_read_row(vrow, &vsi) && sh_read_row(brow, &bsi) && sh_read_row(lrow, &lsi));
+
+    GLuint vs = h_glCreateShader(GL_VERTEX_SHADER), fsb = h_glCreateShader(GL_FRAGMENT_SHADER), fsl = h_glCreateShader(GL_FRAGMENT_SHADER);
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = fvs;
+    shader_of(fsb)->si = &bsi; shader_of(fsb)->fn = fbind;
+    shader_of(fsl)->si = &lsi; shader_of(fsl)->fn = flut;
+    GLuint prb = h_glCreateProgram(), prl = h_glCreateProgram();
+    h_glAttachShader(prb, vs); h_glAttachShader(prb, fsb); h_glLinkProgram(prb);
+    h_glAttachShader(prl, vs); h_glAttachShader(prl, fsl); h_glLinkProgram(prl);
+    assert(prog_of(prb)->linked && prog_of(prl)->linked);
+    GLint u0 = h_glGetUniformLocation(prb, "t0"), u1 = h_glGetUniformLocation(prb, "t1");
+    GLint v0[16] = {-1}, v1[16] = {-1};   // allow a full matrix if reflection reports the wrong type
+    h_glGetUniformiv(prb, u0, v0); h_glGetUniformiv(prb, u1, v1);
+    assert(v0[0] == 0 && v1[0] == 1);
+
+    GLuint rt, fb, vao, bt[2], lut;
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    h_glGenTextures(1, &rt); h_glBindTexture(GL_TEXTURE_2D, rt);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    h_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    h_glGenVertexArrays(1, &vao); h_glBindVertexArray(vao);
+    h_glDisable(GL_BLEND); h_glDisable(GL_DEPTH_TEST); h_glDisable(GL_STENCIL_TEST); h_glDisable(GL_CULL_FACE); h_glDisable(GL_SCISSOR_TEST);
+    h_glColorMask(1, 1, 1, 1); h_glViewport(0, 0, 1, 1);
+
+    // Explicit layout(binding = 1) samples unit 1 without glUniform1i.
+    h_glGenTextures(2, bt);
+    const uint8_t red[4] = {220, 0, 0, 255}, green[4] = {0, 180, 0, 255};
+    h_glActiveTexture(GL_TEXTURE0); h_glBindTexture(GL_TEXTURE_2D, bt[0]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+    h_glActiveTexture(GL_TEXTURE0 + 1); h_glBindTexture(GL_TEXTURE_2D, bt[1]);
+    h_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, green);
+    h_glActiveTexture(GL_TEXTURE0);
+    h_glUseProgram(prb); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    uint8_t px[4] = {0}; const uint8_t want_bind[4] = {220, 180, 0, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    assert(!memcmp(px, want_bind, sizeof want_bind));
+
+    // GL_TEXTURE_SWIZZLE_RGBA on a 3D LUT texture swaps channels on GPU sampling.
+    h_glGenTextures(1, &lut); h_glBindTexture(GL_TEXTURE_3D, lut);
+    const GLint swz[4] = {GL_BLUE, GL_RED, GL_GREEN, GL_ONE};
+    h_glTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_SWIZZLE_RGBA, swz);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    h_glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const uint8_t lut_px[4] = {10, 20, 200, 50};
+    h_glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, lut_px);
+    h_glUseProgram(prl); h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    const uint8_t want_swz[4] = {200, 10, 20, 255};
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    assert(!memcmp(px, want_swz, sizeof want_swz) && h_glGetError() == GL_NO_ERROR);
+
+    h_glUseProgram(0); h_glDeleteProgram(prb); h_glDeleteProgram(prl);
+    h_glDeleteShader(vs); h_glDeleteShader(fsb); h_glDeleteShader(fsl);
+    h_glDeleteTextures(2, bt); h_glDeleteTextures(1, &lut); h_glDeleteTextures(1, &rt);
+    h_glDeleteFramebuffers(1, &fb); h_glDeleteVertexArrays(1, &vao);
+    sh_free(&vsi); sh_free(&bsi); sh_free(&lsi);
+    S = saved;
+    puts("GL layout(binding) and GL_TEXTURE_SWIZZLE_RGBA GPU readback: OK");
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--srgb")) return test_framebuffer_srgb();
     if (argc == 2 && !strcmp(argv[1], "--capture")) return test_capture_shaders();
@@ -1110,6 +1359,24 @@ int main(int argc, char **argv) {
     void (*getiv)(GLuint, GLenum, GLint *) = import("glGetShaderiv");
     GLint value = 0; getiv(sh, GL_SHADER_TYPE, &value); assert(value == GL_VERTEX_SHADER);
     getiv(sh, GL_SHADER_SOURCE_LENGTH, &value); assert(value == strlen(text) + 1);
+    void (*getsrc)(GLuint, GLsizei, GLsizei *, GLchar *) = import("glGetShaderSource");
+    GLsizei slen = -1; GLchar sbuf[32] = {0};
+    getsrc(sh, sizeof sbuf, &slen, sbuf); assert(slen == (GLsizei)strlen(text) && !strcmp(sbuf, text));
+    GLchar small[5] = {'x', 'x', 'x', 'x', 'x'}; slen = -1;
+    getsrc(sh, sizeof small, &slen, small); assert(slen == 4 && !strcmp(small, "void"));
+    getsrc(sh, sizeof small, NULL, small); assert(!strcmp(small, "void"));
+    slen = 99; getsrc(sh, sizeof sbuf, &slen, NULL); assert(slen == 0);
+    slen = 99; small[0] = 'z'; getsrc(sh, 0, &slen, small); assert(slen == 0 && small[0] == 'z');
+    GLuint empty = create(GL_FRAGMENT_SHADER);
+    getiv(empty, GL_SHADER_SOURCE_LENGTH, &value); assert(value == 0);
+    slen = 99; sbuf[0] = 'z'; getsrc(empty, sizeof sbuf, &slen, sbuf); assert(slen == 0 && sbuf[0] == 0);
+    h_glDeleteShader(empty);
+    assert(h_glGetError() == GL_NO_ERROR);
+    slen = 7; getsrc(sh, -1, &slen, sbuf); assert(h_glGetError() == GL_INVALID_VALUE && slen == 7);
+    getsrc(999999, sizeof sbuf, &slen, sbuf); assert(h_glGetError() == GL_INVALID_VALUE && slen == 7);
+    GLuint badpr = h_glCreateProgram();
+    getsrc(badpr, sizeof sbuf, &slen, sbuf); assert(h_glGetError() == GL_INVALID_OPERATION && slen == 7);
+    h_glDeleteProgram(badpr);
     // The import and loader paths must both keep the wrapper, rather than exposing the Metal implementation's small-stack entry.
     assert(import("glCompileShader") == (void *)h_glCompileShader_bs);
     assert(import("glClear") == (void *)h_glClear_bs);
@@ -1211,6 +1478,7 @@ int main(int argc, char **argv) {
     test_active_attributes();
     test_fate_calls();
     test_fixed_function(!cpu);
+    if (!cpu) { test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); test_swizzle_and_layout_binding(); }
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;

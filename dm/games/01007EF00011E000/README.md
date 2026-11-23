@@ -238,7 +238,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
-- [One compile for a vertex shader's libraries](../../../docs/reference/shaders.md#one-compile-for-a-vertex-shaders-libraries): the cold Mac shader build on an M5 Pro (`J=18`, 2026-11-17) took 240.4 to 188.8 s. CPU time went from 3,692 to 2,859 s and Metal compiles from 21,552 to 13,957. The shared compile built all 8,888 vertex shaders with pulling libraries. The 26 shaders compared on the GPU drew bit-identical results.
+- [One compile for a vertex shader's libraries](../../../docs/reference/shaders.md#one-compile-for-a-vertex-shaders-libraries): the cold Mac shader build on an M5 Pro (`J=18`, 2026-11-17) took 240.4 to 188.8 s. CPU time went from 3,692 to 2,859 s and Metal compiles from 21,552 to 13,957. The shared compile built all 8,888 vertex shaders with pulling libraries. The 26 shaders compared on the GPU drew bit-identical results. With the capture entry `main0_gs` calling the body too (2026-11-21, against `806fabe1`): 197.5 to 183.2 s, Metal compiles 1,841 to 1,605 s, `<key>_b` 565.4 to 448.1 MB. The game has no geometry, hull or domain shader, so it never draws with `main0_gs`.
 - [An early display-link wake logs zero lateness](../../../docs/reference/frame-rate.md#an-early-display-link-wake-logs-zero-lateness) (resolved in the host, from PR #1041).
 - [Queued frames wait for the frame's display-link ticks](../../../docs/reference/frame-rate.md#queued-frames-wait-for-the-frames-display-link-ticks) (resolved in the host, from PR #1045).
 - [Repeated Metal texture conformance checks](../../../docs/reference/nvn-objects.md#repeated-metal-texture-conformance-checks) (resolved in the host).

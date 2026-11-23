@@ -20,6 +20,15 @@ int hle_implements(const char *name);
 
 HLE_FORCE("_ZN2nn2ro10InitializeEv", "connect to the ldr:ro service; the host has none, symbol lookups search the loaded modules directly", Result, h_ro_Initialize, void) { LOG("init takeover: ro::Initialize (no-op)"); dm_thread_service_connect(); return 0; }
 
+// The offline host refuses the EOS NRO. An unresolved import would return zero (EOS_Success),
+// so Shredder's Revenge proceeds to create a platform and dereferences the null result.
+// Report the missing implementation so the game takes its own initialization failure path.
+HLE("EOS_Initialize", int32_t, h_eos_Initialize, const void *options) {
+    (void)options;
+    LOG("EOS_Initialize: offline, returning EOS_NotImplemented");
+    return 16;   // EOS_NotImplemented
+}
+
 // The SDK's rtld lists are empty when the host loads the modules. Answer address lookups from the same module table the host uses to relocate them.
 HLE_FORCE("_ZN2nn2ro21GetModuleAddressRangeEPmS1_m", "find the loaded guest module containing an address", bool, h_ro_GetModuleAddressRange,
           uintptr_t *out_base, size_t *out_size, uintptr_t address) {

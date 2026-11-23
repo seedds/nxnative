@@ -39,7 +39,8 @@ class XcodePipelineTests(unittest.TestCase):
             base.touch()
             update.touch()
             registered = game.load('0100A6301214E000')
-            profile = SimpleNamespace(id=registered.id, title_id=registered.title_id, dir=root / 'profile' / registered.id,
+            profile_dir = root / 'profile' / registered.id
+            profile = SimpleNamespace(id=registered.id, title_id=registered.title_id, dir=profile_dir, table=lambda name: profile_dir / name,
                                       get=registered.get, words=registered.words, modules_in=registered.modules_in,
                                       builds=lambda: {'v0': {'display': '1.0.0', 'main': 'other-build'}})
             sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'gl_fixed', 'ue_decode', 'oodle_packs', 'ue_legacy')}
@@ -96,6 +97,8 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertIn('DM_ENV_FILE', environment)   # --no-motion bakes DM_MOTION=0 into the app's dm/env.txt
             self.assertEqual(Path(environment['DM_ENV_FILE']).read_text(), 'DM_MOTION=0\n')
             self.assertEqual(environment['GFXAPI'], graphics)
+            self.assertEqual(environment['DM_PYTHON'], sys.executable)
+            self.assertNotIn('FONT_PY', environment)
             self.assertEqual(environment['DM_BUNDLE_ID'], 'com.example.saved')
             self.assertEqual(environment['DM_TEAM_ID'], 'ABCDEFGHIJ')
             self.assertEqual(Path(environment['DM_XCODE_PROJECT_DIR']), root / f'{registered.id}_build/xcode')

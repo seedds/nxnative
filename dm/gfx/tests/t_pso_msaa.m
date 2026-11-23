@@ -44,7 +44,7 @@ static void pass(NvProg *p, int samples, int color, int a2c, const char *what) {
     CHECK(e != nil, what);
     CHECK(g_pass.samples == (uint32_t)samples, "the pass takes its attachments' sample count");
     uint64_t spec = g_pb_spec;
-    id<MTLRenderPipelineState> ps = pso_get_(p, nil);
+    id<MTLRenderPipelineState> ps = pso_get(p, nil);
     CHECK(ps != nil, "the pipeline builds");
     if (g_comp4) CHECK(g_pb_spec == spec + 1, "the pipeline is specialized from a Metal 4 base (the path under test)");
     uint32_t n = pso_samples(ps);

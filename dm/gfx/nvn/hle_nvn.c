@@ -282,13 +282,39 @@ static uint8_t *pool_cpu_map(const pool_t *p) {
     // Neither is a CPU mapping in NVN, even after a virtual pool aliases physical pages.
     return (p->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) ? NULL : p->mem;
 }
-static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); static void vpool_taken(const pool_t *o);   // sparse virtual pools, see MapVirtual
+static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); static void vpool_taken(const pool_t *o); static void vshadow_drop_phys(const uint8_t *mem, uint64_t size);   // sparse virtual pools, see MapVirtual
+// Host-page-aligned re-backing records for misaligned PHYSICAL|CPU_NO_ACCESS pools (kept out of pool_t so pool_t stays 40 bytes for nvn_capture)
+typedef struct { uint8_t *mem, *orig; size_t alen; } reback_t;
+static reback_t *g_reback; static size_t g_nreback, g_creback; static pthread_mutex_t g_reback_mu = PTHREAD_MUTEX_INITIALIZER;
+static void reback_add(uint8_t *mem, uint8_t *orig, size_t alen) {
+    pthread_mutex_lock(&g_reback_mu);
+    if (g_nreback == g_creback && !(g_reback = realloc(g_reback, (g_creback = g_creback ? g_creback * 2 : 16) * sizeof *g_reback))) die("reback allocation failed");
+    g_reback[g_nreback++] = (reback_t){mem, orig, alen};
+    pthread_mutex_unlock(&g_reback_mu);
+}
+static uint8_t *reback_take(const uint8_t *mem, size_t *alen_out) {
+    uint8_t *orig = NULL;
+    pthread_mutex_lock(&g_reback_mu);
+    for (size_t i = 0; i < g_nreback; i++) if (g_reback[i].mem == mem) { orig = g_reback[i].orig; if (alen_out) *alen_out = g_reback[i].alen; g_reback[i] = g_reback[--g_nreback]; break; }
+    pthread_mutex_unlock(&g_reback_mu);
+    return orig;
+}
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
-    o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
+    o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0; o->asked = 0;
+    uint8_t *share_mem = o->mem;
+    // Physical pool the CPU cannot access, starting inside a host page (4 KB Switch alignment under a 16 KB host page): back with host-page-aligned storage so vm_remap into sparse virtual pools is zero-copy
+    if (o->mem && (o->flags & NVN_MEMORY_POOL_FLAGS_PHYSICAL) && (o->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) {
+        uint64_t pg = (uint64_t)getpagesize();
+        if (((uintptr_t)o->mem) & (pg - 1)) {
+            size_t alen = (size_t)((o->size + pg - 1) & ~(pg - 1));
+            void *al = mmap(NULL, alen, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+            if (al != MAP_FAILED) { memcpy(al, o->mem, o->size); reback_add(al, o->mem, alen); o->mem = al; }
+        }
+    }
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
-    if (o->mem && !(o->flags & 0x200)) dm_device_share(o->mem, o->size, 1);   // the GPU maps the storage: the host refuses to unmap it until Finalize, as Horizon does (hle_svc.c)
+    if (o->mem && !(o->flags & 0x200)) dm_device_share(share_mem, o->size, 1);   // the GPU maps the storage: the host refuses to unmap it until Finalize, as Horizon does (hle_svc.c)
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
@@ -297,11 +323,17 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     // Dead to the replay first (its IDs marked gone under g_rmu, the magic cleared), then torn down: a texture resolving on the submit thread must not find the page table or the storage already gone
-    mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0;
-    if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
-    if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
- nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); mtl_sp_phys_gone(((pool_t *)p)->mem, ((pool_t *)p)->size); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size);
- dm_device_share(((pool_t *)p)->mem, ((pool_t *)p)->size, 0); } }
+    pool_t *o = (pool_t *)p;
+    mtl_alias_drop_pool(p); o->magic = 0;
+    if (o->flags & 0x200 && o->vp) vpool_release(o);
+    if (o->mem && !(o->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
+        vshadow_drop_phys(o->mem, o->size);
+        nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem); mtl_sp_phys_gone(o->mem, o->size); fl_drop(o->mem, o->size);
+        size_t alen = 0; uint8_t *orig = ((o->flags & (NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) == (NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) ? reback_take(o->mem, &alen) : NULL;
+        dm_device_share(orig ? orig : o->mem, o->size, 0);
+        if (orig) { mtl_finish(); munmap(o->mem, alen); o->mem = orig; }
+    }
+}
 static void ft_flush(const uint8_t *a, uint64_t n);
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {   // see ft_add and nvn_flushed
     const pool_t *o = (const pool_t *)p;
@@ -310,8 +342,15 @@ NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, 
     ft_flush(o->mem + off, n);
 }
 // A GPU address exists only once the driver has given one: here, by a buffer (nvnBufferInitialize) or by a texture (nvnTextureGetTextureAddress). Raw global memory can reach only what these name (mtl_pool_addressed)
-static void pool_mark_addressed(const pool_t *o) { vpool_taken(o); static __thread const uint8_t *last; if (o->mem && o->mem != last) { last = o->mem; mtl_pool_addressed(o->mem, o->size); } }
-NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { pool_mark_addressed((const pool_t *)p); return (NVNbufferAddress)((const pool_t *)p)->mem; }
+static void pool_mark_addressed(const pool_t *o) { vpool_taken(o); ((pool_t *)o)->asked = 1; static __thread const uint8_t *last; if (o->mem && o->mem != last) { last = o->mem; mtl_pool_addressed(o->mem, o->size); } }
+// A shader-code pool's own address (NVN_MEMORY_POOL_FLAGS_SHADER_CODE, 0x40; not virtual) is asked for to place programs: nvnProgramSetShaders takes code addresses. The GPU never reads that code,
+// as the shaders run translated and their constants are copied into the host's buffers, so it does not put the pool into the raw pool table, where it would be resident and its pages wired.
+// Ocarina of Time on the iPhone: 223 such pools, 317 MB, wired for nothing on an 8 GB device that pages the guest's files out. A buffer made in the pool still puts it in (nvnBufferInitialize)
+NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) {
+    const pool_t *o = (const pool_t *)p;
+    if ((o->flags & (NVN_MEMORY_POOL_FLAGS_VIRTUAL | NVN_MEMORY_POOL_FLAGS_SHADER_CODE)) != NVN_MEMORY_POOL_FLAGS_SHADER_CODE) pool_mark_addressed(o);
+    return (NVNbufferAddress)o->mem;
+}
 
 // ---------- Descriptor pools ----------
 // One ID space per pool. In NVN a texture or sampler ID indexes the pool the command buffer has bound (SetTexturePool / SetSamplerPool), and two pools may use the same IDs. The replay keeps
@@ -660,8 +699,21 @@ NVN(nvnTextureGetSparseTileLayout, void, const NVNtexture *t, NVNtextureSparseTi
 NVN(nvnTextureGetSamples, int, const NVNtexture *t) { return CTX(t)->d.samples; }
 NVN(nvnTextureGetMemoryPool, NVNmemoryPool *, const NVNtexture *t) { return (NVNmemoryPool *)CTX(t)->pool; }
 NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->off; }
-// The GPU address of the texture's storage (DRAGON QUEST XI S, Unreal Engine 4.18, asks for it at start): pool address + offset, the same address space as nvnMemoryPoolGetBufferAddress
-NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) vpool_taken(o->pool); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)(o->pool->mem + o->off) : 0; }
+// The GPU address of the texture's storage (DRAGON QUEST XI S, Unreal Engine 4.18, asks for it at start): pool address + offset, the same address space as nvnMemoryPoolGetBufferAddress.
+// A texture in storage the CPU cannot reach (CPU_NO_ACCESS), block-linear and not a buffer texture, has its content in a Metal texture of its own (a render target, a GPU-made image): its
+// storage's bytes are never its texels here, so a raw pointer to them would find nothing the GPU wrote, and its address does not put the pool into the raw pool table. Ocarina of Time
+// asks for its render targets' addresses, which lie in virtual pools over one 305 MB physical pool; through them and the mappings that pool was wired whole.
+static int tex_bytes_elsewhere(const tex_t *o) {
+    return o->pool && (o->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && o->d.target != NVN_TEXTURE_TARGET_BUFFER && !(o->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET));
+}
+NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) {
+    const tex_t *o = CTX(t);
+    if (o->pool) {
+        vpool_taken(o->pool);
+        if (!tex_bytes_elsewhere(o)) { ((pool_t *)o->pool)->asked = 1; mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); }
+    }
+    return o->pool ? (NVNtextureAddress)(o->pool->mem + o->off) : 0;
+}
 // The size of a texture's ZCull save area (SaveZCullData / RestoreZCullData). The host does no ZCull and never touches the area, but games allocate it from their own pools, and NVN
 // does not report 0. Cuphead (Unity 2017.4) allocates one per depth target (main+0x1948060) from its pool allocator, which gives a zero-size request the offset of a live block; its
 // map of allocations then loses that block (the zero-size one's size overwrites it, and freeing the zero-size one deletes it), and the block's own free later pushes a garbage-sized
@@ -889,12 +941,15 @@ NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a
 // depth-stencil state still does. The host does no ZCull, so there is nothing to set (Donkey Kong Bananza: EQUAL, 0xff)
 NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, int ref) { (void)c; (void)func; (void)ref; }
 static _Atomic uint64_t g_sync_ns;
+typedef struct acq_wait acq_wait_t;
+static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64_t *gpu_fence_out);
+static void acq_wait_unref(acq_wait_t *aw);
 // A long wait that expires is what a game's GPU watchdog acts on (PRAGMATA aborts when its 15 s wait for the previous frame's sync does): said with the sync's state
 static NVNsyncWaitResult sync_expired(const sync_t *o, uint64_t timeout, uint64_t waited) {
     static _Atomic int n;
     if (timeout >= 1000000000ull && atomic_fetch_add(&n, 1) < 8)
         LOG("[RED] nvnSyncWait: a %.1f s wait on sync %p expired after %.1f s (%s, fence %#llx)", timeout / 1e9, (const void *)o, waited / 1e9,
-            o->fenced == 0 ? "never fenced since its Initialize" : o->fenced == 3 ? "its queue receipt not published" : "its fence not reached", (unsigned long long)o->fence);
+            o->fenced == 0 ? "never fenced since its Initialize" : o->fenced == 3 ? "its queue receipt not published" : o->fenced == 4 ? "its acquire wait not satisfied" : "its fence not reached", (unsigned long long)o->fence);
     return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
@@ -903,6 +958,21 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     // menu's Next) and then waits 15 s on the one it has not fenced yet, aborting on TIMEOUT_EXPIRED or FAILED (main+0x4a8cf0) once two frames are in flight: a shipped path,
     // so on the console that wait does not expire. Answered as a timeout (the host's rule from its first version, with no game behind it), the game aborted at once
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    if (o->fenced == 4) {
+        uint64_t ah = nvn_sync_ref_acq(o);
+        if (!ah) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        uint64_t t0 = now_ns(), gf = 0; int waited = 0;
+        int ok = acq_wait_run((acq_wait_t *)(uintptr_t)ah, timeout, &waited, &gf);
+        acq_wait_unref((acq_wait_t *)(uintptr_t)ah);
+        if (!ok) return sync_expired(o, timeout, now_ns() - t0);
+        if (mtl_wait_acq(gf, 0)) return waited ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        if (!timeout) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+        uint64_t el = now_ns() - t0, rem = timeout == UINT64_MAX ? UINT64_MAX : el >= timeout ? 0 : timeout - el;
+        uint64_t w0 = now_ns();
+        ok = mtl_wait_acq(gf, rem);
+        atomic_fetch_add(&g_sync_ns, now_ns() - w0);
+        return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : sync_expired(o, timeout, now_ns() - t0);
+    }
     if(o->fenced==3) { if(nvn_sync_wait(o,0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:sync_expired(o,timeout,now_ns()-t0); }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
@@ -1593,12 +1663,8 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
     for (int i = 0; i < n; i++) *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
 }
 // compact: as one OPC_HANDLES record (the handles' final values; BindTexturesDeferred edits its record afterwards, so it takes the canonical one)
-static p_bind_handles *bind_handles_ex(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h, int compact) {
-    if (n < 0 || n > 32) { LOG("[RED] bind handle count %d", n); return NULL; }   // a record holds 32
-    // the replay's tables: textures 0-255 (separate texture r at 128 + r), samplers 0-127, images 0-31
-    n = slots_bound(op == OP_BIND_SAMP ? "BindSamplers" : op == OP_BIND_IMG ? "BindImages" : "BindTextures", st, first, n,
-                    op == OP_BIND_SAMP ? DMSH_C2_SEP_SLOTS : op == OP_BIND_IMG ? 32 : NVN_SEPTEX_SLOT0 + DMSH_C2_SEP_SLOTS);
-    if (!n) return NULL;
+enum { BIND_REC_MAX = 32 };   // the handles one record holds
+static p_bind_handles *bind_handles_chunk(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h, int compact) {
     p_bind_handles tmp, *r;
     if (compact && g_rec_compact && (unsigned)st < NVN_RESOURCE_STAGES && first >= 0 && first <= 0xff && n >= 1) r = &tmp;
     else r = RECN(c, op, p_bind_handles, h, n);
@@ -1614,7 +1680,20 @@ static p_bind_handles *bind_handles_ex(NVNcommandBuffer *c, int op, int st, int 
     }
     return r;
 }
-static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) { return bind_handles_ex(c, op, st, first, n, h, 1); }
+static void bind_handles_ex(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h, int compact, int defer) {
+    if (n < 0) { LOG("[RED] bind handle count %d", n); return; }
+    // the replay's tables: textures 0-255 (separate texture r at 128 + r), samplers 0-127, images 0-31
+    n = slots_bound(op == OP_BIND_SAMP ? "BindSamplers" : op == OP_BIND_IMG ? "BindImages" : "BindTextures", st, first, n,
+                    op == OP_BIND_SAMP ? DMSH_C2_SEP_SLOTS : op == OP_BIND_IMG ? 32 : NVN_SEPTEX_SLOT0 + DMSH_C2_SEP_SLOTS);
+    if (!n || !h) return;
+    // More handles than a record holds go in records of 32 each, in slot order: NVN binds up to the stage's slot count in one call (Immortals Fenyx Rising binds 49 textures at once)
+    for (int k = 0; k < n; k += BIND_REC_MAX) {
+        int m = n - k < BIND_REC_MAX ? n - k : BIND_REC_MAX;
+        p_bind_handles *r = bind_handles_chunk(c, op, st, first + k, m, h + k, compact);
+        if (defer && r) { r->defer = 1; r->src = (uint64_t)(uintptr_t)(h + k); }
+    }
+}
+static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) { bind_handles_ex(c, op, st, first, n, h, 1, 0); }
 // Image (writable texture): handle = texture pool index (GetImageHandle returns it as-is; RegisterImage writes the same table as RegisterTexture)
 NVN(nvnCommandBufferBindImages, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNimageHandle *h) { st = st_host(st);
     bind_handles(c, OP_BIND_IMG, st, first, n, (const uint64_t *)h);
@@ -1890,6 +1969,7 @@ __attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the sam
 static void gfx_resume_locked(void) {
     mtl_set_present_suspended(0);
     g_susp = 0;
+    dm_fstep_settle();
     pthread_cond_broadcast(&g_susp_cv);
 }
 static void gfx_drain_worker(void *unused) {
@@ -1967,6 +2047,10 @@ _Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the p
 // The first submission's prepare step (mtl_prepare: the prewarm and the pipeline prebuild) loads shaders and builds pipelines and submits no GPU work, so it runs under the lock but outside the
 // graphics gate: inside it, going to the background meanwhile (dm_gfx_suspend, on the main thread) waited for it, minutes on a first start. It stays host work for the guest scheduler. The lock
 // comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
+static void sleep_until_ns(uint64_t dl);
+static void nvn_acq_ref(uint64_t handle);
+static uint64_t nvn_acq_unref_take_ticket(uint64_t handle);
+static void nvn_acq_snapshot(uint64_t handle, uint64_t *gpu_fence, uint64_t *ticket);
 #include "nvn_queue.inc"
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     ((queue_t *)q)->submits++;
@@ -2059,6 +2143,7 @@ static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
 static int present_unpaced(const win_t *o);
+static int link_ready(const win_t *o);
 static int link_wait(const win_t *o, uint64_t timeout_ns);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
@@ -2069,8 +2154,15 @@ void mtl_res_stats(char *out, size_t n);
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static _Atomic uint64_t g_frame;
-static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
+static _Atomic uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
+// Host-known pauses and window transitions (nvn_fstep.h settle): focus regained (hle_oe.c dm_focus_in_since; weak 0 in nvn_mtl.m for graphics unit tests), graphics resumed,
+// or front-end window size/visibility/screen/fullscreen changes (dm_fstep_settle). Snapshotted at g_fs_start alongside the frame's start time so a pause between AcquireTexture
+// and Present lands on the frame whose [prev, st] span actually covers it instead of being consumed on the prior on-time frame
+uint64_t dm_focus_in_since(void);
+static _Atomic uint64_t g_fs_settle_seq;
+static uint64_t g_fs_focus_at, g_fs_settle_at;
+void dm_fstep_settle(void) { atomic_fetch_add(&g_fs_settle_seq, 1); }
 // The acquire's two waits for the screen, which the frame step and the pacer read differently:
 // - a drain of frames standing in the display link's queue (nvn_mtl.m mtl_link_drain_take_ns, nvn_link_drain.h) is extra: the screen showed every queued frame for its hold
 //   meanwhile, so the part that made the frame longer than its hold is neither late nor time the game owes (fstep_tick, nvn_fstep_drain_cut). g_fs_drain: in the acquire that
@@ -2084,48 +2176,266 @@ static _Atomic uint64_t g_screen_at;   // when the screen wait released the acqu
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
-NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
-    win_t *o = (win_t *)w;
-    int n = window_active(o);
-    *idx = n ? o->next++ % n : 0;
-    // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
-    uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0, drain_ns = 0;
-    if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
-        uint64_t period = present_period(o); rt_acquire(rt_period_ns(o, period));
-        uint64_t p0 = now_ns(); int snap = mtl_snap_on();
-        o->follow = 1;   // the beat paces this frame only where the branches below wait for the slot time (nvn_pace_follow)
+
+// Deferred acquire wait (NVN semantics): nvnWindowAcquireTexture returns the texture index immediately and binds the display-release pacing wait and previous-present ticket wait
+// to the returned NVNsync (fenced == 4). Games that record draw work between AcquireTexture and nvnSyncWait (Super Mario Bros. Wonder – Nintendo Switch 2 Edition measures its CPU
+// time across procCalc_ + AcquireTexture + procDraw_ before calling nvnSyncWait(acquire_sync, -1) in waitDrawDone_) otherwise saw the vsync wait inside their CPU time and could
+// never step back from interval 2 to 1. Games that never call nvnSyncWait (only nvnQueueWaitSync) have the previous pending acquire drained at the next AcquireTexture, while
+// nvnQueueWaitSync snapshots the ticket onto the queue continuation so the GPU never draws into a texture whose previous present has not finished. Lock order: strictly nq_mu -> acq_mu.
+struct acq_wait {
+    win_t *win;           // NULL once finalized or wait completed
+    uint64_t avail;       // snapshotted o->avail[*idx] at acquire time
+    uint64_t ticket;      // snapshotted o->ticket[*idx] at acquire time (owned until completed, finalized, or freed)
+    uint64_t gpu_fence;   // mtl_last_fence() at acquire time
+    unsigned refs;        // held by win->pending_acq, sync_t (fenced == 4), and active waiters
+    int paced;            // 1 once pacing (link / sleep / screen / detclock / snap) has completed
+    int done;             // 0 = pending, 1 = wait in progress, 2 = completed or abandoned
+};
+static pthread_mutex_t acq_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t acq_cv = PTHREAD_COND_INITIALIZER;
+static int g_det_pace = -1;
+static uint64_t g_det_step, g_det_last;
+static void det_pace_init(void) {
+    if (g_det_pace >= 0) return;
+    const char *e = getenv("DM_DETCLOCK_PACE"), *d = getenv("DM_DETCLOCK");
+    g_det_step = d ? strtoull(d, 0, 0) : 0;
+    g_det_pace = e && atoi(e) && g_det_step;
+}
+static void nvn_acq_ref(uint64_t handle) {
+    if (!handle) return;
+    acq_wait_t *aw = (acq_wait_t *)(uintptr_t)handle;
+    pthread_mutex_lock(&acq_mu);
+    aw->refs++;
+    pthread_mutex_unlock(&acq_mu);
+}
+static uint64_t nvn_acq_unref_take_ticket(uint64_t handle) {
+    if (!handle) return 0;
+    acq_wait_t *aw = (acq_wait_t *)(uintptr_t)handle;
+    uint64_t tk = 0;
+    pthread_mutex_lock(&acq_mu);
+    if (!--aw->refs) { tk = aw->ticket; free(aw); }
+    pthread_mutex_unlock(&acq_mu);
+    return tk;
+}
+static void nvn_acq_snapshot(uint64_t handle, uint64_t *gpu_fence, uint64_t *ticket) {
+    if (!handle) { *gpu_fence = 0; *ticket = 0; return; }
+    acq_wait_t *aw = (acq_wait_t *)(uintptr_t)handle;
+    pthread_mutex_lock(&acq_mu);
+    *gpu_fence = aw->gpu_fence;
+    *ticket = aw->ticket;
+    pthread_mutex_unlock(&acq_mu);
+}
+static void acq_wait_unref(acq_wait_t *aw) {
+    uint64_t tk = nvn_acq_unref_take_ticket((uintptr_t)aw);
+    if (tk) nvn_queue_present_release(tk);
+}
+static int acq_pace_ready(const win_t *o, uint64_t at) {
+    if (!dm_detclock_enabled()) {
+        int snap = mtl_snap_on();
+        if (present_unpaced(o)) {}
+        else if (snap && mtl_link_active() && mtl_link_stalled()) { if (at > now_ns()) return 0; }
+        else if (mtl_link_active()) { if (!link_ready(o)) return 0; }
+        else { if (at > now_ns()) return 0; }
+        if (!present_unpaced(o) && !mtl_present_screen_ready()) return 0;
+    } else {
+        det_pace_init();
+        if (g_det_pace && g_det_last && now_ns() < g_det_last + g_det_step) return 0;
+    }
+    return mtl_snap_acquire_ready();
+}
+static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t deadline, int *waited) {
+    uint64_t now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0, drain_ns = 0;
+    int follow = 1;
+    if (!dm_detclock_enabled()) {
+        uint64_t period = present_period(o), p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
-        else if (snap && mtl_link_active() && mtl_link_stalled()) { o->follow = 0; if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
+        else if (snap && mtl_link_active() && mtl_link_stalled()) {   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
             // frames are dropped as fast as they come and nothing frees a ring slot later, so the texture's slot time paces the game: unpaced, Breath of the Wild ran 3 to 4.5 times real time there.
             // Otherwise snapshots take the display link's wait below like any present. The wait for a free ring slot (mtl_snap_acquire_wait) alone did not pace: the link takes frames in
             // order and drops all but the newest two, and a dropped frame frees its slot, so Donkey Kong Bananza at the 30 fps cap ran 43-65 fps of game time and dropped about 110 of every 300 frames
-        else if (mtl_link_active()) { if (!link_wait(o, period ? 2 * period : 33333333ull)) { o->follow = 0; if (wait) sleep_until_ns(at); } }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
-        else { o->follow = 0; if (wait) sleep_until_ns(at); }
-        if (!present_unpaced(o) && mtl_present_screen_wait(period / 1e9)) atomic_store(&g_screen_at, now_ns());   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
+            follow = 0;
+            if (wait) { *waited = 1; if (deadline < at) { sleep_until_ns(deadline); return 0; } sleep_until_ns(at); }
+        } else if (mtl_link_active()) {   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
+            uint64_t lt = period ? 2 * period : 33333333ull;
+            if (!link_ready(o)) *waited = 1;
+            if (timeout_ns < lt) {
+                if (!link_wait(o, timeout_ns)) return 0;
+            } else if (!link_wait(o, lt)) {
+                follow = 0;
+                uint64_t n2 = now_ns();
+                if (at > n2) { *waited = 1; if (deadline < at) { sleep_until_ns(deadline); return 0; } sleep_until_ns(at); }
+            }
+        } else {
+            follow = 0;
+            if (wait) { *waited = 1; if (deadline < at) { sleep_until_ns(deadline); return 0; } sleep_until_ns(at); }
+        }
+        if (!present_unpaced(o) && timeout_ns > 0) {
+            uint64_t sw = mtl_present_screen_wait(period / 1e9);   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
+            if (sw) { *waited = 1; atomic_store(&g_screen_at, now_ns()); }
+        }
         drain_ns = mtl_link_drain_take_ns();   // with it: the ticks a drain of standing frames added to the link's wait
         pace_ns = now_ns() - p0;
     } else {   // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
                // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
-        static int pace = -1; static uint64_t step, last;
-        if (pace < 0) { const char *e = getenv("DM_DETCLOCK_PACE"), *d = getenv("DM_DETCLOCK"); step = d ? strtoull(d, 0, 0) : 0; pace = e && atoi(e) && step; }
-        if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
+        det_pace_init();
+        if (g_det_pace) {
+            uint64_t t = now_ns();
+            if (g_det_last && t < g_det_last + g_det_step) {
+                uint64_t target = g_det_last + g_det_step;
+                *waited = 1;
+                if (deadline < target) { sleep_until_ns(deadline); return 0; }
+                sleep_until_ns(target);
+            }
+            g_det_last = now_ns();
+        }
     }
-    pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
-    g_acq_wait_ns += wait;
+    if (timeout_ns > 0) {
+        uint64_t sa = mtl_snap_acquire_wait();   // ring capacity is waited for before drawing, where the game does not hold its present lock
+        if (sa) *waited = 1;
+        pace_ns += sa;
+    }
+    atomic_fetch_add(&g_acq_wait_ns, wait);
     uint64_t woke = wait ? now_ns() : at;
     trow(g_frame, "@late_ms", woke > at ? (woke - at) / 1e6 : 0);   // a display-link tick can wake the acquire before the slot
-    // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
-    uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
-    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
-    if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
-    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_drain += drain_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    pthread_mutex_lock(&acq_mu);
+    o->follow = follow;   // the beat paces this frame only where the branches above waited for the slot time (nvn_pace_follow)
+    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_drain += drain_ns; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq); }   // the frame starts when the first acquire wait after a present finishes: on a display-link tick when on time
     else g_fs_drain_late += drain_ns;
+    pthread_mutex_unlock(&acq_mu);
+    return 1;
+}
+static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64_t *gpu_fence_out) {
+    uint64_t start = now_ns();
+    uint64_t deadline = timeout_ns == UINT64_MAX || timeout_ns > UINT64_MAX - start ? UINT64_MAX : start + timeout_ns;
+    pthread_mutex_lock(&acq_mu);
+    for (;;) {
+        if (aw->done == 2) {
+            if (gpu_fence_out) *gpu_fence_out = aw->gpu_fence;
+            pthread_mutex_unlock(&acq_mu);
+            return 1;
+        }
+        if (aw->done == 0) break;
+        if (!timeout_ns) { pthread_mutex_unlock(&acq_mu); return 0; }
+        *waited = 1;
+        if (timeout_ns == UINT64_MAX) pthread_cond_wait(&acq_cv, &acq_mu);
+        else {
+            uint64_t now = now_ns();
+            if (now >= deadline) { pthread_mutex_unlock(&acq_mu); return 0; }
+            uint64_t left = deadline - now;
+            struct timespec ts = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+            pthread_cond_timedwait_relative_np(&acq_cv, &acq_mu, &ts);
+        }
+    }
+    aw->done = 1;
+    win_t *o = aw->win;
+    uint64_t at = aw->avail, tk = aw->ticket, gf = aw->gpu_fence;
+    int paced = aw->paced;
+    pthread_mutex_unlock(&acq_mu);
+    if (gpu_fence_out) *gpu_fence_out = gf;
+
+    if (!o) {
+        pthread_mutex_lock(&acq_mu);
+        uint64_t drop = aw->ticket; aw->ticket = 0; aw->done = 2;
+        pthread_cond_broadcast(&acq_cv);
+        pthread_mutex_unlock(&acq_mu);
+        if (drop) nvn_queue_present_release(drop);
+        return 1;
+    }
+    if (!timeout_ns && ((!paced && !acq_pace_ready(o, at)) || (tk && !nvn_queue_present_ready(tk)))) {
+        pthread_mutex_lock(&acq_mu);
+        aw->done = 0;
+        pthread_cond_broadcast(&acq_cv);
+        pthread_mutex_unlock(&acq_mu);
+        return 0;
+    }
+
+    int ok = 1;
+    if (!paced) {
+        uint64_t rem = timeout_ns == UINT64_MAX ? UINT64_MAX : !timeout_ns ? 0 : now_ns() >= deadline ? 0 : deadline - now_ns();
+        ok = acq_pace_do(o, at, rem, deadline, waited);
+        if (ok) {
+            pthread_mutex_lock(&acq_mu);
+            aw->paced = 1;
+            pthread_mutex_unlock(&acq_mu);
+        }
+    }
+    if (ok && tk) {
+        if (!nvn_queue_present_ready(tk)) *waited = 1;
+        uint64_t rem = timeout_ns == UINT64_MAX ? UINT64_MAX : !timeout_ns ? 0 : now_ns() >= deadline ? 0 : deadline - now_ns();
+        uint64_t w0 = now_ns();
+        ok = nvn_queue_present_wait_timeout(tk, rem);
+        if (ok) atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0);
+    }
+
+    uint64_t release_tk = 0;
+    pthread_mutex_lock(&acq_mu);
+    if (ok) { release_tk = aw->ticket; aw->ticket = 0; aw->win = NULL; aw->done = 2; }
+    else aw->done = 0;
+    pthread_cond_broadcast(&acq_cv);
+    pthread_mutex_unlock(&acq_mu);
+    if (release_tk) nvn_queue_present_release(release_tk);
+    return ok;
+}
+NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+    win_t *o = (win_t *)w;
+    // If a prior deferred acquire on this window was never waited on via CPU nvnSyncWait (e.g. only nvnQueueWaitSync), drain its pacing & ticket wait now so pacing stays one wait per frame
+    pthread_mutex_lock(&acq_mu);
+    acq_wait_t *prev = (acq_wait_t *)o->pending_acq;
+    o->pending_acq = NULL;
+    pthread_mutex_unlock(&acq_mu);
+    if (prev) { int dummy = 0; acq_wait_run(prev, UINT64_MAX, &dummy, NULL); acq_wait_unref(prev); }
+
+    int n = window_active(o);
+    *idx = n ? o->next++ % n : 0;
+    if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
+        uint64_t period = present_period(o);
+        rt_acquire(rt_period_ns(o, period));
+    }
+    // Snapshot this slot's earliest display-release time and take ownership of its previous present receipt now, before a concurrent present thread can enqueue a new present for *idx
+    uint64_t at = 0, tk = 0;
+    pthread_mutex_lock(&acq_mu);
+    if (*idx >= 0 && *idx < 4) { at = o->avail[*idx]; tk = o->ticket[*idx]; o->ticket[*idx] = 0; }
+    pthread_mutex_unlock(&acq_mu);
+
+    if (!s) {
+        int dummy = 0;
+        acq_pace_do(o, at, UINT64_MAX, UINT64_MAX, &dummy);
+        if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0); }
+        return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
+    }
+
+    acq_wait_t *aw = calloc(1, sizeof *aw);
+    if (!aw) die("acquire wait allocation failed");
+    aw->win = o;
+    aw->avail = at;
+    aw->ticket = tk;
+    aw->gpu_fence = mtl_last_fence();
+    aw->refs = 2;   // 1 for win->pending_acq, 1 for sync_t
+    pthread_mutex_lock(&acq_mu);
+    o->pending_acq = aw;
+    pthread_mutex_unlock(&acq_mu);
+    nvn_sync_set_acq((sync_t *)s, (uintptr_t)aw);
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
 NVN(nvnWindowFinalize, void, NVNwindow *w) {
-    win_t *o=(win_t *)w;
-    for(int i=0;i<4;i++) { nvn_queue_present_release(o->ticket[i]); o->ticket[i]=0; }
+    win_t *o = (win_t *)w;
+    uint64_t drop[5] = {0}; int nd = 0;
+    pthread_mutex_lock(&acq_mu);
+    acq_wait_t *aw = (acq_wait_t *)o->pending_acq;
+    if (aw) {
+        while (aw->done == 1) pthread_cond_wait(&acq_cv, &acq_mu);
+        if (aw->done == 0) {
+            aw->done = 2; aw->win = NULL;
+            if (aw->ticket) { drop[nd++] = aw->ticket; aw->ticket = 0; }
+            pthread_cond_broadcast(&acq_cv);
+        }
+        o->pending_acq = NULL;
+    }
+    for (int i = 0; i < 4; i++) { if (o->ticket[i]) { drop[nd++] = o->ticket[i]; o->ticket[i] = 0; } }
+    pthread_mutex_unlock(&acq_mu);
+    if (aw) acq_wait_unref(aw);
+    for (int i = 0; i < nd; i++) nvn_queue_present_release(drop[i]);
 }
 NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue *q, NVNwindow *w, int *idx) {
     (void)q; return h_nvnWindowAcquireTexture(w, NULL, idx) == NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS ? (NVNqueueAcquireTextureResult)0 : (NVNqueueAcquireTextureResult)1;
@@ -2159,7 +2469,7 @@ static void dump_frame(void) {
     else if (g_frame % 300 == 0) LOG("[nvn] frame %llu: %u functions %llu calls", g_frame, nfn, total);
     g_frame++; cs_dump();
 counts_done:
-    // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
+    // Every 300 frames read resident memory for the graphics layer's memory report (mtl_mem_stat). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
     if (g_frame % 300 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb);
@@ -2176,6 +2486,7 @@ static double g_pres_exp[TWIN], g_pres_exp_last;   // how long that frame should
 // The hold (60 Hz vsyncs) each present was given, by present number. On-screen intervals are read 8 presents late, so each is judged against the holds of its own presents:
 // with the frame step at 2 vsyncs every frame stays 33.3 ms, which is not a dropped frame
 static uint8_t g_hold_ring[16];
+static _Atomic int g_fs_fine;   // nvn_fstep.fine (fstep_tick): frames late at hold 2, the longest a 30 fps cap allows, each shown at the next vsync after its hold (nvn_game_fps)
 static int fstep_hz(void);
 static double pres_expect_ms(uint64_t n) {   // the interval between presents n - 1 and n shows frame n - 1: the display link holds it for its own present's hold, the Mac pacer spaces present n by n's, so the larger of the two
     int k = g_hold_ring[n % 16] > g_hold_ring[(n - 1) % 16] ? g_hold_ring[n % 16] : g_hold_ring[(n - 1) % 16];
@@ -2290,15 +2601,16 @@ static void tsummary(uint64_t frame) {
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
-    double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)
+    double tgt = 1000.0 / (atomic_load(&g_fs_fine) ? 30 : mtl_fps_target());   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 or at a 30 cap whose late frames the 60 Hz link shows (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > tgt;
         LOG("[nvn] frame interval up to frame %llu: >%.1fms %u / %u frames, p99 %.2f ms", frame, tgt, over, n, v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1]); } }
-    { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
-      for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
+    { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0, over[3] = {0}; double v[TWIN], vs = 1000.0 / fstep_hz();   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
+      // over: intervals at their hold, one vsync longer and two or more longer (at hold 2: 33.3 / 50 / 66.7 ms and more; a frame late at hold 2 shows 50 ms on the 60 Hz link, 66.7 on the 30 Hz one)
+      for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; over[x < g_pres_exp[i] + 0.5 * vs ? 0 : x < g_pres_exp[i] + 1.5 * vs ? 1 : 2]++; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
-      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
+      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; intervals at the hold / one vsync longer / two or more %u / %u / %u; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], over[0], over[1], over[2], fp, br, dm_thermal_now()); }
       g_presn = 0; }
     power_line(frame);
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -2320,8 +2632,9 @@ static void tsummary(uint64_t frame) {
             LOG("[nvn] thread policy: %s; %u guest worker threads QoS %#x; present QoS %#x", rl, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
-    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
+    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc, ea, eb, ep, ef, efb; mtl_pkg_stats(&up, &re); mtl_pkg_edge_stats(&ea, &eb, &ep, &ef, &efb); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
+    { uint64_t sh, st, sm; mtl_spare_stats(&sh, &st, &sm); LOG("[nvn] packaged textures' spares: held %llu, retired idle or at memory pressure %llu, %llu MB", (unsigned long long)sh, (unsigned long long)st, (unsigned long long)sm); }
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu, edge snapshots %llu (%llu KB, peak %llu KB, failed %llu / %llu KB); write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, (unsigned long long)ea, (unsigned long long)(eb >> 10), (unsigned long long)(ep >> 10), (unsigned long long)ef, (unsigned long long)(efb >> 10), fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),
@@ -2545,7 +2858,11 @@ static int fps_high(void) {
     }
     return v;
 }
-static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the frame step counts in
+// Ticks of 1/120 s for a frame step state page in that unit (nvn_fstep.h FSTEP_UNIT_OFF: a FRAME_STEP_120 stub, written by the loader before the game runs, fixed
+// for the run) while the host steps the game (target above 0): steps and holds are counted in them at every cap, 2 / 3 / 4 at 60 / 40 / 30 fps (nvn_fstep.t120),
+// and presentation follows them. At a target of 0 the game's own interval logic runs, in vsyncs as before
+static int fstep_t120(void) { return nvn_fstep_t120(dm_fps_state) && nvn_fstep_target(dm_fps_state) > 0; }
+static int fstep_hz(void) { return fps_high() || fstep_t120() ? 120 : 60; }   // the ticks the frame step counts in
 // Once per present: what the screen and the game's state allow now, and a display link at the rate the screen can show (DM_PRESENT_LINK keeps its own choice)
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
@@ -2555,15 +2872,34 @@ static void high_cap_tick(void) {
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
+// 40 fps (a target of 40 in a page in ticks of 1/120 s): each frame 3 ticks of a 120 Hz link, 25 ms, which only a screen at a multiple of 120 Hz shows evenly (on a 60 Hz link it
+// would be 1 or 2 refreshes, 16.7 or 33.3 ms). Elsewhere the cap is 30, with a line. No window (headless): the pacer's clock holds 25 ms. Uses front_screen_capable_fps() so a
+// Mac ProMotion screen temporarily switched to fixed 60 Hz by front_screen_match during a movie still returns to 40 fps afterwards. Checks Low Power Mode first because iOS
+// front_screen_max_fps() already clamps ProMotion to 60 Hz in Low Power Mode
+static const char *fps40_refused(void) {
+    if (!fstep_t120()) return "this build's frame step takes whole vsyncs of 1/60 s only";
+    if (!mtl_has_window()) return NULL;
+    const char *le = getenv("DM_PRESENT_LINK");
+    if (le && atoi(le) != 0 && atoi(le) != 2) return "DM_PRESENT_LINK=1 pins the display link to 60 Hz";
+    if (dm_low_power_now()) return "Low Power Mode limits the screen to 60 Hz";
+    int hz = front_screen_capable_fps();
+    if (hz <= 0) hz = mtl_display_hz();
+    if (hz < 120 || hz % 120) return "the screen does not run at a multiple of 120 Hz";
+    return NULL;
+}
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
-    uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
+    float t = nvn_fstep_target(dm_fps_state);
     if (t <= 0) return 0;
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
-    int thermal = thermal_capped(), movie = dm_movie_hz();
-    if (movie) return movie >= 50 && !thermal ? 60 : 30;   // a movie: its player takes a picture per game frame, so the step follows its pictures whatever the target, the thermal cap aside (hle_movie.c dm_movie_hz)
-    return t <= 30 || thermal ? 30 : 60;
+    int c = nvn_fstep_cap(t, dm_movie_hz(), thermal_capped());   // a movie: its player takes a picture per game frame, so the step follows its pictures whatever the target, the thermal cap aside (hle_movie.c dm_movie_hz)
+    if (c == 40) {
+        const char *why = fps40_refused(); static _Atomic(const char *) why_was;
+        if (why != atomic_exchange(&why_was, why) && why) LOG("[nvn] 40 fps: %s, so the frame step holds 30", why);
+        if (why) c = 30;
+    }
+    return c;
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
 // Engine-native frame limiters have no frame-step state page. Their requested
@@ -2596,13 +2932,15 @@ static int fps_present_cap(void) {
 static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
-// The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force
+// The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override) and while frames are late at hold 2 (nvn_fstep.h fine): the 30 Hz link
+// shows a late frame only on its next tick, 66.7 ms after the one before, where the 60 Hz link, which holds each frame its two vsyncs (g_link_hold_until, nvn_mtl.m), shows it at the next
+// vsync, 50 ms. Ocarina of Time on an iPhone at the launcher's 30 fps cap (frames 36.5 ms) got 33 intervals of 66.7 ms in each 300 on the 30 Hz link
+int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force (120 fps games only: no state page)
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
 int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
+int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && (atomic_load(&g_fs_k) == fstep_hz() / 60 || atomic_load(&g_fs_fine)) && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -2633,18 +2971,38 @@ static int present_unpaced(const win_t *o) { present_cfg(o); return o->interval 
 static int window_interval(const win_t *o) { present_cfg(o); return g_display_mode ? present_itv(o) : o->interval; }
 // The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
-static int link_wait(const win_t *o, uint64_t timeout_ns) {
-    static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
-    if (fps_high()) { int t = present_itv(o) * mtl_link_rate() / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }   // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz
+static int g_link_hz_was, g_link_rate_was, g_link_rem;   // protected by acq_mu
+static int link_ready(const win_t *o) {
+    if (fps_high() || fstep_t120()) { int t = (present_itv(o) * mtl_link_rate() + 119) / 120; return mtl_link_ready_ticks(t < 1 ? 1 : t); }
     int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
-    if (hz != hz_was || rate != rate_was) { remainder = 0; hz_was = hz; rate_was = rate; }
     if (hz) {
-        int ticks = 1;
+        pthread_mutex_lock(&acq_mu);
+        int rem = hz == g_link_hz_was && rate == g_link_rate_was ? g_link_rem : 0;
+        pthread_mutex_unlock(&acq_mu);
+        int ticks = rate > hz ? (rem + rate) / hz : 1;
+        return mtl_link_ready_ticks(ticks);
+    }
+    return mtl_link_ready_tick(present_itv(o));
+}
+static int link_wait(const win_t *o, uint64_t timeout_ns) {
+    // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz (or 30 at a 30 fps cap): rounded up, so a hold the link cannot show (3 ticks on a 60 Hz link while it changes to 120) stays longer, not shorter
+    if (fps_high() || fstep_t120()) { int t = (present_itv(o) * mtl_link_rate() + 119) / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }
+    int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
+    if (hz) {
+        pthread_mutex_lock(&acq_mu);
+        int rem = hz == g_link_hz_was && rate == g_link_rate_was ? g_link_rem : 0;
+        pthread_mutex_unlock(&acq_mu);
+        int ticks = 1, nrem = rem;
         // Keep the fractional link tick: 90 fps on a 120 Hz link takes 1, 1, 2 ticks, rather than truncating every wait to 1 (120 fps).
         // A requested rate at or above the link's rate takes one tick; changing the rate or returning from game/step pacing starts a new phase.
-        if (rate > hz) { remainder += rate; ticks = remainder / hz; remainder %= hz; }
-        return mtl_link_wait_ticks(ticks, timeout_ns);
+        if (rate > hz) { nrem += rate; ticks = nrem / hz; nrem %= hz; }
+        int ok = mtl_link_wait_ticks(ticks, timeout_ns);
+        if (ok) { pthread_mutex_lock(&acq_mu); g_link_hz_was = hz; g_link_rate_was = rate; g_link_rem = nrem; pthread_mutex_unlock(&acq_mu); }
+        return ok;
     }
+    pthread_mutex_lock(&acq_mu);
+    if (g_link_hz_was || g_link_rate_was != rate) { g_link_rem = 0; g_link_hz_was = 0; g_link_rate_was = rate; }
+    pthread_mutex_unlock(&acq_mu);
     return mtl_link_wait_tick(present_itv(o), timeout_ns);
 }
 static uint64_t present_period(const win_t *o) {
@@ -2696,29 +3054,48 @@ static int fstep_hold(void) {
     }
     return h;
 }
+// The longest hold the frame step may give at cap c (nvn_fstep_next's kmax), and why it may go no higher, for the log: a 30 fps cap's display link runs at 30 Hz, where a hold of 3
+// would take two ticks (66.7 ms), so it holds 2 and late frames are shown at the next vsync instead (nvn_fstep.h fine)
+static int fstep_kmax(int c, const char **why) {
+    int t120 = fstep_t120(), kv = t120 ? 2 : 1, kmin = fstep_hz() / c;
+    if (fps_high()) { *why = "120 fps: the game steps by its target, so a late frame steps down to 60 and no further"; return 2; }
+    if (!fstep_hold()) { *why = "fps_hold off: frames are not held longer than the cap's vsyncs"; return kmin; }
+    if (c == 40 && t120) { *why = "at 40 fps the hold falls back one tick to 30 fps (4 ticks of 1/120 s) and no further"; return 4; }
+    if (kmin >= 2 * kv) { *why = "the 30 fps cap's display link runs at 30 Hz, where a hold of 3 would take 66.7 ms; late frames are shown at the next vsync of a 60 Hz link instead"; return 2 * kv; }
+    *why = "the games' own interval logic uses 1-3"; return FSTEP_MAX * kv;
+}
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
-// Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
+// Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs (ticks of 1/120 s at 120 fps and with t120)
 static void fstep_tick(const win_t *o, int c) {
-    static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
+    static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_HOLD_TOP + 1], seen_focus, seen_settle; static int nlog;
     const double v = 1e9 / fstep_hz();
-    uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
+    const int t120 = fstep_t120(), kv = t120 ? 2 : 1;   // ticks per 1/60 s vsync
+    pthread_mutex_lock(&acq_mu);
+    uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait;
+    uint64_t f_at = g_fs_start ? g_fs_focus_at : dm_focus_in_since();
+    uint64_t s_at = g_fs_start ? g_fs_settle_at : atomic_load(&g_fs_settle_seq);
+    uint64_t fs_drain = g_fs_drain, fs_drain_late = g_fs_drain_late;
+    g_fs_start = g_fs_wait = g_fs_drain = g_fs_drain_late = 0;
+    pthread_mutex_unlock(&acq_mu);
     // A drain of standing frames (g_fs_drain) comes out of the frame's time as far as it made the frame longer than its hold (nvn_fstep_drain_cut)
     static uint64_t drain_before;   // a drain in a later acquire of the previous frame: in this frame's time since that start, not in its pacing wait
     static uint64_t drain_n, drain_cut;   // frames a drain shortened and the time cut (ns), for the 1800-present line
     uint64_t span = prev && st > prev ? st - prev : 0, raw = span;
-    span = nvn_fstep_drain_cut(span, (uint64_t)((g_fs.k ? g_fs.k : fstep_hz() / c) * v), g_fs_drain, drain_before, &pw);
+    span = nvn_fstep_drain_cut(span, (uint64_t)((g_fs.k ? g_fs.k : fstep_hz() / c) * v), fs_drain, drain_before, &pw);
     if (span < raw) { drain_n++; drain_cut += raw - span; }
-    drain_before = g_fs_drain_late; g_fs_drain = g_fs_drain_late = 0;
-    double shown = prev ? span / v : 0, gpu = 0; prev = st;
-    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
+    drain_before = fs_drain_late;
+    int settled = prev && (f_at != seen_focus || s_at != seen_settle);
+    seen_focus = f_at; seen_settle = s_at;
+    double shown = prev ? span / v : 0, gpu = 0; prev = st; int gpu_on = 0;
+    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; gpu_on = 1; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
-    int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
-         kmin0 = g_fs.kmin, probe0 = g_fs.probe;
+    const char *kwhy; int kmin = fstep_hz() / c, kmax = fstep_kmax(c, &kwhy), k0 = g_fs.k;   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
+    int kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
-    int hz = front_screen_max_fps(); g_fs.shown_slack = hz > fstep_hz() && hz % fstep_hz() && mtl_link_active() ? (double)fstep_hz() / hz : 0;
+    int hz = front_screen_max_fps(), lr = mtl_link_rate(); g_fs.shown_slack = hz > lr && hz % lr && mtl_link_active() ? (double)fstep_hz() / hz : 0;
     int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, &g_fs, kmin) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
@@ -2730,32 +3107,44 @@ static void fstep_tick(const win_t *o, int c) {
         if (a < 0) g_fs.screen = 2; else if (a > 0 && b > 0) g_fs.screen = (a - b) * 1e3 > 1.25 * pres_expect_ms(pn) ? 2 : 1;
         static uint16_t slow_bits; static int slow_k; int k = g_fs.k ? g_fs.k : kmin;
         if (k != slow_k) { slow_k = k; slow_bits = 0; }   // judged against the hold in force, not the frames before a step
-        slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE));
+        slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE * kv));
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
-    g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.settle = settled;   // a pause ended, graphics resumed, or the window changed: this frame and the grace after it are not what the scene costs
+    g_fs.per_vsync = fstep_hz() / 60; g_fs.t120 = t120;
     g_fs.smax = dm_fps_step_max;   // the stub's largest step (Mario Kart World: 2): frames held longer than the game steps would play in slow motion
     g_fs.no_payback = fps_high();   // at 120 fps the game steps by its target, not by the step: a late frame is slow motion, so three raise the hold whatever the average
+    g_fs.gpu_on = gpu_on; g_fs.gpu = gpu;   // an idle GPU's late frames do not step up; a hold the GPU does not explain is probed (nvn_fstep.h)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
+    int fine = g_fs.fine && c == 30 && !fps_high(), fine0 = atomic_exchange(&g_fs_fine, fine);   // only a 30 fps cap's link runs slower than the vsyncs
+    if (fine != fine0) mtl_set_fstep_fine(fine);
+    static int nfine;
+    if (fine != fine0 && nfine < 40) {
+        if (fine) LOG("[nvn] frame step: frames late at hold %d, the longest the 30 fps cap allows (cost %.2f, GPU %.2f %s): each is shown at the next vsync (a 60 Hz display link: 50 ms) instead of a 30 Hz link's next tick (66.7 ms), at present %llu%s", g_fs.k, cost, gpu, t120 ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
+        else LOG("[nvn] frame step: %s: the 30 fps cap's own 30 Hz display link again at present %llu%s", c != 30 ? "the cap is no longer 30 fps" : fixed ? "the game fixes its own step" : g_fs.k < kmax ? "the hold may rise again" : "no late frame for 8 s", (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
+    }
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }
     fixed_was = fixed;
     if (k0 && g_fs.k != k0 && nlog < 40) {
-        char why[160], held[48] = ""; int w = snprintf(why, sizeof why, "probe");
+        char why[256], held[48] = ""; int w = snprintf(why, sizeof why, "probe");
         if (cslow) w += snprintf(why + w, sizeof why - w, ", CPU %d%% on performance cores", g_fs_pshare);
         double gr = nvn_fgpu_ratio(&g_fg);   // the failed probes' ratio: the scene's time at kmin is cur over it
         if (gslow && gr > 0) w += snprintf(why + w, sizeof why - w, ", GPU %.2f at hold %d, %.2f at hold %d by the failed probes", g_fg.cur, g_fg.k, g_fg.cur / gr, kmin);
         else if (gslow) w += snprintf(why + w, sizeof why - w, ", GPU %.2f× its time at hold %d", g_fg.cur / g_fg.ref, kmin);
-        if (nvn_fstep_same(&g_fs)) snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
+        if (w >= (int)sizeof why) w = sizeof why - 1;
+        if (nvn_fstep_same(&g_fs)) w += snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
+        if (w >= (int)sizeof why) w = sizeof why - 1;   // snprintf returns the length it would have written
+        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
-        LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
-            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? "3 late frames" : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
+        LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() || t120 ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
+            fixed ? "the game's own step" : kmin0 == FSTEP_OWN ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
     }
     if (probe0 == 1 && g_fs.probe != 1 && !fixed && nlog < 40) {   // whether the controller raised the clock for the shorter deadline, and the GPU time it measured there
         char gm[96] = "";
@@ -2765,13 +3154,19 @@ static void fstep_tick(const win_t *o, int c) {
     else if (probe0 == 2 && !g_fs.probe && g_fs.failed != failed0 && nlog < 40)
         LOG("[nvn] frame step: the run at hold %d after the probe lasted under %.0f s, counted as a failed probe (CPU %d%% on performance cores)%s", kmin, FSTEP_HOLD_MAX / 60, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
-        if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials); standing-frame drains taken out of %llu frames (%.1f ticks)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)drain_n, drain_cut / v); memset(held, 0, sizeof held); drain_n = drain_cut = 0; }
+        if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls, (unsigned long long)drain_n, drain_cut / v); memset(held, 0, sizeof held); drain_n = drain_cut = 0; }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
-        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials); standing-frame drains taken out of %llu frames (%.1f vsyncs)",
-                    (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
-                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed,
-                    (unsigned long long)drain_n, drain_cut / v);
+        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();   // the units stepped: vsyncs, or ticks with t120
+        const double ups = t120 ? 120.0 : 60.0;
+        char fn[96] = ""; if (kmax == 2 * kv && kmin == 2 * kv) snprintf(fn, sizeof fn, ", now %s (switched to the next vsync %llu× so far)", g_fs.fine ? "at the next vsync" : "on the 30 Hz link", (unsigned long long)g_fs.fines);
+        if (t0 && t120) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 2 / 3 / 4 / 6 ticks of 1/120 s %llu / %llu / %llu / %llu frames, %llu late, %llu ticks paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks); cap %d fps, hold at most %d ticks of 1/120 s: %s%s",
+                    (vs - v0) / ups, (t - t0) / 1e9, (vs - v0) / ups / ((t - t0) / 1e9), (unsigned long long)held[2], (unsigned long long)held[3], (unsigned long long)held[4], (unsigned long long)held[6],
+                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls,
+                    (unsigned long long)drain_n, drain_cut / v, c, kmax, kwhy, fn);
+        else if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f vsyncs); cap %d fps, hold at most %d vsyncs: %s%s",
+                    (vs - v0) / ups, (t - t0) / 1e9, (vs - v0) / ups / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
+                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls,
+                    (unsigned long long)drain_n, drain_cut / v, c, kmax, kwhy, fn);
         t0 = t; v0 = vs; memset(held, 0, sizeof held); drain_n = drain_cut = 0;
     }
 }
@@ -2796,8 +3191,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     int movie = dm_movie_hz();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)(movie != 0), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
-    if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
-        LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, why); was = c; } }
+    if (dm_fps_state) { static int was; if (c != was) { char why[64] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was > 30 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
+        else if (c == 30 && was > 30 && nvn_fstep_target(dm_fps_state) > 30) snprintf(why, sizeof why, " (40 fps not shown here: the line above)");
+        char kw[256] = ""; const char *kwhy; if (c) snprintf(kw, sizeof kw, ": hold at most %d %s, %s", fstep_kmax(c, &kwhy), fstep_t120() ? "ticks of 1/120 s" : "vsyncs", kwhy);   // the cap and why the hold may not rise above it, so a log shows both at once
+        LOG("[nvn] frame step cap %d → %d fps at present %llu%s%s", was, c, (unsigned long long)o->presents, why, kw); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
@@ -2823,8 +3220,12 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t t0 = now_ns();
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
-        nvn_queue_present_release(o->ticket[idx]);
-        o->ticket[idx] = nvn_queue_present((queue_t *)q,t,present_period(o) / 1e9,crop);
+        uint64_t new_tk = nvn_queue_present((queue_t *)q, t, present_period(o) / 1e9, crop);
+        pthread_mutex_lock(&acq_mu);
+        uint64_t old_tk = o->ticket[idx];
+        o->ticket[idx] = new_tk;
+        pthread_mutex_unlock(&acq_mu);
+        if (old_tk) nvn_queue_present_release(old_tk);
     }
     gfx_leave();
     // Diagnostic DM_NVN_PRESENT_FINISH=1 (off by default): a present returns once the GPU has run the frame, so the game never runs ahead of the GPU
@@ -2852,7 +3253,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@sync_ms", atomic_exchange(&g_sync_ns, 0) / 1e6); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
-        trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
+        trow(f, "@wait_ms", atomic_exchange(&g_acq_wait_ns, 0) / 1e6); trow(f, "@pq_wait_ms", atomic_exchange(&g_pq_wait_ns, 0) / 1e6);
         if (frame_rec()) {
             static pthread_t pth; static uint64_t pcpu, pproc;
             uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); pthread_t th = pthread_self();
@@ -2890,8 +3291,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
         trow(f, "@drawable_ms", mtl_drawable_ns_take() / 1e6);
         trow(f, "@sub_wall_ms", atomic_exchange(&g_sub_wall_ns, 0) / 1e6); trow(f, "@sub_cpu_ms", atomic_exchange(&g_sub_cpu_ns, 0) / 1e6); trow(f, "@sub_instr", (double)atomic_exchange(&g_sub_instr, 0));
-    } else atomic_store(&g_nvn_ns, 0);
-    g_acq_wait_ns = g_pq_wait_ns = 0;
+    } else { atomic_store(&g_nvn_ns, 0); atomic_store(&g_acq_wait_ns, 0); atomic_store(&g_pq_wait_ns, 0); }
     if (f >= 8) { double g = mtl_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_hr[g_hn++ % HRN] = g; }   // GPU time is taken 8 frames late (already completed)
         { lf_rec *r = &g_lf[(f - 8) % LFN]; if (g >= 0 && r->f == f - 8) mtl_ab_gpu(f - 8, g, r->fr); }   // DM_AB phases
         { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
@@ -2918,10 +3318,13 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Kept on its own phase, the pacer counted the wait as lateness and paid it back with short frames: frame starts of 25, 25, 48 ms at a 30 fps cap without the display link
     // (the screen still showed every frame for 33.3 ms). A frame the display link paced restarts the beat at its present anyway (nvn_pace_follow), and the screen wait runs only without it
     { uint64_t r = atomic_exchange(&g_screen_at, 0); if (r > pc.target) pc.target = r; }
+    pthread_mutex_lock(&acq_mu);
+    int follow = o->follow;
+    pthread_mutex_unlock(&acq_mu);
     uint64_t slot = now;   // a frame the display link paced (or nothing did) is shown from its present on, and the beat follows it (nvn_pace_follow)
-    if (o->follow) nvn_pace_follow(&pc, now); else slot += nvn_pace(&pc, now, period);
+    if (follow) nvn_pace_follow(&pc, now); else slot += nvn_pace(&pc, now, period);
     o->pace = pc.target;
-    if (idx >= 0 && idx < 4) o->avail[idx] = period ? slot + period : 0;
+    if (idx >= 0 && idx < 4) { pthread_mutex_lock(&acq_mu); o->avail[idx] = period ? slot + period : 0; pthread_mutex_unlock(&acq_mu); }
     static uint64_t prev_slot; if (prev_slot && period) trow(f, "@display_ms", (slot - prev_slot) / 1e6); prev_slot = slot;   // display interval between two adjacent frames on screen (this is the one to look at for dropped frames)
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded
     if (o->presents > 9) { uint64_t n = o->presents - 8; double a_ = mtl_presented_time(n), b_ = mtl_presented_time(n - 1);
@@ -3024,8 +3427,9 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
 // mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
 enum { VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
-typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live; } vpte;   // live: the page has been mapped and may still be under a zero-copy buffer the GPU uses (see vunmap_defer)
-struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun, taken; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
+typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live, shadow; uint64_t wst; } vpte;   // live: may still be under a live GPU buffer (vunmap_defer); shadow: per-run copy in reservation (vshadow_map); wst: last copy-change stamp
+struct vshadow { uint64_t voff, size; const uint8_t *src; uint8_t *alias_base, *alias; uint64_t alias_len, stamp; uint8_t **snap; uint32_t np; };   // misaligned physical mapping kept as a per-run copy; alias: host RW vm_remap of physical pages (0 SIGSEGV writebacks); snap: lazy per-host-page snapshot allocated only on GPU-written pages
+struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun, taken, alias_reg; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; struct vshadow *sh; int nsh, csh; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB); alias_reg: counted in resource_vis (mtl_sparse_alias_delta)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
 enum { VLOG_N = 4096 };
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
@@ -3062,13 +3466,17 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     if (o->vmode == 2) LOG("[nvn] virtual pool %p (%#llx bytes, flags %#x): sparse, own address range %p+%#llx, physical pages are remapped into it", (const void *)o, (unsigned long long)o->size, o->flags, a, (unsigned long long)len);
     return a;
 }
+static void vshadow_free(struct vshadow *e);
+static _Atomic uint64_t g_sh_bytes;
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
+    if (v->alias_reg) { mtl_sparse_alias_delta(-1); v->alias_reg = 0; }
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
-    free(v->pt); free(v->log); free(v->run); free(v); o->vp = NULL;
+    for (int k = 0; k < v->nsh; k++) { atomic_fetch_sub(&g_sh_bytes, v->sh[k].size); vshadow_free(&v->sh[k]); }
+    free(v->pt); free(v->log); free(v->run); free(v->sh); free(v); o->vp = NULL;
 }
 static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
 // Pool finalize: the reservation goes (munmap) with its runs' buffers. The GPU finishes the work submitted so far first: the buffers' deferred release keeps them alive for that
@@ -3094,6 +3502,7 @@ static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
     }
     if (mapped) { nl[nn++] = (struct vrun){mlo, mhi}; add[na] = v->base + mlo; asz[na++] = mhi - mlo; }
     if (nd || na) mtl_pool_replace(del, nd, add, asz, na);
+    if (nn && !v->alias_reg) { mtl_sparse_alias_delta(1); v->alias_reg = 1; }
     free(del);
     for (int a = 1; a < nn; a++) for (int b = a; b > 0 && nl[b].lo < nl[b - 1].lo; b--) { struct vrun t = nl[b]; nl[b] = nl[b - 1]; nl[b - 1] = t; }
     if (nn > v->nrun && nn >= 1024 && !(nn & (nn - 1))) LOG("[nvn] virtual pool %p: %d separate mapped runs", (const void *)v->pool, nn);
@@ -3101,6 +3510,11 @@ static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
 }
 // Page table of a sparse pool (see above). Caller holds g_vp_mu
 static const vpte *vpt_get(const struct vpool *v, uint64_t o) { const vpte *l = v->pt[o >> 21]; return l ? &l[(o >> 12) & (VPT_LEAF - 1)] : NULL; }
+static const uint8_t *vpte_mem(const struct vpool *v, const vpte *e, uint64_t o) { return !e || !e->phys ? NULL : e->shadow ? v->base + (o & ~0xFFFull) : e->phys; }
+static void vshadow_written(struct vpool *v, uint64_t lo, uint64_t hi) {   // the shadow copy changed over [lo, hi): textures over it upload again (nvn_sparse_since)
+    nvn_dirty_touch(); uint64_t st = nvn_dirty_now();
+    for (uint64_t o = lo & ~0xFFFull; o < hi && o < v->size; o += 0x1000) { vpte *e = (vpte *)vpt_get(v, o); if (e && e->shadow) e->wst = st; }
+}
 // For the address notes (nvn_mtl.m dm_gfx_addr_note, DM_CTL "addr", the crash dump): the sparse pool an address is in, whether its page is mapped, and the mapped run holding it.
 // Takes g_vp_mu only if it is free (the crash dump may run with it held)
 void nvn_vpool_note(uint64_t a, char *note, size_t n) {
@@ -3110,9 +3524,9 @@ void nvn_vpool_note(uint64_t a, char *note, size_t n) {
         if (a < b || a >= b + v->len) continue;
         const vpte *e = vpt_get(v, a - b); int run = -1;
         for (int r = 0; r < v->nrun; r++) if (a - b >= v->run[r].lo && a - b < v->run[r].hi) { run = r; break; }
-        snprintf(note, n, " sparse pool %p (+%#llx of %#llx reserved, %d runs): page %s%s%#llx, %s", (void *)v->pool, (unsigned long long)(a - b), (unsigned long long)v->len, v->nrun,
+        snprintf(note, n, " sparse pool %p (+%#llx of %#llx reserved, %d runs): page %s%s%#llx%s, %s", (void *)v->pool, (unsigned long long)(a - b), (unsigned long long)v->len, v->nrun,
                  e && e->phys ? "mapped" : "not mapped", e && e->phys ? " from physical " : "", e && e->phys ? (unsigned long long)(uintptr_t)(e->phys + ((a - b) & 0xfff)) : 0ull,
-                 run >= 0 ? "in a mapped run" : "in no run");   // the physical address: where the game's CPU writes what the GPU reads here
+                 e && e->shadow ? " (shadow copy)" : "", run >= 0 ? "in a mapped run" : "in no run");
         break; }
     pthread_mutex_unlock(&g_vp_mu);
 }
@@ -3166,6 +3580,233 @@ static void vunmap_run(int all) {   // caller holds g_vp_mu; all: the pool is go
         }
     }
 }
+// Per-run shadow copies for misaligned sparse mappings (4 KB Switch physical source under a 16 KB host page, e.g. Immortals Fenyx Rising).
+// Where the virtual range [v->base + voff, +size) is host-page aligned but ph->mem + poff is only 4 KB aligned, Apple Silicon's 16 KB MMU cannot vm_remap it directly.
+// Each such request gets anonymous memory in the reservation over its own range and joins the normal run table (vrun_set; resource_vis includes MTL4VisibilityOptionResourceAlias
+// for sparse pools so replaced run buffers stay ordered on Metal 4). Unmaps go through normal vrun_set + vunmap_defer, freeing pages and returning zeros.
+// Coherence: CPU writes to physical pages are dirty-tracked and synced at submission replay start (nvn_shadow_sync); GPU writes back into physical memory use a zero-copy RW vm_remap
+// alias (0 SIGSEGV writeback faults, guest PROT_READ stays intact) and lazily allocate per-host-page snapshots only on GPU-written pages so concurrent CPU/GPU writes in the same host
+// page never clobber each other while static assets use 0 snapshot RAM. Caller holds g_vp_mu unless noted.
+static uint8_t *vshadow_phys_alias(const uint8_t *src, uint64_t size, uint8_t **base_out, uint64_t *len_out) {
+    uint64_t pg = (uint64_t)getpagesize();
+    uintptr_t lo = (uintptr_t)src & ~(uintptr_t)(pg - 1), hi = ((uintptr_t)src + size + pg - 1) & ~(uintptr_t)(pg - 1);
+    vm_address_t to = 0; vm_prot_t cur, max;
+    if (vm_remap(mach_task_self(), &to, hi - lo, 0, VM_FLAGS_ANYWHERE, mach_task_self(), (vm_address_t)lo, FALSE, &cur, &max, VM_INHERIT_NONE) != KERN_SUCCESS) {
+        *base_out = NULL; *len_out = 0; return (uint8_t *)src;
+    }
+    mprotect((void *)to, hi - lo, PROT_READ | PROT_WRITE);
+    *base_out = (uint8_t *)to; *len_out = hi - lo;
+    return (uint8_t *)to + ((uintptr_t)src - lo);
+}
+static uint32_t vshadow_npages(const uint8_t *src, uint64_t size) {
+    uint64_t pg = (uint64_t)getpagesize();
+    uintptr_t lo = (uintptr_t)src & ~(uintptr_t)(pg - 1), hi = ((uintptr_t)src + size + pg - 1) & ~(uintptr_t)(pg - 1);
+    return (uint32_t)((hi - lo) / pg);
+}
+static void vshadow_free(struct vshadow *e) {
+    if (e->snap) { for (uint32_t p = 0; p < e->np; p++) free(e->snap[p]); free(e->snap); e->snap = NULL; }
+    if (e->alias_base) { munmap(e->alias_base, e->alias_len); e->alias_base = NULL; e->alias_len = 0; }
+}
+static struct vshadow vshadow_slice(const struct vshadow *orig, uint64_t voff, uint64_t size) {
+    uint64_t pg = (uint64_t)getpagesize();
+    const uint8_t *src = orig->src + (voff - orig->voff);
+    uint8_t *abase = NULL; uint64_t alen = 0;
+    uint8_t *alias = vshadow_phys_alias(src, size, &abase, &alen);
+    uint32_t np = vshadow_npages(src, size);
+    uint8_t **snap = NULL;
+    if (orig->snap) {
+        uintptr_t obase = (uintptr_t)orig->src & ~(uintptr_t)(pg - 1), nbase = (uintptr_t)src & ~(uintptr_t)(pg - 1);
+        for (uint32_t p = 0; p < np; p++) {
+            uint32_t op = (uint32_t)((nbase + (uintptr_t)p * pg - obase) / pg);
+            if (op < orig->np && orig->snap[op]) {
+                if (!snap && !(snap = calloc(np, sizeof *snap))) die("sparse pool shadow snapshot table allocation failed");
+                if (!(snap[p] = malloc(pg))) die("sparse pool shadow snapshot page allocation failed");
+                memcpy(snap[p], orig->snap[op], pg);
+            }
+        }
+    }
+    return (struct vshadow){voff, size, src, abase, alias, alen, orig->stamp, snap, np};
+}
+static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop or trim shadow entries overlapping [lo, hi)
+    for (int i = 0; i < v->nsh; ) {
+        struct vshadow e = v->sh[i]; uint64_t a = e.voff, b = e.voff + e.size;
+        if (b <= lo || a >= hi) { i++; continue; }
+        v->sh[i] = v->sh[--v->nsh];
+        atomic_fetch_sub(&g_sh_bytes, e.size);
+        struct vshadow piece[2]; int np = 0;
+        if (a < lo) piece[np++] = vshadow_slice(&e, a, lo - a);
+        if (b > hi) piece[np++] = vshadow_slice(&e, hi, b - hi);
+        vshadow_free(&e);
+        for (int k = 0; k < np; k++) {
+            if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
+            v->sh[v->nsh++] = piece[k];
+            atomic_fetch_add(&g_sh_bytes, piece[k].size);
+        }
+    }
+}
+static void vshadow_drop_phys(const uint8_t *mem, uint64_t size) {   // physical pool Finalize: release any shadow entries still pointing into [mem, mem + size)
+    if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !size) return;
+    uintptr_t plo = (uintptr_t)mem, phi = plo + size;
+    pthread_mutex_lock(&g_vp_mu);
+    for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
+        for (int k = 0; k < v->nsh; ) { struct vshadow e = v->sh[k];
+            if ((uintptr_t)e.src + e.size <= plo || (uintptr_t)e.src >= phi) { k++; continue; }
+            v->sh[k] = v->sh[--v->nsh];
+            atomic_fetch_sub(&g_sh_bytes, e.size);
+            for (uint64_t o = 0; o < e.size; o += 0x1000) { vpte *pt = (vpte *)vpt_get(v, e.voff + o); if (pt) pt->shadow = 0; }
+            vshadow_free(&e);
+        }
+    }
+    pthread_mutex_unlock(&g_vp_mu);
+}
+static _Atomic uint64_t g_sh_sync, g_sh_wb;
+static int vshadow_map(struct vpool *v, const map_req *r, const uint8_t *src) {   // → 1 when the request is now a per-run shadow copy
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_SPARSE_COPY"); off = e && !strcmp(e, "0"); }
+    uint64_t pg = (uint64_t)getpagesize(); uint8_t *to = v->base + r->voff;
+    if (off || (uint64_t)r->voff + r->size > v->len || (((uintptr_t)to | r->size) & (pg - 1))) return 0;
+    if (mmap(to, r->size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
+        LOG("[RED] virtual pool %p: cannot make %#llx+%#llx a shadow copy (errno %d)", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, errno); return 0;
+    }
+    uint64_t stamp = nvn_dirty_now(); nvn_dirty_protect(src, r->size);
+    memcpy(to, src, r->size);
+    uint8_t *abase = NULL; uint64_t alen = 0;
+    uint8_t *alias = vshadow_phys_alias(src, r->size, &abase, &alen);
+    if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
+    v->sh[v->nsh++] = (struct vshadow){(uint64_t)r->voff, r->size, src, abase, alias, alen, stamp, NULL, vshadow_npages(src, r->size)};
+    for (uint64_t o = 0; o < r->size; o += 0x1000) { vpte *e = (vpte *)vpt_get(v, (uint64_t)r->voff + o); if (e) e->shadow = 1; }
+    vshadow_written(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
+    vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
+    uint64_t tot = atomic_fetch_add(&g_sh_bytes, r->size) + r->size;
+    if ((tot >> 26) != ((tot - r->size) >> 26) || tot == r->size)
+        LOG("[nvn] virtual pool %p: misaligned physical mapping (%#llx+%#llx from %p) kept as a per-run shadow copy (%llu MB live, %d runs)",
+            (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (const void *)src, (unsigned long long)(tot >> 20), v->nrun);
+    return 1;
+}
+static void vshadow_arm_entry(const struct vpool *v, struct vshadow *e, uint64_t s0, uint64_t s1) {   // caller holds g_vp_mu: lazily snapshot GPU-written host pages from v->base
+    uint64_t pg = (uint64_t)getpagesize();
+    uintptr_t sbase = (uintptr_t)e->src & ~(uintptr_t)(pg - 1);
+    uint32_t p0 = (uint32_t)(((uintptr_t)e->src + (s0 - e->voff) - sbase) / pg);
+    uint32_t p1 = (uint32_t)(((uintptr_t)e->src + (s1 - 1 - e->voff) - sbase) / pg);
+    if (!e->snap && !(e->snap = calloc(e->np, sizeof *e->snap))) die("sparse pool shadow snapshot table allocation failed");
+    for (uint32_t p = p0; p <= p1 && p < e->np; p++) {
+        if (e->snap[p]) continue;
+        if (!(e->snap[p] = malloc(pg))) die("sparse pool shadow snapshot page allocation failed");
+        uintptr_t plo = sbase + (uintptr_t)p * pg, phi = plo + pg;
+        memcpy(e->snap[p], e->alias_base ? e->alias_base + (size_t)p * pg : (const uint8_t *)plo, pg);
+        uintptr_t ov0 = plo > (uintptr_t)e->src ? plo : (uintptr_t)e->src;
+        uintptr_t ov1 = phi < (uintptr_t)e->src + e->size ? phi : (uintptr_t)e->src + e->size;
+        if (ov0 < ov1) memcpy(e->snap[p] + (ov0 - plo), v->base + e->voff + (ov0 - (uintptr_t)e->src), ov1 - ov0);
+    }
+}
+// Arm lazy snapshots for [a, a + n) when a GPU write or completion report targets a shadowed sparse page. → 1 if any shadowed page was hit.
+int nvn_shadow_arm(uint64_t a, uint64_t n) {
+    if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !n) return 0;
+    uint64_t end = n > UINT64_MAX - a ? UINT64_MAX : a + n;
+    int hit = 0; pthread_mutex_lock(&g_vp_mu);
+    for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
+        if (!v->nsh || end <= b || a >= b + v->size) continue;
+        uint64_t lo = a > b ? a - b : 0, hi = end - b < v->size ? end - b : v->size;
+        for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+            if (hi <= e->voff || lo >= e->voff + e->size) continue;
+            uint64_t s0 = lo > e->voff ? lo : e->voff, s1 = hi < e->voff + e->size ? hi : e->voff + e->size;
+            vshadow_arm_entry(v, e, s0, s1); hit = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_vp_mu); return hit;
+}
+// Write-backs that find g_vp_mu busy at completion are queued and drained at the next sync (under g_wbq_mu, never held while taking g_vp_mu)
+enum { WBQ_N = 4096 };
+static struct { uint64_t a, n; } g_wbq[WBQ_N]; static int g_nwbq, g_wbq_over; static pthread_mutex_t g_wbq_mu = PTHREAD_MUTEX_INITIALIZER;
+static void wb_locked(uint64_t a, uint64_t n) {   // caller holds g_vp_mu
+    uint64_t pg = (uint64_t)getpagesize(), end = n > UINT64_MAX - a ? UINT64_MAX : a + n;
+    int touched = 0;
+    for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
+        if (!v->nsh || end <= b || a >= b + v->size) continue;
+        uint64_t lo = a > b ? a - b : 0, hi = end - b < v->size ? end - b : v->size;
+        for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+            if (hi <= e->voff || lo >= e->voff + e->size) continue;
+            uint64_t s0 = lo > e->voff ? lo : e->voff, s1 = hi < e->voff + e->size ? hi : e->voff + e->size;
+            vshadow_arm_entry(v, e, s0, s1);
+            uintptr_t sbase = (uintptr_t)e->src & ~(uintptr_t)(pg - 1);
+            for (uint64_t c = s0; c < s1; ) {
+                uint64_t off = c - e->voff; uintptr_t pa = (uintptr_t)e->src + off;
+                uint32_t p = (uint32_t)((pa - sbase) / pg);
+                uint64_t in_pg = (uint64_t)(pa - (sbase + (uintptr_t)p * pg));
+                uint64_t chunk = 64 - (in_pg & 63);
+                if (chunk > pg - in_pg) chunk = pg - in_pg;
+                if (chunk > s1 - c) chunk = s1 - c;
+                uint8_t *sp = e->snap[p] + in_pg;
+                // Only write bytes the GPU actually changed relative to snap: leaves concurrent CPU writes to neighboring bytes in the same page intact
+                if (memcmp(sp, v->base + c, chunk)) {
+                    memcpy(e->alias + off, v->base + c, chunk);
+                    memcpy(sp, v->base + c, chunk);
+                    atomic_fetch_add(&g_sh_wb, chunk); touched = 1;
+                }
+                c += chunk;
+            }
+        }
+    }
+    if (touched) {
+        static _Atomic uint64_t nl; uint64_t k = atomic_fetch_add(&nl, 1) + 1;
+        if (k == 1 || !(k & (k - 1))) LOG("[nvn] sparse pool shadow copies: %llu GPU writebacks to physical pages (%llu KB changed)", (unsigned long long)k, (unsigned long long)(atomic_load(&g_sh_wb) >> 10));
+    }
+}
+void nvn_shadow_writeback(uint64_t a, uint64_t n) {
+    if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !n) return;
+    if (pthread_mutex_trylock(&g_vp_mu)) {
+        pthread_mutex_lock(&g_wbq_mu);
+        if (g_nwbq < WBQ_N) { g_wbq[g_nwbq].a = a; g_wbq[g_nwbq++].n = n; } else g_wbq_over = 1;
+        pthread_mutex_unlock(&g_wbq_mu);
+        return;
+    }
+    wb_locked(a, n);
+    pthread_mutex_unlock(&g_vp_mu);
+}
+// Sync CPU writes to physical pages behind shadowed sparse mappings at the start of each submission's replay (mtl_sub_begin)
+void nvn_shadow_sync(void) {
+    if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed)) return;
+    static uint64_t seen; uint64_t now = nvn_dirty_now(), pg = (uint64_t)getpagesize(), copied = 0;
+    pthread_mutex_lock(&g_vp_mu);
+    {   // Drain any writebacks queued while g_vp_mu was held before taking over CPU changes
+        pthread_mutex_lock(&g_wbq_mu); int nq = g_nwbq, over = g_wbq_over; static struct { uint64_t a, n; } q[WBQ_N];
+        if (nq) memcpy(q, g_wbq, (size_t)nq * sizeof *q);
+        g_nwbq = 0; g_wbq_over = 0; pthread_mutex_unlock(&g_wbq_mu);
+        for (int i = 0; i < nq; i++) wb_locked(q[i].a, q[i].n);
+        static int nl; if (over && nl++ < 4) LOG("[RED] sparse pool shadow copies: writeback queue overflowed");
+    }
+    if (now == seen) { pthread_mutex_unlock(&g_vp_mu); return; }
+    for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
+        for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+            if (!nvn_dirty_since(e->src, e->size, e->stamp)) continue;
+            uint64_t old = e->stamp; e->stamp = nvn_dirty_now(); nvn_dirty_protect(e->src, e->size);
+            uintptr_t sbase = (uintptr_t)e->src & ~(uintptr_t)(pg - 1);
+            for (uint32_t p = 0; p < e->np; p++) {
+                uintptr_t plo = sbase + (uintptr_t)p * pg;
+                uintptr_t lo = plo > (uintptr_t)e->src ? plo : (uintptr_t)e->src;
+                uintptr_t hi = plo + pg < (uintptr_t)e->src + e->size ? plo + pg : (uintptr_t)e->src + e->size;
+                if (!nvn_dirty_since((const void *)lo, hi - lo, old)) continue;
+                uint64_t o0 = lo - (uintptr_t)e->src, o1 = hi - (uintptr_t)e->src;
+                if (!e->snap || !e->snap[p]) {   // CPU-only host page: direct copy, 0 snapshot RAM
+                    memcpy(v->base + e->voff + o0, e->src + o0, o1 - o0); copied += o1 - o0;
+                    vshadow_written(v, e->voff + o0, e->voff + o1);
+                } else {   // GPU-written host page: copy only 64-byte chunks the CPU changed since snap
+                    uint64_t clo = ~0ull, chi = 0;
+                    for (uint64_t c = o0; c < o1; c += 64) {
+                        uint64_t ce = c + 64 < o1 ? c + 64 : o1, sp_off = (lo - plo) + (c - o0);
+                        if (!memcmp(e->snap[p] + sp_off, e->src + c, ce - c)) continue;
+                        memcpy(e->snap[p] + sp_off, e->src + c, ce - c);
+                        memcpy(v->base + e->voff + c, e->snap[p] + sp_off, ce - c);
+                        copied += ce - c; if (c < clo) clo = c; chi = ce;
+                    }
+                    if (chi) vshadow_written(v, e->voff + clo, e->voff + chi);
+                }
+            }
+        }
+    }
+    seen = now;
+    pthread_mutex_unlock(&g_vp_mu);
+    if (copied) { uint64_t n = atomic_fetch_add(&g_sh_sync, 1) + 1; if (n == 1 || !(n & (n - 1))) LOG("[nvn] sparse pool shadow copies: %llu CPU syncs (last %llu KB)", (unsigned long long)n, (unsigned long long)(copied >> 10)); }
+}
 static int vpool_overwrites(const struct vpool *v, const map_req *r) {   // does a mapping request put new pages over pages mapped before? Caller holds g_vp_mu
     if (!r->phys || r->voff < 0 || (uint64_t)r->voff + r->size > v->size) return 0;
     for (uint64_t o = 0; o < r->size; o += 0x1000) { const vpte *e = vpt_get(v, (uint64_t)r->voff + o); if (e && e->live) return 1; }
@@ -3178,9 +3819,14 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     const pool_t *ph = (const pool_t *)r->phys;
     if (ph && (!ph->mem || r->poff < 0 || (uint64_t)r->poff + r->size > ph->size)) { LOG("[RED] virtual pool %p: physical pool %p (%#llx bytes, storage %p) cannot supply %#llx+%#llx", (const void *)v->pool, (const void *)ph, (unsigned long long)ph->size, (void *)ph->mem, (unsigned long long)r->poff, (unsigned long long)r->size); return 0; }
     vpt_set(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL);
+    if (v->nsh) vshadow_cut(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
     vm_address_t to = (vm_address_t)(v->base + r->voff);
-    // Not aliased (see above): only textures read through the page table see it; the GPU cannot address it directly
+    // Not directly vm_remap-able (beyond reservation, or misaligned to host page): misaligned physical sources with host-page-aligned virtual ranges become per-run shadow copies; others stay in the page table only
     if ((uint64_t)r->voff + r->size > v->len || ((uintptr_t)to | r->size | (uint64_t)r->voff) & (pg - 1) || (ph && (((uintptr_t)ph->mem + (uintptr_t)r->poff) & (pg - 1)))) {
+        if (ph && vshadow_map(v, r, ph->mem + r->poff)) {
+            uint64_t end = (uint64_t)r->voff + r->size; if (end > v->top) v->top = end;
+            return 1;
+        }
         static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[nvn] virtual pool %p: a request %s (%s %#llx+%#llx) is kept in the page table only: textures read it, the GPU cannot address it (later cases are not logged)",
                                                                    (const void *)v->pool, (uint64_t)r->voff + r->size > v->len ? "beyond the reservation" : "not aligned to the host page", r->phys ? "map" : "unmap", (unsigned long long)r->voff, (unsigned long long)r->size);
         return 1;
@@ -3236,7 +3882,9 @@ NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappi
         if (o->mem && o->mem != base) { LOG("[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented: virtual pool %p already maps to %p, this request wants %p", (void *)o, (void *)o->mem, (void *)base); return 0; }
         if (!o->mem) LOG("[nvn] MapVirtual: the storage of virtual pool %p (%#llx bytes) points at physical pool %p + %#llx", (void *)o, (unsigned long long)o->size, (const void *)ph, (unsigned long long)(r[i].poff - r[i].voff));
         o->mem = base;
-        mtl_pool_addressed(o->mem, o->size);   // an address may have been given out before it had storage
+        // An address may have been given out before it had storage (in the pool's own reserved range). Where none was and the CPU cannot reach the pool, it holds only textures whose
+        // content Metal keeps apart (tex_bytes_elsewhere), so the mapping does not put the physical pool into the raw pool table; a buffer or the pool's address given out later does.
+        if (o->asked || !(o->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) mtl_pool_addressed(o->mem, o->size);
     }
     return 1;
 }
@@ -3713,8 +4361,7 @@ NVN(nvnCommandBufferBindTextures, void, NVNcommandBuffer *c, NVNshaderStage st, 
 //   passing the address of the handle field in the texture sampler object with a count of 1; command blocks are recorded once and submitted repeatedly, and the handle is written / replaced afterwards. The host used to copy the handles at recording (mostly 0),
 //   so every texture of the deferred lighting composite became the dummy texture 0 and the whole 3D picture was black. The address is recorded and the replay layer reads it when it reads the record (bh_fresh)
 NVN_NOPROTO(nvnCommandBufferBindTexturesDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNtextureHandle *h) { st = st_host(st);
-    p_bind_handles *r = bind_handles_ex(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h, 0);
-    if (r && h) { r->defer = 1; r->src = (uint64_t)(uintptr_t)h; }
+    bind_handles_ex(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h, 0, 1);
 }
 NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNimageHandle h) { st = st_host(st); uint64_t v = (uint64_t)h; bind_handles(c, OP_BIND_IMG, st, i, 1, &v); }
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }
@@ -3785,12 +4432,13 @@ uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     for (uint64_t p = 0, o = a - (uint64_t)(uintptr_t)v->base; p < n;) {
         uint64_t at = o + p, k = 0x1000 - (at & 0xFFF); if (k > n - p) k = n - p;
         const vpte *e = at < v->size ? vpt_get(v, at) : NULL;
-        if (e && e->phys) memcpy((uint8_t *)dst + p, e->phys + (at & 0xFFF), k); else { memset((uint8_t *)dst + p, 0, k); miss += k; }
+        if (e && e->phys) memcpy((uint8_t *)dst + p, vpte_mem(v, e, at) + (at & 0xFFF), k); else { memset((uint8_t *)dst + p, 0, k); miss += k; }
         p += k;
     }
     pthread_mutex_unlock(&g_vp_mu); return miss;
 }
 // Runs of consecutive physical pages behind [a, a+n): fn on each (nonzero stops the walk and is returned), or 1 at the first page mapped after gen (gen ~0 = do not look)
+static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp);
 static int vpt_walk_locked(const struct vpool *v, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
     int r = 0;
     const uint8_t *rs = NULL, *re = NULL; uint64_t o = a - (uint64_t)(uintptr_t)v->base;
@@ -3799,6 +4447,7 @@ static int vpt_walk_locked(const struct vpool *v, uint64_t a, uint64_t n, uint64
         if (!e) { at |= (2u << 20) - 1; at -= 0xFFF; continue; }   // a leaf never mapped: skip its 2 MB
         if (gen != ~0ull && e->gen > gen) { r = 1; break; }
         if (!e->phys) continue;
+        if (e->shadow) { if (fn == run_written && e->wst > arg) { r = 1; break; } continue; }   // shadow copy: its own stamp, not under physical dirty protection
         if (rs && e->phys == re) { re += 0x1000; continue; }
         if (rs) r = fn(rs, (uint64_t)(re - rs), arg);
         rs = e->phys; re = rs + 0x1000;
@@ -3818,11 +4467,19 @@ static int run_buffer_range(const uint8_t *p, uint64_t n, uint64_t arg) {
 // Capture physical attribution with the copy, not at completion: an unmap drops the page-table entry immediately while its Metal buffer keeps the old physical pages alive.
 void nvn_buffer_write_ranges(uint64_t a, uint64_t n, nvn_buffer_range_fn note) {
     if (!n) return;
-    int sparse = 0;
+    int sparse = 0, sh = 0;
     pthread_mutex_lock(&g_vp_mu);
     for (int i = 0; i < g_nvp; i++) {
-        const struct vpool *v = g_vp[i]; uint64_t base = (uint64_t)(uintptr_t)v->base;
-        if (a >= base && a - base < v->size) { sparse = 1; vpt_walk_locked(v, a, n, ~0ull, run_buffer_range, (uint64_t)(uintptr_t)&note); break; }
+        struct vpool *v = g_vp[i]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a >= base && a - base < v->size) { sparse = 1;
+            uint64_t lo = a - base, hi = n < v->size - lo ? lo + n : v->size;
+            for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+                if (hi <= e->voff || lo >= e->voff + e->size) continue;
+                vshadow_arm_entry(v, e, lo > e->voff ? lo : e->voff, hi < e->voff + e->size ? hi : e->voff + e->size);
+                sh = 1;
+            }
+            if (sh) { vshadow_written(v, lo, hi); note(a, n); }   // stamp shadowed pages for texture uploads and commit copy-cut on virtual range
+            vpt_walk_locked(v, a, n, ~0ull, run_buffer_range, (uint64_t)(uintptr_t)&note); break; }
     }
     pthread_mutex_unlock(&g_vp_mu);
     if (!sparse) note(a, n);
@@ -3842,7 +4499,7 @@ void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(poo
 int nvn_sparse_pages(const void *pool, uint64_t a, uint64_t n, const uint8_t **out) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
     if (!v) { pthread_mutex_unlock(&g_vp_mu); return 0; }
-    for (uint64_t i = 0, o = a - (uint64_t)(uintptr_t)v->base; i < n >> 12; i++, o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; out[i] = e ? e->phys : NULL; }
+    for (uint64_t i = 0, o = a - (uint64_t)(uintptr_t)v->base; i < n >> 12; i++, o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; out[i] = vpte_mem(v, e, o); }
     pthread_mutex_unlock(&g_vp_mu); return 1;
 }
 static int run_protect_tile(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect_sparse(p, n); return 0; }
@@ -3852,8 +4509,8 @@ const uint8_t *nvn_sparse_tile_phys(const void *pool, uint64_t a) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); const uint8_t *p = NULL;
     uint64_t o = v ? a - (uint64_t)(uintptr_t)v->base : 0;
     if (v && !(o & 0xFFFF) && o + 65536 <= v->size) {
-        const vpte *e = vpt_get(v, o); p = e ? e->phys : NULL;
-        for (uint64_t k = 1; p && k < 16; k++) { const vpte *f = vpt_get(v, o + (k << 12)); if (!f || f->phys != p + (k << 12)) p = NULL; }
+        const vpte *e = vpt_get(v, o); p = vpte_mem(v, e, o);
+        for (uint64_t k = 1; p && k < 16; k++) { const vpte *f = vpt_get(v, o + (k << 12)); if (vpte_mem(v, f, o + (k << 12)) != p + (k << 12)) p = NULL; }
     }
     pthread_mutex_unlock(&g_vp_mu); return p;
 }
@@ -3884,6 +4541,7 @@ int nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint64_t gen
         const vpte *e = o < v->size ? vpt_get(v, o) : NULL;
         if (e && e->gen > gen) chg = 1;
         if (!e || !e->phys) { all = 0; continue; }
+        if (e->shadow) { if (e->wst > stamp) chg = 1; continue; }   // shadow copy: its own stamp
         if (rs && e->phys == re) { re += 0x1000; continue; }
         if (rs && !chg) chg = nvn_dirty_since(rs, (uint64_t)(re - rs), stamp);
         rs = e->phys; re = rs + 0x1000;
@@ -4001,7 +4659,22 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
-    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
+    unsigned levels = t->d.levels ? t->d.levels : 1;
+    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, one_d = t->d.target == NVN_TEXTURE_TARGET_1D || t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY;
+    int nz = r->depth ? r->depth : 1;
+    if (level >= levels || level >= 32 || r->xoffset < 0 || r->yoffset < 0 || r->zoffset < 0 || r->width < 0 || r->height < 0 || nz < 0) {
+        ONCE_LOG("[RED] WriteTexels: invalid mip or region");
+        return;
+    }
+    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1;
+    uint32_t lh = one_d ? 1 : (t->d.height >> level ? t->d.height >> level : 1);
+    uint32_t lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
+    if ((uint64_t)r->xoffset + (uint64_t)r->width > lw || (uint64_t)r->yoffset + (uint64_t)r->height > lh ||
+        (uint64_t)r->zoffset + (uint64_t)nz + (is3d ? 0ull : (uint64_t)layer0) > (is3d ? lz : t->L.layers)) {
+        ONCE_LOG("[RED] WriteTexels: region exceeds the mip dimensions or layers");
+        return;
+    }
+    if (!r->width || !r->height) return;
     // A linear texture (LINEAR or LINEAR_RENDER_TARGET) is one 2D level of rows of its stride, written by rows as ReadTexels reads it (mtl_read_texels) and the upload reads it (gsb_geom).
     // The block-linear writes below refuse its layout (nvn_deswizzle_geom), and the whole-level path dropped the write: a movie decoded into a LINEAR | VIDEO_DECODE texture (the host's
     // native-texture output, nvn_host_write_texture) drew black (Tsukihime's title backdrop, 1920x1080 RGBA8, nxnative PR #1983)
@@ -4025,7 +4698,6 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_bl(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
         if (ok) { mtl_tex_cpu_written(t); return; }
     }
-    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
     if (!row) row = wb;

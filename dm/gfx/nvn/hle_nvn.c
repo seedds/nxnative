@@ -2576,7 +2576,11 @@ static int fps_high(void) {
     }
     return v;
 }
-static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the frame step counts in
+// Ticks of 1/120 s for a frame step state page in that unit (nvn_fstep.h FSTEP_UNIT_OFF: a FRAME_STEP_120 stub, written by the loader before the game runs, fixed
+// for the run) while the host steps the game (target above 0): steps and holds are counted in them at every cap, 2 / 3 / 4 at 60 / 40 / 30 fps (nvn_fstep.t120),
+// and presentation follows them. At a target of 0 the game's own interval logic runs, in vsyncs as before
+static int fstep_t120(void) { return nvn_fstep_t120(dm_fps_state) && nvn_fstep_target(dm_fps_state) > 0; }
+static int fstep_hz(void) { return fps_high() || fstep_t120() ? 120 : 60; }   // the ticks the frame step counts in
 // Once per present: what the screen and the game's state allow now, and a display link at the rate the screen can show (DM_PRESENT_LINK keeps its own choice)
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
@@ -2586,15 +2590,34 @@ static void high_cap_tick(void) {
     atomic_store(&g_high_cap, cap);
     if (!link_env) mtl_link_mode_set(ok ? 2 : 1);
 }
+// 40 fps (a target of 40 in a page in ticks of 1/120 s): each frame 3 ticks of a 120 Hz link, 25 ms, which only a screen at a multiple of 120 Hz shows evenly (on a 60 Hz link it
+// would be 1 or 2 refreshes, 16.7 or 33.3 ms). Elsewhere the cap is 30, with a line. No window (headless): the pacer's clock holds 25 ms. Uses front_screen_capable_fps() so a
+// Mac ProMotion screen temporarily switched to fixed 60 Hz by front_screen_match during a movie still returns to 40 fps afterwards. Checks Low Power Mode first because iOS
+// front_screen_max_fps() already clamps ProMotion to 60 Hz in Low Power Mode
+static const char *fps40_refused(void) {
+    if (!fstep_t120()) return "this build's frame step takes whole vsyncs of 1/60 s only";
+    if (!mtl_has_window()) return NULL;
+    const char *le = getenv("DM_PRESENT_LINK");
+    if (le && atoi(le) != 0 && atoi(le) != 2) return "DM_PRESENT_LINK=1 pins the display link to 60 Hz";
+    if (dm_low_power_now()) return "Low Power Mode limits the screen to 60 Hz";
+    int hz = front_screen_capable_fps();
+    if (hz <= 0) hz = mtl_display_hz();
+    if (hz < 120 || hz % 120) return "the screen does not run at a multiple of 120 Hz";
+    return NULL;
+}
 static int fps_step_cap(void) {
     if (!dm_fps_state) return fps_high() ? atomic_load(&g_high_cap) : 0;
-    uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
+    float t = nvn_fstep_target(dm_fps_state);
     if (t <= 0) return 0;
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
-    int thermal = thermal_capped(), movie = dm_movie_hz();
-    if (movie) return movie >= 50 && !thermal ? 60 : 30;   // a movie: its player takes a picture per game frame, so the step follows its pictures whatever the target, the thermal cap aside (hle_movie.c dm_movie_hz)
-    return t <= 30 || thermal ? 30 : 60;
+    int c = nvn_fstep_cap(t, dm_movie_hz(), thermal_capped());   // a movie: its player takes a picture per game frame, so the step follows its pictures whatever the target, the thermal cap aside (hle_movie.c dm_movie_hz)
+    if (c == 40) {
+        const char *why = fps40_refused(); static _Atomic(const char *) why_was;
+        if (why != atomic_exchange(&why_was, why) && why) LOG("[nvn] 40 fps: %s, so the frame step holds 30", why);
+        if (why) c = 30;
+    }
+    return c;
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
 // Engine-native frame limiters have no frame-step state page. Their requested
@@ -2630,12 +2653,12 @@ static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided y
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override) and while frames are late at hold 2 (nvn_fstep.h fine): the 30 Hz link
 // shows a late frame only on its next tick, 66.7 ms after the one before, where the 60 Hz link, which holds each frame its two vsyncs (g_link_hold_until, nvn_mtl.m), shows it at the next
 // vsync, 50 ms. Ocarina of Time on an iPhone at the launcher's 30 fps cap (frames 36.5 ms) got 33 intervals of 66.7 ms in each 300 on the 30 Hz link
-int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force
+int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force (120 fps games only: no state page)
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
 int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && (atomic_load(&g_fs_k) == 1 || atomic_load(&g_fs_fine)) && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
+int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && (atomic_load(&g_fs_k) == fstep_hz() / 60 || atomic_load(&g_fs_fine)) && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -2668,7 +2691,8 @@ static int window_interval(const win_t *o) { present_cfg(o); return g_display_mo
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {
     static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
-    if (fps_high()) { int t = present_itv(o) * mtl_link_rate() / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }   // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz
+    // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz (or 30 at a 30 fps cap): rounded up, so a hold the link cannot show (3 ticks on a 60 Hz link while it changes to 120) stays longer, not shorter
+    if (fps_high() || fstep_t120()) { int t = (present_itv(o) * mtl_link_rate() + 119) / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }
     int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
     if (hz != hz_was || rate != rate_was) { remainder = 0; hz_was = hz; rate_was = rate; }
     if (hz) {
@@ -2732,17 +2756,19 @@ static int fstep_hold(void) {
 // The longest hold the frame step may give at cap c (nvn_fstep_next's kmax), and why it may go no higher, for the log: a 30 fps cap's display link runs at 30 Hz, where a hold of 3
 // would take two ticks (66.7 ms), so it holds 2 and late frames are shown at the next vsync instead (nvn_fstep.h fine)
 static int fstep_kmax(int c, const char **why) {
-    int kmin = fstep_hz() / c;
+    int t120 = fstep_t120(), kv = t120 ? 2 : 1, kmin = fstep_hz() / c;
     if (fps_high()) { *why = "120 fps: the game steps by its target, so a late frame steps down to 60 and no further"; return 2; }
     if (!fstep_hold()) { *why = "fps_hold off: frames are not held longer than the cap's vsyncs"; return kmin; }
-    if (kmin >= 2) { *why = "the 30 fps cap's display link runs at 30 Hz, where a hold of 3 would take 66.7 ms; late frames are shown at the next vsync of a 60 Hz link instead"; return 2; }
-    *why = "the games' own interval logic uses 1-3"; return FSTEP_MAX;
+    if (c == 40 && t120) { *why = "at 40 fps the hold falls back one tick to 30 fps (4 ticks of 1/120 s) and no further"; return 4; }
+    if (kmin >= 2 * kv) { *why = "the 30 fps cap's display link runs at 30 Hz, where a hold of 3 would take 66.7 ms; late frames are shown at the next vsync of a 60 Hz link instead"; return 2 * kv; }
+    *why = "the games' own interval logic uses 1-3"; return FSTEP_MAX * kv;
 }
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
-// Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
+// Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs (ticks of 1/120 s at 120 fps and with t120)
 static void fstep_tick(const win_t *o, int c) {
-    static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1], seen_focus, seen_settle; static int nlog;
+    static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_HOLD_TOP + 1], seen_focus, seen_settle; static int nlog;
     const double v = 1e9 / fstep_hz();
+    const int t120 = fstep_t120(), kv = t120 ? 2 : 1;   // ticks per 1/60 s vsync
     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait;
     uint64_t f_at = g_fs_start ? g_fs_focus_at : dm_focus_in_since();
     uint64_t s_at = g_fs_start ? g_fs_settle_at : atomic_load(&g_fs_settle_seq);
@@ -2765,7 +2791,7 @@ static void fstep_tick(const win_t *o, int c) {
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
     // refresh more than its hold: a cheap 50 ms frame shows 54.5 ms at 165 Hz, which counted as late kept the hold at 20 fps for good
-    int hz = front_screen_max_fps(); g_fs.shown_slack = hz > fstep_hz() && hz % fstep_hz() && mtl_link_active() ? (double)fstep_hz() / hz : 0;
+    int hz = front_screen_max_fps(), lr = mtl_link_rate(); g_fs.shown_slack = hz > lr && hz % lr && mtl_link_active() ? (double)fstep_hz() / hz : 0;
     int cslow = fstep_cpu_slowed(o->presents), gslow = nvn_fstep_gpu_slowed(&g_fg, gpu, &g_fs, kmin) && dm_thermal_now() <= 1 && !dm_low_power_now();   // same gates as the CPU's
     // Present snapshots (nvn_mtl.m snap_take): the game runs up to a frame ahead of the screen, so a frame whose work runs long is absorbed instead of shown late, and its cost is
     // no evidence against the hold (Breath of the Wild in Zora's Domain stepped to 30 at a GPU time of 0.75 vsyncs: the frame's CPU time held its waits on its own GPU work).
@@ -2777,14 +2803,14 @@ static void fstep_tick(const win_t *o, int c) {
         if (a < 0) g_fs.screen = 2; else if (a > 0 && b > 0) g_fs.screen = (a - b) * 1e3 > 1.25 * pres_expect_ms(pn) ? 2 : 1;
         static uint16_t slow_bits; static int slow_k; int k = g_fs.k ? g_fs.k : kmin;
         if (k != slow_k) { slow_k = k; slow_bits = 0; }   // judged against the hold in force, not the frames before a step
-        slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE));
+        slow_bits = (uint16_t)(slow_bits << 1 | (shown > k + FSTEP_LATE * kv));
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.settle = settled;   // a pause ended, graphics resumed, or the window changed: this frame and the grace after it are not what the scene costs
-    g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.per_vsync = fstep_hz() / 60; g_fs.t120 = t120;
     g_fs.smax = dm_fps_step_max;   // the stub's largest step (Mario Kart World: 2): frames held longer than the game steps would play in slow motion
     g_fs.no_payback = fps_high();   // at 120 fps the game steps by its target, not by the step: a late frame is slow motion, so three raise the hold whatever the average
     g_fs.gpu_on = gpu_on; g_fs.gpu = gpu;   // an idle GPU's late frames do not step up; a hold the GPU does not explain is probed (nvn_fstep.h)
@@ -2795,7 +2821,7 @@ static void fstep_tick(const win_t *o, int c) {
     if (fine != fine0) mtl_set_fstep_fine(fine);
     static int nfine;
     if (fine != fine0 && nfine < 40) {
-        if (fine) LOG("[nvn] frame step: frames late at hold %d, the longest the 30 fps cap allows (cost %.2f, GPU %.2f vsyncs): each is shown at the next vsync (a 60 Hz display link: 50 ms) instead of a 30 Hz link's next tick (66.7 ms), at present %llu%s", g_fs.k, cost, gpu, (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
+        if (fine) LOG("[nvn] frame step: frames late at hold %d, the longest the 30 fps cap allows (cost %.2f, GPU %.2f %s): each is shown at the next vsync (a 60 Hz display link: 50 ms) instead of a 30 Hz link's next tick (66.7 ms), at present %llu%s", g_fs.k, cost, gpu, t120 ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
         else LOG("[nvn] frame step: %s: the 30 fps cap's own 30 Hz display link again at present %llu%s", c != 30 ? "the cap is no longer 30 fps" : fixed ? "the game fixes its own step" : g_fs.k < kmax ? "the hold may rise again" : "no late frame for 8 s", (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
     }
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
@@ -2813,8 +2839,8 @@ static void fstep_tick(const win_t *o, int c) {
         if (w >= (int)sizeof why) w = sizeof why - 1;   // snprintf returns the length it would have written
         if (g_fs.uprobe) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
-        LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
-            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
+        LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() || t120 ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
+            fixed ? "the game's own step" : kmin0 == FSTEP_OWN ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
     }
     if (probe0 == 1 && g_fs.probe != 1 && !fixed && nlog < 40) {   // whether the controller raised the clock for the shorter deadline, and the GPU time it measured there
         char gm[96] = "";
@@ -2826,10 +2852,15 @@ static void fstep_tick(const win_t *o, int c) {
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls, (unsigned long long)drain_n, drain_cut / v); memset(held, 0, sizeof held); drain_n = drain_cut = 0; }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
-        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
-        char fn[96] = ""; if (kmax == 2 && kmin == 2) snprintf(fn, sizeof fn, ", now %s (switched to the next vsync %llu× so far)", g_fs.fine ? "at the next vsync" : "on the 30 Hz link", (unsigned long long)g_fs.fines);
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f vsyncs); cap %d fps, hold at most %d vsyncs: %s%s",
-                    (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
+        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();   // the units stepped: vsyncs, or ticks with t120
+        const double ups = t120 ? 120.0 : 60.0;
+        char fn[96] = ""; if (kmax == 2 * kv && kmin == 2 * kv) snprintf(fn, sizeof fn, ", now %s (switched to the next vsync %llu× so far)", g_fs.fine ? "at the next vsync" : "on the 30 Hz link", (unsigned long long)g_fs.fines);
+        if (t0 && t120) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 2 / 3 / 4 / 6 ticks of 1/120 s %llu / %llu / %llu / %llu frames, %llu late, %llu ticks paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f ticks); cap %d fps, hold at most %d ticks of 1/120 s: %s%s",
+                    (vs - v0) / ups, (t - t0) / 1e9, (vs - v0) / ups / ((t - t0) / 1e9), (unsigned long long)held[2], (unsigned long long)held[3], (unsigned long long)held[4], (unsigned long long)held[6],
+                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls,
+                    (unsigned long long)drain_n, drain_cut / v, c, kmax, kwhy, fn);
+        else if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials), %llu stalls; standing-frame drains taken out of %llu frames (%.1f vsyncs); cap %d fps, hold at most %d vsyncs: %s%s",
+                    (vs - v0) / ups, (t - t0) / 1e9, (vs - v0) / ups / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
                     (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, (unsigned long long)g_fs.stalls,
                     (unsigned long long)drain_n, drain_cut / v, c, kmax, kwhy, fn);
         t0 = t; v0 = vs; memset(held, 0, sizeof held); drain_n = drain_cut = 0;
@@ -2856,8 +2887,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     int movie = dm_movie_hz();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)(movie != 0), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
-    if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
-        char kw[256] = ""; const char *kwhy; if (c) snprintf(kw, sizeof kw, ": hold at most %d vsyncs, %s", fstep_kmax(c, &kwhy), kwhy);   // the cap and why the hold may not rise above it, so a log shows both at once
+    if (dm_fps_state) { static int was; if (c != was) { char why[64] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was > 30 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
+        else if (c == 30 && was > 30 && nvn_fstep_target(dm_fps_state) > 30) snprintf(why, sizeof why, " (40 fps not shown here: the line above)");
+        char kw[256] = ""; const char *kwhy; if (c) snprintf(kw, sizeof kw, ": hold at most %d %s, %s", fstep_kmax(c, &kwhy), fstep_t120() ? "ticks of 1/120 s" : "vsyncs", kwhy);   // the cap and why the hold may not rise above it, so a log shows both at once
         LOG("[nvn] frame step cap %d → %d fps at present %llu%s%s", was, c, (unsigned long long)o->presents, why, kw); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided

@@ -373,6 +373,21 @@ int main(void) {
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      // a page in ticks of 1/120 s (+0x38 120, a FRAME_STEP_120 stub; headless: no window): 40 fps is 3 ticks, 25 ms; 60 and 30 are 2 and 4 ticks
+      uint32_t unit=120;memcpy(state+FSTEP_UNIT_OFF,&unit,4);nvn_present_config(120,0);
+      cap=40;memcpy(state,&cap,4);
+      EXPECT("ticks 40: present cap",40,fps_present_cap());
+      EXPECT("ticks 40: three ticks a frame",3,present_itv(&w));
+      EXPECT("ticks 40: period ns",25000000,present_period(&w));
+      EXPECT("ticks 40: display-link target",40,nvn_game_fps());
+      EXPECT("ticks 40: graphics layer's target (statistics, link)",40,mtl_fps_target());
+      cap=60;memcpy(state,&cap,4);
+      EXPECT("ticks 60: two ticks a frame",2,present_itv(&w));
+      EXPECT("ticks 60: period ns",16666666,present_period(&w));
+      EXPECT("ticks 60: graphics layer's target",60,mtl_fps_target());
+      cap=30;memcpy(state,&cap,4);
+      EXPECT("ticks 30: four ticks a frame",4,present_itv(&w));
+      EXPECT("ticks 30: graphics layer's target",30,mtl_fps_target());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's

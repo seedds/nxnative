@@ -8,6 +8,29 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include <sys/wait.h>
 #include <unistd.h>
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
+// 40 fps (loader.c, compiled here): only a stub that takes ticks of 1/120 s (the FRAME_STEP_120 capability in its fixups table) gets it; the loader writes the step's unit (+0x38)
+// for it, 120, at every start, and 0 for every other stub. Elsewhere DM_FPS_TARGET=40 holds 30
+static float page_target(const uint8_t *page) { float t; memcpy(&t, page, 4); return t; }
+static uint32_t page_unit(const uint8_t *page) { uint32_t u; memcpy(&u, page + FSTEP_UNIT_OFF, 4); return u; }
+static void fps_40(void) {
+    _Alignas(8) uint8_t page[0x100] = {0};
+    module_t m = {.base = page, .size = sizeof page};   // a stub in vsyncs (Tears of the Kingdom's, Breath of the Wild's)
+    strcpy(m.name, "main");
+    unsetenv("DM_RENDER_SCALE"); unsetenv("DM_DYNAMIC_RESOLUTION"); unsetenv("DM_SCREEN_ASPECT");
+    install_fps_state(&m);
+    setenv("DM_FPS_TARGET", "40", 1); dm_fps_state_apply();
+    assert(page_target(page) == 30 && page_unit(page) == 0);   // no tick stub: 30, the page stays in vsyncs
+    m.fstep_t120 = 1; install_fps_state(&m);   // Ocarina of Time's: FRAME_STEP_120
+    dm_fps_state_apply();
+    assert(page_target(page) == 40 && page_unit(page) == 120);
+    setenv("DM_FPS_TARGET", "60", 1); dm_fps_state_apply(); assert(page_target(page) == 60 && page_unit(page) == 120);   // the unit at every target
+    setenv("DM_FPS_TARGET", "30", 1); dm_fps_state_apply(); assert(page_target(page) == 30 && page_unit(page) == 120);
+    setenv("DM_FPS_TARGET", "0", 1); dm_fps_state_apply(); assert(page_target(page) == 0 && page_unit(page) == 120);
+    setenv("DM_FPS_TARGET", "45", 1); dm_fps_state_apply(); assert(page_target(page) == 0);   // not a frame rate it takes: the game's own step
+    m.fstep_t120 = 0; install_fps_state(&m); setenv("DM_FPS_TARGET", "60", 1); dm_fps_state_apply(); assert(page_unit(page) == 0);   // back to a stub in vsyncs: 0 again
+    unsetenv("DM_FPS_TARGET"); dm_fps_state = NULL; g_fstep_t120 = 0;
+    puts("40 fps only for a stub in ticks of 1/120 s (FRAME_STEP_120), the step's unit in the state page: OK");
+}
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }
@@ -58,6 +81,7 @@ static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NU
 static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i].loaded); }
 
 int main(void) {
+    fps_40();
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
     for (int i = 0; i < 1432; i++) fprintf(manifest, "nro%d 00 128\n", i);

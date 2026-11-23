@@ -46,7 +46,9 @@ static int g_input_on = 1;   // main thread: the game window is key, so its keyb
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
+static _Atomic int g_screen_native_fps;   // the screen's own rate before front_screen_match temporarily switched it in fullscreen
 int front_screen_max_fps(void) { return g_screen_fps; }
+int front_screen_capable_fps(void) { int hz = g_screen_native_fps; return hz > 0 ? hz : g_screen_fps; }
 static _Atomic CGDirectDisplayID g_screen_id;   // the window's screen (screen_refresh); 0 until the window is up, then the main display stands in
 int front_display_pixels(int *w, int *h) {
     CGDirectDisplayID id = g_screen_id; CGDisplayModeRef m = CGDisplayCopyDisplayMode(id ? id : CGMainDisplayID()); if (!m) return 0;
@@ -72,6 +74,8 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
             double hz = CGDisplayModeGetRefreshRate(cur); if (hz > 0) g_screen_fps = (int)round(hz);
         }
         if (cur) CGDisplayModeRelease(cur);
+    } else {
+        g_screen_native_fps = g_screen_fps;
     }
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
@@ -125,7 +129,7 @@ static void screen_match_restore(int on_it, int undone) {   // main thread: the 
     // fullscreen window left that screen (the screens took the switch back), not the player leaving fullscreen
     double hz = mode_hz(g_match_orig); CGError r = screen_set_mode(g_match_id, g_match_orig);
     LOG("front end: screen %s %.0f Hz", r == kCGErrorSuccess ? "back at" : "could not be switched back to", hz);
-    if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
+    if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = g_screen_native_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
     CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_pick = 0; g_match_pick_vrr = 0;
     if (undone) g_match_undone = CACurrentMediaTime();
 }
@@ -147,7 +151,7 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
     // must not be misread from a leftover variable-refresh flag
     if (!g_match_orig) screen_refresh(scr);
     int32_t cur_id = CGDisplayModeGetIODisplayModeID(cur);
-    if (g_match_orig && cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig)) {
+    if (g_match_orig && cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig) && cur_id != g_match_pick) {
         double since = CACurrentMediaTime() - g_match_switched;
         if (since < MATCH_SETTLE_S) {   // this host's switch has not shown yet: look again once it should have, in case no notification comes
             CGDisplayModeRelease(cur);
@@ -160,7 +164,7 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
         // the screen is at its own mode again with no switch back from this host (macOS or the screen took the switch back): its rate as that mode has it, and the switch is undone
         double own = mode_hz(cur);
         LOG("front end: screen at its own %.0f Hz again %.1f s after this host switched it", own, since);
-        if (own > 0) g_screen_fps = (int)round(own);
+        if (own > 0) g_screen_fps = g_screen_native_fps = (int)round(own);
         g_screen_variable_refresh = g_match_orig_vrr;
         CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_pick = 0; g_match_pick_vrr = 0;
         g_match_undone = CACurrentMediaTime();

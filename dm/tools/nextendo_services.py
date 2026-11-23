@@ -25,17 +25,23 @@ def contract(repository):
     return value
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def provider_ca(value):
     cache = Path.home() / 'Library/Application Support/nxnative/nextendo/public-provider-ca.der'
     if cache.is_file() and not cache.is_symlink() and cache.stat().st_size <= 65536:
         data = cache.read_bytes()
         if hashlib.sha256(data).hexdigest() == value['provider']['caSHA256']: return data
     url = value['provider']['caURL']
-    # Nextendo's own Git server, where Prelude-Nextendo moved from GitHub (the old raw.githubusercontent.com address is 404); the SHA-256 below is the trust, not the host
-    if not url.startswith('https://git.nextendo.network/NextendoNetwork/Prelude-Nextendo/raw/commit/'):
+    # The web UI's raw link can return 403; the API serves the same file at the pinned revision. The SHA-256 below is the trust, not the host.
+    if not re.fullmatch(r'https://git\.nextendo\.network/api/v1/repos/NextendoNetwork/Prelude-Nextendo/raw/'
+                        r'romfs/sd/rootCA\.pem\?ref=[0-9a-f]{40}', url):
         raise ValueError('The provider CA must come from its official source')
     request = urllib.request.Request(url, headers={'User-Agent': 'nxnative'})
-    with urllib.request.urlopen(request, timeout=15) as response: encoded = response.read(65537)
+    with urllib.request.build_opener(_NoRedirect).open(request, timeout=15) as response: encoded = response.read(65537)
     if len(encoded) > 65536: raise ValueError('Provider CA exceeds its bounds')
     match = re.fullmatch(rb'\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\r\n]+)\s*-----END CERTIFICATE-----\s*', encoded)
     if not match: raise ValueError('Expected exactly one public provider certificate')

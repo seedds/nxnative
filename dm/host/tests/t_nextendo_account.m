@@ -175,6 +175,46 @@ static void async_tests(void) {
     CHECK(result(contextA) != 0 && H(Object, "_ZN2nn7account12AsyncContext6CancelEv")(contextA) == 0, "offline: the result is failure and cancel has nothing to cancel");
     close_event(&offline); dtor(contextA); mode=DM_NET_NEXTENDO;
 }
+static dispatch_semaphore_t loginCancelled;
+@interface LoginReply : NSURLProtocol
+@end
+@implementation LoginReply
++ (BOOL)canInitWithRequest:(NSURLRequest *)request { return [request.URL.host isEqual:@"login.test"]; }
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request { return request; }
+- (void)startLoading {
+    NSString *path = self.request.URL.path;
+    if ([path isEqual:@"/stall"]) return;
+    BOOL declared = [path isEqual:@"/declared"], streamed = [path isEqual:@"/streamed"];
+    NSHTTPURLResponse *reply = [[NSHTTPURLResponse alloc] initWithURL:self.request.URL statusCode:200 HTTPVersion:@"HTTP/1.1"
+        headerFields:declared ? @{@"Content-Length": @"65537"} : @{}];
+    [self.client URLProtocol:self didReceiveResponse:reply cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [self.client URLProtocol:self didLoadData:[@"{\"ok\":true}" dataUsingEncoding:NSUTF8StringEncoding]];
+    if (streamed) [self.client URLProtocol:self didLoadData:[NSMutableData dataWithLength:65536]];
+    [self.client URLProtocolDidFinishLoading:self];
+}
+- (void)stopLoading {
+    if ([self.request.URL.path isEqual:@"/stall"]) dispatch_semaphore_signal(loginCancelled);
+}
+@end
+
+static void login_http_tests(void) {
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    config.protocolClasses = @[LoginReply.class];
+    NSString *error = nil;
+    CHECK([nxl_send_with_config(nxl_request(@"https://login.test/ok", 2), config, &error)[@"ok"] isEqual:@YES], "a small JSON reply is accepted");
+    for (NSString *kind in @[@"declared", @"streamed"]) {
+        error = nil;
+        CHECK(!nxl_send_with_config(nxl_request([@"https://login.test/" stringByAppendingString:kind], 2), config, &error) &&
+              [error isEqual:@"Nextendo's answer is too large"], "oversized replies are rejected");
+    }
+    loginCancelled = dispatch_semaphore_create(0); error = nil;
+    uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    CHECK(!nxl_send_with_config(nxl_request(@"https://login.test/stall", .25), config, &error) &&
+          [error isEqual:@"Nextendo did not answer in time"] && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start < NSEC_PER_SEC,
+          "a stalled answer cannot leave the synchronous caller waiting");
+    CHECK(!dispatch_semaphore_wait(loginCancelled, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)), "a stalled task is cancelled");
+}
+
 // The Mac sign-in's pieces that need no network: the record it builds from an nx2 game token passes hle_nextendo_apple.m's own checks, and the stored sign-in
 // is a private file that a loose or linked one cannot stand in for
 static void login_tests(void) {
@@ -216,7 +256,7 @@ int main(void) { @autoreleasepool {
     dm_nextendo_set_credential_provider(provider); unsetenv("DM_NEXTENDO_ROUTES"); mode=DM_NET_AUTO;
     CHECK(!dm_nextendo_account_available(&absent) && !absent && !atomic_load(&providerCalls), "automatic local mode without a profile never invokes the credential provider");
     setenv("DM_NEXTENDO_ROUTES","/synthetic/public-policy.tsv",1); mode=DM_NET_NEXTENDO;
-    dm_nextendo_set_game_version("3.0.5"); identity_tests(); login_tests(); token_tests(); async_tests(); bearer_tests();
+    dm_nextendo_set_game_version("3.0.5"); identity_tests(); login_tests(); login_http_tests(); token_tests(); async_tests(); bearer_tests();
     CHECK(atomic_load(&entered) > 0 && atomic_load(&entered) == atomic_load(&left) && atomic_load(&waits) > 0, "blocking account hooks publish balanced guest contexts and mark host security waits");
     printf("Nextendo account: %d checks, %d failures; synthetic provider only, no user credentials read\n", checks, failures); return failures ? 1 : 0;
 } }

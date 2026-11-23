@@ -125,6 +125,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Fire Emblem Fortune's Weave](04007EF01F8AE000/README.md) | `04007EF01F8AE000` | v131072 (Switch 2) | 22.2.0 (Ounce) | Intelligent Systems' engine, NintendoWare | NVN2 | 60 fps target, [120 fps option](04007EF01F8AE000/README.md#frame-rate) |
 | [Fire Emblem: Three Houses](010055D009F78000/README.md) | `010055D009F78000` | 1.2.0 | 6.5.0 | Koei Tecmo's KTGL | NVN | [60 fps mode](010055D009F78000/README.md#frame-rate) |
 | [Ghost Trick: Phantom Detective](010029B018432000/README.md) | `010029B018432000` | 1.0.0 (base) | 13.3.0 | Capcom's RE Engine, Wwise | NVN | — |
+| [Guacamelee! 2](01007E100456C000/README.md) | `01007E100456C000` | 1.0.4 (provisional Mac profile) | 5.3.0 | DrinkBox Studios' engine, FMOD | NVN | — |
 | [Hades](0100535012974000/README.md) | `0100535012974000` | 1.0.38233 | 9.3.0 | Supergiant Games' engine (The Forge) | Vulkan | — |
 | [Hades II](0100A00019DE0000/README.md) | `0100A00019DE0000` | 1.0.141667 (and base game) | 20.5.15 (base game: 19.3.9) | Supergiant Games' engine | NVN | — |
 | [Hollow Knight](0100633007D48000/README.md) | `0100633007D48000` | 1.5.12620 | 20.5.21 | Unity 6000.0.61f1 IL2CPP, FMOD | NVN | — |
@@ -165,6 +166,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Nintendo Switch 2 Welcome Tour](040057C02159A000/README.md) | `040057C02159A000` | v262144 (Switch 2) | 20.5.29 (Ounce) | NintendoWare Bezel Engine 2.16.0 | NVN2 | — |
 | [Nintendo Switch Sports Resort](04008E001F098000/README.md) | `04008E001F098000` | v65536 (Switch 2) | 22.2.10 (Ounce) | sead / agl / gsys, Havok | NVN2 | — |
 | [Oceanhorn: Monster of Uncharted Seas](01007D7001D0E000/README.md) | `01007D7001D0E000` | 1.0.1 | 3.7.0 | Cornfox & Bros.' engine | NVN | — |
+| [Oceanhorn 2: Knights of the Lost Realm](01006CB010840000/README.md) | `01006CB010840000` | 1.1 | 10.4.1 | Unreal Engine 4.24 | NVN | [60 fps target](01006CB010840000/README.md#frame-rate) |
 | [OCTOPATH TRAVELER](010057D006492000/README.md) | `010057D006492000` | 1.0.5 | 3.5.1 | Unreal Engine 4.18 | NVN | 60 fps target |
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN | 60 fps target |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN | 60 fps target |
@@ -238,6 +240,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Super Smash Bros. Ultimate](01006A800016E000/README.md) | `01006A800016E000` | 13.0.5 | 8.2.1 | Bandai Namco / Sora's engine | NVN | — |
 | [Taiko Risshiden V DX](0100346017304000/README.md) | `0100346017304000` | 1.1.1 | 12.3.3 | Koei Tecmo's KTGL | NVN | [60 fps in menus and town](0100346017304000/README.md#frame-rate) |
 | [Team Sonic Racing](010092B0091D0000/README.md) | `010092B0091D0000` | 1.0.3 | 5.6.0 | Sumo Digital's engine, Wwise | NVN | — |
+| [Teenage Mutant Ninja Turtles: Shredder's Revenge](0100FE701475A000/README.md) | `0100FE701475A000` | 1.0.9 | 13.3.2 | Tribute Games' ParisEngine / MonoGame | NVN | Offline |
 | [The Great Ace Attorney Chronicles](010036E00FB20000/README.md) | `010036E00FB20000` | 1.0.0 (base) | 10.4.1 | Capcom's MT Framework | NVN | — |
 | [The Legend of Heroes: Trails into Reverie](01008CB0156BC000/README.md) | `01008CB0156BC000` | 1.0.4 | 14.3.0 | PhyreEngine (PH3 Switch port) | NVN | [60 fps target](01008CB0156BC000/README.md#frame-rate) |
 | [The Legend of Zelda: Breath of the Wild](01007EF00011E000/README.md) | `01007EF00011E000` | 1.9.0 | 20.5.22 | Nintendo EPD (sead / agl / gsys / ksys, Havok) | NVN | 60 fps target |

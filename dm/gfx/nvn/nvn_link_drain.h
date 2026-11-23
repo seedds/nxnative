@@ -44,31 +44,38 @@ static inline int nvn_link_drain_spare(double age, double tick) { return tick > 
 
 // With the late latch: whole link ticks from the callback that woke the frame's acquire to the one that took it, when its present came early after the first one (lead
 // seconds after it, under half of room, the seconds from that callback to its targetTimestamp, and an eighth of a tick or more inside the latch's wait from there,
-// nvn_link_latch_reach), so the latch would have taken it there; -1 otherwise (lead < 0: no callback woke its acquire, the game was late for the tick; room 0: no latch).
+// nvn_link_latch_reach) and its GPU work plus present pass would also finish an eighth of a tick or more before targetTimestamp (gpu_lead < room - tick / 8; gpu_lead < 0
+// when GPU timing is unavailable, as for external Vulkan / GL producers), so the latch would have taken it there without missing targetTimestamp on the GPU (issue #3251);
+// -1 otherwise (lead < 0: no callback woke its acquire, the game was late for the tick; room 0: no latch).
 // Ocarina of Time at 60 fps: on an external fixed 120 Hz screen (room 8.3 ms) its presents came 1.3 ms after the wake; on a built-in ProMotion screen in the fixed 60 Hz mode
 // (room 16.5 ms) some came 6-13 ms after it and some frames ran 17-20 ms, and without this test each one left an empty tick (42-72 frames shown 33 ms in 25 s, against none
 // without the latch). The margin to the wait keeps a later frame of the same scene inside it: half the room leaves 2.1 ms at 8.3 ms of room (82 % of ticks latched, no frame
 // dropped) and 6.2 ms at 16.5 ms, and an eighth of a tick (2.1 ms at 60 Hz) is that smallest one. Half the room alone passes the wait where the room is over 1.75 ticks (a
 // window on a built-in ProMotion screen: about 33 ms against a wait of 14.6 ms at 60 Hz): a present between the two counted as early and missed its tick, so a drain into
-// the latch came every 2 s and left its end tick empty; there the limit is 12.5 ms
-static inline int nvn_link_latch_spare(double age, double lead, double room, double tick) {
+// the latch came every 2 s and left its end tick empty; there the limit is 12.5 ms.
+// CPU lead alone misses games whose CPU submission arrives early (< limit) while their GPU rendering + MetalFX present finishes past targetTimestamp (Fire Emblem Fortune's
+// Weave and Xenoblade Chronicles: DE, ~10 ms GPU on a 16.6 ms room, issue #3251): gating on gpu_lead < room - tick / 8 keeps them on the queue's 1-frame slack instead of
+// draining into a 30 fps lock
+static inline int nvn_link_latch_spare(double age, double lead, double gpu_lead, double room, double tick) {
     if (tick <= 0 || room <= 0 || lead < 0) return -1;
     double limit = room / 2, inside = nvn_link_latch_reach(room, tick) - tick / 8;
     if (limit > inside) limit = inside;
-    return lead < limit ? (int)floor((age + lead) / tick + 0.5) : -1;
+    if (lead >= limit) return -1;
+    if (gpu_lead >= 0 && gpu_lead >= room - tick / 8) return -1;
+    return (int)floor((age + lead) / tick + 0.5);
 }
 
 // Once per frame the display-link callback takes. now: the callback's time (seconds); age: how long that frame waited in the present queue (seconds; negative when it was
 // presented after this callback started: the latch waited for it); tick: the link's period (seconds); blocked: how long the game's last acquire waited for the link (seconds,
 // 0 = it did not wait); ok: 0 when this take says nothing about a standing queue (frames were dropped on it, the link is rescued, present snapshots run the game ahead on
-// purpose); lead and room: for nvn_link_latch_spare (room 0 when the latch does not run for this frame). Returns the link ticks the next acquire should wait more, with
-// LINK_DRAIN_LATCH when the drain ends in the latch (0 = none).
+// purpose); lead, gpu_lead and room: for nvn_link_latch_spare (room 0 when the latch does not run for this frame; gpu_lead < 0 when GPU timing is unavailable). Returns the
+// link ticks the next acquire should wait more, with LINK_DRAIN_LATCH when the drain ends in the latch (0 = none).
 // The backoff: with no frame standing, a frame that comes late while the latch holds stays up 33 ms where the standing frame would have hidden it, and the frames fall back
 // to the queue's slack (one frame shown 33 ms more than without the latch per hitch). A game that hitches every few seconds paid that each time and kept little of the gain:
 // TUNIC with four 19 ms frames every 5 s, 17 frames shown 33 ms in 42 s against 12 without the latch, present to screen p50 40.8 against 41.0 ms. So a fallback within
 // LINK_LATCH_KEEP latched frames of a drain into the latch, or such a drain that latched nothing, doubles the time the next one needs (up to LINK_LATCH_BACK_MAX doublings),
 // and LINK_LATCH_KEEP latched frames in a row reset it. Only these drains count: during a hitch the queue runs empty and the latch takes a late present or two on its own
-static inline int nvn_link_drain_next(nvn_link_drain *d, double now, double age, double tick, double blocked, int ok, double lead, double room) {
+static inline int nvn_link_drain_next(nvn_link_drain *d, double now, double age, double tick, double blocked, int ok, double lead, double gpu_lead, double room) {
     if (d->in) {   // after a drain into the latch: a latched frame holds, a frame that stood past the drain's own ticks is a fallback
         if (room <= 0) d->in = 0;   // the latch stopped running for these frames (another link rate, a present interval of 2): no verdict
         else if (age < 0) { d->stand = 0; if (++d->held == LINK_LATCH_KEEP) d->back = 0; }
@@ -76,7 +83,7 @@ static inline int nvn_link_drain_next(nvn_link_drain *d, double now, double age,
         else { if (d->held < LINK_LATCH_KEEP && d->back < LINK_LATCH_BACK_MAX) d->back++; d->in = 0; }
     }
     double need = LINK_DRAIN_BLOCKED * tick > 0.002 ? LINK_DRAIN_BLOCKED * tick : 0.002;
-    int good = ok && blocked >= need, as = good ? nvn_link_drain_spare(age, tick) : 0, ls = good ? nvn_link_latch_spare(age, lead, room, tick) : 0;
+    int good = ok && blocked >= need, as = good ? nvn_link_drain_spare(age, tick) : 0, ls = good ? nvn_link_latch_spare(age, lead, gpu_lead, room, tick) : 0;
     if (as < 1) d->run = 0;
     else if (!d->run++) { d->since = now; d->min_age = age; } else if (age < d->min_age) d->min_age = age;
     if (ls < 1) d->erun = 0;

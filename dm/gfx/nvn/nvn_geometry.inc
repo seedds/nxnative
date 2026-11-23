@@ -609,8 +609,9 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; it reads the
 // draw's {count, first} at buffer 29 (DMSH_MESH_DRAW_SLOT). A mesh shader with no task has an object function of its own (mesh_obj, dmsh_meshstage.py main0_o), which reads the same:
 // Metal holds a mesh grid to DMSH_MESH_GRID threadgroups, so it launches the draw's workgroups in blocks of that many, one object threadgroup a block. Native mesh draws have no
-// equivalent fallback: the demanded pipeline must finish compiling before its first draw, so each one built at a draw is recorded as an M row (pso_user.tsv) and the prewarm builds
-// the rows before the game reaches them (docs/reference/shaders.md, Native mesh pipelines compiled at their first draw)
+// equivalent fallback: the demanded pipeline must finish compiling before its first draw. So its base is prebuilt (pso_offline.py / pso_prebuild from mesh_pairs.tsv) and also
+// built in the background when the game makes the program (mtk_prefetch), and the draw only specializes it; a draw that still had to compile, or to wait for that compile, is
+// recorded as an M row (pso_user.tsv), which the prewarm builds before the game reaches it (docs/reference/shaders.md, Native mesh pipelines compiled at their first draw)
 static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_rec; } g_mtk;   // ind: an indirect draw's threadgroups (mdx_mask), ind_rec: its {count, first} record
 // A task shader's payload past Metal's object payload (DMSH_MESH_PAYLOAD_MAX) goes through a buffer at DMSH_MESH_SPILL_SLOT of both stages (dmsh_meshstage.py payload_spill):
 // the Metal payload carries the slice's word offset only. Word 0 holds the slice count, followed by one 16-byte-aligned slice per task workgroup of the draw
@@ -623,28 +624,113 @@ static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thre
 // Noted for Metal 4 (fn4_note) so that such a pipeline goes through the compiler and the archive like the others
 static id<MTLFunction> mtk_nop_fragment(void) {
     static id<MTLFunction> fn; static dispatch_once_t once;
-    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = dev_lib(@"fragment void dm_mesh_nop() {}", &e);
+    dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = lib_tag(dev_lib(@"fragment void dm_mesh_nop() {}", &e), @"dm_mesh_nop");
         fn = fn4_note([l newFunctionWithName:@"dm_mesh_nop"], l, @"dm_mesh_nop", nil); if (!fn) MLOG("[RED] the empty fragment function did not compile: %s", e.localizedDescription.UTF8String); });
     return fn;
 }
-// The Metal 4 descriptor of a native mesh pipeline, whole: no base with open colour state, as a game has some hundred of them, each with functions of its own. Its depth / stencil
-// formats are not named (Metal 4 pipelines serve any). nil when a function has no Metal 4 descriptor (fn4_of: the diagnostic fragment overrides)
-static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff, int border) {
+static void mtk_fixed4(MTL4MeshRenderPipelineDescriptor *m, MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms) {
+    m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
+    m.payloadMemoryLength = mtk_payload_len(ts);
+    m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
+    m.rasterSampleCount = d.rasterSampleCount;
+    m.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
+}
+// The Metal 4 descriptor of a native mesh pipeline: unspec leaves every colour attachment unspecialized (its base, mtk_base), else copies them (the whole pipeline). Its depth /
+// stencil formats are not named (Metal 4 pipelines serve any). nil when a function has no Metal 4 descriptor (fn4_of: the diagnostic fragment overrides)
+static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff, int border, int unspec) {
     MTL4FunctionDescriptor *mf = fn4_of_b(ms->fn, !border), *of = ts ? fn4_of_b(ts->fn, !border) : fn4_of(ms->mesh_obj), *f4 = fn4_of_b(ff, !border);
     if (!mf || !of || !f4) return nil;
     MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
-    m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunctionDescriptor = of; m.payloadMemoryLength = mtk_payload_len(ts); m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
-    m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
-    for (int i = 0; i < 8; i++) pso_col4(m.colorAttachments[i], d.colorAttachments[i]);
+    m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.objectFunctionDescriptor = of;
+    mtk_fixed4(m, d, ts, ms);
+    for (int i = 0; i < 8; i++) {
+        MTL4RenderPipelineColorAttachmentDescriptor *a = m.colorAttachments[i];
+        if (!unspec) { pso_col4(a, d.colorAttachments[i]); continue; }
+        a.pixelFormat = MTLPixelFormatUnspecialized; a.writeMask = MTLColorWriteMaskUnspecialized; a.blendingState = MTL4BlendStateUnspecialized;
+        a.sourceRGBBlendFactor = a.destinationRGBBlendFactor = a.sourceAlphaBlendFactor = a.destinationAlphaBlendFactor = MTLBlendFactorUnspecialized;
+        a.rgbBlendOperation = a.alphaBlendOperation = MTLBlendOperationUnspecialized;
+    }
     return m;
 }
-// A native mesh pipeline for key k (mesh shader ms, optional task shader ts, optional pixel shader fs), on any thread, kept in the pipeline archive as compute pipelines are
-// (cps_new). With the Metal 4 compiler it is looked up in the archive files (the app's bundle among them): a hit costs a lookup, where a build took 1.9-5 s on an iPad Pro (M5)
-// and up to 40 s on an M1 with Metal's own cache cold (Ocarina of Time). On a miss the MTLDevice builds it, which the system's shader cache serves when it holds it, and the
-// Metal 4 compiler compiles it again into the current flush period in the background (arch_harvest), so the next start takes it from the file that period writes; the capture
-// compiles it whole, which the draw or the prewarm does not wait for. A pipeline written with other pipelines may sit in a plain file, which a compacting prewarm replaces, so one
-// taken from such a file then is captured again. Without the compiler, or for a function with no Metal 4 descriptor, only the MTLDevice build. *archived: taken from the archive
+// The base of a native mesh pipeline: its three functions compiled with the colour state left open, as a vertex / pixel pair's base is (pso_build_ex). A pipeline is its base
+// specialized with the draw's colour formats, blend and write masks (tens to hundreds of microseconds), so one base serves every render state its program is drawn in, and it can be
+// prebuilt offline / on the device (mesh_pairs.tsv) or built in the background when the game makes the program (mtk_prefetch). Keyed by a 128-bit digest of its descriptor (by
+// library content tag when loaded from disk, falling back to library pointer for in-memory test libraries), so callers with separate NvShader instances share one entry.
+// Made once: a second caller for the same base waits for the first. Kept in the pipeline archive as the pairs' bases are: looked up there first, else compiled into the current flush
+// period (arch_capture); a compacting prewarm captures one taken from an old plain file again (arch_harvest).
+// *how: 0 already made, 1 taken from the archive, 2 compiled here, 3 another thread's compile waited for
+typedef struct { uint8_t h[16]; } mbase_key;
+static nvn_hmap g_mbase = {.klen = sizeof(mbase_key)}, g_mbase_pending = {.klen = sizeof(mbase_key)};
+static os_unfair_lock g_mbase_lock = OS_UNFAIR_LOCK_INIT;
+static void mbk_fn(CC_SHA256_CTX *c, MTL4FunctionDescriptor *f) {
+    uint64_t u;
+    if (!f) { u = 0; CC_SHA256_Update(c, &u, sizeof u); return; }
+    if ([f isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) {
+        MTL4SpecializedFunctionDescriptor *s = (MTL4SpecializedFunctionDescriptor *)f; MTLFunctionConstantValues *cv = s.constantValues;
+        NSString *desc = cv.description; NSRange nl = [desc rangeOfString:@"\n"];
+        NSString *tail = cv ? (nl.location != NSNotFound ? [desc substringFromIndex:nl.location] : @"?") : @"(none)";
+        u = 2; CC_SHA256_Update(c, &u, sizeof u); u = cv ? cv.hash : 0; CC_SHA256_Update(c, &u, sizeof u);
+        const char *ts = tail.UTF8String ?: ""; size_t tn = strlen(ts); u = tn; CC_SHA256_Update(c, &u, sizeof u); CC_SHA256_Update(c, ts, (CC_LONG)tn);
+        const char *sn = s.specializedName.UTF8String ?: ""; size_t snl = strlen(sn); u = snl; CC_SHA256_Update(c, &u, sizeof u); CC_SHA256_Update(c, sn, (CC_LONG)snl);
+        mbk_fn(c, s.functionDescriptor); return;
+    }
+    if ([f isKindOfClass:MTL4LibraryFunctionDescriptor.class]) {
+        MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f;
+        NSString *tag = l.library ? objc_getAssociatedObject(l.library, &g_lib_tag) : nil;
+        u = tag ? 1 : 3; CC_SHA256_Update(c, &u, sizeof u);
+        if (tag) { const char *s = tag.UTF8String ?: ""; size_t n = strlen(s); u = n; CC_SHA256_Update(c, &u, sizeof u); CC_SHA256_Update(c, s, (CC_LONG)n); }
+        else { u = (uintptr_t)(__bridge const void *)l.library; CC_SHA256_Update(c, &u, sizeof u); }
+        const char *nm = l.name.UTF8String ?: ""; size_t nn = strlen(nm); u = nn; CC_SHA256_Update(c, &u, sizeof u); CC_SHA256_Update(c, nm, (CC_LONG)nn);
+        return;
+    }
+    u = (uintptr_t)(__bridge const void *)f; CC_SHA256_Update(c, &u, sizeof u);
+}
+static void mtk_base_key(mbase_key *bk, MTL4MeshRenderPipelineDescriptor *b) {
+    CC_SHA256_CTX c; CC_SHA256_Init(&c);
+    mbk_fn(&c, b.objectFunctionDescriptor); mbk_fn(&c, b.meshFunctionDescriptor); mbk_fn(&c, b.fragmentFunctionDescriptor);
+    uint64_t flds[5] = {b.payloadMemoryLength, b.maxTotalThreadsPerObjectThreadgroup, b.maxTotalThreadsPerMeshThreadgroup, b.rasterSampleCount, (uint64_t)b.alphaToCoverageState};
+    CC_SHA256_Update(&c, flds, sizeof flds);
+    uint8_t out[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(out, &c);
+    memcpy(bk->h, out, sizeof bk->h);
+}
+static id<MTLRenderPipelineState> mtk_base(MTL4MeshRenderPipelineDescriptor *b, const mbase_key *bk, NSError **e, int *how) {
+    PbaseBuild *job = nil; int owner = 0;
+    os_unfair_lock_lock(&g_mbase_lock);
+    id<MTLRenderPipelineState> base = hm_get_id(&g_mbase, bk);
+    if (!base && !(job = hm_get_id(&g_mbase_pending, bk))) { job = [PbaseBuild new]; job->done = dispatch_group_create(); dispatch_group_enter(job->done); hm_put_id(&g_mbase_pending, bk, job); owner = 1; }
+    os_unfair_lock_unlock(&g_mbase_lock);
+    if (base) { *how = 0; return base; }
+    if (!owner) {
+        uint64_t t0 = bp_now(); dispatch_group_wait(job->done, DISPATCH_TIME_FOREVER); g_mtk_base_wait_n++; g_mtk_base_wait_ns += bp_now() - t0;
+        *how = 3; if (!job->ps && e) *e = job->error;
+        return job->ps;
+    }
+    int from_run = 0; base = arch_lookup(b, 0, &from_run);   // a period of mesh bases alone is a p file (no vertex layout)
+    if (base) { g_mtk_arch++; *how = 1; if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(b, 1); }
+    else {
+        uint64_t t0 = bp_now(); NSError *be = nil; base = arch_capture(b, &be, 0, NULL); job->error = be; g_mtk_base_ns += bp_now() - t0;
+        if (base) { g_mtk_built++; if (g_arch_cap) arch_note_new(); }
+        *how = 2;
+    }
+    os_unfair_lock_lock(&g_mbase_lock);
+    job->ps = base;
+    if (base) hm_put_id(&g_mbase, bk, base);
+    hm_rel(nvn_hm_del(&g_mbase_pending, bk)); dispatch_group_leave(job->done);
+    os_unfair_lock_unlock(&g_mbase_lock);
+    if (!base && e) *e = job->error;
+    return base;
+}
+static void mtk_base_forget(void) {   // the tests: as a new start, which has made no base yet
+    os_unfair_lock_lock(&g_mbase_lock); nvn_hm_clear(&g_mbase, hm_rel); os_unfair_lock_unlock(&g_mbase_lock);
+}
+// A native mesh pipeline for key k (mesh shader ms, optional task shader ts, optional pixel shader fs), on any thread. With the Metal 4 compiler it is its base (mtk_base)
+// specialized with k's colour state: a build took 1.9-5 s on an iPad Pro (M5) and up to 40 s on an M1 with Metal's own cache cold (Ocarina of Time), where a specialization
+// takes microseconds. A pipeline whose mesh function hands per-primitive values on (NvShader mesh_prim, reflection mesh_stage.prim) or whose pixel shader reads the primitive ID is
+// built whole: a specialized Metal 4 mesh base non-deterministically gives the fragment 0 for every per-primitive value (attributes and [[primitive_id]]; reproduced 6/10-7/10 on
+// macOS 27.2.1 Apple M6, and macOS 27.2 M5 Pro; the pairs' bases have the same limit for [[primitive_id]], pso_build_ex). So is one whose base or specialization Metal refuses.
+// A whole pipeline is looked up in the archive files; on a miss the MTLDevice builds it and arch_harvest captures it in the background. Without the compiler, or for a function with
+// no Metal 4 descriptor, only the MTLDevice build. *archived: 2 the base was made already or came from the archive (nothing compiled or waited for here), 1 the whole pipeline came
+// from the archive, 0 the whole pipeline was built, -1 the base was compiled here, -2 another thread's compile of the base was waited for
 static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, NSError **error, int *archived) {
     if (archived) *archived = 0;
     if (!k || !ms || !ms->fn || (!ts && !ms->mesh_obj)) return nil;
@@ -652,7 +738,23 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return nil;
     id<MTLFunction> ff = d.fragmentFunction ?: mtk_nop_fragment();
     pso4_init();
-    MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff, k->border) : nil;
+    MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff, k->border, 0) : nil;
+    if (m4 && !ms->mesh_prim && ![d.label isEqualToString:PSO_WHOLE]) {
+        MTL4MeshRenderPipelineDescriptor *b = mtk_desc4(d, ts, ms, ff, k->border, 1);
+        mbase_key bk; mtk_base_key(&bk, b);
+        int how = 0; NSError *be = nil; id<MTLRenderPipelineState> base = mtk_base(b, &bk, &be, &how), ps = nil;
+        if (base && g_pre_tool) { if (archived) *archived = how < 2 ? 2 : how == 2 ? -1 : -2; return base; }
+        if (base) {
+            MTL4MeshRenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);
+            mtk_fixed4(s, d, ts, ms);
+            for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
+            ps = plain_spec(s, base, &be);
+        }
+        if (ps) { g_mtk_spec++; if (archived) *archived = how < 2 ? 2 : how == 2 ? -1 : -2; return ps; }
+        static _Atomic int said;
+        if (!atomic_exchange(&said, 1)) MLOG("[RED] task / mesh pipeline: %s of task %s mesh %s fragment %s failed (%s): built whole", base ? "the specialization of the base" : "the base",
+                                             ts ? ts->key : "-", ms->key, fs ? fs->key : "-", be ? be.localizedDescription.UTF8String : "no error given");
+    }
     if (m4) {
         id<MTLRenderPipelineState> ps = nil; int from_run = 0;
         ps = arch_lookup(m4, 0, &from_run);   // a period of mesh pipelines alone is a p file (no vertex layout)
@@ -702,13 +804,72 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
         hm_put_id(&g_pso_mtk, &k, NSNull.null); return nil;
     }
     hm_put_id(&g_pso_mtk, &k, ps);
+    if (archived == 2) { g_mtk_ready++; return ps; }   // its base was made before the draw (offline archive, prebuild, mtk_prefetch, prewarm): no stall, and no M row needed
     k.fsfn = NULL;   // The third function has its own key column; this is not a specialized fragment.
     pso_skey sk; char hex[sizeof sk * 2 + 1];
     pso_skey_from(&k, ms, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
     pso_record("M\t%s\t%s\n", task, hex); pso_user_record("M\t%s\t%s\n", task, hex);
     MLOG("task / mesh pipeline: task %s mesh %s fragment %s, %.1f ms%s required at frame %llu", task, ms->key, fs ? fs->key : "-",
-         elapsed / 1e6, archived ? " (from the pipeline archive)" : "", (unsigned long long)atomic_load(&g_cur_frame));
+         elapsed / 1e6, archived == 1 ? " (from the pipeline archive)" : archived == -1 ? " (its base compiled at the draw)" : archived == -2 ? " (waiting for its base's compile)" : "",
+         (unsigned long long)atomic_load(&g_cur_frame));
     return ps;
+}
+// A program's mesh base, built in the background when the game makes the program (mtl_prog_prefetch, nvnProgramSetShaders: most programs while a scene loads, well before
+// their first draw): the base depends on the program's functions alone, so nothing has to say what colour state its draws will have. The common one: one sample, no alpha to
+// coverage, the functions without the border corrections (matching pre_desc_mesh and pso_offline.py); a draw in another such state makes its own. Its shaders are loaded once
+// per key and kept (mbase_key digests library content tags, so the draws match the same g_mbase entry). On a later start or with a bundled pair archive, the base comes from
+// the archive with a lookup. Each triple once. DM_NVN_MESH_PREFETCH=0 turns it off: every base not prebuilt is then made at its first draw, or by an M row's prewarm
+@interface MpfLoad : NSObject { @public NvShader *sh; int done; } @end
+@implementation MpfLoad @end
+static os_unfair_lock g_mpf_lock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<NSString *, MpfLoad *> *g_mpf_sh; static NSMutableSet<NSString *> *g_mpf_seen;
+static NvShader *mpf_shader(NSString *pc, int stage) {
+    os_unfair_lock_lock(&g_mpf_lock);
+    if (!g_mpf_sh) g_mpf_sh = [NSMutableDictionary dictionary];
+    MpfLoad *l = g_mpf_sh[pc]; if (!l) { l = [MpfLoad new]; g_mpf_sh[pc] = l; }
+    os_unfair_lock_unlock(&g_mpf_lock);
+    @synchronized(l) { if (!l->done) { l->sh = shader_load(pc, stage, 0); l->done = 1; } return l->sh; }
+}
+static int mtk_prefetch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MESH_PREFETCH"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_MESH_PREFETCH=0: task / mesh bases are not built when their program is made"); } return v; }
+// The base of (task tk or nil, mesh mk, pixel fk or nil: library names) on the calling thread; 1 when it is made (by this call or before)
+static int mtk_prefetch_base(NSString *tk, NSString *mk, NSString *fk) {
+    pso4_init();
+    if (!g_comp4) return 0;   // no Metal 4 compiler: no bases
+    NvShader *ms = mpf_shader(mk, 4), *ts = tk ? mpf_shader(tk, 3) : nil, *fs = fk ? mpf_shader(fk, 1) : nil;
+    if (!ms || ms->stage != 4 || ms->mesh_kind != 2 || !ms->fn || ms->mesh_prim || (fk && !(fs && fs->stage == 1 && fs->fn))) return 0;   // mesh_prim: its pipelines are built whole (mtk_build)
+    if (tk ? !(ts && ts->stage == 3 && ts->mesh_kind == 1 && ts->fn && !ms->mesh_notask) : !(ms->mesh_notask && ms->mesh_obj)) return 0;
+    pso_key k; memset(&k, 0, sizeof k); k.samples = 1;
+    MTLRenderPipelineDescriptor *d = pso_desc(&k, nil, fs, nil, 0);
+    if ([d.label isEqualToString:PSO_WHOLE]) return 0;   // its pipelines are built whole (mtk_build)
+    id<MTLFunction> ff = d.fragmentFunction ?: mtk_nop_fragment();
+    MTL4MeshRenderPipelineDescriptor *b = mtk_desc4(d, ts, ms, ff, 0, 1);
+    if (!b) return 0;
+    mbase_key bk; mtk_base_key(&bk, b);
+    int how = 0; NSError *e = nil; id<MTLRenderPipelineState> base = mtk_base(b, &bk, &e, &how);
+    if (!base) { static _Atomic int said; if (!atomic_exchange(&said, 1)) MLOG("[RED] task / mesh base at program creation failed: task %s mesh %s fragment %s: %s", tk ? tk.UTF8String : "-", mk.UTF8String, fk ? fk.UTF8String : "-", e ? e.localizedDescription.UTF8String : "no error given"); return 0; }
+    if (how == 1) g_mtk_pf_arch++; else if (how == 2) g_mtk_pf_built++;
+    return 1;
+}
+static void mtk_prefetch(NSString *tk, NSString *mk, NSString *fk) {
+    if (!mtk_prefetch_on() || !pso4_on()) return;
+    NSString *triple = [NSString stringWithFormat:@"%@|%@|%@", tk ?: @"-", mk, fk ?: @"-"];
+    os_unfair_lock_lock(&g_mpf_lock);
+    if (!g_mpf_seen) g_mpf_seen = [NSMutableSet set];
+    int fresh = ![g_mpf_seen containsObject:triple]; if (fresh) [g_mpf_seen addObject:triple];
+    os_unfair_lock_unlock(&g_mpf_lock);
+    if (!fresh) return;
+    // Queues of their own, a compile each: a base takes up to seconds, and the library loads of other programs (pp_bg_queue's serial queues) must not wait behind it
+    static dispatch_queue_t q; static dispatch_semaphore_t width; static dispatch_once_t once;
+    dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
+        q = dispatch_queue_create("dm.nvn.mesh-base", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_UTILITY, 0));
+        width = dispatch_semaphore_create(pc / 2 > 8 ? 8 : pc / 2); });
+    g_mtk_pf_n++;
+    dispatch_async(q, ^{ @autoreleasepool {
+        dispatch_semaphore_wait(width, DISPATCH_TIME_FOREVER);
+        mtk_prefetch_base(tk, mk, fk);
+        dispatch_semaphore_signal(width);
+        if (!atomic_fetch_add(&g_mtk_pf_done, 1)) MLOG("task / mesh base at program creation: first one made in the background, task %s mesh %s fragment %s (DM_NVN_MESH_PREFETCH=0 turns it off)", tk ? tk.UTF8String : "-", mk.UTF8String, fk ? fk.UTF8String : "-");
+    } });
 }
 // The scratch buffer of the mesh shaders whose stage array is a device slice (reflection mesh_spill, dmsh_meshstage.py to_stage, DMSH_MESH_SCRATCH_* in dmsh_abi.h): one buffer for every draw,
 // made on first use, in shared storage so that the host writes the head's words and reads the overflow count. Its slices must outnumber the groups the GPU runs at once: with the stage array out of

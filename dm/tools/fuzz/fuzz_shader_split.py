@@ -3,7 +3,7 @@
 around them, and the others it recognizes by magic), then glslc_shaders when nothing was found, sdf_shaders for 'SDF\\0' (RE Engine) and arh_entries for 'arh1' (Monolith's
 index), nxsd_shaders for 'NXSD', and uniq_keys / var_pairs over what they return.
 Seeds: one synthetic shader pair (a 0x880-byte control section and a small code area per stage, vertex and pixel), wrapped as a BNSH, a BAHS with its binary and program arrays,
-an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, an ARH1 index with one path, and an NXSD with separate control and code regions.
+an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, an ARH1 index with one path, an NXSD with separate control and code regions, and a DrinkBox SHADERS container with the two stages.
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
@@ -152,10 +152,28 @@ def vfs2():
             + struct.pack('<I', names_off) + payload + strtab([b'a.vs', b'a.ps']) + strtab([b'', b'effects']))
 
 
+def dbx():
+    """DrinkBox's SHADERS container: header, string table, uniform descriptors, shader blobs ({20-byte header, uniforms, code, ctl}) and trailing 29-byte entries."""
+    strtab = b'v.vsh\0main\0p.psh\0main\0'
+    uniforms = b'WorldViewProj\0'.ljust(ss.DBX_UNIFORM, b'\0')
+    data, entries = bytearray(), bytearray()
+    for sid, (name_off, entry_off, n_uni, kind, (ctl, code)) in enumerate(((0, 6, 1, 0, VS), (11, 17, 0, 1, PS))):
+        if len(data) % 16: data += bytes(16 - len(data) % 16)
+        d_off = len(data)
+        blob = struct.pack('<5I', len(code), len(ctl), n_uni, n_uni * 16, 0) + bytes(n_uni * ss.DBX_UNIFORM) + code + ctl
+        data += blob
+        entries += struct.pack('<6IBI', name_off, entry_off, 0, n_uni, d_off, len(blob), kind, sid)
+    return (ss.DBX
+            + struct.pack('<BI', 1, len(strtab)) + strtab
+            + struct.pack('<I', 1) + uniforms
+            + struct.pack('<I', len(data)) + bytes(data)
+            + struct.pack('<I', 2) + bytes(entries))
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2(), 'dbx': dbx()}
 
 
 def check(data):
@@ -167,7 +185,8 @@ def check(data):
         else:
             found = []; ss.scan_blob(data, '/fuzz', found)
             if not found and data[:4] != b'MSHD' and GLSLC in data: found += ss.glslc_shaders(data, '/fuzz', need=False)
-        ss.uniq_keys(found); ss.var_pairs(found)
+        keys = ss.uniq_keys(found); ss.var_pairs(found)
+        if data[:8] == ss.DBX: ss.separable_pairs(keys)
     except SystemExit as e:
         if not str(e).startswith('[RED] '): raise   # red(): the declared rejection
     finally: ss.BAHS_VAR.clear()

@@ -95,6 +95,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
+| [Teenage Mutant Ninja Turtles: Shredder's Revenge](#teenage-mutant-ninja-turtles-shredders-revenge) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [The Legend of Heroes: Trails into Reverie](#the-legend-of-heroes-trails-into-reverie) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -574,6 +575,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x443fac`: frame limiter threshold: N × tick frequency / 60 (umulh by 1/60 → udiv by 60), then 0 when N = 1 (cmp w20, #1; csel x20, xzr, x8, eq): one vsync a frame is the present pacing's; N = 2 keeps the 2 ms rounds
 - **function-matched** (`main` of builds without CUTS): frame limiter threshold: 0 when N = 1: 1 function, 1 cut
 - **function-matched** (`main` of builds without CUTS): frame limiter threshold: 0 when N = 1: 1 function, 1 cut
+
+### Teenage Mutant Ninja Turtles: Shredder's Revenge
+
+[Teenage Mutant Ninja Turtles: Shredder's Revenge](../../dm/games/0100FE701475A000/README.md), `0100FE701475A000`, [patches.py](../../dm/games/0100FE701475A000/patches.py).
+
+- **`game`**, runtime, at goal, checked: 1.0.9: both null dereferences traced to the two calls in the same function; caller and callees fingerprinted: character selection without EOS lobby updates. The game's own character-select path asks for an EOS lobby even after EOS initialization fails
+
+- **function-matched** (`main` of builds without CUTS): character selection without EOS lobby updates: 1 function, 2 cuts
 
 ### The Legend of Heroes: Trails into Reverie
 

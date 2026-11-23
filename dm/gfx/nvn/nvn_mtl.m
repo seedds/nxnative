@@ -2095,7 +2095,7 @@ static inline void enc_r_end_pass(id e) {
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { if (g_tf_enc) tf_pass_end(); g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
-static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }
+static inline void enc_r_pso(__unsafe_unretained id<MTL4RenderCommandEncoder> e, __unsafe_unretained id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }   // the caller holds both: no retain and release a draw
 static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { [e setDepthStencilState:s]; }
 static inline void enc_r_viewport(id<MTL4RenderCommandEncoder> e, MTLViewport v) { [e setViewport:v]; }
 static inline void enc_r_scissor(id<MTL4RenderCommandEncoder> e, MTLScissorRect r) { [e setScissorRect:r]; }
@@ -7616,7 +7616,7 @@ static uint64_t g_gs_miss_draws;
 static void draw_gs_check(NvProg *pr) {
     if (pr->gs_miss[0]) { g_gs_miss_draws++; static int m; if (m++ < 8) MLOG("[RED] draw with geometry shader %s, which has no library (vertex %s fragment %s)", pr->gs_miss, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
         PD("G %llu draw with geometry shader %s, which has no library", g_stat_pass, pr->gs_miss); }
-    NvShader *g = pr->sh[2]; static int n;
+    __unsafe_unretained NvShader *g = pr->sh[2]; static int n;
     if (g && !g->fn && n++ < 8) MLOG("[RED] geometry shader %s picks the layer from input %d.%c, but vertex shader %s has no layer entry points for it (layer_from %d.%c): the draw reaches only the first layer",
                                     g->key, g->gs_loc, g->gs_comp, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[0] ? pr->sh[0]->lay_loc : -1, pr->sh[0] && pr->sh[0]->lay_loc >= 0 ? pr->sh[0]->lay_comp : '-');
 }
@@ -7649,14 +7649,17 @@ static NvShader *builtin_get(const char *ctl) {
     return nil;
 }
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
-static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
+// The program's object, as a plain pointer (prog_get): a function that returns an object hands it over retained-and-autoreleased whatever qualifier its return type has, two
+// runtime calls at each of the calls every draw makes; the serial table and lpr hold the object
+#define prog_get(cp) ((__bridge NvProg *)prog_get_ref(cp))
+static void *prog_get_ref(const prog_t *cp) {   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
-    if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
+    if (!p) return NULL;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
     uint64_t gen = g_ser_gen;
-    if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
+    if (p == lp && p->serial == lser && gen == lgen && lpr) return (__bridge void *)lpr;
     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
-    if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }
+    if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return (__bridge void *)have; }
     shmap_load();
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
@@ -7686,8 +7689,8 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         if (!sh && st == 2) strlcpy(o->gs_miss, k.UTF8String, sizeof o->gs_miss);
     }
     prog_fold_gs(o);   // a slice-writing geometry shader: the vertex shader's layer entry points instead
-    if (p->serial) serial_put(p->serial, o);
-    return o;
+    if (p->serial) { serial_put(p->serial, o); return (__bridge void *)o; }   // the serial table holds it
+    return (void *)CFAutorelease(CFBridgingRetain(o));   // a program with no serial: alive until the caller's pool drains, as a returned object was
 }
 // Stage mask of a program without loading shader libraries: reads a resolved NvProg (or its sh[] for synthetic test objects) or the shader map alone,
 // so OP_BIND_PROGRAM and lookahead state walks (fsm_plan, cs_hoist_try, pso_predict_rest) never trigger shader_get or warm_start.
@@ -7736,7 +7739,7 @@ void mtl_prog_snapshot_pin(prog_t *copy,const prog_t *source) {
     own_prog_pin(source->serial);
 }
 void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
-    prog_get(source);
+    (void)prog_get(source);
     mtl_prog_snapshot_pin(copy,source);
 }
 
@@ -12201,7 +12204,9 @@ static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, 
     if (o < (int)n) snprintf(b + o, n - o, "}}");
     return b;
 }
-static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRenderPassDescriptor *unused) { AP_B; __unsafe_unretained id<MTLRenderPipelineState> r = pso_get_(pr, unused); AP_E(2); return r; }
+// As prog_get: a plain pointer, with no retained-and-autoreleased hand-over at the draw (the pipeline tables hold every pipeline pso_get_ returns)
+static void *pso_get_ref(NvProg *pr, MTLRenderPassDescriptor *unused) { AP_B; __unsafe_unretained id<MTLRenderPipelineState> r = pso_get_(pr, unused); AP_E(2); return (__bridge void *)r; }
+#define pso_get(pr, unused) ((__bridge id<MTLRenderPipelineState>)pso_get_ref(pr, unused))
 // The pipelines of slice-merged passes (g_sm_plan): the draw's pipeline built with maxVertexAmplificationCount 2, keyed with AMP_MARK. Built in the background on first use; until it is
 // there the draw gets nil and goes to a pass of its own (sm_plan does not merge, draw splits a merged pass), so no frame waits for the compiler. A failed build is not tried again.
 // Face-split draws' pipelines (FSP_MARK, one per colour output: fsp_plan) are built and kept here the same way
@@ -14180,7 +14185,7 @@ static int border_need(NvShader *sh, int nvn_stage) {
     return need;
 }
 // pso_key.border of a draw of pr in the current state (pso_key_fill): the draw fetches its pipeline again when this changes (draw_)
-static int prog_border(NvProg *pr) { NvShader *vs = pr->sh[0], *fs = pr->sh[1]; return (vs && border_need(vs, vs->stage)) || border_need(fs, 1); }
+static int prog_border(NvProg *pr) { __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1]; return (vs && border_need(vs, vs->stage)) || border_need(fs, 1); }
 // A table of the handles in one of the game's uniform buffers, which a shader indexes at run time (element k = the handle at off + 8k): nothing tells how many the game keeps there, and the argument
 // buffer has one pointer for it, so the table is as long as the last handle the buffer holds. Kirby Air Riders keeps 197 handles up to element 392 in a 4,096-element buffer, and 34,000 textures
 // registered: only those a table names are made here, where pool_gpu's walk over every ID took 16 GB and most of the frame. A table is looked at again in each pass, in each submission (a compute-only
@@ -14369,7 +14374,7 @@ static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, ui
 }
 // A CBUF slot's GPU address, and in *use the buffer it points into: the bound uniform buffer; the shadow of inline updates deferred in this pass; an arena copy padded with zeros
 // when the binding is shorter than the shader reads it at fixed offsets (ub_padded); or the all-zero bank when nothing usable is bound. The full encode and the patch take it from here
-static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __strong id<MTLBuffer> *use) {
+static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> *use) {   // *use is not retained (a pool's buffer, the zero bank or an arena block, each held by its table): a retain and a release a uniform slot otherwise
     int reg = b->reg; const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
     void *mb; uint64_t mo, gpu;
     if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
@@ -14385,7 +14390,7 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
         *use = zero_bank(); return zero_bank_gpu(); }
     if (__builtin_expect(ub_bound(u->size) < 4u * b->fixw, 0)) {   // bound shorter than the shader reads it at fixed offsets: those reads give 0, as on Maxwell
         void *rb; uint64_t ro, rg, live = u->size && mtl_gpu_addr(u->addr, ub_bound(u->size), &rb, &ro, &rg) && rb == mb ? ub_bound(u->size) : u->size;   // the pool may end before the rounded size
-        return ub_padded(sh, nvn_stage, reg, u, live, 4u * b->fixw, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, use); }
+        id<MTLBuffer> pb; uint64_t pg = ub_padded(sh, nvn_stage, reg, u, live, 4u * b->fixw, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, &pb); *use = pb; return pg; }
     *use = (__bridge id<MTLBuffer>)mb;
     uint64_t ul = cb_len(sh, reg, u->size);   // what the shader can read of it
     if (g_nubd && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
@@ -14501,7 +14506,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         uint64_t *p = (uint64_t *)(void *)at.cpu;
         memcpy(p, (const uint8_t *)sh->ab_buf.contents + sh->ab_off, arg_len);
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; id<MTLBuffer> use;
-            if (b->kind == NVN_RB_CBUF) p[b->aid] = cbuf_slot(sh, nvn_stage, b, &use);
+            if (b->kind == NVN_RB_CBUF) { __unsafe_unretained id<MTLBuffer> cu; p[b->aid] = cbuf_slot(sh, nvn_stage, b, &cu); }
             else if (b->kind == NVN_RB_CBSIZE) p[b->aid] = cbsize_table(nvn_stage, &use);
             else continue;
             za_check(p[b->aid], "argument block address slot", b->aid); }
@@ -14544,7 +14549,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
         if (b->kind == NVN_RB_GEOMETRY) { slots[aid] = g_geo_bind[reg]; continue; }
         if (b->kind == NVN_RB_CBUF) {
             const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
-            id<MTLBuffer> use; slots[aid] = cbuf_slot(sh, nvn_stage, b, &use);
+            __unsafe_unretained id<MTLBuffer> use; slots[aid] = cbuf_slot(sh, nvn_stage, b, &use);
             USE(use, MTLResourceUsageRead);
             void *mb; uint64_t mo, g_;
             if (bl && u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &g_)) {
@@ -15848,7 +15853,7 @@ static inline int sh_tex_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *
 static inline int sh_buf_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->buf_idx; return sh->buf_n; }
 // The texture slots (bit per slot 0-255) whose attachment this draw reads from the tile; 0 = none (then g_fb_tfn and the rest are not this draw's)
 static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
-    NvShader *vs = pr->sh[0], *fs = pr->sh[1]; memset(tile, 0, 4 * sizeof *tile);
+    __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1]; memset(tile, 0, 4 * sizeof *tile);   // the program holds them (no retain and release a draw)
     if (g_fb_mode != 1 || !vs || !(fs->rf.fc_proj | fs->rf.fc_fpos) || !fs->rf.color_known || !fs->rf.nfo || !fb_tile_on()) return 0;
     fb_pinfo pi; int learn = 0;
     if (g_enc) { fb_pinfo_now(&pi); if (g_sm_pass) return 0; }
@@ -16035,7 +16040,7 @@ static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || (!R.rt.n && !R.rt.depth) || !fb_mode()) return;
-    NvShader *fs = pr->sh[1];
+    __unsafe_unretained NvShader *fs = pr->sh[1];   // the program holds it
     fb_pass_sync();
     uint32_t dsw = 0;
     if (R.rt.depth) {
@@ -17090,7 +17095,7 @@ void mtl_geohoist_stats(uint64_t *moved, uint64_t *runs, uint64_t *stops) { *mov
 void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = g_csh_moved; *depth = g_csh_depth; for (int i = 0; i < 8; i++) stops[i] = g_csh_stop[i]; }
 // Physical color attachments the selected pipeline can write. A merged pass remaps logical outputs and channel masks; a specialized fragment's outputs are unknown here.
 static uint32_t draw_color_writes(NvProg *pr) {
-    NvShader *fs = pr ? pr->sh[1] : nil;
+    __unsafe_unretained NvShader *fs = pr ? pr->sh[1] : nil;   // the program holds it: no retain and release a draw (as below, where a draw's helpers name its shaders)
     if (!fs || S.rast_discard) return 0;
     uint32_t outputs = g_pso_fsfn || ms_fs_override(fs) || !fs->rf.color_known ? UINT32_MAX : fs->rf.color_mask;
     uint32_t mask = 0;
@@ -17169,7 +17174,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                       a[0], a[1], a[2], (int)a[3], a[4], eok ? "" : "unreadable ", e0, e1, ok_i ? "" : " (index buffer unreadable)", ix[0], ix[1], ix[2], ix[3], ix[4], ix[5],
                       a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]); }]; }
     if (!g_geo_program && S.prog) {
-        NvProg *geometry_program = prog_get(S.prog);
+        __unsafe_unretained NvProg *geometry_program = prog_get(S.prog);
         if (!g_wl.on && wl_wanted(geometry_program, dw, di) && wl_draw(geometry_program, dw, di)) return;   // lines wider than a pixel (nvn_wline.inc)
         if (geometry_program && (dw ? dw->prim : di->prim) == 14 && geometry_program->sh[3] && geometry_program->sh[4]) {   // patches, with or without a geometry shader after the domain: nvn_tess.inc
             if ((dw && dw->mdi_cnt && !mdi_live(dw->mdi_cnt, dw->mdi_i)) || (di && di->mdi_cnt && !mdi_live(di->mdi_cnt, di->mdi_i))) return;

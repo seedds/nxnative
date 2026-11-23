@@ -688,6 +688,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** MacNativeGames commit `7431eb7` (38 of 55 samples of the serial lookup were `memcmp` in a Tears of the Kingdom profile). Here, a lookup in a 3,000-entry table of 8-byte keys takes 1.5 ns instead of 5.9 ns on an M4 Pro (`clang -O2`, 60 million lookups); no game frame has been measured.
 - **Check:** `t_hmap` checks 8- and 20-byte keys against a naive model through random puts, overwrites, deletes and clears.
 
+### Retain and release in every draw's helpers
+
+- **Symptom:** `objc_retain`, `objc_release` and `objc_retainAutoreleasedReturnValue` spread over the replay thread's samples, under small per-draw helpers.
+- **Cause:** ARC retains and releases every strong local and every returned object. The draw helpers named a program's shaders in strong locals, and `prog_get` and `pso_get` handed their objects over retained and autoreleased at each call, though the program, the serial table and the pipeline tables hold them for the whole draw.
+- **Fix:** those locals, and `cbuf_slot`'s and `enc_r_pso`'s object parameters, are `__unsafe_unretained`; `prog_get` and `pso_get` return plain pointers (`prog_get_ref`, `pso_get_ref`, bridged by macros). Records for the encode thread still retain what they name (`nvn_rec.h`), and a program with no serial is still autoreleased.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): ARC traffic was about 13 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
+
 ### Submissions handed to the GPU in segments
 
 - **Symptom:** the GPU sits idle each frame while the host translates the submission (a game that does not submit frame N+1 until frame N's GPU work is done).

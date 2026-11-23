@@ -1,0 +1,50 @@
+# METAL GEAR SOLID: Peace Walker - Master Collection Version, Program 1 (Peace Walker HD Edition, program 1 of application 010099801C4FA000; update v131072 = 1.3.0), SDK 19.3.11.
+# Konami's ported PSP/HD Edition engine on NVN with NintendoSDK_movie (subsdk0) and an explicit CPU / manual nn::audio AudioRenderer. Packed with the launcher as one game.
+
+# ---- Identity ----
+title_id	010099801C4FA001
+program_id	010099801C4FA001
+
+# ---- App ----
+# a program of METAL GEAR SOLID: Peace Walker - Master Collection Version, not a game of its own (dm/games/README.md, programs): packed with it
+program_of	010099801C4FA000
+name	METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)
+ipa	MetalGearSolidPeaceWalkerMasterCollectionVersionGame.ipa
+app_category	public.app-category.games
+
+# third-person stealth action with camera on the right stick
+pad_layout	full
+
+# ---- Versions ----
+build	v131072	1.3.0	main=bca1a793e41a4836ef3c03286b18e816	subsdk0=bda3d43bac6b09f2d7ea324437c728a3	sdk=df7a3960c74c3a4803f826c587153252
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	MLG/disc0_rel/SLOT.DAT
+zip_store	.dat:.mp4:.pdt:.txp:.xpr:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 625 MB of bss (counted as used memory): a 2816 MB heap region
+mem_reserve	0xe0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Graphics ----
+# nvnDeviceSetDepthMode with near = 0: the pipeline bases made before the game runs are made for that mode
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/MLG/=mlg /ms0/=ms0 /SHADER/=shader /EXLANG/=exlang /Text/=text /FONT/=font /loading/=loading
+shader_note	METAL GEAR SOLID: Peace Walker - Master Collection Version (Program 1) shaders
+
+# ---- Launch ----
+# Program 0 hands program 1 a 74-byte ASCII parameter string through oe::ExecuteProgram:
+# "-region eu -lan en -selfregion EU -resolution 0 -upscale 0 -launcherpath 0"
+# For a run of this program alone, supply the same bytes.
+launch_param	hex:2d726567696f6e206575202d6c616e20656e202d73656c66726567696f6e204555202d7265736f6c7574696f6e2030202d75707363616c652030202d6c61756e63686572706174682030

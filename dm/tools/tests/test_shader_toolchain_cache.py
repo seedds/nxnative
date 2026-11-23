@@ -49,7 +49,7 @@ class ShaderCache(unittest.TestCase):
                        XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
-                       DUAL_WANT=set(), BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
+                       BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
                        STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
                        STAMP_BEFORE=None, INPUTS='inputs', dmsh_rt_compile=dmsh_rt_compile, RT_KEYS=set())
@@ -84,42 +84,6 @@ class ShaderCache(unittest.TestCase):
                 self.assertTrue(self.ns['restore_cache']('key', old))
                 self.ns['METAL_FP'] = 'tested Metal and SDK'
                 self.assertFalse(self.ns['restore_cache']('key', self.digest()))
-
-    def test_dual_source_membership_change_rejects_cached_library(self):
-        for ios in (False, True):
-            for listed in (False, True):
-                with self.subTest(ios=ios, listed=listed):
-                    self.ns['STORE'] = shader_cache.Store(Path(self.tmp.name) / f'cas-{ios}-{listed}.db')
-                    self.ns['IOSOUT'] = str(Path(self.tmp.name) / 'ios') if ios else None
-                    self.ns['TARGETS'] = {'mac', 'ios'} if ios else {'mac'}
-                    self.ns['DUAL_WANT'] = {'key'} if listed else set()
-                    old = self.digest()
-                    reflection = {'stage': 'ps', 'entry_d': 'main0_d' if listed else None}
-                    for directory in (self.ns['out'], self.ns['IOSOUT']) if ios else (self.ns['out'],):
-                        assert directory is not None
-                        output = Path(directory); output.mkdir(exist_ok=True)
-                        (output / 'key_b.metal').write_text('synthetic MSL')
-                        (output / 'key_b.metallib').write_bytes(b'dual' if listed else b'ordinary')
-                        (output / 'key_b.json').write_text(json.dumps(reflection))
-                    self.ns['publish_cache']('key', old, 'rule', 'source')
-                    self.assertTrue(self.ns['restore_cache']('key', old))
-                    self.assertEqual(json.loads((Path(self.ns['out']) / 'key_b.json').read_text())['entry_d'],
-                                     reflection['entry_d'])
-                    self.ns['DUAL_WANT'] = set() if listed else {'key'}
-                    self.assertFalse(self.ns['restore_cache']('key', self.digest()),
-                                     'a membership change must not restore the opposite entry-point variant')
-
-    def test_unrelated_dual_source_changes_preserve_shader_key(self):
-        original = self.digest()
-        self.ns['DUAL_WANT'] = {'another-pixel'}
-        self.assertEqual(self.digest(), original)
-        self.ns['DUAL_WANT'] = {'key'}
-        listed = self.digest()
-        self.assertNotEqual(listed, original)
-        self.ns['DUAL_WANT'] = {'another-pixel', 'key'}
-        self.assertEqual(self.digest(), listed)
-        self.ns['DUAL_WANT'] = set()
-        self.assertEqual(self.digest(), original)
 
     def test_unchanged_compiler_reuses_key(self):
         self.assertEqual(self.digest(), self.digest())

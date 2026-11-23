@@ -213,6 +213,21 @@ static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh scree
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link in a window", g_link_mode == 2 && test_match_fps == 120);
     g_dm_present_link = 1; test_screen_hz = 0; test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
+static void forty(void) {   // 40 fps automatically selects the 120 Hz link (3 ticks = 25 ms) and asks front_screen_match(120); movie/thermal drops to 30/60 and back return to 120 Hz
+    reset(); test_fullscreen = 0; test_variable_refresh = 0; test_screen_hz = 120; test_game_fps = 40; g_present_link_env = 0; g_link_drain_on = 0;
+    SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
+    link_sync();
+    CHECK("40 fps automatically selects the 120 Hz link", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && mtl_link_rate() == 120);
+    CHECK("40 fps asks the screen matcher for 120 Hz", test_match_fps == 120);
+    CHECK("40 fps leaves g_dm_present_link untouched", g_dm_present_link == 1);
+    test_game_fps = 30; link_sync();
+    CHECK("a 30 fps movie during 40 fps drops to the 30 Hz link", g_link_mode == 3 && test_match_fps == 30);
+    test_game_fps = 40; link_sync();
+    CHECK("after the movie ends, 40 fps returns to the 120 Hz link and asks for 120 Hz", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 120);
+    g_present_link_env = 1; g_dm_present_link = 1; link_sync();
+    CHECK("explicit DM_PRESENT_LINK=1 keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
+    g_present_link_env = 0; test_game_fps = 60; g_link_drain_on = -1; test_screen_hz = 0; link_sync(); g_link = nil; g_link_started = 0;
+}
 static void settling(void) {
     reset(); g_link = nil; g_link_started = 0; g_link_owns_layer = 0; g_dm_present_link = 0; link_sync();
     NSObject *dummy_layer = [NSObject new]; test_layer = (__bridge void *)dummy_layer; test_settling = 1; g_dm_present_link = 1;
@@ -358,7 +373,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120(); settling(); probation();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); latency(); thirty(); vrr120(); forty(); settling(); probation();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

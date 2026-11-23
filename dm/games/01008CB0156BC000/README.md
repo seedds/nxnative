@@ -1,8 +1,8 @@
 # The Legend of Heroes: Trails into Reverie (`01008CB0156BC000`)
 
-NIS America release, update 1.0.4 (`v262144`). PH3's Switch port of Nihon Falcom's PhyreEngine game, using NVN and Nintendo SDK 14.3.0. The loaded modules are `main`, `subsdk0` (Nintendo's movie player), and `sdk`. The host boots with the stock rewriter. The five DLC packages in the survey contain licences.
+NIS America release, update 1.0.4 (`v262144`). PH3's Switch port of Nihon Falcom's PhyreEngine game, using NVN and Nintendo SDK 14.3.0. The loaded modules are `main`, `subsdk0` (Nintendo's movie player), and `sdk`. The five DLC packages in the survey contain licences.
 
-On an Apple M6 Mac (macOS 27.2.1, Xcode 27.2, 2026-11-23), the title screen, New Game on Normal and the opening Crossbell City cutscenes through field `c1400` all draw with the complete shader library. Both the development build and the standalone app reached those scenes. The audio renderer produces non-silent PCM. The app's audio device had one 228 ms callback gap during the concurrent iOS build and resumed callbacks after the host's existing retry. The title and steady cutscene intervals run around 30 fps. Scene transitions bring some 300-frame intervals below 30 fps on the first run.
+On an Apple M6 Mac (macOS 27.2.1, Xcode 27.2, 2026-11-23), the title screen, New Game on Normal and the opening Crossbell City cutscenes through field `c1400` all draw with the complete shader library. Both the development build and the standalone app reached those scenes. The audio renderer produces non-silent PCM. The app's audio device had one 228 ms callback gap during the concurrent iOS build and resumed callbacks after the host's existing retry.
 
 ## What it needs
 
@@ -13,6 +13,13 @@ On an Apple M6 Mac (macOS 27.2.1, Xcode 27.2, 2026-11-23), the title screen, New
 ## Mac route
 
 At the title, press A, go up from Load Game to New Game and confirm with A. Choose Normal. Select No on each of the three optional import prompts to start the opening sequence. The game loads field `c0000` after the prompts.
+
+## Frame rate
+
+- The stock game asks NVN to present at interval 1. On the Mac the display link runs at 60 Hz, and the game sends about 30 frames per second. The update callback at `main+0x81910` in 1.0.4 accumulates elapsed seconds and schedules camera and render updates every 1/30 s. Two animation deltas in that callback also use 1/30 s as their time base.
+- The rewriter schedules updates every 1/60 s and uses the game's measured elapsed time for the animation deltas, clamped to 1/60–1/15 s before applying their existing time scales. One atomic function rule covers the complete callback and its direct callees. It matches at `main+0x80c20` on the cartridge build and `main+0x81910` on 1.0.4. Both Final Fantasy XII PhyreEngine mains on hand have no match. A future Reverie build whose timing code or direct callees change needs another reviewed fingerprint.
+- On the M6 Mac, 1.0.4's median frame time went from 33.31 ms in the stock title menu to 16.67 ms in the standalone 60 fps app. The steady `c0000` cutscene ran at 16.67 ms median and 16.80–16.87 ms p95. Asset loads still cause dips. From the first `c0000` asset load to the `c1400` load, the stock test took 57.56 s and the 60 fps app took 58.29 s, including load stalls. The rewritten ARM64 timing blocks from v0 and 1.0.4 both passed offline checks for slow frames and non-default animation scales.
+- MasaGratoR identified the update callback and reported a text fade issue above 30 fps in the “Beyond the Reverie” dream. That scene remains untested here. [FPSLocker analysis](https://github.com/masagrator/FPSLocker-Warehouse/blob/v4/SaltySD/plugins/FPSLocker/patches/01008CB0156BC000/7735C8DD89D145F2.yaml)
 
 ## Memory
 

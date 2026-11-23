@@ -256,6 +256,15 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
             self.assertIn('t:texture=0:1:sampler2D', r[1])
             self.assertTrue(any(x.startswith('u:sample=') for x in r[1]), r[1])
 
+    def test_precision_statement_beside_other_text(self):   # glslang stops at `precision float;` once the qualifier is gone, wherever the statement sits on its line
+        body = b'varying vec2 v; uniform sampler2D t; void main(){ gl_FragColor = texture2D(t, v); }\n'
+        for src in (b'precision mediump float; // default\n' + body, b'precision mediump float; ' + body, b'precision\tlowp int; precision highp float;\n' + body):
+            with self.subTest(src=src[:36]), tempfile.TemporaryDirectory() as d:
+                self.assertIsInstance(gl_shaders.translate(src, 'frag', 'k', d), tuple)
+
+    def test_precision_word_in_a_name_stays(self):
+        self.assertIn('float precision_scale;', gl_shaders.es100('float precision_scale;\n', 'frag'))
+
     def test_legacy_desktop_varyings_link_after_macro_expansion(self):
         vert = b'#version 120\nattribute vec4 p;\n#define COLOR gl_FrontColor\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_Position = p; COLOR = p; TEX(0) = p; }\n'
         frag = b'#version 110\n#define COLOR gl_Color\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_FragData[0] = COLOR * TEX(0); }\n'

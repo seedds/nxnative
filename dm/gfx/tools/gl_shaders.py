@@ -225,6 +225,7 @@ def uni_members(refl, ms, prefix, base, f, bools, active):
 def promote_legacy(t, stage, renamed=None, desktop=False):
     if renamed is None: renamed = {}
     t = re.sub(r'^[ \t]*precision[ \t]+\w+[ \t]+\w+[ \t]*;\r?[ \t]*\r?\n', '', t, flags=re.M)
+    t = re.sub(r'\bprecision\s+(?:lowp|mediump|highp)\s+\w+\s*;', '', t)   # one beside a comment or other code on its line; the qualifier strip below would leave `precision float;`
     t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
     t = re.sub(r'\battribute\b', 'in', t)
     t = re.sub(r'\bvarying\b', 'out' if stage == 'vert' else 'in', t)

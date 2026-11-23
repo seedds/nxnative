@@ -1119,7 +1119,7 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
 typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; uint32_t rec_id; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed); rec_id: the recording that took it
-static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
+static hostseg_t *g_hostseg; static size_t g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
 static _Atomic int g_hostseg_held;   // busy segments with a guest range: 0 lets hostseg_written return without the lock (no game seen so far lends one from its own pool)
 static _Atomic uint32_t g_rec_serial;   // BeginRecording's serials (cmd_t rec_id; one that wraps around to a recording whose segment is still lent only keeps that segment lent)
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1136,23 +1136,30 @@ static uint8_t *hostseg_take(cmd_t *o, size_t n, const uint8_t *anchor, size_t a
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
     int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
-    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
+    for (size_t i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!in_seg && o && o->recording && cur) {
         uintptr_t own = anchor ? (uintptr_t)anchor : cmd_own(o) && (uintptr_t)cmd_own(o) <= cur ? (uintptr_t)cmd_own(o) : cur < (uintptr_t)o->end ? cur : 0;
         if (own) { lo = own; hi = anchor ? lo + anchor_size : cur > lo ? cur : lo + 1; }
         else { static int once; if (!once++) LOG("[RED] NVN command memory: a recording ran short at the very end of the game's memory with no byte of its own there; the segment the host lends it is never reclaimed"); }
     }
-    for (int i = 0; i < g_nhostseg && !m; i++)
+    for (size_t i = 0; i < g_nhostseg && !m; i++)
         if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi, o ? o->rec_id : 0 }; m = g_hostseg[i].mem; }
     if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
-        if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
+        if (g_nhostseg == g_caphostseg) {
+            if (g_caphostseg > SIZE_MAX / sizeof *g_hostseg / 2) die("host segment table too large");
+            size_t cap = g_caphostseg ? 2 * g_caphostseg : 64;
+            hostseg_t *segments = realloc(g_hostseg, cap * sizeof *segments);
+            if (!segments) die("host segment table allocation failed");
+            g_hostseg = segments;
+            g_caphostseg = cap;
+        }
         g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi, o ? o->rec_id : 0 }; g_hostseg_bytes += n;
     }
     if (m && hi > lo) atomic_fetch_add_explicit(&g_hostseg_held, 1, memory_order_relaxed);
-    unsigned t = anchor ? 0 : ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
+    unsigned t = anchor ? 0 : ++total; size_t ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
-    if (t && (t == 1 || t % 1024 == 0)) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %d segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
+    if (t && (t == 1 || t % 1024 == 0)) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %zu segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
     return m;
 }
 // Recording o wrote records at [p, p + n) (a piece it closes: ctl_chunk_close, cmd_alloc), or tried to write one at p (n = 1: cmd_alloc): segments of other recordings whose guest bytes
@@ -1161,7 +1168,7 @@ static void hostseg_written(const cmd_t *o, const uint8_t *p, uint64_t n) {
     if (!n || !atomic_load_explicit(&g_hostseg_held, memory_order_relaxed)) return;
     uintptr_t lo = (uintptr_t)p, hi = lo + n;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg; i++) {
+    for (size_t i = 0; i < g_nhostseg; i++) {
         hostseg_t *s = &g_hostseg[i];
         if (s->busy && s->org_hi > s->org_lo && s->rec_id != o->rec_id && s->org_hi > lo && s->org_lo < hi) { s->busy = 0; atomic_fetch_sub_explicit(&g_hostseg_held, 1, memory_order_relaxed); }
     }
@@ -3627,6 +3634,15 @@ static struct vshadow vshadow_slice(const struct vshadow *orig, uint64_t voff, u
     }
     return (struct vshadow){voff, size, src, abase, alias, alen, orig->stamp, snap, np};
 }
+static void vshadow_reserve_one(struct vpool *v) {
+    if (v->nsh < v->csh) return;
+    if (v->csh > INT_MAX / 2) die("sparse pool copy table too large");
+    int cap = v->csh ? 2 * v->csh : 64;
+    struct vshadow *entries = realloc(v->sh, (size_t)cap * sizeof *entries);
+    if (!entries) die("sparse pool copy table allocation failed");
+    v->sh = entries;
+    v->csh = cap;
+}
 static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop or trim shadow entries overlapping [lo, hi)
     for (int i = 0; i < v->nsh; ) {
         struct vshadow e = v->sh[i]; uint64_t a = e.voff, b = e.voff + e.size;
@@ -3638,7 +3654,7 @@ static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop o
         if (b > hi) piece[np++] = vshadow_slice(&e, hi, b - hi);
         vshadow_free(&e);
         for (int k = 0; k < np; k++) {
-            if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
+            vshadow_reserve_one(v);
             v->sh[v->nsh++] = piece[k];
             atomic_fetch_add(&g_sh_bytes, piece[k].size);
         }
@@ -3671,7 +3687,7 @@ static int vshadow_map(struct vpool *v, const map_req *r, const uint8_t *src) { 
     memcpy(to, src, r->size);
     uint8_t *abase = NULL; uint64_t alen = 0;
     uint8_t *alias = vshadow_phys_alias(src, r->size, &abase, &alen);
-    if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
+    vshadow_reserve_one(v);
     v->sh[v->nsh++] = (struct vshadow){(uint64_t)r->voff, r->size, src, abase, alias, alen, stamp, NULL, vshadow_npages(src, r->size)};
     for (uint64_t o = 0; o < r->size; o += 0x1000) { vpte *e = (vpte *)vpt_get(v, (uint64_t)r->voff + o); if (e) e->shadow = 1; }
     vshadow_written(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);

@@ -157,7 +157,7 @@ int main(void) {
     h_nvnCommandBufferAddCommandMemory(&cmd, &cpool, 0, 64 << 10);
     h_nvnCommandBufferAddControlMemory(&cmd, ctl_mem, sizeof ctl_mem);
     NVNtextureHandle handles[49];
-    for (int i = 0; i < 49; i++) handles[i] = (NVNtextureHandle)(i + 100);
+    for (int i = 0; i < 49; i++) handles[i] = (NVNtextureHandle)i + 100;
     h_nvnCommandBufferBeginRecording(&cmd);
     h_nvnCommandBufferBindTextures(&cmd, NVN_SHADER_STAGE_FRAGMENT, 0, 49, handles);
     NVNcommandHandle ch = h_nvnCommandBufferEndRecording(&cmd);
@@ -165,17 +165,17 @@ int main(void) {
     memset(S.tex[1], 0, sizeof S.tex[1]);
     uint8_t *lin = nvn_rec_linear(ch, NULL);
     mtl_exec(lin); free(lin);
-    int all49 = 1; for (int i = 0; i < 49; i++) if (S.tex[1][i] != (uint64_t)(i + 100)) all49 = 0;
+    int all49 = 1; for (int i = 0; i < 49; i++) if (S.tex[1][i] != (uint64_t)i + 100) all49 = 0;
     CHECK("BindTextures 49 handles replayed across split records", all49);
     // Deferred bind >32 handles: mutate array after recording, before replay
     h_nvnCommandBufferBeginRecording(&cmd);
     h_nvnCommandBufferBindTexturesDeferred(&cmd, NVN_SHADER_STAGE_VERTEX, 0, 49, handles);
     NVNcommandHandle ch_def = h_nvnCommandBufferEndRecording(&cmd);
-    for (int i = 0; i < 49; i++) handles[i] = (NVNtextureHandle)(i + 500);
+    for (int i = 0; i < 49; i++) handles[i] = (NVNtextureHandle)i + 500;
     memset(S.tex[0], 0, sizeof S.tex[0]);
     lin = nvn_rec_linear(ch_def, NULL);
     mtl_exec(lin); free(lin);
-    int def49 = 1; for (int i = 0; i < 49; i++) if (S.tex[0][i] != (uint64_t)(i + 500)) def49 = 0;
+    int def49 = 1; for (int i = 0; i < 49; i++) if (S.tex[0][i] != (uint64_t)i + 500) def49 = 0;
     CHECK("BindTexturesDeferred 49 handles read updated handles at replay", def49);
 
     // 8. Geometry GPU-only scratch pool: reuses multiple blocks across geo_big_reset, trims completed blocks on memory pressure

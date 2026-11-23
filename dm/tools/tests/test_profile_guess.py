@@ -218,6 +218,26 @@ class UnrealMemory(unittest.TestCase):
         self.assertGreaterEqual(heap, 128 * pg.MiB)
 
 
+class StackRegion(unittest.TestCase):
+    """A virtual-address game's thread stacks go at random addresses in the stack region, and 256 MB aborts in MapAliasStack once a few 8 MB Unity stacks are live (issues #1809, #2012)"""
+    @staticmethod
+    def guess(imports):
+        facts = {'mods': {'main': {'imports': {'nvnBootstrapLoader', *imports}, 'bss': 0, 'far': False}}, 'romfs': {'root': set(), 'exts': {}}, 'sysres': 16 * pg.MiB, 'main_markers': set()}
+        keys = pg.guess(facts, hooks=set())
+        return tuple(int(keys[k][0], 0) for k in ('mem_reserve', 'mem_alias', 'mem_stack'))
+
+    def test_virtual_address_game_gets_room_for_stacks(self):
+        for imports in (set(), {pg.HEAP_API}):
+            reserve, alias, stack = self.guess(imports)
+            self.assertEqual((reserve, stack), (5 * 1024**3, 640 * pg.MiB))   # the same 5 GB block: a phone has no room for a larger one
+            self.assertEqual(alias, 4 * 1024**3)
+            self.assertEqual(reserve - 0x10000000 - alias - stack, 128 * pg.MiB)   # the initial heap region is unchanged
+
+    def test_game_without_virtual_address_memory_keeps_its_stack_region(self):
+        facts = {'mods': {'main': {'imports': {'nvnBootstrapLoader'}, 'bss': 0, 'far': False}}, 'romfs': {'root': set(), 'exts': {}}, 'sysres': 0, 'main_markers': set()}
+        self.assertEqual(int(pg.guess(facts, hooks=set())['mem_stack'][0], 0), 256 * pg.MiB)
+
+
 class ModulesLeftOut(unittest.TestCase):
     """main_modules and nro_modules: which modules a list leaves out are needed, read from each module's symbols (a symbol: (name, defined, bind))"""
     def setUp(self):

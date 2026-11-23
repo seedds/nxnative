@@ -162,7 +162,17 @@ struct LauncherView: View {
                 if m.values["DM_MIC"] == "1" { MicrophoneDevicePicker() }
                 CloudSavesSection()
                 Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
+                    // a Button, not an empty DisclosureGroup: the sections below live outside it, and in a grouped Form a DisclosureGroup does not toggle on row/label clicks (and failed to open on macOS 27)
+                    Button { advanced.toggle() } label: {
+                        HStack {
+                            Image(systemName: "chevron.right").rotationEffect(.degrees(advanced ? 90 : 0)).foregroundStyle(.secondary).accessibilityHidden(true)
+                            Text("Advanced settings")
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(advanced ? "Expanded" : "Collapsed")
                 }
                 if advanced {
                     settingSections(basic: false)

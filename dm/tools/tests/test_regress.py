@@ -63,6 +63,25 @@ class Regress(unittest.TestCase):
                 compiler.write_bytes(b'compiler version two')
                 self.assertNotEqual(before, regress.chain_key(tree, g, 'other tools'))
 
+    def test_toolchain_fingerprint_survives_a_remount(self):   # the Metal toolchain's mount point gets a new random name at each boot; chain keys must not follow it
+        mnt = '/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v27.2.47.0.'
+        def toolchain(suffix, version='32023.922'):
+            out = {'spirv-cross': 'Git commit:  Timestamp: 2026-09-16T11:27:19\n',
+                   'metal': f'Apple metal version {version} (metalfe-{version}.4)\nTarget: air64-apple-darwin27.0.0\nThread model: posix\n'
+                            f'InstalledDir: {mnt}{suffix}/Metal.xctoolchain/usr/metal/current/bin\n',
+                   '--show-sdk-build-version': '26B118\n'}
+            return lambda cmd, **kw: NS(stdout=next(v for k, v in out.items() if k in cmd), stderr='')
+        with patch.object(regress, 'sh', toolchain('em8TI5')): first = regress.toolchain_fp()
+        with patch.object(regress, 'sh', toolchain('Xq3ZpA')): self.assertEqual(first, regress.toolchain_fp())
+        with patch.object(regress, 'sh', toolchain('em8TI5', '32023.950')): self.assertNotEqual(first, regress.toolchain_fp())
+        g = NS(kind='gl', ver='v0', shader_roots=list); gl = NS(sources=lambda roots: [])
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {}, clear=True), patch.object(regress, 'load_module', return_value=gl), \
+             patch.object(regress.shutil, 'which', return_value=None):
+            keys = []
+            for suffix in ('em8TI5', 'Xq3ZpA'):
+                with patch.object(regress, 'sh', toolchain(suffix)): keys.append(regress.chain_key(NS(path=Path(d)), g, regress.toolchain_fp()))
+            self.assertEqual(keys[0], keys[1])
+
     def test_gl_manifest_preserves_translation_failures(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / 'translations.json'

@@ -20,7 +20,7 @@
 #include <os/proc.h>   // os_proc_available_memory
 #endif
 
-#define SWITCH_ALIAS UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
+#define SWITCH_ALIAS DM_SWITCH_ALIAS   // a Switch's alias region: 64 GB
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
 // Size 5 GB: the game needs the first 1 GB (alias region, stacks) + one whole heap block (application memory pool of 3285 MiB, see APP_POOL below),
@@ -321,13 +321,7 @@ static void mem_init_once(void) {
     // The alias region is the Switch's 64 GB on the Mac (or the profile's, when larger): games lay their regions out for that much, and what the profile can give an iPhone (one
     // reservation of at most 6 GB) crashed Trails in the Sky 1st Chapter at launch and Just Dance within a minute. It is address space, not memory: the application pool bounds
     // what is mapped. DM_ALIAS_SIZE=<bytes> sets another size, the heap and stacks as they are; the profile's value reproduces an iPhone's address space on the Mac (the NSP script's heap check)
-#if TARGET_OS_IPHONE
-    size_t alias = DM_GAME_MEM_ALIAS;
-#else
-    size_t alias = DM_GAME_MEM_ALIAS > SWITCH_ALIAS ? DM_GAME_MEM_ALIAS : SWITCH_ALIAS;
-#endif
-    const char *as = getenv("DM_ALIAS_SIZE");
-    if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
+    size_t alias = dm_alias_size();
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) {

@@ -97,6 +97,17 @@ int main(void) { @autoreleasepool {
     enum { NV = 512 };
     id<MTLBuffer> out = [g_dev newBufferWithLength:NV * 16 options:MTLResourceStorageModeShared], lay = [g_dev newBufferWithLength:sizeof(dm_vlayout_c) options:MTLResourceStorageModeShared];
     id<MTLRenderPipelineState> pull = rp(@"pull_test", nil);
+    id<MTLBuffer> defaults = vertex_constants();
+    for (int t = 0; t < 4; t++) {
+        dm_vlayout_c L; memset(&L, 0, sizeof L);
+        if (t == 1) L.attr[0] = 0x2E;
+        if (t == 2) L.attr[0] = 0x2E | 31u << 27;
+        if (t == 3) { L.attr[0] = 0xff; L.s[0].base = defaults.gpuAddress; }
+        memcpy(lay.contents, &L, sizeof L);
+        run(pull, defaults, -1, lay, out, 0, 1, 1, 0);
+        uint32_t *got = out.contents;
+        for (int c = 0; c < 4; c++) EXPECT("absent attribute default or invalid stream zeros", t == 0 && c == 3 ? 0x3f800000u : 0, got[c]);
+    }
     srand(12345);
     int nfmt = 0, nvd = 0, ncpu = 0;
     for (int f = 1; f < 256; f++) {
@@ -181,7 +192,7 @@ int main(void) { @autoreleasepool {
             S.attr[20] = S.attr[1];   // NVN2's attributes past 15 go into the block as the first 16 do
             pull_layout P; pull_layout_fill(&P, NULL, NULL, NULL);
             EXPECT("base kept 4-byte aligned", 0, P.s[2].base & 3);
-            EXPECT("attribute with no buffer reads zeros", 0, P.attr[4]);
+            EXPECT("attribute with no buffer keeps its format and stream", 0x2E | 5u << 27, P.attr[4]);
             EXPECT("attribute 20 has attribute 1's word", P.attr[1], P.attr[20]);
             for (int a = 0; a < 4; a++) {
                 uint32_t got[NE][4], want[NE][4];

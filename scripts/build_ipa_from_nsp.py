@@ -1215,7 +1215,10 @@ def fingerprint(*items, env=None):
         elif kind in ('tree', 'stat'):
             for rel, st in files_under(v): h.update(f'{rel}\0{st.st_size}\0{st.st_mtime_ns if kind == "stat" else ""}\n'.encode())
         elif kind == 'cmd':
-            try: r = subprocess.run(v, env=env, capture_output=True, text=True, timeout=120); h.update((r.stdout + r.stderr).encode())
+            try:
+                r = subprocess.run(v, env=env, capture_output=True, text=True, timeout=120)
+                # metal --version ends with InstalledDir:, the Metal toolchain cryptex mount whose suffix changes at each boot (dmsh_mtlcache.compiler_id strips it too)
+                h.update(re.sub(r'(?m)^InstalledDir:.*\n?', '', r.stdout + r.stderr).encode())
             except (OSError, subprocess.TimeoutExpired): h.update(b'missing')
         else: h.update(repr(v).encode())
     return h.hexdigest()
@@ -2297,7 +2300,7 @@ def region_check(repo, d, patched, work, env, logs, g):
     rmtree(rd); table.unlink(missing_ok=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
     henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')),
-                DM_ALIAS_SIZE=f'{SWITCH_ALIAS:#x}', DM_REGIONS=str(table))
+                DM_ALIAS_SIZE=f'{SWITCH_ALIAS:#x}', DM_KEEP_ALIAS_CUTS='1', DM_REGIONS=str(table))
     PROG.set(step='booting the game')
     t0, seen = time.time(), {}
     def done():

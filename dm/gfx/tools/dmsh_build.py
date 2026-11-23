@@ -958,7 +958,7 @@ def finish(key, w, j, c1):
         src, full = dmsh_entry.vs_depth(src); open(msl, 'w').write(full + capture)
     fu = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else None   # the typed-output entry point (see fs_uint); the analysis below uses the source with only main0
     shared = dmsh_side.shared_body(src) if fu else None   # it calls main0's body; fs_uint gives none for a main0 whose shape it does not know
-    if shared: plain = src; open(msl, 'w').write(shared + fu)
+    if shared and fu: plain = src; open(msl, 'w').write(shared + fu)
     else: fu = None
     try: binds = dmsh_reflect.reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None

@@ -30,6 +30,7 @@
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
 #   · CRA (Camelot, Mario Tennis Fever): BNSH in the FSHA, VFXB and SARC members of the NARC containers in rom:/42, its files scrambled and listed only in the NRO the game decodes at run time, see cra.py and cra_jobs
+#   · HSPK (Sega Fenrir, Valkyria Chronicles 4): gzip-compressed BNSH in NSGZ records of the HSG shader package, see nsgz_shaders
 #   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
 #       NieR:Automata's DAT members instead prefix length-delimited NVN code and control sections with a binding table (pg_sized_shader)
 #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
@@ -3960,6 +3961,26 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
             # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
             # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
             # that expands 9 times, which then added up to 18 times the file)
+def nsgz_shaders(d, label):
+    """Fenrir's HSPK packages and main embed NSGZ records: eight magic bytes, a u64 compressed length, then one gzip stream holding a BNSH."""
+    out, pos, left = [], 0, NEST * len(d)
+    while (pos := d.find(b'NSGZ    ', pos)) >= 0:
+        where = f'{label}#NSGZ@{pos:#x}'
+        size = field(d, '<Q', pos + 8, where)[0]
+        start, end = pos + 16, pos + 16 + size
+        if end > len(d): red(f'{where}: compressed data runs past the package')
+        stream = zlib.decompressobj(31)
+        try: member = stream.decompress(d[start:end], left + 1)
+        except zlib.error as e: red(f'{where}: invalid gzip stream ({e})')
+        left -= len(member)
+        if left < 0: red(f'{where}: decoded shaders exceed {NEST} times the package')
+        if not stream.eof or stream.unused_data: red(f'{where}: gzip stream does not match its record length')
+        if member[:8] != b'BNSH\0\0\0\0': red(f'{where}: decoded record is not BNSH')
+        if field(member, '<I', 0x1c, where)[0] != len(member): red(f'{where}: BNSH length does not match the decoded record')
+        out.extend(bnsh_shaders(member, 0, where))
+        pos = end
+    return out
+
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
     if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
@@ -4025,6 +4046,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
         return
+    if b'NSGZ    ' in d: out.extend(nsgz_shaders(d, label))
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]

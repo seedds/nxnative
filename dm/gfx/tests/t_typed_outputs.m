@@ -56,7 +56,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!lib) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); return 1; }
     NvShader *vs = [NvShader new]; vs->fn = fn4_note([lib newFunctionWithName:@"vertex_main"], lib, @"vertex_main", nil); vs->stage = 0; snprintf(vs->key, sizeof vs->key, "vt_b");
     NvShader *fs = [NvShader new]; fs->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); fs->stage = 1; snprintf(fs->key, sizeof fs->key, "%s_b", key.UTF8String);
-    fs->u_name = @"main0_u"; fs->u_side = 1; fs->u_alpha = 1; fs->u_logic = 1; fs->has_alpha = 1;   // as the reflection of a shader the build cut says (entry_u, entry_u_side, entry_u_alpha, entry_u_logic, alpha)
+    fs->u_name = @"main0_u"; fs->u_side = 1; fs->u_alpha = 1; fs->u_logic = 1; fs->u_dual = 1; fs->has_alpha = 1;   // as the reflection of a shader the build cut says (entry_u, entry_u_side, entry_u_alpha, entry_u_logic, entry_u_dual, alpha)
     fs->rf.color_known = 1; fs->rf.color_mask = 15; fs->rf.fcols_known = 1; fs->rf.fcols = 15;   // main0 declares every colour float, as the translator does
     CHECK(!fs->xlib_state);   // the side library is not loaded before a pipeline needs it
     id<MTLCommandQueue> q = [g_dev newCommandQueue]; int draws = 0;
@@ -68,7 +68,55 @@ int main(int argc, char **argv) { @autoreleasepool {
         int kind[4] = {0, m % 3, m / 3, -1};
         CHECK(typed_draw(vs, fs, kind, NVN_ALPHA_FUNC_LESS, q) == 1); CHECK(typed_draw(vs, fs, kind, NVN_ALPHA_FUNC_GREATER, q) == 0); draws += 2;
     }
-    CHECK(fs->ufn.count == 34u && fs->afn[0]);   // main0_u with its test per mix with an integer target; main0_a, with no constant, for all float
+    CHECK(fs->ufn.count == 34u && fs->afn);   // main0_u with its test per mix with an integer target; main0_a, with no constant, for all float
+    // Dual-source blending through main0_u (a 4-output shader): target 0 blends with output 1 as SRC1 (with and without alpha test),
+    // on both Metal 4 and MTLDevice. MAIN outputs: m_0=(0.25,-0.5,1,0.25), m_1=(0.25,-0.5,1,3); dst clear=(0.5,0.5,0.5,0.5)
+    for (int at = 0; at < 3; at++) {   // 0: no alpha test; 1: LESS 0.5 (pass); 2: GREATER 0.5 (drop)
+        pso_key dk; memset(&dk, 0, sizeof dk); dk.samples = 1; dk.chmask = 0xf; dk.blend_en = 1; dk.atest = at != 0;
+        dk.cfmt[0] = MTLPixelFormatRGBA32Float;
+        dk.blend[0] = (blend_st){.src_rgb = NVN_BLEND_FUNC_SRC1_COLOR, .dst_rgb = NVN_BLEND_FUNC_ONE, .src_a = NVN_BLEND_FUNC_SRC1_ALPHA, .dst_a = NVN_BLEND_FUNC_ONE, .eq_rgb = 1, .eq_a = 1};
+        MTLRenderPipelineDescriptor *dd = pso_desc(&dk, vs, fs, nil, 0);
+        CHECK(dd.fragmentFunction != fs->fn && dd.colorAttachments[0].blendingEnabled && dd.colorAttachments[0].sourceRGBBlendFactor == MTLBlendFactorSource1Color);
+        id<MTLRenderPipelineState> dps = pso_build(dd, !dk.border, &e); CHECK(dps != nil);
+        if (dps) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:2 height:2 mipmapped:NO];
+            td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared; id<MTLTexture> dt = [g_dev newTextureWithDescriptor:td];
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = dt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            rp.colorAttachments[0].clearColor = MTLClearColorMake(0.5, 0.5, 0.5, 0.5);
+            id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+            [en setRenderPipelineState:dps];
+            struct { uint32_t func; float ref; } st = {(uint32_t)(at == 1 ? NVN_ALPHA_FUNC_LESS : NVN_ALPHA_FUNC_GREATER), 0.5f};
+            if (at) [en setFragmentBytes:&st length:sizeof st atIndex:DMSH_ALPHA_BUFFER];
+            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            CHECK(cb.status == MTLCommandBufferStatusCompleted);
+            float p0[4] = {0};
+            [dt getBytes:p0 bytesPerRow:32 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+            // Kept: dst + m_0 * m_1 = (0.5 + 0.0625, 0.5 + 0.25, 0.5 + 1.0, 0.5 + 0.75) = (0.5625, 0.75, 1.5, 1.25); dropped: (0.5, 0.5, 0.5, 0.5)
+            float exp0[4] = {at == 2 ? 0.5f : 0.5625f, at == 2 ? 0.5f : 0.75f, at == 2 ? 0.5f : 1.5f, at == 2 ? 0.5f : 1.25f};
+            for (int c = 0; c < 4; c++) CHECK(p0[c] == exp0[c]);
+        }
+        draws++;
+    }
+    // Descriptor check: attachments 1..2 are marked unwritten when dual-source blending is active
+    {
+        pso_key dk; memset(&dk, 0, sizeof dk); dk.samples = 1; dk.chmask = 0xfff; dk.blend_en = 7;
+        dk.cfmt[0] = MTLPixelFormatRGBA32Float; dk.cfmt[1] = MTLPixelFormatRGBA32Float; dk.cfmt[2] = MTLPixelFormatR32Float;
+        dk.blend[0] = (blend_st){.src_rgb = NVN_BLEND_FUNC_SRC1_COLOR, .dst_rgb = NVN_BLEND_FUNC_ONE, .src_a = NVN_BLEND_FUNC_SRC1_ALPHA, .dst_a = NVN_BLEND_FUNC_ONE, .eq_rgb = 1, .eq_a = 1};
+        dk.blend[1] = dk.blend[0]; dk.blend[2] = dk.blend[0];
+        MTLRenderPipelineDescriptor *dd = pso_desc(&dk, vs, fs, nil, 0);
+        CHECK(dd.colorAttachments[1].writeMask == MTLColorWriteMaskNone && !dd.colorAttachments[1].blendingEnabled);
+        CHECK(dd.colorAttachments[2].writeMask == MTLColorWriteMaskNone && !dd.colorAttachments[2].blendingEnabled);
+    }
+    // SRC1 blend state left enabled on an integer target 0 must not trigger dual-source mode (blending is off on integer targets)
+    {
+        pso_key ik; memset(&ik, 0, sizeof ik); ik.samples = 1; ik.chmask = 0xff; ik.blend_en = 1;
+        ik.cfmt[0] = MTLPixelFormatRGBA32Uint; ik.cfmt[1] = MTLPixelFormatRGBA32Uint;
+        ik.blend[0] = (blend_st){.src_rgb = NVN_BLEND_FUNC_SRC1_COLOR, .dst_rgb = NVN_BLEND_FUNC_ONE, .src_a = NVN_BLEND_FUNC_SRC1_ALPHA, .dst_a = NVN_BLEND_FUNC_ONE, .eq_rgb = 1, .eq_a = 1};
+        MTLRenderPipelineDescriptor *id_ = pso_desc(&ik, vs, fs, nil, 0);
+        CHECK(!id_.colorAttachments[0].blendingEnabled && id_.colorAttachments[1].writeMask == MTLColorWriteMaskAll);
+        id<MTLRenderPipelineState> ips = pso_build(id_, !ik.border, &e); CHECK(ips != nil);
+    }
     printf("typed outputs: %d draws, %d checks, %d failed\n", draws, checks, failed);
     return failed != 0;
 } }

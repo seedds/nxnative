@@ -71,6 +71,43 @@ class FloatAdd(unittest.TestCase):
         other = loop('b', 0, 'v', 10).replace('&b._m0[0], &', '&b._m0[1], &')   # the swap on another word than the read
         self.assertEqual(float_add_msl(other), other)
 
+    def test_bounded_loop_becomes_guarded_atomic_add(self):
+        src = (
+            '    bool _46;\n'
+            '    do\n'
+            '    {\n'
+            '        bool _71 = (uint(0) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            '        float _48 = as_type<float>(_71 ? (*spvDescriptorSet0.cp_s0)._m0[_71 ? 0 : 0] : 0u);\n'
+            '        float _50 = _48 + _42;\n'
+            '        bool _87 = (uint(0) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            '        uint _91 = as_type<uint>(_48);\n'
+            '        uint _100;\n'
+            '        if (_87)\n'
+            '        {\n'
+            '            uint _97;\n'
+            '            do\n'
+            '            {\n'
+            '                _97 = _91;\n'
+            '            } while (!atomic_compare_exchange_weak_explicit((device atomic_uint*)&(*spvDescriptorSet0.cp_s0)._m0[_87 ? 0 : 0], &_97, as_type<uint>(_50), memory_order_relaxed, memory_order_relaxed) && _97 == _91);\n'
+            '            _100 = _97;\n'
+            '        }\n'
+            '        else\n'
+            '        {\n'
+            '            _100 = 0u;\n'
+            '        }\n'
+            '        uint _53 = _100;\n'
+            '        _46 = int(_53) != as_type<int>(_48);\n'
+            '    } while (_46);\n'
+        )
+        out = float_add_msl(src)
+        self.assertEqual(out, '    if ((uint(0) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y)\n'
+                              '    {\n'
+                              '        atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s0)._m0[0], _42, memory_order_relaxed);\n'
+                              '    }\n'
+                              '    bool _46 = false;\n')
+        mismatch = src.replace('_87 ? 0 : 0', '_87 ? 1 : 0')
+        self.assertEqual(float_add_msl(mismatch), mismatch)
+
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_sums_on_gpu(self):
         body = loop('b', 0, 'v', 10) + loop('b', 1, 'w', 20) + loop('b', 2, 'v', 30) + loop('b', 3, 'w', 40)

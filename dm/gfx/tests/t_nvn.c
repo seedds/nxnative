@@ -373,6 +373,21 @@ int main(void) {
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      // a page in ticks of 1/120 s (+0x38 120, a FRAME_STEP_120 stub; headless: no window): 40 fps is 3 ticks, 25 ms; 60 and 30 are 2 and 4 ticks
+      uint32_t unit=120;memcpy(state+FSTEP_UNIT_OFF,&unit,4);nvn_present_config(120,0);
+      cap=40;memcpy(state,&cap,4);
+      EXPECT("ticks 40: present cap",40,fps_present_cap());
+      EXPECT("ticks 40: three ticks a frame",3,present_itv(&w));
+      EXPECT("ticks 40: period ns",25000000,present_period(&w));
+      EXPECT("ticks 40: display-link target",40,nvn_game_fps());
+      EXPECT("ticks 40: graphics layer's target (statistics, link)",40,mtl_fps_target());
+      cap=60;memcpy(state,&cap,4);
+      EXPECT("ticks 60: two ticks a frame",2,present_itv(&w));
+      EXPECT("ticks 60: period ns",16666666,present_period(&w));
+      EXPECT("ticks 60: graphics layer's target",60,mtl_fps_target());
+      cap=30;memcpy(state,&cap,4);
+      EXPECT("ticks 30: four ticks a frame",4,present_itv(&w));
+      EXPECT("ticks 30: graphics layer's target",30,mtl_fps_target());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's
@@ -1406,8 +1421,55 @@ int main(void) {
         P(nvnQueuePresentTexture)(&q, &win, idx[f]);
     }
     EXPECT("swapchain rotates 0,1,0,1", 0x0101, idx[0] << 12 | idx[1] << 8 | idx[2] << 4 | idx[3]);
-    EXPECT("sync signaled after acquire (0)", 0, P(nvnSyncWait)(&s2, 0));
+    NVNsyncWaitResult awr = P(nvnSyncWait)(&s2, UINT64_MAX);
+    EXPECT("blocking wait on deferred acquire sync succeeds (0 or 1)", 1, awr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || awr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+    EXPECT("sync already signaled after acquire wait completes (0)", 0, P(nvnSyncWait)(&s2, 0));
     EXPECT("Barrier count = 4 frames × 5", 20, nvn_slot[bi].cnt - barriers0);
+
+    // 6a. Deferred acquire sync edge cases:
+    // (1) Present enqueued for the acquired texture behind an unsignaled GPU event BEFORE CPU nvnSyncWait(s) must not deadlock (Super Mario Bros. Wonder Switch 2 Edition's parallel present thread)
+    // (2) Queue-only nvnQueueWaitSync without CPU nvnSyncWait, followed by next acquire drain
+    // (3) Re-fencing and finalizing a pending deferred acquire sync, and finalizing the window with a pending acquire
+    {
+        NVNeventBuilder eb; NVNevent ev;
+        static uint32_t ev_mem[4096] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder epb; NVNmemoryPool ep;
+        P(nvnMemoryPoolBuilderSetDefaults)(&epb); P(nvnMemoryPoolBuilderSetStorage)(&epb, ev_mem, sizeof ev_mem);
+        P(nvnMemoryPoolInitialize)(&ep, &epb);
+        P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb, &ep, 0);
+        P(nvnEventInitialize)(&ev, &eb);
+        ev_mem[0] = 0;
+
+        NVNsync s_acq; P(nvnSyncInitialize)(&s_acq, &dev);
+        int aidx = -1;
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &aidx);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        NVNcommandHandle h_ev = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &h_ev);
+        P(nvnQueuePresentTexture)(&q, &win, aidx);
+        // Queue is now blocked on ev == 1 before aidx's new present can publish; SyncWait must only wait on aidx's PREVIOUS present
+        NVNsyncWaitResult r_par = P(nvnSyncWait)(&s_acq, 5000000000ull);
+        EXPECT("deferred acquire SyncWait does not deadlock on a concurrent present of the same slot", 1, r_par == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_par == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+        P(nvnQueueFinish)(&q);
+
+        // QueueWaitSync without CPU SyncWait, drained by next acquire
+        int qidx0 = -1, qidx1 = -1;
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx0);
+        P(nvnQueueWaitSync)(&q, &s_acq);
+        P(nvnQueuePresentTexture)(&q, &win, qidx0);
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx1);
+        // Re-fencing overwrites the pending acquire sync cleanly
+        P(nvnQueueFenceSync)(&q, &s_acq, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        NVNsyncWaitResult r_ref = P(nvnSyncWait)(&s_acq, UINT64_MAX);
+        EXPECT("re-fenced acquire sync waits cleanly", 1, r_ref == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_ref == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        P(nvnQueueFinish)(&q);
+        P(nvnSyncFinalize)(&s_acq);
+        P(nvnWindowFinalize)(&win);
+        P(nvnEventFinalize)(&ev);
+        P(nvnMemoryPoolFinalize)(&ep);
+    }
 
     // 6b. Readback: pixel (x,y) = {x*16+y, y*16+x, 0x55, 0xAA} (expected values computed directly from the formula)
     {

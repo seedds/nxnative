@@ -20,8 +20,8 @@
 #   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app has no icon unless --icon / ICON gives it one (--fallback-icon / FALLBACK_ICON: only when the game has none).
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
-#   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
-#   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
+#   The newest version in the folder is packed. A version the profile registers (when its shader tables cover it and every version in shader_versions is in the folder) is built from the profile as it is; any other
+#   version (the base game alone, another update, a registered update with its own shaders) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
 # The DLC, the rewrite, the shader split and the iOS (or Vulkan) shaders are reused when all their inputs are as at their last successful run (the game files, the tools, the profile, Xcode and the in-repo spirv-cross: fingerprint() keys beside their output);
 #   the iOS shaders' inputs are the shader package's content and the chain's own tools, so a split that runs again and writes the same package leaves them reused.
@@ -1147,7 +1147,7 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False, *, nup_la
                 if gone := [m for m in want if m not in have]: out.append(f'# this version ships no {" ".join(gone)}')
                 if add: out.append('# main imports from ' + ', '.join(f'{m} ({k})' for m, k in add.items()) + ', which the profile does not list')
                 out.append(f'modules{T}{" ".join(have)}'); continue
-        if not shader_only and line.split(T, 1)[0] in ('build', 'package', 'shader_versions'):
+        if not shader_only and line.split(T, 1)[0] in ('build', 'package', 'shader_versions', 'shader_covers'):
             if not put: out += [row, f'package{T}{ver}', f'shader_versions{T}{ver}']; put = True
             continue
         out.append(line)
@@ -2659,7 +2659,7 @@ def prune_shader_cache(sh, chain):
 
 
 def shader_profile_key(py, repo, env, g):
-    """The profile's part of the shader step's key: the game and the digest of its shader inputs (dmsh_chain.py --inputs: the shader tables, geo_mesh.tsv, geo_pairs.tsv, bf_want.tsv, dual_want.tsv and the
+    """The profile's part of the shader step's key: the game and the digest of its shader inputs (dmsh_chain.py --inputs: the shader tables, geo_mesh.tsv, geo_pairs.tsv, bf_want.tsv and the
     nvn_* / shader_* keys), which the libraries' stamp records and every per-shader cache key already assumes are all a shader build reads of the profile. Hashing every profile file
     instead restored every library from the cache and rewrote the image after an edit of the game's note or prewarm list. Without the digest: every file, as before"""
     r = subprocess.run([str(py), str(repo / 'dm/gfx/tools/dmsh_chain.py'), '--inputs'], env=env, capture_output=True, text=True)
@@ -3365,6 +3365,32 @@ def report_fix_coverage(patched, mods, reg):
         if len(missing) < len(tried): say(f'{m}: function patches applied: ' + ', '.join(repr(name) for name, offs, _ in tried if offs != '-'))
 
 
+def build_modules_match(got, want):
+    """Whether a derived build row's module build IDs match the registered row, ignoring the display string (which control.nacp may spell differently)."""
+    return (want is not None
+            and {m: b for m, b in got.items() if m != 'display'} == {m: b for m, b in want.items() if m != 'display'})
+
+
+def profile_derivation_reason(g, pkg_ver, have, alias=None, app=None):
+    """Why packing pkg_ver from registered profile g needs a derived profile, or False when the profile's committed shader tables cover it directly.
+    Committed shader tables cover shader_versions plus any extra registered builds explicitly verified in shader_covers: registering a build whose shaders differ
+    (Mario Kart World 1.8.0 beside v0) must derive its own shaders even when shader_versions is present in the folder, rather than silently packing v0's shaders."""
+    builds, need = g.builds(), g.words('shader_versions')
+    covered = set(need) | set(g.words('shader_covers', ''))
+    if pkg_ver not in builds:
+        registered_builds = ', '.join(f'{v} {b["display"]}' for v, b in builds.items())
+        return f'{pkg_ver} is not a version game profile {g.id} registers ({registered_builds})'
+    if pkg_ver not in covered:
+        covered_list = ', '.join(sorted(covered, key=vnum))
+        return f'game profile {g.id}\'s shader tables cover {covered_list}, not {pkg_ver}'
+    if not all(v in have for v in need):
+        return f'the folder has no {", ".join(v for v in need if v not in have)}, whose files game profile {g.id}\'s shader tables were made from'
+    if alias:
+        tid = app if app is not None else g.title_id
+        return f'title {tid:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
+    return False
+
+
 def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA', patched=None):
     """Keep build-specific warnings visible for the IPA, the Xcode project and a Mac-only build"""
     disp = g.builds()[pkg_ver]['display'] if derived else ''
@@ -3372,7 +3398,8 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA',
         known = {(m, b) for row in reg.builds().values() for m, b in row.items() if m != 'display'}
         other = [m for m, b in g.builds()[pkg_ver].items() if m != 'display' and (m, b) not in known]
         registered_builds = ", ".join(f'{v} {b["display"]}' for v, b in reg.builds().items())
-        if g.title_id == reg.title_id and g.builds() == reg.builds():
+        # Compare the packed version's module build IDs, not the whole build table: a derived profile keeps only pkg_ver's row, so multi-build profiles never matched reg.builds()
+        if g.title_id == reg.title_id and build_modules_match(g.builds()[pkg_ver], reg.builds().get(pkg_ver)):
             say(f'this {artifact} uses the registered {pkg_ver} ({disp}) builds and every fix for them, with derived shader tables ({derived})')
         elif g.title_id != reg.title_id and not other and pkg_ver in reg.builds():   # a registered build under another title ID (same_build): every fix applies
             say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}) under title ID {g.title_id:016X}: its settings and every fix for its builds, with shaders split from this title\'s own files')
@@ -3508,15 +3535,11 @@ def main(args=None):
     have, derived = nsp_versions(fam), False
     if provisional:   # Do not silently pin a cached survey to an older input version.
         pkg_ver = provisional_version(have, builds, args.package or PACKAGE, g.dir.parent)
-    else:   # the newest version in the folder, or the one asked for. The profile is used as it is for a version it registers when every version its shader tables were made from is there;
-        # any other version (no update, another update) is packed from a profile derived from it (derive_profile), with its own shaders
+    else:   # the newest version in the folder, or the one asked for. The profile is used as it is for a version it registers when its shader tables cover it and every version they were made from is there;
+        # any other version (no update, another update, a registered update with its own shaders) is packed from a profile derived from it (derive_profile), with its own shaders
         pkg_ver = args.package or PACKAGE or max(have, key=vnum)
         if pkg_ver not in have: raise BuildError(f'the version to pack (-p / PACKAGE) is not in the folder, which holds {", ".join(sorted(have, key=vnum))}')
-        if pkg_ver not in builds:
-            registered_builds = ", ".join(f'{v} {b["display"]}' for v, b in builds.items())
-            derived = f'{pkg_ver} is not a version game profile {g.id} registers ({registered_builds})'
-        elif not all(v in have for v in need): derived = f'the folder has no {", ".join(v for v in need if v not in have)}, whose files game profile {g.id}\'s shader tables were made from'
-        if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
+        derived = profile_derivation_reason(g, pkg_ver, have, alias=alias, app=app)
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
     work = build_folder(args, nsp_dir, g.id); BUILD_FOLDERS.add(work)

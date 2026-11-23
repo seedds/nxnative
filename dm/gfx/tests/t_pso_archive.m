@@ -885,6 +885,33 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("t_pso_archive active flush: %d checks, %d failed\n", checks, failed);
         return failed != 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--adopt-prebuilt")) {
+        // Real Metal 4 end-to-end check of arch_adopt_prebuilt(): a no-layout base captured into p*.mtl4a is opened and indexed in the same process,
+        // clears g_pbase_miss, serves compile=0 lookups with zero recompiles, stays out of g_arch_use (arch_sweep), and is idempotent on repeat calls.
+        pso4_init();
+        MTLRenderPipelineDescriptor *nd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        nd.vertexFunction = fn4_note([g_lib newFunctionWithName:@"vs0"], g_lib, @"vs0", nil);
+        nd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        EXPECT("adopt: misses before capture", 1, pso_build_ex(nd, 0, &err, 0) == nil);
+        EXPECT("adopt: miss cached in g_pbase_miss", 1, g_pbase_miss.n == 1);
+        MTL4RenderPipelineDescriptor *m4 = pso_desc4(nd, 1, 0);
+        EXPECT("adopt: Metal 4 base descriptor built", 1, m4 != nil);
+        EXPECT("adopt: prebuild capture succeeded", 1, arch_capture(m4, &err, 0, NULL) != nil);
+        arch_flush_wait();
+        EXPECT("adopt: wrote a p*.mtl4a file", 1, archive_files(@(dir)).count == 1 && [archive_files(@(dir))[0] hasPrefix:@"p"]);
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;
+        arch_adopt_prebuilt();
+        EXPECT("adopt: indexed into g_arch_ix and g_arch_ixf", 1, g_arch_ix.n == 1 && g_arch_ixf.count == 1);
+        EXPECT("adopt: prior miss cleared", 0, g_pbase_miss.n);
+        EXPECT("adopt: excluded from arch_sweep", 0, g_arch_use.count);
+        EXPECT("adopt: compile=0 lookup finds base in same run", 1, pso_build_ex(nd, 0, &err, 0) != nil);
+        EXPECT("adopt: served from archive via index (1 ask, 0 compiles)", 1, g_pb_archived == arch0 + 1 && g_pb_built == built0 && g_arch_asks == asks0 + 1);
+        arch_adopt_prebuilt();
+        EXPECT("adopt: idempotent on already-opened file", 1, g_arch_ixf.count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive adopt prebuilt: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
         int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");

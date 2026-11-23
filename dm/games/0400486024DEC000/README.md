@@ -320,6 +320,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [Center and back channels silent on an audio interface](../../../docs/reference/audio.md#center-and-back-channels-silent-on-an-audio-interface): ocarina notes were almost silent on a 22-output interface treated as 5.1 (issue #3263). The fix is in the host, not yet confirmed on that hardware.
 - [Autoreleased temporaries collect during background pipeline builds](../../../docs/reference/memory.md#autoreleased-temporaries-collect-during-background-pipeline-builds). The audit finding is resolved in the host.
 - [The display link started before fullscreen's mode switch](../../../docs/reference/frame-rate.md#the-display-link-started-before-fullscreens-mode-switch): startup silences and rescues on a variable-refresh screen, and repeated fullscreen mode switches / stale variable-refresh flags ([Fullscreen switches the screen to a rate the frame rate divides](../../../docs/reference/frame-rate.md#fullscreen-switches-the-screen-to-a-rate-the-frame-rate-divides)).
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.

@@ -787,6 +787,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`, rebuilt when pools are added or removed).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): about 1,760 memory pools alive; a CPU sample of the submit thread had about 1,000 of its samples under those scans. Host submit time in the shrine went from 21 ms to 7 ms per frame (p50), the median frame from 38 ms to 21 ms.
 
+### Pool lookups by page missed with thousands of pools
+
+- **Symptom:** the replay thread's samples under `mtl_gpu_addr`'s cache misses: `pc_get`, then `pool_held` and its lock.
+- **Cause:** the per-thread cache (`t_pc`) was direct-mapped by 4 KB page with 1,024 slots. A pool of megabytes was found only from pages already seen and still kept, so a game binding from thousands of pools fell through to the global lock and the [binary search](#address-to-memory-pool-lookups-by-binary-search) again and again.
+- **Fix:** a second table direct-mapped by 64 KB region is looked at first (`pc_slot_w` in `nvn_mtl.m`), filled and cleared with the page table. Every entry is still checked against its pool's range (`pc_holds`), so only the hit rate changes. It costs about 57 KB more thread-local memory in each thread that looks pools up.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): about 3,500 pools; the lookups were about 5 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
+
 ### Argument blocks encoded again when only a uniform buffer moved
 
 - **Symptom:** a submit thread busy in `encode_args` with few blocks reused: the per-frame TSV's `@args_enc` close to `@draws`, though most draws keep their textures and samplers.

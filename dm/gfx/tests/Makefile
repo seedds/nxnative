@@ -279,6 +279,9 @@ check_t_tex_fit_root: t_tex_fit_root
 	MTL_DEBUG_LAYER=1 ./t_tex_fit_root
 t_addr_known: t_addr_known.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_addr_known.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+# The address → pool cache's region table (pc_get / pc_put): another page of a region already seen, a pool's bounds, and no entry kept across a change of the pools
+t_pool_region: t_pool_region.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_region.m $(MTL_T_SRC) $(FW)
 t_file_wire: t_file_wire.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_file_wire.m $(MTL_T_SRC) $(FW)
 t_gpu_only_addr: t_gpu_only_addr.m $(MTL_T_DEP)

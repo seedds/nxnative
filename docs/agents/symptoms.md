@@ -544,6 +544,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
+- Xenoblade Chronicles 2's Japanese release 2.0.2 (`0100F3400332C000`, main `e3938fa78579c1cab27fb0ecef1314e8`) hits its bounds assertion at `main+0x6979dc`, called from `main+0x6ae53c`, just after the first frames. → [Legacy settings language lists before SDK 4](../reference/services.md#legacy-settings-language-lists-before-sdk-4)
 
 ## Movies
 

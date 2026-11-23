@@ -1854,3 +1854,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### Legacy settings language lists before SDK 4
+
+- **Symptom:** Xenoblade Chronicles 2's Japanese release 2.0.2 (`0100F3400332C000`, main `e3938fa78579c1cab27fb0ecef1314e8`) hits its bounds assertion at `main+0x6979dc`, called from `main+0x6ae53c`, just after the first frames.
+- **Cause:** SDK 3.5.0's settings wrappers use the legacy list/count service commands 1/3. The game reserves 15 language slots, asks the count, and then copies that many codes. The host returned 18 and the game added past its 15-entry container. The legacy interface has the original 15 languages; the extensible commands 5/6 arrived in firmware 4.0.0 ([libnx settings implementation](https://github.com/switchbrew/libnx/blob/master/nx/source/services/set.c)).
+- **Fix:** both language-list fallbacks use 15 entries for known SDK majors 1-3. SDK 4 and later, and an unknown SDK, retain the existing extended fallback. The original code order, Chinese comparison aliases and LanguageCode::Make are unchanged.
+- **Found on:** Xenoblade Chronicles 2, Japanese release 2.0.2, during bring-up with a provisional profile. A diagnostic boot with the correction reached the language-selection screen and 900 frames in 40 seconds; gameplay remains unverified.
+- **Check:** `t_language.c` tests old SDKs, modern and unknown SDKs, code order, short and empty buffers and untouched buffer tails under AddressSanitizer and UndefinedBehaviorSanitizer (1,086 checks).

@@ -269,7 +269,7 @@ Nothing else is installed. The download is one self-contained folder, the **bund
 | Windows | `nxnative-windows-x86_64.zip` | `nxlauncher.exe` |
 | Linux | `nxnative-linux-x86_64.tar.gz` | `nxlauncher` |
 
-The [port workflow](.github/workflows/port.yml) builds both on every push and on a manual run (its artifacts). To build them yourself, see [Build the bundles](#build-the-bundles) below. A newer bundle can be unpacked anywhere: its launcher takes over the games packed with an older one.
+Download them from [Releases](https://github.com/charcsllc/nxnative/releases) (the latest `port-preview` release lists each file's SHA-256). The [port workflow](.github/workflows/port.yml) is set to build both on every push and on a manual run. To build them yourself, see [Build the bundles](#build-the-bundles) below. A newer bundle can be unpacked anywhere: its launcher takes over the games packed with an older one.
 
 ### Pack and play (Windows)
 

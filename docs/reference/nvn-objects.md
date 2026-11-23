@@ -183,6 +183,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** `nvn_mtl.m` resolves pool slot 0 to a Metal sampler with that state. Sampler tables and populated combined handles can select it. Empty bindings and invalid sampler IDs still use the dummy. A shader’s samplerless texel fetch still reads only its texture.
 - **Found on:** [The Witcher 3: Wild Hunt — Complete Edition](../../dm/games/0100A0800E9C4000/README.md) (reported on 4.04d, with the same shader in the 4.04b profile).
 
+### Registered textures at pool slot zero
+
+- **Symptom:** full-screen 3D blur while 2D UI and dialogue text remain sharp: post-process depth-of-field composite (`70ab86772c9feaad_b`) reads `0.0` from its bound depth texture and blends 100% of the half-resolution blur buffer over the full-resolution scene.
+- **Cause:** replay treated texture ID 0 in any non-zero handle (`h != 0`, `(h & 0xfffff) == 0`, e.g. `nvnDeviceGetTextureHandle(dev, 0, sid)`) as an empty binding and substituted the zero dummy texture. Although NVN reserves IDs 0..255 by convention, `nvnTexturePoolRegisterTexture` / `RegisterImage` allows a game to register into pool slot 0: Story of Seasons's renderer clears its initial sentinel at pool index 0 (`main+0x316f4c..0x316f64`), allocates slot 0 (`main+0x4f7730`), and registers its 1920×1080 depth-stencil target there.
+- **Fix:** general (`dm/gfx/nvn/nvn_mtl.m`, `dm/gfx/nvn/nvn_ndve.inc`, `dm/gfx/nvn/nvn_raytrace_dispatch.inc`). `bound_handle` clamps the low 20-bit texture ID at `0xfffff` so pool-base offsets never carry into sampler bits; `tex_slot0_id`, `bound_tex_id` and `ubo_tex_id` resolve a non-zero handle with relative texture ID 0 to `S.tex_base` when that pool's slot 0 is registered (`g_tser[base] != 0`), while `h == 0` and an unregistered slot 0 still return `-1` (dummy). Direct, uniform, C2, pool-table, feedback, dependency and cleanup paths treat `tid >= 0` as valid and `-1` as unbound.
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_descriptor_pools` (`texture_zero`, with `MTL_DEBUG_LAYER=1`: unregistered vs registered slot 0 across two pools via direct `tex`, `tex_ubo`, `tex_pool` and `bound_handle` 20-bit clamp), `check_t_feedback`, `check_t_pool_standin`; in Story of Seasons on Mac, frame 1000 binds `st1 tex reg3 tid=0 real ser=2408` with 0 `[RED]` lines and renders a sharp 3D scene.
+- **Found on:** Story of Seasons: Friends of Mineral Town (`0100ED400EEC2000`, no profile yet), [#420](https://github.com/seedds/nxnative/issues/420).
+
 ### The sparse tile layout of a texture
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnTextureBuilderGetSparseTileLayout`, then an out-of-memory abort in Unreal's allocator (`Failed to allocate 1879113728 bytes from Standard Allocator`, on `DM_DBG=1`).
